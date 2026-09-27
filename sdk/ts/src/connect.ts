@@ -1,4 +1,3 @@
-/** Discover the canonical endpoint and pair after an operator approves the code. */
 import type { Pairing } from './pairing.js';
 import { API_VERSION } from './types.js';
 
@@ -16,14 +15,7 @@ export interface PairingRequest {
   userCode: string;
   expiresIn: number;
   interval: number;
-  /**
-   * Does anybody have to APPROVE this before it becomes a pairing?
-   *
-   * `false` on an engine with open pairing — the default since 1.0.0 — where
-   * the request is already approved and the first poll returns a token. `true`
-   * where `[auth] open_pairing = false` restores the approval step, and the
-   * user code has to be read out to somebody at the other machine.
-   */
+  /** Whether an operator must approve this request before it becomes a pairing. */
   approvalRequired: boolean;
 }
 export interface PendingPairing {
@@ -31,7 +23,7 @@ export interface PendingPairing {
   id: string;
   /** The code the person checks against the requesting screen. */
   userCode: string;
-  /** Who is asking, from where, and for how long. */
+  /** Who is asking. */
   clientName: string;
   address: string;
   expiresIn: number;
@@ -95,31 +87,9 @@ async function read(url: string, path: string, options: PairingOptions, body?: u
 export async function startPairing(address: string, clientName: string, options: PairingOptions = {}): Promise<PairingRequest> {
   const url = crucibleAddress(address);
   const ping = await read(url, '/v1/ping', options);
-  // A document with no NUMBER for `api_version` is not an engine stating a
-  // contract, so it stays `not_crucible` beside "this address is a printer".
-  // The refusal below is for a Crucible that DID state one and stated another.
   if (ping['crucible'] !== true || typeof ping['name'] !== 'string' || typeof ping['api_version'] !== 'number') {
     throw new CrucibleConnectionError('not_crucible', 'This address is not a compatible Crucible engine');
   }
-  /*
-   * A CRUCIBLE THAT SPEAKS ANOTHER API VERSION IS NOT "NOT A CRUCIBLE".
-   *
-   * INSTALL-UNINSTALL.md 6.5.5: compatibility rides on `api_version` and not on
-   * either side's build number, so this is the one question that decides whether
-   * these two can talk. Until 2026-09-18 a mismatch fell into `not_crucible`
-   * beside "this address is a printer", and the sentence it produced — "this
-   * address is not a compatible Crucible engine" — was said about a Crucible,
-   * naming neither version, so nobody reading it could tell which side to move.
-   *
-   * `API_VERSION` and not the literal 1: the server reads it from
-   * `crucible/__init__.py` and this client from `types.ts`, and a second copy
-   * here would be the third owner of one number. The header `read()` sends is
-   * built from the same constant for the same reason.
-   *
-   * The code is PREFIXED onto the message because a Connect door shows
-   * `err.message` and nothing else, so "refused by name" is only true where the
-   * name is in the sentence.
-   */
   if (ping['api_version'] !== API_VERSION) {
     throw new CrucibleConnectionError(
       'api_version_mismatch',

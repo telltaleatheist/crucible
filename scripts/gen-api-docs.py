@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-"""Generate `docs/API.md` from the running app's own OpenAPI schema.
-
-Owen, 2026-09-16: *"we should probably be writing documentation for how to use
-crucible, with all the variables you can pass, as we go. api documentation or
-something like it"*.
-
-GENERATED, and that is the whole point. Seventeen phase docs describe the routes
-each phase ADDED, which means there is no document anyone can read to answer
-"what can I send to a chat request" — and a hand-written one would be wrong
-within a release. This reads the same FastAPI app the server runs, so a field
-added to a request model appears here on the next run, and a field removed
-disappears. `scripts/release.sh` runs `--check` before the cut, the same way it
-does for `modules/*.module.json` — the manifests that shipped stale in v0.6.3
-because nothing compared them.
-
-What it CANNOT know is why a field exists. Prose lives in the phase docs and in
-the models' own docstrings, which are carried across into the descriptions here.
-A field with no description is a field whose model says nothing about it.
-"""
 
 from __future__ import annotations
 
@@ -34,9 +15,6 @@ sys.path.insert(0, str(ROOT))
 
 OUTPUT = ROOT / "docs" / "API.md"
 
-#: Route groups, in the order a reader meets them: find the server, pair with it,
-#: ask what it can do, then make it work. The key is matched as a path prefix
-#: after `/v1`, longest first; the empty prefix catches whatever is left.
 GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/ping",
@@ -151,12 +129,6 @@ AUTH_HEADERS = {"authorization", "x-crucible-api"}
 
 
 def build_app() -> Any:
-    """The same app the server runs, with every job type switched on.
-
-    Every job type, because a route registered only when its class is enabled
-    would otherwise be missing from the reference on the say-so of a fixture's
-    defaults.
-    """
     home = Path(tempfile.mkdtemp(prefix="crucible-apidoc-"))
     os.environ["CRUCIBLE_HOME"] = str(home)
     from crucible.api import create_app
@@ -193,24 +165,6 @@ def build_app() -> Any:
 
 
 def auth_scopes(app: Any) -> dict[tuple[str, str], tuple[bool, bool]]:
-    """(path, METHOD) -> (needs a token, needs the version header).
-
-    Read off each route's resolved dependency tree rather than off the router it
-    was registered on, because the routers are built inside `create_app` and a
-    route moved between them must not go on claiming the old scope here.
-
-    THE WALK DESCENDS, and it did not. A flat pass over `app.routes` finds ONE
-    route — `GET /`, the operator page — so every other door in this reference
-    was written "open", which is how `docs/API.md` shipped in 1.0.1 and 1.0.2
-    saying that `/v1/info` and `/v1/capability` need no token. Measured here on
-    fastapi 0.141.1 / starlette 1.6.0: `include_router` no longer splices the
-    routes in, it appends a `_IncludedRouter` whose real ones hang off
-    `original_router`, with the prefix and the router-level dependencies in a
-    separate `include_context`. `tests/test_api_client.py` met the same wrapper
-    from the other side on 2026-09-16 and answered it by asking `app.openapi()`;
-    that document says nothing about auth, so this asks the tree and follows it
-    down.
-    """
     from crucible.api import require_api_version, require_auth
 
     scopes: dict[tuple[str, str], tuple[bool, bool]] = {}
@@ -230,11 +184,6 @@ def auth_scopes(app: Any) -> dict[tuple[str, str], tuple[bool, bool]]:
             if dependant is None:
                 continue
             calls = {dependant.call}
-            # The router-level `dependencies=[…]` a route was included under are
-            # folded into its own dependant by FastAPI, but they are carried down
-            # here as well rather than trusted to be. A door is stated in two
-            # places and reading only one of them is what this function was
-            # already doing wrong.
             stack = list(dependant.dependencies) + [
                 one.dependency for one in inherited if one.dependency is not None
             ]
@@ -242,12 +191,6 @@ def auth_scopes(app: Any) -> dict[tuple[str, str], tuple[bool, bool]]:
                 found = stack.pop()
                 calls.add(getattr(found, "call", found))
                 stack.extend(getattr(found, "dependencies", ()))
-            # `path_format`, not `path`: one route is registered with a
-            # converter — `/v1/models/{subject_id:path}/lease`, so that a model
-            # id with a slash in it survives — and the OpenAPI document this is
-            # joined to keys on the bare `{subject_id}`. `path_format` is the
-            # spelling FastAPI's own generator uses, which is what makes the two
-            # halves the same list.
             spelling = getattr(route, "path_format", route.path)
             for method in getattr(route, "methods", ()) or ():
                 scopes[(prefix + spelling, method.upper())] = (
@@ -269,7 +212,6 @@ def deref(schema: dict[str, Any], components: dict[str, Any]) -> dict[str, Any]:
 
 
 def type_words(schema: dict[str, Any], components: dict[str, Any]) -> str:
-    """One readable type for a property, refs resolved and unions flattened."""
     schema = deref(schema, components)
     for key in ("anyOf", "oneOf"):
         if key in schema:
@@ -280,9 +222,6 @@ def type_words(schema: dict[str, Any], components: dict[str, Any]) -> str:
     if "const" in schema:
         return "`" + repr(schema["const"]) + "`"
     if "enum" in schema:
-        # " or ", as the unions above say it: a bare `|` inside a table cell
-        # ends the cell, and `DecideRequest.missing` was the first enum field
-        # to reach a table (it split its row into six columns).
         return " or ".join("`" + repr(value) + "`" for value in schema["enum"])
     kind = schema.get("type")
     if kind == "array":
@@ -295,14 +234,12 @@ def type_words(schema: dict[str, Any], components: dict[str, Any]) -> str:
 
 
 def cell(text: str | None) -> str:
-    """One table cell: whitespace collapsed, pipes escaped."""
     return " ".join((text or "").split()).replace("|", "\\|")
 
 
 def render_fields(
     schema: dict[str, Any], components: dict[str, Any]
 ) -> list[str]:
-    """One table of every variable a caller may pass into this body."""
     schema = deref(schema, components)
     properties: dict[str, Any] = schema.get("properties", {})
     if not properties:
@@ -400,10 +337,6 @@ def render(app: Any) -> str:
         if blurb:
             out += [blurb, ""]
         for path, method, operation in rows:
-            # NOT `.get(…, (False, False))`. A path the walk did not reach is a
-            # walk that is wrong, and defaulting it prints "open" — the one
-            # answer that reads like somebody decided it. That default is what
-            # kept the flat walk above invisible for two releases.
             if (path, method) not in scopes:
                 raise SystemExit(
                     f"{method} {path} is in the OpenAPI document but auth_scopes "

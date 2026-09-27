@@ -1,19 +1,3 @@
-/**
- * `@crucible/bootstrap` — the app-side installer and ensurer for a local Crucible.
- *
- * A local Crucible is a SERVICE on the machine and no app owns it (Owen,
- * 2026-09-13; PHASE5-APPS.md section 6.0). An app's job is to make sure this
- * machine has one and make sure it is running, and that is the whole surface:
- *
- * ```ts
- * import { detectHost, install, ensureRunning, readLocalConfig, health } from '@crucible/bootstrap';
- * ```
- *
- * Every verb is idempotent. Every missing prerequisite is a named refusal
- * carrying the command the HOST must run. Nothing is spawned as a child that
- * should be a service. The token is never logged.
- */
-
 export { consoleScriptBeside, detectHost, parseNvidiaSmi, pickProbeDistro, WSL_NVIDIA_SMI } from './host.js';
 export type { DetectOptions, GpuFacts, HostFacts, WslFacts } from './host.js';
 
@@ -124,7 +108,6 @@ export type { Evidence, ProbeKey, WslAction, WslState, WslStateDef, WslStateInpu
 
 export { installSteps, renderArgv, renderSh, SHELL_VARIABLE } from './steps.js';
 export type { RefName, StepDef, StepPlan, Word } from './steps.js';
-
 
 export { ensureRunning, parseServiceStatus } from './service.js';
 export type { EnsureRunningOptions, RunningService, ServiceStatus } from './service.js';

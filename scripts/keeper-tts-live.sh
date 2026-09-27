@@ -1,53 +1,4 @@
 #!/usr/bin/env bash
-# Live keeper for the `tts` render door: a real server, a real narrator, a real
-# voice, and real FLACs on disk.
-#
-# This is the script that discharges the owed item in PHASE3-TTS.md section 10.
-# Everything in phase 3b was built against `tests/fake_narrator.py` because both
-# of Owen's cards were busy the night it was written, so no voice manifest
-# carries a MEASURED memory figure — every one of them says `estimate_basis =
-# "declared"`. This run is what turns that into a measurement, and it prints the
-# exact lines to paste back into the manifest.
-#
-# LOCAL MODE (default). Starts a throwaway server on a free port against the
-# operator's real ~/.crucible, because the tts env and the voice weights live
-# there and are gigabytes. It does not install either — that is minutes of
-# downloading and not a keeper's job — but it refuses BY NAME if they are
-# missing rather than skipping.
-#
-#   ./scripts/keeper-tts-live.sh
-#   CRUCIBLE_VOICE=mistborn ./scripts/keeper-tts-live.sh
-#
-# REMOTE MODE. Set both CRUCIBLE_URL and CRUCIBLE_TOKEN and the keeper drives a
-# server already running somewhere else, starting nothing of its own — the shape
-# that matters for the apps, a Windows client driving a GPU on another machine.
-# In remote mode the card cannot be watched, so the memory measurement is
-# skipped and said to be skipped; everything else still runs. Setting one of the
-# two variables and not the other is a refusal, never a silent fall back.
-#
-# What it proves, end to end:
-#   1. the server is reachable and says what it is
-#   2. the voice is installed and loadable there, pinned to a revision, and
-#      /info's tts capability carries exactly the same rows as /voices
-#   3. nothing is resident to begin with
-#   4. a render LOADS its own voice — the one asymmetry with `llm` — streaming
-#      `warming` and ending `done`
-#   5. one `<index>.flac` per chunk, each a real FLAC at the voice's own sample
-#      rate, mono, and non-trivially long
-#   6. a `chunk` event per row carrying seconds, chars and chars_per_sec
-#   7. the provenance sidecar names the merge that rendered it
-#   8. a second render reuses the resident voice and does not restart narrator
-#   9. unload-voice frees the engine and nothing is resident afterwards
-#  10. (local mode only) the card comes back to where it started, and the peak
-#      while rendering is printed as the manifest's measured estimate
-#
-# Exits 0 only if every check passed. Trust the exit code.
-#
-# THE CARD IS NOT TAKEN WITHOUT ASKING. This loads a model. Owen's standing rule
-# is that Crucible never starts GPU work while somebody else is on the card, so
-# the keeper reads /v1/accelerator first and refuses by name if anything that is
-# not this server's own is holding more than the desktop allowance.
-
 set -euo pipefail
 
 VOICE="${CRUCIBLE_VOICE:-deathstalker}"
@@ -66,9 +17,6 @@ die()  { printf 'keeper: %s\n' "$*" >&2; exit 2; }
 
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    # SIGTERM only. The server's own shutdown stops the resident engine the same
-    # way, and narrator's teardown stops SGLang under it. A SIGKILL here would
-    # leave a CUDA process wedged in WSL2 until Windows reboots.
     kill -TERM "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
@@ -80,8 +28,6 @@ trap cleanup EXIT
 for tool in curl python3; do
   command -v "$tool" >/dev/null || die "no $tool on PATH"
 done
-
-# ------------------------------------------------------------------ the server
 
 REMOTE=0
 if [ -n "${CRUCIBLE_URL:-}" ] || [ -n "${CRUCIBLE_TOKEN:-}" ]; then
@@ -120,8 +66,6 @@ post() { curl -fsS "${AUTH[@]}" -H 'Content-Type: application/json' --data-binar
 
 jq_py() { python3 -c "$1" ; }
 
-# ------------------------------------------------------------------- 1. ping
-
 if get ping >/dev/null 2>&1 || curl -fsS "$BASE/ping" >/dev/null; then
   NAME="$(curl -fsS "$BASE/ping" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
   ok "the server answers /ping and calls itself $NAME"
@@ -129,8 +73,6 @@ else
   bad "the server did not answer /ping at $BASE"
   exit 1
 fi
-
-# ----------------------------------------------------- 2. the voice is loadable
 
 get voices >"$WORK/voices.json" || { bad "GET /voices failed"; exit 1; }
 get info   >"$WORK/info.json"   || { bad "GET /info failed"; exit 1; }
@@ -167,8 +109,6 @@ DECLARED="$(sed -n 4p "$WORK/voice.txt")"
 ok "$VOICE is loadable, pinned at ${REVISION:0:12}, and /info's tts rows are /voices' rows"
 log "its estimate is $DECLARED bytes, basis: $BASIS"
 
-# ------------------------------------------------- 3. the card, before anything
-
 BEFORE=""
 if [ "$REMOTE" = "0" ]; then
   get accelerator >"$WORK/accel-before.json" || { bad "GET /accelerator failed"; exit 1; }
@@ -193,8 +133,6 @@ assert h["resident_models"] == [], h
 assert h["resident_kind"] is None, h
 ' && ok "nothing is resident to begin with" || bad "something was already resident"
 
-# ------------------------------------------ 4-7. a render, which loads its voice
-
 cat >"$WORK/render.json" <<JSON
 {"type": "tts", "model": "$VOICE", "params": {"language": "en", "take": 0, "chunks": [
   {"index": 41, "text": "He had been walking for some time, and the road did not appear to end."},
@@ -205,8 +143,6 @@ JSON
 JOB="$(post jobs "$WORK/render.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')"
 log "render job $JOB"
 
-# The card is sampled while the render runs, because the peak is what the guard
-# has to be able to give and it is not visible once the run is over.
 PEAK_FILE="$WORK/peak"
 if [ "$REMOTE" = "0" ] && command -v nvidia-smi >/dev/null; then
   ( best=0
@@ -282,10 +218,8 @@ for name in ("41.flac", "42.flac"):
         sys.exit(f"keeper: {name} is {len(raw)} bytes — BookForge's resume test is "
                  "'exists and exceeds 1024 bytes', so this would read as a finished "
                  "chunk and the sentence would be silently lost from the book")
-    # STREAMINFO is the first metadata block: 4 bytes magic, 4 header, then 18
-    # bytes whose bits 80..99 are the sample rate and 100..102 the channel count.
-    body = raw[8:8 + 18]
-    bits = int.from_bytes(body[10:14], "big")
+    streaminfo = raw[8:8 + 18]
+    bits = int.from_bytes(streaminfo[10:14], "big")
     sample_rate = bits >> 12
     channels = ((bits >> 9) & 0x7) + 1
     if sample_rate != rate:
@@ -301,8 +235,6 @@ print("both flacs are real, mono, at the voice's own rate, and named their merge
 PY
 ok "the bytes are real FLACs, mono at $SAMPLE_RATE Hz, and each names the merge that made it"
 
-# ------------------------------------------- 8. a second render does not reload
-
 JOB2="$(post jobs "$WORK/render.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')"
 curl -fsS --max-time "$RENDER_TIMEOUT" "${AUTH[@]}" "$BASE/jobs/$JOB2/events" >"$WORK/events2.sse"
 if grep -q '^event: warming' "$WORK/events2.sse"; then
@@ -310,8 +242,6 @@ if grep -q '^event: warming' "$WORK/events2.sse"; then
 else
   ok "a second render reused the resident voice and did not restart narrator"
 fi
-
-# ------------------------------------------------------------- 9. unload
 
 if [ "$REMOTE" = "0" ] && [ -f "$PEAK_FILE" ]; then
   PEAK_MIB="$(cat "$PEAK_FILE")"
@@ -326,8 +256,6 @@ h = json.load(sys.stdin)
 assert h["resident_models"] == [], h
 assert h["resident_kind"] is None, h
 ' && ok "unload-voice freed the engine and nothing is resident" || bad "something is still resident after unload"
-
-# ------------------------------------- 10. the measurement, and what to paste
 
 if [ "$REMOTE" = "0" ]; then
   get accelerator >"$WORK/accel-after.json"

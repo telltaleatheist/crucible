@@ -1,45 +1,4 @@
 #!/usr/bin/env bash
-#
-# PHASE15-HOST.md section 8 — THE BUTTON.
-#
-# Owen, 2026-09-14: *"get everything ready so we can just hit a button and have
-# the tests run, and when it's fully ready to test, ill release the card and let
-# you know when its ready."*
-#
-# One script, run from Git Bash on the PC with no arguments. It runs the stages
-# IN ORDER, stops at the first failure with the stage's name and the failing
-# command's output, and writes `C:\tmp\phase15-testrun\<timestamp>\report.md`
-# AS IT GOES, so a stopped run still says what passed. Every stage prints its
-# wall-clock seconds.
-#
-# NOTHING IN IT ASKS A QUESTION. Anything it needs that may not be there — an
-# Anthropic key, a page to read, the mac worktree, a BookForge checkout — is a
-# file or a directory it looks for BY NAME and reports SKIPPED by name when
-# absent. Never silently, and never with a default that pretends.
-#
-#     scripts/testrun-phase15.sh              # the run
-#     scripts/testrun-phase15.sh --dry-run    # print every command, run none
-#     scripts/testrun-phase15.sh --only T5    # one stage
-#
-# THE CARD. T6 and T7 need it; nothing else here does. Each says so before it
-# starts, so a run begun before Owen has released it stops there with the
-# reason rather than fighting a trainer for VRAM.
-#
-# T9 (the Mac) IS NOT IN THIS SCRIPT and skips itself saying so. It drives a
-# second machine's card over ssh, and a button on this one that reaches across
-# the network to hold somebody else's GPU is a button whose blast radius is
-# not what its name says. The stage is run from the Mac side; 7c's M-steps are
-# the recipe.
-#
-# STAGING IS NOT THIS SCRIPT'S EITHER, and its script is GONE. S1 and S2 were
-# `scripts/stage-phase15.sh`, which built the Windows host PACK and unpacked it
-# into a staging root — machinery PHASE20 deleted (section 6). What stages a
-# Windows host now is `install.ps1 -Root <a staging directory>`, which fetches
-# the pinned interpreter and this release's wheel; the rest of S2 (init on the
-# staged port, pull the engine and the two GGUFs) is ordinary CLI. A button that
-# also did 15 GB of downloads would still be a button whose first press takes an
-# hour, which is why none of it is in here.
-#
 set -u -o pipefail
 
 DRY_RUN=0
@@ -76,8 +35,6 @@ PAGE_PNG="${RUN_ROOT}/page.png"
 
 LAST_OUTPUT=""
 LAST_STATUS=0
-
-# ---------------------------------------------------------------- reporting
 
 say() { printf '\n=== %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -121,8 +78,6 @@ fail() {
   exit 1
 }
 
-# EVERY command goes through this, so `--dry-run` has no second code path and
-# cannot drift from the real one.
 run() {
   if [ "$DRY_RUN" = "1" ]; then
     printf '    WOULD RUN: %s\n' "$1"
@@ -139,8 +94,6 @@ tail_of() { printf '%s' "${LAST_OUTPUT:-}" | tail -"${1:-20}"; }
 
 wanted() { [ -z "${ONLY}" ] || [ "${ONLY}" = "$1" ]; }
 
-# Is this stage's subject there? Prints the SKIP itself when it is not, so no
-# caller can forget to.
 present() {
   local what="$1" path="$2" why="$3"
   if [ "$DRY_RUN" = "1" ]; then
@@ -152,12 +105,6 @@ present() {
   return 1
 }
 
-# The pytest wrapper, with the trainer guard S4 asks for.
-#
-# `[t]rain_lora.py` and not `train_lora.py`: the bracket stops the pattern
-# matching the process that is looking for it, which is the oldest trap in
-# grepping a process table and the one that would make this guard fire on
-# itself every time.
 pytest_under_lock() {
   printf "flock -w 7200 %s -c 'if pgrep -f \"[t]rain_lora.py\" >/dev/null; then echo TRAINER_RUNNING; exit 3; fi; cd %s && %s -m pytest -q -p no:cacheprovider'" \
     "${LOCK}" "$1" "${WSL_PYTHON}"
@@ -165,13 +112,10 @@ pytest_under_lock() {
 
 in_guest() { printf 'wsl.exe -d %s --exec bash -lc %q' "${WSL_DISTRO}" "$1"; }
 
-# The WSL engine's bearer, read out of the guest's own config.
 guest_token() {
   wsl.exe -d "${WSL_DISTRO}" --exec bash -lc \
     "grep -m1 '^token' ~/.crucible/config.toml | cut -d'\"' -f2" | tr -d '\r'
 }
-
-# ------------------------------------------------------------------ preflight
 
 if [ "$DRY_RUN" = "0" ]; then
   mkdir -p "${OUT}"
@@ -186,8 +130,6 @@ if [ "$DRY_RUN" = "0" ]; then
   say "report: ${REPORT}"
 fi
 
-# ------------------------------------------------------------------------ T1
-
 if wanted T1; then
   begin "T1 — sdk/bootstrap and sdk/ts"
   run "cd '${REPO}/sdk/bootstrap' && npm test" || fail "${LAST_OUTPUT}"
@@ -197,8 +139,6 @@ if wanted T1; then
   pass "bootstrap: ${bootstrap_count:-(dry run)}
 ts: ${ts_count:-(dry run)}"
 fi
-
-# ------------------------------------------------------------------------ T2
 
 if wanted T2; then
   begin "T2 — pytest on this branch, under the lock"
@@ -215,8 +155,6 @@ press the button again."
   count="$(printf '%s' "${LAST_OUTPUT:-}" | grep -E '[0-9]+ (passed|failed)' | tail -1)"
   pass "${count:-0 failed (no summary line printed by this pytest)}"
 fi
-
-# ------------------------------------------------------------------------ T3
 
 if wanted T3; then
   begin "T3 — pytest in the mac worktree"
@@ -253,8 +191,6 @@ ${failures:-none}
   fi
 fi
 
-# ------------------------------------------------------------------------ T4
-
 if wanted T4; then
   begin "T4 — BookForge keepers"
   if present "BookForge's keeper runner" "${BOOKFORGE}/tools/run-keepers.js" \
@@ -266,8 +202,6 @@ $(tail_of 20)
 \`\`\`"
   fi
 fi
-
-# ------------------------------------------------------------------------ T5
 
 if wanted T5; then
   begin "T5 — the upstream route, end to end"
@@ -284,10 +218,6 @@ the key and nothing else."; then
       [ -n "${token}" ] || fail "no token in the guest's ~/.crucible/config.toml"
       key="$(tr -d '\r\n' < "${KEY_FILE}")"
       [ -n "${key}" ] || fail "${KEY_FILE} is empty"
-      # THE KEY NEVER REACHES A LOG OR AN ARGV. It goes into a file inside the
-      # guest at 0600, curl reads the body from that file, and the file is
-      # deleted in the same command — so it is not in this script's process
-      # table, not in the report, and not in the shell history.
       body="/tmp/crucible-t5-$$.json"
       run "$(in_guest "umask 077; cat > ${body} <<'JSON'
 {\"upstreams\": {\"anthropic\": {\"key\": \"${key}\"}}, \"routes\": {\"translate\": \"anthropic/claude-sonnet-5\"}}
@@ -303,8 +233,6 @@ curl -sS -X PUT -H 'Authorization: Bearer ${token}' -H 'X-Crucible-Api: 1' -H 'C
         || fail "the completion failed: ${LAST_OUTPUT}"
       completion="${LAST_OUTPUT}"
 
-      # RESTORED WHETHER OR NOT THE COMPLETION WORKED. The key never stays on
-      # a test run, so the restore runs before the assertion below.
       run "$(in_guest "curl -sS -X PUT -H 'Authorization: Bearer ${token}' -H 'X-Crucible-Api: 1' -H 'Content-Type: application/json' -d '{\"routes\": {\"translate\": \"local\"}, \"upstreams\": {\"anthropic\": null}}' http://127.0.0.1:${ENGINE_PORT}/v1/settings")" \
         || fail "RESTORE FAILED and the key may still be on that server: ${LAST_OUTPUT}"
       restored="${LAST_OUTPUT}"
@@ -329,8 +257,6 @@ ${restored}
   fi
 fi
 
-# ------------------------------------------------------------------------ T6
-
 if wanted T6; then
   begin "T6 — dots under vLLM in WSL (NEEDS THE CARD)"
   page=""
@@ -348,11 +274,6 @@ it, and is skipped by name if it does not — rasterising is the APP's work
 (3.10) and Crucible ships no rasteriser."
   else
     note "THE CARD IS HELD FROM HERE UNTIL T7 ENDS."
-    # `--load`, like T7. Crucible NEVER loads a model to answer a chat request
-    # — it refuses `model_not_resident` by name, on every backend — so the
-    # CALLER loads it, reads the page, and unloads it. The first run of this
-    # script asked the WSL server to read a page with nothing resident and got
-    # that refusal; the server was right and this line was wrong.
     run "python '${REPO}/scripts/read_one_page.py' --page '${page}' --out '${OUT}/t6' --load --server 'http://127.0.0.1:${ENGINE_PORT}' --token \"\$(wsl.exe -d ${WSL_DISTRO} --exec bash -lc \"grep -m1 '^token' ~/.crucible/config.toml | cut -d'\\\"' -f2\" | tr -d '\r')\"" \
       || fail "${LAST_OUTPUT}"
     pass "one page parsed under vLLM.
@@ -361,8 +282,6 @@ $(tail_of 25)
 \`\`\`"
   fi
 fi
-
-# ------------------------------------------------------------------------ T7
 
 if wanted T7; then
   begin "T7 — llama-windows on ${STAGED_PORT} (NEEDS THE CARD)"
@@ -379,8 +298,6 @@ GGUFs. (\`scripts/stage-phase15.sh\` did this and went with the packs.)"; then
       if [ -e "${PAGE_PNG}" ]; then page="${PAGE_PNG}"; elif [ -e "${PAGE_PDF}" ]; then page="${PAGE_PDF}"; fi
       [ -n "${page}" ] || skip "no page, so there is nothing to compare with T6's artifact."
       if [ -n "${page}" ]; then
-        # The server is started HERE and stopped in the same stage, so a
-        # failure anywhere below cannot leave a llama-server holding the card.
         log="${OUT}/t7-server.log"
         ( CRUCIBLE_HOME="${STAGED_HOME_WIN}" python -m crucible serve \
             --host 127.0.0.1 --port "${STAGED_PORT}" > "${log}" 2>&1 & echo $! > "${OUT}/t7.pid" )
@@ -410,11 +327,6 @@ $(tail -40 "${log}")"; }
         printf '%s\n' "${LAST_OUTPUT}" > "${OUT}/t7-activity.json"
         stop_it
         trap - EXIT
-        # BYTE-SHAPE IDENTICAL is the exit condition (3.10, and Owen's "an app
-        # cannot tell which engine read it"). Compared on the PARSED shape —
-        # the keys of each block — rather than on the text, because two
-        # engines reading one page are allowed to disagree about a character
-        # and are not allowed to disagree about the dialect.
         if [ -f "${OUT}/t6/shape.json" ] && [ -f "${OUT}/t7/shape.json" ]; then
           if ! diff -u "${OUT}/t6/shape.json" "${OUT}/t7/shape.json" > "${OUT}/t7-shape.diff"; then
             fail "the two engines answered in DIFFERENT shapes:
@@ -431,8 +343,6 @@ ${cleanup_said}
     fi
   fi
 fi
-
-# ------------------------------------------------------------------------ T8
 
 if wanted T8; then
   begin "T8 — the remove door on the staged Windows server"
@@ -468,8 +378,6 @@ ${removed}
   fi
 fi
 
-# ------------------------------------------------------------------------ T9
-
 if wanted T9; then
   begin "T9 — the Mac"
   skip "NOT IN THIS SCRIPT, deliberately. T9 drives a SECOND machine's card
@@ -481,8 +389,6 @@ wheel), and what it proves is \`align\` and \`asr\` enabled with one job each.
 \`pages\` is NOT expected there — 4.6's mlx-vlm finding."
 fi
 
-# ----------------------------------------------------------------------- T10
-
 if wanted T10; then
   begin "T10 — the engine task, Windows → WSL2"
   if present "the staged Windows home" "${RUN_ROOT}/home/config.toml" \
@@ -491,19 +397,11 @@ if wanted T10; then
       note "WOULD RUN: crucible serve with CRUCIBLE_HOST_DOOR set; POST /v1/tasks {engine,wsl}; read the events"
       pass "(dry run)"
     else
-      # Is anything listening on the host's door? A GET, never a POST: a POST
-      # to a LIVE door starts a real WSL install. Any HTTP code at all — 405
-      # included — means something answered; `000` means nothing did, which is
-      # what `-w '%{http_code}'` says and a bare exit status does not (curl
-      # exits 0 for a 404 as happily as for a 200).
       door_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:7101/install" 2>/dev/null || printf '000')"
       [ -n "${door_code}" ] || door_code="000"
       host_running=0
       [ "${door_code}" = "000" ] || host_running=1
       log="${OUT}/t10-server.log"
-      # 7102, not 7101: the host's DOOR is 7101 and the staged server's own
-      # port was 7101 too, which is fine while nothing else runs — but T10 is
-      # the one stage where both exist at once.
       ( CRUCIBLE_HOME="${STAGED_HOME_WIN}" CRUCIBLE_HOST_DOOR="http://127.0.0.1:7101" \
           python -m crucible serve --host 127.0.0.1 --port 7102 > "${log}" 2>&1 & echo $! > "${OUT}/t10.pid" )
       stop_it() {
@@ -525,12 +423,6 @@ $(tail -40 "${log}")"; }
         || { stop_it; fail "${LAST_OUTPUT}"; }
       submitted="${LAST_OUTPUT}"
       printf '%s\n' "${submitted}" > "${OUT}/t10-submit.json"
-      # 4.7, AND THE CORRECTION THE FIRST RUN FORCED. With CRUCIBLE_HOST_DOOR
-      # SET there is nothing to refuse at submit time: the server hands the
-      # move to the host and relays its events, so the POST is a 202 with a
-      # task id and EVERY failure of the door is named in the TASK. The first
-      # run of this stage read the POST body for a refusal, found a task id
-      # and called the server wrong. The server was right; this reads the task.
       task_id="$(python "${REPO}/scripts/task_field.py" "${OUT}/t10-submit.json" task_id)"
       if [ "${host_running}" = "0" ]; then
         [ -n "${task_id}" ] || { stop_it; fail "no host is running, and the POST
@@ -582,8 +474,6 @@ and its log is \`%LOCALAPPDATA%\\Crucible\\host.log\`."
     fi
   fi
 fi
-
-# ------------------------------------------------------------------- the end
 
 if [ "$DRY_RUN" = "0" ]; then
   {

@@ -1,19 +1,3 @@
-/**
- * `@crucible/client` — the TypeScript client for a Crucible inference server.
- *
- * ```ts
- * import { CrucibleClient } from '@crucible/client';
- *
- * const crucible = new CrucibleClient({
- *   url: 'http://127.0.0.1:7100',
- *   token: process.env.CRUCIBLE_TOKEN!,
- *   clientName: 'bookforge',
- * });
- * ```
- *
- * Zero runtime dependencies. Node 20+, bun, and the Electron main process.
- */
-
 export { CrucibleClient, engineOf, readAlignment, readRenderResult } from './client.js';
 export type {
   CrucibleClientOptions,
@@ -70,9 +54,6 @@ export {
 export { PAIRING_SCHEME, parsePairing } from './pairing.js';
 export type { Pairing } from './pairing.js';
 
-// NODE ONLY, and re-exported from its own module so a browser bundle that
-// wants `parsePairing` does not pull `node:fs` in behind it
-// (PHASE15-HOST.md section 3.8).
 export {
   CRUCIBLE_HOME_ENV,
   PAIRING_FILE,

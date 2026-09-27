@@ -1,42 +1,4 @@
 #!/usr/bin/env bash
-# Live keeper for the `llm` job type: a real server, a real engine, a real model.
-#
-# LOCAL MODE (default). Starts a throwaway server on a free port against the
-# operator's real ~/.crucible, because the env and the weights live there and are
-# gigabytes. It does not install either — that is minutes of downloading and not a
-# keeper's job — but it refuses BY NAME if they are missing rather than skipping.
-#
-#   ./scripts/keeper-llm-live.sh
-#   CRUCIBLE_LLM_MODEL=qwen3.8-27b ./scripts/keeper-llm-live.sh
-#
-# REMOTE MODE. Set both CRUCIBLE_URL and CRUCIBLE_TOKEN and the keeper drives a
-# server already running somewhere else, starting nothing of its own:
-#
-#   export CRUCIBLE_URL=http://owens-mac-studio.hs.owenmorgan.com:7100
-#   export CRUCIBLE_TOKEN=...
-#   ./scripts/keeper-llm-live.sh
-#
-# That is the shape that matters for the apps: a Windows client driving a GPU on
-# another machine over the tailnet. In remote mode the keeper needs nothing but
-# curl and a python3 — no crucible on PATH, no env, no weights, no sight of the
-# card. The accelerator checks become what a client can honestly see: /v1/health
-# and /v1/models. Setting one of the two variables and not the other is a
-# refusal, never a silent fall back to local mode.
-#
-# What it proves, end to end:
-#   1. the server is reachable and says what it is
-#   2. the model is installed and loadable there, pinned to a revision, and
-#      /info's llm capability carries exactly the same rows as /models
-#   3. a chat before any load is 409 model_not_resident — never an implicit load
-#   4. load-model streams `warming` and ends `done {resident}`
-#   5. a non-streamed chat comes back through the proxy
-#   6. a streamed chat keeps its SSE framing and its [DONE]
-#   7. a wrong model name is 409 model_not_resident naming the resident one
-#   8. unload-model frees the engine and nothing is resident afterwards
-#   9. (local mode only) the accelerator is back where it started
-#
-# Exits 0 only if every check passed. Trust the exit code.
-
 set -euo pipefail
 
 MODEL="${CRUCIBLE_LLM_MODEL:-qwen3.5-9b}"
@@ -53,8 +15,6 @@ bad()  { FAILED=$((FAILED + 1)); printf 'FAIL  %s\n' "$*" >&2; }
 
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    # SIGTERM only. The server's own shutdown stops any resident engine the same
-    # way — a SIGKILL here would leave a CUDA process wedged in WSL2.
     kill -TERM "$SERVER_PID" 2>/dev/null || true
     wait "$SERVER_PID" 2>/dev/null || true
   fi
@@ -66,8 +26,6 @@ trap cleanup EXIT
 
 command -v curl >/dev/null || { echo "keeper: no curl on PATH" >&2; exit 2; }
 
-# python3 is spelled `python` on a Windows Git Bash, where `python3` is a Store
-# stub that refuses to run. Find a real one and name it; never guess silently.
 PY="${CRUCIBLE_PYTHON:-}"
 if [ -z "$PY" ]; then
   for candidate in python3 python; do
@@ -94,8 +52,6 @@ REMOTE=0
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/crucible-llm-keeper.XXXXXX")"
 WORK="$ROOT/work"
 mkdir -p "$WORK"
-
-# ------------------------------------------------------------------ the server
 
 if [ "$REMOTE" = "1" ]; then
   BASE="${URL%/}/v1"
@@ -164,8 +120,6 @@ PYCODE
   SERVER_PID=$!
 fi
 
-# ------------------------------------------------------------- 1. it answers
-
 UP=0
 for _ in $(seq 1 160); do
   if curl -fsS --max-time 4 "$BASE/ping" -o "$WORK/ping.json" 2>/dev/null; then UP=1; break; fi
@@ -199,8 +153,6 @@ else
   bad "GET /info returned $CODE: $(cat "$WORK/info.json")"
 fi
 
-# --------------------------------------------------------------- 2. GET /models
-
 CODE="$(curl -sS -o "$WORK/models.json" -w '%{http_code}' "${AUTH[@]}" "$BASE/models")"
 if [ "$CODE" = "200" ] && "$PY" - "$WORK/models.json" "$MODEL" <<'PYCODE'
 import json, sys
@@ -213,11 +165,8 @@ assert row["installed"], row
 assert row["loadable"], row
 assert row["resident"] is False, row
 assert row["memory_bytes_estimate"] > 0, row
-# The pin this host would serve, and the same row shape /info carries.
 revision = row["revision"]
 assert isinstance(revision, str) and len(revision) == 40, row
-# What a client records, and what it clamps against. Nothing is resident yet, so
-# max_model_len is what this host WOULD serve it at.
 assert row["fingerprint"] == f"{row['id']}@{revision}", row
 assert isinstance(row["max_model_len"], int) and row["max_model_len"] > 0, row
 print("    revision:", revision)
@@ -229,9 +178,6 @@ else
   bad "GET /models returned $CODE: $(cat "$WORK/models.json")"
 fi
 
-# The llm capability in /info is the same rows from the same producer, so a
-# client that has called /info never asks twice and never reconciles two
-# descriptions of one model.
 if "$PY" - "$WORK/info.json" "$WORK/models.json" <<'PYCODE'
 import json, sys
 info = json.load(open(sys.argv[1]))
@@ -246,8 +192,6 @@ else
   bad "/info's llm capability differs from /models"
 fi
 
-# ------------------------------------- 3. the proxy refuses before anything loads
-
 CODE="$(curl -sS -o "$WORK/409a.json" -w '%{http_code}' "${AUTH[@]}" "${JSON[@]}" \
   -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" \
   "$BASE/openai/chat/completions")"
@@ -256,8 +200,6 @@ if [ "$CODE" = "409" ] && grep -q 'model_not_resident' "$WORK/409a.json" && grep
 else
   bad "chat before load returned $CODE: $(cat "$WORK/409a.json")"
 fi
-
-# ------------------------------------------------------------------- 4. the load
 
 CODE="$(curl -sS -o "$WORK/load.json" -w '%{http_code}' "${AUTH[@]}" "${JSON[@]}" \
   -d "{\"type\":\"load-model\",\"model\":\"$MODEL\",\"params\":{\"timeout_s\":$LOAD_TIMEOUT}}" \
@@ -314,15 +256,6 @@ else
   bad "GET /health returned $CODE: $(cat "$WORK/health.json")"
 fi
 
-# --------------------------------------------------- 5. a non-streamed chat
-#
-# Qwen3.5 is a reasoning model: it emits a `reasoning` field first and only then
-# `content`, so a small token ceiling finishes inside the reasoning and comes back
-# with no `content` at all. The fix is to say so rather than to buy the answer with
-# a generous budget: `chat_template_kwargs: {"enable_thinking": false}` is read per
-# request by mlx-lm and honoured by vLLM, and the SDK sends it as `thinking: false`.
-# The proxy forwards it verbatim, which is the other half of what this checks.
-
 cat >"$WORK/chat.json" <<JSON
 {"model": "$MODEL",
  "messages": [{"role": "user", "content": "Reply with exactly this and nothing else: Crucible is running."}],
@@ -350,8 +283,6 @@ then
 else
   bad "non-streamed chat returned $CODE: $(cat "$WORK/chat.out.json")"
 fi
-
-# ------------------------------------------------------- 6. a streamed chat
 
 cat >"$WORK/chatstream.json" <<JSON
 {"model": "$MODEL",
@@ -385,8 +316,6 @@ else
   bad "streamed chat: $(head -c 400 "$WORK/chat.sse")"
 fi
 
-# ------------------------------------ 7. a wrong model name is 409, naming this one
-
 CODE="$(curl -sS -o "$WORK/409b.json" -w '%{http_code}' "${AUTH[@]}" "${JSON[@]}" \
   -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}' \
   "$BASE/openai/chat/completions")"
@@ -402,8 +331,6 @@ then
 else
   bad "wrong model name returned $CODE: $(cat "$WORK/409b.json")"
 fi
-
-# ----------------------------------------------------------------- 8. the unload
 
 CODE="$(curl -sS -o "$WORK/unload.json" -w '%{http_code}' "${AUTH[@]}" "${JSON[@]}" \
   -d "{\"type\":\"unload-model\",\"model\":\"$MODEL\"}" "$BASE/jobs")"
@@ -446,8 +373,6 @@ else
   bad "GET /openai/models after unload returned $CODE: $(cat "$WORK/openaimodels.json")"
 fi
 
-# ----------------------------------------------- 9. the accelerator came back
-
 if [ "$REMOTE" = "1" ]; then
   log "remote mode: the card belongs to the server, and a client cannot see it."
   log "             /health and /openai/models above are what a client can check."
@@ -455,7 +380,6 @@ else
   SETTLED=0
   for _ in $(seq 1 60); do
     read -r USED_AFTER FREE_AFTER _ <<<"$(accelerator_used)"
-    # Back to within a GiB of where it started.
     if [ "$USED_AFTER" -le $((USED_BEFORE + 1073741824)) ]; then SETTLED=1; break; fi
     sleep 2
   done

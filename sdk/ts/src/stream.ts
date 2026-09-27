@@ -1,62 +1,3 @@
-/**
- * `stream()` — the live TTS session. PHASE3-TTS.md section 7.
- *
- * The Listen path, the in-app Play button, and the browser extension. It is
- * four HTTP calls and one SSE stream, and it is the reason the door is not a
- * WebSocket: **Node 20 has no global `WebSocket`** — it is behind
- * `--experimental-websocket` there and only ordinary in 22 — and Electron 33,
- * which is what BookForge ships, bundles Node 20.18 while this SDK runs in the
- * **main** process, where the renderer's browser `WebSocket` is not in scope.
- * Raising the floor to Node 22 does not help, because Electron's Node is
- * Electron's; adding `ws` breaks the zero-dependency rule this package has had
- * since phase 1; and an RFC 6455 client by hand is two hundred lines of
- * masking, fragmentation and close codes inside a client whose whole job is to
- * be boring.
- *
- * So this file is `fetch`, the same `readSseFrames` {@link CrucibleClient.events}
- * already uses, and nothing else.
- *
- * What the caller gets
- * --------------------
- * A session object that is also an `AsyncIterable`. Iterate it for the audio;
- * call `say`, `cancel`, `cancelAll` and `close` on it from anywhere. The
- * frames arrive interleaved across rows — a `done` for one row while another is
- * still emitting — because that is what the server sends and reordering them
- * here would defeat the whole point of a sub-sentence stream.
- *
- * It is attached before the caller sees it
- * ----------------------------------------
- * The server refuses a `say` on a session whose event stream has never been
- * opened (`stream_not_attached`, `crucible/ttsstream.py`'s `StreamSession.say`),
- * because a row said into nothing has nowhere for its audio to go. Until
- * 2026-09-14 this client attached its stream lazily, from inside the iterator,
- * and swallowed the `ready` frame — so a caller could not know when its first
- * `say` was allowed, this file's own example (`say` before `for await`) was
- * refused by the real server, and BookForge had to poll the refusal away with a
- * labelled stopgap. So `openTtsStream` now attaches the stream and reads the
- * server's `ready` frame **before it resolves**: the first `say` is never early,
- * and there is no second call to make and no signal to wait for. Frames the
- * server emits before the caller starts iterating are not lost — they wait in
- * the one stream the session holds, and the iterator picks them up from where
- * `open` left off.
- *
- * It reattaches on its own, and that is a deliberate difference
- * ------------------------------------------------------------
- * `events()` never reconnects: a job goes on running whether anybody is
- * watching, its event log is kept for the life of the job, and a client can
- * resume whenever it likes. A session is the opposite. Its grace window is
- * fifteen seconds, and missing it costs the session, the rows in flight and the
- * listener's place in the paragraph. So a dropped stream is reattached here,
- * with `Last-Event-ID`, for as long as the window can still be open — which is
- * the behaviour the server's SSE door was chosen for, and a behaviour every
- * caller would otherwise have to write again and get wrong.
- *
- * A **refusal** is never retried. `unknown_session` and `replay_unavailable`
- * are the server saying the window has closed or the audio would have a hole in
- * it, and the correct answer to both is to tell the caller rather than to try
- * again quietly.
- */
-
 import { decodeBase64 } from './base64.js';
 import {
   CrucibleError,
@@ -67,13 +8,9 @@ import {
 import { readSseFrames } from './sse.js';
 import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
 
-/** Everything `stream(...)` needs. Neither field has a default. */
+/** Everything `stream(...)` needs. */
 export interface StreamOptions {
-  /**
-   * The voice to speak in. It must ALREADY be resident: the streaming door
-   * never loads, exactly as chat never loads, and refuses `voice_not_resident`
-   * naming what is resident instead. Only a render job loads (section 6).
-   */
+  /** The voice to speak in. */
   voice: string;
   /** The language every row of this session is spoken in. */
   language: string;
@@ -84,17 +21,11 @@ export interface StreamAudio {
   readonly kind: 'audio';
   /** The row's id — the caller's own, from {@link TtsStreamSession.say}. */
   readonly id: string;
-  /**
-   * Which chunk of this row it is. Strictly increasing within a row and never
-   * restarting, so it stays a total order across a {@link StreamRestart}.
-   */
+  /** Which chunk of this row it is. */
   readonly seq: number;
   /** Mono PCM16 at the session's `sampleRate`, ready to play or to write. */
   readonly pcm: Int16Array;
-  /**
-   * Seconds of audio in `pcm`, as the server measured it in the same bytes.
-   * `pcm.length / sampleRate` says the same thing.
-   */
+  /** Seconds of audio in `pcm`, as the server measured it in the same bytes. */
   readonly seconds: number;
 }
 
@@ -109,54 +40,15 @@ export interface StreamRowDone {
   readonly chars: number;
   /** `chars / seconds`, or null for a row that delivered no audio at all. */
   readonly charsPerSec: number | null;
-  /**
-   * Whether generation stopped at the frame cap rather than because the model
-   * finished — the difference between a long sentence and a runaway.
-   *
-   * **`null` means "narrator did not say" and is never to be read as `false`.**
-   * Against the pinned narrator it is always null: the cap it computes never
-   * leaves the engine. A runaway reported as "not capped" is exactly the
-   * failure this field exists to prevent.
-   */
+  /** Whether generation stopped at the frame cap; null means narrator did not say, never false. */
   readonly capped: boolean | null;
   /** Whether this row was stopped rather than finished. */
   readonly cancelled: boolean;
-  /**
-   * The silence that belongs AFTER this row, in seconds — **and the caller is
-   * what realizes it.**
-   *
-   * The audio on this door is bare speech. This number is narrator's own
-   * classification of the row's text (`text/gaps.classify_gap`, the same call
-   * that writes a book's `gaps.json`), relayed by the server verbatim, so a
-   * sentence heard on a stream is paced exactly as it would be inside an
-   * audiobook — the voice's inject included. A player that concatenates rows
-   * without inserting it runs its sentences together; one that adds a constant
-   * of its own is back to two owners of one silence, which is the defect this
-   * field replaced.
-   *
-   * **`null` means the row was CANCELLED** and delivered no complete audio, so
-   * there is no gap to keep. It is never "the server did not say": a row that
-   * retires normally without narrator stating a gap is failed by name as
-   * `narrator_protocol` and arrives as a {@link StreamRowError} instead.
-   */
+  /** The silence the caller inserts after this row, in seconds; null when the row was cancelled. */
   readonly gapSec: number | null;
 }
 
-/**
- * A row starting again, and everything it already sent being void.
- *
- * narrator has **no per-row cancel**: its `cancel` aborts everything in flight.
- * So cancelling one row in a batch kills its neighbours too, and the server
- * resubmits the ones nobody cancelled rather than reporting them as cancelled
- * or failed. This frame is what says so: every {@link StreamAudio} for this id
- * with `seq < fromSeq` must be discarded, and the row's real audio begins at
- * `fromSeq`.
- *
- * It cannot happen on a `higgs-v3` voice, whose measured batch width is 1 — the
- * in-flight row IS the batch, so there is never a survivor. `higgs-v3` is the
- * only narrator engine a Crucible names today, so this frame is written for the
- * engine after it: one whose ramp dispatches more than one row at a time.
- */
+/** A row starting again, and everything it already sent being void. */
 export interface StreamRestart {
   readonly kind: 'restart';
   readonly id: string;
@@ -167,7 +59,7 @@ export interface StreamRestart {
   readonly reason: string;
 }
 
-/** One row failing on its own. Its neighbours are unaffected. */
+/** One row failing on its own. */
 export interface StreamRowError {
   readonly kind: 'error';
   readonly id: string;
@@ -175,15 +67,7 @@ export interface StreamRowError {
   readonly message: string;
 }
 
-/**
- * A session frame this build does not know, carried rather than refused —
- * {@link UnknownEvent}'s rule for a job's stream, applied to a session's.
- *
- * The server's session vocabulary grows as its job events do, and until
- * 2026-09-24 this client threw on a kind it had not heard of, which ended the
- * listener's session over a frame it had no use for. It is never terminal and
- * carries no audio: a player skips it, and a log can say what it was.
- */
+/** A session frame this build does not know, carried rather than refused. */
 export interface StreamUnknown {
   readonly kind: 'unknown';
   /** The event name the server actually sent. */
@@ -199,10 +83,10 @@ export type StreamEvent =
   | StreamRowError
   | StreamUnknown;
 
-/** What `cancel` did. See {@link TtsStreamSession.cancel}. */
+/** What `cancel` did. */
 export type CancelOutcome = 'dropped' | 'aborting_batch' | 'already_finished';
 
-/** A live TTS session. Iterate it for the audio; call the ops from anywhere. */
+/** A live TTS session. */
 export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   readonly sessionId: string;
   readonly voice: string;
@@ -212,56 +96,16 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   /** The backend speaking. */
   readonly backend: string;
 
-  /**
-   * Speak one row. Returns its id, **not its audio**: the audio comes out of
-   * the iterator.
-   *
-   * It may be called the moment `stream()` resolves. The session's event stream
-   * is attached, and the server's `ready` frame read, before the session is
-   * handed over, so the server's `stream_not_attached` refusal — a row said
-   * into a session nobody is listening to — cannot be met by a caller of this
-   * client. Audio for a row said before iteration begins waits in the stream.
-   *
-   * `take` defaults to 0 here and has no default on the wire. 0 is the voice's
-   * own sampling, which is what asking for nothing gets; take N is the Nth rung
-   * of that voice's ladder, resolved by the SERVER into the numbers it sends
-   * the engine. A temperature never travels on this wire. How many rungs a
-   * voice has is {@link VoiceInfo.takes}, and a take past the end is a SEED
-   * LANE at the voice's own sampling since 2026-09-19 (it was `unknown_take`)
-   * — still never clamped, so take 4 is never take 2's numbers under take 4's
-   * name.
-   *
-   * **Rows in one session may be at different takes.** Which is the point: a
-   * retake must not reuse the settings that produced the problem, so spread
-   * your candidates across the rungs rather than re-rolling take 0 (Owen's
-   * ruling, 2026-09-14).
-   */
+  /** Speak one row and return its id; the audio comes out of the iterator. */
   say(id: string, text: string, take?: number): Promise<string>;
 
-  /**
-   * Stop one row.
-   *
-   * **What it costs depends on where the row is**, and the answer says which:
-   * `dropped` means it had not been handed to the engine and cost nothing;
-   * `aborting_batch` means the engine is generating it and its whole batch is
-   * being thrown away to stop it, so its neighbours will arrive again behind a
-   * {@link StreamRestart}; `already_finished` means it retired first, which is
-   * the ordinary race on a live connection and not an error.
-   */
+  /** Stop one row. */
   cancel(id: string): Promise<CancelOutcome>;
 
-  /** Stop every row. Returns how many were still live. Nothing is restarted. */
+  /** Stop every row. */
   cancelAll(): Promise<number>;
 
-  /**
-   * Close the session and free the voice. The iterator ends on the server's
-   * `closed` frame.
-   *
-   * Breaking out of a `for await` does NOT close anything: the stream stays
-   * attached, the server never starts its grace window, and iterating again
-   * resumes exactly where the last loop stopped. A session is over when this is
-   * called, or when the server says so.
-   */
+  /** Close the session and free the voice. */
   close(): Promise<void>;
 }
 
@@ -273,18 +117,8 @@ export interface StreamTransport {
   json(path: string, init: RequestInit, where: string): Promise<Json>;
 }
 
-/**
- * How long to keep reattaching a dropped stream before giving up.
- *
- * The server's grace window is 15 s (`crucible/ttsstream.py`'s
- * `GRACE_SECONDS`); after it the session is closed and every row in flight is
- * cancelled, so a reattach later than this cannot succeed and would only turn a
- * dead session into a slow error. A second of margin, because the window starts
- * when the server notices the drop and not when the client does.
- */
 const REATTACH_BUDGET_MS = 16_000;
 
-/** How long to wait between reattach attempts. Short: the budget is short. */
 const REATTACH_DELAY_MS = 250;
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' } as const;
@@ -304,8 +138,6 @@ export async function openTtsStream(
     { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ voice, language }) },
     'stream',
   );
-  // LOAD-BEARING: the session id every op names, the voice, and the rate the
-  // PCM is at. The fingerprint and the backend describe the session.
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
@@ -316,21 +148,12 @@ export async function openTtsStream(
   try {
     await session.attach();
   } catch (cause) {
-    // The server is holding a session this caller will never be handed, and it
-    // is the ONE session the server allows: left alone it stays open until the
-    // grace window closes it, and a `stream()` retried inside that window is
-    // refused `stream_session_open` for a session nobody has. Closing it is a
-    // courtesy and its failure is not the news — the attach failure is.
     await session.discard();
     throw cause;
   }
   return session;
 }
 
-/**
- * What the session's one stream yields, one level below the caller's events:
- * their events, plus the `ready` frame that only {@link Session.attach} reads.
- */
 type Pumped = StreamEvent | { readonly kind: 'ready' };
 
 interface Identity {
@@ -349,19 +172,9 @@ class Session implements TtsStreamSession {
   readonly backend: string;
 
   readonly #transport: StreamTransport;
-  /**
-   * The session's one event stream, as a generator that is created once and
-   * drawn from twice: {@link attach} pulls it as far as the `ready` frame, and
-   * the public iterator pulls everything after. One instance is what makes a
-   * row said before iteration begins land in the loop rather than in a stream
-   * nobody holds — and what makes a second `for await` resume where the first
-   * one broke off, instead of replaying from an id it no longer knows.
-   */
   readonly #pump: AsyncGenerator<Pumped, void, undefined>;
   #closed = false;
-  /** Whether the server's `ready` has been read. A second one is a fault. */
   #ready = false;
-  /** The `closed` frame's reason, for the one error that arrives before ready. */
   #closedReason: string | null = null;
 
   constructor(transport: StreamTransport, identity: Identity) {
@@ -374,23 +187,8 @@ class Session implements TtsStreamSession {
     this.#pump = this.#run();
   }
 
-  // ------------------------------------------------------------- attaching
-
-  /**
-   * Attach the event stream and wait for the server's `ready`. Called once,
-   * by {@link openTtsStream}, before the session is handed to anybody.
-   *
-   * Every way this can go wrong is the same failure the iterator would have
-   * met one call later, surfaced here instead: a refusal to attach travels
-   * back by name, an unreachable server is reattached for the grace window and
-   * then given up on, and a stream that says anything else before `ready` —
-   * or ends without saying it — is a conversation this client does not know.
-   */
   async attach(): Promise<void> {
     let step = await this.#pump.next();
-    // A frame this build does not know is skipped here as the iterator skips
-    // it — it is not "something other than ready", it is nothing this client
-    // can use — and the wait for `ready` goes on.
     while (step.done !== true && step.value.kind === 'unknown') {
       step = await this.#pump.next();
     }
@@ -408,17 +206,10 @@ class Session implements TtsStreamSession {
     }
   }
 
-  /**
-   * Put down a session {@link attach} could not finish opening: cancel the
-   * stream if one is held, and tell the server. Best effort — the failure
-   * being reported is the attach's, and a second one would only hide it.
-   */
   async discard(): Promise<void> {
     await this.#pump.return(undefined).catch(() => undefined);
     await this.close().catch(() => undefined);
   }
-
-  // ------------------------------------------------------------------ ops
 
   async say(id: string, text: string, take = 0): Promise<string> {
     const row = requireOption(id, 'id');
@@ -435,9 +226,6 @@ class Session implements TtsStreamSession {
     const body = await this.#op({ op: 'cancel', id: row }, 'cancel');
     const outcome = str(body, 'outcome', 'cancel');
     if (outcome !== 'dropped' && outcome !== 'aborting_batch' && outcome !== 'already_finished') {
-      // Narrowed rather than passed through: each of the three names a
-      // different cost, and a fourth is a contract change this client has not
-      // been told about.
       throw new CrucibleProtocolError(
         `cancel answered with outcome "${outcome}", which this client does not know`,
       );
@@ -459,8 +247,6 @@ class Session implements TtsStreamSession {
       true,
     );
     if (!response.ok) {
-      // A session the server has already closed — the grace window ran out
-      // while this client was deciding — is not a failure to close it.
       const failure = await this.#transport.failure(response);
       if (failure instanceof CrucibleRefused && failure.code === 'unknown_session') return;
       throw failure;
@@ -476,34 +262,21 @@ class Session implements TtsStreamSession {
     );
   }
 
-  // ------------------------------------------------------------- the audio
-
   async *[Symbol.asyncIterator](): AsyncGenerator<StreamEvent, void, undefined> {
     for (;;) {
       const step = await this.#pump.next();
       if (step.done === true) return;
       if (step.value.kind === 'ready') {
-        // `#read` refuses a second ready before it can get here; this is the
-        // type's last branch, kept as a refusal rather than a skip for the
-        // reason the unknown-event branch below gives.
         throw new CrucibleProtocolError(`session ${this.sessionId} sent ready twice`);
       }
       yield step.value;
     }
   }
 
-  /**
-   * The one stream, attached and reattached for as long as the session lives.
-   *
-   * Everything the session ever reads off the wire comes through here, in one
-   * generator instance, so the cursor (`delivered`) and the drop clock are the
-   * session's and not a particular loop's.
-   */
   async *#run(): AsyncGenerator<Pumped, void, undefined> {
     let delivered = 0;
     let droppedAt: number | null = null;
 
-    /** Give up, or wait and try again. Called for every kind of disconnection. */
     const reattachOrGiveUp = async (why: string): Promise<void> => {
       const now = Date.now();
       if (droppedAt === null) droppedAt = now;
@@ -523,11 +296,6 @@ class Session implements TtsStreamSession {
       try {
         stream = await this.#attach(delivered);
       } catch (cause) {
-        // A REFUSAL is the server's answer and travels straight back:
-        // `unknown_session` means the window closed, `replay_unavailable` means
-        // the audio would have a hole in it, and retrying either quietly is how
-        // a client ends up playing a sentence that is missing its middle. Only
-        // an unreachable server is a drop worth waiting out.
         if (!(cause instanceof CrucibleUnreachable)) throw cause;
         await reattachOrGiveUp('could not be reached');
         continue;
@@ -547,16 +315,6 @@ class Session implements TtsStreamSession {
           yield this.#read(event, frame.data);
         }
       } catch (cause) {
-        // Sorting one kind of failure from the other, because they want
-        // opposite answers. Anything this client raised — a frame it cannot
-        // read, an id that does not follow, a session-wide `error` — is a fact
-        // about the conversation and travels straight back. A socket that died
-        // under the reader raises something else entirely (a TypeError from the
-        // stream, a DOM error), and that is the drop this whole door was built
-        // to survive, so it is caught and reattached rather than thrown.
-        //
-        // A consumer breaking out of its `for await` does NOT land here: a
-        // return completion at a `yield` runs `finally` and skips `catch`.
         if (cause instanceof CrucibleError) throw cause;
         readFailure = cause;
       } finally {
@@ -568,10 +326,6 @@ class Session implements TtsStreamSession {
         continue;
       }
 
-      // The stream ended without a `closed` frame, which is a dropped
-      // connection and not an ending. The server holds the session open for its
-      // grace window precisely so this can be picked up again, and every frame
-      // emitted while nobody was listening is replayed from `delivered`.
       if (this.#closed) return;
       await reattachOrGiveUp('ended without a closed frame');
     }
@@ -595,17 +349,12 @@ class Session implements TtsStreamSession {
     return stream;
   }
 
-  /** One frame, as the caller's event — or the `ready` only `attach` reads. */
   #read(event: string, data: string): Pumped {
     const body = asObject(parse(data, event), event);
     if (event === 'ready') {
       if (this.#ready) {
         throw new CrucibleProtocolError(`session ${this.sessionId} sent ready twice`);
       }
-      // The identity arrived twice — on the open reply, and again here — and
-      // one fact with two copies is compared, never trusted twice
-      // (ARCHITECTURE.md R1). A `ready` naming another voice, merge, rate or
-      // backend would mean this stream is not the session that was opened.
       const said = {
         voice: str(body, 'voice', 'ready'),
         fingerprint: str(body, 'fingerprint', 'ready'),
@@ -643,16 +392,11 @@ class Session implements TtsStreamSession {
         kind: 'done',
         id: str(body, 'id', 'done'),
         done: true,
-        // Measurements of the row, for a record or a display.
         seconds: num(body, 'seconds', 'done'),
         chars: num(body, 'chars', 'done'),
         charsPerSec: nullableNum(body, 'chars_per_sec', 'done'),
         capped: nullableBool(body, 'capped', 'done'),
-        // Strict: whether the row finished or was stopped is what a player
-        // decides to keep its audio on.
         cancelled: bool(body, 'cancelled', 'done'),
-        // The caller inserts this silence itself, and its `null` MEANS "the
-        // row was cancelled, keep no gap".
         gapSec: nullableNum(body, 'gap_sec', 'done'),
       };
     }
@@ -670,25 +414,14 @@ class Session implements TtsStreamSession {
       const code = str(body, 'code', 'error');
       const message = str(body, 'message', 'error');
       if (typeof id === 'string') return { kind: 'error', id, code, message };
-      // No id means the SESSION failed, not a row: narrator died, or said
-      // something that is not a protocol message. Nothing more is coming, so
-      // this throws rather than being yielded past.
       this.#closed = true;
       throw new CrucibleProtocolError(
         `session ${this.sessionId} failed: ${code}: ${message}`,
       );
     }
-    // An event kind this client does not know: CARRIED, not refused, exactly
-    // as `events()` carries one on a job's stream (`UnknownEvent`). It used to
-    // throw, which ended a listener's whole session over a frame it had no use
-    // for; a newer server's vocabulary is news, not a fault. It is yielded
-    // rather than dropped, so a caller that logs frames still sees it — and it
-    // carries no audio, so a player that ignores it loses nothing.
     return { kind: 'unknown', event, data: body };
   }
 }
-
-// ------------------------------------------------------------------ helpers
 
 /** Narrow a {@link StreamEvent} to a chunk of audio. */
 export function isStreamAudio(event: StreamEvent): event is StreamAudio {
@@ -736,16 +469,6 @@ function readFrameId(raw: string | null, previous: number): number {
   return id;
 }
 
-/**
- * Bytes to samples, without assuming the caller's machine is little-endian.
- *
- * PCM16 on this wire is signed 16-bit **little-endian** — narrator's own
- * format, and the one ffmpeg is told on the render door (`-f s16le`). A plain
- * `new Int16Array(bytes.buffer)` would read it in the host's byte order, which
- * is right on x86 and arm64 and silently wrong anywhere else; and it would
- * throw outright on an odd offset, which a decoded base64 buffer is free to
- * have. A DataView says what it means.
- */
 function pcm16(bytes: Uint8Array): Int16Array {
   if (bytes.length % 2 !== 0) {
     throw new CrucibleProtocolError(

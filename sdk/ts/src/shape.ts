@@ -1,16 +1,3 @@
-/**
- * The readers for every field this client takes off the wire.
- *
- * A field the server always sends is read strictly: `str`, `num`, `bool`,
- * `objectField`, `strArray` for a value that is never null, and the
- * `nullable*` readers for one that may honestly be `null`. A missing key is a
- * {@link CrucibleProtocolError} naming the field.
- *
- * The `opt*` readers are only for keys the server sends in some cases and not
- * others. They answer `null` when the key is absent; a key that IS sent must
- * still be the type API v1 gives it.
- */
-
 import { CrucibleProtocolError } from './errors.js';
 
 export type Json = Record<string, unknown>;
@@ -132,13 +119,6 @@ export function objectField(object: Json, key: string, where: string): Json {
   return asObject(field(object, key, where), `${where}.${key}`);
 }
 
-/**
- * A value from a closed vocabulary. For enums this client or its caller
- * branches on — a job's or a task's state, a decision's type — where a new
- * word would be a contract change. An enum only a display reads (a voice's
- * kind, an estimate's basis, a lane's health) is carried as the server's own
- * word instead.
- */
 export function oneOf<T extends string>(
   value: string,
   allowed: readonly T[],
@@ -151,11 +131,6 @@ export function oneOf<T extends string>(
   }
   return value as T;
 }
-
-// -------------------------------------------------------- conditional keys
-//
-// The `opt*` family. Absent or `null` → `null`; present and the right type →
-// the value; present and the wrong type → CrucibleProtocolError.
 
 function optRaw(object: Json, key: string): unknown {
   const value = object[key];

@@ -1,28 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end on Windows: the server in WSL2, the client native.
-#
-# This is the arrangement BookForge will actually ship on the PC — Crucible has
-# no Windows code path at all (DESIGN.md section 2), so the Electron main
-# process talks over HTTP to a Linux server one hop away. Running the suite this
-# way proves the seam, not just the code: WSL2 forwards Windows localhost into
-# the guest, so the client dials 127.0.0.1 and lands on Linux.
-#
-#   ./scripts/e2e-from-windows.sh          # from Git Bash, in the repo root
-#
-# The Windows side needs: node 20+, npm, curl, wsl.exe.
-# The WSL side needs: the crucible checkout at $CRUCIBLE_WSL_REPO on the branch
-# under test, with `pip install -e .` done in the conda env at $CRUCIBLE_WSL_ENV.
-#
-# The WSL server is started and stopped by scripts/wsl-serve.sh inside the
-# guest, always with SIGTERM. Nothing here ever sends SIGKILL into WSL: a
-# hard-killed GPU process wedges the whole distro.
-
 set -euo pipefail
 
-# Git Bash rewrites any argument that looks like a Unix path into a Windows one
-# before handing it to a native .exe, so `/home/telltale/crucible` reaches
-# wsl.exe as `C:/Program Files/Git/home/telltale/crucible`. Every path in this
-# script is a path inside the guest; none of them may be translated.
 export MSYS2_ARG_CONV_EXCL='*'
 export MSYS_NO_PATHCONV=1
 
@@ -36,8 +14,6 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK="$REPO/sdk/ts"
 WSL_HOME=""
 
-# `--exec` matters: without it wsl.exe hands the string to a shell on the
-# Windows side first, which pre-expands $vars before Linux ever sees them.
 wsl_run() {
   wsl.exe -d "$DISTRO" --exec "$@"
 }
@@ -62,7 +38,6 @@ wsl_run test -x "$CRUCIBLE_BIN" \
 wsl_run test -f "$CONTROL" \
   || { echo "e2e: $CONTROL is missing in $DISTRO (check the branch out there)" >&2; exit 2; }
 
-# Say which tree the server comes from, so a green run cannot claim the wrong one.
 WSL_HEAD="$(wsl_run git -C "$WSL_REPO" rev-parse --short HEAD | tr -d '\r')"
 WSL_BRANCH="$(wsl_run git -C "$WSL_REPO" rev-parse --abbrev-ref HEAD | tr -d '\r')"
 echo "e2e: wsl server from $WSL_REPO @ $WSL_BRANCH ($WSL_HEAD)"
@@ -81,9 +56,6 @@ echo "e2e: wsl home=$WSL_HOME port=$PORT windows node=$(node --version)"
 BASE="http://127.0.0.1:$PORT"
 UP=0
 for _ in $(seq 1 160); do
-  # `>/dev/null` is a bash redirect, not a curl argument: with path conversion
-  # off, curl -o /dev/null would try to write a Windows file of that name and
-  # fail the check even though the server answered.
   if curl -fsS --max-time 2 "$BASE/v1/ping" >/dev/null 2>&1; then
     UP=1
     break
@@ -96,8 +68,6 @@ if [ "$UP" != "1" ]; then
   exit 2
 fi
 echo "e2e: windows reached the WSL server at $BASE"
-
-# ------------------------------------------------------------------- the suite
 
 cd "$SDK"
 npm ci --no-audit --no-fund

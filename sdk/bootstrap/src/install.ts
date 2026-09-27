@@ -1,65 +1,3 @@
-/**
- * `install()` — this host has a Crucible, at the release the app named, with
- * the job types it asked for, running as this machine's service.
- *
- * The sequence is `steps.ts`'s (PHASE14-ENVPACKS.md section 4), and this file
- * WALKS that list rather than restating it, so the generated `install.sh`
- * cannot describe a different install from the one an app performs:
- *
- *   host-facts       CRUCIBLE_HOME, the guest user, free disk, curl/tar
- *   server           the pinned interpreter into <CRUCIBLE_HOME>/server (ONCE,
- *                    skipped when its digest is the one stamped there) and this
- *                    release's wheel pip-installed into it
- *   init             <server>/bin/crucible init --token <minted here> --enable-<type>…
- *                    SKIPPED when a config already exists (its token is kept)
- *   install-<type>   <server>/bin/crucible install <type>
- *   service-install  <server>/bin/crucible service install
- *   capability-write <server>/bin/crucible capability --write
- *
- * **There is no conda step.** A fresh machine has no Python at all and does not
- * need one: the `server` step downloads a relocatable CPython from
- * python-build-standalone at a pinned digest (PHASE20 section 2) and pip-installs
- * the release's wheel into it. `release` — a version string — replaced `wheel`
- * and the conda options, and it defaults to this package's own version, which is
- * the one legitimate default in here: the bootstrapper ships AT the server's
- * version, so "which release" is not a question anybody has to answer.
- *
- * Pulls are NOT part of this: weights are the app's, later, per model.
- *
- * The token is minted on the client — `crucible init --token` — so the app that
- * installed the server already holds what `readLocalConfig()` would read back.
- * It is never logged: the argv reported for the init step spells it
- * `<redacted>`, and `onLine` only ever sees what the step printed.
- *
- * Every step's stdout and stderr stream to `onLine` as they arrive. A failing
- * step stops the sequence with a {@link BootstrapStepFailed} naming the step,
- * carrying the tail, and listing the steps that finished — what they did is on
- * disk and stays there (ARCHITECTURE.md R6).
- *
- * **ON WINDOWS NONE OF THAT HAPPENS HERE** (PHASE15-HOST.md section 4.3). The
- * sequence has ONE implementation and it is the host's: `crucible orchestrator`, the
- * Windows-native tray process, walks the state table and the step list and
- * raises the UAC prompts a WSL install needs. (It has no window of its own —
- * 4.7: its UI is the tray menu and the operator page.) So on win32 this
- * function is two steps and nothing else (PHASE19-AUTOMATIC-WSL.md 2.6) —
- *
- *   host absent?   run `install.ps1`, which is per-user and elevates nothing
- *   then           `watchInstall()`: attach to the move the TRAY started
- *
- * — and the walk below is reached only on linux and darwin, where the machine
- * IS the server and there is no host to ask.
- *
- * **IT NEVER POSTS THE MOVE.** PHASE19 2.3 put that decision in the tray, which
- * takes it at every start from facts on disk: a fresh install, a tray coming
- * back after the reboot `wsl --install` demanded, and an old native install
- * being upgraded are the same decision seen three times, and only a process
- * that is there at login can make all three. A `POST /install` from here would
- * be a second caller racing the first for a claim it would lose.
- *
- * **AND NOBODY IS SHOWN A COMMAND.** This used to refuse `host_not_installed`
- * with the `irm … | iex` line for a person to type. PHASE19: "a command a
- * person could run is a step the app should be running."
- */
 import { randomBytes } from 'node:crypto';
 
 import { readLocalConfig, type LocalConfig } from './config.js';
@@ -91,19 +29,15 @@ export type JobType = (typeof JOB_TYPES)[number];
 /** The job types `crucible install <type>` has an installer for (`cli.INSTALLABLE_JOB_TYPES`). */
 export const INSTALLABLE_JOB_TYPES: readonly JobType[] = ['llm', 'tts', 'asr', 'align', 'rvc'];
 
-/**
- * One job type to enable. `tts` must say which narrator engine, because
- * cuda-linux has one env per engine and `crucible install tts` refuses without
- * it; a bare `'tts'` is refused here by name for the same reason.
- */
+/** One job type to enable; `tts` must name its narrator engine. */
 export type JobTypeRequest = Exclude<JobType, 'tts'> | { type: 'tts'; narratorEngine: string };
 
 export interface InstallTimeouts {
   /** Every `crucible` verb that builds nothing, and the host probe. */
   quickMs: number;
-  /** The server runtime: a ~30 MB interpreter and a 1 MB wheel, over somebody's home line. */
+  /** The server runtime download: the interpreter and the wheel. */
   runtimeMs: number;
-  /** `crucible install <type>`, which pips a recipe — gigabytes, from the mirrors. */
+  /** `crucible install <type>`, which pip-installs a recipe. */
   envMs: number;
 }
 
@@ -115,73 +49,35 @@ export const DEFAULT_INSTALL_TIMEOUTS: InstallTimeouts = {
 
 export interface InstallOptions {
   /**
-   * **No longer read by `install()`.** Which distro a Windows Crucible goes
-   * into is the HOST's answer now (PHASE15 4.3): it owns the `crucible` distro
-   * and imports it itself, so there is nothing for an app to choose and
-   * nothing to send over the door. Kept on the interface because
-   * `readLocalConfig()` and `detectHost()` still take it and callers pass one
-   * object to all three.
+   * Ignored by `install()`; accepted so one options object also serves `detectHost()` and
+   * `readLocalConfig()`.
    */
   distro?: string;
-  /** Same: the host resolves the distro. See {@link InstallOptions.distro}. */
+  /** Ignored by `install()`; see {@link InstallOptions.distro}. */
   exact?: boolean;
   jobTypes: readonly JobTypeRequest[];
-  /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. Omit for the server's default. */
+  /** `CRUCIBLE_HOME` for every `crucible` verb, as the target spells it. */
   home?: string;
-  /**
-   * Which release's wheel to install.
-   *
-   * AN APP PASSES THE RELEASE CHANNEL'S ANSWER (INSTALL-UNINSTALL.md §6.5.1):
-   * `latestRelease()` reads `releases/latest`, and the app's own never-older
-   * gate decides whether to install it at all. It used to say the default
-   * "IS the answer rather than a guess at one" — that sentence was written when
-   * the bootstrapper's version and the release a machine should have were one
-   * fact, and §6.5.2 separated them: a vendored 1.0.1 installing 1.0.1 over a
-   * running 1.0.2 is the defect.
-   *
-   * Omitted, it is {@link BOOTSTRAP_VERSION} — the release this library was cut
-   * with, which is the hand-install case (`npm i @crucible/bootstrap@<v>` and
-   * call this) and nothing else. It is never reached FOR a channel that would
-   * not answer: that is `release_channel_unreadable` at the caller, before this.
-   */
+  /** Which release to install; an app passes the channel's answer from `latestRelease()`. */
   release?: string;
-  /**
-   * AN OPERATOR ROLLBACK, and the only way an install goes backwards.
-   *
-   * `installRuntime` refuses `install_would_downgrade` when
-   * `<home>/server/.crucible` names a release newer than the one being
-   * installed (INSTALL-UNINSTALL.md
-   * §6.5.4). This is how somebody says "yes, put 1.0.1 back" — and it must be
-   * the SAME version as {@link InstallOptions.release}, because a rollback is an
-   * operator naming the Crucible they want rather than a flag that means
-   * "downgrade to whatever". A different version is `rollback_version_mismatch`.
-   */
+  /** An operator rollback: the exact older release to put back, equal to `release`. */
   rollbackTo?: string;
   /** Every line a step prints, as it prints it. */
   onLine: (line: string, stream: OutputStream, step: string) => void;
   /** Optional: a step beginning, finishing, or being skipped. */
   onStep?: (step: InstallStep) => void;
-  /** What `crucible init` should bind. Omit for the server's own defaults (127.0.0.1:7100). */
+  /** What `crucible init` should bind; omit for the server's defaults. */
   bind?: { host?: string; port?: number };
   timeouts?: Partial<InstallTimeouts>;
-  /**
-   * win32 only: every event the host's door sent, verbatim, including the 4c
-   * `state` rows that have no place in `onLine`/`onStep`. Ignored off win32,
-   * where there is no host and no door.
-   */
+  /** win32 only: every event the host's door sent, verbatim. */
   onHostEvent?: (event: HostEvent) => void;
-  /**
-   * win32 only: the `fetch` the host's door is asked with. Defaults to
-   * `globalThis.fetch` — the platform's own, on the node this package declares
-   * (`engines: node >=20`). This exists so the tests can script a host without
-   * opening a socket; an app has no reason to pass it.
-   */
+  /** win32 only: the `fetch` the host's door is asked with. */
   fetchImpl?: HostFetch;
 }
 
 export interface InstallStep {
   name: string;
-  /** What ran, with the token spelled `<redacted>`. Empty for a skipped step. */
+  /** What ran, with the token spelled `<redacted>`. */
   argv: readonly string[];
   status: 'running' | 'ok' | 'skipped';
   detail: string;
@@ -189,7 +85,7 @@ export interface InstallStep {
 
 export interface InstallResult {
   steps: InstallStep[];
-  /** The server as its config now describes it. The token is not here; `readLocalConfig()` is. */
+  /** The server as its config now describes it. */
   server: { name: string; url: string; configPath: string };
   /** Which release is on this host, and which backend it serves. */
   release: string;
@@ -252,36 +148,9 @@ export function planJobTypes(requests: readonly JobTypeRequest[]): Plan {
   return { enableFlags, installs };
 }
 
-/**
- * win32: PHASE15 4.3's two branches, and nothing else.
- *
- * There is no third branch that walks the steps here. A Windows machine
- * installs its Crucible exactly one way — through `crucible orchestrator` — so that
- * `install.ps1`, the operator page's engine switch (4.7) and an app's
- * `install()` cannot describe three different installs (PHASE14 4a, "cannot
- * differ").
- *
- * **Why a library posts to a loopback port when there is a whole tasks API.**
- * 4.3 names two callers of the door. The page's `POST /v1/tasks
- * {"type":"engine","target":"wsl"}` is the primary one and goes through the
- * Windows SERVER, which relays the door's events under a task id. This is the
- * other one, and it runs on a machine that has no server yet — the very first
- * install, before there is a page to open or a `/v1/tasks` to post to.
- */
 async function installThroughHost(options: InstallOptions, release: string, runner: Runner): Promise<InstallResult> {
-  // The one thing this side still does with the job list: refuse a malformed
-  // one BY NAME. `{type: 'tts'}` with no narrator engine is the caller's bug,
-  // and being told so must not require a host to be installed and answering.
-  // The plan itself is thrown away — the host builds its own from the same list.
   planJobTypes(options.jobTypes);
 
-  // A ROLLBACK HAS NO WAY THROUGH THE HOST'S DOOR, so it is refused rather than
-  // dropped. The door's request body (`hostdoor.ts`) carries release, job types,
-  // home and bind and nothing else, and the host would walk an ordinary install
-  // — which `install.ps1`'s own never-older gate then refuses as
-  // `install_would_downgrade`, from inside a process this caller cannot see.
-  // Naming it here puts the refusal where the option was set, with the line an
-  // operator actually runs to go back.
   if (options.rollbackTo !== undefined) {
     throw new BootstrapRefusal(
       'host_rollback_unsupported',
@@ -292,26 +161,9 @@ async function installThroughHost(options: InstallOptions, release: string, runn
   }
 
   if (!hostInstalled(runner)) {
-    // PHASE19: NOBODY IS EVER SHOWN A COMMAND. This used to refuse with the
-    // `irm … | iex` line, on the grounds that a library must not download and
-    // elevate an installer from a background call. Half of that still holds
-    // and half never applied: `install.ps1` is per-user and elevates nothing
-    // (its own header: "No admin. Everything here is per-user and
-    // idempotent"), and the UAC prompt a WSL install needs is raised later, by
-    // the tray, which is a process a person can see. So the script is run, and
-    // the only thing still refused here is elevation.
     await runInstallPs1(options, release, runner);
   }
 
-  // NEVER A POST (PHASE19 2.6). The tray decides at every start whether this
-  // machine should be moving (2.3) and has already started if it should, so a
-  // POST from here would be a second caller racing the first for a claim it
-  // would lose. This attaches to what is already happening.
-  //
-  // The `done` event is kept as it goes past, because it is the one place the
-  // GUEST's facts — its server name, its url, its config path, its console
-  // script — cross to this side. The outcome file records that the move
-  // finished; it does not describe what it finished into.
   let witnessed: InstallResult | null = null;
   const status = await watchInstall(
     {
@@ -328,14 +180,6 @@ async function installThroughHost(options: InstallOptions, release: string, runn
   return installedResult(status, witnessed, runner);
 }
 
-/**
- * `install.ps1`, run as this user, with no console for anybody to read.
- *
- * Downloaded to a file and run with `-Release` rather than piped through
- * `iex`: a piped script cannot take a switch (the script says so itself), and
- * the release this call was given is the release the host must be, not
- * whatever the channel calls latest at this second.
- */
 async function runInstallPs1(options: InstallOptions, release: string, runner: Runner): Promise<void> {
   const url = releaseAssetUrl(release, 'install.ps1');
   const quoted = (value: string): string => `'${value.replace(/'/g, "''")}'`;
@@ -367,15 +211,6 @@ async function runInstallPs1(options: InstallOptions, release: string, runner: R
   }
 }
 
-/**
- * The move's status → the {@link InstallResult} `install()` promises, or the
- * named refusal that says why there is none.
- *
- * Every ending of PHASE19 2.2 has an answer and none of them is a shrug:
- * `done` is the result, `cannot`, `failed`, `reboot-pending` and `declined`
- * are refusals carrying the OUTCOME's own code and sentence — which is the 4c
- * code an app switches on.
- */
 function installedResult(
   status: InstallStatus,
   witnessed: InstallResult | null,
@@ -390,10 +225,6 @@ function installedResult(
     );
   }
   if (recorded.state !== 'done') {
-    // THE OUTCOME'S OWN CODE AND SENTENCE, verbatim. The 4c codes cross the
-    // wire unwrapped for `hostRefusal`'s reason: the app's next move is chosen
-    // from the code, and `virtualization_disabled` wrapped in a generic name
-    // would delete the only thing the message was carrying.
     throw new BootstrapRefusal(
       (recorded.code ?? 'host_install_failed') as BootstrapRefusal['code'],
       recorded.sentence ?? `the engine move on this machine ended as ${recorded.state}.`,
@@ -415,8 +246,6 @@ function installedResult(
 
 export async function install(options: InstallOptions, runner: Runner = processRunner()): Promise<InstallResult> {
   const release = options.release ?? BOOTSTRAP_VERSION;
-  // The rollback is checked HERE rather than in `installRuntime`, so that a caller who
-  // named two different versions is told so before a single guest command runs.
   const rollback = options.rollbackTo === undefined ? null : options.rollbackTo;
   if (rollback !== null && rollback !== release) {
     throw new BootstrapRefusal(
@@ -427,12 +256,6 @@ export async function install(options: InstallOptions, runner: Runner = processR
     );
   }
   if (runner.platform === 'win32') return await installThroughHost(options, release, runner);
-  // ---------------------------------------------------------------------
-  // linux and darwin only, from here down: win32 returned above. Every step,
-  // every argv and every refusal below is what it was before PHASE15 — the
-  // only thing that went is the distro resolution, which had no answer to give
-  // on a machine that IS the server and whose one caller was the win32 arm.
-  // ---------------------------------------------------------------------
   const backend = backendFor(runner.platform);
   const target = resolveTarget(runner, undefined);
   const jobs = planJobTypes(options.jobTypes);
@@ -485,9 +308,6 @@ export async function install(options: InstallOptions, runner: Runner = processR
   const configOptions = options.home === undefined ? {} : { home: options.home };
   const values: Partial<Record<RefName, string>> = { release, backend };
   let crucible: string | null = null;
-  // Measured by `host-facts`, consumed by `server`. A local rather than a
-  // state object threaded through the walk: the sequence is a sequence, and
-  // the one step that reads them is the next one.
   let guest: Awaited<ReturnType<typeof probeGuest>> | null = null;
 
   for (const step of installSteps(plan)) {

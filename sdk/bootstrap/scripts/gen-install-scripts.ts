@@ -1,29 +1,3 @@
-/**
- * Generate `install.sh`, `install.ps1` and `crucible/host/wsl_states.py` from
- * the step list and the WSL state table — the things PHASE14-ENVPACKS.md 4a
- * and 4c, and PHASE15-HOST.md 4.3, say have ONE owner.
- *
- *   node build/scripts/gen-install-scripts.js            # write them
- *   node build/scripts/gen-install-scripts.js --check    # fail if they drift
- *
- * The `--check` mode is what `test/unit-gen-install.test.ts` asserts, so a
- * change to `src/steps.ts` that is not regenerated fails the suite rather than
- * shipping a hand installer that does something else than the app does.
- *
- * What the scripts deliberately do NOT do (4a): no job types, no weights. A
- * bare Crucible that serves nothing until an app or the operator page asks.
- *
- * THE THIRD OUTPUT IS PYTHON, AND THAT IS WHY IT IS HERE (PHASE15 4.3)
- * --------------------------------------------------------------------
- * `crucible orchestrator` drives the same 4c table, and it is Python. Two hand-written
- * copies of a ten-row table with ten sentences in it is exactly the shape
- * ARCHITECTURE.md R1 forbids, so the table's DATA is emitted into
- * `crucible/host/wsl_states.py` from this file, and `--check` refuses a drift
- * in it the same way it does for the two scripts. What is NOT emitted is the
- * `means` predicates, which are code rather than data — those live in
- * `crucible/host/wslstate.py`, one per code, and a pytest asserts the two sets
- * are equal. It is the seam `steps.ts` already uses for its three programs.
- */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,47 +13,23 @@ import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-/** build/scripts → the package root. Written next to this generator, in `scripts/`. */
 const SCRIPTS = join(HERE, '..', '..', 'scripts');
-/** build/scripts → sdk/bootstrap → sdk → the repo root, where `crucible/` is. */
 const REPO = join(HERE, '..', '..', '..', '..');
 
-/**
- * The typographic characters Crucible's prose uses, and their ASCII.
- *
- * **`install.ps1` MUST BE ASCII, and this is the whole of why.** Windows
- * PowerShell 5.1 reads a `.ps1` with no byte-order mark as the system ANSI
- * code page, not as UTF-8 — and the generator writes UTF-8 with no BOM,
- * because a BOM breaks `irm … | iex` in other ways and because every other
- * file in this repo is BOM-less. So an em dash arrives at the 5.1 parser as
- * three cp1252 characters, one of which is a curly double quote, and MEASURED
- * on 2026-09-15: `[Parser]::ParseFile` on the generated script reported *"The
- * string is missing the terminator"* inside a `Die "…"` message that contained
- * one. Comments got away with it for a phase; a string does not.
- *
- * `irm | iex` is not the route that suffers — `Invoke-RestMethod` decodes the
- * HTTP body's declared UTF-8 — but `.\install.ps1 -Uninstall` IS, and that is
- * the documented way to pass a switch, because a piped script cannot take one.
- *
- * So the prose is transliterated rather than being written twice, and
- * `asciiOnly` REFUSES anything not in this table: a new character silently
- * degrading to `?` is exactly the failure this exists to stop.
- */
 const ASCII_FOR: Readonly<Record<string, string>> = {
-  '—': ' - ',   // em dash
-  '–': '-',     // en dash
-  '‘': "'",     // left single quote
-  '’': "'",     // right single quote
-  '“': '"',     // left double quote
-  '”': '"',     // right double quote
-  '…': '...',   // ellipsis
-  ' ': ' ',     // non-breaking space
-  '×': 'x',     // multiplication sign
-  '→': '->',    // rightwards arrow
-  '·': '-',     // middle dot
+  '—': ' - ',
+  '–': '-',
+  '‘': "'",
+  '’': "'",
+  '“': '"',
+  '”': '"',
+  '…': '...',
+  ' ': ' ',
+  '×': 'x',
+  '→': '->',
+  '·': '-',
 };
 
-/** The text with {@link ASCII_FOR} applied, refusing any other non-ASCII. */
 export function asciiOnly(text: string, what: string): string {
   const out = text.replace(/[^\x00-\x7f]/g, (character) => {
     const replacement = ASCII_FOR[character];
@@ -93,13 +43,11 @@ export function asciiOnly(text: string, what: string): string {
     }
     return replacement;
   });
-  // Belt and braces: the transliteration itself must not smuggle one through.
   const left = out.match(/[^\x00-\x7f]/);
   if (left !== null) throw new Error(`gen-install-scripts: ${what} is still not ASCII after transliteration: ${JSON.stringify(left[0])}`);
   return out;
 }
 
-/** Every non-empty line two spaces in. For a block that lands inside an `if`. */
 function indent(text: string): string {
   return text
     .split('\n')
@@ -107,23 +55,6 @@ function indent(text: string): string {
     .join('\n');
 }
 
-const BANNER = (comment: string): string =>
-  `${comment} GENERATED FILE — do not edit.\n`
-  + `${comment} Written by sdk/bootstrap/scripts/gen-install-scripts.ts from src/steps.ts\n`
-  + `${comment} and src/wsl-states.ts, so a hand install and an app-driven install cannot\n`
-  + `${comment} differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install\n`;
-
-/**
- * The standalone installer's plan.
- *
- * Still no job types and no weights BY DEFAULT (4a: a bare Crucible that
- * serves nothing until an app or the operator page asks). What changed with
- * the droplet route is that a person at a terminal can now say otherwise, and
- * the two ways they say it are shell variables the generated script fills
- * from its own flags: `$BIND` for `--host`/`--port`, and `$JOB_TYPES` for
- * `--install <type>`. Both are EMPTY on a bare run, so the script a
- * `curl … | sh` produces is byte for byte the same install it was.
- */
 const STANDALONE: StepPlan = {
   enableFlags: [],
   installs: [],
@@ -131,15 +62,6 @@ const STANDALONE: StepPlan = {
   linger: true,
 };
 
-/**
- * The flags a hand install takes, and the refusal for a flag it does not.
- *
- * Nothing here has a default that does something: every variable starts empty
- * or `0`, and an empty one means the behaviour the script had before the flag
- * existed. An unknown flag is refused by name rather than ignored — a typo in
- * `--purge-weights` on a machine holding 57 GB of voices must not quietly run
- * the version that keeps them and then be believed to have run the other.
- */
 function argumentsSh(): string {
   return [
     'usage() {',
@@ -203,37 +125,12 @@ function argumentsSh(): string {
     'if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then',
     '  die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"',
     'fi',
-    '# An uninstall removes what is on this disk and installs nothing, so a',
-    '# rollback version handed to one is a flag that would be silently ignored.',
     'if [ "$UNINSTALL" = 1 ] && [ -n "$ROLLBACK_TO" ]; then',
     '  die "flag_needs_install: --rollback-to names a release to INSTALL and means nothing with --uninstall"',
     'fi',
   ].join('\n');
 }
 
-/**
- * The prerequisites, checked BY NAME on the backend that has them.
- *
- * `cuda-linux` is the droplet's backend and the one with hardware to refuse
- * over. Each check names the thing it could not find and stops; none of them
- * guesses around a missing answer, because every way this can fail produces a
- * server that installs perfectly and then refuses its first job — which is
- * the failure mode `crucible doctor` exists for and which an installer should
- * not be adding to.
- *
- * `ffmpeg` is the one check that is CONDITIONAL, and deliberately: a bare llm
- * droplet does not need it, and refusing one that asked for nothing else
- * would be an installer inventing a requirement. It is required when a job
- * type that decodes audio was asked for, and REPORTED otherwise. ON THE MAC
- * ONLY since 2026-09-26: on Linux `crucible install` places Crucible's own
- * pinned build (fresh-install #25), so there is nothing to require.
- *
- * Disk is the other conditional. Since PHASE20 the server itself is a ~30 MB
- * interpreter and a 1 MB wheel, which is not worth a guard; WEIGHTS and job
- * envs do not have a size until somebody names a model or a recipe. So the only
- * honest disk rule here is the one the operator states — `--min-free-gib` —
- * plus the free figure, printed.
- */
 function prerequisitesSh(): string {
   return [
     'if [ "$BACKEND" = cuda-linux ]; then',
@@ -246,11 +143,6 @@ function prerequisitesSh(): string {
     '  card="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"',
     '  say "prerequisites: $card, driver $driver, compute capability $cap"',
     'fi',
-    // ON LINUX, FFMPEG IS CRUCIBLE'S OWN (fresh-install #25, 2026-09-26):
-    // `crucible install <type>` places the pinned build in
-    // `$CRUCIBLE_HOME/tools/bin` for every type that decodes audio, so this
-    // neither refuses nor sends anybody to apt. The Mac has no pinned build
-    // yet and still runs Homebrew's, so there the check stands.
     'if [ "$BACKEND" = cuda-linux ]; then',
     '  say "prerequisites: ffmpeg is Crucible\'s own; the first job type that decodes audio places it in $CRUCIBLE_HOME/tools/bin"',
     'else',
@@ -269,9 +161,6 @@ function prerequisitesSh(): string {
     '  have_gib=$(( free_kib / 1048576 ))',
     '  [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"',
     'fi',
-    // #26 (kylies-pc, 2026-09-26): inside WSL, `df` measures the ext4.vhdx,
-    // whose size is a virtual ceiling (954 GiB on a C: with 283 GB free). The
-    // Windows half prints the drive's real free space before this runs.
     'if [ -n "${WSL_DISTRO_NAME:-}" ]; then',
     '  say "prerequisites: WSL\'s virtual disk can grow to $(( free_kib / 1048576 )) GiB; the real limit is the free space on the Windows drive it lives on"',
     'else',
@@ -280,23 +169,6 @@ function prerequisitesSh(): string {
   ].join('\n');
 }
 
-/**
- * `--from-source <ref>`: the server installed from a checkout, not from the
- * release's wheel.
- *
- * For the night a branch is what exists, and for a droplet where there is no
- * app to ask for a release. It is a SEPARATE path and never a fallback: a wheel
- * that failed to download is `runtime_download_failed` and stays that, because
- * "the release is broken" and "I want this branch" are different sentences and
- * only one of them is an argument.
- *
- * IT REPLACES THE WHEEL HALF AND NOTHING ELSE (PHASE20 section 3). The
- * interpreter step above has already put the same pinned CPython at
- * `$dest`, so this is `pip install <checkout>` into it — which is why this
- * route no longer needs a `python3` on the machine, no longer builds a venv of
- * its own, and no longer has console scripts to relocate: pip writes them
- * straight into the tree they will run from.
- */
 function fromSourceSh(): string {
   return [
     `say "server: --from-source $FROM_SOURCE, installing from a checkout instead of the wheel"`,
@@ -308,9 +180,6 @@ function fromSourceSh(): string {
     'crucible_quiesce || say "server: the running server did not stop; installing the checkout and stopping it with that"',
     '"$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"',
     `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "from_source_install_failed: desktop packages could not be installed"; fi`,
-    // The stamp records the COMMIT as the release, because that is what is
-    // installed. The never-older gate then reads a version it cannot order and
-    // says so rather than comparing a sha with a version number.
     `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
     'CRUCIBLE="$dest/bin/crucible"',
     'crucible_quiesce_after',
@@ -322,47 +191,6 @@ export function generateInstallSh(): string {
   const steps = installSteps(STANDALONE);
   const lines: string[] = [
     '#!/bin/sh',
-    BANNER('#').trimEnd(),
-    '#',
-    '# Install a Crucible on this machine (Linux x86_64, macOS arm64, or inside a',
-    '# WSL2 distro). Downloads the pinned CPython from python-build-standalone,',
-    "# pip-installs the release's wheel into it, initialises it, installs the",
-    '# service, and prints the line that pairs an app with it.',
-    '#',
-    '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh | sh',
-    '#',
-    '# On a rented Linux box with a GPU, where the server is reached over the',
-    '# network and the bearer token is the lock:',
-    '#',
-    '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh \\',
-    '#     | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm',
-    '#',
-    '# And to take it off again, keeping the weights:',
-    '#',
-    '#   curl -fsSL https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.sh | sh -s -- --uninstall',
-    '#',
-    '# CRUCIBLE_RELEASE=<version> or --release <version> installs a NAMED release,',
-    '# and that is the one override there is. It still downloads that release from',
-    '# GitHub -- it takes the CHOICE off the channel, not the install off the',
-    '# network (INSTALL-UNINSTALL.md 6.5.2). Given neither, this asks the release',
-    '# channel what its latest is and installs that.',
-    '# Everything here is idempotent: run it again after a failure.',
-    '#',
-    '# THERE IS NO BAKED DEFAULT AND NO FALLBACK, and that is the point. This file',
-    '# used to carry the version it was GENERATED at, which is wrong in the one',
-    '# situation that matters: the documented way to get this script is',
-    '# `releases/latest/download/install.sh`, so the copy you run is whichever one',
-    '# GitHub calls latest. Every release is cut `--prerelease --latest=false` and',
-    '# becomes latest only when promote_release.py says so, so on 2026-09-16 that',
-    '# URL served the v0.6.0 script, which then installed 0.6.0 --',
-    '# six versions behind, silently, with nothing in the output looking wrong.',
-    '# Asking at RUN time cannot drift that way, and a channel that will not',
-    '# answer is `release_channel_unreadable` rather than a quiet older install.',
-    '#',
-    '# AND IT NEVER GOES BACKWARDS. `<home>/server/.crucible` records which release is',
-    '# on this disk; installing an older one over it is refused by name',
-    '# (INSTALL-UNINSTALL.md 6.5.4), and the one way down is --rollback-to naming',
-    '# the exact version.',
     '',
     'set -eu',
     '',
@@ -371,32 +199,14 @@ export function generateInstallSh(): string {
     "say() { printf 'crucible: %s\\n' \"$*\"; }",
     "die() { printf 'crucible: %s\\n' \"$*\" >&2; exit 1; }",
     '',
-    '# --- arguments -----------------------------------------------------------',
-    '# The flags a person types. An app never reaches this file: it calls',
-    '# `install()`, which walks the SAME step list (PHASE14 4a).',
     argumentsSh(),
     '',
-    '# --- backend -------------------------------------------------------------',
-    '# Two backends and no third. Windows is never one: on Windows this script',
-    '# runs INSIDE the WSL2 distro that install.ps1 imported.',
     'case "$(uname -s)/$(uname -m)" in',
     '  Linux/x86_64)  BACKEND=cuda-linux; SHA_TOOL="sha256sum";     MECHANISM=systemd ;;',
     '  Darwin/arm64)  BACKEND=mlx-darwin; SHA_TOOL="shasum -a 256"; MECHANISM=launchd ;;',
     '  *) die "unsupported_platform: $(uname -s)/$(uname -m) is not a Crucible backend '
       + '(cuda-linux on Linux x86_64, mlx-darwin on Apple Silicon)" ;;',
     'esac',
-    '# --- which release -------------------------------------------------------',
-    '# Asked only when nobody named one, and NOT asked at all for --uninstall,',
-    '# which removes what is on this disk and must work with no network.',
-    '# The failure is loud: no fallback to a version this script was built beside,',
-    '# because installing a silently-wrong release is the defect being fixed.',
-    '# THE POINTER IS `releases/latest`, AND NOT `releases?per_page=1`.',
-    '# INSTALL-UNINSTALL.md 6.5.1: every cut is created --prerelease',
-    '# --latest=false and becomes the channel latest only when',
-    '# promote_release.py --publish flips it, after its packs and a fresh-install',
-    '# smoke have been verified. `per_page=1` answers "the newest TAG created",',
-    '# which on every day between a cut and its promotion is the unverified',
-    '# candidate that gate exists to keep off people machines.',
     'newest_release() {',
     `  curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" "${LATEST_RELEASE_URL}" |`,
     `    grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4`,
@@ -413,9 +223,6 @@ export function generateInstallSh(): string {
     '  say "release $RELEASE, backend $BACKEND"',
     'fi',
     '',
-    '# --- uninstall -----------------------------------------------------------',
-    '# The inverse, and then this script exits: `crucible uninstall` does the',
-    '# nine steps inside CRUCIBLE_HOME and this removes the interpreter it unpacked.',
     'if [ "$UNINSTALL" = 1 ]; then',
     '  say "uninstall"',
     indent(uninstallSh().trimEnd()),
@@ -425,20 +232,8 @@ export function generateInstallSh(): string {
     '',
   ];
   for (const step of steps) {
-    lines.push(`# --- ${step.name} ${'-'.repeat(Math.max(0, 68 - step.name.length))}`);
-    lines.push(`# ${step.what}`);
     lines.push(`say "${step.name}"`);
     if (step.name === 'server') {
-      // THE INTERPRETER IS SHARED AND THE WHEEL IS NOT. `--from-source`
-      // replaces the second half only, so the first is emitted once, outside
-      // the `if` — which is also the one place this file would otherwise have
-      // two copies of a pin. Neither branch is the other's fallback.
-      //
-      // THE WHEEL IS FETCHED BEFORE THE INTERPRETER HALF (fresh-install #39,
-      // 2026-09-26), so whichever half replaces the running server's tree
-      // first can stop that server with the NEW release's code
-      // (`crucible_quiesce`). `--from-source` has no wheel to stage, and
-      // falls back to the installed binary and then the new one.
       lines.push(serverPreludeSh().trimEnd());
       lines.push('if [ -z "$FROM_SOURCE" ]; then');
       lines.push(indent(wheelFetchSh().trimEnd()));
@@ -454,33 +249,21 @@ export function generateInstallSh(): string {
     }
     lines.push('');
     if (step.name === 'host-facts') {
-      // AFTER the probe, because it prices the disk the probe measured, and
-      // BEFORE anything is downloaded, because a refusal that arrives after
-      // eight gigabytes is a refusal that cost something.
-      lines.push('# --- prerequisites -------------------------------------------------------');
-      lines.push('# Named, and never guessed around. A missing one is a refusal here rather');
-      lines.push('# than a job type that refuses its first request a week later.');
       lines.push('say "prerequisites"');
       lines.push(prerequisitesSh());
       lines.push('');
     }
     if (step.name === 'init') {
-      // Exactly where `installSteps` puts `install-<type>` for an app.
-      lines.push('# --- install-job-types ---------------------------------------------------');
-      lines.push('# `--install <type>`, from its recipe. Empty on a bare run, which');
-      lines.push('# is 4a: a Crucible that serves nothing until somebody asks.');
       lines.push(installJobTypesSh().trimEnd());
       lines.push('');
     }
   }
-  lines.push('# --- done ----------------------------------------------------------------');
   lines.push('say "installed. Pair an app with the line below."');
   lines.push('"$CRUCIBLE" token --url');
   lines.push('');
   return lines.join('\n');
 }
 
-/** The one row we need by name, refused loudly if the table is renamed under us. */
 function row(states: WslStateDef[], code: string): WslStateDef {
   const found = states.find((state) => state.code === code);
   if (found === undefined) throw new Error(`gen-install-scripts: the WSL state table has no "${code}" row any more`);
@@ -491,24 +274,10 @@ function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-/**
- * pip, as `install.ps1` runs it: its errors and nothing else (#12).
- */
 const PIP_QUIET = '--quiet --disable-pip-version-check --no-warn-script-location';
 
-/**
- * The name `@crucible/bootstrap`'s `install()` saves this script under in
- * `%TEMP%` before running it with its output piped into the app
- * (`runInstallPs1` in `src/install.ts`). It is how the script tells an app
- * reader from a person at a console (#7); the two spellings must agree.
- */
 const APP_SCRIPT_NAME = 'crucible-install.ps1';
 
-/**
- * `/etc/wsl.conf` as ONE bash command, from {@link WSL_CONF_TEXT}. `printf`
- * with a `%s\n` per line and the lines as arguments: wsl.exe halves
- * backslashes before bash exists, so the `\n` is doubled here to arrive whole.
- */
 function wslConfPrintf(): string {
   const lines = WSL_CONF_TEXT.split('\n').filter((line) => line !== '');
   const args = lines.map((line) => `'${line.replace(/'/g, `'\\''`)}'`).join(' ');
@@ -523,60 +292,19 @@ export function generateInstallPs1(): string {
     throw new Error('gen-install-scripts: the WSL table changed shape; install.ps1 must be re-thought, not re-run');
   }
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v$Release`;
-  // The Windows host's interpreter, from the ONE table `install.sh` reads.
   const pin = interpreterFor(HOST_BACKEND);
   const lines: string[] = [
-    BANNER('#').trimEnd(),
-    '#',
-    '# Install Crucible on Windows: the HOST, and nothing else.',
-    '#',
-    '# PHASE15-HOST.md 4.4. This script used to walk the WSL states itself and',
-    '# then run install.sh inside an imported distribution. It no longer does,',
-    '# and that is the point of the phase: `crucible orchestrator` owns that sequence',
-    '# (4.3), it can carry a reboot across because it starts at login, and the',
-    '# page drives it as a task (4.7) — an app that asks for an install talks',
-    '# to the SAME implementation through the host loopback door. Two walks of',
-    '# one table was the thing being removed.',
-    '#',
-    '# So: download the pinned CPython, unpack it to',
-    "# %LOCALAPPDATA%\\Crucible\\host\\, pip-install this release's wheel and the",
-    '# tray into it, register the Startup item, start the host, and STOP.',
-    '#',
-    '#   irm https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.ps1 | iex',
-    '#',
-    '# And to take it off again, keeping the weights (the -Uninstall branch',
-    '# below): download it to a file first, because `irm | iex` has no way to',
-    '# pass a switch.',
-    '#',
-    '#   irm https://github.com/' + RELEASE_REPO + '/releases/latest/download/install.ps1 -OutFile install.ps1',
-    '#   .\\install.ps1 -Uninstall            # weights kept',
-    '#   .\\install.ps1 -Uninstall -WslToo    # and the guest engine with it',
-    '#',
-    '# No admin. Everything here is per-user and idempotent: run it again after',
-    '# a failure and it resumes from whatever is already on disk.',
-    '',
     '[CmdletBinding()]',
     'param(',
-    // No baked default -- see the long note in the sh generator above. Empty
-    // means "ask GitHub which release is newest", which is the only answer that
-    // cannot go stale in a file served from `releases/latest/download/`.
     "  [string]$Release = '',",
-    '  # An operator rollback: install this EXACT older release over a newer host',
-    '  # runtime already on this machine. Must name the same version as -Release;',
-    '  # there is no other way down (INSTALL-UNINSTALL.md 6.5.4).',
     "  [string]$RollbackTo = '',",
     '  [string]$Root = "$env:LOCALAPPDATA\\Crucible",',
-    '  # The inverse. `crucible uninstall` does the work inside the home; this',
-    '  # script removes the host runtime, because this script is what unpacked it.',
     '  [switch]$Uninstall,',
     '  [switch]$PurgeWeights,',
     '  [switch]$DryRun,',
     '  [switch]$WslToo',
     ')',
     '',
-    '# Continue, not Stop: every call below is a native program whose exit code',
-    '# is checked explicitly, and Windows PowerShell 5.1 turns a native command'
-      + ' writing to stderr into a terminating error under Stop.',
     '$ErrorActionPreference = "Continue"',
     '$Root = [System.IO.Path]::GetFullPath($Root)',
     '$env:CRUCIBLE_HOME = $Root',
@@ -588,18 +316,7 @@ export function generateInstallPs1(): string {
     '$Pythonw = Join-Path $HostDir "pythonw.exe"',
     '',
     'function Say($m) { Write-Host "crucible: $m" }',
-    '# `exit` under `irm | iex` closes the whole PowerShell window, so the person',
-    '# never sees why it stopped (flagged by the A2 fix-up, 2026-09-26). From a',
-    '# file, `exit 1` keeps the exit code callers check; pasted, a `throw` stops',
-    '# the script and leaves the window, and the red line, on screen.',
     'function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; if ($PSCommandPath) { exit 1 } else { throw "crucible: $m" } }',
-    '# A native program, with its stderr as plain text (#34, fresh install on',
-    "# kylies-pc, 2026-09-26). Under Windows PowerShell 5.1 a native program's",
-    '# stderr, once redirected (ssh, an app reading the output), arrives as',
-    '# ErrorRecords, and a blank one prints as a bare',
-    '# "System.Management.Automation.RemoteException". Every native call a person',
-    '# may see goes through here: records become their text, blank lines go, and',
-    "# $LASTEXITCODE is still the program's.",
     'function Native([scriptblock]$Command) {',
     '  & $Command 2>&1 | ForEach-Object {',
     '    if ($_ -is [System.Management.Automation.ErrorRecord]) { "$($_.Exception.Message)" } else { "$_" }',
@@ -612,9 +329,6 @@ export function generateInstallPs1(): string {
     '  if (-not $absolute.StartsWith($Root.TrimEnd("\\") + "\\", [System.StringComparison]::OrdinalIgnoreCase)) { Die "unsafe_install_path: $absolute is outside $Root" }',
     '}',
     '',
-    '# --- 0. this machine can hold the host -----------------------------------',
-    '# 64-bit x86 only: the pinned interpreter is',
-    '# x86_64-pc-windows-msvc-install_only and there is no second pin (4.4).',
     'if ([System.Environment]::Is64BitOperatingSystem -ne $true) {',
     '  Die "unsupported_platform: the Crucible Windows host is 64-bit x86 only."',
     '}',
@@ -622,12 +336,6 @@ export function generateInstallPs1(): string {
     '  Die "host_no_localappdata: LOCALAPPDATA is not set, so there is no per-user place to install into."',
     '}',
     '',
-    '# --- the inverse, which exits ---------------------------------------------',
-    '# `crucible uninstall` stops the tray, removes the Startup item and takes',
-    '# %LOCALAPPDATA%\\Crucible apart step by named step — everything except the',
-    '# interpreter it is itself running from. THIS script unpacked that, so this',
-    '# script removes it, after the verb has returned. Weights are kept unless',
-    '# -PurgeWeights; -WslToo runs the guest\'s own uninstall first.',
     'if ($Uninstall) {',
     '  if (-not (Test-Path $Cmd)) {',
     '    Die "not_installed: there is no $Cmd on this machine, so there is no Crucible host here to remove."',
@@ -667,24 +375,11 @@ export function generateInstallPs1(): string {
     '  exit 0',
     '}',
     '',
-    '# python-build-standalone publishes gzip, which every tar reads.',
-    '#',
-    '# NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH',
-    '# is the CALLERS: launched from a Git Bash shell this found',
-    '# C:\\Program Files\\Git\\usr\\bin\\tar.exe and refused a Windows 11 box',
-    '# whose System32 bsdtar was fine. Measured 2026-09-17 deploying 0.6.8 via',
-    '# scripts/deploy.sh. The tar Windows GUARANTEES is the one this uses.',
     '$Tar = Join-Path $env:SystemRoot "System32\\tar.exe"',
     'if (-not (Test-Path $Tar)) {',
     '  Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there, and the interpreter archive cannot be unpacked without one."',
     '}',
     '',
-    '# --- 1. which release -----------------------------------------------------',
-    '# Asked only when nobody named one. -Uninstall returned long before here,',
-    '# so taking Crucible off a machine still needs no network.',
-    '# THE POINTER IS `releases/latest` (INSTALL-UNINSTALL.md 6.5.1): the promoted',
-    '# release, not the newest tag created, which between a cut and its promotion',
-    '# is an unverified candidate.',
     'if (-not $Release) {',
     `  $feed = "${LATEST_RELEASE_URL}"`,
     '  $feedRaw = & curl.exe -fsSL --retry 3 -H "Accept: application/vnd.github+json" "$feed"',
@@ -696,10 +391,6 @@ export function generateInstallPs1(): string {
     'if ($RollbackTo -and $RollbackTo -ne $Release) { Die "rollback_version_mismatch: -RollbackTo names $RollbackTo and the release being installed is $Release; a rollback names the exact Crucible you want back" }',
     'Say "release $Release"',
     '',
-    '# --- 2. the pinned interpreter --------------------------------------------',
-    '# THE SAME TABLE `install.sh` READS (sdk/bootstrap/src/interpreter.ts), and',
-    '# the same rule: pinned by version AND digest, downloaded ONCE. The stamp',
-    '# carries the digest, so an upgrade skips this whole block.',
     `$PyAsset = ${psQuote(pin.asset)}`,
     `$PySha = ${psQuote(pin.sha256)}`,
     `$PyVersion = ${psQuote(pin.version)}`,
@@ -713,12 +404,6 @@ export function generateInstallPs1(): string {
     '    if ($line -match "^release=(.+)$") { $haveRelease = $Matches[1].Trim() }',
     '  }',
     '}',
-    '# --- 2a. never over a newer release ---------------------------------------',
-    '# INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the',
-    '# POSIX installer and installRuntime() use. [version] compares number by',
-    '# number, which is the thing a string comparison gets wrong at 1.0.10.',
-    '# An unstamped runtime is not read as older: a version nobody recorded',
-    '# cannot be compared with one.',
     'if ($haveRelease) {',
     '  $onDisk = $null; $wanted = $null',
     '  if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {',
@@ -734,8 +419,6 @@ export function generateInstallPs1(): string {
     '  $archive = Join-Path $DownloadDir $PyAsset',
     '  if (Test-Path $archive) { Remove-Item $archive -Force }',
     '  Say "host: python $PyVersion from python-build-standalone"',
-    // `-sS`: curl's meter redraws one line with carriage returns, which
-    // `Native` could only print as one burst at the end (#34).
     '  Native { & curl.exe ' + CURL_ARGS.join(' ') + ' -sS -o $archive "$PyUrl" } | Show',
     '  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }',
     '  $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()',
@@ -744,9 +427,6 @@ export function generateInstallPs1(): string {
     '    Die "runtime_sha_mismatch: $PyAsset hashes $got, this installer pins $PySha. The download was deleted"',
     '  }',
     '',
-    '  # --- 2b. unpack beside, prove it runs, THEN move -------------------------',
-    '  # `install_only` archives carry ONE top-level python/ directory and that',
-    '  # directory IS the interpreter, so what moves is $Partial\\python.',
     '  if (Test-Path $Partial) { Remove-Item $Partial -Recurse -Force }',
     '  New-Item -ItemType Directory -Force -Path $Partial | Out-Null',
     `  & $Tar ${TAR_ARGS.join(' ')} $archive -C $Partial`,
@@ -756,9 +436,6 @@ export function generateInstallPs1(): string {
     '  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: python.exe in $staged would not run" }',
     '  if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }',
     '  if (Test-Path -LiteralPath $HostDir) {',
-    // Through `Native` (#34), so a refusal arrives as its own words rather
-    // than as RemoteException lines, and shown only when it IS a refusal:
-    // the success answer is `{"closed": true}`, which says nothing to a person.
     '    if (Test-Path -LiteralPath $Cmd) {',
     '      $said = @(Native { & $Cmd local shutdown })',
     '      if ($LASTEXITCODE -ne 0) { $said | Show; Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }',
@@ -780,10 +457,6 @@ export function generateInstallPs1(): string {
     '  Say "host: python $PyVersion at $HostDir"',
     '}',
     '',
-    '# --- 3. the wheel, which IS the deploy ------------------------------------',
-    '# It always installs. One megabyte, and re-running it is how a half-finished',
-    '# install is repaired. pip runs from the tree at its FINAL path, which is',
-    '# what makes Scripts\\*.exe launchers correct without being rewritten.',
     'New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null',
     `$Wheel = "${wheelAssetName('$Release')}"`,
     '$WheelPath = Join-Path $DownloadDir $Wheel',
@@ -800,16 +473,6 @@ export function generateInstallPs1(): string {
     '  Remove-Item $WheelPath -Force',
     '  Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"',
     '}',
-    // THE NEW RELEASE'S CODE STOPS THE OLD ONE (fresh-install #39, 2026-09-26),
-    // as `crucible_quiesce` does in install.sh. `& $Cmd local shutdown` ran
-    // the INSTALLED release's shutdown, so a fix to how Crucible stops itself
-    // (the guest-token retry for #32, the hold handover for #35) could never
-    // help the upgrade that shipped it. The verified wheel is unpacked beside
-    // the host (`pip install --target`, no dependencies: they are the
-    // installed host's) and its `local shutdown` runs on the installed
-    // interpreter. The installed binary is the fallback. Not fatal, as before
-    // (a tray that is not running is not a failure), but a refusal is shown in
-    // its own words through `Native` (#34), and `{"closed": true}` is not.
     'if (Test-Path -LiteralPath $Cmd) {',
     '  $Stage = Join-Path $DownloadDir "stage"',
     '  if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }',
@@ -829,34 +492,13 @@ export function generateInstallPs1(): string {
     '  }',
     '  if (-not $stopped) { Say "host: the running Crucible did not stop cleanly; installing over it:"; $said | Show }',
     '}',
-    // #12: `--no-warn-script-location`, because pip's eleven "is not on PATH"
-    // warnings about host\Scripts were the loudest thing an install printed,
-    // and none of them is true of how Crucible is started. `--quiet` keeps
-    // pip to its errors, which `Native` shows.
     'Say "host: installing Crucible into $HostDir (about a minute)"',
     `Native { & $PythonExe -m pip install ${PIP_QUIET} --upgrade --no-input $WheelPath } | Show`,
     'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }',
-    '# The tray, which is not a dependency of the wheel: pyproject.toml is what',
-    '# every Crucible installs from, and a headless Linux server must not carry',
-    '# a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.',
     `Native { & $PythonExe -m pip install ${PIP_QUIET} ${DESKTOP_PACKAGES.join(' ')} } | Show`,
     'if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }',
     'Remove-Item $WheelPath -Force',
     '',
-    '# --- 4. the console shim --------------------------------------------------',
-    '# pip does not write a shebang script into Scripts\\ on Windows; it writes',
-    '# Scripts\\crucible.exe, a launcher BINARY. That one works here — pip ran',
-    '# from this very directory — but everything else in Crucible spells the',
-    '# console entry point `<host>\\crucible.cmd` (crucible/host/paths.py\'s',
-    '# CONSOLE_CMD), so the shim is written beside python.exe.',
-    '#',
-    '# CRLF, not LF: cmd.exe\'s batch parser is line-oriented on CRLF, and an',
-    '# LF-only .cmd can swallow its own last line — a shim that silently does',
-    '# nothing rather than one that reports a syntax error.',
-    '#',
-    '# `%~dp0` is the directory of the running batch file, WITH a trailing',
-    '# backslash, quoted because %LOCALAPPDATA% holds the user\'s name and a user',
-    '# called "Owen Morgan" would otherwise split the command in two.',
     '$shim = "@echo off`r`n""%~dp0python.exe"" -m crucible.cli %*`r`n"',
     '[System.IO.File]::WriteAllText($Cmd, $shim, [System.Text.Encoding]::ASCII)',
     '& $Cmd --version | Out-Null',
@@ -864,43 +506,17 @@ export function generateInstallPs1(): string {
     'Set-Content -Path $Stamp -Encoding ascii -Value @("python_sha256=$PySha", "python_version=$PyVersion", "release=$Release")',
     'Say "host: $Release installed at $HostDir (Python $PyVersion)"',
     '',
-    '# --- 6. start at login ----------------------------------------------------',
-    '# The host OWNS that shortcut (4.1). This script asks for it by verb rather',
-    '# than writing a .lnk of its own, so there is one spelling of what it points',
-    '# at and one place that changes when it moves.',
-    // The verbs answer JSON for a program; a person is shown only a failure.
     'foreach ($action in @("register", "install-cli", "install-desktop")) {',
     '  $said = @(Native { & $Cmd local $action })',
     '  if ($LASTEXITCODE -ne 0) { $said | Show; Die "local setup failed: $action (exit $LASTEXITCODE). Run this installer again; it carries on from where it stopped." }',
     '}',
     '',
-    '# --- 7. start the host, and stop ------------------------------------------',
-    '# pythonw, not the .cmd: a tray program has no console window (4.1).',
     'Say "starting the tray"',
-    // #28: the moment this install began its move. An outcome written before
-    // it is an EARLIER run's, and is said as history, never as this one's.
     "$Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')",
     'Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","orchestrator"',
     '$said = @(Native { & $Cmd local start })',
     'if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }',
     '',
-    '# --- 8. what happens next, read rather than asserted ----------------------',
-    '# PHASE19-AUTOMATIC-WSL.md 2.7. This script used to end by saying the Linux',
-    '# engine was "available from its console", which stopped being true the',
-    '# moment the tray began starting the move by itself at every start (2.3).',
-    '#',
-    '# It has no logic of its own and decides nothing about the move: the tray',
-    '# runs the move and publishes it, and `crucible.host.installwatch` READS that',
-    '# (the door of 2.6, and wsl-outcome.json) and says it in plain words.',
-    '#',
-    '# THE CONSOLE IS THE APP (#6, #7, fresh install on kylies-pc, 2026-09-26).',
-    '# This used to wait ten seconds, say "the app you installed from will show',
-    '# its progress" and exit - and twelve seconds later the move stopped for a',
-    '# restart that only host.log mentioned. A person at a console now watches',
-    '# every step here until the move ends: done, a restart owed (and how to do',
-    '# it), cannot, or failed. An APP that ran this script watches the move',
-    '# itself through the same door, so it still gets the short ending.',
-    `# It is an app when it runs a saved ${APP_SCRIPT_NAME} with its output piped.`,
     'Say "Crucible is ready in your notification area."',
     '$FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq '
       + `${psQuote(APP_SCRIPT_NAME)}) -and [Console]::IsOutputRedirected)`,
@@ -912,28 +528,14 @@ export function generateInstallPs1(): string {
     '}',
     '',
   ];
-  // ASCII, because Windows PowerShell 5.1 reads a BOM-less .ps1 as the ANSI
-  // code page. See `asciiOnly`, and the parse error that measured it.
   return asciiOnly(lines.join('\n'), 'install.ps1');
 }
 
-// ------------------------------------------------- the table, as Python data
-
-/**
- * Sentinels. Every row's `sentence` is a FUNCTION of the evidence, so the way
- * to get a template out of it is to call it with values that cannot occur and
- * then swap those for `{placeholders}` — and to ASSERT each swap fired, so a
- * reworded row fails this generator instead of shipping a sentence with a
- * sentinel in it. The alternative, a second table of sentences in Python, is
- * the thing this file exists to prevent.
- */
 const SAID = 'XXSAIDXX';
 const APP_DISTRO = 'XXAPPDISTROXX';
 const GUEST_USER = 'XXGUESTUSERXX';
 const RELEASE_MARK = '424.242.424';
-/** gib(REQUIRED_SENTINEL) is "424242.0 GiB", which occurs in no real sentence. */
 const REQUIRED_SENTINEL = 424242 * 1024 ** 3;
-/** The `df -Pk` reply the disk row is given: gib() renders it "953.7 GiB". */
 const FREE_KIB_SENTINEL = '999999999';
 
 const SUBSTITUTIONS: { from: string; to: string; required: boolean }[] = [
@@ -945,8 +547,6 @@ const SUBSTITUTIONS: { from: string; to: string; required: boolean }[] = [
 ];
 
 function sentinelResult(): RunResult {
-  // `said()` prefers stderr, so putting the sentinel there is what makes every
-  // row that quotes the evidence come back with it.
   return { code: 1, stdout: FREE_KIB_SENTINEL, stderr: SAID, failure: 'ENOENT' };
 }
 
@@ -958,7 +558,6 @@ function pyList(values: readonly string[]): string {
   return `(${values.map((value) => `${pyString(value)}, `).join('')})`;
 }
 
-/** Every sentinel swapped for its `{placeholder}`, and none left behind. */
 function templated(text: string, code: string, fired: Set<string>): string {
   let out = text;
   for (const swap of SUBSTITUTIONS) {
@@ -986,10 +585,6 @@ export function generateWslStatesPy(): string {
     checkNetwork: true,
   };
   const states = wslStates(inputs);
-  // The SAME table with nothing the caller measured, so that `optional` is
-  // read off the rows themselves rather than written down here: a row that is
-  // disabled when nobody asked for a disk figure or a network probe is a row
-  // whose probe costs something, and `detect()` must not run it unasked.
   const bare = wslStates({ release: RELEASE_MARK });
   const optionalCodes = new Set(bare.filter((state) => state.enabled === false).map((state) => state.code));
   const seen = { results: {}, distros: [] as { name: string; version: number }[] };
@@ -999,10 +594,6 @@ export function generateWslStatesPy(): string {
   const rows = states.map((state: WslStateDef) => {
     const sentence = templated(state.sentence(result, seen), state.code, fired);
     const action = state.action(result, seen);
-    // THE PARTITION, CHECKED RATHER THAN COPIED (PHASE19 2.1). `automatic` is
-    // a field because `wsl_ready` is the one row where it is not the action
-    // kind — so every OTHER row must agree with its action, or the boolean has
-    // quietly become a second opinion about what the row does.
     if (state.code !== 'wsl_ready') {
       const carried = action.kind === 'run' || action.kind === 'run-elevated';
       if (state.automatic !== carried) {
@@ -1031,8 +622,6 @@ export function generateWslStatesPy(): string {
     return `    WslStateDef(\n${parts.join('\n')}\n    ),`;
   });
 
-  // Every placeholder the table CAN produce must actually have been produced,
-  // or the Python side would show a sentence with a hole nobody fills.
   for (const wanted of ['{said}', '{app_distro}', '{release}', '{required}', '{free}']) {
     if (!fired.has(wanted)) {
       throw new Error(
@@ -1043,56 +632,29 @@ export function generateWslStatesPy(): string {
   }
 
   return [
-    BANNER('#').trimEnd(),
-    '#',
-    '# The WSL state table of PHASE14-ENVPACKS.md 4c, as DATA, for `crucible orchestrator`',
-    '# (PHASE15-HOST.md 4.3). The ORDER is the order they are tried: deepest cause',
-    '# first, so "virtualization is off in the firmware" is never reported as "WSL',
-    '# is not installed".',
-    '#',
-    '# `sentence`, `action_text`, `action_url` and `probe_argv` carry `{said}` /',
-    '# `{app_distro}` / `{release}` / `{required}` / `{free}`',
-    '# where the TypeScript interpolated something the caller measures. The',
-    '# PREDICATES are not here: they are code, and they live in',
-    '# `crucible/host/wslstate.py`, one per code, tied to this file by a test.',
-    '',
     'from __future__ import annotations',
     '',
     'from dataclasses import dataclass',
     '',
-    '#: The distro Crucible owns. One name, and its owner is sdk/bootstrap/src/distro.ts.',
     `CRUCIBLE_DISTRO = ${pyString(CRUCIBLE_DISTRO)}`,
     `RELEASE_REPOSITORY = ${pyString(RELEASE_REPO)}`,
     '',
-    '#: CANONICAL\'S OWN WSL IMAGE, and the sums file beside it. PHASE20 section 2:',
-    '#: the release carries no rootfs of ours any more, and we store no digest of',
-    '#: theirs -- the sums file in the same directory is the digest\'s one owner.',
     `UBUNTU_WSL_SERIES = ${pyString(UBUNTU_WSL_SERIES)}`,
     `UBUNTU_WSL_ROOTFS = ${pyString(UBUNTU_WSL_ROOTFS)}`,
     `UBUNTU_WSL_ROOTFS_URL = ${pyString(rootfsUrl())}`,
     `UBUNTU_WSL_SUMS_URL = ${pyString(rootfsSumsUrl())}`,
     '',
-    "#: PHASE19 2.2's record of what happened to the engine move, in the host",
-    '#: home. Read by `crucible/host/outcome.py`, which is its writer and parser,',
-    '#: and by `install.ps1` for its closing sentence (2.7).',
     `WSL_OUTCOME_NAME = ${pyString(WSL_OUTCOME_NAME)}`,
     '',
-    '#: The line /etc/wsl.conf carries in a Crucible distro and nowhere else.',
     `WSL_CONF_MARKER = ${pyString(WSL_CONF_MARKER)}`,
     '',
-    '#: /etc/wsl.conf, exactly as the import writes it and as the repair rewrites it.',
     `WSL_CONF_TEXT = ${pyString(WSL_CONF_TEXT)}`,
     '',
-    '#: What an imported Canonical image needs before anything can be installed',
-    '#: into it: the crucible user, passwordless sudo, and the wsl.conf above.',
-    '#: One root script, and its owner is distro.ts -- see `finishImportScript`.',
     `FINISH_IMPORT_SCRIPT = ${pyString(finishImportScript())}`,
     '',
     '',
     '@dataclass(frozen=True)',
     'class WslStateDef:',
-    '    """One row of 4c. `optional` rows are only probed when the caller asks."""',
-    '',
     '    code: str',
     '    probe: str',
     '    probe_argv: tuple[str, ...]',
@@ -1101,10 +663,6 @@ export function generateWslStatesPy(): string {
     '    action_argv: tuple[str, ...]',
     '    action_text: str',
     '    action_url: str',
-    '    #: PHASE19 2.1: can the tray carry a machine past this state with',
-    '    #: nobody in front of it? True for the rows whose action is something',
-    '    #: we run, and for `wsl_ready`, which needs nothing run at all. False',
-    '    #: is the tray writing `cannot` and stopping.',
     '    automatic: bool',
     '    optional: bool',
     '',
@@ -1113,8 +671,6 @@ export function generateWslStatesPy(): string {
     ...rows,
     ')',
     '',
-    '#: Every code, in table order. `crucible/host/wslstate.py` must have a',
-    '#: predicate for each, and no others.',
     'WSL_STATE_CODES: tuple[str, ...] = tuple(state.code for state in WSL_STATES)',
     '',
   ].join('\n');
@@ -1149,5 +705,4 @@ function main(): void {
   if (drifted > 0) process.exitCode = 1;
 }
 
-// Only when run as a program; the test imports the two generators directly.
 if (process.argv[1] !== undefined && process.argv[1].endsWith('gen-install-scripts.js')) main();

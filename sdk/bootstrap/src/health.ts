@@ -1,13 +1,3 @@
-/**
- * `health()` — what `/v1/activity` says, or the named reason it cannot be reached.
- *
- * The local config is read (its token never leaves this process), a
- * `CrucibleClient` is built on it, and `activity()` is asked. The SDK's own
- * error types are mapped to this package's refusals, each carrying what to do:
- * `unreachable` means `ensureRunning()`, `wrong_token` means the config on disk
- * and the server disagree, `not_a_crucible` means something else is on the port.
- * Any other error is the SDK's and is rethrown as it is.
- */
 import {
   CrucibleAuthError,
   CrucibleClient,
@@ -28,10 +18,7 @@ export interface ActivityClient {
 }
 
 export interface HealthOptions extends LocalConfigOptions {
-  /**
-   * Who is asking, for the server's log. Defaults to this package's own name,
-   * which is the truth when nothing more specific was said.
-   */
+  /** Who is asking, for the server's log. */
   clientName?: string;
   /** Injectable so a test can script the answer without a server. */
   clientFactory?: (options: { url: string; token: string; clientName: string }) => ActivityClient;

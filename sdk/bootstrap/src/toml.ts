@@ -1,15 +1,4 @@
-/**
- * Enough TOML to read a `config.toml` that `crucible/config.py` wrote.
- *
- * Zero runtime dependencies is the package rule, and the one file this package
- * reads is written by `tomli_w` from a dict of strings, integers, booleans and
- * an array of tables. So this reads exactly that dialect — tables, arrays of
- * tables, bare and quoted keys, basic and literal strings, integers, floats,
- * booleans, single-line arrays — and REFUSES by name anything else (inline
- * tables, multi-line strings, dates) rather than guessing at it. A refusal is a
- * `TomlError` naming the line; `config.ts` turns it into `config_unreadable`,
- * which is the same thing the server would do with a file it cannot parse.
- */
+/** Refusal for TOML outside the dialect `crucible/config.py` writes. */
 
 export class TomlError extends Error {
   readonly line: number;
@@ -83,7 +72,6 @@ function stripComment(line: string): string {
   return hash < 0 ? line : line.slice(0, hash);
 }
 
-/** Index of `needle` outside any quoted string, or -1. */
 function findUnquoted(line: string, needle: string): number {
   let quote: '"' | "'" | null = null;
   for (let i = 0; i < line.length; i += 1) {
@@ -137,7 +125,6 @@ function descend(from: TomlTable, keys: readonly string[], lineNo: number): Toml
       table[key] = created;
       table = created;
     } else if (Array.isArray(next)) {
-      // A dotted header under an array of tables addresses its last element.
       const last = next[next.length - 1];
       if (last === undefined || typeof last !== 'object' || Array.isArray(last)) {
         throw new TomlError(lineNo, `${key} is an array, not a table`);

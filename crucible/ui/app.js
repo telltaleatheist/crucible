@@ -1,44 +1,3 @@
-/* Crucible operator console — PHASE13-OPERATOR.md section 4.
- *
- * Vanilla, one file, no build step and no dependency. Six sections, each drawn
- * from the read that owns it:
- *
- *   Status      GET /v1/setup      + GET /v1/activity  (+ the card, from /v1/info)
- *   Tasks       GET /v1/tasks      + the running one's SSE
- *   Job types   GET /v1/capability + what /v1/info says this server offers
- *   Catalog     GET /v1/catalog
- *   Connect     GET /v1/setup
- *   Service     GET /v1/info       + GET /v1/setup
- *
- * WHICH READ SAYS A JOB TYPE IS INSTALLED, AND WHY IT IS NOT `/v1/setup`.
- * `setup.job_types` and `info.job_types` are the same list from the same
- * producer — what this server accepts in `POST /v1/jobs` — and that list is
- * spelled in POSTable types: `load-model`, `unload-model`, `tts`, `echo`. The
- * Job types section and the catalog's rows both speak in CAPABILITIES —
- * `llm`, `tts`, `asr` — which is the other of the two lists `/v1/info`
- * deliberately keeps apart, and `info.capabilities[].job_type` is it. Asking
- * `setup.job_types` whether `llm` is here answers no on a server that is
- * serving it, which is the one wrong answer that matters.
- *
- * TWO RULES THE WHOLE FILE IS WRITTEN TO.
- *
- * 1. Every refusal this API names is shown with its CODE and its MESSAGE,
- *    verbatim, beside the control that caused it. There is no toast, no
- *    "something went wrong", and nothing is ever told "maybe"
- *    (ARCHITECTURE.md R3). A 409 that carries a holder shows the holder's own
- *    sentence — `details.who` — because "held by foundry — translate,
- *    qwen3.8-27b-4bit" is the difference between a system working and a button
- *    somebody concludes is broken.
- *
- * 2. Nothing here is a second copy of a server-side table. The job types, the
- *    narrator engines, the subject kinds and what installs what all arrive on
- *    the wire; this file has no list of them and must never grow one.
- *
- * THE EVENTS ARE READ WITH `fetch`, NOT `EventSource`. Every /v1 route needs a
- * bearer token and an API version header, and `EventSource` can send neither.
- * The frame parsing below is the same SSE envelope the job stream uses.
- */
-
 'use strict';
 
 (function () {
@@ -49,8 +8,6 @@
   var STATUS_THROTTLE_MS = 1500;
   var INSTALL_LINES_KEPT = 400;
   var TERMINAL = ['done', 'failed', 'cancelled'];
-
-  // ------------------------------------------------------------------ state
 
   var state = {
     token: null,
@@ -66,40 +23,20 @@
     live: null,
     stream: null,
     revealToken: false,
-    // What the OPERATOR has typed or chosen, kept out of the DOM on purpose.
-    // Status is on a timer and the whole console is redrawn from it, so a
-    // half-typed module or a picked narrator engine that lived only in an
-    // element would be thrown away every four seconds.
     moduleText: '',
     engineChoice: {},
-    // The settings document, as the server last handed it over — never edited
-    // in place. Every control PUTs and replaces this whole object with what
-    // came back, which is section 3.7's "no local state": the panel shows the
-    // engine's answer, not its own idea of it.
     settings: null,
-    // What is TYPED and not yet sent. This is not a second copy of the
-    // settings — nothing here is a setting until a PUT has taken it — and it
-    // has to live outside the DOM for `engineChoice`'s reason: Status is on a
-    // four-second timer that redraws the console, and a half-typed key inside
-    // an element would be thrown away under the operator's hands.
     upstreamDraft: {},
     routeDraft: {},
-    // THE VOICES PANEL: the list as the server last gave it, the one voice
-    // being edited (its draft document and that document's JSON text), and a
-    // half-typed pin. Kept here, not in the DOM, for `engineChoice`'s reason.
     voices: null,
     voiceEdit: null,
     voiceAdd: { id: '', repo: '', revision: '' },
     allowanceDraft: null,
-    // What each upstream answered `test` with, so the route pickers can offer
-    // real model ids. Not cached across a reload and never written to disk:
-    // the list is somebody else's and changes without telling us.
     upstreamModels: {},
     lastStatusAt: 0,
     timer: null
   };
 
-  /** One task's live view, rebuilt from its own event stream. */
   function liveTask(task) {
     return {
       id: task.task_id,
@@ -113,8 +50,6 @@
       ended: null
     };
   }
-
-  // ------------------------------------------------------------- refusals
 
   function Refusal(status, code, message, details) {
     this.status = status;
@@ -142,8 +77,6 @@
         body.error.details === undefined ? null : body.error.details
       );
     }
-    // Not a Crucible refusal at all — a proxy, a gateway, something between.
-    // Named as what it is rather than dressed up as one of ours.
     return new Refusal(
       response.status,
       'http_' + response.status,
@@ -153,8 +86,6 @@
       null
     );
   }
-
-  // ------------------------------------------------------------- transport
 
   function headers(extra) {
     var built = { Authorization: 'Bearer ' + state.token };
@@ -199,10 +130,6 @@
     return response.json();
   }
 
-  // Written as whole template literals rather than concatenated halves so that
-  // `tests/test_ui_mount.py` can read every path this page calls straight out
-  // of the file and check each one against the app's route table. A path built
-  // out of fragments is a path a drift guard cannot see.
   function taskPath(id) {
     var safe = encodeURIComponent(id);
     return `/v1/tasks/${safe}`;
@@ -212,8 +139,6 @@
     var safe = encodeURIComponent(id);
     return `/v1/tasks/${safe}/events`;
   }
-
-  // ------------------------------------------------------------------ token
 
   function readStoredToken() {
     try {
@@ -227,8 +152,6 @@
     try {
       window.localStorage.setItem(TOKEN_KEY, token);
     } catch (blocked) {
-      // A browser that refuses storage still runs the page for this visit; the
-      // next reload will ask again, which is the truth rather than a surprise.
     }
   }
 
@@ -240,7 +163,6 @@
     }
   }
 
-  /** `#token=<t>` from a pairing line: stored, then taken out of the address. */
   function tokenFromFragment() {
     var hash = window.location.hash;
     if (!hash || hash.length < 2) {
@@ -250,8 +172,6 @@
     if (!found) {
       return null;
     }
-    // Out of the address bar, out of the back button, out of a bookmark. A
-    // fragment never reached this server, which is why it travelled in one.
     window.history.replaceState(
       null,
       '',
@@ -270,8 +190,6 @@
     }
     showGate(refusal);
   }
-
-  // ----------------------------------------------------------------- pieces
 
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -339,12 +257,6 @@
     return el('span', { class: 'mono', text: text });
   }
 
-  /**
-   * The capabilities this server is serving right now, by name — `llm`,
-   * `tts`, … — which is what a job type row and a catalog row both speak.
-   * Null when `/v1/info` has not been read or was refused: an empty set would
-   * read as "this server serves nothing", which is a different claim.
-   */
   function offeredCapabilities() {
     if (state.info === null) {
       return null;
@@ -366,9 +278,6 @@
     ]);
     var details = refusal.details;
     if (details && details.fact && details.who) {
-      // The four-shaped `409 server_busy`. `details.who` is the server's own
-      // sentence about the holder and it is shown as written: an operator told
-      // only "busy" concludes the button is broken and presses it until it is.
       box.appendChild(
         el('span', { class: 'refusal-who' }, [
           el('b', { text: details.fact + ' holds the card: ' }),
@@ -390,15 +299,8 @@
     state.refusals[where] = refusal;
   }
 
-  // ---------------------------------------------------------------- numbers
-
   var UNITS = ['B', 'kB', 'MB', 'GB', 'TB'];
 
-  /**
-   * Decimal, because that is what a model card and a download both quote, and
-   * `null` is returned as `null` — never 0. A subject whose manifest declares
-   * no size is a subject nobody knows the size of, and "0" is a number.
-   */
   function bytesText(value) {
     if (value === null || value === undefined) {
       return null;
@@ -437,8 +339,6 @@
     }
     return when.toLocaleTimeString();
   }
-
-  // ------------------------------------------------------------ the reads
 
   async function loadSetup() {
     try {
@@ -484,9 +384,6 @@
 
   async function loadActivity() {
     try {
-      // No `?accelerator_probe=true`. The probe spawns `nvidia-smi` per read,
-      // and this one is on a timer; the route's own ruling is that it is
-      // opt-in. The card's identity comes from `/v1/info`, which costs nothing.
       state.activity = await call('/v1/activity');
       setRefusal('activity', null);
     } catch (refusal) {
@@ -552,8 +449,6 @@
     }
   }
 
-  // --------------------------------------------------------- the event feed
-
   function stopStream() {
     if (state.stream !== null) {
       state.stream.abort();
@@ -604,8 +499,6 @@
         cut = buffer.indexOf('\n\n');
       }
     }
-    // The stream ends at the task's terminal event; re-read everything so the
-    // sections that an install or a pull changed are the ones on screen.
     if (state.token !== null) {
       await refreshAll();
     }
@@ -656,8 +549,6 @@
     var live = state.live;
     if (name === 'step') {
       live.step = data;
-      // A new step is a new denominator: bytes from the last file would read
-      // as progress on this one.
       live.bytesDone = null;
       live.bytesTotal = null;
       live.file = null;
@@ -679,7 +570,6 @@
     }
   }
 
-  /** Status is refreshed on an interval AND on every task event, throttled. */
   function touchStatus() {
     var now = Date.now();
     if (now - state.lastStatusAt < STATUS_THROTTLE_MS) {
@@ -688,8 +578,6 @@
     state.lastStatusAt = now;
     loadActivity().then(render);
   }
-
-  // ------------------------------------------------------------ 1. status
 
   function holderRows(activity) {
     var rows = [];
@@ -740,16 +628,6 @@
     return rows;
   }
 
-  /** Is this `cuda-linux` server the WSL guest of a Windows machine?
-
-   * 4.7's Status line says **Engine: WSL2 (vLLM/SGLang)** there, and
-   * nothing at all on a real Linux box, where there is no second engine to
-   * have moved from. The distinction is not one a Linux server can make
-   * about itself — inside the guest, WSL looks like Linux — so it is read
-   * off the one thing that differs: the guest's kernel names itself.
-   * `/v1/info`'s `host.platform` is `linux` either way, so this asks the
-   * BROWSER, which is running on the Windows machine when it is one.
-   */
   function isWindowsHost() {
     return (
       typeof navigator !== 'undefined' &&
@@ -788,10 +666,6 @@
       ]);
     }
 
-    // WHICH ENGINE RUNS THIS MACHINE, and the one control that changes it
-    // (PHASE15-HOST.md 4.7). Shown on a Windows machine only, because on
-    // Linux and the Mac there is nothing to move: the backend IS the engine
-    // and there is no second one beside it.
     if (setup && setup.backend === 'llama-windows') {
       var engineLine = el('span', null, [
         chip('Windows (llama.cpp)', 'ok'),
@@ -823,12 +697,6 @@
               if (!window.confirm(question)) {
                 return;
               }
-              // THE SERVER DOES NOT RUN IT. It hands the move to the host's
-              // loopback door and relays the host's events under this task
-              // id, so what this page watches is the same Tasks panel that
-              // watches a pull. A server started by hand refuses
-              // `engine_move_needs_host`, and that refusal is drawn like any
-              // other.
               submit({ type: 'engine', target: 'wsl' }, 'engine:wsl');
             }
           }, ['Move to WSL2…']),
@@ -961,9 +829,6 @@
     }
   }
 
-  // ------------------------------------------------------------- 2. tasks
-
-  /** What the task was ASKED for, from the request the server echoes back. */
   function requestText(task) {
     var request = task.request;
     if (task.type === 'pull') {
@@ -993,8 +858,6 @@
     box.appendChild(head);
 
     var cancel = el('button', {
-      // Ids on every control an operator can tab to, so the timed redraw can
-      // put the keyboard back where it found it (see `render`).
       id: 'task-cancel',
       class: 'button danger',
       type: 'button',
@@ -1022,7 +885,6 @@
     var anything = false;
 
     if (live && live.bytesDone !== null) {
-      // "Pulling… 3.2 of 19.4 GB" — the operator's sentence, not the wire's.
       var done = bytesText(live.bytesDone);
       var total = bytesText(live.bytesTotal);
       var text = 'Pulling ' + (live.file ? live.file : 'weights') + ' — ' + done;
@@ -1046,8 +908,6 @@
     }
 
     if (live && live.lines.length) {
-      // pip's own lines. R4: they are shown because an operator wants to read
-      // them, and nothing here parses one.
       var pane = el('div', {
         class: 'pane',
         role: 'log',
@@ -1130,8 +990,6 @@
         el('span', { class: 'row-action' }, [chip(task.state, tone)])
       ]);
       if (task.error) {
-        // The failure verbatim: `pull_failed` is the weights module's own
-        // sentence, `install_failed` the console script's exit.
         cells.appendChild(
           el('div', { class: 'row-span' }, [
             refusalBox(new Refusal(0, task.error.code, task.error.message, null))
@@ -1153,8 +1011,6 @@
       );
     }
   }
-
-  // --------------------------------------------------------- 3. job types
 
   function renderJobTypes() {
     var body = document.getElementById('types-body');
@@ -1292,9 +1148,6 @@
     var wants = entry.narrator_engines.length > 0;
     var group = el('span', { class: 'controls' });
     if (wants) {
-      // Which engine, from the server's list. The choice is kept in `state`
-      // because the console is redrawn on a timer and a value that lived only
-      // in the element would reset under the operator's hand.
       if (state.engineChoice[entry.job_type] === undefined) {
         state.engineChoice[entry.job_type] = entry.narrator_engines[0];
       }
@@ -1339,14 +1192,6 @@
     return group;
   }
 
-  // ---------------------------------------------------------- 4. settings
-  //
-  // PHASE15-HOST.md section 3.7. Owen, 2026-09-14: *"Settings live in the
-  // engine and nowhere else."* This panel and BookForge's settings section
-  // and Foundry's card are three windows onto ONE store, which is why every
-  // control here is a `PUT /v1/settings` and why the panel redraws from the
-  // document the PUT hands back rather than from anything it remembers.
-
   var UPSTREAM_LABELS = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -1355,18 +1200,10 @@
 
   var UPSTREAM_ORDER = ['anthropic', 'openai', 'ollama'];
 
-  /** The field each upstream takes. The server owns this; the page reads it. */
   function upstreamField(name) {
     return name === 'ollama' ? 'url' : 'key';
   }
 
-  /**
-   * Send one patch and take what comes back as the truth.
-   *
-   * A refusal is shown WHERE IT WAS EARNED — `details.field` is the dotted
-   * path the server refused, so the control that caused it is the one that
-   * says so, rather than a banner at the top of a panel with nine controls.
-   */
   async function putSettings(patch, where) {
     try {
       state.settings = await call('/v1/settings', {
@@ -1380,10 +1217,6 @@
       setRefusal(where, refusal);
       return false;
     } finally {
-      // Capability and the catalog both move when a route does, and the
-      // panels above this one draw from them. Re-read rather than patched in
-      // place: the server recomputed the record, and guessing what it decided
-      // would be a second opinion about the same write.
       await loadCapability();
       render();
     }
@@ -1417,7 +1250,6 @@
     body.appendChild(renderAllowance());
   }
 
-  /** Every distinct upstream model something is already routed to. */
   function routedModels() {
     var found = [];
     var routes = state.settings.routes;
@@ -1433,7 +1265,6 @@
     return found;
   }
 
-  /** The ids `test` reported, as `<upstream>/<model>`, for configured ones. */
   function testedModels() {
     var found = [];
     for (var index = 0; index < UPSTREAM_ORDER.length; index += 1) {
@@ -1466,9 +1297,6 @@
 
   function routeRow(name, row) {
     var options = [];
-    // `local` always, and it says WHAT local means on this machine, so the
-    // choice is between two named things rather than between a word and a
-    // word (3.7). `nothing fits` is an answer, not an absence.
     options.push({
       value: 'local',
       label: 'local — ' + (row.model === null ? 'nothing fits' : row.model)
@@ -1623,9 +1451,6 @@
           state.upstreamModels[name] = answer.models;
           setRefusal('upstream-' + name, null);
         } catch (refusal) {
-          // The three test refusals are ANSWERS to "does this work", so they
-          // are shown on this card rather than thrown at the panel. They are
-          // shown verbatim, because the words are the provider's.
           delete state.upstreamModels[name];
           setRefusal('upstream-' + name, refusal);
         }
@@ -1646,8 +1471,6 @@
         patch.upstreams[name][field] = typed;
         putSettings(patch, 'upstream-' + name).then(function (took) {
           if (took) {
-            // The field is emptied on success and only on success: a key that
-            // was refused is still the one the operator has in their hand.
             delete state.upstreamDraft[name];
             renderSettings();
           }
@@ -1705,8 +1528,6 @@
     return card;
   }
 
-  // Written whole so `tests/test_ui_mount.py` can read it: a path built out
-  // of fragments is a path the drift guard cannot see.
   function settingsTestPath(name) {
     var safe = encodeURIComponent(name);
     return `/v1/settings/upstreams/${safe}/test`;
@@ -1776,24 +1597,6 @@
     ]);
   }
 
-  // ----------------------------------------------------------- 5. catalog
-
-  // ------------------------------------------------------------------ voices
-  //
-  // PHASE21, and Owen, 2026-09-26: *"it should be possible to do directly by
-  // the user"*. A voice's settings travel with its weights: the repo's
-  // `crucible-voice.toml` at the revision this machine PINS. What a person does
-  // by hand is the API's two bodies and its one undo:
-  //
-  //   Add      `PUT /v1/voices/{id}` {pin: {hf_repo, revision}}. This machine
-  //            serves that repo at that commit; its file is the settings.
-  //   Edit     `PUT /v1/voices/{id}` {voice: {...}}. An OVERRIDE, a whole
-  //            manifest written on this machine, which wins over the pin.
-  //   Revert   `DELETE /v1/voices/{id}`, the override or this machine's pin.
-  //
-  // The weights are pulled in the Catalog, which already lists every voice.
-  // Nothing typed here is a setting until the PUT that sends it comes back.
-
   function voicePath(id) {
     var safe = encodeURIComponent(id);
     return `/v1/voices/${safe}`;
@@ -1814,7 +1617,6 @@
     }
   }
 
-  /** The words for where a voice's settings came from, by the row's `manifest`. */
   var VOICE_SOURCE = {
     repo: ['from its repo', 'ok'],
     override: ['set on this machine', 'warn'],
@@ -1850,9 +1652,6 @@
       state.voiceEdit = null;
       setRefusal('voices', null);
     } catch (refusal) {
-      // KEPT OPEN on a refusal: the server names what it will not take (a band
-      // past the cap, a declared estimate with no note), and the person fixes
-      // that field rather than typing everything again.
       setRefusal('voices', refusal);
     }
     await loadVoices();
@@ -1899,7 +1698,6 @@
     render();
   }
 
-  /** A number field bound to one key of a table in the draft document. */
   function draftNumber(label, table, key, id, integer) {
     var value = table[key];
     return el('label', { class: 'field' }, [
@@ -2076,8 +1874,6 @@
         id: 'voice-edit-' + row.id,
         class: 'button',
         type: 'button',
-        // The server refuses to rewrite a voice that is on the card; the button
-        // says so first rather than let the refusal teach it.
         disabled: row.resident || state.voiceEdit !== null,
         title: row.resident
           ? 'it is on the card right now; unload it first'
@@ -2202,8 +1998,6 @@
     document.getElementById('catalog-stamp').textContent =
       installed + ' of ' + rows.length + ' installed';
 
-    // Grouped by kind in the order the route lists them, which IS the
-    // catalog's order — no sort of our own, and no list of kinds here.
     var order = [];
     var grouped = {};
     for (var index = 0; index < rows.length; index += 1) {
@@ -2233,11 +2027,6 @@
   }
 
   async function removeSubject(row) {
-    // DELETE, then re-read. The page holds no local state about what is
-    // installed (`render` draws `state.catalog` and nothing else), so the
-    // re-read is not a refresh for tidiness — it IS how the row learns what
-    // happened, and it is what shows a `subject_in_use` refusal beside a row
-    // that is still there.
     var path =
       '/v1/catalog/' + encodeURIComponent(row.kind) + '/' + encodeURIComponent(row.id);
     try {
@@ -2268,12 +2057,6 @@
     }
     var offered = offeredCapabilities();
     if (offered !== null && offered.indexOf(row.job_type) === -1) {
-      // The row's own job type is not served here. Said on the row by
-      // comparing against the capabilities `/v1/info` reports, which is that
-      // fact's only owner — the catalog deliberately carries no
-      // `env_installed` per subject, because that is a fact about the job
-      // type and one copy per subject is how it would disagree with itself.
-      // You may pull the weights first; the row says what is still missing.
       middle.appendChild(chip(row.job_type + ' not installed', 'warn'));
     }
     block.appendChild(middle);
@@ -2294,9 +2077,6 @@
     }
     if (row.installed) {
       action.appendChild(chip('installed', 'ok'));
-      // Greyed, not offered: the API refuses a pull of an installed subject
-      // `already_installed`, and a button that can only be refused is a
-      // button that teaches somebody the page is broken.
       action.appendChild(
         el('button', {
           id: 'pull-' + row.kind + '-' + row.id,
@@ -2309,18 +2089,6 @@
             '--force'
         }, ['Pull'])
       );
-      // REMOVE, on installed rows only (PHASE15-HOST.md 3.5a). Offered
-      // rather than greyed, unlike Pull above, because there IS something
-      // this can do — and refused by name when there is not, which is the
-      // case the confirmation below cannot know about: a resident model, an
-      // open lease, a task naming it.
-      //
-      // ONE CONFIRMATION, and it names the bytes. This is the only act on
-      // this page nobody can undo: everything else either downloads
-      // something again or restarts something. `confirm` and not a modal of
-      // our own, for the page's whole reason — no build step, no framework,
-      // and a browser's own dialog is the one thing every browser draws the
-      // same.
       action.appendChild(
         el('button', {
           id: 'remove-' + row.kind + '-' + row.id,
@@ -2405,8 +2173,6 @@
     block.appendChild(source);
     return block;
   }
-
-  // ----------------------------------------------------------- 6. connect
 
   function copyButton(label, text, id) {
     var button = el('button', {
@@ -2582,9 +2348,6 @@
         try {
           parsed = JSON.parse(state.moduleText);
         } catch (notJson) {
-          // Named before the wire, because this one is the browser's finding
-          // and not the server's; the server's own `invalid_module` looks
-          // different and says different things.
           setRefusal(
             'module',
             new Refusal(
@@ -2618,8 +2381,6 @@
     return block;
   }
 
-  // ----------------------------------------------------------- 7. service
-
   var SERVICE_COMMANDS = [
     ['crucible service status', 'is it installed, and is it up'],
     ['crucible service start', 'start it now'],
@@ -2639,9 +2400,6 @@
       return;
     }
 
-    // `/v1/info` carries service facts on a build that has them; this one does
-    // not, so what is drawn is the terminal a person would use instead. The
-    // check is on the read, never on a version number.
     var service = state.info && state.info.service ? state.info.service : null;
     if (service !== null) {
       var pairs = [];
@@ -2694,19 +2452,6 @@
     );
   }
 
-  // ------------------------------------------------------------- the doors
-
-  // WHAT THIS CARD WILL GET, ASKED BEFORE AN INSTALL OR A PULL. Owen,
-  // 2026-09-26: *"that can be in a modal or something that pops up when the
-  // user tries to install a pakcage from the crucible ui"*. The words are the
-  // SERVER'S (`GET /v1/capability/plan`, decided by the same walk the install
-  // records), so this page only shows them: which model, at what precision,
-  // and why not the best one. `confirm`, for the reason Remove uses it — the
-  // browser's own dialog, no framework. A 404 — a server that predates the
-  // door, or a subject no capability class runs (the llama.cpp engine) — has
-  // nothing to say about the card, and the act goes ahead as it always did;
-  // any other refusal is shown where the act's own would be, and nothing is
-  // submitted.
   async function confirmPlan(query, where) {
     var plan;
     try {
@@ -2751,14 +2496,6 @@
     render();
   }
 
-  // -------------------------------------------------------------- the page
-
-  /**
-   * Every section, rebuilt from state — and the keyboard put back where it
-   * was. Status is on a timer, so a redraw happens under whoever is using the
-   * page; a control that lost focus every four seconds would be unusable with
-   * a keyboard, which is the one way this console has to be operable.
-   */
   function render() {
     var active = document.activeElement;
     var focused = active && active.id ? active.id : null;
