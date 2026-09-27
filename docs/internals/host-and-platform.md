@@ -90,8 +90,8 @@ itself. Plans and rationale live in `docs/PHASE15-HOST.md`, `PHASE17-ORCHESTRATO
   reply identify it.
 - `wsl -l -v` with WSL live and no distros **exits non-zero** ("no installed
   distributions"). The authority for "nothing registered" is the registry key
-  `HKCU\...\Lxss` (`presence.registered_wsl_distros`); any other failure is unreadable, not
-  empty (`presence.read_wsl_distros`, the single reader).
+  `HKCU\...\Lxss` (`wslstate.registered_wsl_distros`); any other failure is unreadable, not
+  empty (`wslstate.read_wsl_distros`, the single reader; `presence` re-exports both).
 - `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED` means "features not live" (off, or awaiting a
   restart), not "missing". `WSL_E_DEFAULT_DISTRO_NOT_FOUND` from `--status` is a live WSL.
 - `Win32_OptionalFeature.InstallState` (1 enabled, 2 disabled, 3 absent) can say "enabled"
@@ -115,10 +115,12 @@ is not the orchestrator, lives beside it so `lan.py`, `sharing.py`, `local.py` a
 `uninstall.py` never import the orchestrator:
 
 - `crucible/platform/`: `paths` (install layout, the loopback URLs, `HOST_DOOR_ENV`), `runner`
-  (the argv runner; a stream past its budget is asked to stop, never killed), `landoor`,
+  (the argv runner; a stream past its budget is asked to stop, never killed; `RunResult.output_tail`
+  is the tail of what a command printed), `lan_door` (the Windows portproxy and firewall rows),
   `portholder`, `startup` (the Startup shortcut), `powershell` (the one `-Command` and RunAs
   builder), `hostconfig` (the one host-side `config.toml` reader: token, backend kind, consent
-  and the WSL decline) and `errors.HostError`.
+  and the WSL decline), `installation` (the `installation.json` record and `release_order`)
+  and `errors` (`HostError`, `LocalError`).
 - `crucible/protocol.py`: header names, `API_VERSION`, the engine and door ports and the
   User-Agent builder. `crucible/__init__.py` and `inflight.py` re-export them.
 - `crucible/wsl.py`: every `wsl.exe` argv, the guest home expression
@@ -130,19 +132,34 @@ is not the orchestrator, lives beside it so `lan.py`, `sharing.py`, `local.py` a
 - `crucible/controller_client.py`: the one client of the controller's door: proxy-free
   opener, headers, `ping` (a non-orchestrator answer names the port's holder), `answering`,
   `ensure_running` (spawn, then poll for `START_SECONDS`), `bearer` (pairing file, then
-  `[auth].token`) and `call` (a 401 is retried with every token this PC holds).
+  `[auth].token`), `call` (a 401 is retried with every token this PC holds) and
+  `shutdown_controller` (the Windows half of `crucible local shutdown`; every collaborator is a
+  parameter, so `local.shutdown` passes its own `request`, `connection` and `act`).
 - `crucible/atomicjson.write_json`: every small record (`wsl-outcome.json`,
   `migration-cleanup.json`, `installation.json`, `landoor.json`, `sharing.json`).
 - `crucible/traylife.py`: the `tray.pid` / `tray.close` handshake.
 - `host/state.py`: the presence enums (`Distro`, `Engine`, `Owner`), `MoveState` and
   `EngineDecision`; `menu.py` and `presence.py` import them from there.
 
-`desktop.py` is the composition root and may import `host`. The generated WSL table stays at
+`desktop.py` is the composition root and may import `host`. It owns the tray verbs
+(`run_tray_verb`: `tray`, `install-desktop`, `remove-desktop`); `local.add_parser` and
+`local.command` take them as a `tray_verbs` parameter and fall back to importing `desktop` only
+while `cli/__init__.py` does not pass `desktop.run_tray_verb`, which is the last edge of the
+`local` / `desktop` cycle. The generated WSL table stays at
 `platform/wsl_table.py` because `sdk/bootstrap/scripts/gen-install-scripts.ts` writes it there;
-`wsl.py` is the one neutral module that reads it. `crucible.host.{paths,runner,landoor,
-portholder,startup}` are the platform modules under their old names for one release: each old
-module replaces itself in `sys.modules`, so a patch through either name reaches the same
-object.
+`wsl.py` is the one neutral module that reads it, and `platform/paths.py` reads the release
+repository from the table itself. `crucible.host.{paths,runner,landoor,portholder,startup}`,
+`crucible.host.door` and `crucible.platform.landoor` are the renamed modules under their old
+names for one release: each old module replaces itself in `sys.modules`, so a patch through
+either name reaches the same object.
+
+**Names.** One process has one name: the **controller** (`crucible orchestrator --headless`,
+port 7101, `host/`). The **tray icon** is only the icon by the clock (`desktop.py`). Wire values
+keep their old spelling (`role: orchestrator`, `crucible-orchestrator@<pc>`, the `crucible
+orchestrator` verb), and so do the door's JSON bodies and refusal texts, which apps read byte
+for byte. `controller_door` is the controller's loopback HTTP door; `lan_door` is the
+Windows forward that lets other machines reach the engine; `lan.py` and `sharing.py` are the
+LAN and Tailscale verbs built on them.
 
 ## The orchestrator (`crucible/host/`)
 
@@ -168,6 +185,18 @@ because it decides which distro is watched) → presence → pairing file → cl
 owner and the pairing token) → door (before the carry thread, so a mid-move `POST /install`
 gets 409 and attaches) → watch → carry thread (waits on the watch's first settled
 presence, bounded by `WATCH_SECONDS + RECIPE_TIMEOUT_SECONDS + BOOT_WAIT_SECONDS`).
+
+**Who owns what in `host/`.** `app.py` is the `Host` lifecycle (start, claim, stop, restart,
+watch, quit, the guest switch) and `run()`, the composition root. Each other concern is its own
+module and takes its collaborators as parameters, so nothing reaches into another module's
+private names: `context.py` (`HostContext` and `install_walk`), `pairing_sync.py` (engine token,
+pairing file), `move_policy.py` (`decide_engine`, `run_move`, the recorded move sequence),
+`migration.py` (`ModelCleanup`, the resumable Windows-copy retirement), `info.py` (the
+`/v1/info` payload), `operator_stop.py` (the `engine.stopped` marker: the one persisted
+"stopped by the operator" state, read on every watch tick instead of a cached flag) and
+`controller_door.py`. `app.py` re-exports the names tests patch (`engine_token`,
+`_write_pairing`, `_sequence`, `HostContext`, `OWNER_ON_THE_WIRE`, `_alive`, ...); `Host` calls
+them through `app`'s own globals so a patch on `app` still lands.
 
 ### Ownership (`state.Owner`)
 
@@ -208,8 +237,10 @@ host never loops on restart because the systemd unit is `Restart=always`. Recove
 guest's system unit (touches only Crucible's unit, so allowed in any distro); host mode
 respawns the child. Every down-to-up edge re-asserts the claim.
 
-### The door (127.0.0.1:7101, `door.py`)
+### The door (127.0.0.1:7101, `controller_door.py`)
 
+- One route table per method (`GET_ROUTES`, `POST_ROUTES`: path → handler function) and one
+  dispatcher; an unknown path is 404 before any bearer check.
 - Loopback only; `serve` takes no wildcard. `http.server`, not FastAPI: the tray must start
   in well under a second and hold no event loop or server stack.
 - Bearer = the **engine's** token, read through a callable because the token changes during
@@ -276,10 +307,12 @@ Try again appears only for outcome `cannot` or `failed`; a disabled restart line
   go through `door.run_recorded` under the door's claim, so there is one event numbering.
   `install.sh` (generated from `sdk/bootstrap/src/steps.ts`) is the only definition of the
   guest half; the host runs it, never restates it.
-- **Decision table** (`Host.decide_engine`): found → nothing; `wsl = "never"` → declined;
-  transient `cannot` → re-probe what is live and resume if live; virtualization-off `cannot` →
-  re-check hypervisor; other `cannot` → nothing until Try again; `failed` with attempts ≥ 2 →
-  nothing; `reboot-pending` → resume; otherwise probe the table.
+- **Decision table** (`move_policy.decide_engine`): found → nothing; `wsl = "never"` →
+  declined; a `cannot` whose code a `RESUME_RULES` row names → re-probe and resume when that
+  row's predicate holds (transient: WSL live; virtualization-off: a hypervisor answers); other
+  `cannot` → nothing until Try again; `failed` with attempts ≥ 2 → nothing; `reboot-pending` →
+  resume; otherwise probe the table. The restart count the outcome records comes from
+  `MoveAttempt.restarts` (the walk's own count once it exists).
 - **Two inits, one token**: `install.sh` mints a token; the host then runs `crucible init
   --force --config-from <file>` carrying `auth.token`, `[routes]`, `[upstreams]` and
   `[accelerator]` (extracted textually, never round-tripped through a TOML writer). Host,
@@ -296,7 +329,8 @@ Try again appears only for outcome `cannot` or `failed`; a disabled restart line
 - **Guest catalog** is reached with `curl` inside the distro (Windows holds 7100 during the
   move), `-w` status not `-f`, so the refusal code survives. Catalog parsing is strict: a
   half-parsed catalog would delete Windows weights prematurely. The key is `rows`.
-- **The walk** (`_walk`): detect, repair, re-detect. A repair that did not change the answer
+- **The walk** (`_walk`, repairs split by action kind: `_repair_elevated`,
+  `_repair_by_command`): detect, repair, re-detect. A repair that did not change the answer
   ends the walk (otherwise it loops forever). **Check what is live before any UAC**: running
   `wsl --install` again while a restart is owed re-pends the servicing transaction.
 - **Restart budget** 3 (`RESTART_BUDGET`): a restart is spent only if Windows actually booted
@@ -343,8 +377,10 @@ A record Crucible owns that will not parse is never a hand step: it is moved asi
 carries on as if the record were absent. Three records take this path:
 
 - `wsl-outcome.json` (above).
-- `migration-cleanup.json`: `installer.quarantine_bad_cleanup_record` runs before a resume
-  (`_resume_model_cleanup`) and before an install on a WSL-owned machine. A bad record used to
+- `migration-cleanup.json` (`host/cleanup_record.py`, the leaf both `installer` and `catalog`
+  read): `quarantine_bad_cleanup_record` runs before a resume
+  (`Host.resume_model_cleanup`, `migration.ModelCleanup`) and before an install on a WSL-owned
+  machine. A bad record used to
   make the cleanup retry every 300 s forever and every later `POST /install` refuse. Now the
   cleanup it described is dropped: the Windows copies of the moved models stay on disk (cost:
   disk only; `crucible uninstall --purge-weights` removes them with the rest).
@@ -392,7 +428,7 @@ else, so it is alive. `host/app.py` (`_alive`), `uninstall.py` (`_alive`), `tray
 that read a denied handle as dead is gone (it could have called a live tray stale and planned
 around it).
 
-## LAN door (`platform/landoor.py`, `lan.py`)
+## LAN door (`platform/lan_door.py`, `lan.py`)
 
 - The WSL engine binds `127.0.0.1` and keeps doing so; `0.0.0.0` inside the NAT'd guest widens
   exposure without reachability. The crossing is a Windows-side fact.
@@ -493,6 +529,10 @@ raises (`503 interfaces_unreadable`), never an empty list.
   header. A controller is gone when connects are **refused or reset** (ECONNRESET/WinError
   10054 is a normal exit) and its pid is not alive. Nothing installed is a successful stop.
 - A refusal's own JSON body is surfaced, not `HTTP Error 409: Conflict`.
+- `local.py` is the engine verbs (`status`, `run_engine_verb` alias `act`, `shutdown`) and thin
+  wrappers over `controller_client` under their old names; the installation record is
+  `platform/installation.py` (`local` re-exports `publish_installation`, `release_order`,
+  `RECORD`).
 - `publish_installation` keeps `venv/bin/python` unresolved (resolving the symlink selects the
   base interpreter). `pythonw` is only for launching UI, never for JSON on a pipe.
 

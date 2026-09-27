@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..platform.errors import HostError
+from ..platform.paths import INSTALL_ONE_LINER
 
 HOST_ERROR_CODES: dict[str, str] = {
     "host_door_unavailable": "The local controller could not bind its control port; its owned child was stopped.",
@@ -11,11 +12,11 @@ HOST_ERROR_CODES: dict[str, str] = {
     ),
     "host_no_localappdata": (
         "LOCALAPPDATA is not set, so there is no per-user directory to put the "
-        "host's files in. It is read from the environment and never assembled "
+        "controller's files in. It is read from the environment and never assembled "
         "from a username."
     ),
     "host_no_token": (
-        "the host has no config yet, so the install door has no bearer to check "
+        "the controller has no config yet, so the install door has no bearer to check "
         "against. True only before the first host-mode `crucible init`."
     ),
     "host_unauthorized": "the install door was called without the engine token.",
@@ -24,17 +25,19 @@ HOST_ERROR_CODES: dict[str, str] = {
         "install on a machine and the second caller waits."
     ),
     "host_already_running": (
-        "another `crucible orchestrator` already holds this machine's tray. Two trays "
-        "would boot the same distro twice and watch each other's recoveries."
+        "another Crucible controller (`crucible orchestrator`) is already running on "
+        "this PC. Two controllers would boot the same distro twice and watch each "
+        "other's recoveries. Run `crucible local shutdown` to stop it first."
     ),
     "host_no_pack": (
-        "this machine has no host runtime installed, so there is no "
-        "`crucible.cmd` to start a host-mode server with."
+        "this machine has no Windows runtime installed, so there is no "
+        "`crucible.cmd` to start a Windows engine with. Reinstall from PowerShell "
+        f"with: {INSTALL_ONE_LINER}"
     ),
     "guest_ahead_of_host": (
-        "the WSL guest is a NEWER Crucible than this host. One release per "
-        "machine, and the host is what moves the guest forward — never "
-        "backwards, so it was left exactly as it is and this is the report."
+        "the WSL guest is a NEWER Crucible than Crucible on Windows. One release "
+        "per machine, and the Windows side is what moves the guest forward — never "
+        "backwards, so it was left exactly as it is. Upgrade Crucible on Windows."
     ),
     "guest_release_unreadable": (
         "the WSL guest's installation.json names a release this build cannot "

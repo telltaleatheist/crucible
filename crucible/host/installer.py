@@ -11,63 +11,24 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .. import wsl
-from ..atomicjson import write_json
 from ..errors import CrucibleError
-from ..platform import landoor
-from ..platform.paths import ENGINE_PORT, engine_url
-from ..platform.runner import RunResult, Runner
+from ..platform import lan_door
+from ..platform.paths import ENGINE_PORT, INSTALL_ONE_LINER, engine_url
+from ..platform.runner import Runner, RunResult
+from ..platform.wsl_table import WSL_CONF_MARKER
 from ..wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE, guest_argv
 from . import outcome, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
+from .cleanup_record import CLEANUP_RECORD, record_cleanup
+from .cleanup_record import CLEANUP_RECORD_INVALID as CLEANUP_RECORD_INVALID
+from .cleanup_record import cleanup_subjects as cleanup_subjects
+from .cleanup_record import quarantine_bad_cleanup_record as quarantine_bad_cleanup_record
 from .errors import HostError
 from .quarantine import quarantine
-from ..platform.wsl_table import WSL_CONF_MARKER
 
 ENGINE_TARGET_WSL = "wsl"
-CLEANUP_RECORD = "migration-cleanup.json"
-
-CLEANUP_RECORD_INVALID = "migration_cleanup_record_invalid"
-
 IMPORT_ARTEFACTS: frozenset[str] = frozenset({"ext4.vhdx"})
 
-
-def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
-    record = home / CLEANUP_RECORD
-    try:
-        value = json.loads(record.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HostError(CLEANUP_RECORD_INVALID, f"{record} is not a JSON document ({exc})") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("subjects"), list):
-        raise HostError(CLEANUP_RECORD_INVALID, f"{record} is not a migration cleanup record this build knows")
-    result = set()
-    for row in value["subjects"]:
-        if (not isinstance(row, list) or len(row) != 2
-                or not all(isinstance(part, str) and part for part in row) or row[0] == "engine"):
-            raise HostError(CLEANUP_RECORD_INVALID, f"{record} names a model subject that is not one: {row!r}")
-        result.add(tuple(row))
-    return result
-
-
-def quarantine_bad_cleanup_record(home: Path, log: Callable[[str], None]) -> Path | None:
-    try:
-        cleanup_subjects(home)
-    except HostError as exc:
-        if exc.code != CLEANUP_RECORD_INVALID:
-            raise
-        aside = quarantine(home / CLEANUP_RECORD)
-        log(
-            f"model cleanup: {exc.message}. It was moved to {aside} and the cleanup "
-            "it described is dropped: the Windows copies of the models that moved "
-            f"into the guest stay under {home} and cost disk only. `crucible "
-            "uninstall --purge-weights` on this Windows side removes them with "
-            "everything else; nothing needs doing to keep using Crucible."
-        )
-        return aside
-    return None
-
-
-def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
-    write_json(home / CLEANUP_RECORD, {"schema_version": 1, "subjects": [list(row) for row in sorted(subjects)]})
 
 STEPS: tuple[str, ...] = (
     "wsl-state",
@@ -237,6 +198,13 @@ class InstallOutcome:
         }
 
 
+@dataclass
+class _MigrationRound:
+    held: dict[tuple[str, str], str] = field(default_factory=dict)
+    deferred: list[str] = field(default_factory=list)
+    removed: int = 0
+
+
 class EngineInstall:
     def __init__(
         self,
@@ -372,7 +340,7 @@ class EngineInstall:
         if not home.ok or home.stdout.strip() == "":
             raise self._fail(
                 "step_failed",
-                f'the guest would not say where its CRUCIBLE_HOME is: {home.said()}',
+                f'the guest would not say where its CRUCIBLE_HOME is: {home.output_tail()}',
             )
         guest_home = home.stdout.strip()
         crucible = f"{guest_home}/server/bin/crucible"
@@ -393,7 +361,7 @@ class EngineInstall:
             raise self._fail(
                 "step_failed",
                 "the guest's server would not print its pairing line, so this "
-                f"install cannot say what it installed: {named.said()}",
+                f"install cannot say what it installed: {named.output_tail()}",
             )
         return guest_home, crucible, name
 
@@ -415,11 +383,11 @@ class EngineInstall:
         if self._windows is not None:
             self._windows = self._windows_after_switch()
         self._lan_door()
-        self._migrate_weights()
+        self.migrate_weights()
         self._home.joinpath(CLEANUP_RECORD).unlink(missing_ok=True)
-        return self._complete()
+        return self.complete()
 
-    def _complete(self) -> InstallOutcome:
+    def complete(self) -> InstallOutcome:
         guest_home, crucible, name = self._guest_facts()
         outcome = InstallOutcome(
             steps=list(self._records),
@@ -462,116 +430,129 @@ class EngineInstall:
             if state.code in stop:
                 self._finish(step, state.sentence)
                 return
-            if state.action_kind == "instruct" or state.action_kind == "link":
-                raise self._fail(state.code, state.sentence + " " + state.action_text)
-            if state.action_kind == "run-elevated":
-                if state.code in repaired:
-                    raise self._fail(
-                        state.code,
-                        f"{state.sentence} WSL was enabled once in this run and "
-                        "the machine still answers the same way, so this is not "
-                        "something Crucible can repair here.",
-                    )
-                before = wslstate.probe_live(self._runner)
-                self._said(f"wsl: {before.line()}")
-                if before.restart_owed:
-                    self._said(
-                        f"wsl: features {before.features_line()}: already on and "
-                        "waiting for a restart, so nothing was enabled and no "
-                        "administrator prompt was raised"
-                    )
-                    raise self._restart_owed()
-                if not self._elevate:
-                    raise self._fail(
-                        state.code,
-                        state.sentence
-                        + " This needs administrator and elevation is off for this run: "
-                        + " ".join(state.action_argv),
-                    )
-                self._line(
-                    "Windows is asking for administrator permission to change "
-                    "this: click Yes on the prompt (if you cannot see it, look "
-                    f"for it flashing on the taskbar). [{' '.join(state.action_argv)}]"
-                )
-                result = self._runner.run(
-                    wslstate.elevated_argv(state), timeout_s=IMPORT_TIMEOUT_SECONDS
-                )
-                if not result.ok:
-                    self._said(
-                        "wsl: an administrator prompt was raised to enable WSL "
-                        f"and was refused, or the command failed; features "
-                        f"{before.features_line()}"
-                    )
-                    raise self._fail(
-                        state.code,
-                        f"{state.sentence} The permission prompt was refused or the "
-                        f"command failed: {result.said()}",
-                    )
-                after = wslstate.probe_live(self._runner)
-                self._said(
-                    "wsl: an administrator prompt was raised to enable WSL and "
-                    "accepted; " + _feature_report(before, after)
-                )
-                if after.live:
-                    repaired.add(state.code)
-                    continue
-                raise self._restart_owed()
-            if state.code in never_repair:
-                raise self._fail(
-                    state.code,
-                    f"{state.sentence} This step does not repair that — the step "
-                    "before it owns it, and it reported success.",
-                )
-            if state.code in repaired:
-                raise self._fail(
-                    state.code,
-                    f"{state.sentence} `{' '.join(state.action_argv)}` ran and "
-                    "the machine still answers the same way, so this is not "
-                    "something Crucible can repair here.",
-                )
-            repaired.add(state.code)
-            result = self._runner.run(list(state.action_argv), timeout_s=QUICK_TIMEOUT_SECONDS)
-            self._line(f"{' '.join(state.action_argv)}: {'ok' if result.ok else result.said()}")
-            if not result.ok:
-                raise self._fail(state.code, f"{state.sentence} {result.said()}")
+            self._repair(state, repaired, never_repair)
+
+    def _repair(self, state: wslstate.WslState, repaired: set[str], never_repair: tuple[str, ...]) -> None:
+        if state.action_kind in ("instruct", "link"):
+            raise self._fail(state.code, state.sentence + " " + state.action_text)
+        if state.action_kind == "run-elevated":
+            self._repair_elevated(state, repaired)
+            return
+        if state.code in never_repair:
+            raise self._fail(
+                state.code,
+                f"{state.sentence} This step does not repair that — the step "
+                "before it owns it, and it reported success.",
+            )
+        self._repair_by_command(state, repaired)
+
+    def _repair_elevated(self, state: wslstate.WslState, repaired: set[str]) -> None:
+        if state.code in repaired:
+            raise self._fail(
+                state.code,
+                f"{state.sentence} WSL was enabled once in this run and "
+                "the machine still answers the same way, so this is not "
+                "something Crucible can repair here.",
+            )
+        before = wslstate.probe_live(self._runner)
+        self._said(f"wsl: {before.line()}")
+        if before.restart_owed:
+            self._said(
+                f"wsl: features {before.features_line()}: already on and "
+                "waiting for a restart, so nothing was enabled and no "
+                "administrator prompt was raised"
+            )
+            raise self._restart_owed()
+        self._run_elevated(state, before)
+        after = wslstate.probe_live(self._runner)
+        self._said(
+            "wsl: an administrator prompt was raised to enable WSL and "
+            "accepted; " + _feature_report(before, after)
+        )
+        if not after.live:
+            raise self._restart_owed()
+        repaired.add(state.code)
+
+    def _run_elevated(self, state: wslstate.WslState, before: wslstate.LiveWsl) -> None:
+        if not self._elevate:
+            raise self._fail(
+                state.code,
+                state.sentence
+                + " This needs administrator and elevation is off for this run: "
+                + " ".join(state.action_argv),
+            )
+        self._line(
+            "Windows is asking for administrator permission to change "
+            "this: click Yes on the prompt (if you cannot see it, look "
+            f"for it flashing on the taskbar). [{' '.join(state.action_argv)}]"
+        )
+        result = self._runner.run(wslstate.elevated_argv(state), timeout_s=IMPORT_TIMEOUT_SECONDS)
+        if result.ok:
+            return
+        self._said(
+            "wsl: an administrator prompt was raised to enable WSL "
+            f"and was refused, or the command failed; features "
+            f"{before.features_line()}"
+        )
+        raise self._fail(
+            state.code,
+            f"{state.sentence} The permission prompt was refused or the "
+            f"command failed: {result.output_tail()}",
+        )
+
+    def _repair_by_command(self, state: wslstate.WslState, repaired: set[str]) -> None:
+        if state.code in repaired:
+            raise self._fail(
+                state.code,
+                f"{state.sentence} `{' '.join(state.action_argv)}` ran and "
+                "the machine still answers the same way, so this is not "
+                "something Crucible can repair here.",
+            )
+        repaired.add(state.code)
+        result = self._runner.run(list(state.action_argv), timeout_s=QUICK_TIMEOUT_SECONDS)
+        self._line(f"{' '.join(state.action_argv)}: {'ok' if result.ok else result.output_tail()}")
+        if not result.ok:
+            raise self._fail(state.code, f"{state.sentence} {result.output_tail()}")
 
     def _import_distro(self) -> None:
         self._step("import-distro")
         listed = self._runner.run(wsl.list_argv(), timeout_s=QUICK_TIMEOUT_SECONDS)
-        from .presence import read_wsl_distros
-
-        distros = read_wsl_distros(listed)
+        distros = wslstate.read_wsl_distros(listed)
         if distros is None:
-            raise self._fail("wsl_read_failed", listed.said())
+            raise self._fail("wsl_read_failed", listed.output_tail())
         if self._distro in distros:
-            marked = self._runner.run(
-                guest_argv(self._distro, ["cat", "/etc/wsl.conf"]),
-                timeout_s=QUICK_TIMEOUT_SECONDS,
-            )
-            if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
-                raise self._fail(
-                    "distro_unmarked",
-                    f'A WSL distro called "{self._distro}" already exists on this PC, '
-                    f"but Crucible did not make it: its /etc/wsl.conf has no "
-                    f'"{WSL_CONF_MARKER}" line. It was left untouched. If it is not '
-                    f"one you want to keep, remove it from PowerShell with: wsl "
-                    f"--unregister {self._distro}  (WARNING: that deletes every file "
-                    f"inside that distro), then {TRY_AGAIN_HINT}.",
-                )
-            self._line(f'"{self._distro}" is already imported')
-            self._finish("import-distro", f'"{self._distro}" was already there')
+            self._keep_the_imported_distro()
             return
-        from ..platform.wsl_table import (
-            FINISH_IMPORT_SCRIPT,
-            UBUNTU_WSL_ROOTFS,
-            UBUNTU_WSL_ROOTFS_URL,
-            UBUNTU_WSL_SUMS_URL,
-        )
-        asset = UBUNTU_WSL_ROOTFS
         downloads, destination = self._home / "downloads", self._home / "wsl"
         downloads.mkdir(parents=True, exist_ok=True)
         destination.mkdir(parents=True, exist_ok=True)
         self._clear_half_import(destination)
+        archive = self._download_ubuntu_image(downloads)
+        self._unpack_ubuntu_image(archive, destination)
+        self._finish("import-distro", f'Imported {archive.name} as "{self._distro}"')
+
+    def _keep_the_imported_distro(self) -> None:
+        marked = self._runner.run(
+            guest_argv(self._distro, ["cat", "/etc/wsl.conf"]),
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
+            raise self._fail(
+                "distro_unmarked",
+                f'A WSL distro called "{self._distro}" already exists on this PC, '
+                f"but Crucible did not make it: its /etc/wsl.conf has no "
+                f'"{WSL_CONF_MARKER}" line. It was left untouched. If it is not '
+                f"one you want to keep, remove it from PowerShell with: wsl "
+                f"--unregister {self._distro}  (WARNING: that deletes every file "
+                f"inside that distro), then {TRY_AGAIN_HINT}.",
+            )
+        self._line(f'"{self._distro}" is already imported')
+        self._finish("import-distro", f'"{self._distro}" was already there')
+
+    def _download_ubuntu_image(self, downloads: Path) -> Path:
+        from ..platform.wsl_table import UBUNTU_WSL_ROOTFS, UBUNTU_WSL_ROOTFS_URL
+
+        asset = UBUNTU_WSL_ROOTFS
         archive = downloads / asset
         self._line(f"Downloading Ubuntu's own WSL image ({asset})")
         fetched = self._runner.download(
@@ -581,9 +562,16 @@ class EngineInstall:
             on_progress=self._bytes,
             attempts=IMAGE_DOWNLOAD_ATTEMPTS,
         )
+        self._verify_ubuntu_image(archive, fetched)
+        return archive
+
+    def _verify_ubuntu_image(self, archive: Path, fetched: RunResult) -> None:
+        from ..platform.wsl_table import UBUNTU_WSL_SUMS_URL
+
+        asset = archive.name
         digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", UBUNTU_WSL_SUMS_URL], timeout_s=300) if fetched.ok else fetched
         if not fetched.ok or not digest.ok:
-            raise self._fail("rootfs_download_failed", f"Ubuntu's WSL image or its SHA256SUMS could not be downloaded: {digest.said()}")
+            raise self._fail("rootfs_download_failed", f"Ubuntu's WSL image or its SHA256SUMS could not be downloaded: {digest.output_tail()}")
         rows = [line.split() for line in digest.stdout.splitlines() if line.strip()]
         want = next(
             (row[0].lower() for row in rows if len(row) >= 2 and row[1].lstrip("*").strip() == asset),
@@ -595,30 +583,41 @@ class EngineInstall:
             raise self._fail("rootfs_sha_mismatch", f"{UBUNTU_WSL_SUMS_URL} names no sha256 for {asset}; no distro was imported")
         if not hashed.ok or want not in candidates:
             raise self._fail("rootfs_sha_mismatch", "The downloaded image does not match Ubuntu's own checksum; no distro was imported")
-        self._line(f"Unpacking Ubuntu into {destination}; this takes about half a minute")
+
+    def _say_free_space(self, destination: Path) -> None:
         try:
             free = shutil.disk_usage(destination).free
-            self._line(
-                f"This PC's drive {destination.anchor or destination} has "
-                f"{free / 1024 ** 3:.0f} GiB free. The Linux engine's disk lives "
-                "there and grows into it, so that is the real limit on what it can hold."
-            )
         except OSError:
-            pass
+            return
+        self._line(
+            f"This PC's drive {destination.anchor or destination} has "
+            f"{free / 1024 ** 3:.0f} GiB free. The Linux engine's disk lives "
+            "there and grows into it, so that is the real limit on what it can hold."
+        )
+
+    def _unpack_ubuntu_image(self, archive: Path, destination: Path) -> None:
+        from ..platform.wsl_table import FINISH_IMPORT_SCRIPT
+
+        self._line(f"Unpacking Ubuntu into {destination}; this takes about half a minute")
+        self._say_free_space(destination)
         imported = self._runner.run(wsl.import_argv(self._distro, str(destination), str(archive)), timeout_s=IMPORT_TIMEOUT_SECONDS)
         if not imported.ok:
-            raise self._fail("distro_import_failed", imported.said())
+            raise self._fail("distro_import_failed", imported.output_tail())
         self._line("Preparing the Linux system for Crucible (its user and settings)")
         finished = self._runner.run(
             wsl.root_argv(self._distro, ["bash", "-c", FINISH_IMPORT_SCRIPT]),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not finished.ok:
-            raise self._fail("distro_import_failed", f"The imported image could not be prepared: {finished.said()}")
+            raise self._fail("distro_import_failed", f"The imported image could not be prepared: {finished.output_tail()}")
         marked = self._runner.run(guest_argv(self._distro, ["cat", "/etc/wsl.conf"]), timeout_s=300)
         if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
-            raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
-        self._finish("import-distro", f'Imported {asset} as "{self._distro}"')
+            raise self._fail(
+                "distro_import_invalid",
+                f'The imported image did not contain its ownership marker; "{self._distro}" was kept '
+                f"so nothing is lost. Remove it from PowerShell with: wsl --unregister {self._distro}  "
+                f"(that deletes every file inside it), then {TRY_AGAIN_HINT}.",
+            )
 
     def _clear_half_import(self, destination: Path) -> None:
         left = sorted(entry.name for entry in destination.iterdir())
@@ -666,7 +665,8 @@ class EngineInstall:
         return release if isinstance(release, str) and release else None
 
     def upgrade_guest(self) -> str | None:
-        from ..local import LocalError, release_order
+        from ..platform.errors import LocalError
+        from ..platform.installation import release_order
 
         theirs = self.guest_release()
         if theirs is not None:
@@ -685,11 +685,11 @@ class EngineInstall:
             if order > 0:
                 raise self._fail(
                     "guest_ahead_of_host",
-                    f'the "{self._distro}" guest is Crucible {theirs} and this host is '
-                    f"{self._release}. It was left alone: a host does not take a guest "
-                    "backwards, and the two halves of this machine are meant to be one "
-                    "release. Upgrade the host, or uninstall the guest and let this "
-                    "install it.",
+                    f'the "{self._distro}" guest is Crucible {theirs} and Crucible on '
+                    f"Windows is {self._release}. It was left alone: Windows does not take "
+                    "a guest backwards, and the two halves of this machine are meant to be "
+                    "one release. Upgrade Crucible on Windows from PowerShell with: "
+                    f"{INSTALL_ONE_LINER}",
                 )
         self._guest_install()
         return self._release
@@ -706,7 +706,7 @@ class EngineInstall:
         if not result.ok:
             raise self._fail(
                 "step_failed",
-                f"install.sh exited {result.code} inside \"{self._distro}\": {result.said()}",
+                f"install.sh exited {result.code} inside \"{self._distro}\": {result.output_tail()}",
             )
         self._finish("guest-install", f"install.sh finished inside \"{self._distro}\"", argv=["bash", "-c", script])
 
@@ -721,6 +721,13 @@ class EngineInstall:
             )
             self._finish("migrate-config", "no Windows config to carry over")
             return
+        self._carry_config_into_guest(config)
+        self._restart_guest_engine()
+        if self._guest is not None:
+            self._wait_for_guest_catalog(self._guest)
+        self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
+
+    def _carry_config_into_guest(self, config: Path) -> None:
         carried = carried_config(config.read_text(encoding="utf-8"))
         remote = "/tmp/crucible-config-from.toml"
         payload = base64.b64encode(carried.encode("utf-8")).decode("ascii")
@@ -733,7 +740,7 @@ class EngineInstall:
         )
         if not written.ok:
             raise self._fail(
-                "step_failed", f"could not write {remote} in the guest: {written.said()}"
+                "step_failed", f"could not write {remote} in the guest: {written.output_tail()}"
             )
         result = self._stream_guest(
             [
@@ -748,9 +755,11 @@ class EngineInstall:
             raise self._fail(
                 "step_failed",
                 "the Windows token could not be carried into the guest "
-                f"(`crucible init --config-from` exited {result.code}): {result.said()}. "
+                f"(`crucible init --config-from` exited {result.code}): {result.output_tail()}. "
                 "Every app that paired with this machine would have to pair again.",
             )
+
+    def _restart_guest_engine(self) -> None:
         restarted = self._stream_guest([
             "bash", "-c", 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
             'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
@@ -759,28 +768,27 @@ class EngineInstall:
             f'"{GUEST_CRUCIBLE}" service start',
         ], QUICK_TIMEOUT_SECONDS)
         if not restarted.ok:
-            raise self._fail("guest_restart_failed", restarted.said())
-        if self._guest is not None:
-            deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS
-            while True:
-                try:
-                    self._guest.installed_subjects()
-                    break
-                except HostError as exc:
-                    if self._monotonic() >= deadline:
-                        code = (
-                            "guest_authentication_failed"
-                            if exc.code == "unauthorized"
-                            else "guest_not_answering"
-                        )
-                        raise self._fail(
-                            code,
-                            f"The restarted guest engine did not answer its catalog "
-                            f"within {GUEST_RESTART_BUDGET_SECONDS:.0f} s. The last "
-                            f"answer was {exc.code}: {exc.message}",
-                        )
-                    self._sleep(0.5)
-        self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
+            raise self._fail("guest_restart_failed", restarted.output_tail())
+
+    def _wait_for_guest_catalog(self, guest: CatalogPort) -> None:
+        deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS
+        while True:
+            try:
+                guest.installed_subjects()
+                return
+            except HostError as exc:
+                if self._monotonic() >= deadline:
+                    raise self._guest_silent(exc)
+            self._sleep(0.5)
+
+    def _guest_silent(self, exc: HostError) -> HostError:
+        code = "guest_authentication_failed" if exc.code == "unauthorized" else "guest_not_answering"
+        return self._fail(
+            code,
+            f"The restarted guest engine did not answer its catalog "
+            f"within {GUEST_RESTART_BUDGET_SECONDS:.0f} s. The last "
+            f"answer was {exc.code}: {exc.message}",
+        )
 
     def _install_job_types(self) -> None:
         self._step("install-job-types")
@@ -809,7 +817,7 @@ class EngineInstall:
         self._finish("prepare-weights", f"Verified {len(source)} subject(s) in the guest; all Windows originals are still present")
         return source
 
-    def _migrate_weights(self, *, allow_pull: bool = True) -> None:
+    def migrate_weights(self, *, allow_pull: bool = True) -> None:
         self._step("migrate-weights")
         if self._windows is None or self._guest is None:
             self._line(
@@ -819,84 +827,102 @@ class EngineInstall:
             )
             self._finish("migrate-weights", "no Windows engine; nothing to move")
             return
-
         moved: list[str] = []
         held: dict[tuple[str, str], str] = {}
         for round_number in range(1, MIGRATE_IN_USE_ROUNDS + 1):
             source = {row.key: row for row in self._windows.installed_subjects() if row.kind != "engine"}
             if not source:
-                detail = (
-                    f"moved {len(moved)} subject(s): {', '.join(moved)}"
-                    if moved
-                    else "the Windows engine had no installed subjects"
-                )
-                self._line(f"migrate-weights: {detail}")
-                self._finish("migrate-weights", detail)
+                self._finish_migration(moved)
                 return
-            target = {row.key for row in self._guest.installed_subjects()}
-            missing = [str(row) for key, row in source.items() if key not in target]
-            if missing and not allow_pull:
-                raise self._fail("migration_cleanup_destination_missing",
-                                 "Windows models are kept; the active guest must restore these subjects before cleanup: " + ", ".join(missing))
-            held = {}
-            deferred: list[str] = []
-            removed_this_round = 0
-            for key in sorted(source):
-                subject = source[key]
-                if key not in target:
-                    self._pull_into_guest(subject)
-                try:
-                    self._windows.remove(subject)
-                except CatalogRefusal as refusal:
-                    if refusal.code == "weights_shared":
-                        deferred.append(str(subject))
-                        self._line(
-                            f"migrate-weights: {subject} is shared with an alias "
-                            "that goes first; retried on the next round"
-                        )
-                        continue
-                    if refusal.code != "subject_in_use":
-                        raise self._fail(
-                            refusal.code,
-                            f"{subject} could not be removed from the Windows engine: "
-                            f"{refusal.message}. The guest has it; the Windows copy "
-                            "stays until this is answered, because a half-deleted "
-                            "subject is worse than a duplicated one.",
-                        )
-                    who = refusal.who or "something on the Windows engine"
-                    held[key] = who
-                    self._line(
-                        f"migrate-weights: {subject} is held by {who} on the "
-                        "Windows engine; the guest already has it, so this is a "
-                        "wait and not a skip",
-                        "stderr",
-                    )
-                    continue
-                moved.append(str(subject))
-                removed_this_round += 1
-                self._line(f"migrate-weights: {subject} is the guest's now, and gone from Windows")
-            if deferred and not held and removed_this_round == 0:
-                raise self._fail(
-                    "weights_shared",
-                    f"{', '.join(deferred)} could not be removed from the Windows "
-                    "engine because an alias still holds its weights, and no alias "
-                    "was removed this round to free them. The guest has every "
-                    "subject; the Windows copies stay until this is answered.",
-                )
+            held = self._migration_round(source, moved, allow_pull).held
             if not held:
                 continue
             if round_number == MIGRATE_IN_USE_ROUNDS:
                 break
             self._sleep(MIGRATE_POLL_SECONDS)
+        raise self._still_held(held)
 
+    _migrate_weights = migrate_weights
+
+    def _finish_migration(self, moved: list[str]) -> None:
+        detail = (
+            f"moved {len(moved)} subject(s): {', '.join(moved)}"
+            if moved
+            else "the Windows engine had no installed subjects"
+        )
+        self._line(f"migrate-weights: {detail}")
+        self._finish("migrate-weights", detail)
+
+    def _migration_round(
+        self, source: dict[tuple[str, str], Subject], moved: list[str], allow_pull: bool
+    ) -> "_MigrationRound":
+        assert self._guest is not None
+        target = {row.key for row in self._guest.installed_subjects()}
+        missing = [str(row) for key, row in source.items() if key not in target]
+        if missing and not allow_pull:
+            raise self._fail("migration_cleanup_destination_missing",
+                             "Windows models are kept; the active guest must restore these subjects before cleanup: " + ", ".join(missing))
+        this_round = _MigrationRound()
+        for key in sorted(source):
+            if self._retire_windows_copy(source[key], key in target, this_round):
+                moved.append(str(source[key]))
+        if this_round.deferred and not this_round.held and this_round.removed == 0:
+            raise self._fail(
+                "weights_shared",
+                f"{', '.join(this_round.deferred)} could not be removed from the Windows "
+                "engine because an alias still holds its weights, and no alias "
+                "was removed this round to free them. The guest has every "
+                "subject; the Windows copies stay until this is answered.",
+            )
+        return this_round
+
+    def _retire_windows_copy(self, subject: Subject, in_guest: bool, this_round: "_MigrationRound") -> bool:
+        assert self._windows is not None
+        if not in_guest:
+            self._pull_into_guest(subject)
+        try:
+            self._windows.remove(subject)
+        except CatalogRefusal as refusal:
+            self._removal_refused(subject, refusal, this_round)
+            return False
+        this_round.removed += 1
+        self._line(f"migrate-weights: {subject} is the guest's now, and gone from Windows")
+        return True
+
+    def _removal_refused(self, subject: Subject, refusal: CatalogRefusal, this_round: "_MigrationRound") -> None:
+        if refusal.code == "weights_shared":
+            this_round.deferred.append(str(subject))
+            self._line(
+                f"migrate-weights: {subject} is shared with an alias "
+                "that goes first; retried on the next round"
+            )
+            return
+        if refusal.code != "subject_in_use":
+            raise self._fail(
+                refusal.code,
+                f"{subject} could not be removed from the Windows engine: "
+                f"{refusal.message}. The guest has it; the Windows copy "
+                "stays until this is answered, because a half-deleted "
+                "subject is worse than a duplicated one.",
+            )
+        who = refusal.who or "something on the Windows engine"
+        this_round.held[subject.key] = who
+        self._line(
+            f"migrate-weights: {subject} is held by {who} on the "
+            "Windows engine; the guest already has it, so this is a "
+            "wait and not a skip",
+            "stderr",
+        )
+
+    def _still_held(self, held: dict[tuple[str, str], str]) -> HostError:
         names = ", ".join(f"{kind} {ident} (held by {who})" for (kind, ident), who in sorted(held.items()))
-        raise self._fail(
+        return self._fail(
             "subject_in_use",
             f"after {MIGRATE_IN_USE_ROUNDS} attempts over "
             f"{MIGRATE_IN_USE_ROUNDS * MIGRATE_POLL_SECONDS / 60:.0f} minutes, the "
             f"Windows engine still holds {names}. The guest has its own copy of "
             "each, so nothing is lost — close whatever is named and run the move "
-            "again; it resumes from where it stopped.",
+            f"again ({TRY_AGAIN_HINT}); it resumes from where it stopped.",
         )
 
     def _pull_into_guest(self, subject: Subject) -> None:
@@ -920,36 +946,21 @@ class EngineInstall:
 
     def _lan_door(self) -> None:
         self._step("lan-door")
-        from .. import lan as lan_door
-
-        try:
-            wanted = (
-                lan_door.read(self._home) is not None
-                if self._share_lan is None else self._share_lan
-            )
-        except CrucibleError as exc:
-            aside = quarantine(self._home / lan_door.RECORD)
-            self._said(
-                f"lan-door: this machine's LAN sharing record could not be read "
-                f"({exc}); it was moved to {aside}. Network sharing stays off; "
-                "`crucible lan enable` turns it back on."
-            )
-            wanted = False
-        if not wanted:
+        if not self._lan_wanted():
             self._finish(
                 "lan-door",
                 "Local engine access is ready. Network sharing is optional and must be "
                 "enabled explicitly; installation changes no port forwards or firewall rules.",
             )
             return
-        from ..sharing import PairedEngine
+        from .. import lan
 
-        door = landoor.detect(self._runner, ENGINE_PORT)
+        door = lan_door.detect(self._runner, ENGINE_PORT)
         missing = [
             command
             for present, command in (
-                (door.forward, landoor.add_argv(ENGINE_PORT)),
-                (door.firewall, landoor.firewall_add_argv(ENGINE_PORT)),
+                (door.forward, lan_door.add_argv(ENGINE_PORT)),
+                (door.firewall, lan_door.firewall_add_argv(ENGINE_PORT)),
             )
             if not present
         ]
@@ -958,13 +969,33 @@ class EngineInstall:
                 "lan-door",
                 "network sharing was requested, but this install may not elevate; "
                 "nothing was changed. Run `crucible lan enable` to open it.",
-                argv=lan_door.elevated_argv(missing),
+                argv=lan.elevated_argv(missing),
             )
             return
         if missing:
-            self._line(landoor.ELEVATION_SENTENCE)
+            self._line(lan_door.ELEVATION_SENTENCE)
+        self._open_lan_door()
+
+    def _lan_wanted(self) -> bool:
+        from .. import lan
+
         try:
-            result = lan_door.enable(
+            return lan.read(self._home) is not None if self._share_lan is None else self._share_lan
+        except CrucibleError as exc:
+            aside = quarantine(self._home / lan.RECORD)
+            self._said(
+                f"lan-door: this machine's LAN sharing record could not be read "
+                f"({exc}); it was moved to {aside}. Network sharing stays off; "
+                "`crucible lan enable` turns it back on."
+            )
+            return False
+
+    def _open_lan_door(self) -> None:
+        from .. import lan
+        from ..sharing import PairedEngine
+
+        try:
+            result = lan.enable(
                 self._home, self._runner, PairedEngine(self._home, "lan"),
                 port=ENGINE_PORT, adopt=True, say=self._line,
             )

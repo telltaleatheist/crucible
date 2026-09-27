@@ -44,13 +44,13 @@ def _ensure_controller(home: Path, say: Say) -> None:
     except OSError as exc:
         raise HostError(
             "host_door_unavailable",
-            f"Crucible's background app could not be started ({exc}), so nothing "
+            f"Crucible's controller could not be started ({exc}), so nothing "
             f"could be tried again. {_sign_out(home)} Then Try again works.",
         ) from exc
     except LocalError as exc:
         raise HostError(
             "host_door_unavailable",
-            "Crucible's background app was started but did not answer within "
+            "Crucible's controller was started but did not answer within "
             f"{CONTROLLER_START_SECONDS:.0f} s, so nothing could be tried "
             f"again. {_sign_out(home)} Then Try again works.",
         ) from exc
@@ -97,7 +97,8 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
         raise HostError(
             "host_no_token",
             "Crucible's controller is running but has not set up its engine yet, "
-            "so there is nothing to try again with. Wait a minute and try again.",
+            "so there is nothing to try again with. Wait a minute and try again; its log is "
+            f"{Path(home) / LOG_NAME}.",
         )
     say("Trying again to set up the Linux engine.")
     try:
@@ -106,12 +107,12 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
             _follow(response, say)
     except urllib.error.HTTPError as exc:
         if exc.code != 409:
-            raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {exc.code}). {_sign_out(home)}") from exc
+            raise HostError("host_door_unavailable", f"Crucible's controller refused the request (HTTP {exc.code}). {_sign_out(home)}") from exc
         say("Crucible was already setting it up; following that.")
         try:
             with open_url(EVENTS_URL, token=token, timeout=STREAM_READ_TIMEOUT_SECONDS) as response:
                 _follow(response, say)
         except urllib.error.HTTPError as again:
             if again.code != 404:
-                raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {again.code}). {_sign_out(home)}") from again
+                raise HostError("host_door_unavailable", f"Crucible's controller refused the request (HTTP {again.code}). {_sign_out(home)}") from again
     return outcome.read(home)

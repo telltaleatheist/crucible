@@ -10,7 +10,7 @@ import time
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import Callable, Iterator, TextIO
 
 from .. import controller_client, local
 from ..platform.paths import LOG_NAME, door_url
@@ -75,13 +75,13 @@ UNDECIDED_SENTENCE = (
 )
 
 STARTING_TRAY_SENTENCE = (
-    "Crucible's background app (the icon by the clock) is not answering, so "
-    "this window is starting it."
+    "Crucible's controller (the background process behind the icon by the "
+    "clock) is not answering, so this window is starting it."
 )
 
 TRAY_GONE_SENTENCE = (
-    "Crucible's background app (the icon by the clock) is not answering and "
-    "could not be started from here, so nothing can carry on the setup right "
+    "Crucible's controller (the background process behind the icon by the "
+    "clock) is not answering and could not be started from here, so nothing can carry on the setup right "
     "now. Sign out of Windows and sign back in: it starts again at sign-in "
     "and carries on by itself. Its log is:"
 )
@@ -237,25 +237,129 @@ def door_status(token: str | None) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def _envelopes(response) -> Iterator[dict]:
+    for raw in response:
+        try:
+            envelope = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(envelope, dict):
+            yield envelope
+
+
+def _print_new(response, console: Console, seen: int) -> int:
+    for envelope in _envelopes(response):
+        number = envelope.get("id")
+        if isinstance(number, int):
+            if number <= seen:
+                continue
+            seen = number
+        console.event(envelope)
+    return seen
+
+
 def follow(token: str, console: Console, seen: int) -> int:
     try:
         with _open("/install/events", token, STREAM_READ_SECONDS) as response:
-            for raw in response:
-                try:
-                    envelope = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(envelope, dict):
-                    continue
-                number = envelope.get("id")
-                if isinstance(number, int):
-                    if number <= seen:
-                        continue
-                    seen = number
-                console.event(envelope)
+            seen = _print_new(response, console, seen)
     except (OSError, socket.timeout, urllib.error.URLError, http.client.HTTPException):
         pass
     return seen
+
+
+def _watch_briefly(
+    home: Path, since: datetime, console: Console,
+    clock: Callable[[], float], sleep: Callable[[float], None],
+) -> int:
+    started = clock()
+    while clock() - started < BRIEF_SECONDS:
+        record = recorded(home)
+        if is_fresh(record, since):
+            assert record is not None
+            console.say(
+                DONE_SENTENCE if record.state == outcome.DONE or not record.sentence
+                else one_line(record.sentence, ENDING_LIMIT)
+            )
+            return 0
+        sleep(0.5)
+    console.say(APP_SENTENCE)
+    return 0
+
+
+class _Watch:
+    def __init__(
+        self, home: Path, since: datetime, console: Console, *,
+        clock: Callable[[], float], alive: Callable[[], bool], start: Callable[[Path], bool],
+    ) -> None:
+        self._home = home
+        self._since = since
+        self._console = console
+        self._clock = clock
+        self._alive = alive
+        self._start = start
+        self._started = clock()
+        self._heartbeat = self._started
+        self._started_controller_at: float | None = None
+        self._token = _token(home)
+        self._seen = 0
+
+    def tick(self) -> int | None:
+        status = door_status(self._token)
+        if self._token is None or status is None:
+            self._token = _token(self._home)
+        if status is not None and status.get("running") is True and self._token is not None:
+            self._seen = follow(self._token, self._console, self._seen)
+            return None
+        record = recorded(self._home)
+        if is_fresh(record, self._since):
+            assert record is not None
+            self._console.ending(record)
+            return 0
+        if self._settled_by_owner(status):
+            return 0
+        waited = self._clock() - self._started
+        if status is None and waited >= DECISION_SECONDS and not self._alive():
+            return self._start_controller_once()
+        return self._wait_or_report(status is None, record, waited)
+
+    def _settled_by_owner(self, status: dict[str, object] | None) -> bool:
+        presence = status.get("presence") if status is not None else None
+        owner = presence.get("owner") if isinstance(presence, dict) else None
+        sentence = {"wsl-unit": ALREADY_SENTENCE, "found": FOUND_SENTENCE}.get(str(owner))
+        if sentence is None:
+            return False
+        self._console.paragraph(sentence)
+        return True
+
+    def _start_controller_once(self) -> int | None:
+        if self._started_controller_at is None:
+            self._started_controller_at = self._clock()
+            self._console.paragraph(STARTING_TRAY_SENTENCE)
+            if self._start(self._home):
+                return None
+        elif self._clock() - self._started_controller_at < CONTROLLER_START_SECONDS:
+            return None
+        self._console.tray_gone(self._home)
+        return 0
+
+    def _wait_or_report(self, blind: bool, record: outcome.Outcome | None, waited: float) -> int | None:
+        if blind and waited < BLIND_SECONDS:
+            if self._clock() - self._heartbeat >= HEARTBEAT_SECONDS:
+                self._heartbeat = self._clock()
+                self._console.say(f"  still working ({waited / 60:.0f} min so far)")
+            return None
+        if waited < DECISION_SECONDS:
+            return None
+        if record is None:
+            self._console.paragraph(UNDECIDED_SENTENCE)
+            return 0
+        self._console.paragraph(
+            f"Nothing new has happened yet. The last time Crucible set up its "
+            f"Linux engine here ({_local(record.at)}, Crucible {record.release}), "
+            "it ended like this:"
+        )
+        self._console.ending(record)
+        return 0
 
 
 def watch(
@@ -270,75 +374,14 @@ def watch(
     start: Callable[[Path], bool] = start_controller,
 ) -> int:
     console = Console(out)
-    started = clock()
-    started_tray_at: float | None = None
     if brief:
-        while clock() - started < BRIEF_SECONDS:
-            record = recorded(home)
-            if is_fresh(record, since):
-                assert record is not None
-                console.say(
-                    DONE_SENTENCE if record.state == outcome.DONE or not record.sentence
-                    else one_line(record.sentence, ENDING_LIMIT)
-                )
-                return 0
-            sleep(0.5)
-        console.say(APP_SENTENCE)
-        return 0
-
+        return _watch_briefly(home, since, console, clock, sleep)
     console.paragraph(CONSOLE_START)
-    token = _token(home)
-    seen = 0
-    heartbeat = started
+    watching = _Watch(home, since, console, clock=clock, alive=alive, start=start)
     while True:
-        status = door_status(token)
-        if token is None or status is None:
-            token = _token(home)
-        if status is not None and status.get("running") is True and token is not None:
-            seen = follow(token, console, seen)
-            sleep(POLL_SECONDS)
-            continue
-        record = recorded(home)
-        if is_fresh(record, since):
-            assert record is not None
-            console.ending(record)
-            return 0
-        presence = status.get("presence") if status is not None else None
-        owner = presence.get("owner") if isinstance(presence, dict) else None
-        if owner == "wsl-unit":
-            console.paragraph(ALREADY_SENTENCE)
-            return 0
-        if owner == "found":
-            console.paragraph(FOUND_SENTENCE)
-            return 0
-        waited = clock() - started
-        if status is None and waited >= DECISION_SECONDS and not alive():
-            if started_tray_at is None:
-                started_tray_at = clock()
-                console.paragraph(STARTING_TRAY_SENTENCE)
-                if not start(home):
-                    console.tray_gone(home)
-                    return 0
-            elif clock() - started_tray_at >= CONTROLLER_START_SECONDS:
-                console.tray_gone(home)
-                return 0
-            sleep(POLL_SECONDS)
-            continue
-        if status is None and waited < BLIND_SECONDS:
-            if clock() - heartbeat >= HEARTBEAT_SECONDS:
-                heartbeat = clock()
-                console.say(f"  still working ({waited / 60:.0f} min so far)")
-        elif waited >= DECISION_SECONDS:
-            if record is None:
-                console.paragraph(UNDECIDED_SENTENCE)
-                return 0
-            console.paragraph(
-                f"Nothing new has happened yet. The last time Crucible set up its "
-                f"Linux engine here ({_local(record.at)}, Crucible {record.release}), "
-                "it ended like this:"
-            )
-            console.ending(record)
-            return 0
+        ended = watching.tick()
+        if ended is not None:
+            return ended
         sleep(POLL_SECONDS)
 
 

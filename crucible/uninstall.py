@@ -284,26 +284,55 @@ def plan(
     mechanism = mechanism_for_platform(platform)
     operator_home = service.user_home() if user_home is None else user_home
     running_from = Path(executable if executable is not None else sys.executable)
+    steps = _prerequisite_steps(
+        home, platform, env, runner, mechanism, operator_home, running_from,
+        purge_weights=purge_weights, wsl_too=wsl_too,
+    )
+    steps += _registration_steps(home, platform, env, runner, mechanism, operator_home, running_from)
+    steps += _file_steps(home)
+    steps += _kept_steps(home, running_from, purge_weights=purge_weights)
+    steps.append(_home_step(home, steps))
+    return Plan(
+        home=home,
+        platform=platform,
+        mechanism=mechanism,
+        purge_weights=purge_weights,
+        wsl_too=wsl_too,
+        backend_kind=read_backend_kind(home),
+        steps=steps,
+    )
+
+
+def _prerequisite_steps(
+    home: Path, platform: str, env: Mapping[str, str], runner: service.Runner,
+    mechanism: str, operator_home: Path, running_from: Path, *, purge_weights: bool, wsl_too: bool,
+) -> list[Step]:
     steps: list[Step] = []
-
     if (home / "sharing.json").is_file():
-        from . import sharing
-        from .platform.runner import ProcessRunner
-        steps.append(Step(
-            name="remove-sharing", what="withdraw the owned Tailscale address and forward",
-            action=REMOVE, target=str(home / "sharing.json"),
-            act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.PairedEngine(home)))],
-        ))
-
+        steps.append(_sharing_step(home, platform, env))
     steps.append(_stop_step(mechanism, home, operator_home, runner, running_from))
-
     if wsl_too:
         steps.append(_wsl_step(platform, runner, purge_weights=purge_weights))
-
     if mechanism == STARTUP:
         steps.append(_controller_step(home, runner, running_from))
+    return steps
 
-    steps.append(_service_step(mechanism, home, operator_home, env, runner))
+
+def _sharing_step(home: Path, platform: str, env: Mapping[str, str]) -> Step:
+    from . import sharing
+    from .platform.runner import ProcessRunner
+    return Step(
+        name="remove-sharing", what="withdraw the owned Tailscale address and forward",
+        action=REMOVE, target=str(home / "sharing.json"),
+        act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.PairedEngine(home)))],
+    )
+
+
+def _registration_steps(
+    home: Path, platform: str, env: Mapping[str, str], runner: service.Runner,
+    mechanism: str, operator_home: Path, running_from: Path,
+) -> list[Step]:
+    steps = [_service_step(mechanism, home, operator_home, env, runner)]
     if platform in ("win32", "darwin") and (home / "installation.json").is_file():
         steps.append(Step(
             name="remove-desktop", what="remove Crucible's registered desktop presence",
@@ -320,57 +349,28 @@ def plan(
             action=REMOVE, target=str(home / "launcher.json"),
             act=lambda: launcher.remove(home),
         ))
+    return steps
 
-    steps.append(
-        _path_step(
-            name="remove-envs",
-            what="the job-type environments; `crucible install <type>` rebuilds one",
-            home=home,
-            path=home / ENVS_DIR,
-            absent_code="envs_absent",
-        )
-    )
 
-    steps.append(
-        _path_step(
-            name="remove-pairing",
-            what="the pairing file an app on this machine reads (3.6)",
-            home=home,
-            path=home / PAIRING_NAME,
-            absent_code="pairing_absent",
-        )
-    )
-    steps.append(
-        _path_step(
-            name="remove-config",
-            what="config.toml — the bearer token goes with it",
-            home=home,
-            path=home / CONFIG_NAME,
-            absent_code="config_absent",
-        )
-    )
+def _file_steps(home: Path) -> list[Step]:
+    named = [
+        ("remove-envs", "the job-type environments; `crucible install <type>` rebuilds one",
+         home / ENVS_DIR, "envs_absent"),
+        ("remove-pairing", "the pairing file an app on this machine reads (3.6)",
+         home / PAIRING_NAME, "pairing_absent"),
+        ("remove-config", "config.toml — the bearer token goes with it",
+         home / CONFIG_NAME, "config_absent"),
+    ]
+    named += [(f"remove-{name}", f"<home>/{name}", home / name, f"{name}_absent") for name in STATE_DIRS]
+    named += [(f"remove-{name}", f"<home>/{name}", home / name, "file_absent") for name in STATE_FILES]
+    return [
+        _path_step(name=name, what=what, home=home, path=path, absent_code=code)
+        for name, what, path, code in named
+    ]
 
-    for name in STATE_DIRS:
-        steps.append(
-            _path_step(
-                name=f"remove-{name}",
-                what=f"<home>/{name}",
-                home=home,
-                path=home / name,
-                absent_code=f"{name}_absent",
-            )
-        )
-    for name in STATE_FILES:
-        steps.append(
-            _path_step(
-                name=f"remove-{name}",
-                what=f"<home>/{name}",
-                home=home,
-                path=home / name,
-                absent_code="file_absent",
-            )
-        )
 
+def _kept_steps(home: Path, running_from: Path, *, purge_weights: bool) -> list[Step]:
+    steps: list[Step] = []
     for name in USER_DATA_DIRS:
         path = home / name
         if path.exists():
@@ -379,41 +379,21 @@ def plan(
                 action=KEEP, target=str(path), bytes=path_bytes(path),
             ))
     for kind in catalog.KINDS:
-        steps.append(
-            _weights_step(home, kind, SUBJECT_DIRS[kind], purge_weights=purge_weights)
-        )
-
+        steps.append(_weights_step(home, kind, SUBJECT_DIRS[kind], purge_weights=purge_weights))
     for name in PACK_DIRS:
         step = _pack_step(home, name, running_from)
         if step is not None:
             steps.append(step)
-
     for name in _strangers(home):
         path = home / name
-        steps.append(
-            Step(
-                name=f"keep-unknown:{name}",
-                what=(
-                    "Crucible did not put this here, so it is not Crucible's to "
-                    "delete"
-                ),
-                action=KEEP,
-                target=str(path),
-                bytes=path_bytes(path),
-            )
-        )
-
-    steps.append(_home_step(home, steps))
-
-    return Plan(
-        home=home,
-        platform=platform,
-        mechanism=mechanism,
-        purge_weights=purge_weights,
-        wsl_too=wsl_too,
-        backend_kind=read_backend_kind(home),
-        steps=steps,
-    )
+        steps.append(Step(
+            name=f"keep-unknown:{name}",
+            what="Crucible did not put this here, so it is not Crucible's to delete",
+            action=KEEP,
+            target=str(path),
+            bytes=path_bytes(path),
+        ))
+    return steps
 
 
 def _strangers(home: Path) -> list[str]:
@@ -522,8 +502,8 @@ def _no_controller(name: str, what: str, home: Path) -> Step:
         refused=Refusal(
             code="engine_not_running",
             message=(
-                f"no live `crucible orchestrator` is recorded in {home / 'host.pid'}; "
-                "there is nothing to stop"
+                f"no live controller (`crucible orchestrator`) is recorded in "
+                f"{home / 'host.pid'}; there is nothing to stop"
             ),
             fatal=False,
         ),
@@ -640,7 +620,7 @@ def _service_step(
         except CrucibleError as exc:
             return Step(
                 name="remove-service",
-                what="the Startup shortcut that runs `crucible orchestrator` at login",
+                what="the Startup shortcut that runs `crucible local tray` at login",
                 action=REMOVE,
                 target="(unknown)",
                 refused=Refusal(
@@ -651,7 +631,7 @@ def _service_step(
             )
         return Step(
             name="remove-service",
-            what="the Startup shortcut that runs `crucible orchestrator` at login (4.1)",
+            what="the Startup shortcut that runs `crucible local tray` at login (4.1)",
             action=REMOVE,
             target=str(lnk),
             act=lambda: _remove_startup(env),
@@ -692,60 +672,51 @@ def _remove_startup(env: Mapping[str, str]) -> list[str]:
     return [outcome.detail]
 
 
+WSL_GUEST_WHAT = "run the guest's own uninstall inside the Crucible distro"
+
+
+def _wsl_refused(code: str, message: str) -> Step:
+    return Step(
+        name="wsl-guest",
+        what=WSL_GUEST_WHAT,
+        action=REMOVE,
+        target=CRUCIBLE_DISTRO,
+        refused=Refusal(code=code, message=message, fatal=True),
+    )
+
+
 def _wsl_step(
     platform: str, runner: service.Runner, *, purge_weights: bool
 ) -> Step:
     if platform != "win32":
-        return Step(
-            name="wsl-guest",
-            what="run the guest's own uninstall inside the Crucible distro",
-            action=REMOVE,
-            target=CRUCIBLE_DISTRO,
-            refused=Refusal(
-                code="wsl_not_here",
-                message=(
-                    f"--wsl-too drives a WSL2 guest through wsl.exe, and this is "
-                    f"{platform}. On linux and darwin the server runs on the "
-                    "machine this command is already on"
-                ),
-                fatal=True,
-            ),
+        return _wsl_refused(
+            "wsl_not_here",
+            f"--wsl-too drives a WSL2 guest through wsl.exe, and this is "
+            f"{platform}. On linux and darwin the server runs on the "
+            "machine this command is already on: run `crucible uninstall` "
+            "without --wsl-too",
         )
     listed = runner(wsl_list_argv())
-    names = parse_wsl_list(listed.stdout) if listed.ok else []
     if not listed.ok:
-        return Step(
-            name="wsl-guest",
-            what="run the guest's own uninstall inside the Crucible distro",
-            action=REMOVE,
-            target=CRUCIBLE_DISTRO,
-            refused=Refusal(
-                code="wsl_unreadable",
-                message=(
-                    "wsl.exe could not be asked what distros this machine has: "
-                    f"`{' '.join(listed.argv)}` exited {listed.returncode}: "
-                    f"{listed.text()}"
-                ),
-                fatal=True,
-            ),
+        return _wsl_refused(
+            "wsl_unreadable",
+            "wsl.exe could not be asked what distros this machine has: "
+            f"`{' '.join(listed.argv)}` exited {listed.returncode}: "
+            f"{listed.text()}",
         )
+    names = parse_wsl_list(listed.stdout)
     if CRUCIBLE_DISTRO not in names:
-        return Step(
-            name="wsl-guest",
-            what="run the guest's own uninstall inside the Crucible distro",
-            action=REMOVE,
-            target=CRUCIBLE_DISTRO,
-            refused=Refusal(
-                code="wsl_distro_absent",
-                message=(
-                    f"this machine has no {CRUCIBLE_DISTRO!r} distro "
-                    f"(wsl -l -v lists {names or ['nothing']}). --wsl-too "
-                    "uninstalls the guest Crucible imported and no other: every "
-                    "distro on this list that is not that one is yours"
-                ),
-                fatal=True,
-            ),
+        return _wsl_refused(
+            "wsl_distro_absent",
+            f"this machine has no {CRUCIBLE_DISTRO!r} distro "
+            f"(wsl -l -v lists {names or ['nothing']}). --wsl-too "
+            "uninstalls the guest Crucible imported and no other: every "
+            "distro on this list that is not that one is yours",
         )
+    return _wsl_uninstall_step(runner, purge_weights=purge_weights)
+
+
+def _wsl_uninstall_step(runner: service.Runner, *, purge_weights: bool) -> Step:
     argv = wsl_uninstall_argv(purge_weights=purge_weights, dry_run=False)
     return Step(
         name="wsl-guest",
@@ -815,7 +786,8 @@ def _rmdir_if_empty(home: Path) -> list[str]:
     if left:
         raise UninstallError(
             f"home_not_empty: {home} holds {left}, which was not true when this "
-            "run was planned. Nothing has been removed from it"
+            "run was planned. Nothing has been removed from it; run `crucible "
+            "uninstall --dry-run` to see the plan for what is there now"
         )
     home.rmdir()
     return [f"removed {home}"]
