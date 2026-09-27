@@ -261,8 +261,11 @@ def retired_asr_id_note(model_id: str) -> str | None:
 #: refuses bfloat16 outright, the engine is started in float16 instead
 #: (`engines.vllm.run_dtype`): the same two bytes a parameter, so every memory
 #: figure in the manifest holds. The job's result records the dtype it ran in.
-#: A quantized Qwen3-ASR would come next, if one existed and were needed; none
-#: is pinned, so none is offered.
+#: On a card too small for the declared width, fewer pieces at once come next,
+#: down to one, still at full precision (Owen, 2026-09-26: "yes, fewer at once
+#: before quantizing for asr too"; `crucible/asrplan.py`). Only then a smaller
+#: or quantized model: no quantized Qwen3-ASR is pinned, so the walk goes on to
+#: the smaller models, never under 4 bits.
 QWEN_ASR_DTYPES: frozenset[str] = frozenset({"bfloat16"})
 
 #: What every Qwen block states beyond whisper's four keys.
@@ -290,9 +293,18 @@ QWEN_BACKEND_REQUIRED: dict[str, type] = {
 #: given. `kv_cache_memory_bytes` is stated so vLLM does not size its own pool
 #: from its 0.92-of-the-card default (`vllm/entrypoints/llm.py` L198 at
 #: v0.29.0) inside a job that shares the card with the aligner.
+#:
+#: `kv_bytes_per_token` (2026-09-26) is the KV one token holds, read from the
+#: checkpoint's config (2 x layers x KV heads x head_dim x 2 B). It is what lets
+#: a card too small for `max_batch` pieces at once run FEWER at full precision
+#: before a smaller or quantized model is taken (Owen: "yes, fewer at once
+#: before quantizing for asr too"; `crucible/asrplan.py`): vLLM will not start
+#: with a pool smaller than one `max_model_len` sequence, and this is the only
+#: way to say how big that is.
 VLLM_BACKEND_REQUIRED: dict[str, type] = {
     "max_model_len": int,
     "kv_cache_memory_bytes": int,
+    "kv_bytes_per_token": int,
 }
 
 #: The longest piece of audio one decode is given. 180 s is `qwen_asr` 0.0.6's
@@ -380,6 +392,7 @@ class AsrBackendSpec:
     max_new_tokens: int | None = None
     max_model_len: int | None = None
     kv_cache_memory_bytes: int | None = None
+    kv_bytes_per_token: int | None = None
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -639,6 +652,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             max_new_tokens=block.get("max_new_tokens"),
             max_model_len=block.get("max_model_len"),
             kv_cache_memory_bytes=block.get("kv_cache_memory_bytes"),
+            kv_bytes_per_token=block.get("kv_bytes_per_token"),
         )
 
     # THE ID NAMES ITS FAMILY. `whisper-tiny`, `qwen3-asr-1.7b`: a reader of a

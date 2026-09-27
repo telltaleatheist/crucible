@@ -820,7 +820,17 @@ class AsrJobType:
         manifest, spec = self._spec_for(model_id)
         accelerator.refuse_if_larger_than_host(
             model_id=model_id,
-            need_bytes=self._need_bytes(spec, params),
+            # The LEAST it can run in: one piece at a time for a Qwen3-ASR
+            # model with a width ladder (Owen, 2026-09-26: "yes, fewer at once
+            # before quantizing for asr too"), so "never on this host" is not
+            # said about a card that fewer pieces at once would fit.
+            need_bytes=(
+                qwen.floor_bytes(
+                    manifest, spec, backend_kind, with_aligner=params.word_timestamps
+                )
+                if spec.engine in QWEN_ASR_ENGINES
+                else spec.memory_bytes_estimate
+            ),
             host_total_bytes=self._backend.gpu.vram_bytes,
             host_name=self._backend.gpu.name,
         )
@@ -847,13 +857,32 @@ class AsrJobType:
             aligner = qwen.plan_aligner(self._config, spec, backend_kind)
         return manifest, spec, python, installed.path, aligner
 
-    def _need_bytes(self, spec: Any, params: AsrParams) -> int:
-        """What THIS job needs: the aligner is on the card only with timestamps."""
+    def _need_bytes(self, manifest: Any, spec: Any, params: AsrParams) -> int:
+        """What THIS job needs: the aligner is on the card only with timestamps,
+        and a Qwen3-ASR engine at the width this card gets (`_width`)."""
         if spec.engine in QWEN_ASR_ENGINES:
             return qwen.need_bytes(
-                spec, self._backend.kind, with_aligner=params.word_timestamps
+                spec,
+                self._backend.kind,
+                with_aligner=params.word_timestamps,
+                width=self._width(manifest, spec, params),
             )
         return spec.memory_bytes_estimate
+
+    def _width(self, manifest: Any, spec: Any, params: AsrParams) -> int | None:
+        """Pieces at once for a Qwen3-ASR engine on this card, or None for the
+        manifest's own (`qwen.serving_width`; Owen, 2026-09-26, "yes, fewer at
+        once before quantizing for asr too")."""
+        if spec.engine not in QWEN_ASR_ENGINES:
+            return None
+        return qwen.serving_width(
+            manifest,
+            spec,
+            self._backend.kind,
+            total_bytes=self._backend.gpu.vram_bytes,
+            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+            with_aligner=params.word_timestamps,
+        )
 
     def _refuse_what_this_engine_has_not_got(
         self, model_id: str, params: AsrParams
@@ -960,11 +989,11 @@ class AsrJobType:
         checked = _params(params)
         self._refuse_what_this_engine_has_not_got(model, checked)
         _require_ffmpeg()
-        _, spec, _, _, _ = self._require_runnable(model, checked)
+        manifest, spec, _, _, _ = self._require_runnable(model, checked)
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
-            need_bytes=self._need_bytes(spec, checked),
+            need_bytes=self._need_bytes(manifest, spec, checked),
             owned_pids=self._owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             # Deliberately no `reclaimable_bytes`. An `llm` load may unload the
@@ -985,7 +1014,7 @@ class AsrJobType:
         try:
             self._refuse_what_this_engine_has_not_got(model, params)
             ffmpeg = _require_ffmpeg()
-            _, spec, python, weights_dir, aligner = self._require_runnable(
+            manifest, spec, python, weights_dir, aligner = self._require_runnable(
                 model, params
             )
             # The card can change between the queue and the lane, so the guard
@@ -993,7 +1022,7 @@ class AsrJobType:
             state = accelerator.guard(
                 self._config.backend_kind,
                 model_id=model,
-                need_bytes=self._need_bytes(spec, params),
+                need_bytes=self._need_bytes(manifest, spec, params),
                 owned_pids=self._owned_pids(),
                 desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             )
@@ -1033,6 +1062,7 @@ class AsrJobType:
                 word_timestamps=params.word_timestamps,
                 piece_s=params.piece_seconds(),
                 overlap_s=params.overlap_seconds(),
+                width=self._width(manifest, spec, params),
             ).run()
         else:
             document = self._whisper(

@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ... import weights, workerenv, workers
+from ... import asrplan, weights, workerenv, workers
 from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError
 from ...alignmodels import load_align_manifest
 from ...asrmodels import (
@@ -171,17 +171,78 @@ def aligner_spec(asr: AsrBackendSpec, backend_kind: str) -> tuple[AlignManifest,
     return manifest, manifest.spec(backend_kind)
 
 
-def need_bytes(asr: AsrBackendSpec, backend_kind: str, with_aligner: bool) -> int:
+def need_bytes(
+    asr: AsrBackendSpec, backend_kind: str, with_aligner: bool, width: int | None = None
+) -> int:
     """What the card must hold for this job: the ASR engine, and its aligner.
 
     Two manifests, two figures, added — never a copy of the aligner's number in
     the ASR manifest, which would go stale the day the aligner is re-measured.
+    `width` is the pieces at once the engine is started with (`serving_width`);
+    None is the manifest's own `max_batch`, and its estimate unchanged.
     """
     total = asr.memory_bytes_estimate
+    if width is not None and asr.engine == VLLM_ENGINE:
+        total = asrplan.need(asr, width)
     if with_aligner:
-        _, spec = aligner_spec(asr, backend_kind)
-        total += spec.memory_bytes_estimate
+        total += aligner_bytes(asr, backend_kind)
     return total
+
+
+def aligner_bytes(asr: AsrBackendSpec, backend_kind: str) -> int:
+    """The aligner's own manifest figure on this backend."""
+    _, spec = aligner_spec(asr, backend_kind)
+    return spec.memory_bytes_estimate
+
+
+def serving_width(
+    manifest: Any,
+    asr: AsrBackendSpec,
+    backend_kind: str,
+    *,
+    total_bytes: int,
+    desktop_allowance_bytes: int,
+    with_aligner: bool,
+) -> int | None:
+    """How many pieces at once the engine starts with on this card, or None.
+
+    Owen, 2026-09-26: *"yes, fewer at once before quantizing for asr too"*
+    (`crucible/asrplan.py`). On a card that cannot hold the manifest's
+    `max_batch` pieces at once at full precision, the widest width that fits
+    is taken, down to one, rather than refusing. The budget is the capability
+    walk's (the card less the desktop allowance, as `ttsplan.load_plan` reads
+    it), and a word-timestamped job counts its aligner too, so it may narrow
+    further than the capability verdict (which is about the transcriber
+    alone) said.
+
+    None keeps `max_batch`: a model with no ladder (the Mac's engines take one
+    piece per call already), or a card that holds the full width. On a card
+    where not even one piece fits, the narrowest width is returned, so the
+    guard refuses by name at the LEAST the job could run in and not at the
+    declared width's figure (`ttsplan.load_plan` does the same for a voice).
+    """
+    ladder = asrplan.ladder_for(manifest, asr, backend_kind)
+    if ladder is None:
+        return None
+    budget = max(0, total_bytes - desktop_allowance_bytes)
+    extra = aligner_bytes(asr, backend_kind) if with_aligner else 0
+    width = asrplan.width_for(asr, backend_kind, manifest, budget, extra)
+    if width is None:
+        width = ladder[-1].width
+    return None if width == asr.max_batch else width
+
+
+def floor_bytes(
+    manifest: Any, asr: AsrBackendSpec, backend_kind: str, with_aligner: bool
+) -> int:
+    """The least this job can run in: one piece at a time, if there is a ladder.
+
+    What `refuse_if_larger_than_host` checks, so "never on this host" is only
+    said below it, and not about a card that fewer pieces at once would fit.
+    """
+    ladder = asrplan.ladder_for(manifest, asr, backend_kind)
+    width = None if ladder is None else ladder[-1].width
+    return need_bytes(asr, backend_kind, with_aligner, width)
 
 
 def plan_aligner(config: Config, asr: AsrBackendSpec, backend_kind: str) -> AlignerPlan:
@@ -391,6 +452,7 @@ class QwenAsrRun:
         word_timestamps: bool,
         piece_s: float,
         overlap_s: float,
+        width: int | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -408,6 +470,8 @@ class QwenAsrRun:
         self._word_timestamps = word_timestamps
         self._piece_s = piece_s
         self._overlap_s = overlap_s
+        #: Pieces at once (`serving_width`); None is the manifest's `max_batch`.
+        self._width = width
         self._ladder = loopguard.window_ladder(piece_s)
         self._asr: workers.WorkerSession | None = None
         self._align: workers.WorkerSession | None = None
@@ -532,22 +596,36 @@ class QwenAsrRun:
     def _start_asr(self) -> None:
         engine = self._spec.engine
         vllm = engine == VLLM_ENGINE
+        # FEWER AT ONCE BEFORE A SMALLER MODEL (Owen, 2026-09-26, `asrplan`):
+        # a narrower width is a smaller KV pool and a smaller start gate, and
+        # the rest of the manifest's figures are unchanged.
+        narrowed = vllm and self._width is not None
+        max_batch = self._width if narrowed else self._spec.require("max_batch")
         request = {
             "op": "load",
             "engine": engine,
             "model_dir": str(self._weights_dir),
             "dtype": self._run_dtype(),
-            "max_batch": self._spec.require("max_batch"),
+            "max_batch": max_batch,
             "max_new_tokens": self._spec.require("max_new_tokens"),
             # vLLM's three; null on mlx-audio, which has no such knobs. Sent
             # either way so the wire has no optional keys.
             "max_model_len": self._spec.require("max_model_len") if vllm else None,
             "kv_cache_memory_bytes": (
-                self._spec.require("kv_cache_memory_bytes") if vllm else None
+                (
+                    asrplan.kv_pool(self._spec, max_batch)
+                    if narrowed
+                    else self._spec.require("kv_cache_memory_bytes")
+                )
+                if vllm
+                else None
             ),
             "gpu_memory_utilization": (
                 gpu_memory_utilization(
-                    self._spec.memory_bytes_estimate, self._backend.gpu.vram_bytes
+                    asrplan.need(self._spec, max_batch)
+                    if narrowed
+                    else self._spec.memory_bytes_estimate,
+                    self._backend.gpu.vram_bytes,
                 )
                 if vllm
                 else None
@@ -576,8 +654,16 @@ class QwenAsrRun:
             log_path=self._config.logs_dir / f"asr-{self._job.id}.log",
             environment=environment,
         )
+        pace = (
+            f", {max_batch} piece(s) at a time instead of "
+            f"{self._spec.require('max_batch')}: this card cannot hold more at "
+            "once at full precision (fewer at once is tried before a smaller "
+            "or quantized model)"
+            if narrowed
+            else ""
+        )
         self._ctx.warming(
-            f"loading {self._model} on {engine} at {request['dtype']}; log "
+            f"loading {self._model} on {engine} at {request['dtype']}{pace}; log "
             f"{session.log_path}"
         )
         try:

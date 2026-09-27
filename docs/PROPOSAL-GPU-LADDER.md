@@ -186,6 +186,7 @@ it is an existing rule of this repo applied to one more caller.
 | what an engine needs, and falls back to | `crucible/engines/vllm.py`: `card_needs`, `bf16_fallback`, `run_dtype`, `card_args` |
 | the precision floor | `crucible/precision.py`: `MIN_WEIGHT_BITS = 4`, bits derived from what each block states |
 | Higgs: width before precision | `crucible/ttsplan.py` (Owen: *"we should drop batches to 1 at a time before we quantize"*) |
+| asr: width before a smaller or quantized model | `crucible/asrplan.py` (Owen, 2026-09-26: *"yes, fewer at once before quantizing for asr too"*). A Qwen3-ASR model on cuda-linux runs fewer pieces at once (vLLM's `max_num_seqs`, the manifest's `max_batch`, 8), down to one, at full precision (bf16, or fp16 on a card without it) before the walk takes a smaller model; nothing under 4-bit. Only the KV pool scales with the width (`kv_cache_memory_bytes / max_batch` a piece, never under one `max_model_len` sequence, `kv_bytes_per_token` new in the manifests and read from config.json); weights, overhead and the audio tower's 1 GiB are held at their declared values. Declared, unmeasured. The verdict and the install modal say which was chosen |
 | install measures, then decides | `cli._measure_step` before `_capability_step`; `--no-gpu-measure` skips the GPU rungs |
 | on demand | `crucible ladder [--rung R] [--no-gpu] [--json]`; `crucible doctor` prints the record and says when it is stale |
 | the modal | `GET /v1/capability/plan?job_type=` / `?subject=` → `confirm`; the operator page's Install and Pull buttons show it with `window.confirm` before acting |
@@ -221,8 +222,22 @@ it is an existing rule of this repo applied to one more caller.
 4. *Memory*: **recorded, not consumed for fit.** PHASE9's ruling that declared estimates
    decide fit stands. The desktop the card rung sees is printed beside the allowance.
 5. *Inputs*: open; nothing built needs them yet.
-6. *Quality under fallback*: open. fp16 on a bf16-trained checkpoint is unmeasured for every
-   model; the verdict says fp16 in words so a person knows what they are getting.
+6. *Quality under fallback*: **closed, no quality check.** Owen, 2026-09-26: *"no quality
+   check. lower quality is part of quantizing. it is what it is"*. The ladder never compares
+   output against a reference (a known transcript, a known page), and nothing is refused for
+   sounding or reading worse at a lower precision; the verdict says the precision in words
+   (fp16, 8-bit, 4-bit) so a person knows what they are getting. (This was the third call
+   the owens-pc session put to Owen on 2026-09-26.)
+
+**Measurements owed:**
+
+- **Does Higgs start on a Turing card?** Unknown. Its SGLang-Omni stages default to bfloat16
+  and the env carries flash-attn-4 and flashinfer, which vLLM floors at 8.0 (section 1, case
+  2). Owen, 2026-09-26: *"would be interesting to know"*. Owed when a Turing card with enough
+  memory for one passage at a time (~10 GB declared, `ttsplan.BF16_ONE_AT_A_TIME_BYTES`, plus
+  the desktop allowance: a 24 GB Titan RTX or Quadro RTX 6000) is free: load a Higgs voice, render one
+  sentence, record whether it starts and what dtype it ran in. Until then the capability walk
+  does not guess, in either direction.
 
 **What the measured facts do:**
 

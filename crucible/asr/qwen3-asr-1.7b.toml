@@ -97,6 +97,13 @@ max_model_len = 8192
 # memory profiling (`v1/worker/gpu_worker.py` L527-546 at v0.29.0). That is
 # why the audio-tower reserve below is a stated term: nothing else reserves it.
 kv_cache_memory_bytes = 3758096384
+# The KV one token holds: 2 (K and V) x 28 layers x 8 KV heads x 128 head_dim
+# x 2 B, READ from config.json at the pinned sha (above). DECLARED here
+# 2026-09-26 for crucible/asrplan.py: a card that cannot hold 8 pieces at once
+# runs fewer at full precision before a smaller model is taken (Owen: "yes,
+# fewer at once before quantizing for asr too"), and vLLM will not start with
+# a pool smaller than one max_model_len sequence (8,192 x this = 896 MiB).
+kv_bytes_per_token = 114688
 # 11,006,754,728 B = 10.25 GiB, COMPUTED:
 #   4,698,521,512  the two safetensors, exactly. An UPPER bound: 622,329,856 B
 #                  of it is the tied lm_head copy vLLM does not load.
