@@ -466,6 +466,18 @@ or pad to the input's exact frame count) makes the joined master sample-exact re
 `token --url` lists `192.168.96.1:7100`, the WSL vEthernet address, which no other machine can use.
 Only addresses another machine can reach belong there.
 
+### 48. Nothing says what this GPU can do until something fails on it
+- **What:** the GTX 1660 SUPER is a 6 GB Turing card (sm_75): no bf16, no FlashAttention 2, and
+  most of the catalog doesn't fit or doesn't run on it. Crucible's capability decision
+  (`capability.py`) goes by total memory against the manifests' declared estimates, which says
+  nothing about compute features or speed.
+- **Owen, 2026-09-26:** *"this gpu is also not capable of most things, so itll be useful to figure
+  out how we can know what its capable of without direct measurements. or maybe we could run a
+  measurement ladder that tests what the gpu is capable of upon install"*
+- **Should be:** to be decided. Either a declared rule (compute capability, dtype and kernel support
+  per engine, VRAM) or a measurement ladder run at install, or both. A proposal comes first, with
+  no code.
+
 ## Where it ended
 At 22:45, kylies-pc served sigma rvc to owens-pc over the tailnet, and training-pc-1's queue (d3k,
 then lp) started from `C:	mp\crucible-pairing\kylies.txt`.
