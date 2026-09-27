@@ -201,6 +201,17 @@ journal). A missing-weights refusal starts the pull after the lock is released.
   `check_replayable` runs before the response starts so an unreplayable resume
   is a 409. Keepalives every `KEEPALIVE_SECONDS` (15 s) also probe
   `is_disconnected()`, which is what finds a tunnel that died without closing.
+- `crucible/ttsstream/` is split by concern: `log` (the replayable `EventLog`, pruned by
+  time and by the slowest reader), `session` (`StreamSession`: rows, the batching
+  scheduler, cancel and restart), `decode` (narrator's `batch_chunk` and `batch_item`
+  messages into PCM or a named `RowFailure`/`ItemEnd`, with no session state),
+  `manager` (`StreamManager`: one session, the residency claim, the grace watchdog) and
+  `validate` (`batch_width_for`, `require_streamable`, `require_sayable`). The knobs
+  tests turn (`GRACE_SECONDS`, `BATCH_COALESCE_SECONDS`, `STREAM_BATCH_WIDTH`) are read
+  through the package at call time, so patching `crucible.ttsstream.X` still reaches the
+  code that uses it.
+- Operator tasks live in `crucible/tasks/` (see `jobs-runtime.md`, "Operator tasks"); the
+  route layer reads only `TaskStore`, `Task` and `TASK_TYPES`.
 - Jobs and tasks share `sse._event_stream` (an append-only event list, a
   subscribe/unsubscribe waiter, a terminal event set). A streaming session has
   its own loop because its log is pruned behind its readers, so the cursor is
