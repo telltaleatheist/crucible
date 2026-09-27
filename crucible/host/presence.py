@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 from urllib.parse import urlsplit
 
+from .. import wsl
+from ..platform.paths import ENGINE_HOST, ENGINE_PORT, engine_url
+from ..platform.runner import Child, RunResult, Runner
+from ..service import UNIT_NAME
+from ..wsl import CRUCIBLE_DISTRO, guest_argv
+from ..wsl import parse_distro_list as parse_wsl_list
 from .log import HostLog
-from .menu import Distro, Engine, Owner
-from .paths import ENGINE_HOST, ENGINE_PORT, engine_url
-from .runner import Child, RunResult, Runner
-from .wsl_states import CRUCIBLE_DISTRO
+from .state import Distro, Engine, Owner
 
 BOOT_WAIT_SECONDS = 30
 WATCH_SECONDS = 15
@@ -19,8 +22,6 @@ WSL_LIST_TIMEOUT_SECONDS = 20.0
 WSL_BOOT_TIMEOUT_SECONDS = 120.0
 RECIPE_TIMEOUT_SECONDS = 60.0
 GUEST_READ_TIMEOUT_SECONDS = 30.0
-
-UNIT_NAME = "crucible.service"
 
 RECIPE_SYSTEM_UNIT_START = "system-unit-start"
 
@@ -34,18 +35,15 @@ def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
 
 
 def wsl_list_argv() -> list[str]:
-    return ["wsl.exe", "-l", "-v"]
+    return wsl.list_argv()
 
 
 def wsl_running_argv() -> list[str]:
-    return ["wsl.exe", "-l", "-v", "--running"]
+    return wsl.list_argv(running=True)
 
 
 def guest_pairing_argv(distro: str) -> list[str]:
-    return guest_argv(
-        distro,
-        ["bash", "-lc", 'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/pairing"'],
-    )
+    return wsl.pairing_argv(distro)
 
 
 def keepalive_argv(distro: str) -> list[str]:
@@ -69,10 +67,7 @@ def _printed_state(result: RunResult) -> str:
 
 
 def system_systemctl_argv(distro: str, verb: str) -> list[str]:
-    return [
-        "wsl.exe", "-d", distro, "-u", "root", "--exec",
-        "systemctl", verb, UNIT_NAME,
-    ]
+    return wsl.root_argv(distro, ["systemctl", verb, UNIT_NAME])
 
 
 UNIT_STATES: frozenset[str] = frozenset(
@@ -135,37 +130,6 @@ def read_wsl_distros(result: object) -> list[str] | None:
     if registered_wsl_distros() == []:
         return []
     return None
-
-
-GUEST_USER = "crucible"
-
-
-def guest_argv(distro: str, argv: list[str] | tuple[str, ...]) -> list[str]:
-    user = ["-u", GUEST_USER] if distro == _crucible_distro() else []
-    return ["wsl.exe", "-d", distro, *user, "--exec", *argv]
-
-
-def _crucible_distro() -> str:
-    from .wsl_states import CRUCIBLE_DISTRO
-
-    return CRUCIBLE_DISTRO
-
-
-def parse_wsl_list(text: str) -> list[str]:
-    names: list[str] = []
-    for raw in text.replace("\x00", "").splitlines():
-        line = raw.strip()
-        if line == "":
-            continue
-        if line.startswith("*"):
-            line = line[1:].strip()
-        first = line.split()[0] if line.split() else ""
-        if first.upper() in ("NAME", "NOM", "NAAM"):
-            continue
-        parts = line.split()
-        if len(parts) >= 3 and parts[-1].isdigit():
-            names.append(" ".join(parts[:-2]))
-    return names
 
 
 @dataclass(frozen=True)

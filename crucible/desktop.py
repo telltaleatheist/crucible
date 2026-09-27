@@ -10,38 +10,23 @@ import sys
 import threading
 import time
 
+from . import local, traylife
 from .config import crucible_home
-from . import local
 from .errors import CrucibleError
+from .platform.runner import ProcessRunner
 
 LABEL = "com.crucible.tray"
 
+REFRESH_SECONDS = 5
+
 
 def close_tray() -> None:
-    home = crucible_home()
-    pid_file = home / "tray.pid"
-    if not pid_file.exists():
-        return
-    from .host.app import _alive
-    raw = pid_file.read_text().strip()
-    if not raw.isdigit() or not _alive(int(raw)):
-        pid_file.unlink(missing_ok=True)
-        return
-    (home / "tray.close").write_text("close\n")
-    deadline = time.monotonic() + 15
-    while True:
-        if not _alive(int(raw)):
-            pid_file.unlink(missing_ok=True)
-            return
-        if time.monotonic() >= deadline:
-            raise local.LocalError("tray_close_failed: the tray did not close; installation is unchanged")
-        time.sleep(0.1)
+    traylife.close_tray(crucible_home())
 
 
 def install_desktop() -> None:
     if sys.platform == "win32":
-        from .host.startup import install
-        from .host.runner import ProcessRunner
+        from .platform.startup import install
         install(ProcessRunner(sys.platform, os.environ))
         return
     if sys.platform != "darwin":
@@ -84,8 +69,7 @@ def install_desktop() -> None:
 def remove_desktop() -> None:
     close_tray()
     if sys.platform == "win32":
-        from .host.startup import remove
-        from .host.runner import ProcessRunner
+        from .platform.startup import remove
         remove(ProcessRunner(sys.platform, os.environ))
     elif sys.platform == "darwin":
         target = f"gui/{os.getuid()}/{LABEL}"
@@ -125,40 +109,26 @@ def tray() -> None:
     from .processlock import ProcessLock
     home = crucible_home()
     home.mkdir(parents=True, exist_ok=True)
-    pid_file = home / "tray.pid"
-    guard = ProcessLock(home / "tray.lock")
+    guard = ProcessLock(home / traylife.LOCK_NAME)
     if not guard.acquire():
         return
     try:
         _run_tray(home)
     finally:
-        pid_file.unlink(missing_ok=True)
-        (home / "tray.close").unlink(missing_ok=True)
+        traylife.pid_path(home).unlink(missing_ok=True)
+        traylife.close_request_path(home).unlink(missing_ok=True)
         guard.close()
 
 
 def _run_tray(home: Path) -> None:
     import pystray
     from .host.tray import icon_image, ICON_FOREGROUND
-    pid_file = home / "tray.pid"
-    (home / "tray.close").unlink(missing_ok=True)
+    pid_file = traylife.pid_path(home)
+    close_request = traylife.close_request_path(home)
+    close_request.unlink(missing_ok=True)
     pid_file.write_text(str(os.getpid()))
     if sys.platform == "win32":
-        try:
-            observed = local.controller_ping()
-        except OSError:
-            local._spawn_controller(home)
-            deadline = time.monotonic() + 90
-            while True:
-                try:
-                    observed = local.controller_ping()
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise local.LocalError("controller_start_failed: inspect host.log")
-                    time.sleep(0.5)
-        if observed.get("role") != "orchestrator":
-            raise local.LocalError("wrong_controller: port 7101 is occupied")
+        local.ensure_controller(home)
     stopped = threading.Event()
     retrying = threading.Event()
     busy = threading.Lock()
@@ -197,9 +167,8 @@ def _run_tray(home: Path) -> None:
             try:
                 if verb == "sharing":
                     from . import sharing
-                    from .host.runner import ProcessRunner
                     runner = ProcessRunner(sys.platform, os.environ)
-                    engine = sharing.Engine(home)
+                    engine = sharing.PairedEngine(home)
                     if sharing.read(home) is not None:
                         sharing.disable(home, runner, engine)
                         notice["message"] = "Tailscale sharing stopped"
@@ -252,7 +221,7 @@ def _run_tray(home: Path) -> None:
 
     def watch() -> None:
         while not stopped.is_set():
-            if (home / "tray.close").exists():
+            if close_request.exists():
                 close()
                 return
             if busy.acquire(blocking=False):
@@ -263,7 +232,7 @@ def _run_tray(home: Path) -> None:
                 finally:
                     busy.release()
                 refresh()
-            stopped.wait(5)
+            stopped.wait(REFRESH_SECONDS)
 
     refresh()
     threading.Thread(target=watch, daemon=True).start()
@@ -272,4 +241,4 @@ def _run_tray(home: Path) -> None:
     finally:
         stopped.set()
         pid_file.unlink(missing_ok=True)
-        (home / "tray.close").unlink(missing_ok=True)
+        close_request.unlink(missing_ok=True)

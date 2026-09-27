@@ -7,11 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from . import catalog, service
+from . import catalog, service, wsl
 from .errors import CrucibleError
-from .host.paths import LOG_NAME
-from .host.wsl_states import CRUCIBLE_DISTRO
+from .platform import hostconfig
+from .platform.paths import LOG_NAME
 from .processlock import alive
+from .wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE
 
 
 class UninstallError(CrucibleError):
@@ -64,10 +65,8 @@ ENVS_DIR = "envs"
 
 PACK_DIRS: tuple[str, ...] = ("server", "host")
 
-CONFIG_NAME = "config.toml"
+CONFIG_NAME = hostconfig.CONFIG_NAME
 PAIRING_NAME = "pairing"
-
-GUEST_CRUCIBLE = "$HOME/.crucible/server/bin/crucible"
 
 WSL_TIMEOUT_SECONDS = 600.0
 
@@ -214,15 +213,10 @@ def _remove_path(home: Path, path: Path) -> list[str]:
 
 
 def wsl_list_argv() -> list[str]:
-    return ["wsl.exe", "-l", "-q"]
+    return wsl.list_argv()
 
 
-def parse_wsl_list(text: str) -> list[str]:
-    return [
-        line.strip()
-        for line in text.replace("\x00", "").splitlines()
-        if line.strip() != ""
-    ]
+parse_wsl_list = wsl.parse_distro_list
 
 
 def wsl_uninstall_argv(
@@ -233,15 +227,7 @@ def wsl_uninstall_argv(
         flags += " --purge-weights"
     if dry_run:
         flags += " --dry-run"
-    return [
-        "wsl.exe",
-        "-d",
-        distro,
-        "--exec",
-        "bash",
-        "-lc",
-        f'"{GUEST_CRUCIBLE}" uninstall{flags}',
-    ]
+    return wsl.guest_shell_argv(distro, f'"{GUEST_CRUCIBLE}" uninstall{flags}')
 
 
 def local_argv(running_from: Path, action: str) -> list[str]:
@@ -266,20 +252,7 @@ def read_host_pid(home: Path) -> int | None:
 
 
 def read_backend_kind(home: Path) -> str | None:
-    import tomllib
-
-    path = home / CONFIG_NAME
-    if not path.is_file():
-        return None
-    try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    backend = document.get("backend")
-    if not isinstance(backend, dict):
-        return None
-    kind = backend.get("kind")
-    return kind if isinstance(kind, str) and kind else None
+    return hostconfig.read_backend_kind(home)
 
 
 def known_entries() -> set[str]:
@@ -315,11 +288,11 @@ def plan(
 
     if (home / "sharing.json").is_file():
         from . import sharing
-        from .host.runner import ProcessRunner
+        from .platform.runner import ProcessRunner
         steps.append(Step(
             name="remove-sharing", what="withdraw the owned Tailscale address and forward",
             action=REMOVE, target=str(home / "sharing.json"),
-            act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.Engine(home)))],
+            act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.PairedEngine(home)))],
         ))
 
     steps.append(_stop_step(mechanism, home, operator_home, runner, running_from))
@@ -660,7 +633,7 @@ def _service_step(
     runner: service.Runner,
 ) -> Step:
     if mechanism == STARTUP:
-        from .host import startup as host_startup
+        from .platform import startup as host_startup
 
         try:
             lnk = host_startup.shortcut_path(env)
@@ -712,8 +685,8 @@ def _service_step(
 
 
 def _remove_startup(env: Mapping[str, str]) -> list[str]:
-    from .host import startup as host_startup
-    from .host.runner import ProcessRunner
+    from .platform import startup as host_startup
+    from .platform.runner import ProcessRunner
 
     outcome = host_startup.remove(ProcessRunner("win32", env))
     return [outcome.detail]
@@ -766,7 +739,7 @@ def _wsl_step(
                 code="wsl_distro_absent",
                 message=(
                     f"this machine has no {CRUCIBLE_DISTRO!r} distro "
-                    f"(wsl -l -q lists {names or ['nothing']}). --wsl-too "
+                    f"(wsl -l -v lists {names or ['nothing']}). --wsl-too "
                     "uninstalls the guest Crucible imported and no other: every "
                     "distro on this list that is not that one is yours"
                 ),

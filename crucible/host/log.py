@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .paths import LOG_ROLL_BYTES
+from ..platform.paths import LOG_ROLL_BYTES
 
 
 _ASCII_SPELLING = str.maketrans(

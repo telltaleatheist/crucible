@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import API_VERSION
+from .atomicjson import write_json
 from .config import crucible_home
 from .errors import CrucibleError
-from .host.runner import ProcessRunner, Runner
 from .pairing import parse_pairing_line, read_pairing_file
+from .platform.runner import ProcessRunner, Runner
+from .protocol import DEFAULT_PORT, api_headers, user_agent
 
 RECORD = "sharing.json"
 TIMEOUT = 15.0
@@ -55,10 +56,7 @@ def _run(runner: Runner, argv: list[str]) -> None:
 
 
 def _write(home: Path, data: dict[str, Any]) -> None:
-    home.mkdir(parents=True, exist_ok=True)
-    temporary = home / (RECORD + ".tmp")
-    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(home / RECORD)
+    write_json(home / RECORD, data)
 
 
 def read(home: Path) -> dict[str, Any] | None:
@@ -77,8 +75,8 @@ def read(home: Path) -> dict[str, Any] | None:
     return record
 
 
-class Engine:
-    def __init__(self, home: Path, label: str):
+class PairedEngine:
+    def __init__(self, home: Path, label: str = "sharing"):
         self.label = label
         line = read_pairing_file(home)
         if line is None:
@@ -95,9 +93,8 @@ class Engine:
         request = urllib.request.Request(
             self.pairing.url + "/v1/" + path,
             data=None if body is None else json.dumps(body).encode(), method=method,
-            headers={"Authorization": "Bearer " + self.pairing.token,
-                     "X-Crucible-Api": str(API_VERSION),
-                     "Content-Type": "application/json", "User-Agent": "crucible-sharing"},
+            headers={**api_headers(self.pairing.token),
+                     "Content-Type": "application/json", "User-Agent": user_agent("sharing")},
         )
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -123,7 +120,7 @@ class Engine:
             )
 
 
-def enable(home: Path, runner: Runner, engine: Engine, *, port: int = 7100,
+def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = DEFAULT_PORT,
            adopt: bool = False) -> dict[str, Any]:
     if type(port) is not int or not 1 <= port <= 65535:
         raise SharingError("sharing_bad_port: expected a port from 1 to 65535")
@@ -157,7 +154,7 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = 7100,
     return {**record, "url": "http://" + authority, "remote_reachability": "not_tested"}
 
 
-def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
+def disable(home: Path, runner: Runner, engine: PairedEngine) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled"}
@@ -173,7 +170,7 @@ def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     return {"state": "disabled"}
 
 
-def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
+def status(home: Path, runner: Runner, engine: PairedEngine) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled", "remote_reachability": "not_tested"}
@@ -194,14 +191,14 @@ def reconcile(home: Path, runner: Runner | None = None) -> dict[str, Any]:
     if record is None:
         return {"state": "disabled"}
     runner = ProcessRunner(sys.platform, os.environ) if runner is None else runner
-    return enable(home, runner, Engine(home, "sharing"), port=record["port"])
+    return enable(home, runner, PairedEngine(home, "sharing"), port=record["port"])
 
 
 def command(args: argparse.Namespace) -> int:
     home = crucible_home()
     runner = ProcessRunner(sys.platform, os.environ)
     try:
-        engine = Engine(home, "sharing")
+        engine = PairedEngine(home, "sharing")
         if args.sharing_action == "enable":
             result = enable(home, runner, engine, port=args.port, adopt=args.adopt)
         elif args.sharing_action == "reconcile":
@@ -224,6 +221,9 @@ def add_parser(subparsers: Any) -> None:
     for name in ("enable", "disable", "status", "reconcile"):
         action = actions.add_parser(name)
         if name == "enable":
-            action.add_argument("--port", type=int, default=7100)
+            action.add_argument("--port", type=int, default=DEFAULT_PORT)
             action.add_argument("--adopt", action="store_true", help="take ownership of an existing matching forward")
         action.set_defaults(func=command)
+
+
+Engine = PairedEngine

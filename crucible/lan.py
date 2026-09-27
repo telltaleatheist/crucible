@@ -8,13 +8,15 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .atomicjson import write_json
 from .backend import LLAMA_WINDOWS
 from .config import crucible_home
 from .errors import CrucibleError
-from .host import landoor
-from .host.paths import ENGINE_PORT
-from .host.runner import ProcessRunner, RunResult, Runner
-from .sharing import Engine
+from .platform import landoor
+from .platform.paths import ENGINE_PORT
+from .platform.powershell import POWERSHELL, quote, runas_argv
+from .platform.runner import ProcessRunner, RunResult, Runner
+from .sharing import PairedEngine
 
 RECORD = "landoor.json"
 
@@ -53,29 +55,18 @@ class LanError(CrucibleError):
 
 def _ps_call(argv: Sequence[str]) -> str:
     program, *rest = argv
-    words = " ".join("'" + word.replace("'", "''") + "'" for word in rest)
-    return f"& '{program}' {words}".rstrip()
+    words = " ".join(quote(word) for word in rest)
+    return f"& {quote(program)} {words}".rstrip()
 
 
 def elevated_argv(commands: Sequence[Sequence[str]]) -> list[str]:
     script = "$ErrorActionPreference='Continue';" + ";".join(_ps_call(c) for c in commands)
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "Start-Process -Verb RunAs -Wait -FilePath 'powershell.exe' -ArgumentList "
-        f"'-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}'",
-    ]
+    return runas_argv([POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded])
 
 
 def _write(home: Path, data: dict[str, Any]) -> None:
-    home.mkdir(parents=True, exist_ok=True)
-    temporary = home / (RECORD + ".tmp")
-    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(home / RECORD)
+    write_json(home / RECORD, data)
 
 
 def read(home: Path) -> dict[str, Any] | None:
@@ -105,7 +96,7 @@ def _require_windows(runner: Runner) -> None:
         )
 
 
-def _refuse_a_native_engine(engine: Engine, port: int) -> None:
+def _refuse_a_native_engine(engine: PairedEngine, port: int) -> None:
     info = engine.request("GET", "info")
     host = info.get("host")
     backend = host.get("backend") if isinstance(host, dict) else None
@@ -275,7 +266,7 @@ def _ask_on_terminal(public: Sequence[landoor.NetworkInterface]) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_PORT,
+def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGINE_PORT,
            adopt: bool = False, ask_private: AskPrivate | None = None,
            say: Say | None = None) -> dict[str, Any]:
     if type(port) is not int or not 1 <= port <= 65535:
@@ -356,7 +347,7 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
     return report
 
 
-def disable(home: Path, runner: Runner, engine: Engine, *,
+def disable(home: Path, runner: Runner, engine: PairedEngine, *,
             say: Say | None = None) -> dict[str, Any]:
     record = read(home)
     if record is None:
@@ -390,7 +381,7 @@ def disable(home: Path, runner: Runner, engine: Engine, *,
     return {"state": "disabled"}
 
 
-def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
+def status(home: Path, runner: Runner, engine: PairedEngine) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled", "remote_reachability": "not_tested"}
@@ -435,12 +426,12 @@ def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
 
 
 def reconcile(home: Path, runner: Runner | None = None, *,
-              engine: Engine | None = None) -> dict[str, Any]:
+              engine: PairedEngine | None = None) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled"}
     runner = ProcessRunner(sys.platform, os.environ) if runner is None else runner
-    engine = Engine(home, "lan") if engine is None else engine
+    engine = PairedEngine(home, "lan") if engine is None else engine
     return enable(home, runner, engine, port=record["port"], adopt=True)
 
 
@@ -455,7 +446,7 @@ def command(args: argparse.Namespace) -> int:
         if args.lan_action == "explain":
             print(landoor.ELEVATION_SENTENCE)
             return 0
-        engine = Engine(home, "lan")
+        engine = PairedEngine(home, "lan")
         if args.lan_action == "enable":
             if args.make_private:
                 ask: AskPrivate | None = lambda _public: True

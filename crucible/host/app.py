@@ -4,7 +4,6 @@ import os
 import sys
 import threading
 import time
-import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -12,32 +11,43 @@ from typing import Any, Callable
 from .. import API_VERSION, VERSION
 from .. import peer as peer_module
 from ..pairing import parse_pairing_line
-from ..processlock import alive
-from . import door as door_module
-from . import installer, menu, outcome, portholder, startup, wslstate
-from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
-from .door import OrchestratorDoor, serve
-from .errors import HostError
-from .log import HostLog
-from .menu import Distro, Engine, Owner
-from .paths import (
+from ..platform import portholder, startup
+from ..platform.hostconfig import (
+    CONSENT_KEY,
+    CONSENT_TABLE,
+    WSL_KEY,
+    WSL_NEVER,
+    ConfigUnreadable,
+    consented_distro,
+    declined_wsl,
+    read_token,
+    server_name_and_token,
+)
+from ..platform.paths import (
     CONSOLE_CMD,
     DOOR_PORT,
     ENGINE_PORT,
+    HOST_DOOR_ENV,
     INSTALL_ONE_LINER,
     console_cmd_path,
-    crucible_root,
     door_url,
     engine_url,
     host_pack_dir,
     log_path,
     previous_log_path,
 )
+from ..platform.runner import ProcessRunner, Runner
+from ..processlock import alive
+from ..wsl import CRUCIBLE_DISTRO
+from . import door as door_module
+from . import installer, outcome, wslstate
 from . import presence as presence_module
+from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
+from .door import OrchestratorDoor, serve
+from .errors import HostError
+from .log import HostLog
 from .presence import Presence, PresenceWatcher
-from .runner import ProcessRunner, Runner
-from ..tasks import HOST_DOOR_ENV
-from .wsl_states import CRUCIBLE_DISTRO
+from .state import Distro, Engine, EngineDecision, Owner
 
 LOCK_NAME = "host.pid"
 
@@ -73,12 +83,6 @@ def orchestrator_name() -> str:
 
 
 ORCHESTRATOR_GPU = {"vendor": "none", "name": "", "vram_bytes": 0}
-"""What an accelerator block says about a process that plays nothing.
-
-Not omitted and not null: a client reading `host.gpu.vram_bytes` must get a
-number, and the true number is zero. PHASE17 1: "what accelerator does the
-thing that plays nothing have" has exactly one honest answer.
-"""
 
 OWNER_ON_THE_WIRE = {
     Owner.WSL_UNIT: peer_module.OWNER_WSL_UNIT,
@@ -130,97 +134,6 @@ def engine_token_detail(context: "HostContext") -> str:
     )
 
 
-def read_token(home: Path) -> str | None:
-    import tomllib
-
-    path = Path(home) / "config.toml"
-    if not path.is_file():
-        return None
-    try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
-    auth = document.get("auth")
-    if not isinstance(auth, dict):
-        return None
-    token = auth.get("token")
-    return token if isinstance(token, str) and token else None
-
-
-CONSENT_TABLE = "orchestrator"
-CONSENT_KEY = "distro"
-
-WSL_KEY = "wsl"
-WSL_NEVER = "never"
-
-
-def declined_wsl(home: Path) -> bool:
-    import tomllib
-
-    path = Path(home) / "config.toml"
-    if not path.is_file():
-        return False
-    try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise HostError(
-            "orchestrator_wsl_invalid",
-            f"{path} could not be read as TOML ({exc}), so whether this machine "
-            "declined the Linux engine cannot be known. Nothing is moved until "
-            "the file parses.",
-        ) from exc
-    table = document.get(CONSENT_TABLE)
-    if table is None or not isinstance(table, dict) or WSL_KEY not in table:
-        return False
-    value = table[WSL_KEY]
-    if value != WSL_NEVER:
-        raise HostError(
-            "orchestrator_wsl_invalid",
-            f"{CONSENT_TABLE}.{WSL_KEY} in {path} is {value!r}. The one value "
-            f'this key takes is "{WSL_NEVER}", which keeps this machine on its '
-            "native Windows engine; remove the key to let Crucible install the "
-            "Linux one.",
-        )
-    return True
-
-
-def consented_distro(home: Path) -> str | None:
-    import tomllib
-
-    path = Path(home) / "config.toml"
-    if not path.is_file():
-        return None
-    try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise HostError(
-            "orchestrator_distro_invalid",
-            f"{path} could not be read as TOML ({exc}), so whether this "
-            "orchestrator was given a distro to manage cannot be known. It "
-            "manages none until the file parses.",
-        ) from exc
-    table = document.get(CONSENT_TABLE)
-    if table is None:
-        return None
-    if not isinstance(table, dict):
-        raise HostError(
-            "orchestrator_distro_invalid",
-            f"[{CONSENT_TABLE}] in {path} is a {type(table).__name__} and not "
-            "a table.",
-        )
-    if CONSENT_KEY not in table:
-        return None
-    name = table[CONSENT_KEY]
-    if not isinstance(name, str) or name.strip() == "":
-        raise HostError(
-            "orchestrator_distro_invalid",
-            f"{CONSENT_TABLE}.{CONSENT_KEY} in {path} is "
-            f"{name!r}; it names a WSL distribution, as `wsl -l -v` spells it "
-            '(e.g. distro = "Ubuntu").',
-        )
-    return name.strip()
-
-
 def acquire(home: Path) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     lock = home / LOCK_NAME
@@ -259,31 +172,6 @@ def init_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
     return [str(console_cmd_path(env)), "init", "--backend", "llama-windows"]
 
 
-def open_console(home: Path, log: HostLog) -> None:
-    from ..pairing import read_pairing_file
-
-    line = read_pairing_file(home)
-    if line is None:
-        log.write(
-            f"open console: there is no pairing file in {home}, so there is no "
-            "server on this machine to open yet"
-        )
-        return
-    from urllib.parse import urlsplit
-
-    parts = urlsplit(line)
-    url = f"http://{parts.netloc.rsplit('@', 1)[-1]}/#token={parts.fragment}"
-    log.write(f"open console: {parts.netloc.rsplit('@', 1)[-1]}")
-    webbrowser.open(url)
-
-
-def open_log(log: HostLog) -> None:
-    if sys.platform == "win32":
-        os.startfile(str(log.path))
-        return
-    log.write(f"the log is {log.path}")
-
-
 def _step(name: str, index: int, total: int = 2) -> "installer.Event":
     return installer.Event("step", {"name": name, "index": index, "total": total})
 
@@ -291,7 +179,6 @@ def _step(name: str, index: int, total: int = 2) -> "installer.Event":
 class Host:
     def __init__(self, context: HostContext) -> None:
         self._c = context
-        self._icon: object | None = None
         self._stop = threading.Event()
         self._shutdown_complete = threading.Event()
         self._door_server: object | None = None
@@ -348,7 +235,6 @@ class Host:
                 _write_pairing(self._c)
                 self._claimed = False
                 self.claim()
-            self._refresh()
             return self.local_status()
 
     def local_stop(self) -> dict[str, object]:
@@ -381,7 +267,7 @@ class Host:
         info = request(engine_url("/v1/info"), token=pair.token)
         server, machine = info.get("server"), info.get("host")
         if (not isinstance(server, dict) or server.get("name") != pair.name
-                or server.get("api_version") != 1 or not isinstance(machine, dict)
+                or server.get("api_version") != API_VERSION or not isinstance(machine, dict)
                 or machine.get("backend") != "cuda-linux"):
             raise HostError("engine_move_failed", "Windows is not reaching the authenticated WSL engine with the expected API")
         was = (self._c.watcher, self._c.presence, self._paused)
@@ -407,7 +293,6 @@ class Host:
             self._claimed = False
             watcher.release()
             raise
-        self._refresh()
         from ..sharing import SharingError, reconcile
         try:
             reconcile(self._c.home, self._c.runner)
@@ -454,22 +339,21 @@ class Host:
             self._c.log.write(f"guest release: already {self._c.release}")
         else:
             self._c.log.write(f"guest release: carried the guest to {carried}")
-            self._refresh()
 
 
-    def decide_engine(self) -> str:
+    def decide_engine(self) -> EngineDecision:
         owner = self._c.presence.owner
         if owner is Owner.FOUND:
             self._c.log.write(
                 "engine: this machine's engine is one this orchestrator did not "
                 "start (owner=found), so nothing is moved (PHASE17 4.1a)"
             )
-            return "found"
+            return EngineDecision.FOUND
         try:
             declined = declined_wsl(self._c.home)
         except HostError as exc:
             self._c.log.write(f"engine: {exc.code}: {exc.message}")
-            return "unreadable"
+            return EngineDecision.UNREADABLE
         previous = outcome.read_or_quarantine(self._c.home, self._c.log.write)
         if declined:
             if previous is None or previous.state != outcome.DECLINED:
@@ -483,7 +367,7 @@ class Host:
                 'engine: this machine declined the Linux engine '
                 f'([{CONSENT_TABLE}] {WSL_KEY} = "{WSL_NEVER}"); it stays native'
             )
-            return outcome.DECLINED
+            return EngineDecision.DECLINED
         if (
             previous is not None
             and previous.state == outcome.CANNOT
@@ -493,14 +377,14 @@ class Host:
                 live = wslstate.probe_live(self._c.runner)
             except Exception as exc:
                 self._c.log.write(f"engine: the WSL re-check crashed: {type(exc).__name__}: {exc}")
-                return outcome.CANNOT
+                return EngineDecision.CANNOT
             self._c.log.write(
                 f"engine: {previous.code} was recorded {previous.at}; checked again "
                 f"at this start: {live.line()}"
             )
             if live.live:
                 return self._move("resumed: WSL is live now")
-            return outcome.CANNOT
+            return EngineDecision.CANNOT
         if (
             previous is not None
             and previous.state == outcome.CANNOT
@@ -510,21 +394,21 @@ class Host:
                 live = wslstate.probe_live(self._c.runner)
             except Exception as exc:
                 self._c.log.write(f"engine: the virtualization re-check crashed: {type(exc).__name__}: {exc}")
-                return outcome.CANNOT
+                return EngineDecision.CANNOT
             self._c.log.write(
                 f"engine: {previous.code} was recorded {previous.at}; checked again "
                 f"at this start: {live.line()}"
             )
             if live.answer.kind != "no_hypervisor":
                 return self._move("resumed: virtualization is on now")
-            return outcome.CANNOT
+            return EngineDecision.CANNOT
         if previous is not None and previous.state == outcome.CANNOT:
             self._c.log.write(
                 f"engine: this machine cannot run the Linux engine "
                 f"({previous.code}), recorded {previous.at}. Nothing is retried "
                 "on its own; the apps offer Try again (2.5)"
             )
-            return outcome.CANNOT
+            return EngineDecision.CANNOT
         if (
             previous is not None
             and previous.state == outcome.FAILED
@@ -535,7 +419,7 @@ class Host:
                 f"({previous.code}); it stays failed until somebody presses Try "
                 "again (2.2)"
             )
-            return outcome.FAILED
+            return EngineDecision.FAILED
         if previous is not None and previous.state == outcome.DONE:
             self._c.log.write(
                 f"engine: the last move finished at {previous.at} and this "
@@ -544,7 +428,7 @@ class Host:
             )
         return self._move("resumed" if previous is not None and previous.state == outcome.REBOOT_PENDING else "started")
 
-    def _move(self, why: str) -> str:
+    def _move(self, why: str) -> EngineDecision:
         door = self._install_door
         if door is None:
             self._c.log.write(
@@ -552,26 +436,25 @@ class Host:
                 "move runs under the door's claim so that a POST /install can "
                 "be refused and attached rather than queued"
             )
-            return "no_door"
+            return EngineDecision.NO_DOOR
         if not door.claim():
             self._c.log.write(
                 "engine: a move is already running on this machine; this one is "
                 "not a second walk over the same distro"
             )
-            return "already_running"
+            return EngineDecision.ALREADY_RUNNING
         self._c.log.write(f"engine: the move is {why}")
         try:
             door.run_recorded()
         except HostError as exc:
             self._c.log.write(f"engine: {exc.code}: {exc.message}")
-            return outcome.classify(exc.code)
+            return EngineDecision.of(outcome.classify(exc.code))
         except Exception as exc:
             self._c.log.write(f"engine: the move crashed: {type(exc).__name__}: {exc}")
-            return outcome.FAILED
+            return EngineDecision.FAILED
         finally:
             door.release()
-            self._refresh()
-        return outcome.DONE
+        return EngineDecision.DONE
 
     def stopped_windows_catalog(self) -> CatalogPort:
         from ..backend import detect_backend
@@ -838,14 +721,12 @@ class Host:
                 "a restart did not bring it back",
                 owner,
             )
-            self._refresh()
             return
         self._c.presence = Presence(
             self._c.presence.distro, Engine.RUNNING, "restarted", owner
         )
         self._claimed = False
         self.claim()
-        self._refresh()
         emit(installer.Event("done", {"engine": engine_url()}))
 
     def _respawn_child(self) -> bool:
@@ -854,55 +735,6 @@ class Host:
         self._c.watcher.respawn_host_mode(server_argv(env), server_environment(env))
         return self._c.watcher._wait_for_ping(HOST_CHILD_START_WAIT_SECONDS)
 
-
-    def model(self) -> menu.MenuModel:
-        recorded = outcome.read_or_quarantine(self._c.home, self._c.log.write)
-        return menu.menu_model(
-            self._c.presence.distro,
-            self._c.presence.engine,
-            self._c.presence.owner,
-            None if recorded is None else recorded.state,
-        )
-
-    def try_again(self) -> None:
-        threading.Thread(
-            target=self._move, args=("tried again from the tray menu",),
-            name="crucible-try-again", daemon=True,
-        ).start()
-
-    def on_click(self, item_id: str) -> None:
-        self._c.log.write(f"menu: {item_id}")
-        if item_id == menu.OPEN_CONSOLE:
-            open_console(self._c.home, self._c.log)
-        elif item_id == menu.INSTALL_ENGINE:
-            open_console(self._c.home, self._c.log)
-        elif item_id == menu.TRY_AGAIN:
-            self.try_again()
-        elif item_id == menu.RESTART_ENGINE:
-            if self._refuse_acting_on_a_found_engine("restart"):
-                return
-            self.restart_engine(
-                lambda event: self._c.log.write(f"restart {event.event}: {event.data}")
-            )
-            self._hold()
-        elif item_id == menu.STOP_ENGINE:
-            if self._refuse_acting_on_a_found_engine("stop"):
-                return
-            self.local_stop()
-        elif item_id == menu.OPEN_LOG:
-            open_log(self._c.log)
-        elif item_id == menu.QUIT:
-            self.quit()
-        self._refresh()
-
-    def _refuse_acting_on_a_found_engine(self, verb: str) -> bool:
-        if self._c.presence.owner is not Owner.FOUND:
-            return False
-        self._c.log.write(
-            f"menu: refusing to {verb} an engine this host did not start "
-            "(owner=found)"
-        )
-        return True
 
     def _stop_engine(self) -> None:
         if self._c.presence.distro is Distro.PRESENT:
@@ -935,14 +767,6 @@ class Host:
             self._c.presence.owner,
         )
 
-    def _refresh(self) -> None:
-        if self._icon is None:
-            return
-        from . import tray
-
-        tray.update(self._icon, self.model(), self.on_click)
-
-
     def watch(self) -> None:
         while not self._stop.wait(self._c.watcher.watch_s):
             with self._operation:
@@ -968,7 +792,6 @@ class Host:
                         if self._c.presence.engine is Engine.RUNNING:
                             self._claimed = False
                             self.claim()
-                        self._refresh()
                 self._presence_settled.set()
 
     def quit(self, *, handover: bool = False) -> None:
@@ -992,13 +815,10 @@ class Host:
         if owner is Owner.HOST_CHILD:
             self._c.watcher.stop_child()
         self._shutdown_complete.set()
-        if self._icon is None:
-            self._c.log.write("quit: shutdown complete; controller loop signalled")
-            return
-        self._icon.stop()
+        self._c.log.write("quit: shutdown complete; controller loop signalled")
 
 
-def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
+def run(argv: list[str] | None = None, *, headless: bool = True) -> int:
     env = os.environ
     from ..config import crucible_home
     home = crucible_home()
@@ -1055,7 +875,7 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     host._install_door = door
     try:
         host._door_server = serve(door)
-        log.write("door: listening on 127.0.0.1:7101")
+        log.write(f"door: listening on {door_url()}")
     except OSError as exc:
         held = portholder.held_sentence(DOOR_PORT)
         log.write(f"door: NOT listening ({exc}); {held}; shutting down this controller's owned child")
@@ -1074,18 +894,10 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
         name="crucible-guest-release",
         daemon=True,
     ).start()
-    if headless:
-        host._shutdown_complete.wait()
-        if host._door_server is not None:
-            host._door_server.shutdown()
-            host._door_server.server_close()
-        return 0
-
-    from . import tray
-
-    icon = tray.make_icon(host.model(), host.on_click)
-    host._icon = icon
-    icon.run()
+    host._shutdown_complete.wait()
+    if host._door_server is not None:
+        host._door_server.shutdown()
+        host._door_server.server_close()
     return 0
 
 
@@ -1228,22 +1040,15 @@ def _guest_line(context: HostContext) -> str | None:
 def _host_mode_line(context: HostContext) -> str | None:
     from ..pairing import pairing_line
 
-    import tomllib
-
-    path = context.home / "config.toml"
-    if not path.is_file():
+    if not (context.home / "config.toml").is_file():
         context.log.write("pairing: no config yet, so no pairing file")
         return None
     try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-        return pairing_line(
-            document["server"]["name"],
-            engine_url(),
-            document["auth"]["token"],
-        )
-    except (OSError, KeyError, tomllib.TOMLDecodeError) as exc:
-        context.log.write(f"pairing: {path} could not be read ({exc})")
+        name, token = server_name_and_token(context.home)
+    except ConfigUnreadable as exc:
+        context.log.write(f"pairing: {exc}")
         return None
+    return pairing_line(name, engine_url(), token)
 
 
 def _write_pairing(context: HostContext) -> None:
