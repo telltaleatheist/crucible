@@ -1,10 +1,3 @@
-"""Model manifests: the three this build ships, and what the loader refuses.
-
-Strict validation is the point (PHASE2-LLM.md section 1). A manifest with a typo
-in `memory_bytes_estimate` must not load with no estimate and let the guard wave a
-27B onto a 24 GB card, so every one of these refusals is asserted by name.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -46,9 +39,6 @@ def parse(text: str, name: str = "demo-1b"):
     return parse_manifest(text, Path(f"{name}.toml"), name)
 
 
-# ------------------------------------------------------------ what it accepts
-
-
 def test_a_complete_manifest_parses() -> None:
     manifest = parse(GOOD)
     assert manifest.id == "demo-1b"
@@ -69,17 +59,10 @@ def test_a_backend_without_its_own_context_serves_the_models() -> None:
 
 
 def test_a_backend_may_carry_its_own_context() -> None:
-    """What the model is FOR and what an accelerator has room for can differ.
-
-    `qwen3.8-27b-4bit` is the live case: 98304 on 64 GB of unified memory, less
-    on a 24 GB card once 18.6 GB of weights are down.
-    """
     manifest = parse(GOOD + "context_default = 1024\n")
     assert manifest.context_default == 4096
     assert manifest.spec("cuda-linux").context_default == 1024
     assert manifest.context_for("cuda-linux") == 1024
-    # A backend this manifest does not declare falls back to the model's number
-    # rather than raising: the caller asked what context that host would serve.
     assert manifest.context_for("mlx-darwin") == 4096
 
 
@@ -95,12 +78,7 @@ def test_a_backend_context_must_be_an_int() -> None:
     assert "context_default must be int, got str" in str(caught.value)
 
 
-# ---------------------------------------------------------- max_context
-
-
 def test_a_block_without_max_context_is_capped_at_its_own_default() -> None:
-    """No `max_context` means the ceiling every block had before the key:
-    its served context. Never an invented larger one."""
     manifest = parse(GOOD)
     assert manifest.spec("cuda-linux").max_context is None
     assert manifest.max_context_for("cuda-linux") == 4096
@@ -112,7 +90,6 @@ def test_a_block_may_state_its_max_context() -> None:
     manifest = parse(GOOD + "max_context = 32768\n")
     assert manifest.spec("cuda-linux").max_context == 32768
     assert manifest.max_context_for("cuda-linux") == 32768
-    # The default a load that states nothing gets does not move.
     assert manifest.context_for("cuda-linux") == 4096
     assert manifest.spec("cuda-linux").to_dict()["max_context"] == 32768
 
@@ -136,14 +113,11 @@ def test_an_invalid_max_context_is_refused_by_name(line: str, said: str) -> None
 
 
 def test_max_context_is_held_to_the_blocks_own_default_not_the_models() -> None:
-    """A block that serves 1024 may state a maximum below the MODEL's 4096."""
     manifest = parse(GOOD + "context_default = 1024\nmax_context = 2048\n")
     assert manifest.max_context_for("cuda-linux") == 2048
 
 
 def test_the_shipped_maxima_are_the_computed_ones() -> None:
-    """Each number is COMPUTED in its manifest (2026-09-23, load test owed);
-    this pins them so a change to one is a change somebody meant."""
     found = {
         (m.id, kind): m.max_context_for(kind)
         for m in load_all_manifests().values()
@@ -155,16 +129,12 @@ def test_the_shipped_maxima_are_the_computed_ones() -> None:
     assert found[("qwen3.8-27b-4bit", "mlx-darwin")] == 131072
     assert found[("qwen3.5-9b", "mlx-darwin")] == 131072
     assert found[("qwen3.8-27b-4bit", "llama-windows")] == 65536
-    # No maximum above the default where there are no terms to compute from.
     assert found[("qwen3.5-9b-vl", "cuda-linux")] == 16384
     assert found[("qwen3.8-27b-4bit-vl", "cuda-linux")] == 16384
     assert found[("dots-ocr", "cuda-linux")] == 32768
 
 
 def test_the_8bit_mac_terms_count_kv_once() -> None:
-    """The overhead inherited from the 4-bit's Mac run contained that run's KV
-    (98_220 x 65_536); the terms now carry the residual alone, and add back up
-    to the estimate at the block's own 12288."""
     terms = load_manifest("qwen3.8-27b-8bit").spec("mlx-darwin").memory
     assert terms.overhead_bytes == 17_818_943_521 - 98_220 * 65_536 == 11_381_997_601
     assert terms.bytes_for(context=12288, concurrency=1) == (
@@ -185,9 +155,6 @@ def test_an_unsupported_backend_is_named_not_guessed() -> None:
         manifest.spec("mlx-darwin")
     assert "no mlx-darwin block" in str(caught.value)
     assert "cuda-linux" in str(caught.value)
-
-
-# ------------------------------------------------------------ what it refuses
 
 
 def test_an_unknown_key_in_model_is_refused() -> None:
@@ -321,71 +288,23 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
     assert "['demo-1b']" in str(caught.value)
 
 
-# ------------------------------------------------------- the shipped manifests
-
-
-#: Every manifest this build ships, in the order `load_all_manifests` returns
-#: them — which is id order, and the order `/v1/models` lists them in. The 4-bit
-#: 27B sorts after the bf16 one because its id extends it.
-# SORTED, because the assertion is against `sorted(manifests)`. The 2026-09-17
-# rename put `-8bit` where the bare `qwen3.8-27b` sat, which is BEFORE `-4bit`
-# in the old ordering and after it in the real one ('4' < '8').
-# The two small tiers joined on 2026-09-23 for the decision door
-# (PHASE22-DECIDE.md section 2.9); they sort before the 9B ('0' < '4' < '9').
-# The 2B joined them on 2026-09-24 (Owen: "27b, 9b, 4b, all the way down to
-# 0.8b"), between the two ('0' < '2' < '4').
 SHIPPED = [
     "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
     "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
-# The vision forms (PHASE22 section 2.9), aliases that share their base's
-# download. Kept apart so every list above still says what it always said.
-# TWO since 2026-09-23: `qwen3.8-27b-8bit-vl` was served on cuda-linux alone,
-# and went with the 8-bit's cuda-linux arm (Owen: *"we shouldnt have an 8 bit
-# 27b on here. waste of space, wont fit in the gpu"*).
 ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl"]
 
-#: Each model's `context_default`. The two bf16 manifests carry Owen's pinned
-#: cleanup context; the 4-bit 27B carries the 98304 of his `qwen3.8:27b-24g`
-#: Ollama tag, which is the context he actually runs on the 3090 Ti; `dots-ocr`
-#: carries the 32768 a rasterised page needs (PHASE3-VLM.md section 4).
 CONTEXTS = {
     "dots-ocr": 32768,
-    # 16384 SINCE 2026-09-15, and 12288 had no claimant left. It reached the file
-    # as BookForge's `numCtxMaxForModel` 32B tier ("tuned for 32B Q4_K_M")
-    # landing on a 9B — the right function's wrong tier. cuda-linux and
-    # mlx-darwin were each moved first, leaving 12288 standing as
-    # "llama-windows's number alone"; that did not survive either, because the
-    # `<=15B` tier's premise is "Q4_K_M weights are <= ~9.5 GiB" and the Q8_0
-    # GGUF that block names is 9.53 GB. So the number moved to [model] and both
-    # overrides were deleted — see BACKEND_CONTEXTS, which no longer names it.
     "qwen3.5-9b": 16384,
-    # The 9B's argument for the 4B (the same `<=15B` client tier); the
-    # 0.8B's own 8192, the context it was measured serving decisions at.
     "qwen3.5-4b": 16384,
-    # The 4B's argument again (2026-09-24): nobody has served the 2B, so the
-    # 0.8B's measured 8192 has no record here to carry.
     "qwen3.5-2b": 16384,
     "qwen3.5-0.8b": 8192,
     "qwen3.8-27b-8bit": 12288,
     "qwen3.8-27b-4bit": 98304,
 }
 
-#: Which backends each shipped manifest declares. The three text models are
-#: served on both; `dots-ocr` has a cuda-linux block only, because Foundry's
-#: in-process `mlx-local` route is the Mac's only page-reading route today and a
-#: block here carrying an unmeasured estimate would compete with a route that
-#: works (PHASE3-VLM.md section 4).
 BACKENDS = {
-    # `llama-windows` (PHASE15-HOST.md 3.10) on the three whose GGUF is
-    # published. `qwen3.8-27b-8bit` has none and gets no row: its FP8 weights
-    # are 28.75 GiB before any cache, which is not a thing a 24 GB Windows box
-    # runs, and a row with nothing truthful in it is worse than no row.
-    # The same reason took its cuda-linux block on 2026-09-23 — Owen: *"we
-    # shouldnt have an 8 bit 27b on here. waste of space, wont fit in the
-    # gpu"* — so it is the Mac's alone ("put 8 bit on the Mac. 4 bit for pc").
-    # `mlx-darwin` on dots-ocr since 2026-09-21: Crucible's own page server
-    # (crucible/engines/mlx_vlm_serve.py) runs it in process.
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
@@ -395,23 +314,10 @@ BACKENDS = {
     "qwen3.8-27b-4bit": ["cuda-linux", "llama-windows", "mlx-darwin"],
 }
 
-#: Where a backend serves a context of its own. `qwen3.8-27b-4bit` wants 98304
-#: and gets it on the Mac; on a 24 GB card 98304 of its KV is 7.9 GiB that is not
-#: there, MEASURED 2026-09-12, so its cuda-linux block carries 16384.
 BACKEND_CONTEXTS = {
     ("qwen3.8-27b-4bit", "cuda-linux"): 16384,
-    # AND ON WINDOWS, for a different reason that lands on the same number: the
-    # llama-windows block was INHERITING 98304, which is a fact about the Mac's
-    # unified memory and was never argued for a 24 GB card (crucible e49871d).
     ("qwen3.8-27b-4bit", "llama-windows"): 16384,
-    # `-c 16384` is Foundry's launcher verbatim: a page at 200 dpi is up to
-    # ~8k image tokens plus the answer (PHASE15-HOST.md 3.10, fact 3).
     ("dots-ocr", "llama-windows"): 16384,
-    # `qwen3.5-9b` USED TO BE HERE, on cuda-linux, and is deliberately not any
-    # more: all three of its backends now inherit one 16384 from [model]. An
-    # override that merely restates the inherited value is a second place to
-    # change a number, which is how 12288 came to mean two different things on
-    # two backends in the first place. See CONTEXTS above.
 }
 
 
@@ -421,7 +327,6 @@ def test_this_build_ships_the_manifests_the_contracts_name() -> None:
 
 
 def test_the_ids_sort_the_way_the_listing_shows_them() -> None:
-    """`qwen3.8-27b-4bit` sits after `qwen3.8-27b-8bit`, not before it."""
     assert sorted(SHIPPED) == SHIPPED
     assert list(load_all_manifests()) == sorted(SHIPPED + ALIASES)
 
@@ -429,13 +334,6 @@ def test_the_ids_sort_the_way_the_listing_shows_them() -> None:
 def test_an_id_that_is_a_prefix_of_another_still_lists_in_id_order(
     tmp_path: Path,
 ) -> None:
-    """The order is the ids', not the filenames'.
-
-    As whole paths `demo-1b-4bit.toml` sorts BEFORE `demo-1b.toml` — '-' is 0x2D
-    and '.' is 0x2E — while as ids `demo-1b` comes first. `load_all_manifests`
-    documents id order and `/v1/models` lists in exactly this order, so the
-    difference is not cosmetic.
-    """
     (tmp_path / "demo-1b.toml").write_text(GOOD, encoding="utf-8")
     (tmp_path / "demo-1b-4bit.toml").write_text(
         GOOD.replace('id = "demo-1b"', 'id = "demo-1b-4bit"'), encoding="utf-8"
@@ -452,7 +350,6 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
     assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
-        # From what the BLOCK serves (PHASE22 section 2.9), not the weights.
         assert spec.engine == engine_for(kind, spec.serves)
         assert len(spec.revision) == 40
         expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])
@@ -461,15 +358,6 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
 
 
 def test_the_engine_table_is_one_per_backend_and_family() -> None:
-    """The change of 2026-09-14, and what did NOT change with it.
-
-    `cuda-linux` maps both families to vLLM, which is why "one engine per
-    backend" was true by accident for a year. `mlx-darwin` cannot: mlx-lm is a
-    text server and cannot be handed an image. `llama-windows` maps both to
-    `llama-server`, and that is a fact rather than a slot left unfilled —
-    llama.cpp serves a text GGUF and a vision GGUF pair from the same binary,
-    with `--mmproj` as the whole difference.
-    """
     assert BACKEND_ENGINES == {
         "cuda-linux": {"text": "vllm", "pages": "vllm"},
         "mlx-darwin": {"text": "mlx-lm", "pages": "mlx-vlm"},
@@ -478,8 +366,6 @@ def test_the_engine_table_is_one_per_backend_and_family() -> None:
 
 
 def test_the_family_is_read_off_modalities_and_is_not_a_key() -> None:
-    """One owner: `qwen3.5-9b` has a vision tower and is served text-only, and
-    it says so once. A `family = "pages"` key would be the second owner."""
     assert class_family(["text"]) == "text"
     assert class_family(["text", "image"]) == "pages"
     assert load_manifest("dots-ocr").modalities == ("text", "image")
@@ -488,9 +374,6 @@ def test_the_family_is_read_off_modalities_and_is_not_a_key() -> None:
 
 
 def test_a_text_engine_named_by_a_page_model_is_refused() -> None:
-    """The refusal the new table exists to make. It names the modalities it
-    read the family from, because a reader who was told only "wrong engine"
-    would go looking in the wrong table."""
     text = GOOD.replace('modalities = ["text"]', 'modalities = ["text", "image"]')
     text = text.replace("[backends.cuda-linux]", "[backends.mlx-darwin]")
     text = text.replace('engine = "vllm"', 'engine = "mlx-lm"')
@@ -503,8 +386,6 @@ def test_a_text_engine_named_by_a_page_model_is_refused() -> None:
 
 
 def test_a_page_engine_named_by_a_text_model_is_refused_too() -> None:
-    """The mirror, which is the half that keeps `mlx-vlm` from quietly becoming
-    the Mac's text server."""
     text = GOOD.replace("[backends.cuda-linux]", "[backends.mlx-darwin]")
     text = text.replace('engine = "vllm"', 'engine = "mlx-vlm"')
     with pytest.raises(ManifestError) as caught:
@@ -514,10 +395,6 @@ def test_a_page_engine_named_by_a_text_model_is_refused_too() -> None:
 
 
 def test_the_8bit_27b_is_not_offered_on_cuda_linux_or_windows() -> None:
-    """Owen, 2026-09-23: *"we shouldnt have an 8 bit 27b on here. waste of
-    space, wont fit in the gpu"*. Its FP8 weights alone are 28.75 GiB, more
-    than the whole 24 GiB card, so a cuda-linux block could only ever be
-    downloaded and then refused. It is not refused on the PC; it is absent."""
     manifest = load_manifest("qwen3.8-27b-8bit")
     assert sorted(manifest.backends) == ["mlx-darwin"]
     assert not manifest.supports("cuda-linux")
@@ -533,13 +410,6 @@ def test_the_9b_does_fit_a_24_gib_card() -> None:
 
 
 def test_the_4bit_27b_fits_a_24_gib_card_and_the_8bit_one_is_mac_only() -> None:
-    """The whole reason the 4-bit manifest exists, as arithmetic.
-
-    Same model, same family, same params_b; the only difference is the weights
-    each backend block points at. The 4-bit fits Owen's card and is offered
-    there; the 8-bit is offered on the Mac alone — *"put 8 bit on the Mac. 4
-    bit for pc."*
-    """
     small = load_manifest("qwen3.8-27b-4bit")
     big = load_manifest("qwen3.8-27b-8bit")
     assert small.family == big.family == "qwen3.8"
@@ -550,7 +420,6 @@ def test_the_4bit_27b_fits_a_24_gib_card_and_the_8bit_one_is_mac_only() -> None:
 
 
 def test_the_4bit_27b_does_not_force_a_dtype() -> None:
-    """W4A16 carries its own weight dtype; `--dtype bfloat16` would override it."""
     args = load_manifest("qwen3.8-27b-4bit").spec("cuda-linux").engine_args
     assert "--dtype" not in args
     assert args == (
@@ -561,33 +430,7 @@ def test_the_4bit_27b_does_not_force_a_dtype() -> None:
     )
 
 
-# ------------------------------------------- the text lane never loads a tower
-#
-# BOTH TEXT MODELS THIS BUILD CAN ACTUALLY SERVE ON A 24 GiB CARD ARE MULTIMODAL
-# CHECKPOINTS, and the `llm` lane sends them nothing but text. Without
-# `--language-model-only` vLLM reads the vision tower onto the card anyway and
-# holds it for the life of the engine: 912_020_960 B on the 9B and 921_460_192 B
-# on the 4-bit 27B, summed from each backend's own pinned safetensors headers on
-# 2026-09-15.
-#
-# This is BookForge's configuration, not a new idea — `electron/scripts/vllm/
-# serve_text_vllm.sh` has served the same 9B with `--limit-mm-per-prompt
-# '{"image":0,"video":0}'` since 2026-09-08, and its header says the intent out
-# loud. The handover carried the PROFILING flag and lost the LOADING one; these
-# tests are what stop it being lost again.
-#
-# `--skip-mm-profiling` is asserted beside it deliberately. The two are not the
-# same flag: one stops vLLM RESERVING for an image, the other stops it READING
-# the tower, and the manifests carry a measured reason for each.
-
-
 def test_the_text_models_are_served_language_model_only() -> None:
-    """A lane that sends only text does not pay for a vision tower.
-
-    Pinned per model rather than looped over every manifest. (The 8-bit 27B
-    once had a cuda-linux block that carried neither flag; it has no
-    cuda-linux block at all since 2026-09-23, Mac only by Owen's ruling.)
-    """
     for model_id in ("qwen3.5-9b", "qwen3.8-27b-4bit"):
         args = load_manifest(model_id).spec("cuda-linux").engine_args
         assert "--language-model-only" in args, model_id
@@ -595,13 +438,6 @@ def test_the_text_models_are_served_language_model_only() -> None:
 
 
 def test_the_page_reader_is_never_language_model_only() -> None:
-    """The one model that IS shown an image must keep its tower.
-
-    The same flag that is right for the text lane is catastrophic here and would
-    not error: dots.ocr would load without a vision tower and answer about a page
-    it was never shown. `modalities` naming `image` is the fact that makes it
-    wrong, so that is what this asserts against.
-    """
     manifest = load_manifest("dots-ocr")
     assert "image" in manifest.modalities
     assert "--language-model-only" not in manifest.spec("cuda-linux").engine_args
@@ -612,16 +448,6 @@ def test_the_manifests_directory_is_beside_the_package() -> None:
     assert (manifests_dir() / "qwen3.5-9b.toml").is_file()
 
 
-# ------------------------------------------------------------ the local form
-#
-# `[local]` is what a model is on a machine with NO Crucible — Foundry's Ollama
-# / llama.cpp fallback — and Owen ruled (2026-09-13) that these manifests are the
-# catalog of record for that lineup too. It is held to the same strictness as
-# every other table, for the same reason: the row it feeds lights a tile on a
-# screen, and a typo that loaded as "no memory figure" would light it on a card
-# that cannot hold the model.
-
-#: GOOD with the two display facts a `[local]` table requires.
 NAMED = GOOD.replace(
     'modalities = ["text"]',
     'modalities = ["text"]\ndisplay = "Demo 1B"\ndescription = "A fixture."',
@@ -636,7 +462,6 @@ needs_bytes = 2500000000
 needs_basis = "declared"
 """
 
-#: A page reader: `image` in modalities, and a projector beside the file.
 GGUF = NAMED.replace('modalities = ["text"]', 'modalities = ["text", "image"]') + """
 [local]
 kind = "gguf"
@@ -705,17 +530,12 @@ def test_a_manifest_without_a_local_table_says_so() -> None:
 
 
 def test_the_display_facts_are_on_the_row_and_the_local_form_is_not() -> None:
-    """`local` is what a machine WITHOUT Crucible runs; `/v1/models` is what a
-    Crucible says about itself. Its one door is the lineup file."""
     row = parse(OLLAMA).to_dict()
     assert row["display"] == "Demo 1B"
     assert row["description"] == "A fixture."
     assert "local" not in row
     unnamed = parse(GOOD).to_dict()
     assert unnamed["display"] is None and unnamed["description"] is None
-
-
-# --------------------------------------------------- what [local] refuses
 
 
 def test_a_local_table_needs_the_display_facts() -> None:
@@ -756,7 +576,6 @@ def test_an_invented_kind_is_refused() -> None:
 
 
 def test_a_gguf_key_on_an_ollama_block_is_an_unknown_key() -> None:
-    """A half-converted block: the other kind's keys are not silently ignored."""
     with pytest.raises(ManifestError) as caught:
         parse(OLLAMA.replace('tag = "demo:1b"', 'tag = "demo:1b"\nhf_repo = "demo/x"'))
     assert "unknown key(s) ['hf_repo']" in str(caught.value)
@@ -772,9 +591,6 @@ def test_every_ollama_key_is_required(key: str) -> None:
 
 @pytest.mark.parametrize("key", ["hf_repo", "revision", "file"])
 def test_every_gguf_key_is_required(key: str) -> None:
-    # Only the [local] block loses the key: `hf_repo` and `revision` are backend
-    # keys too, and stripping those would make the backend table refuse first.
-    # The fixture appends [local] after the backend block, so it is the tail.
     head, local = GGUF.split("[local]")
     kept = [line for line in local.splitlines() if not line.startswith(f"{key} ")]
     with pytest.raises(ManifestError) as caught:
@@ -804,8 +620,6 @@ def test_a_gguf_repo_must_be_owner_slash_name() -> None:
 
 
 def test_a_page_reader_without_a_projector_is_refused() -> None:
-    """llama-server without `--mmproj` loads, answers /v1/models, and refuses
-    every page — a broken page rather than a missing file. Refused at the file."""
     with pytest.raises(ManifestError) as caught:
         parse(GGUF.replace('mmproj = "mmproj-demo-1b-f16.gguf"\n', ""))
     assert "declares 'image' and this block has no mmproj" in str(caught.value)
@@ -838,7 +652,6 @@ def test_a_zero_download_is_refused() -> None:
 
 
 def test_needs_less_than_the_weights_is_refused() -> None:
-    """A model cannot run in less memory than its weights occupy."""
     with pytest.raises(ManifestError) as caught:
         parse(OLLAMA.replace("needs_bytes = 2500000000", "needs_bytes = 900000000"))
     assert "needs_bytes (900000000) is less than download_bytes (1000000000)" in (
@@ -889,18 +702,12 @@ def test_minimum_for_may_not_repeat_a_class() -> None:
 
 def test_a_local_table_that_is_not_a_table_is_refused() -> None:
     with pytest.raises(ManifestError) as caught:
-        # At the top, before any table, or TOML files it under [backends.cuda-linux].
         parse('local = "ollama"\n' + NAMED)
     assert "[local]: must be a table" in str(caught.value)
 
 
-# ---------------------------------------------- the shipped local forms
-
-#: The three Foundry runs locally, and the one it cannot (no Ollama tag or GGUF
-#: for a bf16 27B on a machine without Crucible).
 LOCAL_KINDS_SHIPPED = {
     "dots-ocr": "gguf",
-    # The decision tiers (2026-09-23), bf16 tags like the 9B's.
     "qwen3.5-0.8b": "ollama",
     "qwen3.5-2b": "ollama",
     "qwen3.5-4b": "ollama",
@@ -922,9 +729,6 @@ def test_each_shipped_local_form_is_declared_and_named(model_id: str) -> None:
     assert manifest.display and manifest.description
     local = manifest.local
     assert local is not None
-    # DECLARED, every one: the numbers are downloads plus Foundry's 1.5 GB
-    # overhead, and none has been watched on a card. The basis travels to the
-    # screen so a picker can err on the side it wants.
     assert local.needs_basis == "declared"
     assert local.needs_bytes == local.download_bytes + 1_500_000_000
 
@@ -934,31 +738,12 @@ def test_the_cleanup_model_is_the_bf16_tag_the_clean_text_ruling_names() -> None
     assert isinstance(local, OllamaLocal)
     assert local.tag == "qwen3.5:9b-bf16"
     assert local.download_bytes == 19_321_189_044
-    # THE FLOOR SINCE 2026-09-16, moved here from the 27B. Owen reversed his own
-    # ruling of 2026-09-13: "they cant pick smaller than 9b… i think 9b could do
-    # an ok job at translation." `qwen3.8-27b-4bit.toml` had carried a written
-    # RULING OWED asking for exactly this call since 2026-09-14.
     assert local.minimum_for == ("translate", "simplify")
 
 
 def test_the_27b_no_longer_floors_anything() -> None:
-    """The reversal, seen from the row that used to carry the floor.
-
-    It is still the model a card that can hold it should PREFER — the capability
-    walk picks it first by declared size — and it is no longer the smallest thing
-    that lights a translate tile.
-    """
     local = load_manifest("qwen3.8-27b-4bit").local
     assert isinstance(local, OllamaLocal)
-    # The PUBLISHED parent, not Owen's local `-24g` Modelfile over it (2026-09-14):
-    # a tag that pulls on one machine is not what a setup wizard offers.
-    #
-    # MEASURED 2026-09-16, and it settled a wrong claim of mine: `-24g` and this
-    # published tag share their model, projector and licence digests exactly
-    # (f5f1dd8920d417a / ac3714bfdddeca3 / 4c6a8e842ef0d85). The only difference
-    # was an 18-byte params layer carrying Owen's `num_ctx: 98304`. So a 404 on a
-    # tag NAME is not evidence about the bytes, and this pin was always the right
-    # one to publish.
     assert local.tag == "qwen3.8:27b"
     assert local.download_bytes == 17_741_872_172
     assert local.minimum_for == ()
@@ -975,15 +760,6 @@ def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:
 
 
 def test_a_model_id_with_a_slash_is_refused_by_name() -> None:
-    """`manifest_model_id_slash` — the slash belongs to upstream model ids.
-
-    PHASE15-HOST.md sections 1 and 3.4: the chat door tells
-    `anthropic/claude-sonnet-5` from a model on this card by that one
-    character, so no local id may contain it. The id regex already excluded it
-    as a side effect of its character class; the rule is now load-bearing on
-    another door, and a reader who broke it is owed the rule's name rather
-    than a regex.
-    """
     text = GOOD.replace('id = "demo-1b"', 'id = "vendor/demo-1b"')
     with pytest.raises(ManifestError, match="manifest_model_id_slash"):
         parse_manifest(text, Path("vendor-demo-1b.toml"), "vendor/demo-1b")

@@ -1,4 +1,3 @@
-"""CPU-only migration fault injection: temporary weights and loopback peers."""
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -19,7 +18,6 @@ from tests.test_host import FakeCatalog, Scripted, _context, migration
 
 @contextmanager
 def guest_http(*, reject_info=False):
-    """A real authenticated transport, with no subprocesses or inference."""
     calls = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -162,8 +160,6 @@ def test_restart_journal_retires_missing_stamp_via_owner_not_guest_http(tmp_path
         walk = migration(stopped, HttpCatalog(base, 'token', where='guest fixture'), [], tmp_path)
         walk._migrate_weights(allow_pull=False)
         assert not residue.exists()
-        # Simulate restart before the controller removed the journal. The named
-        # owner operation is idempotent even with the whole native tree gone.
         restarted = StoppedWindowsCatalog(config, backend, installer.cleanup_subjects(tmp_path))
         migration(restarted, HttpCatalog(base, 'token', where='guest fixture'), [], tmp_path)._migrate_weights(allow_pull=False)
         assert all(method == 'GET' for method, _, _ in calls)

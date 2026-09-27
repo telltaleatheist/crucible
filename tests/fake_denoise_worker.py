@@ -1,50 +1,3 @@
-"""A stand-in for `crucible/jobs/denoise/worker.py`, faithful to its wire.
-
-`tests/fake_align_worker.py`'s idea: a **real subprocess**, run exactly as the
-server runs the real one (`<python> <this file>`, requests on stdin until EOF,
-newline-delimited JSON on fd 1), steered entirely by environment variables.
-
-IT IS A SESSION, not a one-shot, because the real worker is one since the
-residency ruling of 2026-09-15: `{"op": "load"}` once, then `{"op": "separate"}`
-per block for as long as the server holds it. The TRANSCRIPT is what lets a test
-count the loads across a whole pass — which is the assertion that matters, since
-a pass that has lost the residency looks identical in every other way: every job
-succeeds and every log is clean.
-
-It does not run audio-separator, and it does not import soundfile either —
-neither is in the interpreter running this suite. What it does is everything
-around them that the server depends on: it reads the input's shape from an
-environment variable, it WRITES a stem file per output into the directory it was
-told to, and it answers one result carrying every stem, in the shape the real
-worker answers with.
-
-    CRUCIBLE_FAKE_DENOISE_INPUT      JSON: {"sample_rate", "frames", "channels"}
-                                     — what this worker "reads" off the input.
-                                     Defaults to 44.1 kHz and 441000 frames.
-    CRUCIBLE_FAKE_DENOISE_STEMS      JSON list of stem descriptors, each
-                                     {"name", optional "sample_rate", "frames"}.
-                                     Defaults to one `(Dry)` stem matching the
-                                     input exactly, which is the good case.
-    CRUCIBLE_FAKE_DENOISE_EXIT_CODE  exit with this code before saying anything.
-    CRUCIBLE_FAKE_DENOISE_LOAD_FAIL  fail as the model load would, on the load op.
-    CRUCIBLE_FAKE_DENOISE_SILENT     say nothing and sit there, for the silence
-                                     timeout. A test that sets this MUST let the
-                                     server terminate it.
-    CRUCIBLE_FAKE_DENOISE_NO_DONE    exit 0 without `done`.
-    CRUCIBLE_FAKE_DENOISE_JUNK_LINE  write this text to fd 1 verbatim before the
-                                     result — a library logging to stdout.
-    CRUCIBLE_FAKE_DENOISE_SLOW_S     seconds to sleep before separating, so a
-                                     cancel has something to interrupt.
-    CRUCIBLE_FAKE_DENOISE_TRANSCRIPT a path. Every request line is appended to
-                                     it, each followed by a JSON line holding the
-                                     engine environment variables this process
-                                     actually INHERITED — the only way to assert
-                                     that the OpenMP hardening reached the
-                                     engine, since it travels in the
-                                     environment. Counting the `load` lines in it
-                                     is how a test pins the residency.
-"""
-
 from __future__ import annotations
 
 import json
@@ -52,9 +5,6 @@ import os
 import sys
 import time
 
-#: What the server sets for the shared rvc env, and what a test asserts arrived.
-#: Listed again here rather than imported: a test double that imported from
-#: `crucible` would be testing a relationship that does not exist at runtime.
 ENGINE_KEYS = ("KMP_DUPLICATE_LIB_OK", "OMP_NUM_THREADS", "PYTHONUNBUFFERED")
 
 DEFAULT_INPUT = {"sample_rate": 44100, "frames": 441000, "channels": 2}
@@ -77,7 +27,6 @@ def _env_int(name: str) -> int | None:
 
 
 def _record(line: str) -> None:
-    """Append one request line plus the engine environment this process got."""
     transcript = os.environ.get("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT")
     if not transcript:
         return
@@ -89,12 +38,6 @@ def _record(line: str) -> None:
 
 
 def do_load(results, request: dict) -> int:
-    """The `load` op: `ready` with the load time, then `done`. NO results.
-
-    A load that answered with results would be a worker that had separated
-    something nobody asked it to, and the real `Residency.load_separator`
-    refuses exactly that.
-    """
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_LOAD_FAIL") == "1":
         send(
             results,
@@ -111,7 +54,6 @@ def do_load(results, request: dict) -> int:
 
 
 def do_separate(results, request: dict) -> int:
-    """The `separate` op: one block in, its stems out."""
     source = _env_json("CRUCIBLE_FAKE_DENOISE_INPUT", DEFAULT_INPUT)
     send(
         results,
@@ -171,12 +113,6 @@ def do_separate(results, request: dict) -> int:
     send(results, "result", stems=stems, separate_seconds=8.25)
 
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_NO_DONE") == "1":
-        # EXIT, rather than looping back to stdin. A HELD worker that simply
-        # withheld `done` would be indistinguishable from one still working, and
-        # the server would rightly wait out its silence timeout — so the protocol
-        # violation this stands in for is a worker that ENDS without saying
-        # `done`, which is what the server can actually detect.
-        # `fake_align_worker.py:175` does the same, for the same reason.
         raise SystemExit(0)
     send(results, "done")
     return 0
@@ -214,7 +150,6 @@ def main() -> int:
         code = handler(results, request)
         if code != 0:
             return code
-    # EOF on stdin: the session was stopped politely.
     return 0
 
 

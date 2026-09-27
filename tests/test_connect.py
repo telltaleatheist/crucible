@@ -1,11 +1,3 @@
-"""How an app gets the token, under both policies.
-
-OPEN is the default since 2026-09-17 (Owen: *"ollama allows anybody to connect if
-they can reach it"*), so the tests that describe the APPROVAL step now say
-`open_pairing=False` out loud. They were not deleted: the closed policy is still
-reachable and everything that serves it still has to work, and a mechanism with
-no test is a mechanism that rots until the day somebody needs it.
-"""
 import pytest
 
 from crucible.connect import PairingRequests, MAX_REQUESTS
@@ -34,7 +26,6 @@ def test_pairing_requires_operator_approval_and_device_secret(make_client):
         wrong = {**credentials, "device_code": "x" * 43}
         assert client.post("/v1/pairing/poll", headers=HEADERS, json=wrong).status_code == 403
         assert client.post("/v1/pairing/decision", headers=AUTH, json=decision).json() == {"status": "approved"}
-        # Advance the fixture's clock rather than sleeping or touching any service.
         store = client.app.state.pairing_requests
         store.entries[request["id"]].last_poll -= 2
         result = client.post("/v1/pairing/poll", headers=HEADERS, json=credentials)
@@ -65,8 +56,6 @@ def test_pairing_denial_expiry_and_poll_throttle():
 
 def test_pairing_requests_are_bounded_and_expire():
     now = [0.0]
-    # The flood guards are NOT authentication and apply under either policy;
-    # this states the closed one only so `pending()` has something to count.
     store = PairingRequests(lambda: now[0], open_pairing=False)
     store.start("one", "same-ip")
     with pytest.raises(ApiError):
@@ -90,23 +79,13 @@ def test_pairing_rejects_cross_origin_simple_posts_and_bad_names(make_client):
         }).status_code == 400
 
 
-# ------------------------------------------------------- the OPEN default
-
-
 def test_reaching_the_engine_is_the_whole_of_the_authorisation(make_client):
-    """The ruled default: type the address, and you are connected.
-
-    No operator, no short code, no second window. This is Ollama's posture and
-    it is the one that was asked for on 2026-09-17.
-    """
     with make_client() as client:
         start = client.post(
             "/v1/pairing/start", headers=HEADERS, json={"client_name": "BookForge"}
         )
         assert start.status_code == 200
         request = start.json()
-        # The token is still never in the START response. It is one poll away,
-        # because the device secret is what proves the poller is the asker.
         assert "token" not in request
         assert request["approval_required"] is False
 
@@ -115,17 +94,10 @@ def test_reaching_the_engine_is_the_whole_of_the_authorisation(make_client):
         }).json()
         assert answer == {"status": "approved", "name": "crucible@test", "token": TOKEN}
 
-        # Nothing was ever waiting for a person, so nothing is shown to one.
         assert client.get("/v1/pairing/requests", headers=AUTH).json() == {"requests": []}
 
 
 def test_an_open_engine_still_refuses_the_wrong_device_secret(make_client):
-    """Open is not the same as unauthenticated-per-request.
-
-    Anyone may ASK and be approved. Nobody may collect somebody else's approval:
-    the device secret is what ties a poll to the request that made it, and an
-    open door does not make one asker able to read another's token.
-    """
     with make_client() as client:
         request = client.post(
             "/v1/pairing/start", headers=HEADERS, json={"client_name": "BookForge"}
@@ -135,7 +107,6 @@ def test_an_open_engine_still_refuses_the_wrong_device_secret(make_client):
 
 
 def test_the_approval_step_is_kept_and_a_config_can_ask_for_it(make_client):
-    """`[auth] open_pairing = false` puts it back, whole."""
     with make_client(open_pairing=False) as client:
         request = client.post(
             "/v1/pairing/start", headers=HEADERS, json={"client_name": "BookForge"}
@@ -148,12 +119,6 @@ def test_the_approval_step_is_kept_and_a_config_can_ask_for_it(make_client):
 
 
 def test_open_pairing_survives_a_config_round_trip(home):
-    """A written `false` is still false when read back.
-
-    The default is open, so the way this breaks is by a stored `false` being
-    dropped on the way out or in — which would silently re-open a door its
-    operator closed. Written, loaded, asserted.
-    """
     from crucible.config import load_config, write_config
 
     for chosen in (True, False):
@@ -171,11 +136,6 @@ def test_open_pairing_survives_a_config_round_trip(home):
 
 
 def test_a_quoted_boolean_is_refused_rather_than_read_as_true():
-    """`open_pairing = "false"` is a truthy string and would open the door.
-
-    This is the one mistake this field must never make quietly, because the
-    person making it is the person trying to shut the door.
-    """
     from crucible.config import ConfigError, _open_pairing
 
     assert _open_pairing({"auth": {}}) is True, "absent means the ruled default"

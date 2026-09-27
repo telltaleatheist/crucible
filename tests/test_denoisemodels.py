@@ -1,17 +1,3 @@
-"""Denoise manifests and `crucible denoise pull`.
-
-Strict for `crucible/asrmodels.py`'s reason. A separator run with the wrong
-checkpoint produces audio that sounds nearly right, and the manifest is the only
-place that says which weights made it.
-
-Nothing here reaches the network: `hf_hub_download` is replaced with a function
-that writes bytes this test made up, which is `tests/test_rvcbase.py`'s fake hub
-and is all these need from the hub. What the second half is really about is the
-thing that makes the command worth having — **the puller and the job read the
-same function for the layout**, so the two files land under exactly the names
-audio-separator resolves by and a doctor run says so.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -77,8 +63,6 @@ def test_a_complete_manifest_parses() -> None:
 
 
 def test_the_shipped_manifest_names_both_filenames_and_a_real_pin() -> None:
-    """The names audio-separator resolves by are NOT the paths they come from,
-    and the manifest carries both halves."""
     manifest = load_denoise_manifest("denoise-roformer")
     assert manifest.model_filename.endswith(".ckpt")
     assert manifest.config_filename.endswith("_config.yaml")
@@ -89,8 +73,6 @@ def test_the_shipped_manifest_names_both_filenames_and_a_real_pin() -> None:
         assert len(spec.revision) == 40
         assert len(spec.model_sha256) == 64
         assert len(spec.config_sha256) == 64
-        # Both sizes are the HuggingFace API's, read at the pinned revision on
-        # 2026-09-13: 913,097,300 for the checkpoint and 1,621 for the YAML.
         assert spec.model_bytes == 913_097_300
         assert spec.config_bytes == 1_621
 
@@ -101,22 +83,12 @@ def test_every_shipped_manifest_loads() -> None:
 
 
 def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
-    """The second separator: audio-separator's own names for it, `vocals` as
-    the stem it exists to produce, and both backends pinned to the same mirror
-    snapshot as the denoiser, by digest and size.
-
-    The figures are the HuggingFace API's at `929e057b`, read on 2026-09-23:
-    the checkpoint's LFS oid (= its sha256, and the same bytes as
-    KimberleyJSN/melbandroformer's own upload) and the config's digest computed
-    from the 895 bytes the hub served.
-    """
     manifest = load_denoise_manifest("vocals-roformer")
     assert manifest.model_filename == "vocals_mel_band_roformer.ckpt"
     assert manifest.config_filename == "vocals_mel_band_roformer.yaml"
     assert manifest.primary_stem == "vocals"
     assert manifest.sample_rate == 44100
     denoiser = load_denoise_manifest("denoise-roformer")
-    # One flat model_file_dir holds both separators, so no name may collide.
     assert {manifest.model_filename, manifest.config_filename}.isdisjoint(
         {denoiser.model_filename, denoiser.config_filename}
     )
@@ -137,7 +109,6 @@ def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
             "146b28921f01f2debd62f58222de3c732d82a8d2db6c4fac16653b0985ea0c6e"
         )
         assert spec.config_bytes == 895
-        # COMPUTED the denoiser's way: the checkpoint plus the declared 1.5 GiB.
         assert spec.memory_bytes_estimate == 913_106_900 + 1_610_612_736
     assert "COMPUTED, NOT MEASURED" in manifest.path.read_text(encoding="utf-8")
 
@@ -172,7 +143,6 @@ def test_what_the_loader_refuses(bad: str, fragment: str) -> None:
     ["../../etc/passwd", "sub/dir/model.ckpt", ".hidden.ckpt"],
 )
 def test_a_filename_that_is_a_path_is_refused(value: str) -> None:
-    """These are written into one flat directory an engine then reads BY NAME."""
     with pytest.raises(DenoiseManifestError) as caught:
         parse(GOOD.replace('model_filename = "demo_denoise.ckpt"',
                            f'model_filename = "{value}"'))
@@ -185,8 +155,6 @@ def test_an_id_that_disagrees_with_its_filename_is_refused() -> None:
     assert "the same thing" in str(caught.value)
 
 
-# ------------------------------------------------------------------- pulling
-
 CKPT = b"not really 913 MB"
 YAML = b"chunk_size: 352800"
 
@@ -195,10 +163,6 @@ def sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-#: The shipped manifest with this test's digests in place of the real ones, so
-#: the pull can be driven end to end against files a test can write. Everything
-#: else — the repo, the revision, both source paths, both target filenames — is
-#: the shipped manifest's, because those are what the command has to get right.
 def shipped_with_test_digests(model_id: str = "denoise-roformer"):
     manifest = load_denoise_manifest(model_id)
     backends = {
@@ -254,7 +218,6 @@ def config(home: Path):
 
 
 def serve(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, bytes]) -> list[str]:
-    """Replace `hf_hub_download` with one that writes `payloads[filename]`."""
     import huggingface_hub
 
     asked: list[str] = []
@@ -279,8 +242,6 @@ def payloads_for(manifest, spec) -> dict[str, bytes]:
 
 
 def test_the_puller_and_the_job_read_the_same_layout(config) -> None:
-    """One owner of "where the separator's files live". They were two
-    definitions, and two definitions are two that can disagree."""
     assert denoisemodels.denoise_models_root(config.home) == (
         denoise_job.denoise_models_dir(config)
     )
@@ -292,13 +253,10 @@ def test_the_file_list_is_the_manifest_s_two_names() -> None:
     spec = manifest.spec(FAKE_BACKEND.kind)
     files = denoisemodels.model_files(manifest, spec)
     assert [entry.source for entry in files] == [spec.model_path, spec.config_path]
-    # What they are CALLED when they land is not what they are called upstream.
     assert [entry.target for entry in files] == [
         manifest.model_filename,
         manifest.config_filename,
     ]
-    # The config's upstream name is not the name it lands under, which is the
-    # whole reason both halves are declared.
     assert files[1].target != files[1].source.rsplit("/", 1)[-1]
     for entry in files:
         assert entry.why.strip() != ""
@@ -323,7 +281,6 @@ def test_a_pull_places_both_files_where_the_job_looks(
     assert (root / manifest.config_filename).read_bytes() == YAML
     assert result.bytes == len(CKPT) + len(YAML)
     assert denoisemodels.missing(config.home, manifest) == []
-    # The staging directory does not survive the placement.
     assert not (root / ".crucible-files").exists()
 
 
@@ -352,8 +309,6 @@ def test_force_re_pulls(config, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_bad_digest_places_nothing_at_all(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A checkpoint beside somebody else's config is a separator that loads and
-    produces audio which is subtly wrong and says so nowhere."""
     manifest = shipped_with_test_digests()
     spec = manifest.spec(FAKE_BACKEND.kind)
     serve(monkeypatch, {spec.model_path: CKPT, spec.config_path: b"another config"})
@@ -362,15 +317,11 @@ def test_a_bad_digest_places_nothing_at_all(
     assert "hashes to" in str(caught.value)
     assert "NOTHING was placed" in str(caught.value)
     root = denoisemodels.denoise_models_root(config.home)
-    # Not even the checkpoint, which DID verify: verified first, placed last.
     assert not (root / manifest.model_filename).exists()
     assert denoisemodels.installed(config.home, manifest, spec) is None
 
 
 def test_each_model_gets_its_own_stamp(config, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One flat directory, one stamp per set. A single `crucible-pull.json` at
-    the root would be overwritten by the second model's pull and would then
-    report the first as never installed."""
     manifest = shipped_with_test_digests()
     spec = manifest.spec(FAKE_BACKEND.kind)
     serve(monkeypatch, payloads_for(manifest, spec))
@@ -390,7 +341,6 @@ def test_each_model_gets_its_own_stamp(config, monkeypatch: pytest.MonkeyPatch) 
 def test_a_deleted_file_makes_the_set_not_installed(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stamp beside a file somebody removed is a stamp that lies."""
     manifest = shipped_with_test_digests()
     spec = manifest.spec(FAKE_BACKEND.kind)
     serve(monkeypatch, payloads_for(manifest, spec))
@@ -398,9 +348,6 @@ def test_a_deleted_file_makes_the_set_not_installed(
     assert denoisemodels.installed(config.home, manifest, spec) is not None
     (denoisemodels.denoise_models_root(config.home) / manifest.config_filename).unlink()
     assert denoisemodels.installed(config.home, manifest, spec) is None
-
-
-# --------------------------------------------------------------------- the CLI
 
 
 @pytest.fixture
@@ -494,8 +441,6 @@ def test_denoise_pull_refuses_a_digest_mismatch(
 def test_denoise_pull_says_so_when_the_file_is_not_there_afterwards(
     config, cli_backend, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """`rvc pull-base`'s rule: a pull that finished and left the expected file
-    absent is said out loud, never reported as success."""
     manifest = shipped_with_test_digests()
     spec = manifest.spec(FAKE_BACKEND.kind)
     serve(monkeypatch, payloads_for(manifest, spec))
@@ -517,17 +462,8 @@ def test_denoise_pull_says_so_when_the_file_is_not_there_afterwards(
     assert manifest.config_filename in err
 
 
-# ------------------------------------------------- what the doctor then says
-
-
 @pytest.fixture
 def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/rvc` whose python is this interpreter.
-
-    `rvc`, not `denoise`: this type has no env of its own. Without it `check()`
-    stops at the env and never reaches the question these tests are about,
-    which is whether the checkpoint is there.
-    """
     import sys
 
     from crucible import jobenv
@@ -560,7 +496,6 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def denoise_row(capsys: pytest.CaptureFixture[str], cli) -> dict:
-    """`crucible doctor --json`'s row for the denoise job type."""
     cli.main(["doctor", "--json"])
     report = json.loads(capsys.readouterr().out)
     return next(
@@ -575,13 +510,6 @@ def test_the_doctor_line_flips_once_the_pull_has_run(
     rvc_env: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The whole point of the command, read where the operator reads it.
-
-    `job denoise: NOT READY — no separator checkpoint is in ~/.crucible/
-    denoise-models` is the line both machines printed before this verb existed.
-    It flips because the puller writes into the tree `check()` reads, and that
-    is one function rather than two that agree.
-    """
     before = denoise_row(capsys, cli_backend)
     assert before["ready"] is False
     assert denoisemodels.PULL_COMMAND in before["detail"]
@@ -596,9 +524,6 @@ def test_the_doctor_line_flips_once_the_pull_has_run(
     after = denoise_row(capsys, cli_backend)
     assert after["ready"] is True
     assert "installed: ['denoise-roformer']" in after["detail"]
-    # And `/v1/info`'s row for the same model names the same bytes: the
-    # revision the puller pinned and the path it fetched. One model, one
-    # description — a client never reconciles two.
     row = next(row for row in after["models"] if row["id"] == "denoise-roformer")
     shipped = load_denoise_manifest("denoise-roformer").spec(FAKE_BACKEND.kind)
     assert row["revision"] == shipped.revision

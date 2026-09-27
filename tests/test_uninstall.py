@@ -1,18 +1,3 @@
-"""`crucible uninstall` — the plan, the order, and what it refuses to touch.
-
-Nothing here runs `systemctl`, `launchctl`, `taskkill` or `wsl.exe`: every
-subprocess goes through `crucible/service.py`'s injectable runner, the same one
-`tests/test_service.py` uses, so the tests assert on the ARGV that would have
-run. Every filesystem test builds a whole `CRUCIBLE_HOME` under `tmp_path` and
-then asserts on what is and is not there afterwards — because the interesting
-property of this command is the second half of that sentence.
-
-The Windows steps take the platform and the environment as ARGUMENTS
-(`crucible/uninstall.py`'s `plan()` does not read `sys.platform` or
-`os.environ`), which is what lets the `win32` branch be exercised by a suite
-that runs in WSL. A test that skipped its subject would pin nothing.
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,11 +10,7 @@ from crucible import catalog, cli, service, uninstall
 from crucible.backend import CUDA_LINUX, MLX_DARWIN
 
 
-# ----------------------------------------------------------------- the runner
-
-
 class Runner:
-    """Records every argv and answers from a table, like test_service.py's."""
 
     def __init__(self, answers: dict[tuple[str, ...], service.Ran] | None = None):
         self.calls: list[tuple[str, ...]] = []
@@ -63,12 +44,8 @@ WINDOWS_ENV = {
 }
 
 
-# ------------------------------------------------------------------ fixtures
-
-
 @pytest.fixture
 def installed_home(tmp_path: Path) -> Path:
-    """A `CRUCIBLE_HOME` with one of everything an install leaves behind."""
     home = tmp_path / "home"
     (home / "envs" / "tts-higgs-v3" / "bin").mkdir(parents=True)
     (home / "envs" / "tts-higgs-v3" / "bin" / "python").write_text("x", encoding="utf-8")
@@ -95,7 +72,6 @@ def installed_home(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def unit_home(tmp_path: Path) -> Path:
-    """An operator home with a systemd unit already written into it."""
     operator = tmp_path / "operator"
     unit = service.unit_path(operator)
     unit.parent.mkdir(parents=True)
@@ -118,7 +94,7 @@ def make(
         runner=runner if runner is not None else Runner(),
         user_home=user_home if user_home is not None else home / "no-operator-home",
         executable=str(home / "server" / "bin" / "python"),
-        **kwargs,  # type: ignore[arg-type]
+        **kwargs,
     )
 
 
@@ -129,31 +105,13 @@ def step(plan: uninstall.Plan, name: str) -> uninstall.Step:
     raise AssertionError(f"no step called {name!r} in {[s.name for s in plan.steps]}")
 
 
-# ------------------------------------------------------- the two tied tables
-
-
 def test_every_catalog_kind_has_a_directory_and_no_seventh_exists() -> None:
-    """A subject kind and a subject directory are ONE fact (R1).
-
-    A seventh kind added to `catalog.KINDS` without a directory here would be
-    a kind `--purge-weights` silently keeps forever, and the operator would
-    never learn which directory was left.
-    """
     assert tuple(uninstall.SUBJECT_DIRS) == catalog.KINDS
 
 
 def test_the_platform_table_agrees_with_service_pys_backend_table() -> None:
-    """`uninstall` keys the mechanism off the platform, `service` off the backend.
-
-    Both are the same fact — 3.5: a backend runs where its engine runs — and
-    this is the check that ties them, so a third mechanism arriving in
-    `service.SERVICE_MECHANISM` cannot leave this module undoing the wrong one.
-    """
     assert uninstall.UNINSTALL_MECHANISM["linux"] == service.SERVICE_MECHANISM[CUDA_LINUX]
     assert uninstall.UNINSTALL_MECHANISM["darwin"] == service.SERVICE_MECHANISM[MLX_DARWIN]
-    # win32 is the one that is NOT in service.py, and deliberately: there is no
-    # unit to install on Windows, so there is no `crucible service install`
-    # there either — the host's Startup shortcut is the whole of it (4.1).
     assert uninstall.UNINSTALL_MECHANISM["win32"] == uninstall.STARTUP
     assert set(service.SERVICE_MECHANISM) == {CUDA_LINUX, MLX_DARWIN}
 
@@ -165,11 +123,7 @@ def test_a_platform_with_no_supervisor_is_refused_by_name() -> None:
     assert "freebsd" in str(caught.value)
 
 
-# -------------------------------------------------------------- the order
-
-
 def test_the_plan_is_the_install_list_read_upwards(installed_home: Path) -> None:
-    """Stop, then the service, then the envs, then the config, then the weights."""
     plan = make(installed_home)
     names = [s.name for s in plan.steps]
     order = [
@@ -189,20 +143,11 @@ def test_the_plan_is_the_install_list_read_upwards(installed_home: Path) -> None
 def test_the_guest_is_uninstalled_before_the_tray_that_watches_it(
     installed_home: Path,
 ) -> None:
-    """`--wsl-too` sits between the stop and the service removal (4.1).
-
-    The tray BOOTS and WATCHES the guest. Remove the guest's unit while the
-    tray is alive and its two recovery recipes fire against a Crucible that is
-    being deleted, so the tray is stopped first and the guest goes second.
-    """
     runner = Runner({("wsl.exe", "-l"): answer(out=f"Ubuntu\n{uninstall.CRUCIBLE_DISTRO}\n")})
     plan = make(installed_home, platform="win32", runner=runner, wsl_too=True)
     names = [s.name for s in plan.steps]
     assert names.index("stop-engine") < names.index("wsl-guest")
     assert names.index("wsl-guest") < names.index("remove-service")
-
-
-# ------------------------------------------------------------------ dry run
 
 
 def test_a_dry_run_touches_nothing(installed_home: Path) -> None:
@@ -216,14 +161,10 @@ def test_a_dry_run_touches_nothing(installed_home: Path) -> None:
 def test_a_dry_run_names_every_step_the_real_run_performs(
     installed_home: Path, unit_home: Path
 ) -> None:
-    """One plan, two readings. There is no second description of the work."""
     dry = make(installed_home, user_home=unit_home)
     live = make(installed_home, user_home=unit_home, runner=Runner())
     assert [s.name for s in dry.steps] == [s.name for s in live.steps]
     assert [s.action for s in dry.steps] == [s.action for s in live.steps]
-
-
-# ------------------------------------------------------------- what it does
 
 
 def test_a_real_run_removes_the_state_and_keeps_the_weights(
@@ -261,7 +202,6 @@ def test_purge_weights_removes_all_six_subject_directories(
 def test_the_pack_it_is_running_from_is_kept_and_named(
     installed_home: Path, unit_home: Path
 ) -> None:
-    """`<home>/server` holds the interpreter; the wrapper removes it, not this."""
     plan = uninstall.run(
         make(installed_home, user_home=unit_home, purge_weights=True)
     )
@@ -309,7 +249,6 @@ def test_the_home_goes_when_the_last_step_leaves_it_empty(tmp_path: Path) -> Non
 def test_an_entry_crucible_did_not_write_is_kept_and_reported(
     installed_home: Path, unit_home: Path
 ) -> None:
-    """`~/.crucible/hf-token.txt` on the Mac: never written, never read, never deleted."""
     stray = installed_home / "hf-token.txt"
     stray.write_text("hf_xxx", encoding="utf-8")
     plan = uninstall.run(
@@ -332,9 +271,6 @@ def test_nothing_outside_crucible_home_is_ever_removed(tmp_path: Path) -> None:
     assert outside.is_file()
 
 
-# ------------------------------------------------------------- the service
-
-
 def test_the_service_is_stopped_before_anything_is_deleted(
     installed_home: Path, unit_home: Path
 ) -> None:
@@ -352,7 +288,6 @@ def test_the_service_is_stopped_before_anything_is_deleted(
 def test_a_missing_service_is_refused_by_name_and_is_not_a_failure(
     installed_home: Path, tmp_path: Path
 ) -> None:
-    """A machine with no unit is a machine that can still be uninstalled."""
     runner = Runner()
     plan = uninstall.run(
         make(installed_home, user_home=tmp_path / "no-unit", runner=runner)
@@ -374,8 +309,6 @@ def test_a_launchd_uninstall_boots_the_agent_out_and_deletes_the_plist(
     plist = service.plist_path(operator)
     plist.parent.mkdir(parents=True)
     plist.write_text("<plist/>", encoding="utf-8")
-    # `service._domain()` asks for the launchd `gui/<uid>` domain, and
-    # `os.getuid` does not exist on Windows — this suite runs on both.
     monkeypatch.setattr(service.os, "getuid", lambda: 501, raising=False)
     runner = Runner({("launchctl", "list"): answer(out=f"123 0 {service.LAUNCHD_LABEL}\n")})
     plan = uninstall.run(
@@ -389,7 +322,6 @@ def test_a_launchd_uninstall_boots_the_agent_out_and_deletes_the_plist(
 def test_a_service_that_will_not_stop_preserves_its_runtime_and_config(
     installed_home: Path, unit_home: Path
 ) -> None:
-    """R6: partial work survives failure, and the exit code carries the failure."""
     runner = Runner(
         {("systemctl", "--user", "stop"): answer(code=1, err="Failed to stop")}
     )
@@ -398,9 +330,6 @@ def test_a_service_that_will_not_stop_preserves_its_runtime_and_config(
     assert (installed_home / "config.toml").exists(), "a live service must retain its config"
     assert (installed_home / "envs").exists(), "a live service must retain its runtime"
     assert plan.to_dict()["ok"] is False
-
-
-# --------------------------------------------------------------- win32 bits
 
 
 def test_on_windows_the_service_is_the_startup_shortcut(installed_home: Path) -> None:
@@ -440,9 +369,6 @@ def test_a_stale_lock_is_not_a_running_tray(
     assert refused.fatal is False
 
 
-# ------------------------------------------------------------------- --wsl-too
-
-
 def test_wsl_too_refuses_by_name_when_the_crucible_distro_is_not_there(
     installed_home: Path,
 ) -> None:
@@ -458,7 +384,6 @@ def test_wsl_too_refuses_by_name_when_the_crucible_distro_is_not_there(
 def test_wsl_too_never_touches_a_distro_crucible_did_not_import(
     installed_home: Path,
 ) -> None:
-    """Owen's Ubuntu is HIS. The only name in the argv is Crucible's own."""
     runner = Runner(
         {("wsl.exe", "-l"): answer(out=f"Ubuntu\n{uninstall.CRUCIBLE_DISTRO}\n")}
     )
@@ -472,7 +397,6 @@ def test_wsl_too_never_touches_a_distro_crucible_did_not_import(
 
 
 def test_the_guest_argv_lets_the_GUESTs_bash_expand_its_own_home() -> None:
-    """`--exec` stops wsl.exe pre-expanding `$HOME` on the Windows side."""
     argv = uninstall.wsl_uninstall_argv(purge_weights=True, dry_run=False)
     assert argv[:6] == [
         "wsl.exe",
@@ -494,13 +418,9 @@ def test_wsl_too_off_windows_is_refused_by_name(installed_home: Path) -> None:
     assert refused.fatal is True
 
 
-# ------------------------------------------------------------------- the json
-
-
 def test_the_json_shape_is_the_one_the_apps_read(
     installed_home: Path, unit_home: Path
 ) -> None:
-    """Every field `docs/INSTALL-UNINSTALL.md` names, on a dry run and a real one."""
     dry = make(installed_home, user_home=unit_home).to_dict()
     assert set(dry) == {
         "dry_run",
@@ -524,7 +444,6 @@ def test_the_json_shape_is_the_one_the_apps_read(
         assert row["done"] is False
         if "refused" in row:
             assert set(row["refused"]) == {"code", "message", "fatal"}
-    # And it is JSON, with nothing in it a stdout pipe cannot carry.
     assert json.loads(json.dumps(dry))["home"] == str(installed_home)
 
     live = uninstall.run(make(installed_home, user_home=unit_home)).to_dict()
@@ -533,15 +452,11 @@ def test_the_json_shape_is_the_one_the_apps_read(
 
 
 def test_a_home_with_no_config_reports_the_backend_as_null(tmp_path: Path) -> None:
-    """An uninstall must run on a machine a previous half-run already gutted."""
     home = tmp_path / "home"
     (home / "logs").mkdir(parents=True)
     plan = make(home)
     assert plan.backend_kind is None
     assert plan.to_dict()["backend_kind"] is None
-
-
-# --------------------------------------------------------------------- the CLI
 
 
 def test_the_cli_verb_exists_with_its_four_flags() -> None:
@@ -576,12 +491,11 @@ def test_the_cli_exits_1_when_a_step_could_not_be_done(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A fatal step is an exit code, and the other work still happened."""
     monkeypatch.setenv("CRUCIBLE_HOME", str(installed_home))
     real = uninstall.plan
 
     def one_fatal(**kwargs: object) -> uninstall.Plan:
-        built = real(**kwargs)  # type: ignore[arg-type]
+        built = real(**kwargs)
         built.steps[0].refused = uninstall.Refusal(
             code="stop_failed", message="the unit would not stop", fatal=True
         )
@@ -597,7 +511,6 @@ def test_the_cli_exits_1_when_a_step_could_not_be_done(
 def test_the_cli_refuses_by_name_when_this_host_cannot_say_where_home_is(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`crucible_home()`'s refusal reaches the operator, not a traceback."""
     monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
     monkeypatch.setattr(cli.uninstall_cmd.sys, "platform", "win32")
     monkeypatch.setattr(cli.uninstall_cmd.os, "environ", {}, raising=False)

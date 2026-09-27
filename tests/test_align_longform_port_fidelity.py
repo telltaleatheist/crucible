@@ -1,28 +1,3 @@
-"""The port must keep agreeing with the original it was taken from.
-
-`crucible/jobs/alignlongform/coarse.py` is a transcription of bookforge's
-`electron/scripts/align_audiobook.py:coarse_align`. The tests beside this one pin
-the BEHAVIOURS that specific books put there; this one pins the stronger and
-duller property — that the two functions return the same thing.
-
-WHY A DIFFERENTIAL TEST AND NOT MORE EXAMPLES. Every constant in that function
-was set by a book going wrong, and the failure mode of a bad port is not a crash:
-it aligns, produces cues, and is quietly wrong. Examples catch the cases somebody
-thought of. This catches the ones nobody did, by running both implementations
-over randomised books and comparing all six return values.
-
-It also catches drift in the OTHER direction. If BookForge's aligner is improved
-and this port is not, the suite goes red and names the divergence, which is the
-only thing that keeps "port, don't re-derive" true over time rather than on the
-day it was written. This session paid for that lesson once already: the MLX
-backend ran seven times slow because a width was re-derived instead of carried.
-
-SKIPPED, LOUDLY, when the BookForge checkout is not beside this one. The original
-lives in another repository, so this cannot be a hard dependency of Crucible's
-suite — but a silent pass would be worse than a skip, because the whole point is
-the comparison.
-"""
-
 from __future__ import annotations
 
 import ast
@@ -36,8 +11,6 @@ import pytest
 
 from crucible.jobs.alignlongform import coarse as port
 
-#: Where the original lives. A sibling checkout, which is how both repos sit on
-#: Owen's machines.
 ORIGINAL = (
     Path(__file__).resolve().parents[2]
     / "bookforge"
@@ -57,7 +30,6 @@ pytestmark = pytest.mark.skipif(
 
 
 def _norm(s: str) -> str:
-    """The original's own normaliser, verbatim — the port must not supply it."""
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     return re.sub(r"[^0-9a-z]+", "", s.lower())
@@ -68,13 +40,6 @@ def _toks(s: str) -> list[str]:
 
 
 def load_original(name: str = "coarse_align"):
-    """Lift one function out of the script without importing it.
-
-    The script imports faster-whisper, torch and friends at module scope and is
-    written to be run, not imported. Extracting the one function by AST keeps
-    this suite free of that entire stack — and keeps it honest, because what is
-    executed is the original's own bytes rather than a copy kept here.
-    """
     tree = ast.parse(ORIGINAL.read_text(encoding="utf-8", errors="replace"))
     fn = next(
         (
@@ -105,7 +70,6 @@ def stream(text: str, step: float = 0.5) -> list[tuple[str, float]]:
 
 
 def books() -> list[tuple[list[str], list[tuple[str, float]]]]:
-    """Two shaped cases and twenty-five randomised ones."""
     cases: list[tuple[list[str], list[tuple[str, float]]]] = []
 
     prose = (
@@ -117,7 +81,6 @@ def books() -> list[tuple[list[str], list[tuple[str, float]]]]:
         ([s.strip() + "." for s in prose.split(". ") if s.strip()], stream(prose))
     )
 
-    # Well of Ascension's shape: text nobody read aloud, between two spoken lines.
     a = "It was the best of times it was the worst of times."
     b = "The year was seventeen seventy five and the age was wisdom."
     unspoken = [
@@ -176,12 +139,6 @@ def test_the_port_returns_exactly_what_the_original_returns() -> None:
 
 
 def test_snap_boundaries_matches_the_original_too() -> None:
-    """The `write` stage's seam placement, held to the same standard.
-
-    Randomised seams and silences rather than chosen ones: the conservative
-    rules (clip to the window, bound by neighbours, nearest wins) interact, and
-    the combinations that break a port are not the ones anybody writes by hand.
-    """
     original = load_original("snap_boundaries")
     from crucible.jobs.alignlongform import cues as ported
 
@@ -197,7 +154,6 @@ def test_snap_boundaries_matches_the_original_too() -> None:
             ends.append(round(t, 3))
             starts.append(round(t, 3))
         starts = starts[:n]
-        # Silences scattered near and far from the seams.
         silences = []
         for e in ends[:-1]:
             if rng.random() < 0.7:

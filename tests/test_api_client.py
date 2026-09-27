@@ -1,15 +1,3 @@
-"""`crucible api …` — the client half of the command line.
-
-Almost everything here runs against a REAL server on a REAL socket
-(tests/live_server.py), driven through `cli.main` with the argv a person would
-type. That is deliberate and it is not slower than it needs to be: this module's
-whole job is HTTP, SSE framing and exit codes, and a `TestClient` would let the
-one thing it can get wrong — reading a streamed body off a socket a line at a
-time — be faked out from under it. The `echo` job type is what carries the
-end-to-end cases, because it is the one type that finishes without an
-accelerator, and no test in this file touches the card.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -30,22 +18,16 @@ from .live_server import serve
 
 @pytest.fixture
 def base(make_app: Callable[..., FastAPI]) -> Iterator[str]:
-    """A real Crucible on a real loopback port, with `echo` enabled."""
     with serve(make_app()) as url:
         yield url
 
 
 def run(base: str, *argv: str) -> int:
-    """`crucible api --url … --token … <argv>`, through the real entry point."""
     return cli.main(["api", "--url", base, "--token", TOKEN, *argv])
 
 
 def lines(captured: str) -> list[Any]:
-    """Every line of a JSONL stream, parsed."""
     return [json.loads(line) for line in captured.splitlines() if line.strip()]
-
-
-# ------------------------------------------------------------------ connection
 
 
 def _namespace(**overrides: Any) -> argparse.Namespace:
@@ -55,7 +37,6 @@ def _namespace(**overrides: Any) -> argparse.Namespace:
 
 
 def test_a_url_without_a_token_is_refused_and_never_borrows_the_local_one() -> None:
-    """The credential-leak refusal. A typo'd address must not get this machine's bearer."""
     with pytest.raises(ClientRefusal) as refusal:
         apiclient.resolve(_namespace(url="http://192.168.68.20:7100"))
     assert "token_required" in str(refusal.value)
@@ -68,7 +49,6 @@ def test_a_token_without_a_url_is_refused_by_name() -> None:
 
 
 def test_a_pairing_line_carries_the_address_the_name_and_the_token() -> None:
-    """`crucible token --url` prints exactly this line; parsing it is pairing.py's."""
     resolved = apiclient.resolve(
         _namespace(pairing="crucible://crucible%40mac-studio@192.168.68.20:7100/#abc123")
     )
@@ -92,9 +72,6 @@ def test_a_line_that_is_not_a_pairing_line_is_refused_by_name() -> None:
     assert "pairing_line_invalid" in str(refusal.value)
 
 
-# ----------------------------------------------------------------- plain reads
-
-
 def test_a_read_prints_one_json_document(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -107,7 +84,6 @@ def test_a_read_prints_one_json_document(
 def test_the_api_version_header_travels_on_every_request(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`require_api_version` refuses 426 without it, so a 200 here proves it was sent."""
     assert run(base, "health") == 0
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
 
@@ -115,25 +91,12 @@ def test_the_api_version_header_travels_on_every_request(
 def test_the_bearer_token_is_what_the_server_checks(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The WRONG token, and the refusal that says so rather than the one for none.
-
-    `require_auth` answers `unauthorized` to a missing header and to a wrong
-    token alike, so asserting the code proves only that some header question was
-    asked — a client that sent no Authorization at all passes that. The two
-    MESSAGES differ ("missing Authorization header" against "bearer token is not
-    this server's token"), and asserting the second is what proves the header
-    was sent and carried this value. Found by mutation, 2026-09-16: deleting the
-    Authorization line entirely left this test green.
-    """
     assert cli.main(["api", "--url", base, "--token", "not-the-token", "info"]) == 1
     captured = capsys.readouterr()
     assert "HTTP 401" in captured.err
     refusal = json.loads(captured.err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "unauthorized"
     assert refusal["error"]["message"] == "bearer token is not this server's token"
-
-
-# ------------------------------------------------------------------------ jobs
 
 
 def test_submit_returns_the_job_id_and_does_not_wait(
@@ -149,7 +112,6 @@ def test_submit_returns_the_job_id_and_does_not_wait(
 def test_follow_streams_the_events_then_the_final_state(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The whole path: upload, submit, SSE, terminal status, artifacts on disk."""
     source = tmp_path / "in.txt"
     source.write_text("he had been walking for some time", encoding="utf-8")
     out = tmp_path / "artifacts"
@@ -163,7 +125,6 @@ def test_follow_streams_the_events_then_the_final_state(
     assert "job_id" in printed[0]
     events = [row for row in printed if "event" in row]
     assert [row["event"] for row in events][-1] == "done"
-    # Strictly increasing ids are what `--since` resumes against.
     assert [row["id"] for row in events] == sorted(row["id"] for row in events)
 
     state = printed[-2]
@@ -178,7 +139,6 @@ def test_follow_streams_the_events_then_the_final_state(
 def test_a_failed_job_exits_nonzero_even_though_every_request_succeeded(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """echo with no inputs fails inside the job. A script must not read that as 0."""
     assert run(base, "job", "submit", "--type", "echo", "--follow") == 1
     printed = lines(capsys.readouterr().out)
     assert printed[-1]["status"] == "failed"
@@ -188,7 +148,6 @@ def test_a_failed_job_exits_nonzero_even_though_every_request_succeeded(
 def test_a_server_refusal_is_printed_verbatim_with_its_code(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The code is the string a person greps this repo for; it must survive."""
     assert run(base, "job", "submit", "--type", "nosuchtype") == 1
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -207,12 +166,6 @@ def test_artifacts_dir_without_follow_is_refused_rather_than_implying_follow(
 def test_events_resume_after_a_last_event_id(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--since N` is the server's own Last-Event-ID — how a dropped follow comes back.
-
-    Run against a job that has already finished, so what comes back is the
-    REPLAY and nothing else: the tail of the log, starting after the id given,
-    and no repeat of what was already delivered.
-    """
     source = tmp_path / "in.txt"
     source.write_text("x", encoding="utf-8")
     assert run(base, "job", "submit", "--type", "echo", "--params", '{"delay_ms": 0}',
@@ -253,7 +206,6 @@ def test_an_input_that_is_not_name_equals_path_is_named(
 def test_cancel_reports_what_the_server_answered_not_what_it_will_become(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """DELETE answers `cancelling`; a client that printed `cancelled` would be lying."""
     source = tmp_path / "in.txt"
     source.write_text("x", encoding="utf-8")
     assert run(base, "job", "submit", "--type", "echo",
@@ -291,9 +243,6 @@ def test_an_unknown_artifact_names_the_ones_the_job_has(
     assert "unknown_artifact" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------------- upload
-
-
 def test_upload_returns_a_blob_the_next_job_can_name(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -315,9 +264,6 @@ def test_uploading_a_file_that_is_not_there_is_refused_before_any_request(
     assert "input_missing" in capsys.readouterr().err
 
 
-# ------------------------------------------------------------------ the chat door
-
-
 def test_chat_will_not_take_a_whole_body_and_a_shorthand_at_once(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -330,15 +276,6 @@ def test_chat_with_neither_form_is_refused(
 ) -> None:
     assert run(base, "chat", "--model", "qwen3.5-9b") == 1
     assert "chat_underspecified" in capsys.readouterr().err
-
-
-# ---------------------------------------------------------- the serial tts door
-#
-# The session's own machinery is `crucible/ttsstream.py` and is tested against a
-# real narrator double in tests/test_tts_stream.py. What is tested HERE is the
-# part this module owns: which frames stop the follow, and the WAV header it
-# writes. The frames are canned rather than generated, so `--until` can be shown
-# to stop on the right one without standing up an engine.
 
 
 def _frames(*rows: dict[str, Any]) -> Callable[..., Iterator[dict[str, Any]]]:
@@ -378,7 +315,6 @@ def test_the_wav_is_written_at_the_rate_the_session_reported(
     base: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """PHASE3-TTS section 6: the rate is the engine's, never a constant here."""
     import base64
     import wave
 
@@ -397,7 +333,7 @@ def test_the_wav_is_written_at_the_rate_the_session_reported(
     with wave.open(str(out / "r1.wav"), "rb") as handle:
         assert handle.getframerate() == 16000
         assert handle.getnchannels() == 1
-        assert handle.getnframes() == len(pcm)  # two frames of 1200 samples each
+        assert handle.getnframes() == len(pcm)
     assert lines(capsys.readouterr().out)[-1]["sample_rate"] == 16000
 
 
@@ -421,13 +357,9 @@ def test_say_needs_text_and_will_not_take_two_sources(
     assert "say_overspecified" in capsys.readouterr().err
 
 
-# ------------------------------------------------------------------- transport
-
-
 def test_an_address_nothing_answers_on_is_not_a_refusal(
     capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A dead port is not the server saying no, and must not read like one."""
     assert cli.main(["api", "--url", "http://127.0.0.1:1", "--token", "t", "ping"]) == 1
     assert "server_unreachable" in capsys.readouterr().err
 
@@ -435,28 +367,11 @@ def test_an_address_nothing_answers_on_is_not_a_refusal(
 def test_a_closed_pipe_is_success_and_not_an_unreachable_server(
     base: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`crucible api info | head -4` must exit 0.
-
-    BrokenPipeError is an OSError, so the order of the two `except` clauses
-    decides this. Written the wrong way round it printed `server_unreachable:
-    the local engine did not answer: [Errno 32] Broken pipe` about a server that
-    had just answered — measured on the first live run, 2026-09-16.
-    """
     def closed(value: Any) -> None:
         raise BrokenPipeError(32, "Broken pipe")
 
     monkeypatch.setattr(apiclient, "emit", closed)
     assert run(base, "info") == 0
-
-
-# --------------------------------------------- the doors that need what is off
-#
-# `tts`, `llm` and the task lane are disabled on the fixture's server and
-# standing any of them up means an engine. What these prove is the half this
-# module owns: that the verb assembles a request the route ACCEPTS as
-# well-formed, so the refusal that comes back is about the server's state and
-# not about the body. A malformed body would be a 422 from pydantic instead, and
-# that is what these would catch.
 
 
 def test_stream_open_reaches_the_route_and_is_refused_for_the_servers_own_reason(
@@ -470,7 +385,6 @@ def test_stream_open_reaches_the_route_and_is_refused_for_the_servers_own_reason
 def test_lease_open_reaches_the_route_with_both_required_fields(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A missing `act` or `ttl_seconds` would be a 422; nothing resident is a 409."""
     assert run(base, "lease", "open", "qwen3.5-9b", "--act", "clean", "--ttl", "600") == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "not_resident"
@@ -479,16 +393,6 @@ def test_lease_open_reaches_the_route_with_both_required_fields(
 def test_task_submit_reaches_the_route_with_the_fields_its_type_needs(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A `pull` with `--kind` and `--id` is refused for the SUBJECT, not the body.
-
-    It does NOT prove that the unset flags were left out rather than sent as
-    null: measured by mutation on 2026-09-16, `TaskCreate`'s validator tests
-    `getattr(...) is not None`, so an explicit `"job_type": null` and an absent
-    `job_type` are the same request to it and nothing here can tell them apart.
-    `cmd_task_submit` still omits them — stating a field nobody asked for is
-    wrong even where it is invisible — and that is a choice this test is not the
-    witness for.
-    """
     assert run(base, "task", "submit", "--type", "pull",
                "--kind", "model", "--id", "no-such-model") == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
@@ -498,13 +402,6 @@ def test_task_submit_reaches_the_route_with_the_fields_its_type_needs(
 def test_a_post_with_no_body_at_all_reaches_its_route(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`upstream-test` and `lease heartbeat` both POST nothing.
-
-    `crucible/local.py` sends a literal `b"{}"` on every POST rather than an
-    empty body, and it does not say why — so whether urllib's bodyless POST is
-    accepted here is a question to ask rather than assume. It is: both routes
-    answer their own 404, which they can only do after the request parsed.
-    """
     assert run(base, "upstream-test", "no-such-upstream") == 1
     first = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert first["error"]["code"] == "unknown_upstream"
@@ -516,12 +413,6 @@ def test_a_post_with_no_body_at_all_reaches_its_route(
 
 @pytest.fixture
 def tts_base(make_app: Callable[..., FastAPI]) -> Iterator[str]:
-    """The same real server with `tts` on, for the two voice-manifest verbs.
-
-    `voice_write` and `voice_remove` check `enable_tts` before anything else, so
-    against the plain `base` they would answer the same 503 whatever argv sent
-    them and prove nothing about the request that was built.
-    """
     with serve(make_app(enable_tts=True)) as url:
         yield url
 
@@ -529,12 +420,6 @@ def tts_base(make_app: Callable[..., FastAPI]) -> Iterator[str]:
 def test_voice_write_carries_the_whole_manifest_document(
     tts_base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The refusal is the server reading the BODY — `voice_invalid` names the table.
-
-    A document with no `voice` key is rejected by `write_home_voice`, which runs
-    after `await request.json()`, so a 400 saying so is only reachable if the
-    file's contents travelled and parsed as a dict.
-    """
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"not_a_voice": {}}), encoding="utf-8")
     assert run(tts_base, "voice-write", "made-up",
@@ -546,7 +431,6 @@ def test_voice_write_carries_the_whole_manifest_document(
 def test_voice_remove_reaches_the_route_and_is_told_there_is_no_overlay(
     tts_base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`voice_not_custom` is the route's own 404, and only it says that word."""
     assert run(tts_base, "voice-remove", "made-up") == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "voice_not_custom"
@@ -555,27 +439,13 @@ def test_voice_remove_reaches_the_route_and_is_told_there_is_no_overlay(
 def test_a_params_file_is_read_and_sent(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`@file` is how a ladder's thousand chunks get past a shell's argument limit."""
     params = tmp_path / "params.json"
     params.write_text(json.dumps({"delay_ms": 999999}), encoding="utf-8")
     assert run(base, "job", "submit", "--type", "echo",
                "--params", f"@{params}", "--follow") == 1
-    # 999999 is past `EchoParams.delay_ms`'s `le=60_000`. Echo validates its
-    # params inside `run()` rather than in `preflight`, so this is admitted and
-    # then FAILS — and the failure names the field, which it can only do if the
-    # file's contents actually reached the server.
     assert "delay_ms" in json.dumps(lines(capsys.readouterr().out)[-1])
 
 
-# ---------------------------------------------------------- the decision door
-#
-# PHASE22-DECIDE.md (2026-09-23). The grammar is snap's (`snap/cli.py`), and
-# the first two tests are about the half this module owns — the body it builds
-# from that grammar — so they record the request rather than serve it. The
-# last two need the SERVER half of the phase (the door in `crucible/api.py`,
-# and `tests/fake_engine.py` answering logprobs) and run against a real socket.
-
-#: The contract's worked example (section 2.2), as a person types it.
 DECIDE_ARGV = (
     "decide", "--model", "qwen3.5-9b",
     "--state", "I was charged twice for March, please refund one.",
@@ -602,7 +472,6 @@ DECIDE_BODY = {
 
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Every `call` the verb makes, answered `{}` — the body is what is asserted."""
     calls: list[dict[str, Any]] = []
 
     def record(connection: Any, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -619,11 +488,8 @@ def test_decide_builds_the_contract_s_worked_example_from_snap_s_grammar(
     assert run("http://127.0.0.1:1", *DECIDE_ARGV) == 0
     assert recorded == [{"method": "POST", "path": "/v1/decide",
                          "json_body": DECIDE_BODY, "extra_headers": None}]
-    # The ORDER the flags were typed in is the order of `questions`, across
-    # flag kinds — the reply's `answers` follows it.
     assert list(recorded[0]["json_body"]["questions"]) == ["team", "anger", "urgent"]
 
-    # @file for the state, the act as a header, images base64 and state "".
     state = tmp_path / "ticket.txt"
     state.write_text("from a file", encoding="utf-8")
     image = tmp_path / "page.png"
@@ -643,10 +509,6 @@ def test_decide_builds_the_contract_s_worked_example_from_snap_s_grammar(
 
 
 def test_decide_missing_travels_only_when_given(recorded: list[dict[str, Any]]) -> None:
-    """Left out, the body has no `missing` and the server's default (refuse)
-    stands — the worked example above already asserts that exact body. Given,
-    it travels verbatim, including a word the server will refuse: the two words
-    are the server's to check, not a second copy here."""
     for word in ("report", "refuse", "sometimes"):
         recorded.clear()
         assert run("http://127.0.0.1:1", *DECIDE_ARGV, "--missing", word) == 0
@@ -662,14 +524,11 @@ def test_decide_missing_report_reaches_the_door_and_an_unknown_word_is_its_400(
     engine_factory: Callable[..., Any],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """NEEDS THE SERVER HALF: `--missing report` through the door, the fake
-    engine cutting anger's `C` below the top-K; then an unknown word refused
-    by the server, naming the field."""
     from .live_server import run_job
 
     def probs_for(messages: list[dict[str, Any]]) -> dict[str, float]:
         text = json.dumps(messages)
-        if "How frustrated" in text:  # K = 7; seven tokens outrank C
+        if "How frustrated" in text:
             return {"A": 0.3, "B": 0.2, "so": 0.09, "I": 0.08, "Um": 0.07,
                     "Well": 0.06, "It": 0.05, "C": 0.001}
         return {"A": 0.83, "B": 0.17}
@@ -685,8 +544,6 @@ def test_decide_missing_report_reaches_the_door_and_an_unknown_word_is_its_400(
         assert printed["answers"]["anger"]["probabilities"]["Very angry"] is None
         assert printed["answers"]["team"]["missing_labels"] == []
         assert run(url, *DECIDE_ARGV, "--missing", "sometimes") == 1
-    # raw_decode: the in-process server's own stderr lines (the settlement
-    # unloading the model behind the decision) follow the printed refusal.
     refusal, _ = json.JSONDecoder().raw_decode(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "invalid_request"
     assert ["body", "missing"] in [p["location"] for p in refusal["error"]["details"]["problems"]]
@@ -721,9 +578,6 @@ def llm_base(
 def test_decide_reaches_the_door_and_is_refused_for_the_servers_own_reason(
     llm_base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """NEEDS THE SERVER HALF (`POST /v1/decide`). Nothing is resident, so the
-    door's 409 is the answer — which it can only give after the body validated;
-    a body the door could not read would be a 400 `invalid_request` instead."""
     assert run(llm_base, *DECIDE_ARGV) == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "model_not_resident"
@@ -738,9 +592,6 @@ def test_decide_prints_the_door_s_answer_for_the_worked_example(
     engine_factory: Callable[..., Any],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """NEEDS THE SERVER HALF: the door, and `tests/fake_engine.py`'s `probs_for`
-    (PHASE22-DECIDE.md section 3). The fake answers the letters the contract's
-    example reads, and the verb prints what the door made of them, unchanged."""
     from .live_server import run_job
 
     def probs_for(messages: list[dict[str, Any]]) -> dict[str, float]:
@@ -766,15 +617,6 @@ def test_decide_prints_the_door_s_answer_for_the_worked_example(
     assert printed["model"]["id"] == "qwen3.5-9b"
 
 
-# -------------------------------------------------------------- route coverage
-
-
-#: Every route the server serves, and the argv that reaches it — or the reason
-#: this CLI deliberately does not. Owen asked for a command per endpoint, and a
-#: claim like that is worth nothing unless something enumerates the server and
-#: checks. The map is HERE and not in the module because it is the assertion,
-#: not the implementation: a route added to `crucible/api.py` with no verb makes
-#: this test fail with the path in the message.
 COVERED: dict[str, str] = {
     "GET /v1/ping": "api ping",
     "GET /v1/health": "api health",
@@ -822,8 +664,6 @@ COVERED: dict[str, str] = {
     "DELETE /v1/leases/{lease_id}": "api lease release",
 }
 
-#: The routes with no verb, each with the reason. Both halves of the pairing
-#: dance a REQUESTING app does, and the orchestrator's relation to its engine.
 EXCLUDED: dict[str, str] = {
     "POST /v1/pairing/start": "the requesting app's half; this CLI already has a token",
     "POST /v1/pairing/poll": "the requesting app's half; this CLI already has a token",
@@ -838,16 +678,6 @@ def test_every_api_route_has_a_verb_or_a_stated_reason(
 ) -> None:
     app = make_app(enable_llm=True, enable_tts=True, enable_asr=True,
                    enable_align=True, enable_rvc=True, enable_denoise=True)
-    # THE OPENAPI DOCUMENT, not `app.routes`. The first draft of this walked the
-    # route list and found nothing: this FastAPI wraps every `include_router`
-    # into a `_IncludedRouter` whose real routes hang off `original_router` with
-    # the prefix in a separate `include_context`, so a flat `isinstance(route,
-    # APIRoute)` matched only `GET /`. Measured 2026-09-16 — and the test PASSED
-    # its first assertion while doing it, because an empty set is a subset of
-    # everything. `app.openapi()` is the server's own published answer to "what
-    # do you serve", and it is stable across the versions that private class is
-    # not. The one route it omits is `GET /`, the operator page, which is
-    # `include_in_schema=False` and is not an API route.
     served = {
         f"{method.upper()} {path}"
         for path, verbs in app.openapi()["paths"].items()
@@ -870,7 +700,6 @@ def test_every_api_route_has_a_verb_or_a_stated_reason(
 def test_capability_passes_a_client_size_through_for_the_server_to_judge(
     recorded: list[dict[str, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`generate` is sized per call; the SERVER validates, so the CLI only carries."""
     assert run("http://127.0.0.1:1", "capability") == 0
     assert recorded[-1]["path"] == "/v1/capability"
     assert run("http://127.0.0.1:1", "capability", "--class", "generate",

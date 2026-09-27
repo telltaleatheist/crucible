@@ -1,15 +1,3 @@
-"""One copy on disk, two fit rows in the catalog (PHASE22-DECIDE.md section 2.9).
-
-Owen, 2026-09-23: *"One copy on disk, two fit rows in the catalog — i think this
-is a fine way to do it."* A model manifest may declare `[model] weights_of =
-"<base id>"`: an ALIAS, whose weights are its base's download in its base's
-folder, and which owns on disk only the files its block names beyond the
-base's. These tests hold every rule of that by the name it is refused with,
-drive the real store against `tests/fake_hub.py`, and read the real rows.
-
-Nothing here touches the network, a card or an engine.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,18 +25,11 @@ from .fake_hub import CHUNK, FakeHub
 GIB = 1024 ** 3
 BASE = "qwen3.5-9b"
 ALIAS = "qwen3.5-9b-vl"
-#: TWO since 2026-09-23. `qwen3.8-27b-8bit-vl` was served on cuda-linux alone
-#: and went with its base's cuda-linux arm (Owen: *"we shouldnt have an 8 bit
-#: 27b on here. waste of space, wont fit in the gpu"*); the test below that
-#: rebuilds it shows the loader would refuse it by name if it came back.
 ALIASES = {
     "qwen3.5-9b-vl": "qwen3.5-9b",
     "qwen3.8-27b-4bit-vl": "qwen3.8-27b-4bit",
 }
 MMPROJ = "mmproj-F16.gguf"
-
-
-# ------------------------------------------------------------------ fixtures
 
 
 def _config(home: Path, backend_kind: str) -> Config:
@@ -94,7 +75,6 @@ def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
 
 @pytest.fixture
 def catalog_dir(tmp_path: Path) -> Path:
-    """A models/ tree holding the shipped 9B, for aliases written by hand."""
     root = tmp_path / "models"
     root.mkdir()
     shipped = manifests_dir()
@@ -107,7 +87,6 @@ def catalog_dir(tmp_path: Path) -> Path:
 
 
 def _alias_text(**overrides: Any) -> str:
-    """The shipped 9B-vl, with lines swapped out. Keys are TOML lines."""
     text = (manifests_dir() / f"{ALIAS}.toml").read_text(encoding="utf-8")
     for old, new in overrides.items():
         assert old in text, old
@@ -125,16 +104,12 @@ def _refusal(root: Path, model_id: str = ALIAS) -> str:
     return str(caught.value)
 
 
-# ------------------------------------------------------------ the loader
-
-
 def test_a_well_formed_alias_loads_with_its_base_attached(catalog_dir: Path) -> None:
     _write_alias(catalog_dir, _alias_text())
     alias = load_manifest(ALIAS, catalog_dir)
     assert alias.weights_of == BASE
     assert alias.weights_base is not None and alias.weights_base.id == BASE
     assert alias.store_id == BASE
-    # A base names no base and owns its own folder.
     base = load_manifest(BASE, catalog_dir)
     assert base.weights_of is None and base.weights_base is None
     assert base.store_id == BASE
@@ -171,12 +146,8 @@ def test_an_alias_of_an_alias_is_weights_of_chain(catalog_dir: Path) -> None:
 def test_a_base_aliased_to_something_else_is_weights_of_chain(
     catalog_dir: Path,
 ) -> None:
-    """The mirror: the BASE declares a `weights_of`, so the alias that names it
-    names a folder with two owners. Also closes a cycle without recursing."""
     base = catalog_dir / f"{BASE}.toml"
     text = base.read_text(encoding="utf-8")
-    # An alias carries no [local] (`weights_of_local`), so the base loses its
-    # own before it is made one — otherwise that refusal would answer first.
     text = text[: text.index("[local]\n")] + text[text.index("[backends.cuda-linux]"):]
     text = text.replace(
         'id = "qwen3.5-9b"\n', 'id = "qwen3.5-9b"\nweights_of = "qwen3.5-4b"\n', 1
@@ -246,8 +217,6 @@ def test_an_alias_with_no_defaults_when_its_base_has_them_is_a_fact_mismatch(
 
 
 def test_what_the_alias_serves_is_its_own(catalog_dir: Path) -> None:
-    """modalities, serves, context_default, display, description, engine_args
-    and memory differ from the base's — the point of the alias — and load."""
     _write_alias(catalog_dir, _alias_text())
     alias = load_manifest(ALIAS, catalog_dir)
     base = load_manifest(BASE, catalog_dir)
@@ -275,10 +244,6 @@ def test_a_backend_the_base_does_not_declare_is_weights_of_backend_missing(
 def test_an_8bit_27b_vision_alias_on_cuda_linux_is_weights_of_backend_missing(
     catalog_dir: Path,
 ) -> None:
-    """The retired `qwen3.8-27b-8bit-vl`, rebuilt as it shipped until
-    2026-09-23: one cuda-linux block over the FP8 repo. Its base has no
-    cuda-linux block any more (Mac only, by Owen's ruling), so there is no
-    download for the alias to share and the loader says so by name."""
     shipped = manifests_dir()
     (catalog_dir / "qwen3.8-27b-8bit.toml").write_text(
         (shipped / "qwen3.8-27b-8bit.toml").read_text(encoding="utf-8"),
@@ -323,9 +288,6 @@ def test_an_alias_with_a_local_form_is_weights_of_local(catalog_dir: Path) -> No
     assert "weights_of_local" in _refusal(catalog_dir)
 
 
-# ------------------------------------------------------------- the two aliases
-
-
 @pytest.mark.parametrize("alias_id, base_id", sorted(ALIASES.items()))
 def test_the_vision_forms_load_and_agree_with_their_bases(
     alias_id: str, base_id: str
@@ -338,7 +300,6 @@ def test_the_vision_forms_load_and_agree_with_their_bases(
     assert alias.modalities == ("text", "image")
     assert alias.display == f"{base.display} · with vision"
     assert alias.local is None
-    # No mlx-darwin block: mlx-lm serves text, and the base covers the Mac.
     assert MLX_DARWIN not in alias.backends
     for kind, spec in alias.backends.items():
         base_spec = base.spec(kind)
@@ -351,7 +312,6 @@ def test_the_vision_forms_load_and_agree_with_their_bases(
             assert "--skip-mm-profiling" not in spec.engine_args
             flag = spec.engine_args.index("--limit-mm-per-prompt")
             assert json.loads(spec.engine_args[flag + 1]) == {"image": 8, "video": 0}
-            # The image reserve, 1.90 GiB, is what the intercept gains.
             assert (
                 spec.memory.overhead_bytes - base_spec.memory.overhead_bytes
                 == 2_040_109_466
@@ -364,11 +324,6 @@ def test_the_vision_forms_load_and_agree_with_their_bases(
 
 
 def test_the_vl_aliases_carry_the_tower_their_text_bases_do_not() -> None:
-    """The 9B's calibrated weights are text-only, so the tower is added. The
-    27B-4bit's base term is text-only too since 2026-09-23 (its 17.68 GiB card
-    figure less the 921_460_192 B tower `--language-model-only` no longer
-    loads), so its alias adds that tower back. (The 8-bit's alias is gone with
-    its base's cuda-linux arm, 2026-09-23.)"""
     nine = load_manifest(ALIAS).spec(CUDA_LINUX).memory
     assert nine.weights_bytes == load_manifest(BASE).spec(CUDA_LINUX).memory.weights_bytes + 912_020_960
     four = load_manifest("qwen3.8-27b-4bit-vl")
@@ -379,7 +334,6 @@ def test_the_vl_aliases_carry_the_tower_their_text_bases_do_not() -> None:
 
 
 def test_the_nine_b_vl_leaves_about_1700_tokens_on_the_3090ti() -> None:
-    """PHASE22 section 7.3's ~2,000, to the byte, against the fit budget."""
     terms = load_manifest(ALIAS).spec(CUDA_LINUX).memory
     budget = 25_757_220_864 - 3 * GIB
     assert terms.max_context(available_bytes=budget, concurrency=1) == 1_700
@@ -389,7 +343,6 @@ def test_the_nine_b_vl_leaves_about_1700_tokens_on_the_3090ti() -> None:
 
 def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
     expected_decide = {
-        # No 8-bit 27B, text or vision: Mac only since 2026-09-23.
         CUDA_LINUX: [
             "qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
             "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
@@ -438,9 +391,6 @@ def test_every_alias_the_catalog_ships_is_one_of_the_two() -> None:
     assert shipped == ALIASES
 
 
-# ------------------------------------------------------------ the store
-
-
 def test_an_alias_s_folder_is_its_base_s(tmp_path: Path) -> None:
     config = _config(tmp_path / "home", LLAMA_WINDOWS)
     alias, base = load_manifest(ALIAS), load_manifest(BASE)
@@ -456,10 +406,8 @@ def test_pulling_the_alias_pulls_the_base_then_only_its_own_file(
     config = _config(tmp_path / "home", LLAMA_WINDOWS)
     alias, base = load_manifest(ALIAS), load_manifest(BASE)
     found = weights.pull(config, alias, alias.spec(LLAMA_WINDOWS))
-    # The base as the base (its one GGUF), then ONLY the projector.
     assert hub.allowed == [["Qwen3.5-9B-Q8_0.gguf"], [MMPROJ]]
     assert found.path == config.home / "models" / BASE / LLAMA_WINDOWS
-    # The alias owns the projector's bytes and nothing else.
     assert found.bytes == 2 * CHUNK
     assert weights.installed(config, base, base.spec(LLAMA_WINDOWS)) is not None
     assert not (config.home / "models" / ALIAS).exists()
@@ -467,7 +415,6 @@ def test_pulling_the_alias_pulls_the_base_then_only_its_own_file(
         weights.alias_record_path(config, alias, LLAMA_WINDOWS).read_text("utf-8")
     )
     assert record["weights_of"] == BASE and record["files"] == [MMPROJ]
-    # A second pull of either is a no-op: nothing is downloaded twice.
     weights.pull(config, alias, alias.spec(LLAMA_WINDOWS))
     weights.pull(config, base, base.spec(LLAMA_WINDOWS))
     assert len(hub.allowed) == 2
@@ -479,7 +426,6 @@ def test_with_the_base_already_pulled_the_alias_fetches_only_its_file(
     config = _config(tmp_path / "home", LLAMA_WINDOWS)
     alias, base = load_manifest(ALIAS), load_manifest(BASE)
     weights.pull(config, base, base.spec(LLAMA_WINDOWS))
-    # A base-only pull leaves the alias NOT installed, honestly.
     assert weights.installed(config, alias, alias.spec(LLAMA_WINDOWS)) is None
     with pytest.raises(weights.WeightsError, match=MMPROJ):
         weights.require_installed(config, alias, alias.spec(LLAMA_WINDOWS))
@@ -519,10 +465,8 @@ def test_removing_the_base_while_the_alias_holds_it_is_weights_shared(
     assert caught.value.code == "weights_shared"
     assert caught.value.aliases == (ALIAS,)
     assert ALIAS in str(caught.value)
-    # A forced re-pull of the base empties the folder: the same refusal.
     with pytest.raises(weights.WeightsShared):
         weights.pull(config, base, base.spec(LLAMA_WINDOWS), force=True)
-    # Nothing went.
     assert weights.installed(config, alias, alias.spec(LLAMA_WINDOWS)) is not None
 
 
@@ -547,13 +491,9 @@ def test_removing_the_alias_takes_only_its_file_then_the_base_may_go(
 def test_on_cuda_linux_a_pulled_alias_also_holds_the_base(
     tmp_path: Path, hub: FakeHub
 ) -> None:
-    """The record is what makes "an alias exists here" a fact on a backend
-    where it owns no file; without it the base could never be refused."""
     config = _config(tmp_path / "home", CUDA_LINUX)
     alias, base = load_manifest(ALIAS), load_manifest(BASE)
     weights.pull(config, base, base.spec(CUDA_LINUX))
-    # Installed by the ruling's definition (base stamp + no extras), but never
-    # pulled as itself: removing the base is not refused.
     assert weights.installed(config, alias, alias.spec(CUDA_LINUX)) is not None
     assert weights.aliases_holding(config, base, CUDA_LINUX) == ()
     weights.pull(config, alias, alias.spec(CUDA_LINUX))
@@ -579,9 +519,6 @@ def test_a_cancelled_projector_pull_leaves_the_base_alone(
     folder = weights.subject_dir(config, base, LLAMA_WINDOWS)
     assert not (folder / MMPROJ).exists()
     assert weights.installed(config, base, base.spec(LLAMA_WINDOWS)) is not None
-
-
-# ------------------------------------------------------------- the rows
 
 
 def _rows_through_the_api(
@@ -616,10 +553,8 @@ def test_the_catalog_counts_the_download_once_on_the_base(
     assert base_row["shares_weights_of"] is None
     assert base_row["missing_files"] is None
     assert alias_row["shares_weights_of"] == BASE
-    # Base-only: the alias is not installed, and its row says which file.
     assert alias_row["installed"] is False
     assert alias_row["missing_files"] == [MMPROJ]
-    # A projector's size is not declared by any manifest, so null, not a guess.
     assert alias_row["expected_bytes"] is None
 
     weights.pull(config, alias, alias.spec(LLAMA_WINDOWS))
@@ -635,7 +570,6 @@ def test_the_catalog_counts_the_download_once_on_the_base(
         .read_text("utf-8")
     )
     assert base_row["installed_bytes"] == stamp["bytes"]
-    # ONCE: the alias's row counts only the projector.
     assert alias_row["installed_bytes"] == 2 * CHUNK
 
 
@@ -665,15 +599,12 @@ def test_models_and_info_rows_carry_weights_of(
     assert {r["id"]: r["weights_of"] for r in llm["models"]} == {
         model_id: ALIASES.get(model_id) for model_id in models
     }
-    # A not-installed alias's reason names the shared download, not a folder.
     assert f"shares the weights of {BASE!r}" in models[ALIAS]["reason"]
 
 
 def test_an_alias_never_reads_as_held_in_the_ollama_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The store reuse is base-only: Ollama's blob is the text GGUF with no
-    projector, and the alias has no [local] to name a tag with."""
     from crucible.jobs.llm import model_rows
     from crucible.residency import Residency
 
@@ -710,7 +641,6 @@ def test_the_api_refuses_the_base_by_name_and_names_the_alias(
         assert error["code"] == "weights_shared"
         assert error["details"]["aliases"] == [ALIAS]
         assert ALIAS in error["message"]
-        # The alias goes (only what is its own), then the base may.
         assert client.delete(f"/v1/catalog/model/{ALIAS}", headers=auth).status_code == 204
         assert client.delete(f"/v1/catalog/model/{BASE}", headers=auth).status_code == 204
 
@@ -721,15 +651,11 @@ def test_an_alias_holding_the_card_holds_its_base_even_unpulled(
     home: Path,
     hub: FakeHub,
 ) -> None:
-    """On cuda-linux the alias is installed by the base's pull alone, with no
-    record of its own — so `weights_shared` cannot see it. What CAN is the
-    hold: a lease (or a residency) on the alias is a run reading the base's
-    folder, and the door refuses `subject_in_use`, naming the alias."""
     config = _config(home, CUDA_LINUX)
     base = load_manifest(BASE)
     weights.pull(config, base, base.spec(CUDA_LINUX))
     with make_client(enable_llm=True) as client:
-        client.app.state.leases.open(  # type: ignore[attr-defined]
+        client.app.state.leases.open(
             kind="llm", subject=ALIAS, act="decide", client="foundry/1",
             ttl_seconds=60,
         )
@@ -773,8 +699,6 @@ def test_the_cli_refuses_the_base_by_name(
 def test_the_windows_migration_removes_the_alias_before_its_base(
     tmp_path: Path, hub: FakeHub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`qwen3.5-9b` sorts first, meets `weights_shared`, and goes on the next
-    round once the alias has — the real catalog, the real store."""
     from crucible.host import installer
     from crucible.host.catalog import StoppedWindowsCatalog
 
@@ -785,8 +709,6 @@ def test_the_windows_migration_removes_the_alias_before_its_base(
     alias = load_manifest(ALIAS)
     weights.pull(config, alias, alias.spec(LLAMA_WINDOWS))
     keys = {("model", BASE), ("model", ALIAS)}
-    # The controller journals the cleanup before it builds the stopped
-    # catalog (tests/test_host_migration_faults.py does the same).
     installer.record_cleanup(home, keys)
     stopped = StoppedWindowsCatalog(
         config, _backend(LLAMA_WINDOWS), installer.cleanup_subjects(home)

@@ -1,15 +1,3 @@
-"""The `rvc` job type, end to end through the API.
-
-No GPU, no ultimate-rvc and no 180 MB of checkpoints. What stands in for them is
-what the real code paths actually read — a stamped venv whose `bin/python` is a
-real interpreter, a stamped and unpacked weights directory, a base-asset tree,
-monkeypatched accelerator probes, and `tests/fake_rvc_worker.py` spawned as a
-real subprocess in place of the real worker script. Everything else is the
-server: the preflight refusals, the inverted `protect_rate` bound, the staged
-`URVC_MODELS_DIR`, the engine environment, the batching and the every-input-an-
-output rule are exactly what would run on the PC.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -32,9 +20,6 @@ from .conftest import FAKE_BACKEND, end_process_tree, parse_sse
 MODEL = "deathstalker-rvc-v1"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_rvc_worker.py"
 
-#: The tuned deathstalker→Sigma recipe: rmvpe, -2 semitones, index 0.3,
-#: protect 0.1 — and protect 0.1 protects MORE than 0.5 would, which is the
-#: thing this whole job type has a comment about.
 PARAMS: dict[str, Any] = {
     "index_rate": 0.3,
     "protect_rate": 0.1,
@@ -49,12 +34,8 @@ INPUTS = {
 }
 
 
-# ------------------------------------------------------------------ fixtures
-
-
 @pytest.fixture
 def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/rvc` whose python is this interpreter."""
     directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
@@ -84,12 +65,6 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def rvc_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp an RVC model as pulled AND unpacked at its pinned revision.
-
-    The directory layout matters and is not invented here: the published archives
-    unpack to `rvc/voice_models/<model_name>/`, verified against the tarballs on
-    2026-09-13, and `_stage_models` looks for exactly that.
-    """
 
     def stamp(model_id: str) -> Path:
         manifest = load_rvc_manifest(model_id)
@@ -123,14 +98,6 @@ def rvc_weights(home: Path) -> Callable[[str], Path]:
 
 @pytest.fixture
 def base_assets(home: Path) -> Path:
-    """Every declared base asset, as an empty file.
-
-    Read off `rvcbase`'s declaration rather than listed here, which is the whole
-    point of that file existing: the set that is pulled and the set that is
-    checked for are one list, so a fixture cannot quietly test a shorter one.
-    (It used to list two, and the job used to check for two — and the pair of
-    them missed the `config.json` transformers needs beside the embedder.)
-    """
     root = home / "rvc-base"
     for target in rvcbase.load_rvc_base().targets:
         path = root / target
@@ -147,8 +114,6 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def ffmpeg_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """rvc refuses `ffmpeg_missing` up front (2026-09-26); these tests are about
-    everything else, so the probe answers for the machine running the suite."""
     monkeypatch.setattr(
         rvc_job,
         "ffmpeg_paths",
@@ -205,9 +170,6 @@ def ready(
     return rvc_client
 
 
-# ------------------------------------------------------------------- listing
-
-
 def test_info_advertises_every_rvc_model(
     rvc_client: TestClient, auth: dict[str, str]
 ) -> None:
@@ -224,20 +186,16 @@ def test_info_advertises_every_rvc_model(
         "us-female-1",
     ]
     row = next(r for r in by_type["rvc"]["models"] if r["id"] == MODEL)
-    # The repo AND the file: seven models share one repo, so the repo alone
-    # would identify none of them.
     assert row["source"] == (
         "owenmorgan/owen-morgan-bookforge:rvc/deathstalker_rvc_v1.tar.gz"
     )
     assert row["installed"] is False
-    # Nothing is ever resident: the whole design is a process that exits.
     assert row["resident"] is False
 
 
 def test_info_says_installed_once_an_rvc_model_is_pulled(
     rvc_client: TestClient, auth: dict[str, str], rvc_weights: Callable[[str], Path]
 ) -> None:
-    """`installed` is the puller's stamp at the pinned revision, per model."""
     rvc_weights(MODEL)
     capabilities = rvc_client.get("/v1/info", headers=auth).json()["capabilities"]
     by_type = {entry["job_type"]: entry for entry in capabilities}
@@ -257,9 +215,6 @@ def test_rvc_is_off_unless_the_config_says_otherwise(
     assert "requires a model" in response.json()["error"]["message"]
 
 
-# ------------------------------------------------------------------ refusals
-
-
 @pytest.mark.parametrize(
     "missing", ["index_rate", "protect_rate", "n_semitones"]
 )
@@ -276,8 +231,6 @@ def test_the_three_numbers_that_change_the_sound_are_required(
 def test_protect_rate_above_a_half_is_refused_because_the_scale_is_inverted(
     rvc_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """0.5 is protection OFF, not protection maximal. A higher number can only
-    mean the caller believed urvc's own documented scale, which is backwards."""
     response = submit(rvc_client, auth, params={**PARAMS, "protect_rate": 0.9})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_params"
@@ -287,7 +240,6 @@ def test_protect_rate_above_a_half_is_refused_because_the_scale_is_inverted(
 def test_protect_rate_of_exactly_a_half_is_allowed(
     rvc_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """It means "no protection", which is a thing a caller is entitled to ask for."""
     assert rvc_job.RvcParams.model_validate(
         {**PARAMS, "protect_rate": 0.5}
     ).protect_rate == 0.5
@@ -296,7 +248,6 @@ def test_protect_rate_of_exactly_a_half_is_allowed(
 def test_f0_method_and_hop_length_may_be_absent(
     rvc_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """The one meaningful absence on the whole wire."""
     params = {k: v for k, v in PARAMS.items() if k != "f0_method"}
     validated = rvc_job.RvcParams.model_validate(params)
     assert validated.f0_method is None
@@ -306,7 +257,6 @@ def test_f0_method_and_hop_length_may_be_absent(
 def test_batch_size_is_not_a_wire_parameter(
     rvc_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """A memory bound the client could set is a memory bound the client can break."""
     response = submit(rvc_client, auth, params={**PARAMS, "batch_size": 4096})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_params"
@@ -339,7 +289,6 @@ def test_missing_base_assets_are_refused_by_name_with_the_paths(
     idle_card: None,
     rvc_weights: Callable[[str], Path],
 ) -> None:
-    """Crucible does not fetch them and does not pretend to."""
     rvc_weights(MODEL)
     response = submit(rvc_client, auth)
     assert response.status_code == 409
@@ -375,7 +324,6 @@ def test_a_model_with_no_index_refuses_a_non_zero_index_rate(
     rvc_weights: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`forceIndexRate0`, said out loud rather than clamped behind the caller's back."""
     rvc_weights(MODEL)
     real = load_rvc_manifest
 
@@ -394,8 +342,6 @@ def test_a_model_with_no_index_refuses_a_non_zero_index_rate(
 def test_mixed_formats_and_a_name_without_an_extension_are_converted(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """#45 (2026-09-26): the worker reads each input's format from its bytes, so
-    neither the NAME's extension nor one format per job is the server's to refuse."""
     events = run_job(
         ready,
         auth,
@@ -416,9 +362,6 @@ def test_a_job_with_no_inputs_is_refused(
     assert terminal(events)["data"]["error"]["code"] == "invalid_inputs"
 
 
-# ---------------------------------------------------------------- it runs
-
-
 def test_a_run_converts_every_input_and_keeps_its_name(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
@@ -431,16 +374,12 @@ def test_a_run_converts_every_input_and_keeps_its_name(
     for name in SENTENCES:
         response = ready.get(f"/v1/jobs/{job_id}/artifacts/{name}", headers=auth)
         assert response.status_code == 200
-        # The converted bytes, not the input's — proof the artifact came from
-        # the output directory and not from a copy of the input.
         assert response.content.endswith(b"[converted by the fake rvc worker]\n")
 
 
 def test_a_missing_output_fails_the_job_and_keeps_the_rest(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The job fails, so it never ends like a whole conversion; what did convert
-    is kept (2026-09-26: a cancel at 26 of 35 used to lose all 26)."""
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_SKIP", "42.flac")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
@@ -460,7 +399,6 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The batch sizes and the staged models root never cross the wire."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_TRANSCRIPT", str(transcript))
     run_job(ready, auth)
@@ -471,17 +409,13 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
     assert sent["model_name"] == "deathstalker_rvc_v1"
     assert sent["memory_fraction"] == 0.5
     assert sent["max_batch_audio_s"] == 1800.0
-    # Absent piece params are the server's defaults, sent resolved (#5).
     assert (sent["piece_s"], sent["overlap_s"], sent["crossfade_s"]) == (60.0, 0.5, 0.02)
     assert sent["inputs"] == SENTENCES
-    # The four numbers the client DID choose reach the engine unadjusted — in
-    # particular protect_rate, which is not flipped on the way through.
     assert sent["index_rate"] == 0.3
     assert sent["protect_rate"] == 0.1
     assert sent["n_semitones"] == -2
     assert sent["f0_method"] == "rmvpe"
 
-    # The hardening travels in the ENVIRONMENT, so that is where it is asserted.
     assert environment["KMP_DUPLICATE_LIB_OK"] == "TRUE"
     assert environment["OMP_NUM_THREADS"] == "1"
     assert environment["URVC_SKIP_INIT"] == "1"
@@ -494,7 +428,6 @@ def test_an_absent_f0_method_is_absent_from_the_request(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Absent means the flag is OMITTED, not a value Crucible chose."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_TRANSCRIPT", str(transcript))
     params = {k: v for k, v in PARAMS.items() if k != "f0_method"}
@@ -511,8 +444,6 @@ def test_the_staged_models_root_holds_this_job_s_model_and_no_other(
     tmp_path: Path,
     home: Path,
 ) -> None:
-    """urvc resolves a model by NAME; a root holding seven is a root that can
-    resolve to the wrong one."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_TRANSCRIPT", str(transcript))
     run_job(ready, auth)
@@ -520,8 +451,6 @@ def test_the_staged_models_root_holds_this_job_s_model_and_no_other(
     root = Path(sent["models_dir"])
     voices = sorted(p.name for p in (root / "rvc" / "voice_models").iterdir())
     assert voices == ["deathstalker_rvc_v1"]
-    # And the base assets are reachable from the same root, which is what makes
-    # it a whole URVC_MODELS_DIR rather than half of one.
     assert (root / "rvc" / "embedders" / "contentvec" / "pytorch_model.bin").is_file()
     assert (root / "rvc" / "predictors" / "rmvpe.pt").is_file()
 
@@ -542,7 +471,6 @@ def test_batching_is_the_servers_and_recycles_per_batch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Proven on a 64 GB Mac: what bounds the memory is the process EXITING."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_TRANSCRIPT", str(transcript))
     monkeypatch.setattr(rvc_job, "BATCH_SIZE", 2)
@@ -550,14 +478,9 @@ def test_batching_is_the_servers_and_recycles_per_batch(
     assert terminal(events)["event"] == "done"
     rows = [e["data"] for e in events if e["event"] == "progress"]
     batched = [row for row in rows if row.get("stage") == "converting"]
-    # Three files at two per batch is two batches, and the progress keeps
-    # counting across the boundary rather than restarting.
     assert [row["processed"] for row in batched] == [1, 2, 3, 3]
     warming = [e["data"]["message"] for e in events if e["event"] == "warming"]
     assert any("2 batch(es) of 2" in message for message in warming)
-
-
-# ------------------------------------------------------------- it fails well
 
 
 def test_a_worker_that_dies_fails_the_job_with_its_log(
@@ -629,22 +552,14 @@ def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
     with ready.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
         events = parse_sse(line for line in stream.iter_lines())
     if procgroup.platform_kind() == procgroup.WIN32:
-        # win32 has no WSL2 wedge to protect: the worker deaf to CTRL_BREAK has
-        # its tree terminated, so the cancel is simply a cancel
-        # (`crucible/procgroup.py`).
         assert terminal(events)["event"] == "cancelled", terminal(events)
     else:
         assert terminal(events)["event"] in ("cancelled", "failed")
         if terminal(events)["event"] == "failed":
             assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
 
-    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
-    # this test installed would otherwise append it to the list being walked.
     for pid in list(pids):
         end_process_tree(pid)
-
-
-# ------------------------------------------------------------------- doctor
 
 
 def test_check_reports_what_is_missing_in_order(

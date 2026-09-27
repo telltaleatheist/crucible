@@ -1,12 +1,3 @@
-"""`prepare_inputs` and `should_add_special_tokens`, in the shape 0.7.1 gives them.
-
-The fake `input_ids` carries the images' sizes and the prompts, because that is
-all the fake generator needs to spell its answer; `shape[1]` is what the reader
-reports as `prompt_tokens`, so it is a number a test can predict:
-34 + (height * width) // 196, the way a real 14-pixel patch grid merged 2x2
-comes out (the constant is not upstream's; it only needs to be deterministic).
-"""
-
 from __future__ import annotations
 
 
@@ -21,13 +12,9 @@ class FakeArray:
 
 def prepare_inputs(processor, images, audio, prompts, image_token_index, resize_shape,
                    add_special_tokens, pad_to_uniform_size):
-    # ONE image per call is the reader's contract since the watchdog finding
-    # (the vision tower runs per image); a batch here is the old path.
     if len(images) != 1:
         raise AssertionError(f"prepare_inputs was handed {len(images)} images; the reader embeds one at a time")
     height, width = images[0].height, images[0].width
-    # The same grid rule the fake image processor applies, so two raw sizes
-    # on one grid get one prompt length — the property batching rests on.
     height = max(28, round(height / 28) * 28)
     width = max(28, round(width / 28) * 28)
     prompt_tokens = 34 + (height * width) // 196

@@ -1,5 +1,3 @@
-"""Backend detection: the three viable hosts and the refusals."""
-
 from __future__ import annotations
 
 import subprocess
@@ -81,17 +79,6 @@ def test_linux_without_nvidia_smi_is_refused(monkeypatch: pytest.MonkeyPatch) ->
 def test_win32_detects_llama_windows_and_cuda_linux_is_the_one_refused_there(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Windows IS a backend, and it is `llama-windows` (PHASE15-HOST.md 0, 3.5).
-
-    This replaces `test_windows_is_never_a_backend`, which pinned the sentence
-    section 0's AMENDED block struck — Owen, 2026-09-14: *"the windows side
-    should still host GPU jobs even if WSL isnt present/workable … just like it
-    runs from the mac side."* So `detect_backend()` on win32 answers rather than
-    raising, and the refusal that survives is the NARROWER one from 3.5: a
-    backend runs where its engine runs and nowhere else, so a `cuda-linux`
-    config found on a Windows host is `backend_not_here` — and THAT is the one
-    place vLLM/SGLang's absence on win32 is still said.
-    """
     monkeypatch.setattr(backend_module.sys, "platform", "win32")
     monkeypatch.setattr(backend_module.platform, "machine", lambda: "AMD64")
     monkeypatch.setattr(
@@ -107,9 +94,6 @@ def test_win32_detects_llama_windows_and_cuda_linux_is_the_one_refused_there(
     assert detected.gpu.vendor == "nvidia"
     assert detected.gpu.vram_bytes == 25_757_220_864
 
-    # The refusal a `cuda-linux` config gets on this host, by name. The CLI
-    # prefixes it with the error code (`tests/test_host.py`); the sentence is
-    # this module's.
     sentence = backend_not_here(CUDA_LINUX, detected.kind, detected.platform)
     assert CUDA_LINUX in sentence and LLAMA_WINDOWS in sentence
     assert "A backend runs where its engine runs" in sentence
@@ -124,7 +108,6 @@ def test_unknown_platform_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_wsl_nvidia_smi_location_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under `wsl.exe --exec bash -c`, nvidia-smi is not on PATH but is at its known place."""
     monkeypatch.setattr(backend_module.shutil, "which", lambda name: None)
     monkeypatch.setattr(
         backend_module.os.path, "exists", lambda path: path == backend_module.WSL_NVIDIA_SMI

@@ -1,14 +1,3 @@
-"""`load-model`, `unload-model`, `/v1/models` and the OpenAI proxy.
-
-No GPU and no 19 GB of weights — the env, the weights and the engine are stood
-up by the fixtures in conftest.py exactly as the real code paths read them. What
-is *not* faked is any of the server's own logic: the preflight refusals, the
-exclusive lane, the event stream and the proxy are exactly what runs on the PC.
-
-The one thing this file cannot ask is what happens when the caller goes away
-mid-request; `TestClient` has no such state. That is tests/test_proxy_disconnect.py.
-"""
-
 from __future__ import annotations
 
 import json
@@ -40,22 +29,13 @@ from .conftest import (
 from .fake_engine import ANSWER, DELTAS, TOOL_CALL, FakeEngine
 
 MODEL = "qwen3.5-9b"
-#: The page reader, which sorts first by id and so leads every listing.
 PAGE_MODEL = "dots-ocr"
-#: The 27B at 8 bits, which has NO cuda-linux block (Owen, 2026-09-23: *"we
-#: shouldnt have an 8 bit 27b on here. waste of space, wont fit in the gpu"*).
-#: It is still listed here, as every manifest is, and never offered.
 MAC_ONLY_MODEL = "qwen3.8-27b-8bit"
-#: The same 27B at 4 bits: the one that does fit Owen's card.
 SMALL_BIG_MODEL = "qwen3.8-27b-4bit"
-
-
-# ------------------------------------------------------------------ fixtures
 
 
 @pytest.fixture
 def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
     spec = jobenv.llm_env(FAKE_BACKEND.kind)
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
@@ -78,7 +58,6 @@ def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def fake_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp a model as pulled at exactly the revision its manifest pins."""
 
     def stamp(model_id: str) -> Path:
         spec = load_manifest(model_id).spec(FAKE_BACKEND.kind)
@@ -109,17 +88,11 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
-#: A card big enough for the 27B, so residency can be tested with two real
-#: manifests rather than a contrived pair.
 ROOMY_BACKEND = replace(
     FAKE_BACKEND,
     gpu=replace(FAKE_BACKEND.gpu, name="NVIDIA H100 80GB HBM3", vram_bytes=80 * GIB),
 )
 
-#: A card the 4-bit 27B does NOT fit: 12 GiB against its 20.1 GiB estimate.
-#: Every cuda-linux block this build ships fits the 3090 Ti now that the 8-bit
-#: has none, so "a model too big for the card" is tested on a smaller card
-#: rather than on a model that is never offered.
 SMALL_CARD_BACKEND = replace(
     FAKE_BACKEND,
     gpu=replace(FAKE_BACKEND.gpu, name="NVIDIA GeForce RTX 3060", vram_bytes=12 * GIB),
@@ -156,7 +129,6 @@ def roomy_client(
 
 @pytest.fixture
 def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
-    """Every engine the residency builds, in order, so a test can inspect them."""
     built: list[FakeEngine] = []
 
     def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
@@ -186,18 +158,12 @@ def submit(client: TestClient, auth: dict[str, str], **body: Any):
 
 
 def _stream_chunks(text: str) -> list[dict[str, Any]]:
-    """Every `chat.completion.chunk` of a streamed completion, in order.
-
-    Asserts the stream ended on OpenAI's terminator on the way past, because a
-    chunk list read out of a truncated stream would quietly be a shorter one.
-    """
     lines = [line for line in text.split("\n") if line.startswith("data: ")]
     assert lines[-1] == "data: [DONE]", lines[-3:]
     return [json.loads(line[len("data: ") :]) for line in lines[:-1]]
 
 
 def run_job(client: TestClient, auth: dict[str, str], **body: Any) -> list[dict]:
-    """Submit a job and read its whole event stream. Fails loudly if refused."""
     response = submit(client, auth, **body)
     assert response.status_code == 202, response.json()
     job_id = response.json()["job_id"]
@@ -207,20 +173,12 @@ def run_job(client: TestClient, auth: dict[str, str], **body: Any) -> list[dict]
         return parse_sse(line for line in stream.iter_lines())
 
 
-# -------------------------------------------------------------- /v1/models
-
-
 def test_models_lists_every_manifest_with_its_standing(
     llm_client: TestClient, auth: dict[str, str]
 ) -> None:
     response = llm_client.get("/v1/models", headers=auth)
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
-    # ORDERED BY ID, so the 4-bit precedes the 8-bit ('4' < '8'). It read
-    # BIG then SMALL_BIG while BIG was the bare `qwen3.8-27b`, which sorted
-    # before both; the 2026-09-17 rename moved it to the end of the family.
-    # The decision tiers (2026-09-23; the 2B 2026-09-24) sort before the 9B:
-    # '0' < '2' < '4' < '9'.
     assert [row["id"] for row in response.json()] == [
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
         SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
@@ -228,15 +186,11 @@ def test_models_lists_every_manifest_with_its_standing(
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
     assert row["params_b"] == 9
-    # The pin for *this* host's backend, verbatim from the manifest: a client
-    # that records what it talked to records the same sha the puller used.
     assert row["revision"] == load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision
     assert row["backend_supported"] is True
     assert row["installed"] is False
     assert row["resident"] is False
     assert row["loadable"] is False
-    # 16384 on this backend: the context BookForge's launcher served, not the
-    # 12288 Foundry pins on Ollama for a model larger than this one.
     assert row["context_default"] == 16384
     assert row["max_model_len"] == 16384
     assert row["memory_bytes_estimate"] > 0
@@ -251,7 +205,6 @@ def test_models_says_loadable_once_the_weights_are_there(
     assert rows[MODEL]["installed"] is True
     assert rows[MODEL]["loadable"] is True
     assert "reason" not in rows[MODEL]
-    # The 27B has a manifest and is supported here; it is simply not pulled.
     assert rows[SMALL_BIG_MODEL]["installed"] is False
 
 
@@ -274,11 +227,6 @@ def test_info_gains_an_llm_capability(
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
         SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
-    # The two things you can actually POST are in `job_types`, NOT in
-    # `capabilities`. They were capabilities of their own until 2026-09-13, and
-    # the effect was that one model appeared three times — under `load-model`,
-    # under `unload-model` and under `llm` — in two different shapes, which is
-    # the thing PHASE2-LLM.md section 5 forbids in as many words.
     info = llm_client.get("/v1/info", headers=auth).json()
     assert "load-model" in info["job_types"]
     assert "unload-model" in info["job_types"]
@@ -293,10 +241,6 @@ def test_info_gains_an_llm_capability(
 def test_the_lifecycle_types_describe_installed_as_the_models_route_does(
     llm_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """`load-model` and `unload-model` describe their models with DESIGN.md
-    section 4's row — the one `resolve_model` and `crucible doctor` read — and
-    that row's `installed` is the same stamp `/v1/models` reads, not a second
-    opinion (ARCHITECTURE.md R1)."""
     store = llm_client.app.state.store
     for name in ("load-model", "unload-model"):
         rows = {d.id: d.to_dict() for d in store.registry[name].describe_models()}
@@ -316,7 +260,6 @@ def test_the_lifecycle_types_describe_installed_as_the_models_route_does(
 def test_the_llm_capability_rows_are_the_models_rows(
     llm_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """One shape, one producer: `/info`'s llm rows *are* `/v1/models`' rows."""
     fake_weights(MODEL)
     models = llm_client.get("/v1/models", headers=auth).json()
     capabilities = llm_client.get("/v1/info", headers=auth).json()["capabilities"]
@@ -325,8 +268,6 @@ def test_the_llm_capability_rows_are_the_models_rows(
     for row in models:
         manifest = load_manifest(row["id"])
         if not manifest.supports(FAKE_BACKEND.kind):
-            # The 8-bit 27B is Mac-only (Owen, 2026-09-23): listed, never
-            # given another backend's pin.
             assert row["backend_supported"] is False, row["id"]
             assert row["revision"] is None, row["id"]
             continue
@@ -339,9 +280,6 @@ def test_a_model_this_backend_cannot_serve_has_no_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`revision` is the pin for *this* backend, so a model with no block here
-    reports null — never the other backend's sha, and never an empty string that
-    would read as a pin."""
     fixture = tmp_path / "models"
     fixture.mkdir()
     (fixture / "mac-only.toml").write_text(
@@ -370,40 +308,22 @@ memory_bytes_estimate = 3000000000
     assert rows[0]["backend_supported"] is False
     assert rows[0]["revision"] is None
     assert rows[0]["memory_bytes_estimate"] is None
-    # And no max_model_len either: this host would not serve it at any context.
-    # `context_default` still answers, because the model's own number is a fact
-    # about the model rather than about a backend block that is not there.
     assert rows[0]["max_model_len"] is None
     assert rows[0]["context_default"] == 4096
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert by_type["llm"]["models"] == rows
 
 
-# ---------------------------------------------------------------- fingerprint
-
-
 def test_every_row_carries_the_fingerprint_a_client_records(
     llm_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """`<id>@<revision>` — the id alone does not identify bytes.
-
-    Foundry hashes the served model id into its cleanup cache key and BookForge
-    stamps it into a book's OPF (CLIENT-SURFACES.md section 6.5). The server
-    spells the fingerprint out rather than leaving each client to assemble one,
-    because two clients inventing two spellings is two names for one set of
-    weights.
-    """
     rows = llm_client.get("/v1/models", headers=auth).json()
     for row in rows:
         if not row["backend_supported"]:
-            # No block here, so no pin and no bytes to name (the Mac-only 8-bit).
             assert row["revision"] is None and row["fingerprint"] is None, row
             continue
         assert row["fingerprint"] == f"{row['id']}@{row['revision']}"
     assert any(not row["backend_supported"] for row in rows)
-    # By id, not by position: the rows are sorted by manifest stem, so which one
-    # is first changes the moment a manifest is added — `dots-ocr` took the slot
-    # from `qwen3.5-9b` the day page reading landed.
     row = next(r for r in rows if r["id"] == MODEL)
     assert row["fingerprint"] == (
         f"{MODEL}@{load_manifest(MODEL).spec(FAKE_BACKEND.kind).revision}"
@@ -416,7 +336,6 @@ def test_a_model_this_backend_cannot_serve_has_no_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Null, not the bare id: an unpinned fingerprint would look like a pin."""
     fixture = tmp_path / "models"
     fixture.mkdir()
     (fixture / "mac-only.toml").write_text(
@@ -451,7 +370,6 @@ def test_the_openai_listing_names_the_weights_the_engine_actually_read(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """That entry describes the engine, so its pin is the loaded one."""
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
@@ -464,16 +382,6 @@ def test_a_provenance_sidecar_names_the_revision_it_was_served_at(
     make_app: Callable[..., Any],
     fake_env: Path,
 ) -> None:
-    """The bug: `revision: null` on every artifact Crucible had ever written.
-
-    The queue holds a model id and nothing that could turn it into a revision, so
-    it wrote null and a sidecar named a model while declining to say which one.
-    The job type knows; it is asked.
-
-    No `llm` job produces artifacts today, so this reads the document the way the
-    artifact writer does rather than fetching a file. That is the point of fixing
-    it now: `tts` and `vlm-pages` are the ones that will write it into a book.
-    """
     store = make_app(enable_llm=True).state.store
     spec = load_manifest(MODEL).spec(FAKE_BACKEND.kind)
 
@@ -484,7 +392,6 @@ def test_a_provenance_sidecar_names_the_revision_it_was_served_at(
         "fingerprint": f"{MODEL}@{spec.revision}",
     }
 
-    # A model-less job type still says `model: null`, which is the honest shape.
     assert store.provenance(store.create("echo", None, {}))["model"] is None
 
 
@@ -492,13 +399,6 @@ def test_a_provenance_sidecar_names_THIS_host_s_pin(
     make_app: Callable[..., Any],
     fake_env: Path,
 ) -> None:
-    """The same model at two shas, because the weights differ per backend.
-
-    `qwen3.5-9b` is one Crucible id over two HuggingFace repos — Qwen's own on
-    cuda-linux, the bf16 conversion on mlx-darwin. A record that named the id
-    without the host's pin would say the same thing about two different sets of
-    bytes, which is exactly what the fingerprint exists to prevent.
-    """
     mac_store = make_app(enable_llm=True, backend=FAKE_MAC_BACKEND).state.store
     mac = mac_store.provenance(mac_store.create("load-model", MODEL, {}))["model"]
     pc_store = make_app(enable_llm=True).state.store
@@ -510,9 +410,6 @@ def test_a_provenance_sidecar_names_THIS_host_s_pin(
     assert mac["fingerprint"] != pc["fingerprint"]
 
 
-# ------------------------------------------------------------- max_model_len
-
-
 def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
     llm_client: TestClient,
     auth: dict[str, str],
@@ -520,19 +417,11 @@ def test_the_openai_listing_reports_the_context_the_engine_was_started_with(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """`/v1/openai/models` is the door Foundry reads, so it carries the number.
-
-    Without it `capFor` has no clamp at all and the request goes out unsized
-    (CLIENT-SURFACES.md section 6.1).
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
     assert entry["id"] == MODEL
     assert entry["max_model_len"] == 16384
-    # The same number vLLM was handed as --max-model-len. Asked for by NAME and
-    # not by position: since crucible/vram.py the KV pool's own flags go on
-    # after this one, and where it sits on the line was never the point.
     args = engines[0].args
     assert args[args.index("--max-model-len") + 1] == "16384"
 
@@ -547,15 +436,6 @@ def test_max_model_len_follows_the_engine_and_context_default_follows_the_manife
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The one moment the two fields disagree, and which one is which.
-
-    A manifest edited while its engine is up: `context_default` is the manifest's
-    intent and moves with the file, `max_model_len` is what is being served and
-    stays with the engine. Re-deriving `max_model_len` from the manifest would
-    have this row promise a 32768-token context to a client talking to an engine
-    that was started at 8192 — and the client would size a request against it and
-    be refused by the engine.
-    """
     fixture = tmp_path / "models"
     fixture.mkdir()
     manifest = fixture / "shifty.toml"
@@ -606,16 +486,13 @@ memory_bytes_estimate = 3000000000
         assert events[-1]["event"] == "done", events[-1]
         assert engines[0].args == ["--max-model-len", "8192", *VLLM_DECIDE_ARGS]
 
-        write(32768)  # somebody edits the manifest with the engine still up
+        write(32768)
         row = client.get("/v1/models", headers=auth).json()[0]
         assert row["resident"] is True
         assert row["context_default"] == 32768, "the manifest's intent moved"
         assert row["max_model_len"] == 8192, "what is being served did not"
         entry = client.get("/v1/openai/models", headers=auth).json()["data"][0]
         assert entry["max_model_len"] == 8192
-
-
-# -------------------------------------------------- the refusals before queuing
 
 
 def test_an_unknown_model_is_refused_by_name(
@@ -668,7 +545,7 @@ def test_a_missing_env_is_env_missing(
     fake_weights: Callable[[str], Path],
 ) -> None:
     fake_weights(MODEL)
-    with make_client(enable_llm=True) as client:  # no fake_env fixture here
+    with make_client(enable_llm=True) as client:
         response = submit(client, auth, type="load-model", model=MODEL)
     assert response.status_code == 409
     error = response.json()["error"]
@@ -691,7 +568,6 @@ def test_weights_at_the_wrong_revision_are_not_installed(
     auth: dict[str, str],
     home: Path,
 ) -> None:
-    """A manifest that moved must not serve yesterday's bytes under today's id."""
     directory = home / "models" / MODEL / FAKE_BACKEND.kind
     directory.mkdir(parents=True)
     (directory / "crucible-pull.json").write_text(
@@ -731,15 +607,10 @@ def test_a_busy_card_is_refused_before_the_job_exists(
     error = response.json()["error"]
     assert error["code"] == "accelerator_busy"
     assert "sgl-omni" in error["message"]
-    # Refused *before* queuing: nothing was created.
     assert llm_client.get("/v1/health", headers=auth).json()["queue_depth"] == 0
 
 
 def _stamp_without_a_block(home: Path, model_id: str) -> Path:
-    """A pull stamp in `<home>/models/<id>/cuda-linux` for a model whose
-    manifest has NO cuda-linux block — what an install that pulled the 8-bit's
-    FP8 arm before 2026-09-23 would still hold. `fake_weights` cannot write it:
-    it reads the block, and there is none."""
     directory = home / "models" / model_id / FAKE_BACKEND.kind
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "crucible-pull.json").write_text(
@@ -765,14 +636,6 @@ def test_the_8bit_27b_is_not_offered_on_cuda_linux_even_with_weights_on_disk(
     home: Path,
     idle_card: None,
 ) -> None:
-    """Owen, 2026-09-23: *"we shouldnt have an 8 bit 27b on here. waste of
-    space, wont fit in the gpu"*. The 8-bit has no cuda-linux block, so it is
-    refused for having none — `backend_unsupported`, by name — and not for its
-    size, which is a question this host no longer asks about it.
-
-    Stamped weights on disk change nothing and break nothing: every inventory
-    is walked from the manifests, and a manifest with no block for this backend
-    is reported as such without its folder being read."""
     _stamp_without_a_block(home, MAC_ONLY_MODEL)
     response = submit(llm_client, auth, type="load-model", model=MAC_ONLY_MODEL)
     assert response.status_code == 400
@@ -795,12 +658,6 @@ def test_the_8bit_27b_is_not_offered_on_cuda_linux_even_with_weights_on_disk(
 def test_a_model_too_big_for_the_card_is_refused_before_the_download(
     small_card_client: TestClient, auth: dict[str, str], small_card: None
 ) -> None:
-    """20.1 GiB on a 12 GiB card is not a "pull 22 GB first" problem.
-
-    The weights are deliberately NOT stamped here: a refusal that says
-    `model_not_installed` would send somebody off to download a model that can
-    never load on this host.
-    """
     response = submit(
         small_card_client, auth, type="load-model", model=SMALL_BIG_MODEL
     )
@@ -834,13 +691,6 @@ def test_the_4bit_27b_is_loadable_on_this_card_and_the_8bit_is_not_offered(
     home: Path,
     idle_card: None,
 ) -> None:
-    """The 27B this card runs, on Owen's own card.
-
-    `llm_client` is the RTX 3090 Ti: 24 GiB in total. Two manifests for the same
-    27B — same family, same params_b — and the host answers differently about
-    each: the 4-bit fits and is offered; the 8-bit, whose FP8 weights alone
-    (28.75 GiB) exceed the card, has no block here at all (Owen, 2026-09-23).
-    """
     fake_weights(SMALL_BIG_MODEL)
     _stamp_without_a_block(home, MAC_ONLY_MODEL)
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
@@ -852,14 +702,8 @@ def test_the_4bit_27b_is_loadable_on_this_card_and_the_8bit_is_not_offered(
     assert small["installed"] is True
     assert small["loadable"] is True
     assert "reason" not in small
-    # THIS HOST's context, not the model's. The model wants Owen's
-    # `qwen3.8:27b-24g` 98304 and gets it on mlx-darwin; on a 24 GB card that is
-    # 7.9 GiB of KV the card does not have, so the cuda-linux block carries its
-    # own 16384 and that is what vLLM is given as --max-model-len.
     assert load_manifest(SMALL_BIG_MODEL).context_default == 98304
     assert small["context_default"] == 16384
-    # Nothing is resident, so what this host WOULD serve it at is the whole
-    # answer, and the two fields agree.
     assert small["max_model_len"] == 16384
     assert small["memory_bytes_estimate"] == 21_633_171_456
     assert small["revision"] == (
@@ -869,7 +713,6 @@ def test_the_4bit_27b_is_loadable_on_this_card_and_the_8bit_is_not_offered(
     assert rows[MAC_ONLY_MODEL]["backend_supported"] is False
     assert rows[MAC_ONLY_MODEL]["loadable"] is False
 
-    # And the refusal the listing predicts is the refusal the load makes.
     response = submit(llm_client, auth, type="load-model", model=MAC_ONLY_MODEL)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "backend_unsupported"
@@ -882,15 +725,6 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     monkeypatch: pytest.MonkeyPatch,
     engines: list[FakeEngine],
 ) -> None:
-    """Not merely "the card is big enough" — the guard lets it through.
-
-    `loadable` in `/v1/models` compares the estimate against the card's TOTAL, so
-    it cannot answer "right now". This does: an empty 24 GiB card, and the live
-    guard passes the 23.3 GiB estimate. The margin is 0.7 GiB, which is why the
-    `idle_card` fixture — 22 GiB free, the Windows desktop holding the rest — is
-    deliberately not used here. On Owen's real card, with his desktop up, this
-    load is expected to be tight; see the manifest's comment.
-    """
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     monkeypatch.setattr(
         accelerator,
@@ -902,27 +736,6 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
     assert events[-1]["event"] == "done"
     assert events[-1]["data"]["resident"] == SMALL_BIG_MODEL
     assert len(engines) == 1
-    # vLLM is told the context the manifest promises, and nothing forces a dtype:
-    # compressed-tensors W4A16 carries its own, and `dtype auto` is what it wants.
-    # `--max-model-len` is the cuda-linux block's own 16384, not the model's
-    # 98304: on a 24 GB card 98304 of KV is 7.9 GiB that is not there.
-    # `--language-model-only` is BookForge's `--limit-mm-per-prompt 0`, carried
-    # across on 2026-09-15: this checkpoint is multimodal, the `llm` lane sends it
-    # nothing but text, and without the flag vLLM reads 921_460_192 B of vision
-    # tower onto the card and holds it for the life of the engine.
-    #
-    # AND THE KV POOL IS SIZED AGAINST THE CARD, which is what this test is now
-    # also the record of (crucible/vram.py, docs/MEASUREMENTS.md). The card here
-    # is entirely free, so the budget is `total - desktop_allowance` and the pool
-    # is whatever the weights and overhead leave of it. Derived rather than
-    # typed: a literal would have to be recomputed by hand the next time this
-    # model is calibrated, and the arithmetic is the thing being asserted.
-    #
-    # `--gpu-memory-utilization` appears TWICE and that is deliberate. The
-    # manifest's own 0.86 stays on the line and the derived value overrides it,
-    # because argparse takes the last spelling of a flag — an engine line that
-    # silently dropped the manifest's value would hide which number came from
-    # where.
     terms = load_manifest(SMALL_BIG_MODEL).spec(FAKE_BACKEND.kind).memory
     assert terms is not None
     total = FAKE_BACKEND.gpu.vram_bytes
@@ -934,14 +747,10 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
         "--skip-mm-profiling",
         "--language-model-only",
         "--max-model-len", "16384",
-        # The decision door's flags (PHASE22 section 2.6), composed beside the
-        # context and before the sized pool.
         *VLLM_DECIDE_ARGS,
         "--kv-cache-memory-bytes", str(pool),
         "--gpu-memory-utilization", f"{budget / total:.4f}",
     ]
-    # It is a real pool, not a rounding artefact: more than one full-context
-    # request, which is the floor vLLM refuses below.
     assert pool > terms.kv_bytes_per_token * 16384
 
 
@@ -959,9 +768,6 @@ def test_unknown_params_are_refused(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-# ------------------------------------------------------ the load/unload machine
-
-
 def test_a_load_warms_then_reports_the_resident_model(
     llm_client: TestClient,
     auth: dict[str, str],
@@ -976,9 +782,7 @@ def test_a_load_warms_then_reports_the_resident_model(
     assert kinds[0] == "queued"
     assert kinds[-1] == "done"
     assert "warming" in kinds
-    # Several warming events, streamed from the engine's readiness (section 5).
     assert kinds.count("warming") >= 3
-    # Event ids are strictly increasing from 1, as DESIGN.md section 4 requires.
     assert [event["id"] for event in events] == list(range(1, len(events) + 1))
 
     warmings = [e["data"]["message"] for e in events if e["event"] == "warming"]
@@ -1021,7 +825,6 @@ def test_loading_a_second_model_unloads_the_first(
     roomy_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """Phase 2 residency rule: one resident model at a time (section 3)."""
     llm_client = roomy_client
     fake_weights(MODEL)
     fake_weights(SMALL_BIG_MODEL)
@@ -1077,20 +880,6 @@ def test_unloading_a_model_that_is_not_resident_is_refused(
     assert response.json()["error"]["details"]["resident"] == MODEL
 
 
-# ------------------------------- unloading what is already being unloaded
-#
-# T6, 2026-09-15, on a live card. The page was read, the settlement began
-# clearing `dots-ocr` the instant the last chat completion finished, and the
-# same client's `unload-model dots-ocr` — a few milliseconds behind it, in a
-# `finally` — came back `409 engine_in_use`, *"held by 'the settlement clearing
-# the card'"*. The stage failed on its own tidying up and its message overwrote
-# the page it had just read.
-#
-# The three tests below are the whole ruling: the settlement is the same intent
-# and is answered; every other holder is a conflict and is still refused, by the
-# name it was refused by before.
-
-
 def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
     llm_client: TestClient,
     auth: dict[str, str],
@@ -1098,12 +887,6 @@ def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """T6's exact race: the clearance is under way and the client's unload lands.
-
-    It is `done` with the card clear, because that is what the client asked for
-    and it is what happened. `engine_in_use` would be naming the client's own
-    tidying up as somebody else's conversation.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     reached, release = a_clearance_to_hold(engines[0])
@@ -1119,11 +902,8 @@ def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
     )
     clearing.start()
     assert reached.wait(timeout=10), "the settlement never reached the engine"
-    # The state T6 arrived in, pinned: the card IS claimed, and by the holder
-    # whose name was in the 409. This is what makes the 202 below the fix.
     assert llm_client.app.state.residency.claimed_by == SETTLEMENT_HOLDER
 
-    # THE MOMENT T6 FAILED IN. Admitted, not refused.
     response = submit(llm_client, auth, type="unload-model", model=MODEL)
     assert response.status_code == 202, response.json()
     job_id = response.json()["job_id"]
@@ -1139,7 +919,6 @@ def test_unloading_what_the_settlement_is_clearing_is_the_same_intent(
         events = parse_sse(line for line in stream.iter_lines())
     assert events[-1]["event"] == "done", events[-1]
     assert events[-1]["data"]["resident"] is None
-    # And the card really is clear — the job did not merely say so.
     assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == []
     assert engines[0].stopped is True
 
@@ -1151,12 +930,6 @@ def test_unloading_under_a_holder_that_is_using_the_card_is_still_engine_in_use(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The refusal keeps its whole meaning for a genuinely different holder.
-
-    A streaming session is on narrator's one stdin and one stdout. Taking the
-    engine off the card now ends its conversation mid-sentence, which is exactly
-    what `engine_in_use` is for — and it is unchanged.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     residency = llm_client.app.state.residency
@@ -1169,7 +942,6 @@ def test_unloading_under_a_holder_that_is_using_the_card_is_still_engine_in_use(
     error = response.json()["error"]
     assert error["code"] == "engine_in_use"
     assert error["details"]["held_by"] == "tts stream abc123"
-    # Nothing was taken off the card on the way past.
     assert engines[0].stopped is False
 
 
@@ -1180,12 +952,6 @@ def test_unloading_under_another_client_s_lease_is_still_leased(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The other holder that refuses an unload, and by its own name.
-
-    A lease is a client saying it has more work on this model. That refusal is
-    `leased` and is answered before the type's preflight is even asked, so the
-    clearance exception cannot reach it.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     lease = llm_client.post(
@@ -1201,27 +967,9 @@ def test_unloading_under_another_client_s_lease_is_still_leased(
     assert engines[0].stopped is False
 
 
-# ------------------------------------- every door waits the clearance out
-#
-# T6 GENERALISED, 2026-09-24, live on 1.0.25. Briefcase's second run followed a
-# SIGINT'd first one straight into the clearance that run's release began: its
-# lease was granted (the model still published), its chat was
-# `model_not_resident` (unpublished a moment later), and its `load-model` was
-# `409 engine_in_use`, held by "the settlement clearing the card". A clearance
-# is weather — it ends — so each door now waits it out and answers from the
-# settled card. The tests below hold the clearance inside the engine's stop, the
-# state Briefcase arrived in, and send each door into it.
-
-
 def _a_clearance_under_way(
     client: TestClient, engine: FakeEngine
 ) -> tuple[threading.Event, threading.Thread, list[Any]]:
-    """Start the settlement and hold it inside `engine.stop()`.
-
-    Returns `(release, thread, settled)`. The card is claimed by the
-    settlement when this returns — asserted, because every test below is only
-    about something if that is so.
-    """
     reached, release = a_clearance_to_hold(engine)
     settled: list[Any] = []
     clearing = threading.Thread(
@@ -1240,12 +988,6 @@ def _a_clearance_under_way(
 def _a_door_waiting(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> threading.Event:
-    """Set once a door has started waiting a clearance out.
-
-    The wait is the observable: a door that answered from the dying card would
-    never call this, and a test that released the clearance on a timer would be
-    testing a duration rather than a state.
-    """
     residency = client.app.state.residency
     waiting = threading.Event()
     wait = residency.await_settled
@@ -1264,11 +1006,6 @@ def _sent_during(
     release: threading.Event,
     clearing: threading.Thread,
 ) -> Any:
-    """Send `request` into the held clearance, let it finish, return the answer.
-
-    Asserts the request was still unanswered when the door began to wait —
-    that is, that it WAITED rather than answering from the card mid-clearance.
-    """
     answers: list[Any] = []
     sender = threading.Thread(target=lambda: answers.append(request()), daemon=True)
     sender.start()
@@ -1290,12 +1027,6 @@ def test_a_load_submitted_during_a_clearance_waits_it_out_and_ends_done(
     engines: list[FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Briefcase's `load-model`: the request that would repair the card.
-
-    It was refused `engine_in_use` naming the settlement. Now it is `202`,
-    admitted against the SETTLED card, and ends `done` with the model resident
-    on a fresh engine — the first one really stopped, not merely unpublished.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     release, clearing, settled = _a_clearance_under_way(llm_client, engines[0])
@@ -1330,11 +1061,6 @@ def test_a_lease_opened_during_a_clearance_waits_and_is_not_resident(
     engines: list[FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Briefcase's lease: granted on a model that was already leaving.
-
-    The true answer is the one the settled card gives — nothing is resident —
-    and no lease is left open on a thing that is gone.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
@@ -1365,11 +1091,6 @@ def test_a_chat_sent_during_a_clearance_waits_and_is_not_resident(
     engines: list[FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Briefcase's chat: never proxied to an engine that is being SIGTERMed.
-
-    `model_not_resident` after the wait, with no `InFlight` row left behind —
-    a row would be a holder the next settlement reads as somebody chatting.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
@@ -1398,12 +1119,6 @@ def test_a_clearance_that_never_finishes_is_a_wedge_not_a_hang(
     engines: list[FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The budget is real. Past it the door says the card is wedged, by name.
-
-    The budget is the engine's own SIGTERM deadline plus a margin, so reaching
-    it means the stop is stuck — and starting work on top of that would make it
-    worse. Shortened here; the shape of the answer is what is under test.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
@@ -1418,7 +1133,6 @@ def test_a_clearance_that_never_finishes_is_a_wedge_not_a_hang(
     assert error["code"] == "engine_in_use"
     assert "wedged" in error["message"]
     assert error["details"]["held_by"] == SETTLEMENT_HOLDER
-    # Refused, not queued: nothing was left on the lane behind the wedge.
     assert llm_client.app.state.store.queue_depth == 0
 
 
@@ -1429,13 +1143,6 @@ def test_health_says_warming_while_a_load_is_in_flight(
     idle_card: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PHASE2-LLM.md section 5: `/health` reports `warming` while a load runs.
-
-    The engine is held inside `ready()` so the server is looked at with a load
-    genuinely in flight, rather than racing a sleep. The job's event stream is
-    deliberately NOT open while `/health` is read: nesting a request inside a
-    TestClient stream answers from a stale view of the store.
-    """
     hold = threading.Event()
     built: list[FakeEngine] = []
 
@@ -1460,7 +1167,7 @@ def test_health_says_warming_while_a_load_is_in_flight(
         while time.monotonic() < deadline:
             if built and built[0].warming_started.wait(timeout=0.1):
                 break
-            time.sleep(0.05)  # the engine is not built yet; let the lane run
+            time.sleep(0.05)
         assert built and built[0].warming_started.is_set(), "the lane never started"
 
         health = llm_client.get("/v1/health", headers=auth).json()
@@ -1482,9 +1189,6 @@ def test_health_says_warming_while_a_load_is_in_flight(
         "queue_depth": 0,
         "resident_models": [MODEL],
         "resident_kind": "llm",
-        # Nothing was asked to stop, and the key says so rather than being
-        # absent (ledger R13): `resident` and `stopping` are never both set,
-        # and a reader has to be able to see which of the two this is.
         "stopping": None,
     }
 
@@ -1516,12 +1220,8 @@ def test_an_engine_that_never_becomes_ready_fails_the_job(
     assert events[-1]["event"] == "failed"
     assert events[-1]["data"]["error"]["code"] == "engine_failed"
     assert "exited 1" in events[-1]["data"]["error"]["message"]
-    # Nothing is left resident and the half-started engine was stopped.
     assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == []
     assert built[0].stopped is True
-
-
-# ------------------------------------------------------------------- the proxy
 
 
 def test_the_proxy_refuses_a_model_that_is_not_resident(
@@ -1559,7 +1259,6 @@ def test_the_proxy_names_the_resident_model_in_the_409(
     assert error["code"] == "model_not_resident"
     assert "'qwen3.5-9b' is" in error["message"]
     assert error["details"] == {"requested": "gpt-4", "resident": MODEL}
-    # And nothing was loaded to satisfy it.
     assert len(engines) == 1
 
 
@@ -1571,17 +1270,6 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
     engine_factory: Callable[..., list[FakeEngine]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """THE DOOR, wired. `tests/test_chat_admission.py` covers the pieces.
-
-    Foundry's clean pass died at block 352 of 940 on 2026-09-20 with 12 chats in
-    flight against mlx-lm, which accepts every connection and generates on one
-    thread. The twelfth was accepted, never started, and found out at its own
-    300 s deadline. A refusal it can act on is the fix.
-
-    Every engine class is given a concurrency here rather than only the resident
-    one, because which engine the fake manifest names is not what this test is
-    about.
-    """
     for cls in ENGINES.values():
         monkeypatch.setattr(cls, "chat_concurrency_flag", None, raising=False)
         monkeypatch.setattr(cls, "chat_concurrency", 1, raising=False)
@@ -1593,12 +1281,10 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
 
-    # The limit is concurrency + 1 = 2: one generating, one ready to start.
     activity = llm_client.get("/v1/activity", headers=auth).json()
     assert activity["chat"]["max_in_flight"] == 2
     assert activity["chat"]["max_in_flight_basis"] == "one generation thread"
 
-    # Two already open, so the third is the one the engine could not have run.
     inflight = llm_client.app.state.inflight
     held = [
         inflight.open(act=None, model=MODEL, client="a-test") for _ in range(2)
@@ -1617,9 +1303,6 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
     error = response.json()["error"]
     assert error["code"] == "chat_queue_full"
     assert error["details"]["max_in_flight"] == 2
-    # NOTHING REACHED THE ENGINE. The refusal has to be safe to repeat, and a
-    # request that half-ran would not be. `posts` counts completions the fake
-    # engine actually served, incremented on its own serving thread.
     assert posts == []
 
 
@@ -1630,11 +1313,6 @@ def test_vllm_admits_its_whole_batch_and_says_so(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The batching half. vLLM overlaps completions on purpose; since
-    2026-09-24 it also STATES how many (`--max-num-seqs`, off the argv the load
-    composed), so `/v1/activity` publishes 17 on the 9B instead of null and
-    Foundry's pool stops falling back to 4 -- and twelve open still admit a
-    thirteenth."""
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
 
@@ -1681,7 +1359,6 @@ def test_a_non_streamed_completion_is_passed_through(
     body = response.json()
     assert body["choices"][0]["message"]["content"] == ANSWER
     assert body["usage"]["total_tokens"] == 12
-    # The sampling the client asked for reached the engine unchanged.
     sent = engines[0].last_request
     assert sent["temperature"] == 0.2
     assert sent["max_tokens"] == 32
@@ -1719,9 +1396,7 @@ def test_a_streamed_completion_keeps_its_sse_framing(
     ]
     assert deltas == DELTAS
     assert "".join(deltas) == ANSWER
-    # The closing frame carries no delta, only the reason the engine stopped.
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
-    # Every frame is terminated by a blank line, as SSE requires.
     assert text.endswith("data: [DONE]\n\n")
 
 
@@ -1729,12 +1404,6 @@ def test_a_streamed_completion_keeps_its_sse_framing(
 def engines_under_a_path_name(
     monkeypatch: pytest.MonkeyPatch, home: Path
 ) -> list[FakeEngine]:
-    """Engines that answer to the weights directory, the way mlx-lm does.
-
-    The other `engines` fixture makes the engine's name and the Crucible id the
-    same string, which is true of vLLM (`--served-model-name`) and hides the
-    substitution entirely. This is the other backend's shape.
-    """
     built: list[FakeEngine] = []
 
     def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
@@ -1758,7 +1427,6 @@ def test_a_completion_comes_back_naming_crucible_s_id_not_the_engine_s(
     idle_card: None,
     engines_under_a_path_name: list[FakeEngine],
 ) -> None:
-    """The proxy substitutes `model` on the way in; it undoes it on the way out."""
     weights = fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     response = llm_client.post(
@@ -1767,11 +1435,8 @@ def test_a_completion_comes_back_naming_crucible_s_id_not_the_engine_s(
         json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
     )
     assert response.status_code == 200
-    # The engine was asked by the name it answers to...
     assert engines_under_a_path_name[0].last_request["model"] == str(weights.resolve())
-    # ...and the client is answered by the name it asked with.
     assert response.json()["model"] == MODEL
-    # Everything else is the engine's own body, untouched.
     assert response.json()["choices"][0]["message"]["content"] == ANSWER
 
 
@@ -1798,9 +1463,7 @@ def test_every_streamed_chunk_names_crucible_s_id(
         text = "".join(response.iter_text())
 
     chunks = _stream_chunks(text)
-    # Every frame, the closing one included — the relabelling reaches all of them.
     assert [chunk["model"] for chunk in chunks] == [MODEL] * (len(DELTAS) + 1)
-    # The framing and the content survived the relabelling.
     assert [
         chunk["choices"][0]["delta"]["content"]
         for chunk in chunks
@@ -1809,14 +1472,6 @@ def test_every_streamed_chunk_names_crucible_s_id(
     assert text.endswith("data: [DONE]\n\n")
 
 
-# ------------------------------------------- the constrained transport survives
-
-#: A Foundry analyze verdict, as `askConstrained` builds it (CLIENT-SURFACES.md
-#: section 6.2), plus every other knob the OpenAI dialect defines that a client
-#: might one day send. The point of the extra fields is that "verbatim" is a rule
-#: about the whole body and not about the four keys Crucible happens to know:
-#: `logit_bias` and `top_logprobs` are here precisely because nothing in either
-#: app sends them today, so nothing in the proxy has ever been taught about them.
 CONSTRAINED_BODY: dict[str, Any] = {
     "model": MODEL,
     "messages": [{"role": "user", "content": "Does the passage support the claim?"}],
@@ -1850,7 +1505,6 @@ CONSTRAINED_BODY: dict[str, Any] = {
 def _post_raw(
     client: TestClient, auth: dict[str, str], body: dict[str, Any]
 ) -> tuple[bytes, Any]:
-    """POST a chat body as exact bytes, so byte identity is a question you can ask."""
     payload = json.dumps(body).encode("utf-8")
     response = client.post(
         "/v1/openai/chat/completions",
@@ -1867,13 +1521,6 @@ def test_a_constrained_body_reaches_the_engine_byte_for_byte(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """On vLLM there is nothing to substitute, so nothing is re-encoded.
-
-    `response_format.json_schema.schema` is a grammar the guided-decoding backend
-    compiles. Crucible round-tripping it through `json.loads`/`json.dumps` would
-    be a re-encoding of somebody else's document on the way past — harmless until
-    the day it is not. Here the engine reads the client's own bytes.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     payload, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
@@ -1889,13 +1536,6 @@ def test_only_the_model_field_changes_when_the_engine_answers_to_a_path(
     idle_card: None,
     engines_under_a_path_name: list[FakeEngine],
 ) -> None:
-    """The other backend's shape: one field substituted, nothing else touched.
-
-    mlx-lm has no `--served-model-name`, so `model` has to change and the
-    document is re-serialised. Everything else — the schema, `strict`, the
-    template kwargs, the knobs Crucible has never heard of — arrives with the
-    same value in the same position.
-    """
     weights = fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     _, response = _post_raw(llm_client, auth, CONSTRAINED_BODY)
@@ -1903,8 +1543,6 @@ def test_only_the_model_field_changes_when_the_engine_answers_to_a_path(
 
     sent = engines_under_a_path_name[0].last_request
     assert sent == {**CONSTRAINED_BODY, "model": str(weights.resolve())}
-    # Order too: `model` keeps the place it held, so nothing is appended or
-    # shuffled on the way through.
     assert list(sent) == list(CONSTRAINED_BODY)
 
 
@@ -1917,13 +1555,6 @@ def test_finish_reason_comes_back_untouched(
     engine_factory: Callable[..., list[FakeEngine]],
     reason: str,
 ) -> None:
-    """Foundry turns `length` into a degradation rather than a wrong answer.
-
-    A proxy that normalised or dropped the field would turn a caught truncation
-    into silent corruption (CLIENT-SURFACES.md section 6.2), so the engine's own
-    word is what comes back — including on a `tool_calls` completion, whose
-    `content` is null and whose answer is not text at all.
-    """
     engine_factory(finish_reason=reason)
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
@@ -1949,7 +1580,6 @@ def test_a_streamed_finish_reason_comes_back_untouched(
     engine_factory: Callable[..., list[FakeEngine]],
     reason: str,
 ) -> None:
-    """The same rule on the streaming half, where it lives in the closing frame."""
     engine_factory(finish_reason=reason)
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
@@ -1968,7 +1598,6 @@ def test_a_streamed_finish_reason_comes_back_untouched(
 
     chunks = _stream_chunks(text)
     assert chunks[-1]["choices"][0]["finish_reason"] == reason
-    # And it is the ONLY frame that names one: the deltas keep their null.
     assert [chunk["choices"][0]["finish_reason"] for chunk in chunks[:-1]] == [
         None
     ] * len(DELTAS)
@@ -1981,12 +1610,6 @@ def test_an_engine_s_own_400_is_relayed_rather_than_rewritten(
     idle_card: None,
     engine_factory: Callable[..., list[FakeEngine]],
 ) -> None:
-    """A schema the engine will not compile is the engine's refusal to explain.
-
-    Rewrapped in Crucible's `{"error": {"code", "message"}}` envelope it would
-    read as the server refusing, and the message naming the part of the grammar
-    to fix would be gone.
-    """
     engine_factory(reject_response_format=True)
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
@@ -1996,7 +1619,6 @@ def test_an_engine_s_own_400_is_relayed_rather_than_rewritten(
     body = response.json()
     assert body["type"] == "BadRequestError"
     assert "prefixItems" in body["message"]
-    # Not Crucible's envelope: this refusal is not Crucible's to make.
     assert "error" not in body
 
 
@@ -2007,10 +1629,6 @@ def test_an_engine_s_own_400_is_relayed_on_a_streamed_request_too(
     idle_card: None,
     engine_factory: Callable[..., list[FakeEngine]],
 ) -> None:
-    """The stream is opened before anything is returned, so a refusal is a refusal.
-
-    It must never come back as a 200 whose stream turns out to be an error.
-    """
     engine_factory(reject_response_format=True)
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
@@ -2053,9 +1671,6 @@ def test_a_body_that_is_not_json_is_refused(
     assert response.json()["error"]["code"] == "invalid_request"
 
 
-# ------------------------------------- a chat is work, and work must be visible
-
-
 def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
     llm_client: TestClient,
     auth: dict[str, str],
@@ -2063,14 +1678,6 @@ def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """A wrong act name on a bench is worse than no act name.
-
-    Owen, 2026-09-13: *"they can't lie to the user and say a translate job is
-    running when it's actually a simplify job."* A silently-accepted typo would
-    do exactly that, so the header is validated against the capability classes
-    and refused by name — and refused BEFORE the completion runs, so nobody pays
-    for a 27B pass that is then reported under a name nothing knows.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     response = llm_client.post(
@@ -2082,7 +1689,6 @@ def test_an_unknown_act_is_refused_BEFORE_the_work_rather_than_mislabelled(
     error = response.json()["error"]
     assert error["code"] == "unknown_act"
     assert "'translat'" in error["message"]
-    # The refusal names the vocabulary rather than leaving a caller to guess it.
     assert "simplify" in error["message"] and "translate" in error["message"]
 
 
@@ -2093,12 +1699,6 @@ def test_generate_is_an_act_and_a_near_miss_is_still_refused(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """`generate` is a capability class, so it is an act.
-
-    The act vocabulary is read off `capability.CLASSES` (`inflight.ACT_NAMES`),
-    so adding the class is what admits the header — and a name nothing knows
-    is refused exactly as before.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     refused = llm_client.post(
@@ -2112,7 +1712,6 @@ def test_generate_is_an_act_and_a_near_miss_is_still_refused(
     assert "'generat'" in error["message"]
     assert "generate" in error["details"]["known"]
 
-    # Refused BEFORE the work, so the model is still resident for the real one.
     accepted = llm_client.post(
         "/v1/openai/chat/completions",
         headers={**auth, "X-Crucible-Act": "generate"},
@@ -2128,11 +1727,6 @@ def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """This door is OpenAI-shaped and a generic client cannot know Crucible's
-    vocabulary, so the header is optional. What is NOT optional is honesty about
-    its absence: the server cannot tell a simplify from a translate — both are a
-    chat against the same model, differing only in a prompt it does not own — so
-    an absent header is `null`, never an inferred act."""
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     response = llm_client.post(
@@ -2141,14 +1735,7 @@ def test_a_chat_with_no_act_header_records_null_rather_than_a_guess(
         json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
     )
     assert response.status_code == 200, response.text
-    # And the entry is GONE once the completion is over: an entry that outlived
-    # its request would make this server look permanently busy with work that
-    # stopped.
     body = llm_client.get("/v1/activity", headers=auth).json()
-    # The door's own limit rides alongside the count since 2026-09-20: a client
-    # sizes its pool from this rather than discovering the ceiling as a starved
-    # socket. Null for an engine that states no concurrency, which the fake's
-    # engine does.
     assert body["chat"] == {
         "in_flight": 0,
         "max_in_flight": None,
@@ -2164,15 +1751,6 @@ def test_a_chat_in_flight_is_visible_and_still_does_not_take_the_lane(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The defect, and the shape of the fix.
-
-    A chat took no lane, made no job and left no record, so a server grinding
-    through a 27B translation reported `running: []` and read as idle to every
-    bench polling it. It is counted now — and it still gates nothing, because a
-    vLLM engine BATCHES: two passes on one resident model genuinely run at once,
-    and taking the lane to fix a reporting bug would serialise work the engine
-    exists to overlap.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     inflight = llm_client.app.state.inflight
@@ -2184,15 +1762,11 @@ def test_a_chat_in_flight_is_visible_and_still_does_not_take_the_lane(
 
     assert seen["chat"]["in_flight"] == 1
     row = seen["chat"]["rows"][0]
-    # The act is named as what it IS. Before Crucible everything ran under
-    # "translate"; nothing may report a simplify as one.
     assert row["act"] == "simplify"
     assert row["model"] == MODEL
     assert row["client"] == "foundry/0.9.0"
     assert row["since"]
 
-    # THE OTHER HALF. The lane is free and says so, and the machine still
-    # accepts work — because it really does.
     assert seen["slots"]["accelerated"]["busy"] == 0
     assert seen["slots"]["accelerated"]["accepts_work"] is True
     assert seen["running"] == []
@@ -2204,22 +1778,12 @@ def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """`/openai/v1/models` and `/openai/v1/chat/completions` are the same doors as
-    `/v1/openai/...`, at the path every OpenAI client composes.
-
-    Found 2026-09-13 by the first real Foundry act against a Crucible: its
-    engine appends `/v1` to a base that does not end in a version, asked for
-    `/v1/openai/v1/models`, and got a 404 from a server that had the door. Same
-    handler, same token, same version header — only the path differs, and it is
-    the OTHER protocol's convention.
-    """
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
     ours = llm_client.get("/v1/openai/models", headers=auth).json()
     theirs = llm_client.get("/openai/v1/models", headers=auth).json()
     assert theirs == ours
     assert theirs["data"][0]["id"] == MODEL
-    # The same refusals, by the same names, at the new path.
     no_model = llm_client.post("/openai/v1/chat/completions", headers=auth, json={"messages": []})
     assert no_model.status_code == 400
     assert no_model.json()["error"]["code"] == "model_required"
@@ -2228,23 +1792,11 @@ def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
     )
     assert other.status_code == 409
     assert other.json()["error"]["code"] == "model_not_resident"
-    # And the same lock: no token, no door.
     assert llm_client.get("/openai/v1/models").status_code == 401
-
-
-
-# ------------------------------------------------- load-time context (2026-09-23)
-#
-# `params.context` on `load-model`: absent is the block's default, present is
-# checked against the SAME ceiling `GET /v1/capability` publishes
-# (`capability.check_load_context`) and reaches the engine's argv, the KV plan
-# and the resident row. The card here is the 3090 Ti, entirely free, so every
-# number below is the manifest's own arithmetic against 21.0 GiB.
 
 
 @pytest.fixture
 def free_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The whole 3090 Ti free — the budget is `total - allowance` exactly."""
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     monkeypatch.setattr(
         accelerator,
@@ -2285,17 +1837,13 @@ def test_a_stated_context_reaches_the_engine_the_plan_and_the_resident_row(
     )
     assert events[-1]["event"] == "done", events[-1]
     args = engines[0].args
-    # The LAST spelling is the one argparse keeps, and there is only one.
     assert args.count("--max-model-len") == 1
     assert _flag(args, "--max-model-len") == "65536"
-    # The KV pool follows the loaded context: `fits` is one 65536-token request,
-    # and the pool is capped at context x max_num_seqs, never at the default's.
     terms = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory
     budget = FAKE_BACKEND.gpu.vram_bytes - DEFAULT_DESKTOP_ALLOWANCE_BYTES
     pool = int(_flag(args, "--kv-cache-memory-bytes"))
     assert pool == min(budget - terms.fixed_bytes, terms.kv_bytes_per_token * 65536 * 16)
     assert pool >= terms.kv_bytes_per_token * 65536
-    # The resident row and both listings report what was loaded, not the file.
     row = {r["id"]: r for r in llm_client.get("/v1/models", headers=auth).json()}[MODEL]
     assert row["max_model_len"] == 65536
     assert row["context_default"] == 16384
@@ -2311,8 +1859,6 @@ def test_a_context_over_the_ceiling_is_refused_before_anything_moves(
     free_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The same `400 context_over_limit` body `GET /v1/capability` answers,
-    at submit, with the resident model untouched and no job created."""
     fake_weights(MODEL)
     fake_weights(SMALL_BIG_MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
@@ -2334,11 +1880,9 @@ def test_a_context_over_the_ceiling_is_refused_before_anything_moves(
     assert [c["model"] for c in details["ceilings"]] == [SMALL_BIG_MODEL]
     assert "40960" in error["message"] and "32768" in error["message"]
 
-    # Nothing was evicted and nothing was started.
     assert len(engines) == 1 and engines[0].stopped is False
     assert llm_client.get("/v1/health", headers=auth).json()["resident_models"] == [MODEL]
 
-    # The 9B's own ceiling on this card is its max_context, 65536.
     over = submit(
         llm_client, auth, type="load-model", model=MODEL, params={"context": 65537}
     )
@@ -2371,14 +1915,9 @@ def test_loading_the_resident_model_at_a_new_context_is_a_reload(
     monkeypatch: pytest.MonkeyPatch,
     engines: list[FakeEngine],
 ) -> None:
-    """`Residency.load` evicts unconditionally, so the same id at a new context
-    is a restart — and the guard and the KV plan now credit the resident's own
-    bytes, which the eviction gives back. Before, both read the card with the
-    9B still on it and refused a same-model reload on a 24 GB card."""
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     total = FAKE_BACKEND.gpu.vram_bytes
     resident_estimate = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory_bytes_estimate
-    # The card as nvidia-smi reads it WITH the 9B resident: its estimate is gone.
     free = {"bytes": total}
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (free["bytes"], total))
     fake_weights(MODEL)

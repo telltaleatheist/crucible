@@ -1,26 +1,3 @@
-"""The streaming door — `POST /v1/tts/stream` and its three companions.
-
-PHASE3-TTS.md section 7. Every test here runs the **real app under a real
-uvicorn on a real socket** (tests/live_server.py) rather than through
-`TestClient`, and that is not a preference:
-
-- The centrepiece of this door is what happens when a listener's connection
-  drops mid-row and comes back with `Last-Event-ID` inside the grace window.
-  `TestClient`'s `receive` answers `http.disconnect` only once the app has
-  finished responding, so a caller who walks away from a stream is a state it
-  cannot reach at all.
-- The ops are separate requests that have to arrive **while** the event stream
-  is open and a row is generating. A cancel that could only be posted after the
-  stream was fully consumed would be testing a queue, not a cancel.
-
-What is faked is the env (a stamped directory), the weights (a stamped
-directory), the card (monkeypatched nvidia-smi probes) and narrator itself
-(tests/fake_narrator.py, driven through the real
-`crucible/engines/narrator.py` and its real pipes). Nothing about the server's
-own logic is: the session, the replay buffer, the grace window, the per-row
-cancel and the residency claim are exactly what will run on the PC.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -43,7 +20,7 @@ from . import fake_narrator_engine
 from .conftest import a_clearance_to_hold
 from .live_server import run_job, serve
 from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
-from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
+from .test_tts_api import (
     fake_env,
     fake_weights,
     idle_card,
@@ -53,34 +30,18 @@ from .test_tts_api import (  # noqa: F401 — imported to be used as fixtures
 VOICE = "deathstalker"
 OTHER_VOICE = "thirdreich"
 
-#: The fake worker's default: 15.0 characters of text per second of audio, which
-#: is Higgs's configured pace. Every duration assertion below is arithmetic on
-#: this number rather than a tolerance, because the fake makes it exact.
 CHARS_PER_SEC = 15.0
 
-#: The rate every voice in this build declares and the fake renders at.
 SAMPLE_RATE = 24_000
 
-#: Long enough that, at the delay the slow fixtures set, a row is still
-#: generating several chunks after the test has read the first one.
 LONG_TEXT = (
     "He had been walking for some time, and the road did not appear to end, "
     "not that day and not the next, and the rain did not stop either."
 )
 
-#: How long a test waits for a frame it expects. Generous against a fake that
-#: answers in microseconds; it is a wedge detector, not a budget.
 WAIT = 20.0
 
-#: How long a dropped listener's reader thread may take to unwind. It is end of
-#: file on a socket that has just been shut down, so this is a wedge detector
-#: too — and one that earns its name: when the drop was `close()` rather than
-#: `shutdown()`, every test in this file silently paid this in full on macOS
-#: (measured 2026-09-14: 20.3 s each, against well under a second on Linux).
 DROP_UNWIND_SECONDS = 10.0
-
-
-# ------------------------------------------------------------------ fixtures
 
 
 @pytest.fixture(autouse=True)
@@ -93,17 +54,11 @@ def quick_engine(monkeypatch: pytest.MonkeyPatch) -> None:
 def streaming_server(
     make_app: Callable[..., Any],
     auth: dict[str, str],
-    fake_env: Path,  # noqa: F811
-    fake_weights: Callable[[str], Path],  # noqa: F811
-    idle_card: None,  # noqa: F811
+    fake_env: Path,
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[..., Any]:
-    """A live server with `deathstalker` resident, ready to be streamed from.
-
-    The voice is put on the card by a real `load-voice` job over HTTP, because
-    the streaming door never loads one — it refuses `voice_not_resident` and
-    names what is resident instead, exactly as chat does (section 7).
-    """
 
     @contextmanager
     def start(**fake_options: Any) -> Iterator[str]:
@@ -117,9 +72,6 @@ def streaming_server(
             yield base
 
     return start
-
-
-# ------------------------------------------------------------------ the wire
 
 
 def open_session(base: str, auth: dict[str, str], **body: Any) -> httpx.Response:
@@ -155,12 +107,6 @@ def say_at_take(
 
 
 class Listener:
-    """One attached event stream, read on a thread so a test can post while it runs.
-
-    The frames accumulate in arrival order and `wait_for` blocks until the
-    predicate is satisfied, which is what lets a test say "once two chunks of
-    r1 have landed, drop the connection" without a sleep standing in for it.
-    """
 
     def __init__(self, response: httpx.Response) -> None:
         self.frames: list[dict[str, Any]] = []
@@ -174,55 +120,12 @@ class Listener:
         self._thread.start()
 
     def drop(self) -> None:
-        """Half-close the TCP socket under the reader. **Measured, not assumed.**
-
-        `httpx.Response.close()` from this thread while the pump thread is
-        blocked inside `iter_lines()` does **not** close the socket, and the
-        server goes on holding the connection until its next write fails — 15 s
-        later, at the keepalive. A test that called it and then reconnected was
-        not testing a reattach at all; it was opening a second reader beside a
-        first that had never left. Measured 2026-09-13 by timing the server's
-        shutdown, which waits for its open connections.
-
-        So the drop is a real `shutdown(SHUT_RDWR)`, which is what a tunnel
-        collapsing does: the peer gets a FIN, the reader gets end of file.
-
-        **And it is `shutdown` ALONE — never `close()`.** The first version of
-        this helper closed the socket straight afterwards, which is closing a
-        file descriptor another thread is blocked reading, and that is undefined
-        behaviour rather than a strong way to hang up. Linux and Windows
-        tolerate it; macOS does not, and on 2026-09-14 it was the whole of why
-        this file failed on both macOS CI jobs. Measured there rather than
-        guessed at: `faulthandler` put the reader in `httpcore`'s `recv`, and a
-        standalone probe on the same box gave
-
-            shutdown : reader exited after 0.00s
-            close    : reader STILL BLOCKED after 10.01s
-            both     : reader exited after 0.00s
-
-        — so `shutdown` is what wakes it, `close` is what never does, and "both"
-        only looks safe: `close()` frees the descriptor number, uvicorn and
-        httpx are opening sockets constantly in this process, and a reader that
-        had not yet been scheduled woke up armed on somebody else's connection.
-        Which is worse than a hang. It reproduced only sometimes, and only on
-        macOS, for exactly that reason.
-
-        The consequence for the rest of the file is that the socket is closed by
-        `httpx.stream`'s own context manager, after the reader has unwound —
-        which is the only thread allowed to be reading it.
-
-        Waiting for that unwind is deliberate and is checked rather than hoped
-        for: a test reads `last_id()` immediately after a drop, and a reader
-        still appending frames would make that cursor a moving target.
-        """
         if self._dropped:
             return
         self._dropped = True
         try:
             self._socket.shutdown(socket.SHUT_RDWR)
         except OSError:
-            # Already gone — the server hung up first. Nothing to half-close,
-            # and the reader is on its way out for the same reason.
             pass
         if not self.ended.wait(DROP_UNWIND_SECONDS):
             raise AssertionError(
@@ -254,10 +157,6 @@ class Listener:
                 elif field == "data":
                     current["data"] = json.loads(value)
         except (httpx.HTTPError, OSError, RuntimeError, ValueError):
-            # The test shut the socket down under this thread. A dropped stream
-            # is the subject of half this file, so it is an outcome and not an
-            # error. (After a clean `shutdown` the usual arrival is end of file
-            # rather than an exception; both end the same way.)
             pass
         finally:
             self.ended.set()
@@ -294,7 +193,6 @@ class Listener:
 def listen(
     base: str, auth: dict[str, str], session_id: str, after: int | None = None
 ) -> Iterator[Listener]:
-    """Attach an event stream, and close the socket for real on the way out."""
     headers = dict(auth)
     headers["Accept"] = "text/event-stream"
     if after is not None:
@@ -314,11 +212,6 @@ def listen(
 
 
 def pcm_of(listener: Listener, row: str) -> bytes:
-    """Every chunk of one row's audio, concatenated in `seq` order.
-
-    The fake threads the sine's phase through consecutive chunks on purpose, so
-    a discontinuity here is a chunk Crucible dropped or reordered.
-    """
     chunks = sorted(listener.audio_for(row), key=lambda data: data["seq"])
     assert [data["seq"] for data in chunks] == list(range(len(chunks))), chunks
     return b"".join(base64.b64decode(data["pcm_base64"]) for data in chunks)
@@ -326,9 +219,6 @@ def pcm_of(listener: Listener, row: str) -> bytes:
 
 def seconds_of(pcm: bytes) -> float:
     return len(pcm) / 2 / SAMPLE_RATE
-
-
-# ------------------------------------------------------------------- opening
 
 
 def test_opening_a_session_answers_the_identity_of_what_will_speak(
@@ -339,8 +229,6 @@ def test_opening_a_session_answers_the_identity_of_what_will_speak(
         assert body["voice"] == VOICE
         assert body["sample_rate"] == SAMPLE_RATE
         assert body["backend"] == "cuda-linux"
-        # The fingerprint binds the audio to a merge rather than to a name: two
-        # merges of one fine-tune are two narrators.
         assert body["fingerprint"].startswith(f"{VOICE}@")
         assert len(body["session_id"]) == 32
 
@@ -348,14 +236,11 @@ def test_opening_a_session_answers_the_identity_of_what_will_speak(
 def test_the_streaming_door_never_loads_a_voice(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """A connection behaves like chat, not like a render job (section 6 and 7)."""
     with streaming_server() as base:
         response = open_session(base, auth, voice=OTHER_VOICE)
         assert response.status_code == 409, response.text
         error = response.json()["error"]
         assert error["code"] == "voice_not_resident"
-        # Naming what IS resident is the whole point: "not resident" alone
-        # leaves a client with nothing to do about it.
         assert VOICE in error["message"]
         assert "never loads" in error["message"]
 
@@ -377,22 +262,6 @@ def test_a_session_that_cannot_be_built_does_not_keep_the_card(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ledger C4: the claim was taken before the thing that releases it existed.
-
-    `StreamManager.open` claimed the card and then CONSTRUCTED the session, and
-    the only thing that ever releases a claim is the worker thread `start()`
-    would have begun. So any refusal between those two lines held the card for
-    the life of the process: no expiry, no watchdog, and every later load,
-    unload and render answered `engine_in_use` naming a session that was never
-    opened.
-
-    The refusal used here is the one the constructor actually has —
-    `batch_width_for`, which has deliberately NO default, because a guessed
-    streaming batch width is wrong in both directions. Emptying the table is
-    how a build reaches that state today: every voice in the catalog is
-    `higgs-v3`, so the live case is the day a second narrator engine ships
-    without a measured width.
-    """
     with streaming_server() as base:
         measured = dict(ttsstream.STREAM_BATCH_WIDTH)
         monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", {})
@@ -402,17 +271,9 @@ def test_a_session_that_cannot_be_built_does_not_keep_the_card(
         assert error["code"] == "unknown_narrator_engine"
         assert "higgs-v3" in error["message"]
 
-        # THE CARD IS FREE. `/v1/activity` is where the claim is reported, and
-        # `claim` there is null exactly when `Residency.claimed_by` is None and
-        # `{"held_by": ...}` otherwise (crucible/api.py) — so this is the same
-        # read the bench tests at the bottom of this file make, asserted for
-        # the opposite answer.
         activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0)
         assert activity.json()["claim"] is None, activity.text
 
-        # And free in the way that matters: with the widths back, the next
-        # client gets a session rather than an `engine_in_use` naming a holder
-        # that never existed.
         monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", measured)
         assert opened(base, auth)["voice"] == VOICE
 
@@ -435,9 +296,6 @@ def test_the_door_is_shut_when_tts_is_off(
         assert response.json()["error"]["code"] == "job_type_disabled"
 
 
-# ----------------------------------------------------------------- speaking
-
-
 def test_a_session_streams_sub_sentence_audio_and_retires_the_row(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
@@ -453,9 +311,6 @@ def test_a_session_streams_sub_sentence_audio_and_retires_the_row(
             say(base, auth, session["session_id"], "r1", text)
             stream.wait_for(lambda s: s.of("done"), "r1 to retire")
 
-            # More than one audio frame for one row is the whole difference
-            # between this door and the render door: sub-sentence chunks, emitted
-            # while the row is still generating.
             chunks = stream.audio_for("r1")
             assert len(chunks) > 1, chunks
 
@@ -466,8 +321,6 @@ def test_a_session_streams_sub_sentence_audio_and_retires_the_row(
             done = stream.of("done")[0]
             assert done["id"] == "r1"
             assert done["cancelled"] is False
-            # The server's own count of the text it sent, never a number read
-            # back off a reply.
             assert done["chars"] == len(text)
             assert abs(done["seconds"] - expected) < 0.01
             assert abs(done["chars_per_sec"] - CHARS_PER_SEC) < 0.1
@@ -492,7 +345,6 @@ def test_say_answers_with_the_row_id_and_not_the_audio(
 def test_a_client_that_never_opened_the_stream_is_refused_by_name(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """Generating into nothing is worse than a refusal (section 7)."""
     with streaming_server() as base:
         session = opened(base, auth)
         response = post_op(
@@ -523,12 +375,6 @@ def test_two_rows_cannot_share_an_id(
 def test_a_row_longer_than_the_cap_is_said_rather_than_refused(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """`chunk_too_long` is RETIRED on this door too (PHASE18 section 4,
-    2026-09-19), and it mattered that both went together: two doors refusing a
-    chunk by two readings of one number is exactly the "fact with two owners"
-    shape `docs/ARCHITECTURE.md` catalogues. Chunking stays the client's; the
-    server stops acting on a cap a screening voice may not have and a second
-    engine would not be described by."""
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
@@ -548,10 +394,6 @@ def test_a_row_longer_than_the_cap_is_said_rather_than_refused(
 def test_a_take_above_the_ladder_renders_in_its_own_lane_and_is_never_clamped(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """PHASE18 section 5, 2026-09-19. This was `unknown_take`.
-
-    Past the declared ladder is a seed lane at the voice's own sampling — not
-    a refusal, and still not rung 1's numbers under take 3's name."""
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
@@ -570,14 +412,6 @@ def test_a_take_above_the_ladder_renders_in_its_own_lane_and_is_never_clamped(
 def test_a_row_at_take_one_carries_that_rungs_numbers_and_take_zero_carries_none(
     streaming_server: Callable[..., Any], auth: dict[str, str], tmp_path: Path
 ) -> None:
-    """The ladder, one row at a time. deathstalker's rung 1 is one line,
-    `temperature = 0.7`; take 0 sends no `sampling` key at all, because absent
-    means "the loaded voice's own sampling", which IS take 0.
-
-    **A batch here may MIX rungs** — rows arrive one `say` at a time and each
-    carries its own, which is what Correct Sentences spreading N candidates
-    across the ladder looks like on this door — so both rows go into one
-    session and the log is keyed by the row's slot."""
     log = tmp_path / "sampling.jsonl"
     with streaming_server(sampling_log=str(log)) as base:
         session = opened(base, auth)
@@ -597,25 +431,15 @@ def test_a_row_at_take_one_carries_that_rungs_numbers_and_take_zero_carries_none
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines() if line
     ]
-    # Slot 0 is the first `say` and slot 1 the second: the session allocates
-    # one per row and never reuses one.
     assert {row["i"]: row["sampling"] for row in rows} == {
         0: None, 1: {"temperature": 0.7},
     }
-    # AND EACH ROW'S TAKE, which is the rung's other half: it puts that row in
-    # its own seed lane, so a mixed batch is a mixed set of DRAWS and not only
-    # a mixed set of numbers. On the MLX arm it is also what splits the slab,
-    # because one `mx.random.seed` serves a whole batch there.
     assert {row["i"]: row["take"] for row in rows} == {0: 0, 1: 1}
 
 
 def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """narrator's per-row refusal, carried across as this row's `error` frame
-    by name and not interpreted. `sampling_not_supported` is the engine
-    saying it has no such lever — the MLX arm has no repetition penalty — and
-    it is a different fact from `sampling_malformed`, which is a typo."""
     with streaming_server(sampling_levers="topP") as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
@@ -630,24 +454,6 @@ def test_a_rung_narrator_cannot_honour_fails_that_row_by_name(
 def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
     streaming_server: Callable[..., Any], auth: dict[str, str], tmp_path: Path
 ) -> None:
-    """The render door's 2026-09-15 hole, on this door, which had it too.
-
-    The env pins narrator by commit. That night the pin (bookforge 0eeb0267)
-    predated `narrator/engine/item_sampling.py`, so the narrator read an item's
-    `voice` and dropped its `sampling` without a word — two render jobs at take
-    0 and take 1 returned byte-identical audio. This door sends the rung
-    through the same `generate_batch` items, so it would have lied the same
-    way, one row at a time.
-
-    `say` asks the live engine now. Refused per ROW and only above take 0: take
-    0 asks for the numbers and the seed lane every narrator ever built already
-    uses, so the session stays usable for the takes it can serve.
-
-    THE GATE IS ON THE TAKE, NOT ON THE SAMPLING (2026-09-15). What the caller
-    asked for is take N and what the handshake answers is "do you read a rung";
-    `sampling is not None` stood in for both and was equal to neither, held up
-    only by a rule in `voices.py` that refuses a rung declaring no numbers.
-    """
     log = tmp_path / "sampling.jsonl"
     with streaming_server(sampling_log=str(log), no_item_take=1) as base:
         session = opened(base, auth)
@@ -674,8 +480,6 @@ def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines() if line
     ]
-    # Only the take-0 row ever reached the wire, and it carried no numbers and
-    # the bottom rung.
     assert [row["sampling"] for row in rows] == [None]
     assert [row["take"] for row in rows] == [0]
 
@@ -683,7 +487,6 @@ def test_a_narrator_without_the_channel_refuses_a_rung_and_still_says_take_zero(
 def test_say_has_no_default_take_on_the_wire(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """A default here would be the server choosing a take nobody asked for."""
     with streaming_server() as base:
         session = opened(base, auth)
         response = post_op(
@@ -696,7 +499,6 @@ def test_say_has_no_default_take_on_the_wire(
 def test_a_blank_row_is_refused_before_it_reaches_narrator(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """narrator answers an empty generate with a WHOLE-REQUEST error."""
     with streaming_server() as base:
         session = opened(base, auth)
         response = post_op(
@@ -706,17 +508,9 @@ def test_a_blank_row_is_refused_before_it_reaches_narrator(
         assert response.json()["error"]["code"] == "invalid_request"
 
 
-# ------------------------------------------------------------- the residency
-
-
 def test_a_session_holds_the_card_against_every_job_that_wants_it(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """narrator has one stdin, so a render and a session cannot both have it.
-
-    Refused **before the job is queued**, so the client is told by name rather
-    than watching a job fail in the lane a minute later.
-    """
     with streaming_server() as base:
         opened(base, auth)
         for body in (
@@ -738,19 +532,11 @@ def test_a_session_holds_the_card_against_every_job_that_wants_it(
 def test_a_session_opened_during_a_clearance_waits_it_out(
     make_app: Callable[..., Any],
     auth: dict[str, str],
-    fake_env: Path,  # noqa: F811
-    fake_weights: Callable[[str], Path],  # noqa: F811
-    idle_card: None,  # noqa: F811
+    fake_env: Path,
+    fake_weights: Callable[[str], Path],
+    idle_card: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2026-09-24, Briefcase: the settlement is not a second USER of the card.
-
-    A session opened while the settlement clears the voice used to be refused
-    `engine_in_use` by `claim()`, naming the settlement. It now waits the
-    clearance out and is answered from the settled card: `voice_not_resident`,
-    because by then it is true — and the card is left unclaimed, not held by a
-    session on a narrator that is gone.
-    """
     fake_narrator_engine.install(monkeypatch)
     fake_weights(VOICE)
     app = make_app(enable_tts=True, enable_echo=False)
@@ -806,19 +592,6 @@ def test_the_card_is_free_again_once_the_session_closes(
         assert closed.status_code == 200, closed.text
         assert closed.json()["closed"] is True
 
-        # The render door is no longer refused for the CLAIM, which is the
-        # proof — and it is available on every host, including the ones with no
-        # ffmpeg. `TtsJobType.preflight` asks `refuse_if_claimed` BEFORE it
-        # probes for ffmpeg, so a refusal that has moved from `engine_in_use` to
-        # `ffmpeg_missing` has got past the claim and says so by name. Where
-        # ffmpeg is there, the job simply runs, which is better still.
-        #
-        # This is not a concession to the runner. The first version ran the
-        # render unconditionally and failed on both macOS CI jobs for a second
-        # reason entirely — macOS runners carry no ffmpeg by design
-        # (.github/workflows/ci.yml), which is why `test_tts_render.py` skips
-        # there wholesale. Skipping this test there would have thrown away the
-        # residency claim's release, which has nothing to do with ffmpeg.
         render = {
             "type": "tts",
             "model": VOICE,
@@ -834,18 +607,12 @@ def test_the_card_is_free_again_once_the_session_closes(
             assert refused.status_code == 409, refused.text
             assert refused.json()["error"]["code"] == "ffmpeg_missing", refused.text
 
-        # And the job that was refused `engine_in_use` a moment ago in the test
-        # above now runs to completion. No ffmpeg anywhere in it.
         run_job(base, auth, type="load-voice", model=OTHER_VOICE)
-
-
-# ------------------------------------------------------------ per-row cancel
 
 
 def test_a_row_cancelled_before_it_starts_costs_nothing(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """The exact half of per-row cancel: it never reaches narrator at all."""
     with streaming_server(chunk_delay_ms=40) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -853,8 +620,6 @@ def test_a_row_cancelled_before_it_starts_costs_nothing(
             stream.wait_for(lambda s: s.of("ready"), "the ready frame")
             say(base, auth, sid, "r1", LONG_TEXT)
             say(base, auth, sid, "r2", LONG_TEXT)
-            # r2 is still pending: the width for higgs-v3 is 1, so r1 is the
-            # whole of the batch in flight.
             stream.wait_for(lambda s: s.audio_for("r1"), "r1 to start")
             response = post_op(base, auth, sid, op="cancel", id="r2")
             assert response.status_code == 202, response.text
@@ -868,7 +633,6 @@ def test_a_row_cancelled_before_it_starts_costs_nothing(
             assert by_id["r2"]["seconds"] == 0.0
             assert by_id["r2"]["chars_per_sec"] is None
             assert stream.audio_for("r2") == []
-            # Its neighbour was never touched.
             assert by_id["r1"]["cancelled"] is False
             assert not stream.of("restart")
 
@@ -876,12 +640,6 @@ def test_a_row_cancelled_before_it_starts_costs_nothing(
 def test_cancelling_the_row_in_flight_stops_it_where_it_is(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """On higgs-v3 the in-flight row IS the batch, so this is exact and free.
-
-    `HIGGS_STREAM_BATCH_WIDTH = 1` (CLIENT-SURFACES.md section 3.3, measured
-    worthless above one at 2.0x realtime), which is why nothing is restarted
-    here — there are no survivors to restart.
-    """
     with streaming_server(chunk_delay_ms=60) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -899,8 +657,6 @@ def test_cancelling_the_row_in_flight_stops_it_where_it_is(
             done = stream.of("done")[0]
             assert done["id"] == "r1"
             assert done["cancelled"] is True
-            # Stopped short, and honest about it: the row's full duration is
-            # never reported for audio that was never sent.
             assert done["seconds"] < len(LONG_TEXT) / CHARS_PER_SEC
             assert abs(done["seconds"] - seconds_of(pcm_of(stream, "r1"))) < 0.01
             assert not stream.of("restart")
@@ -911,24 +667,7 @@ def test_a_cancel_costs_its_batch_and_the_survivors_are_restarted(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What per-row cancel costs on a wide engine, and what the client is told.
-
-    **This test patches the batch width**, and that is deliberate rather than
-    convenient. Every voice this build ships declares `narrator_engine =
-    "higgs-v3"`, the only engine this build names and the one whose measured
-    width is 1, so the survivor branch is unreachable through a manifest today
-    — and it is exactly the branch that will run the day a wider engine lands.
-    narrator has no per-row cancel: its `cancel` aborts everything in flight. So
-    a cancel of one in-flight row costs its whole batch, and the rows nobody
-    cancelled are resubmitted with a `restart` frame saying the audio already
-    sent for them is void.
-    """
     monkeypatch.setitem(ttsstream.STREAM_BATCH_WIDTH, "higgs-v3", 3)
-    # And the coalescing window with it. In production it is 25 ms, BookForge's
-    # own measured flush window; three `say` posts over a loopback socket do not
-    # reliably land inside that, and a test that sometimes put r1 in a batch of
-    # its own would sometimes pass for the wrong reason. Widening it here is
-    # widening the same knob, not disabling one.
     monkeypatch.setattr(ttsstream, "BATCH_COALESCE_SECONDS", 2.0)
     with streaming_server(chunk_delay_ms=40) as base:
         session = opened(base, auth)
@@ -949,8 +688,6 @@ def test_a_cancel_costs_its_batch_and_the_survivors_are_restarted(
             by_id = {data["id"]: data for data in stream.of("done")}
             assert by_id["r2"]["cancelled"] is True
 
-            # The survivors. Each was told its earlier audio is void, and each
-            # then rendered in full — which is the resubmission, not a partial.
             restarted = {data["id"]: data for data in stream.of("restart")}
             assert sorted(restarted) == ["r1", "r3"]
             full = len(LONG_TEXT) / CHARS_PER_SEC
@@ -958,8 +695,6 @@ def test_a_cancel_costs_its_batch_and_the_survivors_are_restarted(
                 assert restarted[row]["from_seq"] > 0
                 assert by_id[row]["cancelled"] is False
                 assert abs(by_id[row]["seconds"] - full) < 0.01
-                # `seq` never restarts, so the void is a prefix and the good
-                # audio is everything at or after `from_seq`.
                 after = [
                     data for data in stream.audio_for(row)
                     if data["seq"] >= restarted[row]["from_seq"]
@@ -990,7 +725,6 @@ def test_cancel_all_stops_everything_and_restarts_nothing(
 def test_cancelling_a_row_that_has_already_retired_is_not_an_error(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """The ordinary race on a live connection deserves an answer, not a refusal."""
     with streaming_server() as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1013,24 +747,9 @@ def test_cancelling_a_row_nobody_said_is_refused(
         assert response.json()["error"]["code"] == "unknown_row"
 
 
-# ------------------------------------------------------- the grace window
-
-
 def test_a_dropped_stream_reattaches_and_is_replayed_what_it_missed(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """**The centrepiece.** A tunnel costs a reconnect, not a sentence.
-
-    This is the one behaviour a WebSocket could not have given for free, and it
-    is the reason PHASE3-TTS.md section 7 chose SSE: `Last-Event-ID` already
-    works on this server's streams. The row keeps generating across the drop,
-    the session is not cancelled, and the frames that landed while nobody was
-    listening are still there when somebody is.
-
-    The proof is arithmetic rather than a feeling: the two halves of the stream,
-    concatenated in `seq` order, are the row's whole audio — no gap, no repeat,
-    and no seq seen twice.
-    """
     with streaming_server(chunk_delay_ms=60) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1043,21 +762,12 @@ def test_a_dropped_stream_reattaches_and_is_replayed_what_it_missed(
             )
             before = first.snapshot()
             delivered = first.last_id()
-            # The socket goes down HERE, for real, while r1 is still generating
-            # — not at the end of the block, so the drop and the reattach are
-            # two things this test does rather than one it hopes for. `drop()`
-            # itself refuses to return until the reader has unwound, so the
-            # cursor just read is final and every drop in this file is checked
-            # rather than only this one.
             first.drop()
 
-        # Inside the grace window, and carrying the id of the last frame seen.
         with listen(base, auth, sid, after=delivered) as second:
             second.wait_for(lambda s: s.of("done"), "r1 to retire on the new stream")
             after = second.snapshot()
 
-            # Nothing is replayed twice and nothing is skipped: the ids pick up
-            # exactly where the first stream stopped.
             assert after[0]["id"] == delivered + 1
             assert [frame["id"] for frame in after] == list(
                 range(delivered + 1, delivered + 1 + len(after))
@@ -1088,7 +798,6 @@ def test_the_session_closes_when_nobody_comes_back(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Work nobody is waiting for is time stolen from the next job."""
     monkeypatch.setattr(ttsstream, "GRACE_SECONDS", 0.4)
     with streaming_server(chunk_delay_ms=60) as base:
         session = opened(base, auth)
@@ -1108,11 +817,6 @@ def test_the_session_closes_when_nobody_comes_back(
         assert response.status_code == 404, response.text
         assert response.json()["error"]["code"] == "unknown_session"
 
-        # And the card is not merely free, it is EMPTY. A session closing is the
-        # last holder letting go, so Owen's ruling clears the voice behind it
-        # (2026-09-14, crucible/settle.py) — which is a stronger version of the
-        # point of closing it at all. The streaming door never loads, so the
-        # honest answer to the next `open` is that nothing is resident.
         deadline = time.monotonic() + WAIT
         while time.monotonic() < deadline:
             health = httpx.get(f"{base}/v1/health", headers=auth, timeout=30.0)
@@ -1130,7 +834,6 @@ def test_a_resume_the_session_can_no_longer_serve_is_refused_not_skipped(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Audio with a hole in it and nothing saying so is the failure to avoid."""
     monkeypatch.setattr(ttsstream, "GRACE_SECONDS", 0.3)
     with streaming_server() as base:
         session = opened(base, auth)
@@ -1139,8 +842,6 @@ def test_a_resume_the_session_can_no_longer_serve_is_refused_not_skipped(
             stream.wait_for(lambda s: s.of("ready"), "the ready frame")
             say(base, auth, sid, "r1", LONG_TEXT)
             stream.wait_for(lambda s: s.of("done"), "r1 to retire")
-            # Everything so far is delivered and older than the window, so the
-            # next frame prunes it.
             time.sleep(0.5)
             say(base, auth, sid, "r2", "Rain.")
             stream.wait_for(lambda s: len(s.of("done")) == 2, "r2 to retire")
@@ -1161,15 +862,11 @@ def test_the_stream_keeps_itself_alive_while_nothing_is_happening(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 15 s keepalive the job streams already send, on the same clock."""
     monkeypatch.setattr("crucible.api.sse.KEEPALIVE_SECONDS", 0.1)
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:
             stream.wait_for(lambda s: s.keepalives >= 2, "two keepalive comments")
-
-
-# ---------------------------------------------------------------- closing
 
 
 def test_closing_ends_the_stream_with_a_closed_frame(
@@ -1185,8 +882,6 @@ def test_closing_ends_the_stream_with_a_closed_frame(
             assert response.json()["closed"] is True
             stream.wait_for(lambda s: s.of("closed"), "the closed frame")
             assert stream.of("closed")[0]["reason"]
-            # The stream ends after it, the way a job's does at its terminal
-            # event: a client never has to guess whether more is coming.
             stream.ended.wait(WAIT)
             assert stream.ended.is_set()
         assert post_op(base, auth, sid, op="cancel_all").status_code == 404
@@ -1215,7 +910,6 @@ def test_closing_cancels_every_row_still_in_flight(
 def test_a_narrator_row_that_fails_on_its_own_is_reported_not_restarted(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """A genuine per-row failure is not collateral, and is never resubmitted."""
     with streaming_server(fail_row=0) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1233,18 +927,6 @@ def test_a_narrator_row_that_fails_on_its_own_is_reported_not_restarted(
 def test_a_retiring_row_carries_the_gap_the_player_must_insert(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """THE PACING IS ON THE WIRE (Owen, 2026-09-18: *"yes, it paces like the
-    book... maybe the browser extension should handle the gaps for itself"*).
-
-    The audio on this door is bare speech: narrator classifies the silence that
-    belongs after each row with the same function that writes a book's
-    `gaps.json`, and the PLAYER inserts it, because on a stream there is no
-    assembler but the player. This server neither computes it nor pads anything
-    — it relays the number VERBATIM on `done`.
-
-    Steered to 1.25 s, which is no floor anybody ships, so the assertion cannot
-    pass on a number invented at either end.
-    """
     with streaming_server(gap_sec=1.25) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1254,8 +936,6 @@ def test_a_retiring_row_carries_the_gap_the_player_must_insert(
             stream.wait_for(lambda s: s.of("done"), "r1 to retire")
             done = stream.of("done")[0]
             assert done["gap_sec"] == 1.25
-            # And the relay is the WHOLE of it: no silence was inserted into the
-            # audio on the way past.
             pcm = pcm_of(stream, "r1")
             assert abs(seconds_of(pcm) - done["seconds"]) < 0.01
 
@@ -1263,12 +943,6 @@ def test_a_retiring_row_carries_the_gap_the_player_must_insert(
 def test_a_row_narrator_retires_without_a_gap_is_refused_by_name(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """A NARRATOR THAT DOES NOT STATE THE GAP IS OLDER THAN THIS SERVER, and its
-    audio is not bare: it still has the flat 0.3 s this field replaced baked into
-    every row. A client told to insert a gap as well would pace that stream by
-    the sum of two numbers, neither of which anybody chose — so the row fails by
-    name and nothing is defaulted.
-    """
     with streaming_server(omit_gap=1) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1286,9 +960,6 @@ def test_a_row_narrator_retires_without_a_gap_is_refused_by_name(
 def test_a_cancelled_row_has_no_gap_to_keep(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """`null` is the ONE other answer, and it means the row was cancelled: it
-    delivered no complete audio, so there is nothing for a player to pace after.
-    It is never "the server did not say" — that case is the refusal above."""
     with streaming_server(chunk_delay_ms=60) as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1307,49 +978,23 @@ def test_a_cancelled_row_has_no_gap_to_keep(
 def test_the_batch_width_has_no_default_for_an_unmeasured_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A guess is wrong in both directions: too low halves throughput, too
-    high multiplies the cost of a cancel. The table has one row and the
-    refusal is what keeps the second engine from arriving without a
-    measurement."""
     assert ttsstream.batch_width_for("higgs-v3") == 1
     with pytest.raises(Exception) as caught:
         ttsstream.batch_width_for("some-engine-nobody-measured")
     assert getattr(caught.value, "code", None) == "unknown_narrator_engine"
 
 
-# --------------------------------------- the bench, while a session is running
-
-
 def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """The defect this was written for, and the direction it failed in.
-
-    `/v1/activity` drew its whole answer from the JobStore, and a streaming
-    session does not occupy the lane. So a bench polling for a free machine read
-    `busy: 0`, `running: []` and `queued: []` **while the browser extension was
-    streaming from that very server**, submitted, and was refused
-    `engine_in_use` after the round trip. The refusal was right; the display was
-    a lie, and it lied in the one direction that matters.
-
-    Owen, 2026-09-13, naming the three surfaces that do this — the streaming
-    page, the correct-sentences/re-roll page and the browser extension:
-    *"those places are independent of a queue but claim a server while they
-    run... that means crucible wont always have a percent complete to hand
-    back."*
-    """
     with streaming_server() as base:
         session = opened(base, auth)
         body = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
 
-        # The lane really is free, and still says so. `busy` counts the lane and
-        # nothing else — redefining it to mean "the card" would make it a second
-        # owner of the claim.
         assert body["slots"]["accelerated"]["busy"] == 0
         assert body["running"] == []
         assert body["queued"] == []
 
-        # But the machine will not take work, and now says so in one read.
         assert body["slots"]["accelerated"]["accepts_work"] is False
         assert body["claim"] is not None
         assert "tts stream" in body["claim"]["held_by"]
@@ -1360,20 +1005,12 @@ def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
         assert streaming["voice"] == VOICE
         assert streaming["since"]
 
-        # THE POINT OF THE WHOLE FIELD. A session has no denominator: rows arrive
-        # one `say` at a time, indefinitely, so any percentage would be a
-        # percentage of the work that happens to have arrived — a number that
-        # goes DOWN when more arrives. The key is present and null, which is this
-        # server's one spelling of "did not say"; what it offers instead is
-        # counts.
         assert "progress" in streaming
         assert streaming["progress"] is None
         assert streaming["said"] == 0
         assert streaming["finished"] == 0
         assert streaming["in_flight"] == 0
 
-        # And the refusal a client gets if it submits anyway agrees with the
-        # bench about who has it. One fact.
         refused = httpx.post(
             f"{base}/v1/jobs",
             headers=auth,
@@ -1389,7 +1026,6 @@ def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
 def test_the_bench_counts_what_a_session_has_actually_said(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """Counts rather than a percentage — the honest half of the same answer."""
     with streaming_server() as base:
         session = opened(base, auth)
         sid = session["session_id"]
@@ -1406,18 +1042,12 @@ def test_the_bench_counts_what_a_session_has_actually_said(
         assert streaming["in_flight"] == 0
         assert streaming["chars"] == len("Rain fell on the roof.")
         assert streaming["seconds"] > 0.0
-        # Still no percentage, and there never will be one.
         assert streaming["progress"] is None
 
 
 def test_the_bench_names_the_client_that_opened_the_session_or_says_it_did_not(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """null means "it did not say" — never a name this server invented.
-
-    A bench that guessed would be confidently wrong about who is on the card,
-    which is the rule `Job.client` already follows (PHASE7-LANES.md section 5).
-    """
     with streaming_server() as base:
         named = httpx.post(
             f"{base}/v1/tts/stream",
@@ -1438,19 +1068,6 @@ def test_the_bench_names_the_client_that_opened_the_session_or_says_it_did_not(
 def test_the_door_names_the_dying_process_before_it_names_the_voice(
     make_client: Callable[..., Any], auth: dict[str, str]
 ) -> None:
-    """Ledger R14, and the ORDER is the point.
-
-    `unload` unpublishes the voice before it signals the process, so a
-    narrator that will not stop leaves `resident_voice` None — and the
-    `voice_not_resident` check would send this client away with "post a
-    load-voice job first", which is a job that is itself refused
-    `engine_still_stopping`. Two round trips to reach a refusal this door
-    already had in hand.
-
-    Through `TestClient` rather than a live server, alone in this file: what
-    is under test is a refusal made before anything is claimed, spawned or
-    streamed, so none of the reasons in the module docstring apply.
-    """
     with make_client(enable_tts=True, enable_echo=False) as client:
         with a_process_that_will_not_stop(client.app.state.residency):
             response = client.post(
@@ -1462,7 +1079,6 @@ def test_the_door_names_the_dying_process_before_it_names_the_voice(
             error = response.json()["error"]
             assert error["code"] == "engine_still_stopping"
             assert str(STUBBORN_PID) in error["message"]
-            # And no session was opened on the way to saying so.
             assert (
                 client.get("/v1/activity", headers=auth).json()["streaming"] is None
             )

@@ -1,33 +1,3 @@
-"""A stand-in for `crucible/jobs/asr/qwen_worker.py`, faithful to its wire.
-
-`fake_align_worker.py`'s idea for the Qwen3-ASR session: a real subprocess, run
-as the server runs the real one, looping over requests until stdin closes, and
-steered entirely by environment variables. No vLLM, no MLX, no audio.
-
-A "wav" this fake writes is a small JSON file, not audio: `{"start", "duration",
-"window", "lead"}` in ABSOLUTE seconds of the job's input, the piece's core and
-how far into its overlapped audio that core begins. A re-cut names its stretch
-in `region_s`, so a test can say "the loop is at 200 s" and have it follow the
-audio through every re-cut, the way a real loop follows the real audio.
-
-    CRUCIBLE_FAKE_QWEN_DURATION_S   the input's duration (default 400).
-    CRUCIBLE_FAKE_QWEN_LOOP_AT      an absolute second. The piece covering it
-                                    loops when decoded.
-    CRUCIBLE_FAKE_QWEN_LOOP_KIND    `token_limit` (the decode runs out its
-                                    budget), `repeat` (one line 60 times, inside
-                                    the budget), or `collapse` (reads like speech
-                                    but carries the aligner fake's collapse
-                                    marker, so only the aligner can tell).
-    CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S the loop happens only in pieces decoded at a
-                                    window LARGER than this; at this window and
-                                    below it the piece transcribes cleanly. 0 (the
-                                    default) means it never recovers.
-    CRUCIBLE_FAKE_QWEN_SILENT_AT    an absolute second whose piece transcribes
-                                    to nothing (a silent stretch).
-    CRUCIBLE_FAKE_QWEN_LOAD_FAIL    answer the load with `failed`.
-    CRUCIBLE_FAKE_QWEN_TRANSCRIPT   a path; every request line is appended to it.
-"""
-
 from __future__ import annotations
 
 import json
@@ -70,10 +40,6 @@ def handle_load(results, request: dict) -> None:
 
 
 def handle_split(results, request: dict) -> None:
-    """The real wire since 2026-09-26: `region_s` names the stretch to cut (null for
-    the whole input), `overlap_s` is written each side, and every offset is
-    ABSOLUTE seconds of the input. A piece's file records its core, the window it
-    was cut at, and `lead`, how far into its audio the core begins."""
     window = float(request["max_piece_s"])
     overlap = float(request["overlap_s"])
     total = _float("CRUCIBLE_FAKE_QWEN_DURATION_S", 400.0)

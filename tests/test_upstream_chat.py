@@ -1,9 +1,3 @@
-"""Chat completions forwarded to an upstream, in all three dialects.
-
-PHASE15-HOST.md section 3.4. The local half of this door is
-`tests/test_llm_api.py` and is untouched by any of it.
-"""
-
 from __future__ import annotations
 
 import json
@@ -28,21 +22,11 @@ def upstream():
 
 @pytest.fixture(autouse=True)
 def no_lookup_waits(monkeypatch):
-    """The Ollama context lookup's budget, without its sleeps.
-
-    The ATTEMPTS are the budget under test; the waits between them are
-    seconds that would only make the suite slower.
-    """
     monkeypatch.setattr(upstreams, "OLLAMA_LOOKUP_BACKOFF_SECONDS", (0.0, 0.0))
 
 
 @pytest.fixture
 def routed(make_client: Callable[..., TestClient], auth, upstream, monkeypatch):
-    """A server with all three upstreams configured, pointed at the fake.
-
-    Configured through the real `PUT /v1/settings`, not by writing a config
-    behind the door's back: the thing being tested is a server an app set up.
-    """
     monkeypatch.setattr(upstreams, "ANTHROPIC_BASE", upstream.url)
     monkeypatch.setattr(upstreams, "OPENAI_BASE", upstream.url)
     with make_client(enable_llm=True, capability=decided()) as instance:
@@ -70,9 +54,6 @@ def chat(client: TestClient, auth: dict[str, str], body: dict[str, Any], **kw):
     return client.post("/v1/openai/chat/completions", headers=auth, json=body, **kw)
 
 
-# ------------------------------------------------------------ the happy path
-
-
 @pytest.mark.parametrize(
     "model",
     ["anthropic/claude-sonnet-5", "openai/gpt-5", "ollama/qwen3.5:9b"],
@@ -80,11 +61,6 @@ def chat(client: TestClient, auth: dict[str, str], body: dict[str, Any], **kw):
 def test_a_completion_comes_back_in_openai_shape_naming_the_id_asked_for(
     routed, auth, model
 ) -> None:
-    """Whatever the hop, the caller reads an OpenAI completion naming ITS model.
-
-    Crucible's id is the contract in both directions — the same rule
-    `_restore_model_id` follows for the local engine, one hop further out.
-    """
     body = chat(routed, auth, {"model": model, "messages": [{"role": "user", "content": "hi"}]})
     assert body.status_code == 200, body.text
     document = body.json()
@@ -97,12 +73,6 @@ def test_a_completion_comes_back_in_openai_shape_naming_the_id_asked_for(
 def test_anthropic_gets_a_system_field_and_a_max_tokens_and_says_so(
     routed, auth, upstream
 ) -> None:
-    """The three translations 3.4 names, on one request.
-
-    A leading `system` message becomes Anthropic's top-level `system`;
-    `max_tokens` is supplied because Anthropic requires it; and the audit
-    header says which of them this server filled.
-    """
     body = chat(
         routed,
         auth,
@@ -146,13 +116,6 @@ def test_a_stated_max_tokens_wins_and_the_audit_says_request(
 def test_thinking_is_dropped_and_the_audit_says_dropped(
     routed, auth, upstream
 ) -> None:
-    """BookForge sends `thinking: false` on every cleanup call.
-
-    Neither hosted upstream reads `chat_template_kwargs`, so the table is
-    dropped rather than forwarded blind — and the header says `dropped`, which
-    is neither "the model got it" nor "nobody asked". Ollama DOES take it, as
-    `think` (section 3.4a; `test_thinking_reaches_ollama_as_think`).
-    """
     for model in ("anthropic/claude-sonnet-5", "openai/gpt-5"):
         body = chat(
             routed,
@@ -182,12 +145,6 @@ def test_a_request_that_said_nothing_about_thinking_says_engine(
 def test_a_json_schema_becomes_a_forced_tool_and_its_input_is_the_content(
     routed, auth, upstream
 ) -> None:
-    """How `analysis` gets guided decoding out of a cloud model.
-
-    Anthropic has no `response_format`; a tool with a forced choice IS guided
-    decoding, and the tool's argument object is what a caller that sent a
-    schema reads out of `content`.
-    """
     schema = {
         "type": "object",
         "properties": {"verdict": {"type": "string"}},
@@ -215,15 +172,12 @@ def test_a_json_schema_becomes_a_forced_tool_and_its_input_is_the_content(
     }
     content = body.json()["choices"][0]["message"]["content"]
     assert json.loads(content) == {"verdict": "routed"}
-    # `tool_use` is not told to the caller as a tool call: this server forced
-    # the tool to carry JSON, and the caller asked for JSON.
     assert body.json()["choices"][0]["finish_reason"] == "stop"
 
 
 def test_a_bare_json_object_response_format_forces_no_tool(
     routed, auth, upstream
 ) -> None:
-    """Nothing to force a tool WITH, so nothing is invented."""
     chat(
         routed,
         auth,
@@ -255,15 +209,8 @@ def test_the_provider_sees_its_own_credentials(routed, auth, upstream) -> None:
         auth,
         {"model": "ollama/qwen3.5:9b", "messages": [{"role": "user", "content": "hi"}]},
     )
-    # Ollama is reached by address and has no account, so there is no
-    # credential header at all. That is what Ollama is, not a hole this
-    # server opened.
     assert "authorization" not in {k.lower() for k in upstream.headers_seen[-1]}
-    # …and the prefix is this server's, so the upstream is sent the bare id.
     assert upstream.requests[-1]["model"] == "qwen3.5:9b"
-
-
-# ------------------------------------------------------------------ streaming
 
 
 @pytest.mark.parametrize(
@@ -271,11 +218,6 @@ def test_the_provider_sees_its_own_credentials(routed, auth, upstream) -> None:
     ["anthropic/claude-sonnet-5", "openai/gpt-5", "ollama/qwen3.5:9b"],
 )
 def test_a_streamed_completion_arrives_as_openai_chunks(routed, auth, model) -> None:
-    """Anthropic's envelope is translated; the other two are relayed.
-
-    Either way the caller reads OpenAI chunks naming its own model id and
-    ending in `[DONE]`, because that is the protocol it spoke to this door.
-    """
     with routed.stream(
         "POST",
         "/v1/openai/chat/completions",
@@ -319,14 +261,9 @@ def test_the_streamed_audit_header_is_on_the_response(routed, auth) -> None:
     assert sources["max_tokens"] == "upstream default 4096"
 
 
-# ------------------------------------------------------------------ refusals
-
-
 def test_an_unconfigured_upstream_is_refused_409_and_never_falls_back(
     make_client, auth
 ) -> None:
-    """*"Nothing decides to go to the cloud because something local failed"* —
-    and nothing decides to go local because the cloud is not configured."""
     with make_client(enable_llm=True, capability=decided()) as instance:
         body = chat(
             instance,
@@ -375,7 +312,6 @@ def test_a_rejection_is_502_with_the_upstreams_own_words(
 def test_a_rate_limit_is_passed_through_with_retry_after_and_never_retried(
     routed, auth, upstream
 ) -> None:
-    """The caller waits. This server never sends a billed request twice."""
     upstream.status = 429
     upstream.error_body = {"error": {"message": "slow down"}}
     upstream.extra_headers = {"Retry-After": "42"}
@@ -433,9 +369,6 @@ def test_a_streamed_rejection_comes_back_before_any_frames(
     assert body.json()["error"]["code"] == "upstream_rejected"
 
 
-# ------------------------------------------------------- the other two doors
-
-
 def test_a_lease_on_an_upstream_model_is_refused_lease_not_needed(
     routed, auth
 ) -> None:
@@ -465,7 +398,6 @@ def test_load_model_naming_an_upstream_model_is_refused_the_same_way(
 def test_openai_models_lists_the_routed_upstream_models_and_no_catalog(
     routed, auth
 ) -> None:
-    """3.4: the ROUTED models, not the upstream's whole catalog."""
     rows = routed.get("/v1/openai/models", headers=auth).json()["data"]
     by_id = {row["id"]: row for row in rows}
     assert set(by_id) == {
@@ -477,11 +409,9 @@ def test_openai_models_lists_the_routed_upstream_models_and_no_catalog(
     assert row["upstream"] == "anthropic"
     assert row["owned_by"] == "anthropic"
     assert row["routed_for"] == ["translate"]
-    # This server did not load it and has no manifest for it.
     assert "max_model_len" not in row
     assert "defaults" not in row
     assert "created" not in row
-    # …and the fake's other models are NOT here; that is `test`'s job.
     assert "anthropic/claude-haiku-5" not in by_id
 
 
@@ -500,14 +430,6 @@ def test_two_classes_on_one_model_are_one_row(routed, auth) -> None:
 def test_a_forwarded_chat_is_recorded_in_flight_with_its_act_and_model(
     routed, auth, monkeypatch
 ) -> None:
-    """*"so `/v1/activity` says 'translating on anthropic'"* — 3.4.
-
-    A completion is over in the time the test client takes to return, so the
-    row cannot be READ mid-flight without a barrier that would tell us nothing
-    extra. What matters is that the record is opened at all, and with which
-    two facts: the act the client named, and the id it asked for — never the
-    bare upstream model, which would report a name no app sent.
-    """
     from crucible.inflight import InFlight
 
     opened: list[dict[str, Any]] = []
@@ -534,13 +456,10 @@ def test_a_forwarded_chat_is_recorded_in_flight_with_its_act_and_model(
             "client": "foundry/9",
         }
     ]
-    # And it is closed: a record that outlived its request would make this
-    # server look permanently busy with work that stopped.
     assert routed.get("/v1/activity", headers=auth).json()["chat"]["in_flight"] == 0
 
 
 def test_a_forwarded_chat_takes_no_lane_and_settles_nothing(routed, auth) -> None:
-    """No lease, no lane, the settlement untouched — nothing was on the card."""
     from crucible.settle import Settlement
 
     settled: list[str] = []
@@ -570,16 +489,7 @@ def test_a_forwarded_chat_takes_no_lane_and_settles_nothing(routed, auth) -> Non
     assert after["lease"] is None
 
 
-# ------------------------------------------------ ollama, natively (3.4a)
-#
-# The bug these pin: the `ollama` upstream used to go through Ollama's OpenAI
-# shim, which has no `num_ctx`, so every chat ran at Ollama's default 4096 and a
-# longer prompt was silently cut from the front. Now it is Ollama's own
-# `/api/chat`, and `options.num_ctx` is on every body.
-
-
 def _chats(upstream: FakeUpstream) -> list[dict[str, Any]]:
-    """The `/api/chat` bodies the fake received (`/api/show`'s carry no messages)."""
     return [body for body in upstream.requests if "messages" in body]
 
 
@@ -590,11 +500,6 @@ def _context(response) -> dict[str, Any]:
 def test_ollama_gets_its_native_body_with_the_requests_context(
     routed, auth, upstream
 ) -> None:
-    """Every OpenAI knob lands where `/api/chat` reads it, `num_ctx` first.
-
-    A stated `context_tokens` is sent as it stands, and nothing is looked up:
-    the caller knows its prompt and this server has no tokenizer for it.
-    """
     body = chat(
         routed,
         auth,
@@ -621,7 +526,6 @@ def test_ollama_gets_its_native_body_with_the_requests_context(
             {"role": "system", "content": "You are terse."},
             {"role": "user", "content": "hi"},
         ],
-        # Stated even when false: Ollama's own default is to stream.
         "stream": False,
         "options": {
             "num_ctx": 16384,
@@ -646,10 +550,6 @@ def test_ollama_gets_its_native_body_with_the_requests_context(
 def test_ollama_with_no_stated_context_is_sent_the_trained_maximum(
     routed, auth, upstream
 ) -> None:
-    """A tag that states no `num_ctx` runs at `model_info.<arch>.context_length`.
-
-    NEVER nothing: nothing is Ollama's 4096, which is the bug.
-    """
     body = chat(
         routed,
         auth,
@@ -668,11 +568,6 @@ def test_ollama_with_no_stated_context_is_sent_the_trained_maximum(
 def test_a_tags_own_modelfile_num_ctx_wins_over_the_trained_maximum(
     routed, auth, upstream
 ) -> None:
-    """`PARAMETER num_ctx` is the tag author's statement of what fits the card.
-
-    Owen's `qwen3.8:27b-24g` carries 98304 because 262144 does not fit 24 GB;
-    overriding it with the trained maximum would push the KV cache off the card.
-    """
     body = chat(
         routed,
         auth,
@@ -692,7 +587,6 @@ def test_a_tags_own_modelfile_num_ctx_wins_over_the_trained_maximum(
 def test_the_looked_up_context_is_remembered_per_digest(
     routed, auth, upstream
 ) -> None:
-    """`/api/show` once per digest; `ollama create` over the same name asks again."""
     request = {
         "model": "ollama/qwen3.5:9b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -724,8 +618,6 @@ def test_thinking_reaches_ollama_as_think(routed, auth, upstream, thinking) -> N
     assert "chat_template_kwargs" not in sent
     assert json.loads(body.headers[SAMPLING_HEADER])["thinking"] == "request"
     message = body.json()["choices"][0]["message"]
-    # Ollama's `message.thinking` is the door's `reasoning`, the field the
-    # local engines answer in and the SDK reads.
     if thinking:
         assert message["reasoning"] == fake_upstream.THINKING
     else:
@@ -821,7 +713,6 @@ def _payloads(frames: list[str]) -> list[dict[str, Any]]:
 
 
 def test_ollamas_ndjson_stream_becomes_openai_sse(routed, auth, upstream) -> None:
-    """Thinking as `reasoning` deltas, content as `content`, a finish, usage, `[DONE]`."""
     frames, context = _stream(
         routed,
         auth,
@@ -856,7 +747,6 @@ def test_ollamas_ndjson_stream_becomes_openai_sse(routed, auth, upstream) -> Non
 def test_an_ollama_stream_cut_before_done_gets_no_done_terminator(
     routed, auth, upstream
 ) -> None:
-    """A `[DONE]` here would make a truncated answer read as a finished one."""
     upstream.truncate_stream = True
     frames, _ = _stream(
         routed,
@@ -876,7 +766,6 @@ def test_an_ollama_stream_cut_before_done_gets_no_done_terminator(
 def test_a_show_that_keeps_failing_is_refused_by_name_after_the_budget(
     routed, auth, upstream
 ) -> None:
-    """Weather gets `OLLAMA_LOOKUP_ATTEMPTS`, then a name — never a guessed 4096."""
     upstream.show_failures = upstreams.OLLAMA_LOOKUP_ATTEMPTS
     body = chat(
         routed,
@@ -911,7 +800,6 @@ def test_a_show_that_recovers_inside_the_budget_is_answered(
 def test_a_tag_ollama_does_not_have_is_its_own_404_asked_once(
     routed, auth, upstream
 ) -> None:
-    """Misconfiguration, not weather: Ollama's own words, and no retry."""
     body = chat(
         routed,
         auth,
@@ -933,11 +821,6 @@ def test_a_tag_ollama_does_not_have_is_its_own_404_asked_once(
 def test_a_field_the_ollama_translation_would_drop_is_refused_by_name(
     routed, auth, upstream, extra
 ) -> None:
-    """A field left behind silently is how `num_ctx` was lost; now it is a 400.
-
-    Refused before the context lookup: a request this translation cannot carry
-    costs no round trip.
-    """
     body = chat(
         routed,
         auth,
@@ -1022,7 +905,6 @@ def test_an_image_by_address_is_refused(routed, auth, upstream) -> None:
 def test_the_hosted_upstreams_drop_context_tokens_and_say_so(
     routed, auth, upstream
 ) -> None:
-    """A hosted model's window is its provider's; OpenAI would refuse the field."""
     body = chat(
         routed,
         auth,

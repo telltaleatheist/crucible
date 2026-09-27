@@ -1,9 +1,3 @@
-"""Shared fixtures.
-
-Every test runs against a throwaway `CRUCIBLE_HOME` under pytest's tmp_path, so no
-test can see or touch a real `~/.crucible`.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -35,8 +29,6 @@ from crucible.manifests import load_manifest
 
 from .fake_engine import FakeEngine
 
-# A stand-in for a real host probe. Backend detection itself is tested separately
-# against monkeypatched probes; the API tests must not depend on the machine.
 FAKE_BACKEND = Backend(
     kind="cuda-linux",
     platform="linux",
@@ -65,12 +57,6 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def make_app(home: Path) -> Callable[..., FastAPI]:
-    """One configured server instance, as an ASGI app.
-
-    Almost every test wants it wrapped in a `TestClient` (see `make_client`); the
-    disconnect tests want the bare app, because they run it under a real uvicorn
-    on a real socket (tests/live_server.py).
-    """
 
     def factory(
         *,
@@ -84,19 +70,8 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
         desktop_allowance_bytes: int = 3 * 1024 ** 3,
-        # None means this host has DECIDED NOTHING, which is the honest default
-        # for a fixture: a config written before anything probed the card. Pass a
-        # record to test a server that has decided.
         capability: Any = None,
-        # Taken from the ONE owner of the default rather than restated, so that a
-        # test asserting the open behaviour actually fails if the product's
-        # default changes. A test about the approval step passes False here.
         open_pairing: bool = DEFAULT_OPEN_PAIRING,
-        # WHAT `crucible init` WRITES ON THIS BACKEND (PHASE21 section 2.3),
-        # taken from the one function that states it rather than restated here:
-        # a server that has never been told what a narrator engine costs refuses
-        # every repo-manifest voice by name, and a fixture that silently was
-        # that server would make the refusal look like a bug in the door.
         tts_engines: Any = None,
     ) -> FastAPI:
         write_config(
@@ -152,19 +127,8 @@ def auth() -> dict[str, str]:
     }
 
 
-# ------------------------------------------------------------- the llm fixtures
-#
-# The env, the weights and the engine, stood up exactly as the real code paths
-# read them: a stamped venv directory, a stamped weights directory, and an
-# `Engine` that serves a trivial OpenAI surface on a real loopback port
-# (tests/fake_engine.py). No GPU and no 19 GB of weights. Nothing about the
-# server's own logic is faked — the preflight refusals, the exclusive lane, the
-# event stream and the proxy are exactly what runs on the PC.
-
-
 @pytest.fixture
 def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/llm` that `env_status` accepts."""
     spec = jobenv.llm_env(FAKE_BACKEND.kind)
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
@@ -187,7 +151,6 @@ def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def fake_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp a model as pulled at exactly the revision its manifest pins."""
 
     def stamp(model_id: str) -> Path:
         spec = load_manifest(model_id).spec(FAKE_BACKEND.kind)
@@ -222,12 +185,6 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
 def engine_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[..., list[FakeEngine]]:
-    """`engines`, for a test that needs the engine configured.
-
-    Returns the same list of built engines; the keyword arguments go to every
-    `FakeEngine` the residency builds, so a test can say what the engine stops
-    for or what it refuses without writing its own `build_engine` patch.
-    """
 
     def install(**options: Any) -> list[FakeEngine]:
         built: list[FakeEngine] = []
@@ -248,31 +205,8 @@ def engine_factory(
     return install
 
 
-# ------------------------------------------------------------------ helpers
-
-
 @contextmanager
 def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
-    """Keep what a job left resident on the card across the job's end.
-
-    OWEN'S RULING, 2026-09-14 (`crucible/settle.py`): the card is cleared the
-    moment the last of four holders lets go. A test that wants to LOOK at what a
-    job left resident is, by definition, looking after the last holder let go —
-    so it has to be one.
-
-    A chat completion in flight is the holder it takes, because it is the only
-    one of the four that can be held BEFORE the job runs. A lease is the honest
-    holder for a run of renders or aligns and since 2026-09-14 it can name a
-    voice or an aligner (`crucible/leases.py`) — but a lease never loads, so it
-    cannot be taken until the first job has made the thing resident, which is
-    exactly the window a test that wants to LOOK at what one job left for the
-    next is standing in. `test_tts_render.py` and `test_align_api.py` each carry
-    the real-lease version of the same measurement beside the tests that use
-    this.
-
-    Nothing is faked: `Settlement.holder` reads this record through exactly the
-    code path `/v1/activity` reports it from.
-    """
     with client.app.state.inflight.tracked(
         act=act, model="a test holding the card", client=None
     ):
@@ -280,14 +214,6 @@ def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
 
 
 def a_clearance_to_hold(engine: FakeEngine) -> tuple[threading.Event, threading.Event]:
-    """Make `engine.stop()` block, so a clearance can be caught mid-flight.
-
-    Returns `(reached, release)`: `reached` is set once the settlement is inside
-    the engine's stop — the exact state PHASE15-HOST.md section 8's T6 saw an
-    `unload-model` arrive in, 2026-09-15 — and `release` lets it finish. Two
-    events and no sleep, because what is being tested is a state and not a
-    duration.
-    """
     reached, release = threading.Event(), threading.Event()
     stop = engine.stop
 
@@ -296,12 +222,11 @@ def a_clearance_to_hold(engine: FakeEngine) -> tuple[threading.Event, threading.
         assert release.wait(timeout=30), "the test never released the clearance"
         stop()
 
-    engine.stop = held_stop  # type: ignore[method-assign]
+    engine.stop = held_stop
     return reached, release
 
 
 def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
-    """Turn an SSE byte stream's lines into [{id, event, data}] in arrival order."""
     events: list[dict[str, Any]] = []
     current: dict[str, Any] = {}
     for line in lines:
@@ -310,7 +235,7 @@ def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
                 events.append(current)
                 current = {}
             continue
-        if line.startswith(":"):  # keepalive comment
+        if line.startswith(":"):
             continue
         field, _, value = line.partition(":")
         value = value[1:] if value.startswith(" ") else value
@@ -326,15 +251,6 @@ def parse_sse(lines: Iterator[str]) -> list[dict[str, Any]]:
 
 
 def wav_bytes(seconds: float, rate: int = 24000) -> bytes:
-    """A real, minimal, silent mono PCM16 WAV of `seconds`.
-
-    Real because `crucible/voicereference.py` reads the duration out of the
-    RIFF header rather than taking a client's word for it, so a test that
-    handed it a made-up blob would be testing the refusal path and nothing
-    else. `wave` writes it, `wave` reads it: one standard-library container,
-    no fixture file in the repo, and the duration is arithmetic a reader can
-    check.
-    """
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as handle:
         handle.setnchannels(1)
@@ -345,7 +261,6 @@ def wav_bytes(seconds: float, rate: int = 24000) -> bytes:
 
 
 def wav_base64(seconds: float, rate: int = 24000) -> str:
-    """`wav_bytes`, encoded the way `params.reference.data` carries it."""
     return base64.b64encode(wav_bytes(seconds, rate)).decode("ascii")
 
 
@@ -366,64 +281,16 @@ __all__ = [
 def _state_the_systemd_scope(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Pin the suite to the USER scope; the system-scope tests opt in.
-
-    `service.systemd_scope()` reads the kernel and answers SYSTEM inside WSL,
-    which is right for the product and wrong for a suite that asserts
-    `systemctl --user` argv and writes units under a temp home. Left to
-    inherit it, these tests measure the MACHINE: run on a developer's WSL box
-    they reached for the real /etc/systemd/system and failed there, and on a
-    hosted Linux runner they passed — the same code, two answers, neither of
-    them about the code. A test whose result depends on where it runs is not
-    testing anything.
-    """
     from crucible import service
 
     monkeypatch.setattr(service, "in_wsl", lambda: False)
-    # AND THE SAME FOR WHERE A SYSTEM UNIT WOULD BE. Pinning `in_wsl`
-    # settles `systemd_scope()` - where an install would PUT a unit - and
-    # leaves `installed_scope()` alone, which reads SYSTEM_UNIT_DIR
-    # straight off the filesystem and so was still asking the real
-    # /etc/systemd/system. That answered `no` on every machine anyone had
-    # run this on, so the gap held until 2026-09-17, when a deploy finally
-    # installed a system unit on this developer's WSL box and 17 tests
-    # that had never been touched began to fail. Same defect the docstring
-    # above describes; it was only half fixed.
     monkeypatch.setattr(service, "SYSTEM_UNIT_DIR", tmp_path / "etc-systemd-system")
 
 
-# ------------------------------------------------- no child outlives its test
-#
-# MEASURED 2026-09-23 on owens-pc: after Windows runs of this suite, 114
-# `mlx_vlm_serve.py` servers and a trail of `fake_align_worker.py`,
-# `fake_asr_worker.py` and `fake_narrator.py` processes were still alive, some
-# since 2026-09-20. The OWNER was production code — every stop path called
-# `os.killpg`, which does not exist on win32, so a stop raised and nothing was
-# signalled (fixed in `crucible/procgroup.py`). What made it invisible for three
-# days was the other half: nothing in the suite noticed a child that outlived
-# the test that started it. This is that noticing.
-#
-# Every `subprocess.Popen` made during a test — by the test, a fixture, or the
-# code under test — is recorded. At teardown (this fixture is set up first, so it
-# is torn down LAST, after every client's lifespan has stopped what it owns) a
-# child that is still running after a short grace is ended — tree and all — and
-# the test FAILS naming it. Reaping without failing would be the band-aid: the
-# leak would stop costing processes and go on existing.
-
-#: How long a child is given to finish exiting after its test. Covers a stop
-#: that a background job thread is still waiting out; it is not a clock on
-#: anything a test asserts.
 _CHILD_GRACE_SECONDS = 5.0
 
 
 def end_process_tree(pid: int) -> None:
-    """End `pid` and everything it started, whatever the platform. For tests.
-
-    win32: `taskkill /T /F`. POSIX: SIGKILL to its group when it LEADS one —
-    and only then, because a child left in pytest's own group would take
-    pytest with it — otherwise to the pid alone. Tests may SIGKILL; Crucible
-    never does (`crucible/procgroup.py`).
-    """
     import os
     import signal
     import subprocess
@@ -456,14 +323,13 @@ def _no_child_outlives_its_test(monkeypatch: pytest.MonkeyPatch) -> Iterator[Non
     spawned: list[subprocess.Popen[Any]] = []
     real = subprocess.Popen
 
-    class _Recorded(real):  # type: ignore[misc, valid-type]
+    class _Recorded(real):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             spawned.append(self)
 
     monkeypatch.setattr(subprocess, "Popen", _Recorded)
     yield
-    # Restore before reaping, so the reaper's own `taskkill` is not recorded.
     monkeypatch.setattr(subprocess, "Popen", real)
 
     deadline = time.monotonic() + _CHILD_GRACE_SECONDS

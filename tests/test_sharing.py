@@ -136,21 +136,12 @@ def test_cli_launcher_refuses_unowned_or_modified_files(tmp_path):
 
 
 def test_a_launcher_that_already_runs_this_crucible_is_adopted(tmp_path):
-    """An upgrade replacing a shim written by something else is not a conflict.
-
-    Measured 2026-09-16: BOTH of Owen's machines carried a hand-written shim —
-    its own comments say it existed because `Scripts\crucible.exe --version`
-    exited 1 — and the 0.6.3 install refused each one with "nothing changed"
-    and no remedy. Replacing a launcher that already launches THIS Crucible is
-    what an upgrade is.
-    """
     home = tmp_path / "crucible"
     user = tmp_path / "user"
     record = launcher.install(home, "/usr/bin/python", "/runtime",
                               platform="linux", user_home=user)
     assert record["adopted"] is False
 
-    # A launcher for this home, written by something that is not this installer.
     Path(record["path"]).write_text(
         "#!/bin/sh" + chr(10) +
         "export CRUCIBLE_HOME=" + str(home) + chr(10) +
@@ -163,7 +154,6 @@ def test_a_launcher_that_already_runs_this_crucible_is_adopted(tmp_path):
 
 
 def test_a_stranger_named_crucible_is_still_refused_and_told_what_to_do(tmp_path):
-    """The refusal protects somebody else's file, and must stay — with a remedy."""
     home = tmp_path / "crucible"
     user = tmp_path / "user"
     record = launcher.install(home, "/usr/bin/python", "/runtime",
@@ -206,9 +196,6 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
             elif argv[0] == "certutil":
                 output = "a" * 64
             elif argv[-1].endswith("SHA256SUMS"):
-                # CANONICAL'S OWN sums file, which names every image in that
-                # directory: the row is found by FILENAME, so a fixture that
-                # answered a bare digest would be checking nothing.
                 from crucible.host.wsl_states import UBUNTU_WSL_ROOTFS
                 output = f"{chr(98) * 64} *other.tar.gz\n{chr(97) * 64} *{UBUNTU_WSL_ROOTFS}\n"
             elif argv[-1] == "/etc/wsl.conf":

@@ -1,5 +1,3 @@
-"""The API v1 surface: ping, auth, api version, info, health."""
-
 from __future__ import annotations
 
 from typing import Callable
@@ -42,7 +40,6 @@ def test_non_bearer_scheme_is_401(client: TestClient) -> None:
 
 
 def test_auth_is_checked_before_the_api_version(client: TestClient) -> None:
-    """No token and no version header answers 401, not 426."""
     response = client.get("/v1/info")
     assert response.status_code == 401
 
@@ -114,9 +111,6 @@ def test_health(client: TestClient, auth: dict[str, str]) -> None:
         "queue_depth": 0,
         "resident_models": [],
         "resident_kind": None,
-        # Present and null, never absent (ledger R13). An omitted key leaves a
-        # client unable to tell "nothing is stopping" from "this build cannot
-        # say"; tests/test_activity.py holds what it carries when something is.
         "stopping": None,
     }
 

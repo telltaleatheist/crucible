@@ -1,17 +1,3 @@
-"""`crucible-voice.toml`, the pins, and the box's own `[tts.<engine>]` table.
-
-PHASE21-VOICES-FROM-HF.md sections 2.1, 2.2, 2.3 and 2.4. A voice's facts travel
-with its weights: the manifest is committed into the repo in the SAME commit as
-the bytes it describes, and the local side pins one thing.
-
-NOTHING HERE TOUCHES THE NETWORK. A pinned manifest is read from one of three
-places in order — the PULLED snapshot, this home's content-addressed cache, and
-only then the Hub — so a fixture that writes the file into the cache exercises
-the whole loader with no transport at all. The one test that does reach the
-transport replaces `huggingface_hub.hf_hub_download`, the same seam
-`snapshot_download` already sits behind.
-"""
-
 from __future__ import annotations
 
 import json
@@ -39,8 +25,6 @@ SHA = "a" * 40
 OTHER_SHA = "b" * 40
 REPO = "owenmorgan/mistborn-higgs-v3"
 
-#: A repo manifest that loads. Every refusal test below is this document with
-#: one thing wrong, so a failure names the one thing rather than the schema.
 GOOD = """
 schema = 1
 
@@ -77,9 +61,6 @@ temperature = 0.7
 reason = "a retake must not reuse the settings that produced the problem"
 """
 
-#: This box's footprint for higgs-v3, the numbers `crucible init` writes. They
-#: are the ones every packaged manifest declared on 2026-09-19, which is where
-#: this fixture gets them from rather than from a round number chosen here.
 CONFIG = """
 [tts.higgs-v3]
 memory_bytes_estimate = 19_000_000_000
@@ -90,9 +71,6 @@ max_num_seqs_note = "vllm-omni's own stage-0 value, measured at 0.35 + 0.10."
 """
 
 
-#: The one line of `GOOD` that carries a measured pace's prose, and the sentence
-#: an INHERITED one owes instead. Named because six tests swap between them, and
-#: a literal retyped six times is a literal that will disagree with GOOD once.
 MEASURED_LINE = (
     'measured_from      = "mb_hp_rvcbed1 ckpt-4257, n=51 in the 500-800 band"'
 )
@@ -118,20 +96,12 @@ def swap(old: str, new: str) -> str:
 
 @pytest.fixture
 def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A `CRUCIBLE_HOME` with a config that states this box's TTS footprint."""
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
     (tmp_path / "config.toml").write_text(CONFIG, encoding="utf-8")
     return tmp_path
 
 
-#: THE ID A PIN IS TRIED UNDER, and it is deliberately NOT one of the five this
-#: build still ships: a packaged manifest BEATS a pin for the same id while
-#: section 8.1 is true, so a test that pinned `mistborn` and then read
-#: `load_all_voices()["mistborn"]` would be reading the packaged file and
-#: passing for the wrong reason. `test_a_packaged_manifest_still_beats_a_pin_for
-#: _the_same_id` is the one test that pins a shipped id, and it is about exactly
-#: that.
 PINNED_ID = "nightingale"
 
 
@@ -144,7 +114,6 @@ def a_pin(home: Path, voice_id: str = PINNED_ID, revision: str = SHA) -> None:
 
 
 def a_cached_manifest(home: Path, text: str = GOOD, revision: str = SHA) -> Path:
-    """The manifest where a fetch would have left it — the seam, not the Hub."""
     path = (
         home
         / "voice-manifests"
@@ -155,9 +124,6 @@ def a_cached_manifest(home: Path, text: str = GOOD, revision: str = SHA) -> Path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
-
-
-# ------------------------------------------------------------- the schema
 
 
 def test_the_good_repo_manifest_parses() -> None:
@@ -171,8 +137,6 @@ def test_the_good_repo_manifest_parses() -> None:
         "cuda-linux": "measured",
         "mlx-darwin": "placeholder",
     }
-    # `basis` and `measured_from` do NOT reach the internal pace table: they say
-    # how the numbers were got, not what they are.
     assert "basis" not in repo.pace and "measured_from" not in repo.pace
 
 
@@ -206,12 +170,6 @@ def test_a_schema_that_is_not_a_number_is_refused() -> None:
 def test_a_machine_fact_in_the_repo_schema_is_refused_by_name(
     line: str, key: str
 ) -> None:
-    """THE WHOLE REASON SECTION 2.1 LISTS THEM.
-
-    A file converted from a packaged manifest would otherwise carry a claim
-    about a box it has never run on, and `check_table`'s "unknown key(s)" would
-    send its reader looking for a typo instead of at the fact that these moved.
-    """
     message = refused(swap('display         = "Mistborn"', f'display = "M"\n{line}'))
     assert f"carries {key}" in message
     assert "may not state" in message
@@ -250,16 +208,6 @@ def test_a_measured_pace_owes_its_prose() -> None:
 
 
 def test_an_inherited_pace_owes_its_own_sentence() -> None:
-    """RULED 2026-09-19, and it is `estimate_basis`'s rule.
-
-    Section 1: owen's pace is INHERITED from the predecessor run and the
-    re-measurement is owed. The schema's job is to make that state SAYABLE — and
-    then to make it ACTIONABLE, which the word alone is not: inheriting from a
-    sibling checkpoint of the same corpus is near enough (mistborn 13.29 / 13.33
-    / 13.76 across three retrains) while inheriting from a different corpus two
-    versions back is the deathstalker defect (16.64 onto weights that measured
-    15.91). Only the sentence separates them.
-    """
     repo = parse(
         swap('basis              = "measured"', 'basis = "inherited"').replace(
             MEASURED_LINE, f'inherited_from = "{INHERITED}"'
@@ -281,7 +229,6 @@ def test_an_inherited_pace_with_no_inherited_from_is_refused() -> None:
 
 
 def test_inherited_from_on_a_measured_pace_is_refused() -> None:
-    """Prose about a measurement this voice did not make."""
     message = refused(
         swap(MEASURED_LINE, MEASURED_LINE + f'\ninherited_from = "{INHERITED}"')
     )
@@ -299,7 +246,6 @@ def test_measured_from_on_an_inherited_pace_is_refused() -> None:
 
 
 def test_an_inherited_pace_rides_on_the_row(host: Path) -> None:
-    """The sentence reaches a client, beside the word."""
     a_pin(host)
     a_cached_manifest(
         host,
@@ -314,7 +260,6 @@ def test_an_inherited_pace_rides_on_the_row(host: Path) -> None:
 
 
 def test_a_measured_pace_reports_a_null_inherited_from(host: Path) -> None:
-    """Null means NOT INHERITED, never "inherited from somewhere unstated"."""
     a_pin(host)
     a_cached_manifest(host)
     voice = load_all_voices()[PINNED_ID]
@@ -323,12 +268,6 @@ def test_a_measured_pace_reports_a_null_inherited_from(host: Path) -> None:
 
 
 def test_a_voice_may_omit_its_pace_table_in_whole(host: Path) -> None:
-    """PHASE18 section 4.1: absent, never zeroed, never partial.
-
-    A screening checkpoint's pace is unknown by definition and measuring it is
-    one of the run's outputs, so a manifest that declared one would be asserting
-    the answer to the question its own render exists to ask.
-    """
     text = GOOD[: GOOD.index("[voice.pace]")] + GOOD[GOOD.index("[voice.arms.cuda-linux]"):]
     repo = parse(text)
     assert repo.pace is None and repo.pace_basis is None
@@ -340,18 +279,11 @@ def test_a_voice_may_omit_its_pace_table_in_whole(host: Path) -> None:
 
 
 def test_a_cap_without_a_basis_is_refused() -> None:
-    """The two keys are ONE statement, and since 2026-09-19 the pairing is what
-    is enforced rather than the presence of either: `max_chars` moved to
-    optional here exactly as it did in `voices.py`, so the refusal had to move
-    from "this key is missing" to "this key is missing BESIDE a cap"."""
     message = refused(swap('max_chars_basis = "measured"\n', ""))
     assert "states max_chars 800 and no max_chars_basis" in message
 
 
 def test_a_basis_without_a_cap_is_refused_as_the_leftover_it_is() -> None:
-    """The other half. A basis describing a cap that is not there reads as a
-    cap this loader checked and passed — `_check_pace` refuses its own `edges`
-    key the same way and for the same sentence."""
     message = refused(
         GOOD.replace(
             'max_chars       = 800\nmax_chars_basis = "measured"',
@@ -361,8 +293,6 @@ def test_a_basis_without_a_cap_is_refused_as_the_leftover_it_is() -> None:
     assert "states max_chars_basis 'measured' and no max_chars" in message
 
 
-#: The two arms with neither key — a repo published before any sweep has run on
-#: its weights. Both arms, because a cap comes out of one sweep.
 UNCAPPED_ARMS = (
     GOOD.replace('max_chars       = 800\nmax_chars_basis = "measured"\n', "")
     .replace('max_chars       = 800\nmax_chars_basis = "placeholder"\n', "")
@@ -370,12 +300,6 @@ UNCAPPED_ARMS = (
 
 
 def test_an_arm_may_state_no_cap_at_all(host: Path) -> None:
-    """PHASE18 section 4, 2026-09-19 — and it must be expressible in BOTH
-    schemas or a voice would be publishable and unloadable, or the reverse.
-
-    The merged `VoiceManifest` carries `max_chars` None and `max_chars_basis`
-    None, which is "not measured" and not "no limit".
-    """
     repo = parse(UNCAPPED_ARMS)
     assert repo.max_chars_basis == {"cuda-linux": None, "mlx-darwin": None}
     a_pin(host)
@@ -393,12 +317,6 @@ def test_an_unknown_max_chars_basis_is_refused() -> None:
 
 
 def test_the_existing_pace_rules_apply_verbatim(host: Path) -> None:
-    """A lopsided band is refused by `_check_pace`, which is the SAME code.
-
-    The repo schema does not restate the rules — it translates into the document
-    the internal loader already reads — so a rule edited in `crucible/voices.py`
-    is edited for both schemas at once.
-    """
     a_pin(host)
     a_cached_manifest(host, swap("min_chars_per_sec  = 10.58", "min_chars_per_sec = 13.31"))
     with pytest.raises(VoiceError) as caught:
@@ -430,9 +348,6 @@ def test_a_deviating_sampling_still_owes_a_reason(host: Path) -> None:
     assert "carries no sampling_reason" in str(caught.value)
 
 
-# --------------------------------------------------------------- the pins
-
-
 def test_a_pin_is_read_and_the_voice_is_served(host: Path) -> None:
     a_pin(host)
     a_cached_manifest(host)
@@ -453,8 +368,6 @@ def test_a_pin_is_read_and_the_voice_is_served(host: Path) -> None:
 def test_the_machine_table_fills_the_facts_the_manifest_may_not_state(
     host: Path,
 ) -> None:
-    """Section 2.3: identical across all seven packaged voices, which is the
-    proof they are facts about a BOX and an ENGINE."""
     a_pin(host)
     a_cached_manifest(host)
     voice = load_all_voices()[PINNED_ID]
@@ -485,12 +398,6 @@ def test_a_box_with_no_footprint_refuses_the_voice_by_name(
 def test_a_revision_with_no_manifest_is_refused_by_name_and_not_served(
     host: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The refusal that makes section 8's order safe.
-
-    A pinned repo whose manifest is missing is NOT served and its band, caps and
-    sampling are NOT read from any other source — not from the packaged file it
-    is replacing, and not from the card.
-    """
     import huggingface_hub
     from huggingface_hub.errors import EntryNotFoundError
 
@@ -510,8 +417,6 @@ def test_a_revision_with_no_manifest_is_refused_by_name_and_not_served(
 def test_a_hub_that_is_down_is_not_reported_as_a_missing_manifest(
     host: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two different facts. "This revision has no manifest" is permanent and
-    sends its reader to commit one; "the Hub did not answer" is a minute."""
     import huggingface_hub
 
     a_pin(host)
@@ -530,7 +435,6 @@ def test_a_hub_that_is_down_is_not_reported_as_a_missing_manifest(
 def test_the_manifest_is_fetched_alone_so_an_uninstalled_voice_still_lists(
     host: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """8.5 GB is not the price of knowing what a voice is."""
     import huggingface_hub
 
     asked: list[tuple[str, str, str]] = []
@@ -546,15 +450,11 @@ def test_the_manifest_is_fetched_alone_so_an_uninstalled_voice_still_lists(
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
     assert load_all_voices()[PINNED_ID].display == "Mistborn"
     assert asked == [(REPO, REPO_MANIFEST_NAME, SHA)]
-    # And the second read costs nothing: a sha names one byte-state forever, so
-    # the cache is content-addressed rather than time-limited.
     assert load_all_voices()[PINNED_ID].display == "Mistborn"
     assert len(asked) == 1
 
 
 def test_the_pulled_snapshot_answers_before_the_cache(host: Path) -> None:
-    """The manifest rides in with the weights (section 5), and that copy is the
-    one provably beside the bytes being served."""
     snapshot = host / "voices" / PINNED_ID / "cuda-linux"
     snapshot.mkdir(parents=True)
     (snapshot / "crucible-pull.json").write_text(
@@ -570,8 +470,6 @@ def test_the_pulled_snapshot_answers_before_the_cache(host: Path) -> None:
 
 
 def test_a_snapshot_at_the_old_revision_is_not_read(host: Path) -> None:
-    """Serving new bytes under an old manifest is the substitution this whole
-    phase exists to prevent, so the STAMP is checked."""
     snapshot = host / "voices" / PINNED_ID / "cuda-linux"
     snapshot.mkdir(parents=True)
     (snapshot / "crucible-pull.json").write_text(
@@ -646,19 +544,11 @@ def test_removing_a_home_pin_says_whether_one_went(host: Path) -> None:
 
 
 def test_pins_toml_is_not_read_as_a_voice_called_pins(host: Path) -> None:
-    """It lives in the directory voices are read from, by design."""
     write_home_pin(PINNED_ID, REPO, SHA)
     a_cached_manifest(host)
     assert "pins" not in load_all_voices()
 
 
-# ------------------------------------------------------ against the packaged
-
-#: The catalog numbers, asserted against a FAKE REPO rather than against a file
-#: this build ships (section 3). Each row is `(id, kind, cap, safe band)` and
-#: every one of them is read off the packaged manifest of the same name as of
-#: 2026-09-19, so the day those five files are deleted (section 8.3) these
-#: assertions go on saying the same thing about the thing that now owns them.
 CATALOG: dict[str, tuple[str, int, tuple[int, int] | None]] = {
     "deathstalker": ("checkpoint", 800, (500, 800)),
     "mistborn": ("checkpoint", 800, (400, 700)),
@@ -672,14 +562,6 @@ CATALOG: dict[str, tuple[str, int, tuple[int, int] | None]] = {
 def test_a_fake_repo_carries_the_catalog_numbers_through(
     host: Path, voice_id: str
 ) -> None:
-    """The same assertions the `test_this_build_ships_...` group makes, made of
-    a `crucible-voice.toml` instead of a packaged file.
-
-    The packaged five still ship and still win in this build (section 8.1), so
-    this cannot be `load_voice(voice_id)` — it pins a DIFFERENT id at a fake
-    repo and checks that the numbers survive the repo schema, the pin and the
-    machine table without changing.
-    """
     kind, cap, band = CATALOG[voice_id]
     packaged = load_voice(voice_id)
     text = GOOD
@@ -724,20 +606,11 @@ def test_a_fake_repo_carries_the_catalog_numbers_through(
 
 
 def test_the_engine_rows_report_themselves_as_the_engines(host: Path) -> None:
-    """Section 2.6: `higgs-default` and `zeroshot` are not voices anybody
-    trains, and "Crucible ships no voices" is exactly true of voices."""
     served = load_all_voices()
     for voice_id in ("higgs-default", "zeroshot"):
         assert served[voice_id].manifest_source == "engine"
-        # An engine's base rows state no pace: no ladder has been run on either.
         assert served[voice_id].pace.pace_chars_per_sec is None
         assert served[voice_id].pace_basis is None
-
-
-# ------------------------------------------------- the machine's own table
-#
-# PHASE21 section 2.3. The five values that used to sit in every voice manifest,
-# stated once per engine on the box they are true of.
 
 
 def a_config(home: Path, body: str) -> None:
@@ -795,7 +668,6 @@ def test_a_serving_width_with_no_note_is_refused(tmp_path: Path) -> None:
     assert "measured at 64" in message
 
 
-#: The two levers added 2026-09-19, as this machine would state them.
 MACHINE_LEVERS = """mem_fraction = 0.48
 mem_fraction_note = "0.48 + width 4 is ~20 GB; 0.55 measured 24.0-24.1 GB here and WDDM then pages to host RAM"
 context_length = 8192
@@ -804,10 +676,6 @@ context_length_note = "4096 holds ~2,000 chars and this bank tops at 2,008, so t
 
 
 def test_the_machine_table_may_state_the_two_serving_levers(tmp_path: Path) -> None:
-    """They live in `[tts.<engine>]` and not in the repo manifest, because
-    `[voice.serving]` is REFUSED in a repo manifest by name: what sizes the
-    server narrator starts is a property of the box and the engine, and a repo
-    published once cannot know which card it will be served on."""
     from crucible.config import tts_engine_footprints
 
     a_config(tmp_path, CONFIG + MACHINE_LEVERS)
@@ -821,9 +689,6 @@ def test_the_machine_table_may_state_the_two_serving_levers(tmp_path: Path) -> N
 def test_a_repo_voice_inherits_the_machines_serving_levers(
     host: Path, tmp_path: Path
 ) -> None:
-    """End to end: the box states them, and the voice that comes down from a
-    repo is served with them. Absent in the table means absent on the voice,
-    which `_check_serving` reads as narrator's own launcher defaults."""
     a_pin(host)
     a_cached_manifest(host, GOOD)
     a_config(host, CONFIG + MACHINE_LEVERS)
@@ -833,8 +698,6 @@ def test_a_repo_voice_inherits_the_machines_serving_levers(
 
 
 def test_a_machine_lever_with_no_note_is_refused(tmp_path: Path) -> None:
-    """`max_num_seqs`'s contract, applied to both: a number that reconfigures
-    the server narrator starts owes the measurement that chose it."""
     message = footprint_refused(
         tmp_path, CONFIG + "mem_fraction = 0.48\n"
     )
@@ -849,8 +712,6 @@ def test_a_machine_note_with_no_number_is_refused(tmp_path: Path) -> None:
 
 
 def test_a_machine_mem_fraction_outside_zero_to_one_is_refused(tmp_path: Path) -> None:
-    """narrator's launcher refuses anything else by name, so the config refuses
-    it first — a fraction of 1.2 would otherwise be a worker that exits 4."""
     message = footprint_refused(
         tmp_path, CONFIG + 'mem_fraction = 1.2\nmem_fraction_note = "x"\n'
     )
@@ -862,10 +723,7 @@ def test_an_unknown_key_in_the_machine_table_is_refused(tmp_path: Path) -> None:
     assert "unknown key(s) ['max_chars']" in message
 
 
-def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:  # noqa: N802
-    """Section 2.3, and section 9's ruling 2 is what `declared_tts_footprints`
-    makes reversible: the numbers are the ones every packaged manifest declared
-    on 2026-09-19, and they are stated in exactly one function."""
+def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:
     from crucible.config import (
         declared_tts_footprints,
         load_config,
@@ -902,41 +760,20 @@ def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:  # noq
         assert found.memory_bytes_estimate == estimate
         assert found.estimate_basis == "declared"
         assert found.max_num_seqs == 16
-        # The citation rides with the number, because a declared figure is only
-        # worth what the next reader can find out about it.
         assert "2026-09-05" in found.estimate_note
         assert "vllm-omni" in found.max_num_seqs_note
 
 
 def test_a_backend_that_serves_no_narrator_engine_writes_no_table() -> None:
-    """`llama-windows` cannot serve a voice, and the honest record of that is no
-    `[tts.*]` table at all rather than a number it would never use."""
     from crucible.config import declared_tts_footprints
 
     assert declared_tts_footprints("llama-windows") == ()
-
-
-# ------------------------------------------------- the round trip, field by field
 
 
 @pytest.mark.parametrize("voice_id", sorted(CATALOG))
 def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
     host: Path, voice_id: str
 ) -> None:
-    """THE ONE ASSERTION THE WHOLE PHASE RESTS ON (section 3).
-
-    `crucible voices export` converts a packaged manifest to a repo one; the
-    loader fetches that file at a pin and merges it with this box's
-    `[tts.<engine>]` table; and what comes out has to be the SAME VOICE, field
-    by field. Anything that does not survive the round trip is a fact the new
-    shape cannot carry, and the migration would drop it silently on the day the
-    packaged file is deleted.
-
-    The three fields that deliberately DIFFER are the three the packaged schema
-    could not state and the box now owns: where the manifest came from, and the
-    two certificates (`pace_basis`, `max_chars_basis`) that exist because an
-    inherited pace and a placeholder cap shipped as measured facts.
-    """
     from crucible.voicecard import export_manifest
     from crucible.voicerepo import merge, parse_repo_manifest
     from crucible.config import tts_engine_footprints
@@ -975,21 +812,14 @@ def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
         assert now.sampling == was.sampling
         assert now.sampling_reason == was.sampling_reason
         assert now.clips == was.clips
-        # THE PIN carries the weights, not the file: the repo manifest states
-        # neither, and the merged spec has both because the pin does.
         assert (now.hf_repo, now.revision) == (REPO, SHA)
 
-    # THE MACHINE FACTS CAME FROM THE BOX. They are the same NUMBERS as the
-    # packaged file's — which is the point of section 2.3, and the evidence that
-    # `crucible init`'s figures really are read off these manifests — but their
-    # owner moved, and the note is now the box's.
     assert merged.serving.max_num_seqs == packaged.serving.max_num_seqs
     for arm in merged.backends:
         assert merged.spec(arm).memory_bytes_estimate == footprint.memory_bytes_estimate
         assert merged.spec(arm).estimate_note == footprint.estimate_note
     assert any("config.toml [tts.higgs-v3]" in line for line in dropped)
 
-    # And the three that differ, deliberately.
     assert packaged.manifest_source == "override"
     assert merged.manifest_source == "repo"
     assert packaged.pace_basis is None and merged.pace_basis == "measured"

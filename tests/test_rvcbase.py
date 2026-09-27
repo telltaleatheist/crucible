@@ -1,15 +1,3 @@
-"""ultimate-rvc's base assets: the declaration, and `weights.pull_files`.
-
-Nothing here reaches the network. `hf_hub_download` is replaced with a function
-that writes bytes this test made up, which is all this module needs from it —
-the same shape `tests/test_weights_archive.py` uses for the archive pull.
-
-What these tests are really about is the rule that made the third pull shape
-worth writing: **every digest is checked before any file is placed**, because a
-half-placed base tree is one urvc will start against and fail inside, hours
-later, in somebody's book.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -85,7 +73,6 @@ def config(home: Path):
 
 
 def serve(monkeypatch: pytest.MonkeyPatch, payloads: dict[str, bytes]) -> list[str]:
-    """Replace `hf_hub_download` with one that writes `payloads[filename]`."""
     import huggingface_hub
 
     asked: list[str] = []
@@ -111,12 +98,7 @@ PAYLOADS = {
 }
 
 
-# ------------------------------------------------------------ the shipped one
-
-
 def test_the_shipped_declaration_names_the_engines_own_repo() -> None:
-    """Read out of the installed fork's own downloader, not from a tutorial:
-    `prerequisites_download.py`'s `url_base` is JackismyShephard/ultimate-rvc."""
     assets = rvcbase.load_rvc_base()
     assert assets.id == rvcbase.ULTIMATE_RVC
     assert assets.hf_repo == "JackismyShephard/ultimate-rvc"
@@ -127,7 +109,6 @@ def test_the_shipped_declaration_names_the_engines_own_repo() -> None:
         "rvc/predictors/rmvpe.pt",
         "rvc/predictors/fcpe.pt",
     )
-    # About 600 MB, all four.
     assert 5e8 < assets.total_bytes < 7e8
     for entry in assets.files:
         assert len(entry.sha256) == 64
@@ -135,8 +116,6 @@ def test_the_shipped_declaration_names_the_engines_own_repo() -> None:
 
 
 def test_the_job_reads_the_same_list_the_puller_does(config) -> None:
-    """One owner of "which files urvc needs". They were two lists, and the
-    job's was missing the embedder's config.json."""
     assets = rvcbase.load_rvc_base()
     root = rvc_job.rvc_base_dir(config)
     assert root == rvcbase.base_root(config)
@@ -146,9 +125,6 @@ def test_the_job_reads_the_same_list_the_puller_does(config) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"")
     assert rvcbase.missing(config, assets) == []
-
-
-# --------------------------------------------------------- what it refuses
 
 
 @pytest.mark.parametrize(
@@ -190,9 +166,6 @@ def test_a_declaration_with_no_files_is_refused() -> None:
     assert "missing [[files]]" in str(caught.value)
 
 
-# ------------------------------------------------------------------- pulling
-
-
 def test_every_file_is_fetched_and_placed_where_the_engine_looks(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -204,7 +177,6 @@ def test_every_file_is_fetched_and_placed_where_the_engine_looks(
     assert (root / "rvc/embedders/contentvec/pytorch_model.bin").read_bytes() == BIN
     assert (root / "rvc/predictors/rmvpe.pt").read_bytes() == PT
     assert result.bytes == len(BIN) + len(PT)
-    # The staging directory does not survive the placement.
     assert not (root / ".crucible-files").exists()
 
 
@@ -231,7 +203,6 @@ def test_force_re_pulls(config, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_declaration_at_a_new_revision_is_not_installed(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stamp at another pin is another set of bytes."""
     assets = declaration()
     serve(monkeypatch, PAYLOADS)
     rvcbase.pull(config, assets)
@@ -248,8 +219,6 @@ def test_a_declaration_at_a_new_revision_is_not_installed(
 def test_a_bad_digest_places_nothing_at_all(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rule the third pull shape exists for: a half-placed base tree is one
-    urvc starts against and fails inside, hours later, in somebody's book."""
     assets = declaration()
     serve(
         monkeypatch,
@@ -260,8 +229,6 @@ def test_a_bad_digest_places_nothing_at_all(
     assert "hashes to" in str(caught.value)
     assert "NOTHING was placed" in str(caught.value)
     root = rvcbase.base_root(config)
-    # Not even the file that DID verify, because it is verified first and
-    # placed last.
     assert not (root / "rvc/embedders/contentvec/pytorch_model.bin").exists()
     assert not (root / "rvc/predictors/rmvpe.pt").exists()
     assert rvcbase.installed(config, assets) is None
@@ -280,8 +247,6 @@ def test_a_missing_file_in_the_repo_names_it(
 def test_an_interrupted_pull_does_not_read_as_installed(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stamp is removed before anything is fetched, so a run that dies part
-    way leaves a tree nothing downstream trusts."""
     assets = declaration()
     serve(monkeypatch, PAYLOADS)
     rvcbase.pull(config, assets)
@@ -312,7 +277,6 @@ def test_the_stamp_records_every_file_and_the_pin(
 def test_a_deleted_file_makes_the_set_not_installed(
     config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stamp beside a file somebody removed is a stamp that lies."""
     assets = declaration()
     serve(monkeypatch, PAYLOADS)
     rvcbase.pull(config, assets)
@@ -320,22 +284,15 @@ def test_a_deleted_file_makes_the_set_not_installed(
     assert rvcbase.installed(config, assets) is None
 
 
-# ------------------------------------------------------------- the refusal
-
-
 def test_the_cli_verb_pulls_the_shipped_set(
     config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`crucible rvc pull-base`, driven the way an operator drives it."""
     from crucible import cli
 
     monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assets = rvcbase.load_rvc_base()
     payloads = {entry.source: b"" for entry in assets.files}
     serve(monkeypatch, payloads)
-    # The shipped declaration pins the REAL digests; these are empty files, so
-    # the pins are swapped for theirs. Everything else — the repo, the
-    # revision, every source and every target — is the shipped one's.
     empty = sha(b"")
     monkeypatch.setattr(
         rvcbase,
@@ -376,6 +333,4 @@ def test_the_job_refusal_names_the_command_that_fetches_them(config) -> None:
     assert rvcbase.PULL_COMMAND in error.message
     assert error.details["command"] == rvcbase.PULL_COMMAND
     assert error.details["hf_repo"] == "JackismyShephard/ultimate-rvc"
-    # And the status line says it too, so a doctor run and a refused job send
-    # the reader to the same place.
     assert plugin is not None

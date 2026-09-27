@@ -1,5 +1,3 @@
-"""The command line: init, doctor, token — with the host probe monkeypatched."""
-
 from __future__ import annotations
 
 import json
@@ -37,12 +35,6 @@ def test_init_writes_a_0600_config_with_a_token(
     assert config.backend_kind == "cuda-linux"
     assert config.enable_echo is True
     assert len(config.token) >= 40
-    # THE TOKEN IS NOW PRINTED, inside the pairing line, and that reverses what
-    # this test used to assert. PHASE13-OPERATOR.md section 3.5: `init` ends by
-    # printing the lines an app's connect door takes, because Owen's rule for
-    # the whole phase is that nobody types a token twice. It is printed to the
-    # terminal of the person who just minted it, on the machine they are
-    # sitting at — which is the one audience that already has it.
     assert config.token in capsys.readouterr().out
 
 
@@ -136,7 +128,6 @@ def test_token_needs_show_or_url(home: Path, viable: None) -> None:
 def test_token_url_prints_one_pairing_line_per_address(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """PHASE13-OPERATOR.md 3.5. A concrete bind is exactly one line."""
     assert cli.main(["init", "--host", "127.0.0.1", "--port", "7100"]) == 0
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
@@ -158,10 +149,6 @@ def test_token_url_lists_every_interface_of_a_wildcard_bind(
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.strip().splitlines()
-    # The LOOPBACK line first, then every interface (PHASE15-HOST.md section
-    # 3.6). `reachable_urls` has no loopback entry for a wildcard bind, and
-    # the pairing file's one line is the loopback one — *"`crucible token
-    # --url` prints the same"* is only true if it is printed.
     assert [line.split("@")[-1] for line in printed] == [
         f"127.0.0.1:7100/#{load_config(home).token}",
         f"10.0.0.4:7100/#{load_config(home).token}",
@@ -175,7 +162,6 @@ def test_token_url_refuses_when_the_interfaces_cannot_be_read(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No line is better than a guessed one, and the reason is said out loud."""
 
     def refuse() -> list[str]:
         raise InterfaceError("getifaddrs(3) failed")
@@ -193,7 +179,6 @@ def test_service_install_ends_with_the_pairing_line(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """3.5's second line. The unit itself is `tests/test_service.py`'s."""
     from crucible import service
 
     assert cli.main(["init"]) == 0
@@ -203,7 +188,6 @@ def test_service_install_ends_with_the_pairing_line(
     capsys.readouterr()
     assert cli.main(["service", "install"]) == 0
     out = capsys.readouterr().out
-    # #33 (2026-09-26): says where the line is, never prints the secret.
     assert cli.PAIRING_NOT_PRINTED in out
     assert load_config(home).token not in out
 
@@ -214,7 +198,6 @@ def test_init_ends_with_the_pairing_line(
     assert cli.main(["init"]) == 0
     out = capsys.readouterr().out
     assert "pairing:" in out
-    # #33 (2026-09-26): an install's log must not capture the token.
     assert "crucible://" not in out
     assert load_config(home).token not in out
 
@@ -232,15 +215,9 @@ def test_token_without_a_config_is_refused(home: Path) -> None:
     assert cli.main(["token", "--show"]) == 1
 
 
-# ------------------------------------------------------------------- the tts
-# job type: `crucible voices`, the doctor's env rows, and `crucible install tts`.
-
-
 def test_doctor_reports_one_tts_env_per_narrator_engine(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """On cuda-linux the two engines cannot share a venv, so there are two rows —
-    and neither is installed on a fresh host, which is a problem and says so."""
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
 
@@ -268,7 +245,6 @@ def test_doctor_says_nothing_about_tts_when_it_is_off(
 def test_the_two_tts_engines_share_one_env_on_the_mac(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """On mlx-darwin they genuinely do, so the two rows name the same directory."""
     from .conftest import FAKE_MAC_BACKEND
 
     monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
@@ -305,7 +281,6 @@ def test_voices_pull_refuses_an_unknown_voice(
 def test_installing_tts_needs_a_narrator_engine(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Two envs on this backend, so the command may not pick one for you."""
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
     assert cli.main(["install", "tts"]) == 1
@@ -324,16 +299,6 @@ def test_installing_llm_refuses_a_narrator_engine(
 def test_this_build_ships_a_tts_recipe_for_every_env_a_voice_can_need(
     home: Path, viable: None
 ) -> None:
-    """One recipe per (narrator engine, backend), which is not one per backend.
-
-    Each narrator engine pins its own serving stack against its own torch, so
-    on cuda-linux two of them cannot share a venv and the engine is in the env's
-    name. On mlx-darwin they genuinely do share, and every name resolves to the
-    one `mlx-darwin` recipe.
-
-    `tests/test_jobenv.py`'s drift guard is the stronger form of this — it
-    compares the named engines against the recipe FILES in both directions.
-    """
     for engine in sorted(NARRATOR_ENGINE_SAMPLING):
         assert jobenv.recipe_for(jobenv.tts_env(engine, "cuda-linux")).is_file()
     mac = {
@@ -344,13 +309,6 @@ def test_this_build_ships_a_tts_recipe_for_every_env_a_voice_can_need(
 
 
 def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) -> None:
-    """A branch name is not a pin, and `narrator==0.1.0` would let any commit in.
-
-    narrator is not on PyPI — it is `python/narrator` in the BookForge repo,
-    versioned with the app — so it is pinned by a direct reference carrying a
-    40-character sha, and `crucible doctor` checks it against the commit pip
-    recorded in PEP 610's direct_url.json rather than against a version.
-    """
     for spec in (
         jobenv.tts_env("higgs-v3", "cuda-linux"),
         jobenv.tts_env("higgs-v3", "mlx-darwin"),
@@ -364,31 +322,14 @@ def test_every_tts_recipe_pins_narrator_by_a_commit(home: Path, viable: None) ->
 def test_the_tts_recipes_pin_the_stack_each_arm_measured(
     home: Path, viable: None
 ) -> None:
-    """The numbers a `tts` env is only good at, restated where a change shows.
-
-    cuda-linux: sglang-omni 0.1.4 against sglang 0.5.18 and torch 2.13.0, which
-    is the stack `jobenv.CUDA_LINUX_SERVING_STACK` names and `HIGGS_STACK`
-    tells narrator to start. It was vllm-omni 0.28.0 until Owen's ruling of
-    2026-09-15 — "we dont use vllm-omni. we use sglang. vllm-omni doesnt work
-    for higgs" — and the versions here are the `sglomni` env's own, read off
-    the machine every night-3 measurement was taken on.
-
-    mlx-darwin: mlx-lm 0.31.3 (below it `GenerationBatch` does not exist and
-    the batched fast path refuses) and mlx-audio 0.4.8, whose ceiling the
-    recipe's own header now marks as owed a re-measurement.
-    """
     higgs = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux"))
     )
     assert higgs["sglang-omni"] == "0.1.4"
     assert higgs["sglang"] == "0.5.18"
     assert higgs["torch"] == "2.13.0"
-    # The flashinfer pair, which is what needs the CUDA 13 toolkit inside the
-    # wheel and the two symlinks beside it.
     assert higgs["flashinfer-python"] == "0.6.17"
     assert higgs["flashinfer-jit-cache"] == "0.6.17+cu130"
-    # AND NOT THE STACK OWEN RULED OUT. A recipe carrying both would be an env
-    # that resolves torch twice and serves whichever won.
     assert "vllm" not in higgs
     assert "vllm-omni" not in higgs
     mac = jobenv.recipe_pins(jobenv.recipe_for(jobenv.tts_env("higgs-v3", "mlx-darwin")))
@@ -400,24 +341,7 @@ def test_doctor_runs_with_every_job_type_enabled(
     home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Every enabled type's env row, on one report, without raising.
-
-    This is the test that was missing. `crucible doctor` crashed with a
-    `TypeError` on any config with `enable_llm` on, for the whole time the
-    `tts` merge was on main, and the suite stayed green because every existing
-    doctor test enables `echo` alone — the one job type with no env at all. A
-    command whose entire job is "tell the operator what is wrong here" was the
-    one command nobody could run.
-
-    It asserts the report is *complete and unhealthy*, not that it is healthy:
-    no env is installed in a test home, so every row should be naming what is
-    missing and the command that fixes it.
-    """
     monkeypatch.setattr("crucible.cli.common.detect_backend", lambda: FAKE_BACKEND)
-    # EVERY type, which is what this test is named after and what it has to keep
-    # being: two more (`align`, `rvc`) landed after it was written, and a test
-    # that says "every" while naming four is a test that stops covering the
-    # thing it exists for the moment a fifth arrives.
     assert cli.main(
         [
             "init",
@@ -454,20 +378,6 @@ def test_doctor_runs_with_every_job_type_enabled(
 def test_init_takes_a_token_the_caller_minted(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--token` is for `@crucible/bootstrap`, which mints on the app's side.
-
-    The token written is the one given, byte for byte.
-
-    **It now appears in the printed pairing line, and that reverses what this
-    test used to assert.** The old reasoning was that a bootstrapper which
-    mints its own token must never have to read it back out of a log — which
-    is still true, and is still why `--token` exists: the app already holds it
-    and reads nothing. What changed is that the OTHER audience for this
-    command's output is a person at a terminal who has just created a server
-    and needs to point an app at it, and PHASE13-OPERATOR.md section 3.5 rules
-    that they get one pasteable line rather than three values to transcribe.
-    `token: as given` still distinguishes the two cases in the summary.
-    """
     given = "bootstrap-minted-" + "x" * 30
     assert cli.main(["init", "--token", given, "--enable-echo"]) == 0
     assert load_config(home).token == given
@@ -482,18 +392,7 @@ def test_init_refuses_a_blank_or_spaced_token(home: Path, viable: None) -> None:
     assert not config_path(home).exists()
 
 
-# --------------------------------------------- what an install proves it built
-
-
 def test_every_installable_name_has_a_smoke_import() -> None:
-    """R1: `INSTALLER_FOR` and `SMOKE_IMPORT` are two halves of one answer.
-
-    They used to be two modules — `cli` and `envpack` — tied by a pytest,
-    because `envpack` could not import `cli` without a cycle. The packs went
-    (PHASE20 section 6) and so did the separation; this check stayed, because
-    a job type `crucible install` can install and nothing can prove it IMPORTS
-    is an env the command would call ready without ever opening it.
-    """
     for backend_kind in ("cuda-linux", "mlx-darwin"):
         for job_type in cli.INSTALLABLE_JOB_TYPES:
             if job_type in jobenv.WORKER_JOB_TYPES:
@@ -520,8 +419,6 @@ def test_every_installable_name_has_a_smoke_import() -> None:
 def test_an_env_with_no_smoke_import_is_refused_rather_than_called_installed(
     tmp_path: Path,
 ) -> None:
-    """The gap is named, not shrugged at: a table this build does not cover is
-    a bug in this build, and the sentence says which file owns it."""
     refusal = cli._smoke_import(tmp_path / "python", "llm", "rocm-linux")
     assert refusal is not None
     assert "SMOKE_IMPORT" in refusal
@@ -530,8 +427,6 @@ def test_an_env_with_no_smoke_import_is_refused_rather_than_called_installed(
 def test_a_failing_import_is_refused_by_name_with_the_last_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """pip returning 0 says the wheels resolved and says nothing about whether
-    the thing they are for loads."""
 
     class _Completed:
         returncode = 1

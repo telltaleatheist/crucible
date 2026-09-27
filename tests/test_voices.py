@@ -1,12 +1,3 @@
-"""Voice manifests: every refusal, and the real catalog this build ships.
-
-`crucible/voices.py` is `manifests.py`'s strictness applied to a file where a
-wrong number is a whole book rendered wrong and reported as success — a cap that
-cuts chunks mid-sentence, a pace band that re-rolls every healthy take, a
-reference clip cloned from an absent transcript. So every refusal has a test, and
-the shipped manifests are checked against the numbers they were translated from.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,8 +15,6 @@ from crucible.voices import (
     voices_dir,
 )
 
-#: A manifest that loads. Every refusal test below is this document with one
-#: thing wrong, so a failure names the one thing rather than the whole schema.
 GOOD = """
 [voice]
 id = "probe"
@@ -71,14 +60,7 @@ def swap(old: str, new: str) -> str:
     return GOOD.replace(old, new)
 
 
-#: The good manifest with the `[voice.serving]` table removed. `max_num_seqs`
-#: is a HIGGS_* variable, so a manifest naming an engine that reads none of
-#: them must drop the table with it — and the fixture exists so a test about
-#: the missing table is not also a test about the engine.
 SERVING_TABLE = GOOD[GOOD.index("[voice.serving]"):GOOD.index("[voice.backends")]
-
-
-# ------------------------------------------------------------------ the base
 
 
 def test_the_good_manifest_loads() -> None:
@@ -94,7 +76,6 @@ def test_the_good_manifest_loads() -> None:
 
 
 def test_a_fingerprint_binds_the_id_to_the_revision() -> None:
-    """Two merges of one run are two sets of weights under one name."""
     voice = parse(GOOD)
     assert voice.fingerprint("cuda-linux") == (
         "probe@0123456789abcdef0123456789abcdef01234567"
@@ -109,9 +90,6 @@ def test_a_backend_with_no_block_is_refused_by_name() -> None:
     assert "['cuda-linux']" in str(caught.value)
 
 
-# ------------------------------------------------------------------- [voice]
-
-
 def test_an_unknown_top_level_table_is_refused() -> None:
     assert "unknown top-level table(s) ['serving']" in refused(
         GOOD + '\n[serving]\nport = 8095\n'
@@ -123,7 +101,6 @@ def test_a_manifest_with_no_voice_table_is_refused() -> None:
 
 
 def test_an_unknown_key_in_voice_is_refused() -> None:
-    """A typo must not load with the field silently absent."""
     assert "unknown key(s) ['sampel_rate']" in refused(
         swap("sample_rate = 24000", "sample_rate = 24000\nsampel_rate = 22050")
     )
@@ -165,19 +142,7 @@ def test_a_zero_sample_rate_is_refused() -> None:
     )
 
 
-# -------------------------------------------------------------- [voice.pace]
-
-
 def test_a_voice_may_omit_the_pace_table_entirely() -> None:
-    """THE TABLE ITSELF, not only its rates (PHASE18 section 4.1, 2026-09-19).
-
-    `missing the [voice.pace] table` was the refusal here, and with the three
-    rates optional as a group since 2026-09-18 it was the last thing making a
-    screening checkpoint inexpressible: the only way past it was an empty table
-    written to satisfy a parser. Absent and empty now mean the same thing, which
-    is "nothing was measured", and neither is a band of zeros or a predecessor's
-    numbers.
-    """
     voice = parse(
         GOOD[: GOOD.index("[voice.pace]")]
         + GOOD[GOOD.index("[voice.serving]"):]
@@ -191,8 +156,6 @@ def test_a_voice_may_omit_the_pace_table_entirely() -> None:
 
 
 def test_a_pace_that_is_not_a_table_is_still_refused() -> None:
-    """Omissible is not the same as "anything goes": a `pace` that is a number
-    is a file somebody got wrong, and reading it as absent would pass it."""
     without_pace = (
         GOOD[: GOOD.index("[voice.pace]")] + GOOD[GOOD.index("[voice.serving]"):]
     )
@@ -202,21 +165,12 @@ def test_a_pace_that_is_not_a_table_is_still_refused() -> None:
 
 
 def test_half_a_band_is_refused() -> None:
-    """narrator's rule: the band is a triple, write all three or none."""
     message = refused(swap("min_chars_per_sec = 12.3\n", ""))
     assert "declares only part of its rate band" in message
     assert "['min_chars_per_sec']" in message
 
 
 def test_a_voice_may_state_no_rates_at_all() -> None:
-    """THE OTHER HALF OF "all three or none": none is a legal statement.
-
-    A voice nobody ran a ladder on has no pace to state, and narrator already
-    knows what to do with one — given no band it uses its engine's own default
-    and derives the centre as the geometric mean of the two edges
-    (`engine/higgs/truncation.tracker_for`). The alternative, which the loader
-    obliged until 2026-09-18, is a manifest made to invent three numbers.
-    """
     voice = parse(
         swap(
             "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
@@ -227,7 +181,6 @@ def test_a_voice_may_state_no_rates_at_all() -> None:
     assert voice.pace.pace_chars_per_sec is None
     assert voice.pace.max_chars_per_sec is None
     assert voice.pace.min_chars_per_sec is None
-    # The packing shape is a different fact in the same table and is untouched.
     assert voice.pace.safe_min_chars == 600
     assert voice.pace.safe_max_chars == 800
 
@@ -238,12 +191,6 @@ def test_a_pace_outside_its_own_edges_is_refused() -> None:
     assert "the band is min < pace < max" in message
 
 
-#: THE TRIPLE THAT CAUSED THE RULING — narrator's Higgs v3 defaults spliced
-#: together, `HiggsDefaults.CHARS_PER_SEC` 15.0 between `HiggsV3Defaults`'
-#: 20.0/14.5 edges. It satisfies `min < pace < max` and is still wrong: the two
-#: halves were written around different centres, so the band is 1.333 long and
-#: 1.034 short, and narrator — which keeps only the RATIOS — judged healthy
-#: chunks run-ons and re-rolled them to MAX_DEPTH.
 SPLICED = swap(
     "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\nmin_chars_per_sec = 12.3",
     "pace_chars_per_sec = 15.0\nmax_chars_per_sec = 20.0\nmin_chars_per_sec = 14.5",
@@ -251,11 +198,6 @@ SPLICED = swap(
 
 
 def test_a_lopsided_triple_is_refused_naming_both_ratios() -> None:
-    """A BAND IS SYMMETRIC UNLESS IT SAYS OTHERWISE (ruled 2026-09-18).
-
-    `min < pace < max` passes this triple, which is how it shipped. The defect
-    is one level up: the edges were not derived from the pace at all.
-    """
     message = refused(SPLICED)
     assert "1.333" in message
     assert "1.034" in message
@@ -263,12 +205,6 @@ def test_a_lopsided_triple_is_refused_naming_both_ratios() -> None:
 
 
 def test_a_percentile_band_may_be_lopsided() -> None:
-    """The escape hatch, and it is a STATEMENT rather than a tolerance.
-
-    A band read off a distribution's percentiles is lopsided because the
-    distribution is, and there is nothing to refuse. Saying so in the manifest
-    is what separates that voice from one whose edges were spliced.
-    """
     voice = parse(
         SPLICED.replace(
             "min_chars_per_sec = 14.5",
@@ -281,7 +217,6 @@ def test_a_percentile_band_may_be_lopsided() -> None:
 
 
 def test_an_unknown_edges_word_is_refused() -> None:
-    """A typo in the escape hatch must not read as "not percentile, so check"."""
     message = refused(
         SPLICED.replace(
             "min_chars_per_sec = 14.5",
@@ -293,7 +228,6 @@ def test_an_unknown_edges_word_is_refused() -> None:
 
 
 def test_edges_without_a_band_is_refused() -> None:
-    """A key that describes edges the manifest does not state is a leftover."""
     message = refused(
         swap(
             "pace_chars_per_sec = 16.0\nmax_chars_per_sec = 20.8\n"
@@ -331,13 +265,11 @@ def test_half_a_safe_band_is_refused() -> None:
 
 
 def test_a_floor_at_the_ceiling_is_refused() -> None:
-    """Floor == cap is how a 400-character chunk ships alone (2026-09-09)."""
     message = refused(swap("safe_min_chars = 600", "safe_min_chars = 800"))
     assert "is not below safe_max_chars" in message
 
 
 def test_a_voice_declaring_neither_packs_to_the_backend_cap() -> None:
-    """What `higgs-default` does, and what BookForge does with such a voice."""
     voice = parse(swap("safe_min_chars = 600\nsafe_max_chars = 800\n", ""))
     assert voice.pace.target_chars is None
     assert voice.pace.safe_max_chars is None
@@ -360,9 +292,6 @@ def test_a_target_above_the_backend_cap_is_refused() -> None:
     assert "packs to target_chars 1200" in message
 
 
-# ---------------------------------------------------------- backend blocks
-
-
 def test_a_voice_with_no_backend_block_is_refused() -> None:
     assert "missing every [voice.backends.<kind>] table" in refused(
         GOOD[: GOOD.index("[voice.backends")]
@@ -370,7 +299,6 @@ def test_a_voice_with_no_backend_block_is_refused() -> None:
 
 
 def test_an_empty_backends_table_is_refused() -> None:
-    """A voice nothing can serve is not a voice."""
     assert "no backend blocks" in refused(
         GOOD[: GOOD.index("[voice.backends")] + "[voice.backends]"
     )
@@ -414,16 +342,6 @@ def test_a_zero_cap_is_refused() -> None:
 
 
 def test_a_backend_may_state_no_cap_at_all() -> None:
-    """PHASE18 section 4, 2026-09-19. `max_chars` was `_BACKEND_REQUIRED` and
-    narratorvoices called it "the one field narrator refuses a checkpoint voice
-    without"; both moved on the same day.
-
-    A cap is a RESULT — the longest chunk a sweep on these weights on this arm
-    came back whole from — so a checkpoint being screened has none, and
-    requiring it made a screening voice inexpressible. `None` means NOT
-    MEASURED and nothing substitutes: not the other arm's number, not a
-    sibling's, not the engine's.
-    """
     voice = parse(
         swap("safe_min_chars = 600\nsafe_max_chars = 800\n", "").replace(
             "max_chars = 800\n", ""
@@ -434,15 +352,9 @@ def test_a_backend_may_state_no_cap_at_all() -> None:
 
 
 def test_a_packing_band_above_a_cap_is_still_refused_when_a_cap_is_stated() -> None:
-    """The relaxation is "may be absent", not "is no longer checked": a stated
-    cap keeps every rule it had, so the band-above-the-cap refusal below is not
-    reachable only by accident."""
     assert "The band may never exceed the arm's cap" in refused(
         swap("safe_max_chars = 800", "safe_max_chars = 900")
     )
-
-
-# ---------------------------------------------------------- estimate_basis
 
 
 def test_an_unknown_estimate_basis_is_refused() -> None:
@@ -468,7 +380,6 @@ def test_a_declared_estimate_with_a_note_is_accepted() -> None:
 
 
 def test_a_measured_estimate_may_not_carry_a_note() -> None:
-    """A note beside a measured number reads as an excuse for it."""
     message = refused(
         swap(
             'estimate_basis = "measured"',
@@ -478,15 +389,11 @@ def test_a_measured_estimate_may_not_carry_a_note() -> None:
     assert "estimate_basis is 'measured' and it also carries an estimate_note" in message
 
 
-# ----------------------------------------------------------------- sampling
-
-
 def test_the_boson_default_needs_no_reason() -> None:
     assert parse(GOOD).spec("cuda-linux").sampling_reason is None
 
 
 def test_a_deviation_without_a_reason_is_refused() -> None:
-    """Owen's rule: one engine-level number, and a deviation owes a reason."""
     message = refused(
         swap("temperature = 0.8, top_p = 0.95", "temperature = 0.7, top_p = 0.95")
     )
@@ -531,7 +438,6 @@ def test_a_reason_with_nothing_to_explain_is_refused() -> None:
 
 
 def test_a_partial_sampling_block_is_refused() -> None:
-    """On SGLang an unfilled top_k samples the untruncated codebook tail."""
     message = refused(
         swap(
             "sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }",
@@ -539,9 +445,6 @@ def test_a_partial_sampling_block_is_refused() -> None:
         )
     )
     assert "missing required key(s) ['top_k', 'top_p']" in message
-
-
-# --------------------------------------------------------- [voice.serving]
 
 
 def test_the_serving_width_is_read() -> None:
@@ -553,9 +456,6 @@ def test_the_serving_width_is_read() -> None:
 
 
 def test_a_higgs_voice_without_a_serving_table_is_refused() -> None:
-    """narrator refuses HIGGS_MAX_NUM_SEQS by name — it is stage 0's admission
-    width AND the width of narrator's own batch — so a manifest that does not
-    state it cannot start a server."""
     message = refused(GOOD.replace(SERVING_TABLE, ""))
     assert "[voice.serving]" in message
     assert "max_num_seqs" in message
@@ -566,8 +466,6 @@ def test_a_serving_width_below_one_is_refused() -> None:
 
 
 def test_a_serving_width_with_no_note_is_refused() -> None:
-    """The same contract `estimate_note` has, for the same reason: 16 is
-    contested by a live certificate that ran at 64."""
     quoted = GOOD[GOOD.index("max_num_seqs_note = "):].splitlines()[0]
     assert "carries no note" in refused(
         GOOD.replace(quoted, 'max_num_seqs_note = "   "')
@@ -583,7 +481,6 @@ def test_an_unknown_serving_key_is_refused() -> None:
     )
 
 
-#: The two levers added on 2026-09-19, as a screening voice states them.
 SCREENING_SERVING = """mem_fraction = 0.48
 mem_fraction_note = "0.48 + width 4 is ~20 GB; 0.55 measured 24.0-24.1 GB on this 24 GB card and WDDM then pages to host RAM"
 context_length = 8192
@@ -592,11 +489,6 @@ context_length_note = "the Third Reich bank tops at 2,008 chars and 4096 tokens 
 
 
 def test_a_voice_may_state_a_mem_fraction_and_a_context_length() -> None:
-    """Owen's ruling of 2026-09-19, which decides PHASE18 section 11.
-
-    Both OPTIONAL — every manifest this build ships states neither and must
-    keep loading — and both reach narrator at engine start on BOTH arms.
-    """
     voice = parse(swap("max_num_seqs = 16\n", "max_num_seqs = 16\n" + SCREENING_SERVING))
     assert voice.serving.mem_fraction == 0.48
     assert voice.serving.context_length == 8192
@@ -605,10 +497,6 @@ def test_a_voice_may_state_a_mem_fraction_and_a_context_length() -> None:
 
 
 def test_a_voice_stating_neither_reports_them_as_null_on_its_row() -> None:
-    """Absent means narrator's own launcher default — 0.60
-    (`serve_higgs_sgl.sh:59`) and the Higgs builder's 4096 — which is a number
-    in a file with an owner. The KEYS are still on the row, because an absent
-    key would say "this build has no such field"."""
     row = parse(GOOD).serving.to_dict()
     assert row["mem_fraction"] is None and row["mem_fraction_note"] is None
     assert row["context_length"] is None and row["context_length_note"] is None
@@ -616,8 +504,6 @@ def test_a_voice_stating_neither_reports_them_as_null_on_its_row() -> None:
 
 @pytest.mark.parametrize("key", ["mem_fraction", "context_length"])
 def test_a_serving_lever_with_no_note_is_refused(key: str) -> None:
-    """`max_num_seqs`'s contract, applied to both: a number that reconfigures
-    the server narrator starts owes the measurement that chose it."""
     stated = {"mem_fraction": "0.48", "context_length": "8192"}[key]
     message = refused(
         swap("max_num_seqs = 16\n", f"max_num_seqs = 16\n{key} = {stated}\n")
@@ -629,9 +515,6 @@ def test_a_serving_lever_with_no_note_is_refused(key: str) -> None:
 def test_a_serving_note_with_no_number_is_refused_as_the_leftover_it_is(
     key: str,
 ) -> None:
-    """The other half. A note describing a number that is not there reads as a
-    lever this loader checked and passed — `[voice.pace]`'s `edges` key and the
-    repo schema's `max_chars_basis` are refused with the same sentence."""
     message = refused(
         swap("max_num_seqs = 16\n", f'max_num_seqs = 16\n{key}_note = "x"\n')
     )
@@ -639,9 +522,6 @@ def test_a_serving_note_with_no_number_is_refused_as_the_leftover_it_is(
 
 
 def test_a_mem_fraction_outside_zero_to_one_is_refused() -> None:
-    """narrator's launcher refuses anything else by name
-    (`serve_higgs_sgl.sh:129-131`), so the manifest refuses it first — a
-    fraction of 1.2 would otherwise be a worker that exits 4 after a load."""
     message = refused(
         swap(
             "max_num_seqs = 16\n",
@@ -662,10 +542,6 @@ def test_a_zero_context_length_is_refused() -> None:
 
 
 def test_the_two_levers_are_not_refused_on_a_voice_with_an_mlx_arm() -> None:
-    """Owen, 2026-09-19: *"we're going to want to configure darwin to work the
-    same way. context limits and such."* So these are NOT cuda-linux only, and
-    a voice that serves on MLX may state both. What narrator's MLX backend has
-    no knob for is narrator's refusal to make, by name, at load."""
     mlx = GOOD + """
 [voice.backends.mlx-darwin]
 hf_repo = "owenmorgan/probe-higgs-v3"
@@ -683,9 +559,6 @@ sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
 
 
 def test_applied_sampling_is_the_whole_triple_and_not_the_rungs_override() -> None:
-    """What the job result pins (2026-09-19). The rung's override alone says
-    nothing about the top-p and top-k a run actually used, and those are what a
-    ladder's comparison rests on."""
     voice = parse(GOOD + LADDER)
     assert voice.applied_sampling("cuda-linux", 0) == {
         "temperature": 0.8, "top_p": 0.95, "top_k": 50,
@@ -693,23 +566,17 @@ def test_applied_sampling_is_the_whole_triple_and_not_the_rungs_override() -> No
     assert voice.applied_sampling("cuda-linux", 1) == {
         "temperature": 0.7, "top_p": 0.95, "top_k": 50,
     }
-    # And past the ladder it is take 0's, which is what a seed lane means.
     assert voice.applied_sampling("cuda-linux", 5) == {
         "temperature": 0.8, "top_p": 0.95, "top_k": 50,
     }
 
 
 def test_every_shipped_higgs_voice_declares_one() -> None:
-    """Not a fixture: the real manifests. A voice that loads but cannot be
-    started is a row on /v1/voices that fails at the spawn."""
     for voice in load_all_voices().values():
         if voice.narrator_engine == "higgs-v3":
             assert voice.serving is not None, voice.id
             assert voice.serving.max_num_seqs >= 1, voice.id
             assert voice.serving.max_num_seqs_note.strip(), voice.id
-
-
-# -------------------------------------------------------------------- clips
 
 
 def zeroshot(clips: str) -> str:
@@ -763,8 +630,6 @@ def test_a_declared_clip_is_read() -> None:
 
 
 def test_a_clip_with_no_transcript_is_refused() -> None:
-    """narrator refuses it too: a clone on an absent transcript is a whole book
-    in a subtly wrong voice, reported as success."""
     message = refused(
         zeroshot(
             'clips = [{ file = "stranger-01.wav", transcript = "  ", seconds = 8.4 }]'
@@ -787,9 +652,6 @@ def test_an_empty_clip_list_is_refused() -> None:
     assert "must be a non-empty list" in refused(zeroshot("clips = []"))
 
 
-# -------------------------------------------------------------------- takes
-
-
 def test_a_voice_with_no_ladder_still_has_take_zero() -> None:
     voice = parse(GOOD)
     assert len(voice.takes) == 1
@@ -798,35 +660,20 @@ def test_a_voice_with_no_ladder_still_has_take_zero() -> None:
 
 
 def test_a_take_past_the_end_is_a_seed_lane_at_take_zeros_sampling() -> None:
-    """PHASE18 section 5, 2026-09-19. It used to be `unknown_take`.
-
-    A screening sweep names takes 0..N on a voice that declares no ladder at
-    all and needs every one of them to be the SAME sampling — the matched-cell
-    property its Wilson-bound comparison rests on — so "past the end" has to
-    mean the voice's own numbers. narrator still moves the draw, because `take`
-    rides on every item and seeds `base + index + stride * take`.
-    """
     rung = parse(GOOD).take(3)
     assert rung.index == 3
     assert rung.overrides == {}
     assert rung.reason is None
-    # And the ladder is still what the manifest declares: a lane is not a rung.
     assert len(parse(GOOD).takes) == 1
 
 
 def test_a_take_past_a_DECLARED_ladder_is_not_the_last_rungs_numbers() -> None:
-    """Not a clamp, and this is the assertion that says so. A clamp would hand
-    back take 1's `temperature = 0.7` under take 4's name, which is the silent
-    substitution the old refusal existed to prevent — and the relaxation keeps
-    preventing it by answering with take 0's sampling instead."""
     rung = parse(GOOD + LADDER).take(4)
     assert rung.overrides == {}
     assert parse(GOOD + LADDER).take(1).overrides == {"temperature": 0.7}
 
 
 def test_a_negative_take_is_still_refused() -> None:
-    """The one thing `take` still refuses. No door can reach it — both carry
-    `Field(ge=0)` — but a lane below 0 is a bug in a caller, not a draw."""
     with pytest.raises(VoiceError) as caught:
         parse(GOOD).take(-1)
     assert "is below take 0" in str(caught.value)
@@ -855,15 +702,6 @@ def test_take_zero_may_not_deviate() -> None:
 
 
 def test_a_rung_that_changes_nothing_is_a_different_draw_and_is_allowed() -> None:
-    """PHASE18 section 5, 2026-09-19. This was `take 1 changes nothing`.
-
-    The refusal was true when written — a rung could not move the seed, so a
-    numberless one rendered take 0 byte for byte. Since 2026-09-15 narrator
-    draws `base + index + REROLL_SEED_STRIDE * (TAKE_REROLL_LANES * take +
-    attempt)`, so the same numbers in another lane is a different draw, which
-    is the screening ladder's entire unit of work. narrator's own
-    `item_sampling.py` says so and leaves the ruling to Crucible.
-    """
     voice = parse(GOOD + "\n[[voice.takes]]\n\n[[voice.takes]]\n")
     assert len(voice.takes) == 2
     assert voice.take(1).overrides == {}
@@ -871,8 +709,6 @@ def test_a_rung_that_changes_nothing_is_a_different_draw_and_is_allowed() -> Non
 
 
 def test_take_zero_still_may_not_deviate_and_a_deviation_still_owes_a_reason() -> None:
-    """The two rules the relaxation does NOT touch, pinned together so a future
-    edit cannot take all three out as one."""
     assert "take 0 is the engine default and may not deviate" in refused(
         GOOD + '\n[[voice.takes]]\ntemperature = 0.7\nreason = "x"\n'
     )
@@ -885,9 +721,6 @@ def test_a_rung_without_a_reason_is_refused() -> None:
     message = refused(GOOD + "\n[[voice.takes]]\n\n[[voice.takes]]\ntemperature = 0.7\n")
     assert "deviates from the higgs-v3 default (temperature 0.7)" in message
     assert "each one owes the measurement that chose it" in message
-
-
-# ------------------------------------------------------------------ loading
 
 
 def test_the_voices_dir_env_is_honoured(tmp_path: Path, monkeypatch) -> None:
@@ -920,8 +753,6 @@ def test_an_unknown_voice_lists_what_this_build_ships(
 def test_voices_are_listed_by_id_and_not_by_path(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """`zeroshot` sorts before `zeroshot-x` as ids and after it as filenames,
-    because '-' is 0x2D and '.' is 0x2E. This build has that exact pair."""
     monkeypatch.setenv("CRUCIBLE_VOICES_DIR", str(tmp_path))
     (tmp_path / "zeroshot.toml").write_text(
         GOOD.replace('id = "probe"', 'id = "zeroshot"'), encoding="utf-8"
@@ -940,11 +771,7 @@ def test_bad_toml_is_refused_by_name(tmp_path: Path, monkeypatch) -> None:
     assert "not valid TOML" in str(caught.value)
 
 
-# ------------------------------------------------------- the shipped catalog
-
-
 SHIPPED = {
-    # id: (kind, caps per backend, safe band or target)
     "deathstalker": ("checkpoint", 800),
     "mistborn": ("checkpoint", 800),
     "owen": ("checkpoint", 800),
@@ -955,11 +782,6 @@ SHIPPED = {
 }
 
 
-#: The two voices in this build that are the BASE WEIGHTS rather than a
-#: fine-tune, and therefore the two nobody has run a length ladder on. They are
-#: named here because "which voices have no measured pace" is a fact about the
-#: catalog, and a third one appearing must be a deliberate edit to this line
-#: rather than a manifest quietly shipping without a band.
 UNMEASURED_PACE = ("higgs-default", "zeroshot")
 
 
@@ -969,29 +791,10 @@ def test_this_build_ships_the_voices_it_says_it_does() -> None:
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))
 def test_a_manifest_states_the_pace_it_measured_and_no_other(voice_id: str) -> None:
-    """A MANIFEST STATES WHAT WAS MEASURED (ruling of 2026-09-18).
-
-    `higgs-default` and `zeroshot` are the base weights, no ladder has been run
-    on either, and until 2026-09-18 both satisfied a required-triple rule by
-    copying narrator's Higgs v3 defaults out of its source — `CHARS_PER_SEC`
-    15.0, which is the DIVISOR `cap_frames()` sizes the frame cap against and
-    not a rate anything was measured speaking at, between edges written around
-    a book pace nearer 17.2. narrator keeps a band's RATIOS, and those ratios
-    are 1.333 short against 1.034 long, so it judged healthy chunks run-ons and
-    re-rolled them to MAX_DEPTH. Stating nothing puts the derivation back where
-    it has one owner: narrator centres its own default band on the geometric
-    mean of the edges.
-
-    The five fine-tunes DO state all three, each from its own ladder, and this
-    test is the pair of those two statements.
-    """
     pace = load_voice(voice_id).pace
     rates = (pace.pace_chars_per_sec, pace.max_chars_per_sec, pace.min_chars_per_sec)
     if voice_id in UNMEASURED_PACE:
         assert rates == (None, None, None)
-        # Dropping the rates did not take the packing shape with them: they are
-        # two different facts in one table, and zeroshot still packs to the
-        # catalog's single 600-character target.
         if voice_id == "zeroshot":
             assert pace.target_chars == 600
         return
@@ -1001,14 +804,6 @@ def test_a_manifest_states_the_pace_it_measured_and_no_other(voice_id: str) -> N
 
 @pytest.mark.parametrize("voice_id", sorted(set(SHIPPED) - set(UNMEASURED_PACE)))
 def test_every_measured_band_in_this_catalog_is_symmetric(voice_id: str) -> None:
-    """EVERY LADDER IN THIS BUILD WROTE max = pace x 1.3 AND min = pace / 1.3.
-
-    Not a rule the loader imposes — `edges = "percentile"` exists for a band
-    read off a distribution instead — but a fact about the five manifests that
-    are here, and the reason the symmetry check can be the default. A sixth
-    voice arriving with genuinely lopsided edges must say so in its manifest,
-    and this test is where that shows up.
-    """
     pace = load_voice(voice_id).pace
     long_side = pace.max_chars_per_sec / pace.pace_chars_per_sec
     short_side = pace.pace_chars_per_sec / pace.min_chars_per_sec
@@ -1018,16 +813,11 @@ def test_every_measured_band_in_this_catalog_is_symmetric(voice_id: str) -> None
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))
 def test_each_shipped_voice_carries_the_catalog_numbers(voice_id: str) -> None:
-    """The caps are 600 / 800 / 1000 / 1100, from higgs-models.json."""
     kind, cap = SHIPPED[voice_id]
     voice = load_voice(voice_id)
     assert voice.kind == kind
     assert voice.narrator_engine == "higgs-v3"
     assert voice.sample_rate == 24000
-    # Every Higgs voice is staged on both arms in the catalog, so every manifest
-    # carries both blocks — and the cap is stated per backend even though the two
-    # agree today, because a cap is produced by rendering and the two arms sample
-    # through different implementations.
     assert sorted(voice.backends) == ["cuda-linux", "mlx-darwin"]
     for backend in voice.backends:
         assert voice.spec(backend).max_chars == cap
@@ -1035,8 +825,6 @@ def test_each_shipped_voice_carries_the_catalog_numbers(voice_id: str) -> None:
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))
 def test_every_shipped_voice_renders_at_the_boson_default(voice_id: str) -> None:
-    """One engine-level number for every Higgs voice on both arms; no voice in
-    this build has a measured reason to deviate, so none does."""
     voice = load_voice(voice_id)
     for backend in voice.backends:
         spec = voice.spec(backend)
@@ -1046,8 +834,6 @@ def test_every_shipped_voice_renders_at_the_boson_default(voice_id: str) -> None
 
 @pytest.mark.parametrize("voice_id", sorted(SHIPPED))
 def test_no_shipped_voice_claims_a_measured_estimate(voice_id: str) -> None:
-    """Neither of Owen's cards was free; PHASE3-TTS.md section 10 leaves the
-    measurement owed, and the row must say so rather than imply otherwise."""
     voice = load_voice(voice_id)
     for backend in voice.backends:
         spec = voice.spec(backend)
@@ -1059,17 +845,6 @@ def test_no_shipped_voice_claims_a_measured_estimate(voice_id: str) -> None:
 def test_the_five_fine_tunes_declare_a_second_rung_and_nothing_else_does(
     voice_id: str,
 ) -> None:
-    """The ladder as shipped on 2026-09-14, after Owen's ruling that a retake
-    must not reuse the settings that produced the problem.
-
-    Two rungs on every `checkpoint` voice — take 0 the boson default, take 1
-    the measured 0.7 — and ONE on the base-weights pair. `higgs-default` and
-    `zeroshot` are left alone deliberately: the 0.7 measurement is 88 chunks
-    of a fine-tune's output, a zero-shot voice's spread depends on a clip
-    nobody has measured against, and a rung that is not measured is a number
-    somebody will later mistake for one. They still have take 0, which every
-    voice has whether or not its file says so.
-    """
     voice = load_voice(voice_id)
     kind = SHIPPED[voice_id][0]
     if kind != "checkpoint":
@@ -1080,10 +855,6 @@ def test_the_five_fine_tunes_declare_a_second_rung_and_nothing_else_does(
     assert voice.take(0).overrides == {}
     assert voice.take(0).reason is None
     assert voice.take(1).overrides == {"temperature": 0.7}
-    # The rung owes the measurement that chose it, in writing, and the reason
-    # says what the measurement was rather than that 0.7 is better — it is
-    # not: it fired the guard twice as often. It is DIFFERENT, which is the
-    # whole property a retake needs.
     reason = voice.take(1).reason
     assert reason is not None
     assert "measured 2026-09-11" in reason
@@ -1092,7 +863,6 @@ def test_the_five_fine_tunes_declare_a_second_rung_and_nothing_else_does(
 
 
 def test_the_zeroshot_voice_takes_its_clips_from_the_request() -> None:
-    """Its reference wavs live in a userData directory nothing can pull from."""
     voice = load_voice("zeroshot")
     for backend in voice.backends:
         assert voice.spec(backend).clips_from_request is True
@@ -1102,20 +872,7 @@ def test_the_shipped_manifests_are_the_directory_beside_the_package() -> None:
     assert voices_dir() == Path(__file__).resolve().parent.parent / "crucible" / "voices"
 
 
-# ------------------------------------------- deploying a voice without a release
-#
-# Owen, 2026-09-16: *"we dont have to cut a new release every time we deploy a
-# model do we? if thats the case, we should simplify it so it just reads the
-# model manifest and i can upload new models at will. i train models all the
-# time. nearly every night."*
-#
-# Before this, voice manifests were package data and the answer was yes: a voice
-# could not be served until a version was tagged, its packs rebuilt on CI and the
-# result installed on three machines. These four tests are the answer being no.
-
-
 def a_voice_file(into: Path, voice_id: str, display: str | None = None) -> Path:
-    """A real manifest, copied from a shipped one and re-identified."""
     import re
 
     into.mkdir(parents=True, exist_ok=True)
@@ -1129,7 +886,6 @@ def a_voice_file(into: Path, voice_id: str, display: str | None = None) -> Path:
 
 
 def test_a_voice_dropped_into_the_home_is_served(tmp_path, monkeypatch) -> None:
-    """THE WHOLE POINT: a file appears, the voice exists, nothing was released."""
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
     a_voice_file(tmp_path / "voices", "tonights-finetune")
@@ -1138,29 +894,16 @@ def test_a_voice_dropped_into_the_home_is_served(tmp_path, monkeypatch) -> None:
 
 
 def test_the_shipped_voices_are_still_there_beside_it(tmp_path, monkeypatch) -> None:
-    """AN OVERLAY, NOT A REPLACEMENT — the distinction the old env var got wrong.
-
-    `CRUCIBLE_VOICES_DIR` replaces the set, so adding one voice through it meant
-    copying all seven shipped manifests somewhere and maintaining them by hand
-    forever. Adding must not cost that.
-    """
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
     a_voice_file(tmp_path / "voices", "tonights-finetune")
     served = load_all_voices()
     for shipped in ("deathstalker", "mistborn", "owen", "zeroshot"):
         assert shipped in served, f"the overlay hid the packaged {shipped}"
-    # And the order is by ID, not by directory: a home voice belongs where its
-    # name puts it, because this dict's order is what `/v1/voices` lists in.
     assert list(served) == sorted(served)
 
 
 def test_a_home_manifest_overrides_a_shipped_id(tmp_path, monkeypatch) -> None:
-    """Retuning a shipped voice is the same gesture, and is REVERSIBLE.
-
-    Deleting the file restores the packaged manifest, which is what makes
-    trying a new pace on deathstalker a safe thing to do on a Tuesday.
-    """
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
     path = a_voice_file(tmp_path / "voices", "mistborn", display="Mistborn (tonight)")
@@ -1171,7 +914,6 @@ def test_a_home_manifest_overrides_a_shipped_id(tmp_path, monkeypatch) -> None:
 
 
 def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> None:
-    """The escape hatch keeps its meaning: run THIS set and nothing else."""
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "home"))
     only = tmp_path / "only"
     a_voice_file(only, "just-this-one")
@@ -1179,14 +921,6 @@ def test_the_full_override_still_replaces_everything(tmp_path, monkeypatch) -> N
     monkeypatch.setenv(VOICES_DIR_ENV, str(only))
     assert sorted(load_all_voices()) == ["just-this-one"]
 
-
-# ------------------------------------------------- the source axis (PHASE18)
-#
-# A backend block names ONE source: a pin Crucible fetches and owns, or a
-# directory somebody else put on the serving machine
-# (PHASE18-UNCERTIFIED.md section 3). Both halves of "exactly one" are refused
-# by their own name, because a block with two sources and a block with none are
-# different mistakes.
 
 PIN = (
     'hf_repo = "owenmorgan/probe-higgs-v3"\n'
@@ -1205,7 +939,6 @@ def test_a_local_block_loads_and_says_what_it_is() -> None:
     assert spec.hf_repo is None and spec.revision is None
     assert spec.path == "/home/telltale/higgs_v3_merged/mb_ha_rvcbed1_5368"
     assert spec.identity == "mb_ha_rvcbed1@5368"
-    # ASSERTED, not verified: nothing checked that directory against anything.
     assert spec.identity_basis == "asserted"
     assert str(spec.local_path).replace("\\", "/").endswith("mb_ha_rvcbed1_5368")
 
@@ -1219,8 +952,6 @@ def test_a_pinned_block_is_still_verified() -> None:
 
 
 def test_the_fingerprint_is_the_identity_either_way() -> None:
-    # One shape, so a client comparing two renders never parses before it can
-    # compare. How much the answer is worth is `identity_basis` on the row.
     assert parse(GOOD).fingerprint("cuda-linux") == (
         "probe@0123456789abcdef0123456789abcdef01234567"
     )
@@ -1261,8 +992,6 @@ def test_a_local_path_must_be_absolute() -> None:
 
 
 def test_a_windows_path_is_absolute_too() -> None:
-    # The loader may be running on a different OS than the one that will serve
-    # the voice, so "absolute" is asked of the PATH and not of this host.
     voice = parse(
         swap(PIN, 'path = "C:/merged/mb_5368"\nidentity = "mb_ha_rvcbed1@5368"')
     )
@@ -1276,9 +1005,6 @@ def test_a_local_block_without_an_identity_is_refused() -> None:
 
 
 def test_an_empty_path_is_no_source_rather_than_a_bad_one() -> None:
-    # `path = ""` reads as a declaration to `in`, and would otherwise be
-    # refused for not being absolute — a second-order message about a block
-    # that really declared no source at all.
     message = refused(swap(PIN, 'path = ""\nidentity = "x"'))
     assert "names no weights" in message
 
@@ -1289,7 +1015,3 @@ def test_a_pin_without_a_revision_says_which_door_may_omit_one() -> None:
     assert "PUT /v1/voices" in message
 
 
-# The pin's own two checks — the `<owner>/<name>` shape and the 40-character
-# sha — moved into `_check_source` with everything else and are NOT re-tested
-# here: `test_a_branch_name_is_not_a_pin` and `test_a_bare_repo_name_is_refused`
-# above run through the moved code and are the owners of those two facts.

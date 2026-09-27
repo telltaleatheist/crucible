@@ -1,47 +1,3 @@
-"""A stand-in for `crucible/jobs/rvc/worker.py`, faithful to its JSON-lines wire.
-
-`tests/fake_asr_worker.py`'s idea again: a **real subprocess**, run exactly as the
-server runs the real one (`<python> <this file>`, one request on stdin,
-newline-delimited JSON on fd 1), steered entirely by environment variables.
-
-It does not run ultimate-rvc — obviously — but it does everything around it that
-the server depends on: it batches at the size it was given, it reports urvc's
-per-file progress with the batch offset applied, it WRITES an output file per
-input into the directory it was told to, and it answers one result per input in
-the order they arrived.
-
-    CRUCIBLE_FAKE_RVC_EXIT_CODE      exit with this code before saying anything.
-    CRUCIBLE_FAKE_RVC_SILENT         say nothing and sit there, for the silence
-                                     timeout. A test that sets this MUST let the
-                                     server terminate it.
-    CRUCIBLE_FAKE_RVC_SKIP           a comma-separated list of input NAMES to
-                                     write no output for, which is the failure
-                                     `rvc` exists to refuse: every input must
-                                     produce an output.
-    CRUCIBLE_FAKE_RVC_BATCH_FAIL     a 1-based batch number to fail outright,
-                                     with `failed`, as urvc exiting non-zero.
-    CRUCIBLE_FAKE_RVC_SHORT          emit one fewer result than there are inputs.
-    CRUCIBLE_FAKE_RVC_NO_DONE        exit 0 without `done`.
-    CRUCIBLE_FAKE_RVC_JUNK_LINE      write this text to fd 1 verbatim before the
-                                     first result — a library logging to stdout.
-    CRUCIBLE_FAKE_RVC_SLOW_S         seconds to sleep per batch, so a cancel has
-                                     something to interrupt.
-    CRUCIBLE_FAKE_RVC_IGNORE_SIGTERM ignore SIGTERM, so the refusal to escalate
-                                     to SIGKILL can be tested. A test that sets
-                                     this MUST kill the process itself.
-    CRUCIBLE_FAKE_RVC_TRANSCRIPT     a path. The request line is appended to it,
-                                     followed by a JSON line holding the engine
-                                     environment variables this process actually
-                                     INHERITED — which is the only way to assert
-                                     that `KMP_DUPLICATE_LIB_OK` and the rest of
-                                     the hardening reached the engine, since they
-                                     travel in the environment and not in the
-                                     request.
-
-The output it writes is the input's bytes with a marker appended, so a test can
-tell a converted file from a copied one.
-"""
-
 from __future__ import annotations
 
 import json
@@ -50,10 +6,6 @@ import signal
 import sys
 import time
 
-#: What the server sets for urvc, and what a test asserts arrived. The names are
-#: `crucible.jobs.rvc.ENGINE_ENVIRONMENT`'s; they are listed again here because a
-#: test double that imported from `crucible` would be testing a relationship that
-#: does not exist at runtime — a worker env has no `crucible` in it.
 ENGINE_KEYS = (
     "URVC_SKIP_INIT",
     "HF_HUB_OFFLINE",
@@ -93,8 +45,6 @@ def main() -> int:
 
     if os.environ.get("CRUCIBLE_FAKE_RVC_IGNORE_SIGTERM") == "1":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        # win32's polite signal is CTRL_BREAK_EVENT, which arrives as SIGBREAK
-        # (`crucible/procgroup.py`); ignoring the POLITE signal means that one.
         if hasattr(signal, "SIGBREAK"):
             signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 

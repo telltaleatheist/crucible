@@ -1,13 +1,3 @@
-"""`GET /v1/accelerator` — the probe (PHASE4-AUDIO.md section 5).
-
-Every probe underneath is monkeypatched, so these assert on what the route
-reports rather than on whatever card the suite happens to run on. The case worth
-the whole route is `test_somebody_else_s_process_is_reported_and_left_alone`:
-BookForge has three incompatible arbitration schemes and a lock file with no
-producer because there was no way to ask this question, and the answer has to be
-right precisely when the card is NOT free.
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,13 +17,10 @@ from .fake_engine import FakeEngine
 
 MODEL = "qwen3.5-9b"
 
-#: The pid the engine double claims. Crucible's own, so it must come back
-#: `owned_by_crucible: true` while the stranger beside it does not.
 OURS = 31_337
 
 
 class OwnedEngine(FakeEngine):
-    """`FakeEngine` that admits to a pid, which is what the probe reports on."""
 
     @property
     def pids(self) -> frozenset[int]:
@@ -120,9 +107,6 @@ def load(client: TestClient, auth: dict[str, str]) -> None:
     assert events[-1]["event"] == "done", events[-1]
 
 
-# -------------------------------------------------------------------- access
-
-
 def test_the_probe_needs_the_bearer_token(client: TestClient) -> None:
     response = client.get("/v1/accelerator")
     assert response.status_code == 401
@@ -134,9 +118,6 @@ def test_the_probe_needs_the_api_version_header(client: TestClient) -> None:
         "/v1/accelerator", headers={"Authorization": "Bearer test-token-not-minted"}
     )
     assert response.status_code == 426
-
-
-# ------------------------------------------------------------------ the shape
 
 
 def test_an_idle_cuda_card(
@@ -160,7 +141,6 @@ def test_an_idle_cuda_card(
 def test_somebody_else_s_process_is_reported_and_left_alone(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The case the whole route exists for. It reports; it never evicts."""
     cuda(
         monkeypatch,
         apps=[ComputeApp(pid=44503, name="python", used_bytes=17 * GIB)],
@@ -175,15 +155,12 @@ def test_somebody_else_s_process_is_reported_and_left_alone(
             "owned_by_crucible": False,
         }
     ]
-    # A held card is a 200 describing the holding, not a refusal and not an act.
-    # Asking twice changes nothing, because asking does nothing.
     assert client.get("/v1/accelerator", headers=auth).json() == body
 
 
 def test_memory_the_driver_will_not_report_is_null_not_zero(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`[N/A]` from the driver is a refusal to answer, and zero is an answer."""
     cuda(
         monkeypatch,
         apps=[ComputeApp(pid=9, name="python", used_bytes=None)],
@@ -196,16 +173,9 @@ def test_memory_the_driver_will_not_report_is_null_not_zero(
 def test_unattributed_vram_is_reported_because_wsl2_lists_nothing(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Measured on Owen's PC: 17 GB held inside WSL2, an empty compute-app list.
-
-    Without this figure the route would report an empty `holders` and 6 GiB free
-    and a caller would conclude the card was idle, which is the exact mistake
-    BookForge's lock file existed to paper over.
-    """
     cuda(monkeypatch, apps=[], free_bytes=4 * GIB)
     body = client.get("/v1/accelerator", headers=auth).json()
     assert body["holders"] == []
-    # 20 GiB in use, 3 GiB of it the declared desktop allowance.
     assert body["unattributed_bytes"] == 17 * GIB
 
 
@@ -224,8 +194,6 @@ def test_the_mac_reports_unified_memory_and_no_holders(
     assert body["gpu"]["total_bytes"] == 64 * GIB
     assert body["free_bytes"] == 40 * GIB
     assert body["holders"] == []
-    # Not 0: vm_stat cannot attribute unified memory to compute processes, and
-    # a zero here would read as "all of it is accounted for".
     assert body["unattributed_bytes"] is None
     assert "unified memory" in body["detail"]
 
@@ -243,9 +211,6 @@ def test_a_probe_that_cannot_answer_never_says_free(
     assert "did not answer" in response.json()["error"]["message"]
 
 
-# --------------------------------------------------------------- the resident
-
-
 def test_crucible_s_own_engine_is_named_as_its_own(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
@@ -254,7 +219,6 @@ def test_crucible_s_own_engine_is_named_as_its_own(
     owned_engines: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both halves of the answer: what is resident, and whose the holders are."""
     cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
     with make_client(enable_llm=True) as client:
         load(client, auth)
@@ -282,21 +246,6 @@ def test_a_resident_voice_is_reported_as_a_voice(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The route that says what is on the card must be able to say "a voice".
-
-    It could not, until 2026-09-13. The `resident` block hard-coded
-    `"kind": "llm"` and read `resident.model_id`, which was true while a model
-    was the only thing a card could hold and became a 500 the moment
-    PHASE3-TTS.md section 5's generalised residency landed — a `ResidentVoice`
-    has a `voice_id` and an `id`, and no `model_id` at all. `model_rows()` had
-    already learned to ask for `resident_model`; this route had not caught up.
-
-    Asserted through the residency rather than through a real load, because a
-    load needs an engine and the point here is the *reporting*, not the loading.
-    Phase 4's aligner will be a third kind and this test should keep passing
-    without being touched, which is why it asserts `kind` echoes the resident
-    rather than that it equals any particular word.
-    """
     from crucible import residency as residency_module
 
     cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
@@ -313,7 +262,7 @@ def test_a_resident_voice_is_reported_as_a_voice(
             log_path=Path("/tmp/engine-deathstalker.log"),
             loaded_at="2026-09-13T04:00:00+00:00",
         )
-        client.app.state.residency._resident = held  # type: ignore[attr-defined]
+        client.app.state.residency._resident = held
         body = client.get("/v1/accelerator", headers=auth).json()
 
     assert body["resident"]["kind"] == held.kind == "tts"

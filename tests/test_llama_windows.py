@@ -1,17 +1,3 @@
-"""`llama-windows`: Windows is a backend, and what that means here.
-
-PHASE15-HOST.md section 0's AMENDED block, 3.3's host paragraph, 3.5 and 3.10.
-Owen, 2026-09-14: *"the windows side should still host GPU jobs even if WSL
-isnt present/workable … just like it runs from the mac side."*
-
-**Nothing in this file runs a llama-server.** The card is off limits and the
-engine is a Windows binary this suite runs on Linux, so what is proved here is
-the half that is decidable from the tables: that the backend exists and is
-detected, that the manifests name real files, that capability answers the
-right sentence for each of the three kinds of class, and that the pool is
-called what it is on a machine with no card.
-"""
-
 from __future__ import annotations
 
 import platform
@@ -35,7 +21,6 @@ from crucible.manifests import BACKEND_ENGINES, load_all_manifests, load_manifes
 
 GIB = 1024 ** 3
 
-#: A 3090 Ti running Windows natively, and a laptop with no card at all.
 WINDOWS_CARD = 24 * GIB
 WINDOWS_RESERVE = 3 * GIB
 LAPTOP_RAM = 32 * GIB
@@ -52,15 +37,7 @@ def _decide(name: str, total: int, reserve: int, vendor: str, chosen: str | None
     )
 
 
-# --------------------------------------------------------------- the backend
-
-
 def test_windows_is_a_backend_and_llama_server_is_its_engine() -> None:
-    """There is no `backend_kind = "none"`, and this is why.
-
-    Section 0's AMENDED block: `llama-windows` is structurally what
-    `mlx-darwin` is — a per-model engine child — and the engine is llama.cpp.
-    """
     assert LLAMA_WINDOWS in BACKEND_KINDS
     assert BACKEND_ENGINES[LLAMA_WINDOWS] == {
         "text": "llama-server",
@@ -70,7 +47,6 @@ def test_windows_is_a_backend_and_llama_server_is_its_engine() -> None:
 
 
 def test_a_backend_runs_where_its_engine_runs_and_nowhere_else() -> None:
-    """`backend_not_here` covers every kind/platform mismatch, both ways."""
     sentence = backend_not_here(CUDA_LINUX, LLAMA_WINDOWS, "windows")
     assert "cuda-linux" in sentence and "llama-windows" in sentence
     assert "A backend runs where its engine runs" in sentence
@@ -81,10 +57,6 @@ def test_a_backend_runs_where_its_engine_runs_and_nowhere_else() -> None:
 def test_detect_windows_answers_with_a_card_or_with_the_machines_ram(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**Nothing here refuses.** Owen: *"a crucible server will run on
-    absolutely anything."* The two answers differ only in which pool is
-    measured, and a cardless machine is a machine this backend serves.
-    """
     from crucible import backend as backend_module
     from crucible.errors import NoViableBackend
 
@@ -111,19 +83,12 @@ def test_detect_windows_answers_with_a_card_or_with_the_machines_ram(
 
 
 def test_the_windows_home_is_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Section 3.5: every subject a Windows server pulls lives under it.
-
-    Not `~/.crucible`: this directory holds tens of gigabytes of GGUF and a
-    dot-directory in the user profile is roamed by some configurations and
-    backed up by others.
-    """
     import crucible.config as config_module
 
     monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
     monkeypatch.setattr(config_module.sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", str(Path("/tmp/AppData/Local")))
     assert crucible_home() == Path("/tmp/AppData/Local") / WINDOWS_HOME_DIRNAME
-    # …and `$CRUCIBLE_HOME` still wins, as it does on every platform.
     monkeypatch.setenv("CRUCIBLE_HOME", "/tmp/elsewhere")
     assert crucible_home() == Path("/tmp/elsewhere")
 
@@ -131,7 +96,6 @@ def test_the_windows_home_is_localappdata(monkeypatch: pytest.MonkeyPatch) -> No
 def test_a_windows_session_with_no_localappdata_is_refused_not_guessed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tens of gigabytes must never land somewhere quietly chosen."""
     import crucible.config as config_module
     from crucible.errors import ConfigError
 
@@ -142,16 +106,7 @@ def test_a_windows_session_with_no_localappdata_is_refused_not_guessed(
         crucible_home()
 
 
-# -------------------------------------------------------------- the catalog
-
-
 def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
-    """Section 3.10: *"a model whose GGUF is not published is simply absent."*
-
-    `qwen3.8-27b-8bit` has no llama-windows block, because a 29 GB GGUF on a
-    24 GB card is not a thing a Windows box runs and a row with nothing
-    truthful in it is worse than no row.
-    """
     catalog = load_all_manifests()
     served = {
         model_id
@@ -161,14 +116,11 @@ def test_the_three_published_ggufs_are_named_and_the_fourth_is_absent() -> None:
     assert served == {
         "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
         "qwen3.8-27b-4bit",
-        # The vision forms of the two above (PHASE22 section 2.9): the same
-        # GGUF plus the projector, in the base's folder.
         "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl",
     }
 
 
 def test_every_llama_windows_row_names_the_one_file_it_is() -> None:
-    """A GGUF repo holds twenty quantizations; a row pulls one."""
     for model_id in (
         "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
         "qwen3.8-27b-4bit",
@@ -180,7 +132,6 @@ def test_every_llama_windows_row_names_the_one_file_it_is() -> None:
 
 
 def test_the_page_reader_names_its_projector_and_the_text_models_do_not() -> None:
-    """Fact 2: half a vision model is a model that loads and then cannot see."""
     dots = load_manifest("dots-ocr").spec(LLAMA_WINDOWS)
     assert dots.mmproj == "mmproj-dots.ocr-Q8_0.gguf"
     assert dots.files == ("dots.ocr-Q8_0.gguf", "mmproj-dots.ocr-Q8_0.gguf")
@@ -191,12 +142,6 @@ def test_the_page_reader_names_its_projector_and_the_text_models_do_not() -> Non
 
 
 def test_the_page_reader_pins_the_same_pair_the_local_form_names() -> None:
-    """ONE pin, read two ways — R1 in one file.
-
-    `[local]` says what this model is on a machine with no Crucible;
-    `llama-windows` is Crucible USING that form. A second repo or revision
-    here would be the two-owners defect written on purpose.
-    """
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
     local = manifest.local
@@ -208,20 +153,6 @@ def test_the_page_reader_pins_the_same_pair_the_local_form_names() -> None:
 
 
 def test_the_projector_comes_from_the_same_project_as_the_binary() -> None:
-    """T7's third defect (PHASE15-HOST.md 7.6), pinned so it cannot come back.
-
-    The catalog pinned `anthonym21/dots.ocr-GGUF`, whose own README says its
-    files want the `anthony-maio/llama.cpp` FORK. Its projector carries the
-    older `clip.vision.spatial_merge_size` and not
-    `clip.vision.projector.scale_factor`, which `clip.cpp` reads for
-    `PROJECTOR_TYPE_DOTS_OCR` with no `required = false` — so `llama-server`
-    exited at `clip_init` and no upstream tag makes that file load.
-
-    The invariant is not "this exact sha" (a revision may move for a good
-    reason); it is that the GGUF conversion and the loader come from ONE
-    project. `crucible/llamacpp.py` fetches `ggml-org/llama.cpp`, so the
-    weights are `ggml-org`'s conversion of them.
-    """
     spec = load_manifest("dots-ocr").spec(LLAMA_WINDOWS)
     assert spec.hf_repo.split("/")[0] == "ggml-org", (
         f"the page reader's GGUFs come from {spec.hf_repo}, but the engine is "
@@ -288,17 +219,8 @@ memory_bytes_estimate = 3000000000
         parse_manifest(text, Path("demo-1b.toml"), "demo-1b")
 
 
-# ------------------------------------------------------------- capability
-
-
 def test_the_five_python_job_types_answer_one_sentence(
 ) -> None:
-    """Section 3.3: the same words for all five, so an app shows it once.
-
-    And the reason has nothing to do with the card: narrator, whisper, the
-    aligner, urvc and the separator are PYTHON environments, and this backend
-    is llama.cpp. A 4090 does not change that.
-    """
     reasons = set()
     for name in ("tts", "asr", "align", "rvc", "denoise"):
         verdict = _decide(name, WINDOWS_CARD, WINDOWS_RESERVE, "nvidia")
@@ -311,7 +233,6 @@ def test_the_five_python_job_types_answer_one_sentence(
 
 
 def test_the_llm_classes_and_pages_answer_from_the_gguf_table() -> None:
-    """A 24 GB Windows card serves all five, and says which file it picked."""
     verdicts = {
         name: _decide(name, WINDOWS_CARD, WINDOWS_RESERVE, "nvidia")
         for name in ("clean", "translate", "simplify", "analysis", "pages")
@@ -321,20 +242,11 @@ def test_the_llm_classes_and_pages_answer_from_the_gguf_table() -> None:
     assert verdicts["pages"].selected == "dots-ocr"
     for name, verdict in verdicts.items():
         assert verdict.enabled is True, name
-        # The pool is the card, and the sentence says so.
         assert "card" in verdict.reason, name
         assert "cpu build" not in verdict.reason, name
 
 
 def test_a_windows_box_with_no_card_still_serves_and_says_it_is_slow() -> None:
-    """Owen: *"a crucible server will run on absolutely anything."*
-
-    The row LIGHTS and carries the warning; nothing refuses it for the absence
-    of a card. What it is measured against is the machine's RAM, because that
-    is where a GGUF on the CPU really allocates from — and the sentence calls
-    it that rather than "card", which would be a lie on this machine exactly
-    as it is on a Mac.
-    """
     verdict = _decide("clean", LAPTOP_RAM, WINDOWS_RESERVE, "cpu")
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.5-9b"
@@ -349,7 +261,6 @@ def test_echo_is_on_and_needs_neither_a_card_nor_wsl() -> None:
 
 
 def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
-    """One read, and an app can draw the whole machine from it."""
     decisions = decide_all(
         LLAMA_WINDOWS,
         total_bytes=WINDOWS_CARD,
@@ -367,13 +278,6 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
 
 def test_a_small_card_turns_the_27b_off_with_the_number(
 ) -> None:
-    """The arithmetic is the SAME rule on every backend, and it is TOTAL.
-
-    Section 3.10's sentence says "free VRAM"; this uses available memory
-    (total less the desktop allowance), which is `crucible/capability.py`'s
-    rule 2 and its reason: a capability is a fact about the host, and one
-    decided on free VRAM would be switched off by an open browser.
-    """
     verdict = _decide("translate", 12 * GIB, WINDOWS_RESERVE, "nvidia")
     assert verdict.enabled is False
     assert verdict.shortfall_bytes > 0

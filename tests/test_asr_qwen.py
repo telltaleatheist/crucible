@@ -1,14 +1,3 @@
-"""`asr` on Qwen3-ASR (docs/PHASE25-QWEN-ASR.md): the manifest, the params, the
-loop guard, and the job end to end through the API.
-
-No GPU, no vLLM, no MLX and no 4.7 GB of weights. The two sessions a Qwen job
-holds are real subprocesses — `tests/fake_qwen_asr_worker.py` in place of
-`qwen_worker.py`, `tests/fake_align_worker.py` in place of the aligner — spawned
-by the real `WorkerSession` from stamped envs, so the preflight refusals, the
-guard's arithmetic, the piece bookkeeping, the re-decode ladder and the
-document are exactly what runs on the PC and the Mac.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -42,7 +31,6 @@ HERE = Path(__file__).resolve().parent
 FAKE_QWEN = HERE / "fake_qwen_asr_worker.py"
 FAKE_ALIGN = HERE / "fake_align_worker.py"
 
-#: ContentStudio's default filler prompt, verbatim (2026-09-24).
 CONTEXT = (
     "Verbatim transcript of a livestream. Transcribe every disfluency exactly as "
     "spoken, including filler sounds: um, uh, ah, er, hmm, and false starts and "
@@ -57,9 +45,6 @@ PARAMS = {
 AUDIO = base64.b64encode(b"not really a stream").decode("ascii")
 
 MANIFEST = Path(__file__).resolve().parents[1] / "crucible" / "asr" / f"{MODEL}.toml"
-
-
-# =================================================================== manifest
 
 
 def _qwen_text() -> str:
@@ -77,15 +62,11 @@ def test_one_id_on_both_backends_pinning_one_set_of_bytes() -> None:
     assert (cuda.engine, mac.engine) == ("vllm", "mlx-audio")
     assert cuda.hf_repo == mac.hf_repo == "Qwen/Qwen3-ASR-1.7B"
     assert cuda.revision == mac.revision == "7278e1e70fe206f11671096ffdd38061171dd6e5"
-    # Full precision on both machines (Owen, 2026-09-24).
     assert cuda.dtype == mac.dtype == "bfloat16"
     assert cuda.aligner == mac.aligner == ALIGNER
 
 
 def test_the_batch_is_the_manifests_never_the_librarys() -> None:
-    """ContentStudio's crash was the library default (32) on MPS; the batch is
-    stated per backend, and mlx-audio's is 1 because it is given one piece per
-    call."""
     manifest = load_asr_manifest(MODEL)
     assert manifest.spec("cuda-linux").max_batch == 8
     assert manifest.spec("mlx-darwin").max_batch == 1
@@ -94,7 +75,6 @@ def test_the_batch_is_the_manifests_never_the_librarys() -> None:
 
 
 def test_the_estimates_are_the_computed_sums_they_claim() -> None:
-    """Each figure is its terms, added; the manifest says COMPUTED and why."""
     manifest = load_asr_manifest(MODEL)
     weights = 4_220_320_824 + 478_200_688
     kv_per_token = 2 * 28 * 8 * 128 * 2
@@ -118,7 +98,6 @@ def test_the_aligner_it_names_exists_on_every_backend_it_serves() -> None:
 
 
 def test_two_blocks_that_pin_different_bytes_are_refused() -> None:
-    """ONE ID, ONE SET OF BYTES: a conversion cannot hide under the official id."""
     text = _qwen_text()
     head, mac = text.split("[backends.mlx-darwin]")
     mac = mac.replace('hf_repo = "Qwen/Qwen3-ASR-1.7B"', 'hf_repo = "mlx-community/Qwen3-ASR-1.7B-bf16"')
@@ -170,7 +149,6 @@ def test_a_whisper_block_may_not_carry_qwen_keys() -> None:
 
 
 def test_the_vllm_worker_runs_under_the_resident_engines_environment() -> None:
-    """One owner of vLLM's measured env lines, plus the in-process engine core."""
     environment = qwen.WORKER_ENVIRONMENT_FOR_ENGINE["vllm"]
     for key, value in VLLM_ENVIRONMENT.items():
         assert environment[key] == value
@@ -183,9 +161,6 @@ def test_the_start_gate_is_the_estimate_over_the_card_rounded_up() -> None:
     assert qwen.gpu_memory_utilization(estimate, FAKE_BACKEND.gpu.vram_bytes) == 0.43
     assert qwen.gpu_memory_utilization(50, 100) == 0.5
     assert qwen.gpu_memory_utilization(501, 1000) == 0.51
-
-
-# ================================================================ loop guard
 
 
 LINE = "and so we went back to the start "
@@ -204,7 +179,6 @@ def test_a_decode_that_ran_out_its_budget_is_a_loop() -> None:
 
 
 def test_contentstudios_loop_is_caught_by_rate_and_by_repetition() -> None:
-    """2,388 words in 180 s: one line about sixty times (2026-09-24)."""
     text = (LINE * 300).strip()
     words = loopguard.words_of(text)
     assert len(words) / 180.0 > loopguard.WORDS_PER_SECOND_CEILING
@@ -217,7 +191,6 @@ def test_contentstudios_loop_is_caught_by_rate_and_by_repetition() -> None:
 
 
 def test_verbatim_fillers_and_repeats_are_speech_not_a_loop() -> None:
-    """What Owen wants KEPT: ums, uhs, false starts and repeated words."""
     text = (
         "Um, so, uh, I I I think, um, we should, we should, uh, go. Hmm. "
         "Okay okay okay okay. Let's go, let's go, let's go! Um, uh, er, ah."
@@ -263,9 +236,6 @@ def test_the_ladder_starts_at_the_piece_and_halves_twice_then_nothing() -> None:
 def test_the_clock_names_a_place_a_person_can_find() -> None:
     assert loopguard.clock(200.0) == "0:03:20.0"
     assert loopguard.clock(3725.46) == "1:02:05.5"
-
-
-# ==================================================================== the API
 
 
 def _stamp_llm_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: str) -> None:
@@ -341,7 +311,6 @@ def _stage(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: str, *, al
 
 @pytest.fixture
 def sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """Where each fake writes the request lines it was sent."""
     paths = {"asr": tmp_path / "sent-asr.jsonl", "align": tmp_path / "sent-align.jsonl"}
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_TRANSCRIPT", str(paths["asr"]))
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(paths["align"]))
@@ -389,9 +358,6 @@ def lines(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
-# ---------------------------------------------------------------- refusals
 
 
 @pytest.mark.parametrize(
@@ -450,8 +416,6 @@ def test_a_context_that_is_not_plain_text_is_refused(
 def test_the_guard_asks_for_the_asr_engine_and_the_aligner_together(
     qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """13.46 GiB with word timestamps; 10.25 GiB without, because no aligner
-    loads. With 12 GiB free the first is refused and the second admitted."""
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (12 * GIB, 12 * GIB))
     refused = submit(qwen_client, auth)
     assert refused.status_code == 409, refused.json()
@@ -473,9 +437,6 @@ def test_word_timestamps_without_the_align_env_is_refused_naming_it(
     assert "qwen3-aligner" in response.json()["error"]["message"]
 
 
-# ------------------------------------------------------------------- a run
-
-
 def test_a_clean_run_is_word_timestamped_in_absolute_time(
     qwen_client: TestClient, auth: dict[str, str], sent: dict[str, Path]
 ) -> None:
@@ -491,18 +452,15 @@ def test_a_clean_run_is_word_timestamped_in_absolute_time(
     assert document["language"] == "en"
     assert document["duration_s"] == 400.0
     assert document["redecoded"] == []
-    # 400 s in pieces of at most 180 s: three, at 0, 180 and 360.
     assert [s["start"] for s in document["segments"]] == [0.0, 180.0, 360.0]
     third = document["segments"][2]
     assert third["end"] == 400.0
     assert third["text"].startswith("Um, the piece at 360 seconds")
-    # The aligner's items, shifted into the stream's own time, whisper's shape.
     first_word = third["words"][0]
     assert first_word == {"start": 360.0, "end": 360.1, "word": "Um,", "probability": None}
 
     load, split, transcribe = lines(sent["asr"])[:3]
     assert load["op"] == "load" and load["engine"] == "vllm"
-    # Every number from the manifest, none from a library default.
     assert load["max_batch"] == 8
     assert load["max_new_tokens"] == 4096
     assert load["max_model_len"] == 8192
@@ -547,15 +505,11 @@ def test_a_silent_stretch_is_no_segment_and_is_counted(
     assert document["silent_pieces"] == 1 and document["pieces"] == 3
 
 
-# ---------------------------------------------------------------- the guard
-
-
 @pytest.mark.parametrize("kind", ["token_limit", "repeat", "collapse"])
 def test_a_loop_that_clears_at_a_smaller_window_is_redecoded_and_noted(
     qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
     sent: dict[str, Path], kind: str,
 ) -> None:
-    """Weather with a budget: loops at 180 s, clears when re-cut to 60 s."""
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_AT", "200")
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", kind)
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S", "60")
@@ -574,7 +528,6 @@ def test_a_loop_that_clears_at_a_smaller_window_is_redecoded_and_noted(
     }[kind]
     assert [(r["start"], r["end"], r["signal"], r["window_s"], r["next_window_s"])
             for r in document["redecoded"]] == [(180.0, 360.0, expected_signal, 180, 60)]
-    # The looping stretch is now three 60 s pieces; nothing of the loop is kept.
     assert [s["start"] for s in document["segments"]] == [0.0, 180.0, 240.0, 300.0, 360.0]
     assert all("went back to the start" not in s["text"] for s in document["segments"])
     assert all("zzcollapse" not in s["text"] for s in document["segments"])
@@ -596,14 +549,10 @@ def test_a_loop_that_never_clears_fails_the_job_by_name_with_its_place(
     assert "200.0-220.0s (0:03:20.0-0:03:40.0)" in message
     assert "180 s, 60 s, 20 s" in message
     notes = [e["data"]["message"] for e in events if e["event"] == "note"]
-    assert len(notes) == 2  # 180 -> 60, then 60 -> 20; the third loop is the failure
+    assert len(notes) == 2
     response = qwen_client.get(f"/v1/jobs/{job_id}/artifacts/transcript.json", headers=auth)
     assert response.status_code == 404
-    # Both sessions were told to go: stdin closed, and each fake exits on EOF.
     assert [line["op"] for line in lines(sent["asr"])][0] == "load"
-
-
-# -------------------------------------------------------------------- the Mac
 
 
 def test_the_mac_runs_mlx_audio_one_piece_at_a_time_with_the_same_document(

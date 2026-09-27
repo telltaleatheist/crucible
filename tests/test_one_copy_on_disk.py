@@ -1,11 +1,3 @@
-"""One copy of every set of weights on disk (Owen, 2026-09-24: "lets reduce it to
-a single copy of everything").
-
-`zeroshot` and `higgs-default` sit on the Higgs base checkpoint at one pin and
-had each pulled 9.3 GB of it. A voice may now say `weights_of`, like a model or
-an asr model, and `zeroshot` says `higgs-default`.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,13 +1,3 @@
-"""`crucible/jobs/asr/qwen_worker.py`'s engine-free parts, in process.
-
-The worker's engines (vLLM, mlx-audio) cannot run here, and the end-to-end API
-tests use a fake in their place (`tests/test_asr_qwen.py`). What CAN be tested
-on any machine is everything the two engines share, and it is where a wrong
-number would move every timestamp: where the pieces are cut, what the wav
-files hold, what prompt vLLM is given, and that a transcribe request is decoded
-in batches of the manifest's size and answered in order.
-"""
-
 from __future__ import annotations
 
 import io
@@ -24,7 +14,6 @@ RATE = worker.SAMPLE_RATE
 
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
-    """The worker's fd 1, as a buffer a test can read."""
     buffer = io.StringIO()
     monkeypatch.setattr(worker.workerio, "_RESULTS", buffer)
     return buffer
@@ -35,7 +24,6 @@ def messages(buffer: io.StringIO) -> list[dict]:
 
 
 def _speech(seconds: float, quiet: list[tuple[float, float]]) -> numpy.ndarray:
-    """A loud signal with silent stretches at the stated places."""
     samples = numpy.full(int(seconds * RATE), 0.5, dtype=numpy.float32)
     samples[::2] = -0.5
     for start, end in quiet:
@@ -48,14 +36,11 @@ def test_a_short_input_is_one_piece() -> None:
 
 
 def test_the_cut_lands_in_the_quiet_before_the_limit_and_never_past_it() -> None:
-    """The boundary is found in the 10 s BEFORE the nominal cut, so no piece is
-    longer than the limit the aligner, the budget and the context were sized
-    for."""
     wav = _speech(400.0, [(174.0, 174.5), (355.0, 355.4)])
     spans = worker.split_points(wav, 180)
     assert spans[0][0] == 0 and spans[-1][1] == wav.shape[0]
     for (_, end), (start, _) in zip(spans, spans[1:]):
-        assert end == start  # no gap, no overlap
+        assert end == start
     first_cut = spans[0][1] / RATE
     assert 174.0 <= first_cut <= 174.5
     assert all((end - start) / RATE <= 180 for start, end in spans)
@@ -91,9 +76,6 @@ def test_a_wav_the_worker_did_not_write_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_vllm_prompt_is_the_repos_own_chat_template_with_the_language_forced() -> None:
-    """`chat_template.json` at the pinned revision: a system turn always, the
-    context verbatim before `<|im_end|>`, then `language English<asr_text>` as
-    qwen_asr 0.0.6's `_build_text_prompt` forces it."""
     assert worker.official_prompt("Verbatim. um, uh.", "English") == (
         "<|im_start|>system\nVerbatim. um, uh.<|im_end|>\n"
         "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n"

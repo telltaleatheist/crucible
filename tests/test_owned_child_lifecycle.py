@@ -1,4 +1,3 @@
-"""Real CPU subprocesses prove the private pipe runs ASGI/worker cleanup."""
 from __future__ import annotations
 
 import os
@@ -99,7 +98,6 @@ time.sleep(60)
             controller.terminate()
             controller.wait(5)
         if not (tmp_path / "cleaned").exists():
-            # Only these test-owned fixture pids, never a process-name sweep.
             for name in ("worker.pid", "engine.pid"):
                 if (tmp_path / name).exists():
                     try:

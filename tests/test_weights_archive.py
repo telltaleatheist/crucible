@@ -1,16 +1,3 @@
-"""`weights.pull_archive` — one file out of a shared repo, verified and unpacked.
-
-The second shape of pull, and it exists because of how a real repo is laid out
-rather than because somebody wanted a second shape: every RVC model Owen has
-published is a `.tar.gz` under `rvc/` in ONE HuggingFace repo alongside six others
-and the XTTS weights, so a snapshot download would fetch about 800 MB to get at
-80 (`crucible/rvcmodels.py`).
-
-Nothing here reaches the network. `hf_hub_download` is replaced with a function
-that writes a tarball this test built, which is what the real one does and all
-this module needs from it.
-"""
-
 from __future__ import annotations
 
 import io
@@ -55,7 +42,6 @@ def config(home: Path):
 
 
 def build_archive(tmp_path: Path, members: dict[str, bytes]) -> Path:
-    """A gzipped tar holding exactly these paths."""
     path = tmp_path / "archive.tar.gz"
     with tarfile.open(path, "w:gz") as handle:
         for name, payload in members.items():
@@ -76,7 +62,6 @@ def build_link_archive(tmp_path: Path) -> Path:
 
 
 def serve(monkeypatch: pytest.MonkeyPatch, archive: Path) -> list[dict]:
-    """Replace `hf_hub_download` with one that copies `archive` into place."""
     import huggingface_hub
 
     calls: list[dict] = []
@@ -105,9 +90,6 @@ MEMBERS = {
 }
 
 
-# ------------------------------------------------------------------ it works
-
-
 def test_one_file_is_fetched_not_the_whole_repo(
     config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,27 +97,20 @@ def test_one_file_is_fetched_not_the_whole_repo(
     spec = manifest.spec(FAKE_BACKEND.kind)
     archive = build_archive(tmp_path, MEMBERS)
     calls = serve(monkeypatch, archive)
-    # The manifest pins the digest of the REAL archive; this test built its own,
-    # so the pin is swapped for that one. Everything else about the spec — the
-    # repo, the revision, the path inside it — is the shipped manifest's.
     spec = replace(spec, archive_sha256=weights.sha256_of(archive))
 
     result = weights.pull_archive(config, manifest, spec)
     assert len(calls) == 1
     assert calls[0]["filename"] == "rvc/deathstalker_rvc_v1.tar.gz"
     assert calls[0]["revision"] == spec.revision
-    # And what landed is a whole URVC_MODELS_DIR root, which is what
-    # `jobs/rvc._stage_models` goes looking for.
     model_dir = result.path / "rvc" / "voice_models" / "deathstalker_rvc_v1"
     assert (model_dir / "deathstalker_rvc_v1.pth").read_bytes() == b"checkpoint"
-    # The staging directory does not survive the unpack.
     assert not (result.path / ".crucible-archive").exists()
 
 
 def test_the_stamp_is_the_same_shape_a_snapshot_pull_writes(
     config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Which is what lets `installed` read either without knowing which ran."""
     manifest = load_rvc_manifest(MODEL)
     spec = manifest.spec(FAKE_BACKEND.kind)
     archive = build_archive(tmp_path, MEMBERS)
@@ -169,14 +144,9 @@ def test_a_second_pull_does_not_refetch(
     assert len(calls) == 1
 
 
-# ----------------------------------------------------------------- it refuses
-
-
 def test_a_digest_mismatch_refuses_and_unpacks_nothing(
     config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A truncated or substituted checkpoint converts a whole book into
-    something subtly wrong and says nothing about it."""
     manifest = load_rvc_manifest(MODEL)
     spec = manifest.spec(FAKE_BACKEND.kind)
     serve(monkeypatch, build_archive(tmp_path, MEMBERS))
@@ -208,7 +178,6 @@ def test_a_member_that_escapes_the_target_is_refused(
 def test_a_link_member_is_refused(
     config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A weights archive is files; a link is a way to write somewhere else."""
     manifest = load_rvc_manifest(MODEL)
     spec = manifest.spec(FAKE_BACKEND.kind)
     archive = build_link_archive(tmp_path)
@@ -220,8 +189,6 @@ def test_a_link_member_is_refused(
 
 
 def test_a_refusal_names_the_command_for_this_family(config) -> None:
-    """`crucible models pull sigma` would send its reader to a command that
-    tells them there is no such model."""
     manifest = load_rvc_manifest("sigma")
     spec = manifest.spec(FAKE_BACKEND.kind)
     with pytest.raises(weights.WeightsError) as caught:

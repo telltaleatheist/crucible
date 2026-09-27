@@ -1,14 +1,3 @@
-"""What the command line gained with `align` and `rvc`.
-
-Two flags, two more worker envs, the aligner joining the one namespace of model
-ids, and `crucible rvc` — a command of its own, because an RVC model's weights
-are one archive fetched by name rather than a repo snapshot, so `crucible models
-pull` could not serve one.
-
-`crucible init` refuses on win32 by design, so like `tests/test_cli.py` these run
-on Linux (in WSL on Owen's PC) and not on Windows.
-"""
-
 from __future__ import annotations
 
 import json
@@ -42,9 +31,6 @@ def mac(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
 
 
-# --------------------------------------------------------------------- init
-
-
 def test_init_records_both_flags(home: Path, viable: None) -> None:
     assert cli.main(["init", "--enable-align", "--enable-rvc"]) == 0
     config = load_config(home)
@@ -59,21 +45,9 @@ def test_both_are_off_unless_asked_for(home: Path, viable: None) -> None:
     assert config.enable_rvc is False
 
 
-# ------------------------------------------------------------------- doctor
-
-
 def test_doctor_reports_each_missing_worker_env_once(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Three worker envs now, and each one gets exactly one row and one problem.
-
-    The "once" is the point, and it is not hypothetical: `_doctor_report` had the
-    llm env's report nested INSIDE this loop, where with one worker type it never
-    ran at all and with three it would have written the same row three times and
-    appended the same problem three times. `fix(doctor)` took it out for its own
-    reason — it was also a TypeError — and this is the test that keeps it out as
-    the number of worker types grows.
-    """
     assert cli.main(["init", "--enable-align", "--enable-rvc", "--enable-asr"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor", "--json"]) == 1
@@ -82,7 +56,6 @@ def test_doctor_reports_each_missing_worker_env_once(
     assert sorted(envs) == ["align", "asr", "rvc"]
     assert "crucible install align" in envs["align"]["detail"]
     assert "crucible install rvc" in envs["rvc"]["detail"]
-    # The llm env is off, so it is neither reported nor complained about.
     assert report["llm_env"] is None
     assert not [p for p in report["problems"] if p.startswith("llm_env")]
 
@@ -100,36 +73,20 @@ def test_doctor_says_nothing_about_them_when_they_are_off(
     assert types["rvc"]["enabled"] is False
 
 
-# ------------------------------------------------------------------ install
-
-
 def test_align_is_installable_and_rvc_is_installable(viable: None) -> None:
-    """Both are worker envs, which is a fact about the SHAPE of their work."""
     assert "align" in cli.INSTALLABLE_JOB_TYPES
     assert "rvc" in cli.INSTALLABLE_JOB_TYPES
     assert set(jobenv.WORKER_JOB_TYPES) == {"align", "asr", "rvc"}
 
 
 def test_every_worker_type_has_a_mac_recipe_now(mac: None) -> None:
-    """`align` joined `rvc` on 2026-09-14, and `asr` came with it.
-
-    All three recipes are freezes of envs that exist on Owen's Mac: `rvc`'s is
-    the one `crucible install rvc` built there, `align`'s is BookForge's
-    `qwen-align`, and `asr`'s is the scratch env the seven mlx-whisper
-    manifests were measured in.
-    """
     for job_type in jobenv.WORKER_JOB_TYPES:
         recipe = jobenv.recipe_for(jobenv.worker_env(job_type, FAKE_MAC_BACKEND.kind))
         assert recipe.is_file(), job_type
         assert jobenv.recipe_pins(recipe), job_type
-    # And a backend with no recipe at all still refuses by name, which is what
-    # the Mac used to be the example of.
     with pytest.raises(jobenv.EnvError) as caught:
         jobenv.recipe_for(jobenv.worker_env("align", "llama-windows"))
     assert "no align env recipe for backend 'llama-windows'" in str(caught.value)
-
-
-# ------------------------------------------------------------------- models
 
 
 def test_the_aligner_joins_the_one_namespace_of_model_ids(
@@ -141,13 +98,8 @@ def test_the_aligner_joins_the_one_namespace_of_model_ids(
     rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)}
     assert "qwen3-aligner" in rows
     assert rows["qwen3-aligner"]["hf_repo"] == "Qwen/Qwen3-ForcedAligner-0.6B"
-    # An aligner has no context. Null means "this model has no such knob".
     assert rows["qwen3-aligner"]["context_default"] is None
-    # And an RVC model is NOT in that namespace: its weights are an archive.
     assert not any(row.startswith("deathstalker") for row in rows)
-
-
-# ---------------------------------------------------------------------- rvc
 
 
 def test_rvc_list_shows_every_manifest_and_where_it_stands(
@@ -179,7 +131,6 @@ def test_pulling_an_unknown_rvc_model_names_what_ships(
 def test_an_rvc_id_and_a_voice_id_may_be_the_same_word(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`sigma` is both, and the two must not be able to collide on disk."""
     from crucible.rvcmodels import load_rvc_manifest
     from crucible.voices import load_voice
 

@@ -1,14 +1,3 @@
-"""What an install DOES about a recipe that moved, and when it refuses instead.
-
-PHASE20-CODE-NOT-ENVIRONMENTS.md section 4: an env is brought to its recipe by
-pip, INTO the venv that is already there, and `--force` is the only thing left
-that deletes one. These tests hold the line between the edits pip acting on
-this recipe will make true and the two it will not — an `--index-url` that
-moves which wheel a satisfied pin resolves to, and a requirement that vanished
-and stays installed — because a stamp written after either of those would claim
-bytes nobody installed.
-"""
-
 from __future__ import annotations
 
 import json
@@ -36,9 +25,6 @@ def test_a_comment_only_edit_is_not_a_reason_to_rebuild() -> None:
 
 
 def test_a_moved_version_pin_is_left_to_the_package_check() -> None:
-    # `env_status` compares every pin against `pip list`, so a pin that moved
-    # is already answered exactly; saying so twice is how the two answers start
-    # to disagree.
     assert _changes(BASE, BASE.replace("2.5.1", "2.6.0")) == []
 
 
@@ -47,12 +33,6 @@ def test_a_moved_direct_reference_is_left_to_the_package_check() -> None:
 
 
 def test_a_changed_index_url_is_refused_because_the_pin_would_still_match() -> None:
-    """The case the whole refusal exists for.
-
-    `torch==2.5.1` from PyPI and from the cu121 index are the same version
-    string and different binaries - one of them with no CUDA in it at all - and
-    nothing `env_status` reads afterwards can tell which one is installed.
-    """
     after = BASE.replace("cu121", "cu124")
     problems = _changes(BASE, after)
     assert problems, "a changed index URL must never be re-stamped away"
@@ -60,7 +40,6 @@ def test_a_changed_index_url_is_refused_because_the_pin_would_still_match() -> N
 
 
 def test_a_dropped_requirement_is_refused_even_though_every_check_passes() -> None:
-    """`env_status` asks what is PRESENT, never what is extra."""
     after = BASE.replace("torch==2.5.1\n", "")
     assert _changes(BASE, after) == ["r.txt no longer requires 'torch', which is still installed"]
 
@@ -70,11 +49,7 @@ def test_an_added_requirement_is_fine_because_absence_would_have_failed() -> Non
     assert _changes(BASE, after) == []
 
 
-# ----------------------------------------------------------- the install door
-
-
 def _env(tmp_path: Path, recipe_text: str | None, *, environment: str | None) -> tuple[Path, Path]:
-    """A stamped env directory and its recipe, both on disk."""
     directory = tmp_path / "envs" / "tts-higgs-v3"
     directory.mkdir(parents=True)
     recipe = tmp_path / "r.txt"
@@ -113,9 +88,6 @@ def test_a_stamp_without_the_recipe_text_is_built_again(tmp_path: Path) -> None:
 
 
 def test_an_index_url_change_refuses_rather_than_pipping(tmp_path: Path) -> None:
-    """THE CASE THE REFUSAL EXISTS FOR. `torch==2.5.1` from PyPI and from the
-    cu121 index are the same version string and different binaries, and pip run
-    over the new recipe finds the pin already satisfied and does nothing."""
     directory, recipe = _env(tmp_path, BASE, environment=jobenv.environment_sha256(
         _written(tmp_path / "before.txt", BASE)
     ))
@@ -127,8 +99,6 @@ def test_an_index_url_change_refuses_rather_than_pipping(tmp_path: Path) -> None
 
 
 def test_a_moved_pin_is_pip_into_the_venv_that_is_there(tmp_path: Path) -> None:
-    """The ordinary drift, and the whole ruling: the answer is pip over the
-    recipe, never a delete and rebuild."""
     before = _written(tmp_path / "before.txt", BASE)
     directory, recipe = _env(
         tmp_path, BASE, environment=jobenv.environment_sha256(before)
@@ -143,8 +113,6 @@ def test_a_moved_pin_is_pip_into_the_venv_that_is_there(tmp_path: Path) -> None:
 def test_a_moved_direct_reference_is_that_one_line_and_nothing_else(
     tmp_path: Path,
 ) -> None:
-    """The 1b case: the environment half hashes the same, so the 13 GB around
-    narrator did not move and is not reinstalled."""
     before = _written(tmp_path / "before.txt", BASE)
     directory, recipe = _env(
         tmp_path, BASE, environment=jobenv.environment_sha256(before)
@@ -169,8 +137,6 @@ def test_an_env_that_matches_its_recipe_is_left_alone(tmp_path: Path) -> None:
 def test_a_wrong_backend_is_the_one_drift_that_is_genuinely_a_rebuild(
     tmp_path: Path,
 ) -> None:
-    """A venv full of one backend's wheels is not re-pointed at another's by
-    pip, so this refuses by name instead of pretending it can be fixed."""
     directory, recipe = _env(tmp_path, BASE, environment="0" * 64)
     stamp = directory / "crucible-env.json"
     record = json.loads(stamp.read_text(encoding="utf-8"))
@@ -183,7 +149,6 @@ def test_a_wrong_backend_is_the_one_drift_that_is_genuinely_a_rebuild(
 
 
 def test_a_half_finished_install_is_built_again(tmp_path: Path) -> None:
-    """No stamp means nothing downstream has ever trusted this venv."""
     directory = tmp_path / "envs" / "tts-higgs-v3"
     directory.mkdir(parents=True)
     recipe = _written(tmp_path / "r.txt", BASE)
@@ -193,8 +158,6 @@ def test_a_half_finished_install_is_built_again(tmp_path: Path) -> None:
 
 
 def test_the_normalisation_is_the_one_the_hash_uses(tmp_path: Path) -> None:
-    """A stamp whose text says CRLF and whose hash was taken over LF disagrees
-    with itself, and the disagreement only shows up on the other platform."""
     recipe = tmp_path / "r.txt"
     recipe.write_bytes(BASE.replace("\n", "\r\n").encode())
     assert jobenv.recipe_text(recipe) == BASE

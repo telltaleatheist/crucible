@@ -1,4 +1,3 @@
-"""Installed lifecycle: test observable failures, not just launch arguments."""
 import json
 from pathlib import Path
 import threading
@@ -72,7 +71,6 @@ def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatc
     host = Host(context)
     assert host.local_status()["state"] == "stopped"
     assert engine_token(context) == "secret"
-    # The watch must not call any recovery method on this deliberately tiny watcher.
     thread = threading.Thread(target=host.watch)
     thread.start()
     host._stop.set()
@@ -227,7 +225,6 @@ def test_controller_failure_always_has_one_terminal_event(tmp_path, already_emit
 
 
 def _engine_serving(monkeypatch, tmp_path, version):
-    """A fake paired engine that reports `version` from /v1/info."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.endswith("ping"):
@@ -270,14 +267,6 @@ def _config(home: Path, body: str) -> Path:
 
 
 def _stub_the_service_path(monkeypatch):
-    """HERMETIC ON PURPOSE, and only as far as the systemd call.
-
-    `act` defaults `home` to the real `crucible_home()` and then drives
-    systemctl for real; an earlier draft of these tests did exactly that and
-    passed by touching the live engine. What is stubbed is the service
-    mechanism lookup and the start itself — never the ownership question the
-    guard asks, which reads the config file each test writes.
-    """
     from types import SimpleNamespace
     from crucible import service as service_module
 
@@ -287,18 +276,7 @@ def _stub_the_service_path(monkeypatch):
 
 
 def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp_path):
-    """The stale-process defect, measured 2026-09-16.
-
-    `systemctl enable --now` does nothing to an already-running unit, so an
-    upgrade that rewrote ExecStart left the OLD executable serving while the
-    install reported success end to end. Whatever the route to it, an engine
-    answering with a version this installation did not install is not a start
-    that worked.
-    """
     server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
-    # THE CONFIG IS A REAL FILE, because the guard reads one: `own_engine_backend`
-    # answers "does this installation run an engine at all" out of the document,
-    # and a stub in its place would pin the answer instead of the reading.
     _config(tmp_path, "[server]\nname = 'expected'\n[backend]\nkind = 'cuda-linux'\n")
     _stub_the_service_path(monkeypatch)
     try:
@@ -312,17 +290,6 @@ def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp
 
 
 def test_an_orchestrator_only_installation_judges_nobodys_engine(monkeypatch, tmp_path):
-    """Owen's PC, exactly, on the first real `ship.sh patch --deploy` (1.0.3).
-
-    The Windows half's `config.toml` is an ORCHESTRATOR's — `[orchestrator]
-    distro = "Ubuntu"` and no `[server]` — because the engine on that machine
-    lives in the guest and belongs to the guest's installation. `load_config`
-    raised on it, the draft read the raise as "own backend unknown" and treated
-    unknown as OURS, so the 1.0.3 host compared the guest's 1.0.2 against
-    itself and refused the whole install: the chicken-and-egg the guard's own
-    comment records fixing, back through another door. An installation with no
-    `[server]` section runs no engine, so there is nothing here for it to judge.
-    """
     server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
     _config(tmp_path, '[orchestrator]\ndistro = "Ubuntu"\n')
     _stub_the_service_path(monkeypatch)
@@ -337,11 +304,6 @@ def test_an_orchestrator_only_installation_judges_nobodys_engine(monkeypatch, tm
 def test_a_config_that_cannot_be_read_is_refused_by_name_and_never_read_as_ours(
     monkeypatch, tmp_path
 ):
-    """An unreadable config is not a verdict about whose engine is answering.
-
-    "We do not know" and "it is not ours" are different sentences, and only the
-    second one is a judgement this installation is entitled to make.
-    """
     server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
     _config(tmp_path, "[server\nname = 'unterminated'\n")
     _stub_the_service_path(monkeypatch)
@@ -355,7 +317,6 @@ def test_a_config_that_cannot_be_read_is_refused_by_name_and_never_read_as_ours(
 
 
 def test_an_engine_too_old_to_report_a_version_is_not_called_stale(monkeypatch, tmp_path):
-    """Absent is not mismatched; refusing it would invent a fault from a missing key."""
     server, thread = _engine_serving(monkeypatch, tmp_path, None)
     try:
         observed = local.status(tmp_path)
@@ -365,12 +326,6 @@ def test_an_engine_too_old_to_report_a_version_is_not_called_stale(monkeypatch, 
         server.shutdown(); server.server_close(); thread.join()
 
 def test_a_refusal_behind_an_http_error_still_names_itself():
-    """`HTTP Error 409: Conflict` is not a diagnosis; the body was.
-
-    Measured 2026-09-17: an upgrade refused with exactly that line, and the
-    reason the door had written into the response - which stop had failed and
-    why - was thrown away by the last `str(exc)` on the path.
-    """
     import io
     import urllib.error
 
@@ -387,7 +342,6 @@ def test_a_refusal_behind_an_http_error_still_names_itself():
 
 
 def test_a_failure_with_no_structured_body_is_reported_as_it_came():
-    """No invention. A refusal that said nothing parseable says what it said."""
     import io
     import urllib.error
 

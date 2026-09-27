@@ -1,4 +1,3 @@
-"""CPU-only lifecycle boundaries; no installed service or real UI is touched."""
 import sys
 import threading
 import json
@@ -151,8 +150,6 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
         assert not stopped and not local_calls
         return
     local.shutdown()
-    # #35 (2026-09-26): only a native child is stopped; a guest serves on
-    # through the Windows swap.
     assert local_calls == (["stop"] if owner == "child" else [])
     assert stopped == [True]
     assert not any("/local/" in url for url in calls)
@@ -249,21 +246,14 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("backend,raises", [
-    ("cuda-linux", False),      # a guest unit: outliving its controller is normal
+    ("cuda-linux", False),
     ("mlx-darwin", False),
-    ("llama-windows", True),    # the controller's OWN child, still answering
-    (None, True),               # could not be asked: keep the refusal
+    ("llama-windows", True),
+    (None, True),
 ])
 def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
     monkeypatch, tmp_path, backend, raises
 ):
-    """A WSL unit is MEANT to survive the Windows swap; a native child is not.
-
-    Measured 2026-09-16: this refusal stopped an upgrade on a machine whose
-    engine was a healthy WSL guest, because the check asked whether an engine
-    was answering and not whether it was one this controller should have
-    stopped.
-    """
     from crucible.host import app
 
     monkeypatch.setattr(local.sys, "platform", "win32")
@@ -274,7 +264,7 @@ def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
 
     def request(url, **kw):
         if ":7101/" in url:
-            raise URLError(ConnectionRefusedError())   # no controller at all
+            raise URLError(ConnectionRefusedError())
         if url.endswith("/v1/ping"):
             return {"crucible": True}
         if url.endswith("/v1/info"):
@@ -292,20 +282,12 @@ def test_an_engine_outliving_its_controller_is_only_a_fault_when_native(
 
 
 @pytest.mark.parametrize("gone_as", [
-    ConnectionRefusedError(),                 # the port stopped accepting
-    ConnectionResetError(),                   # the held socket was torn down
+    ConnectionRefusedError(),
+    ConnectionResetError(),
 ])
 def test_a_controller_that_quit_is_gone_however_the_socket_ended(
     monkeypatch, tmp_path, gone_as
 ):
-    """A refusal and a reset both mean the controller went. Only one was read.
-
-    Measured 2026-09-16 on the 0.6.3 -> 0.6.5 upgrade: the orchestrator was
-    asked to quit, DID quit, and tore down the socket it was holding as it
-    exited. That is WinError 10054, which was not in the list, so a clean
-    shutdown was reported as `controller_shutdown_unknown` and the upgrade
-    stopped on a machine with nothing wrong with it.
-    """
     from crucible.host import app
 
     monkeypatch.setattr(local.sys, "platform", "win32")
@@ -337,26 +319,14 @@ def test_a_controller_that_quit_is_gone_however_the_socket_ended(
 def test_a_guest_of_another_version_does_not_fail_this_installations_start(
     monkeypatch, tmp_path
 ):
-    """A Windows host and its WSL guest are TWO installations, upgraded apart.
-
-    Measured 2026-09-16: the first draft of the stale-engine guard compared the
-    guest's version to the Windows host's and refused the 0.6.5 install because
-    the guest it had just started was still 0.6.3 — a chicken-and-egg in which
-    neither side could go first. An engine this installation did not install is
-    not its to judge, the same distinction `owner=found` draws.
-    """
     monkeypatch.setattr(local.sys, "platform", "linux")
     monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
     monkeypatch.setattr(local, "connection", lambda home: ("http://127.0.0.1:7100", "test", "secret"))
 
     class Config:
-        backend_kind = "llama-windows"      # what THIS installation serves
+        backend_kind = "llama-windows"
 
     monkeypatch.setattr(local, "load_config", lambda home: Config())
-    # THE SAME FACT IN THE FILE, because the guard reads the document rather
-    # than a Config: `own_engine_backend` answers "what does this installation
-    # serve" straight out of `config.toml`, so a stub alone would leave the
-    # question being asked of a file that is not there.
     (tmp_path / "config.toml").write_text(
         "[server]\nname = 'this-one'\n[backend]\nkind = 'llama-windows'\n",
         encoding="utf-8",

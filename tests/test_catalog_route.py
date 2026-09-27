@@ -1,11 +1,3 @@
-"""`GET /v1/catalog` — one row per subject this backend can hold.
-
-PHASE13-OPERATOR.md section 3.2. What these tests hold to is that every field is
-DERIVED: each assertion names the thing that owns the fact and checks the row
-agrees with it, rather than pinning a literal the route could satisfy by
-carrying its own copy.
-"""
-
 from __future__ import annotations
 
 import json
@@ -36,9 +28,6 @@ def by_id(rows: list[dict[str, Any]], kind: str, subject_id: str) -> dict[str, A
     found = [r for r in rows if r["kind"] == kind and r["id"] == subject_id]
     assert len(found) == 1, f"{kind}/{subject_id} appears {len(found)} times"
     return found[0]
-
-
-# ------------------------------------------------------------------- shape
 
 
 def test_every_kind_is_present(client: TestClient, auth: dict[str, str]) -> None:
@@ -82,9 +71,6 @@ def test_a_row_carries_exactly_the_contract_s_fields(
 
 def test_the_catalog_needs_the_token(client: TestClient) -> None:
     assert client.get("/v1/catalog").status_code == 401
-
-
-# --------------------------------------------------------------- derivation
 
 
 def test_the_model_rows_are_the_three_manifest_directories(
@@ -149,8 +135,6 @@ def test_expected_bytes_is_declared_where_a_file_is_named_and_null_otherwise(
         if row["kind"] in ("model", "voice") and row["shares_weights_of"] is None:
             assert row["expected_bytes"] is None, row["id"]
         elif row["kind"] == "model":
-            # An alias counts only its own files (PHASE22 section 2.9): 0 on a
-            # whole-repo backend, where it adds none; this fixture is cuda-linux.
             assert row["expected_bytes"] == 0, row["id"]
         else:
             assert isinstance(row["expected_bytes"], int) and row["expected_bytes"] > 0
@@ -179,7 +163,6 @@ def test_license_is_null_everywhere_because_no_manifest_declares_one(
 def test_a_subject_with_no_block_for_this_backend_is_absent(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """Not listed as unsupported — absent. Compared across the two backends."""
     with make_client(backend=FAKE_BACKEND) as client:
         on_pc = {(r["kind"], r["id"]) for r in fetch(client, auth)}
     with make_client(backend=FAKE_MAC_BACKEND) as client:
@@ -210,9 +193,6 @@ def _supports(kind: str, subject_id: str, backend_kind: str) -> bool:
     return loaders[kind]()[subject_id].supports(backend_kind)
 
 
-# ------------------------------------------------------------- installed-ness
-
-
 def test_installed_follows_the_stamp_weights_py_writes(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
@@ -234,7 +214,6 @@ def test_installed_follows_the_stamp_weights_py_writes(
 def test_a_stamp_at_another_revision_does_not_read_as_installed(
     make_client: Callable[..., TestClient], auth: dict[str, str], home: Path
 ) -> None:
-    """`weights.installed` owns this rule; the row inherits it rather than re-deciding."""
     directory = home / "models" / "qwen3.5-9b" / FAKE_BACKEND.kind
     directory.mkdir(parents=True)
     (directory / "crucible-pull.json").write_text(
@@ -254,9 +233,6 @@ def test_a_stamp_at_another_revision_does_not_read_as_installed(
         assert by_id(fetch(client, auth), "model", "qwen3.5-9b")["installed"] is False
 
 
-# ------------------------------------------------------------------ resident
-
-
 def test_resident_is_the_residency_s_own_answer(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
@@ -267,7 +243,7 @@ def test_resident_is_the_residency_s_own_answer(
             kind = "llm"
             id = "qwen3.5-9b"
 
-        client.app.state.residency._resident = _Resident()  # type: ignore[attr-defined]
+        client.app.state.residency._resident = _Resident()
         rows = fetch(client, auth)
         assert by_id(rows, "model", "qwen3.5-9b")["resident"] is True
         assert sum(1 for row in rows if row["resident"]) == 1
@@ -276,25 +252,16 @@ def test_resident_is_the_residency_s_own_answer(
 def test_a_voice_sharing_a_model_s_id_is_not_made_resident_by_it(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """The namespaces are separate, so the kind has to be compared too.
-
-    `sigma` is both a voice and an RVC model in this build, which is the
-    collision `crucible/weights.py` keeps apart on disk; the catalog has to keep
-    it apart on the wire.
-    """
     with make_client(enable_tts=True) as client:
 
         class _Resident:
             kind = "tts"
             id = "sigma"
 
-        client.app.state.residency._resident = _Resident()  # type: ignore[attr-defined]
+        client.app.state.residency._resident = _Resident()
         rows = fetch(client, auth)
         assert by_id(rows, "voice", "sigma")["resident"] is True
         assert by_id(rows, "rvc", "sigma")["resident"] is False
-
-
-# ------------------------------------------------------------------ refusal
 
 
 def test_a_catalog_that_cannot_be_read_refuses_whole(

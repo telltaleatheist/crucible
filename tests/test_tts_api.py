@@ -1,17 +1,3 @@
-"""`load-voice`, `unload-voice`, `GET /v1/voices`, and the shared residency.
-
-No GPU and no 8.5 GB of weights: the env, the weights and the card are stood up
-as the real code paths read them — a stamped venv, a stamped weights directory,
-monkeypatched nvidia-smi probes. What is *not* faked is any of the server's own
-logic: the preflight refusals, the exclusive lane, the event stream and the row
-producer are exactly what will run on the PC.
-
-Nothing here reaches the spawn. `crucible/engines/narrator.py` exists now and
-`tests/test_tts_render.py` drives it against `tests/fake_narrator.py`; this file
-keeps the half that never needed it — every refusal, every `/v1/voices` row, and
-the shared residency's behaviour across both kinds.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -37,14 +23,7 @@ from .fake_engine import FakeEngine
 VOICE = "deathstalker"
 OTHER_VOICE = "thirdreich"
 
-#: What the fixture recipe pins. `envs/tts/` is not in this build — the recipes
-#: are the next builder's, and pinning `narrator` needs a git sha rather than a
-#: version — so the tests point `$CRUCIBLE_RECIPES_DIR` at a fixture root instead
-#: of asserting against a file that does not exist yet.
 RECIPE_PINS = {"narrator": "0.1.0", "torch": "2.13.0"}
-
-
-# ------------------------------------------------------------------ fixtures
 
 
 @pytest.fixture
@@ -64,7 +43,6 @@ def tts_recipes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def fake_env(
     home: Path, tts_recipes: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
-    """A stamped `~/.crucible/envs/tts-higgs-v3` that `env_status` accepts."""
     spec = jobenv.tts_env("higgs-v3", FAKE_BACKEND.kind)
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
@@ -88,7 +66,6 @@ def fake_env(
 
 @pytest.fixture
 def fake_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp a voice as pulled at exactly the revision its manifest pins."""
 
     def stamp(voice_id: str) -> Path:
         spec = load_voice(voice_id).spec(FAKE_BACKEND.kind)
@@ -146,9 +123,6 @@ def rows(client: TestClient, auth: dict[str, str]) -> dict[str, dict[str, Any]]:
     return {row["id"]: row for row in response.json()}
 
 
-# -------------------------------------------------------------- /v1/voices
-
-
 def test_voices_is_refused_when_the_type_is_off(
     client: TestClient, auth: dict[str, str]
 ) -> None:
@@ -172,9 +146,6 @@ def test_a_voice_with_everything_in_place_is_loadable(
     assert row["language"] == "en"
     assert row["sample_rate"] == 24000
     assert row["max_chars"] == 800
-    # TWO rungs since 2026-09-14 — take 0 and the measured 0.7 — and the row
-    # carries the COUNT so a client can spread N candidates across the ladder
-    # without guessing where it ends.
     assert row["takes"] == 2
     assert row["needs_reference"] is False
     assert row["estimate_basis"] == "declared"
@@ -186,8 +157,6 @@ def test_a_voice_with_everything_in_place_is_loadable(
 def test_a_row_never_carries_the_sampling(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """Engine tuning is the server's; publishing it invites a client to send it
-    back (PHASE3-TTS.md section 2)."""
     fake_weights(VOICE)
     for row in rows(tts_client, auth).values():
         assert "sampling" not in row
@@ -210,8 +179,6 @@ def test_a_missing_env_is_the_reason_before_the_weights_are(
     auth: dict[str, str],
     tts_recipes: Path,
 ) -> None:
-    """An env nobody installed is a fact about this host, and it is reported
-    ahead of an 8.5 GB download the operator would otherwise start first."""
     with make_client(enable_tts=True) as client:
         row = rows(client, auth)[VOICE]
         assert row["loadable"] is False
@@ -239,7 +206,6 @@ def test_a_backend_this_host_is_not_gets_nulls_and_not_zeroes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A 0 estimate would read as "needs nothing" and an empty revision as a pin."""
     directory = tmp_path / "voices"
     directory.mkdir()
     (directory / "cuda-only.toml").write_text(
@@ -266,7 +232,6 @@ def test_a_backend_this_host_is_not_gets_nulls_and_not_zeroes(
 def test_info_carries_the_voice_rows_verbatim(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """One voice, one description; a client never reconciles two."""
     fake_weights(VOICE)
     info = tts_client.get("/v1/info", headers=auth).json()
     capability = [c for c in info["capabilities"] if c["job_type"] == "tts"]
@@ -277,12 +242,6 @@ def test_info_carries_the_voice_rows_verbatim(
 def test_the_voice_types_describe_installed_as_the_voices_route_does(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """`load-voice`, `unload-voice` and `tts` describe their voices with
-    DESIGN.md section 4's row — the one `resolve_model` and `crucible doctor`
-    read, since `/v1/info` carries `/v1/voices`' richer row instead — and that
-    row's `installed` is the same stamp `/v1/voices` reads, not a second
-    opinion (ARCHITECTURE.md R1). Per voice: one pulled voice does not make
-    the others installed, and pulled is not resident."""
     store = tts_client.app.state.store
     names = sorted(name for name, capability in ALL_JOB_TYPES.items() if capability == "tts")
     assert names == ["load-voice", "tts", "unload-voice"]
@@ -307,9 +266,6 @@ def test_the_voices_are_listed_in_id_order(
 ) -> None:
     listed = [row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()]
     assert listed == sorted(listed)
-
-
-# ------------------------------------------------------------ load refusals
 
 
 def test_an_unknown_voice_is_refused_before_the_job_exists(
@@ -379,7 +335,6 @@ def test_a_busy_accelerator_is_refused_by_name(
     fake_weights: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Crucible never evicts another process."""
     fake_weights(VOICE)
     monkeypatch.setattr(
         accelerator,
@@ -400,8 +355,6 @@ def test_a_full_card_is_refused_by_name(
 ) -> None:
     fake_weights(VOICE)
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    # Free memory below the 19 GB estimate, with nothing unattributed: the
-    # desktop allowance covers the difference, so this is memory and not a squat.
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (10 * GIB, 12 * GIB))
     response = submit(tts_client, auth, type="load-voice", model=VOICE)
     assert response.status_code == 409
@@ -421,22 +374,12 @@ def test_unknown_params_are_refused(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-# ------------------------------------------------- the zero-shot reference
-#
-# PHASE3-TTS.md section 5's amendment (2026-09-14). A zero-shot voice is the
-# base weights plus a recording: the weights are Crucible's and the CLIP is
-# the client's, so it travels on the load. Every refusal below is made before
-# the job is queued — the client can fix any of them without waiting for a
-# lane.
-
-
 ZEROSHOT = "zeroshot"
 
 
 def load_zeroshot(
     client: TestClient, auth: dict[str, str], **reference: Any
 ) -> dict[str, Any]:
-    """Submit a `load-voice` for the zero-shot voice and return the response."""
     params: dict[str, Any] = {}
     if reference:
         params["reference"] = reference
@@ -446,9 +389,6 @@ def load_zeroshot(
 def test_the_zeroshot_row_says_it_needs_a_reference(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
-    """On the row so a picker can show the clip field before the load is
-    refused, and derived from `kind` by the SERVER, because which kinds need
-    one is the server's rule and not a client's inference."""
     fake_weights(ZEROSHOT)
     listed = rows(tts_client, auth)
     assert listed[ZEROSHOT]["needs_reference"] is True
@@ -461,8 +401,6 @@ def test_a_zeroshot_load_with_no_reference_is_refused_by_name(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
     idle_card: None,
 ) -> None:
-    """Without one the engine would come up in the model's OWN voice — a
-    different speaker at 12 % of the narrator ceiling — under this id."""
     fake_weights(ZEROSHOT)
     response = load_zeroshot(tts_client, auth)
     assert response.status_code == 400
@@ -476,8 +414,6 @@ def test_a_reference_on_a_checkpoint_voice_is_refused_by_name(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
     idle_card: None,
 ) -> None:
-    """A checkpoint's voice is in its weights; narrator would clone from the
-    clip and leave those weights doing nothing, under their fingerprint."""
     fake_weights(VOICE)
     response = submit(
         tts_client, auth, type="load-voice", model=VOICE,
@@ -519,11 +455,6 @@ def test_a_reference_that_is_not_one_is_refused_by_name(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
     idle_card: None, reference: dict[str, Any], expected: str,
 ) -> None:
-    """One code for every way the clip itself is unusable, and the message
-    names the field. The 30-second cap is narrator's own
-    (`v3_served.MAX_REFERENCE_SECONDS`; vllm-omni answers HTTP 400 above it),
-    checked here so the refusal names the clip rather than arriving from
-    inside an engine that has already started."""
     fake_weights(ZEROSHOT)
     response = load_zeroshot(tts_client, auth, **reference)
     assert response.status_code == 400, response.json()
@@ -536,9 +467,6 @@ def test_a_reference_carrying_a_key_this_door_does_not_know_is_refused(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path],
     idle_card: None,
 ) -> None:
-    """`seconds` in particular: the server is holding the bytes and reads the
-    duration off the header, so a client stating one would be a second owner
-    of a fact the server already has."""
     fake_weights(ZEROSHOT)
     response = load_zeroshot(
         tts_client, auth, data=wav_base64(3.0), transcript="Rain.", seconds=3.0
@@ -547,23 +475,9 @@ def test_a_reference_carrying_a_key_this_door_does_not_know_is_refused(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-# ---------------------------------------------------------------- the spawn
-#
-# The engine seam is FILLED (`crucible/engines/narrator.py`), so what used to be
-# two tests asserting that a load refuses by name now lives in
-# `tests/test_tts_render.py`, which drives the real engine against the real wire:
-# a load that reaches narrator, one that dies before it is ready, and one whose
-# engine renders at a sample rate the manifest does not declare.
-
-
-# ---------------------------------------------------------------- unloading
-
-
 def test_unloading_a_voice_that_is_not_resident_is_refused(
     tts_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """Contract (c), unchanged by the clearance exception below: an unload for a
-    card that is simply empty is `voice_not_resident`, at the door."""
     response = submit(tts_client, auth, type="unload-voice", model=VOICE)
     assert response.status_code == 409
     error = response.json()["error"]
@@ -575,14 +489,6 @@ def test_unloading_a_voice_that_is_not_resident_is_refused(
 def test_unloading_the_voice_the_settlement_is_clearing_is_the_same_intent(
     tts_client: TestClient, auth: dict[str, str], tmp_path: Path
 ) -> None:
-    """T6's finding, on the voice door (PHASE15-HOST.md section 8, 2026-09-15).
-
-    A render's client hits this exactly as the page reader did: the settlement
-    clears the voice the moment the render job ends, and the client's own
-    `unload-voice` — the one in its `finally` — lands inside that moment.
-    Refusing it `engine_in_use` names the client's own tidying up as somebody
-    else's conversation on narrator's wire, which it is not.
-    """
     residency = tts_client.app.state.residency
     engine = FakeEngine(Path("python"), tmp_path / "engine-narrator.log")
     residency._resident = resident_voice(VOICE)
@@ -600,8 +506,6 @@ def test_unloading_the_voice_the_settlement_is_clearing_is_the_same_intent(
     )
     clearing.start()
     assert reached.wait(timeout=10), "the settlement never reached the engine"
-    # The state T6 arrived in, pinned: the card IS claimed, and by the holder
-    # whose name was in the 409. This is what makes the 202 below the fix.
     assert residency.claimed_by == SETTLEMENT_HOLDER
 
     response = submit(tts_client, auth, type="unload-voice", model=VOICE)
@@ -626,7 +530,6 @@ def test_unloading_the_voice_the_settlement_is_clearing_is_the_same_intent(
 def test_unloading_a_voice_under_a_holder_using_the_card_is_still_engine_in_use(
     tts_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """And the refusal keeps its whole meaning for a genuinely different holder."""
     residency = tts_client.app.state.residency
     residency._resident = resident_voice(VOICE)
     residency.claim("tts stream abc123", may_mutate=False)
@@ -641,16 +544,7 @@ def test_unloading_a_voice_under_a_holder_using_the_card_is_still_engine_in_use(
     assert residency.resident_voice is not None
 
 
-# --------------------------------------------------- the shared residency
-
-
 def resident_voice(voice_id: str) -> ResidentVoice:
-    """A ResidentVoice as `load_voice` would publish one, without an engine.
-
-    The engine is the only part that cannot run yet; the HOLDER's rules — one
-    resident of either kind, who may unload what — are complete, and this is how
-    they get tested tonight rather than after somebody writes narrator.py.
-    """
     manifest = load_voice(voice_id)
     spec = manifest.spec(FAKE_BACKEND.kind)
     return ResidentVoice(
@@ -690,13 +584,11 @@ def test_a_resident_voice_lights_up_its_own_row_only(
 def test_unload_voice_will_not_take_a_model_off_the_card(
     tts_client: TestClient, auth: dict[str, str], home: Path
 ) -> None:
-    """Ids are two namespaces; the holder unloads by id alone, so the job type
-    checks the kind before it asks."""
     from crucible.residency import ResidentModel
 
     residency = tts_client.app.state.residency
     residency._resident = ResidentModel(
-        model_id=VOICE,  # a MODEL that happens to share the voice's id
+        model_id=VOICE,
         backend=FAKE_BACKEND.kind,
         engine="vllm",
         engine_model_name=VOICE,
@@ -719,8 +611,6 @@ def test_unload_voice_will_not_take_a_model_off_the_card(
 def test_a_resident_voice_is_what_a_model_load_would_reclaim(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The point of one holder for both kinds: a voice's bytes count as free to
-    an incoming model exactly as a model's would."""
     from crucible.config import load_config, write_config
 
     write_config(
@@ -747,7 +637,6 @@ def test_a_resident_voice_is_what_a_model_load_would_reclaim(
     holder._resident = resident_voice(VOICE)
     assert holder.resident_kind == KIND_TTS
     assert holder.reclaimable_bytes() == 19_000_000_000
-    # ...and zero when the thing asking IS the resident, which is a reload.
     assert holder.reclaimable_bytes(excluding=VOICE) == 0
     assert holder.is_resident(KIND_TTS, VOICE) is True
     assert holder.is_resident(KIND_LLM, VOICE) is False
@@ -756,8 +645,6 @@ def test_a_resident_voice_is_what_a_model_load_would_reclaim(
 def test_the_openai_proxy_does_not_see_a_voice_as_a_model(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_env: Path
 ) -> None:
-    """narrator answers no OpenAI route, so a chat request gets the same honest
-    `model_not_resident` it gets on an empty card."""
     with make_client(enable_llm=True, enable_tts=True) as client:
         client.app.state.residency._resident = resident_voice(VOICE)
         listed = client.get("/v1/openai/models", headers=auth).json()
@@ -789,7 +676,6 @@ def test_unload_model_will_not_take_a_voice_off_the_card(
 def test_one_holder_serves_both_job_types(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_env: Path
 ) -> None:
-    """"Loading a voice unloads a model" is only true if they share the holder."""
     with make_client(enable_llm=True, enable_tts=True) as client:
         store = client.app.state.store
         holder = client.app.state.residency
@@ -803,12 +689,6 @@ def test_a_render_with_no_ffmpeg_is_refused_before_it_is_queued(
     fake_weights: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refused by the same name and through the same probe `asr` uses.
-
-    It lives here rather than beside the rest of the render tests because those
-    all encode a real FLAC and are skipped on a machine with no ffmpeg — and a
-    machine with no ffmpeg is exactly where this refusal has to be right.
-    """
     from crucible import hosttools
 
     fake_weights("deathstalker")

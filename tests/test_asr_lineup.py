@@ -1,18 +1,3 @@
-"""Owen's asr lineup ruling of 2026-09-24, held where each half of it lives.
-
-*"the transcription job offers EXACTLY three models, which the caller picks:
-Whisper large-v3-turbo, Qwen3-ASR-1.7B, and Whisper tiny"* — every other whisper
-size removed, and each of the three ONE id on both backends.
-
-- The capability class's candidates are exactly those three on cuda-linux and
-  on mlx-darwin, best-first QWEN, TURBO, TINY (`crucible/capability.py` says
-  why that order).
-- Whatever nothing owns is REPORTED by `catalog.stranded_weights`, and never
-  deleted.
-- A transcript's provenance names the engine and the repo, because one id is
-  now two conversions (`AsrJobType.model_provenance`).
-"""
-
 from __future__ import annotations
 
 import json
@@ -30,8 +15,6 @@ from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
 BEST_FIRST = ["qwen3-asr-1.7b", "qwen3-asr-0.6b", "whisper-large-v3-turbo", "whisper-tiny"]
 
-#: The Mac also offers each Qwen's MLX port, right after it: the official engine
-#: first (Owen, 2026-09-24: *"if i want speed i can get it via mlx"*).
 BEST_FIRST_FOR = {
     "cuda-linux": BEST_FIRST,
     "mlx-darwin": [
@@ -51,7 +34,6 @@ def config(make_app: Callable[..., Any], home: Path) -> Config:
 def _stamp(
     home: Path, subject_id: str, backend: str, hf_repo: str, revision: str
 ) -> Path:
-    """A finished pull under `subject_id`, as `weights.pull` writes one."""
     directory = home / "models" / subject_id / backend
     directory.mkdir(parents=True)
     (directory / "model.bin").write_bytes(b"\0" * 1000)
@@ -74,21 +56,14 @@ def _stamp(
     return directory
 
 
-# ------------------------------------------------------------------ the three
-
-
 @pytest.mark.parametrize("backend", ["cuda-linux", "mlx-darwin"])
 def test_the_asr_class_offers_exactly_the_lineup_best_first(backend: str) -> None:
-    """Qwen, turbo, tiny on both machines as the same ids; the Mac adds the
-    MLX port second."""
     candidates = capability.BY_NAME["asr"].candidates(backend)
     assert [c.id for c in candidates] == BEST_FIRST_FOR[backend]
     assert set(BEST_FIRST_FOR["mlx-darwin"]) == ASR_LINEUP
 
 
 def test_the_mac_runs_the_official_qwen_package_and_the_port_under_its_own_id() -> None:
-    """The first live runs (2026-09-24): the official package is the default
-    on the Mac, and the faster MLX port is its own id, `-mlx`."""
     assert load_asr_manifest("qwen3-asr-1.7b").spec("mlx-darwin").engine == "qwen-asr"
     port = load_asr_manifest("qwen3-asr-1.7b-mlx")
     assert port.spec("mlx-darwin").engine == "mlx-audio"
@@ -104,8 +79,6 @@ def test_the_lineup_is_declared_in_the_build() -> None:
 def test_a_retired_size_is_reported_and_nothing_else_is(
     config: Config, home: Path
 ) -> None:
-    """The reconciler names what nothing owns — and only that: a declared id's
-    folder, and a folder not named for a backend, are none of its business."""
     retired = _stamp(
         home, "faster-whisper-large-v3", "cuda-linux", "Systran/faster-whisper-large-v3", "e" * 40
     )
@@ -123,14 +96,9 @@ def test_a_retired_size_is_reported_and_nothing_else_is(
 def test_a_model_this_build_does_not_declare_on_a_backend_is_stranded_there(
     config: Config, home: Path
 ) -> None:
-    """Not asr-only: the Mac-only 8-bit 27B's cuda-linux folder (its block was
-    removed on 2026-09-23) is the same kind of orphan."""
     _stamp(home, "qwen3.8-27b-8bit", "cuda-linux", "Qwen/whatever", "a" * 40)
     [row] = catalog.stranded_weights(config)
     assert (row["id"], row["backend"]) == ("qwen3.8-27b-8bit", "cuda-linux")
-
-
-# ------------------------------------------------------------ the provenance
 
 
 @pytest.mark.parametrize(
@@ -144,7 +112,6 @@ def test_a_model_this_build_does_not_declare_on_a_backend_is_stranded_there(
 def test_the_provenance_names_the_conversion_that_made_the_transcript(
     make_app: Callable[..., Any], home: Path, backend: Any, engine: str, hf_repo: str
 ) -> None:
-    """One id is two conversions since 2026-09-24, so the sidecar says which."""
     make_app(enable_asr=True, backend=backend)
     job_type = asr_job.AsrJobType(load_config(home), backend, frozenset)
     spec = load_asr_manifest("whisper-large-v3-turbo").spec(backend.kind)
@@ -157,12 +124,7 @@ def test_the_provenance_names_the_conversion_that_made_the_transcript(
     }
 
 
-# ------------------------------------------------------- one copy on disk
-
-
 def test_an_mlx_id_stores_in_its_official_siblings_folder(config: Config) -> None:
-    """2026-09-24: `qwen3-asr-0.6b-mlx` had pulled a second 1.88 GB copy of
-    `qwen3-asr-0.6b`'s checkpoint. An alias's folder IS its base's."""
     for alias_id, base_id in (
         ("qwen3-asr-1.7b-mlx", "qwen3-asr-1.7b"),
         ("qwen3-asr-0.6b-mlx", "qwen3-asr-0.6b"),
@@ -193,8 +155,6 @@ def test_an_asr_alias_pinned_to_other_bytes_is_refused(tmp_path: Path) -> None:
 def test_a_folder_left_under_an_alias_id_is_reported_stranded(
     config: Config, home: Path
 ) -> None:
-    """Before 2026-09-24 `qwen3-asr-0.6b-mlx` pulled its own copy. As an alias
-    it reads its base's folder, so that old copy is nobody's and doctor says so."""
     spec = load_asr_manifest("qwen3-asr-0.6b").spec("mlx-darwin")
     left = _stamp(home, "qwen3-asr-0.6b-mlx", "mlx-darwin", spec.hf_repo, spec.revision)
     rows = catalog.stranded_weights(config)

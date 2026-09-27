@@ -1,24 +1,3 @@
-"""The wheel carries everything a server reads. Built here, not assumed.
-
-THE DEFECT THIS EXISTS FOR, measured 2026-09-14: `pyproject.toml`'s
-`packages.find = ["crucible*"]` shipped the package and `crucible/ui/` and
-nothing else, while `models/ voices/ denoise/ rvc/ rvcbase/ align/ asr/ envs/`
-sat BESIDE the package in the checkout. Every developer install is
-`pip install -e .`, which makes the checkout the install and the gap
-invisible; the first machine to meet a real wheel — the Mac, which unpacks
-the phase-14 `server` pack — answered `catalog_unreadable` and
-`denoise_manifests_unreadable`. The pack's own smoke test is
-`crucible --version`, which does not read a manifest, so nothing noticed.
-
-So this file BUILDS A WHEEL and looks inside it, and then INSTALLS one in a
-throwaway venv and calls the readers. Not a glob over the source tree and not
-a read of `pyproject.toml`: a glob that silently matches nothing is precisely
-how this was broken, and a declaration is not a file.
-
-It SKIPS by name when `python -m build` is not importable, because that is a
-missing developer tool and not a defect in the package — CI installs it.
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -31,19 +10,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Every directory the server READS at run time, with one file each that the
-#: reader owning it needs. One row per resolver in `crucible/*.py`:
-#: `manifests_dir`, `voices_dir`, `denoise_manifests_dir`,
-#: `rvc_manifests_dir`, `rvc_base_dir`, `align_manifests_dir`,
-#: `asr_manifests_dir`, `recipes_dir`, and the operator page.
 REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/models", "qwen3.5-9b.toml"),
     ("crucible/voices", "mistborn.toml"),
-    # THE ENGINE'S OWN BASE ROWS (PHASE21 section 2.6). `higgs-default` and
-    # `zeroshot` used to be `crucible/voices/*.toml` and stood for this row;
-    # they moved here when "Crucible ships no voices" became true of voices,
-    # and a wheel without this file is a server with no zero-shot and no token
-    # default — the same invisible failure this file exists for.
     ("crucible/engines/higgs-v3", "base.toml"),
     ("crucible/denoise", "denoise-roformer.toml"),
     ("crucible/rvc", "sigma.toml"),
@@ -57,7 +26,7 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
 
 def _require_build() -> None:
     try:
-        import build  # noqa: F401
+        import build
     except ImportError:
         pytest.skip(
             "`python -m build` is not installed in this interpreter. The wheel "
@@ -68,7 +37,6 @@ def _require_build() -> None:
 
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """One wheel, built once for this file. `--no-isolation`: no network."""
     _require_build()
     out = tmp_path_factory.mktemp("wheel")
     completed = subprocess.run(
@@ -118,7 +86,6 @@ def test_core_wheel_installs_mlx_for_apple_silicon_backend_detection(built_wheel
 def test_every_directory_the_server_reads_is_inside_the_wheel(
     wheel_names: list[str],
 ) -> None:
-    """The whole of the 2026-09-14 defect, as one row per reader."""
     missing: list[str] = []
     for directory, example in REQUIRED_TREES:
         if not any(name.startswith(f"{directory}/") for name in wheel_names):
@@ -138,7 +105,6 @@ def test_every_directory_the_server_reads_is_inside_the_wheel(
 def test_every_manifest_in_the_checkout_is_in_the_wheel(
     wheel_names: list[str],
 ) -> None:
-    """Not a sample. A row added to `models/` and not shipped is the same bug."""
     inside = set(wheel_names)
     missing: list[str] = []
     for directory, _example in REQUIRED_TREES:
@@ -155,14 +121,6 @@ def test_every_manifest_in_the_checkout_is_in_the_wheel(
 def test_every_recipe_an_install_can_be_asked_for_travels(
     wheel_names: list[str],
 ) -> None:
-    """`crucible install <type>` reads `envs/<type>/<recipe>.txt` ON THE
-    MACHINE, out of the installed wheel.
-
-    It used to read them to BUILD a pack, on a runner, from a checkout — so a
-    recipe missing from the wheel cost a CI job. Since PHASE20 there is no
-    build and no checkout: the recipe is what pip is handed, so one missing
-    from the wheel is a job type that cannot be installed at all.
-    """
     from crucible import jobenv
     from crucible.voices import NARRATOR_ENGINE_SAMPLING
 
@@ -175,9 +133,6 @@ def test_every_recipe_an_install_can_be_asked_for_travels(
             try:
                 wanted.add(jobenv.recipe_for(jobenv.worker_env(job_type, backend_kind)))
             except jobenv.EnvError:
-                # No recipe for that backend is a FACT rather than a gap —
-                # `envs/asr/mlx-darwin.md` is prose saying CTranslate2 has no
-                # Metal backend — and a missing file cannot be in the wheel.
                 continue
     names = {path.resolve().relative_to(REPO_ROOT).as_posix() for path in wanted}
     missing = sorted(name for name in names if name not in wheel_names)
@@ -185,12 +140,6 @@ def test_every_recipe_an_install_can_be_asked_for_travels(
 
 
 def test_the_wheel_is_not_only_python_files(wheel_names: list[str]) -> None:
-    """The SHAPE of the bug, so a future `packages.find` cannot repeat it.
-
-    A wheel that is `.py` files and metadata and nothing else is exactly what
-    shipped; this is the assertion that fails the instant that happens again,
-    whatever the reason.
-    """
     data = [
         name
         for name in wheel_names
@@ -208,13 +157,6 @@ def test_the_wheel_is_not_only_python_files(wheel_names: list[str]) -> None:
 def test_an_INSTALLED_wheel_reads_its_own_catalog(
     built_wheel: Path, tmp_path: Path
 ) -> None:
-    """The end-to-end half: a venv, the wheel, and the readers that broke.
-
-    `pip install -e .` cannot prove this — under it the checkout IS the
-    install, which is the whole reason nobody noticed for a year. So the
-    wheel goes into a throwaway venv and the eight loaders are called there,
-    with a working directory that is not this checkout.
-    """
     environment = tmp_path / "venv"
     venv.create(environment, with_pip=True, symlinks=True)
     python = environment / "bin" / "python"

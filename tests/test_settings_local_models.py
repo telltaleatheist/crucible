@@ -1,21 +1,3 @@
-"""An app's own choice of local model, and the two ways it is refused.
-
-INTENT.md: *"BookForge chooses its voice models and other required
-capabilities. Foundry chooses its input-processing and language models."* The
-engine runs them and owns the arithmetic; this door is where the choice is
-made, so the two never have to guess at each other.
-
-The numbers here are the real ones a `cuda-linux` build ships:
-`qwen3.8-27b-4bit` at 20.1 GiB against the 23 GiB budget the shared fixture
-decides (26 GiB card, 3 GiB desktop allowance), and against 13 GiB on a smaller
-card where it does not fit.
-
-`qwen3.8-27b-8bit` is NOT among a cuda-linux build's choices at all since
-2026-09-23 — Owen: *"we shouldnt have an 8 bit 27b on here. waste of space,
-wont fit in the gpu"* — so choosing it there is `local_model_unknown`, the same
-refusal as any id the build does not offer, not a does-not-fit.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Callable
@@ -44,30 +26,16 @@ def test_the_document_offers_every_selectable_class_and_null_for_automatic(setti
     body = document(settings_client, auth)
     assert body["local_models"]["translate"] is None
     assert body["local_models"]["tts"] is None
-    # `echo` has nothing to choose between, so it is absent rather than null:
-    # null is "nobody chose", and that is a different claim from "there is no
-    # choice to make here".
     assert "echo" not in body["local_models"]
     assert "echo" not in body["local_model_choices"]
 
     offered = body["local_model_choices"]["translate"]
-    # THE 9B IS IN THIS LIST SINCE 2026-09-16, and this row is where Owen's
-    # ruling becomes a thing a person can click: *"bookforge/foundry should give
-    # the user the option of using 3.5:9b or 3.8:27b IF their system can manage
-    # it."* Foundry's settings card renders exactly this list, so its picker
-    # gains the option with no app change.
-    #
-    # Ordered best-first by declared size, which is why the 9B is LAST: the
-    # default is still the largest thing that fits, and preferring a 9B at bf16
-    # over a 27B at 4-bit for speed is a trade no arithmetic here can rank.
     assert [row["id"] for row in offered] == [
         "qwen3.8-27b-4bit",
         "qwen3.5-9b",
     ]
     assert [row["fits"] for row in offered] == [True, True]
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
-    # `installed` is a fact about this disk and every row carries it, so a
-    # chooser never has to infer "probably not" from a missing key.
     assert all(isinstance(row["installed"], bool) for row in offered)
 
 
@@ -81,35 +49,19 @@ def test_a_choice_is_kept_written_and_decided_on(settings_client, auth, home):
     assert response.status_code == 200
     assert response.json()["local_models"]["tts"] == "mistborn"
 
-    # Written, so it survives a restart...
     assert load_config(home).local_model("tts") == "mistborn"
-    # ...and DECIDED ON, so the capability row names the chosen voice rather
-    # than the one the best-first walk would have taken.
     rows = client.get("/v1/capability", headers=auth).json()["classes"]
     row = next(r for r in rows if r["capability"] == "tts")
     assert row["selected"] == "mistborn"
     assert row["enabled"] is True
     assert "was chosen" in row["reason"]
 
-    # AND THE CHOICE IS WHAT PREPARATION WILL FETCH. `tasks.py`'s `_resolve_need`
-    # reads exactly one thing to decide what a module owes — the RECORDED
-    # capability row's `selected` — so this assertion is the join between "an app
-    # chose a model" and "Crucible downloads that model". Owen, 2026-09-16: a
-    # model that is not installed may still be chosen, because the choice is the
-    # demand. Read off the file rather than the response, because a restarted
-    # server and the task runner both read the file.
     recorded = load_config(home).capability
     assert recorded is not None
     assert recorded.row("tts").selected == "mistborn"
 
 
 def test_a_model_that_is_not_installed_may_still_be_chosen(settings_client, auth, home):
-    """Owen, 2026-09-16: accept it; preparation is what downloads the weights.
-
-    Refusing here would force an app to install a model before it was allowed
-    to say it wanted one, which is backwards — the choice is the demand that
-    preparation reads.
-    """
     client = settings_client
     offered = document(client, auth)["local_model_choices"]["translate"]
     fitting = next(row for row in offered if row["fits"])
@@ -121,9 +73,6 @@ def test_a_model_that_is_not_installed_may_still_be_chosen(settings_client, auth
 
 
 def test_a_choice_that_does_not_fit_is_refused_with_the_arithmetic(make_client, auth, home):
-    # A 16 GiB card: 13 GiB to give once the 3 GiB desktop allowance is kept,
-    # and the 4-bit 27B needs 20.1. (This read the 8-bit on the 26 GiB card
-    # until the 8-bit stopped being offered on cuda-linux, 2026-09-23.)
     with make_client(enable_llm=True, capability=decided(total=16 * 1024 ** 3)) as client:
         response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-4bit"}})
         assert response.status_code == 409
@@ -137,17 +86,12 @@ def test_a_choice_that_does_not_fit_is_refused_with_the_arithmetic(make_client, 
             details["memory_bytes_estimate"] - details["available_bytes"]
         )
         assert details["shortfall_bytes"] > 0
-        # The numbers are in the sentence too, because the person who chose is
-        # the one who has to act on them.
         assert "20.1 GiB" in error["message"] and "13.0 GiB" in error["message"]
-        # A REFUSAL APPLIES NOTHING.
         assert load_config(home).local_model("translate") is None
         assert document(client, auth)["local_models"]["translate"] is None
 
 
 def test_the_8bit_27b_is_not_a_choice_on_cuda_linux(settings_client, auth, home):
-    """Not offered, so not refused for its size: the build has no cuda-linux
-    block for it, and it is answered exactly as an id the build does not ship."""
     client = settings_client
     response = put(client, auth, {"local_models": {"translate": "qwen3.8-27b-8bit"}})
     assert response.status_code == 400
@@ -167,7 +111,6 @@ def test_null_restores_the_automatic_decision(settings_client, auth, home):
     assert response.status_code == 200
     assert response.json()["local_models"]["tts"] is None
     assert load_config(home).local_model("tts") is None
-    # The table is gone from the file entirely, not left behind empty.
     assert "local_models" not in (home / "config.toml").read_text(encoding="utf-8")
     rows = client.get("/v1/capability", headers=auth).json()["classes"]
     assert next(r for r in rows if r["capability"] == "tts")["selected"] == "deathstalker"
@@ -196,14 +139,11 @@ def test_an_unknown_model_is_refused_and_names_what_there_was(settings_client, a
 
 
 def test_a_selection_is_measured_against_the_allowance_in_the_same_patch(settings_client, auth, home):
-    """One patch, applied in order: the allowance moves the budget the choice is checked against."""
     client = settings_client
-    # 20.1 GiB fits the 23 GiB budget, but not once 20 GiB is reserved for the desktop.
     response = put(client, auth, {
         "desktop_allowance_bytes": 20 * 1024 ** 3,
         "local_models": {"translate": "qwen3.8-27b-4bit"},
     })
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "local_model_does_not_fit"
-    # Neither half landed: the allowance is unchanged too.
     assert load_config(home).desktop_allowance_bytes == 3 * 1024 ** 3

@@ -1,16 +1,3 @@
-"""The `engine` subject, the file-aware pull, and `LlamaServerEngine`.
-
-PHASE15-HOST.md 3.10 and 7.4's items 1-3. What is provable without a card and
-without Windows — which is all of it except starting the binary, because
-every platform decision in these three modules takes the platform, the GPU
-vendor or the transport as an ARGUMENT rather than reading it.
-
-**Nothing here starts a llama-server, downloads anything, or touches a card.**
-The release is a fake fetch that writes a zip from bytes this file makes up;
-the hub is `tests/fake_hub.py`, which honours `allow_patterns` because the
-real one does and because that is half of what is under test.
-"""
-
 from __future__ import annotations
 
 import io
@@ -42,11 +29,7 @@ GIB = 1024 ** 3
 LLAMA_WINDOWS = "llama-windows"
 
 
-# ------------------------------------------------------------------ fixtures
-
-
 def _config(home: Path) -> Config:
-    """A `llama-windows` config with nothing but a home. Nothing here serves."""
     home.mkdir(parents=True, exist_ok=True)
     return Config(
         path=home / "config.toml",
@@ -70,7 +53,6 @@ def _config(home: Path) -> Config:
 
 
 def _zip_bytes(names: dict[str, bytes]) -> bytes:
-    """A zip holding these members, in memory. The fake release's payload."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as bundle:
         for name, payload in names.items():
@@ -79,13 +61,6 @@ def _zip_bytes(names: dict[str, bytes]) -> bytes:
 
 
 class FakeRelease:
-    """Stands in for the GitHub release. Writes bytes, records what was asked.
-
-    It drives the REAL `llamacpp.pull` — the staging directory, the digest
-    check, the unzip, the stamp and the `llama-server.exe` search are all the
-    shipping code's. What is faked is the transport, exactly as
-    `tests/fake_hub.py` fakes the hub's.
-    """
 
     def __init__(self, payloads: dict[str, bytes]) -> None:
         self.payloads = payloads
@@ -103,11 +78,7 @@ class FakeRelease:
             on_progress(len(payload), len(payload), name)
 
 
-# ------------------------------------------------------- the pin, as declared
-
-
 def test_the_pin_is_one_constant_and_the_three_published_assets() -> None:
-    """7.4 item 1, verbatim. A digest here is the RELEASE's, not a measurement."""
     assert llamacpp.LLAMA_CPP_RELEASE == "b10970"
     cuda = {asset.name: asset for asset in llamacpp.CUDA_ASSETS}
     assert set(cuda) == {
@@ -131,7 +102,6 @@ def test_the_pin_is_one_constant_and_the_three_published_assets() -> None:
 
 
 def test_an_nvidia_machine_takes_two_assets_and_a_cardless_one_takes_the_cpu_build() -> None:
-    """Fact 1: the server does not start without the cudart DLLs."""
     assert llamacpp.build_for("nvidia") == llamacpp.CUDA_BUILD
     assert llamacpp.build_for("cpu") == llamacpp.CPU_BUILD
     assert len(llamacpp.assets_for(llamacpp.CUDA_BUILD)) == 2
@@ -146,7 +116,6 @@ def test_a_build_this_server_does_not_know_is_refused_by_name() -> None:
 
 
 def test_every_asset_url_is_the_pinned_tag_and_nothing_is_listed() -> None:
-    """No runtime listing call exists at all — there is nothing to fall back to."""
     for asset in (*llamacpp.CUDA_ASSETS, *llamacpp.CPU_ASSETS):
         assert asset.url.startswith(
             f"https://github.com/ggml-org/llama.cpp/releases/download/"
@@ -157,11 +126,7 @@ def test_every_asset_url_is_the_pinned_tag_and_nothing_is_listed() -> None:
     assert "per_page" not in source
 
 
-# --------------------------------------------------------------- pull, faked
-
-
 def _stage(tmp_path: Path, monkeypatch, payloads: dict[str, bytes]) -> tuple[Config, FakeRelease]:
-    """A config plus a release whose digests match the bytes it will serve."""
     config = _config(tmp_path / "home")
     release = FakeRelease(payloads)
     assets = tuple(
@@ -205,7 +170,6 @@ def test_a_pull_verifies_both_zips_and_unpacks_them_into_one_directory(
 def test_a_digest_that_does_not_match_is_engine_sha_mismatch_and_places_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The refusal 7.4 item 1 names, and NOTHING is left behind."""
     payloads = {"server.zip": _zip_bytes({"llama-server.exe": b"MZ the server"})}
     config, release = _stage(tmp_path, monkeypatch, payloads)
     release.payloads["server.zip"] = _zip_bytes({"llama-server.exe": b"different"})
@@ -220,7 +184,6 @@ def test_a_digest_that_does_not_match_is_engine_sha_mismatch_and_places_nothing(
 def test_the_cudart_half_failing_leaves_no_half_installed_engine(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A directory with the server and no cudart LOOKS installed and starts nothing."""
     payloads = {
         "server.zip": _zip_bytes({"llama-server.exe": b"MZ the server"}),
         "cudart.zip": _zip_bytes({"cudart64_12.dll": b"MZ the runtime"}),
@@ -270,7 +233,6 @@ def test_a_pull_is_idempotent_and_force_replaces(tmp_path: Path, monkeypatch) ->
 def test_an_engine_stamped_for_another_build_is_not_installed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A card added to a machine changes the answer, and must not be ignored."""
     payloads = {"server.zip": _zip_bytes({"llama-server.exe": b"MZ the server"})}
     config, release = _stage(tmp_path, monkeypatch, payloads)
     llamacpp.pull(config, llamacpp.CPU_BUILD, fetch=release.fetch)
@@ -299,15 +261,7 @@ def test_remove_deletes_the_directory_and_says_which(
     assert not gone.exists()
 
 
-# ------------------------------------------------ the file-aware weights pull
-
-
 def test_a_llama_windows_row_pulls_ONLY_its_named_files(tmp_path: Path, monkeypatch) -> None:
-    """7.4 item 2, the whole of it.
-
-    `unsloth/Qwen3.8-27B-GGUF` holds every quantization — hundreds of
-    gigabytes — and a row there IS one of them.
-    """
     config = _config(tmp_path / "home")
     manifest = load_manifest("qwen3.5-9b")
     spec = manifest.spec(LLAMA_WINDOWS)
@@ -320,7 +274,6 @@ def test_a_llama_windows_row_pulls_ONLY_its_named_files(tmp_path: Path, monkeypa
     found = weights.pull(config, manifest, spec)
     assert hub.allowed == [["Qwen3.5-9B-Q8_0.gguf"]]
     assert (found.path / "Qwen3.5-9B-Q8_0.gguf").is_file()
-    # And the stamp says which files the pin MEANT on this backend.
     record = json.loads((found.path / weights.STAMP_NAME).read_text("utf-8"))
     assert record["files"] == ["Qwen3.5-9B-Q8_0.gguf"]
 
@@ -328,7 +281,6 @@ def test_a_llama_windows_row_pulls_ONLY_its_named_files(tmp_path: Path, monkeypa
 def test_a_safetensors_backend_still_pulls_the_whole_repo(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The empty tuple is a real answer: the repository IS the weights."""
     config = _config(tmp_path / "home")
     manifest = load_manifest("qwen3.5-9b")
     spec = manifest.spec("cuda-linux")
@@ -346,12 +298,6 @@ def test_a_safetensors_backend_still_pulls_the_whole_repo(
 def test_dots_ocr_with_the_text_tower_and_no_mmproj_is_NOT_installed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """3.10 fact 2: the mmproj is not optional.
-
-    A server started with only the text tower loads, answers `/v1/models`,
-    and then refuses every page — which is exactly the state `installed` must
-    not call installed.
-    """
     config = _config(tmp_path / "home")
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
@@ -365,7 +311,6 @@ def test_dots_ocr_with_the_text_tower_and_no_mmproj_is_NOT_installed(
     with pytest.raises(WeightsError) as caught:
         weights.pull(config, manifest, spec)
     assert "mmproj-dots.ocr-Q8_0.gguf" in str(caught.value)
-    # NOTHING IS STAMPED, so nothing reads back as installed.
     assert weights.installed(config, manifest, spec) is None
 
 
@@ -386,7 +331,6 @@ def test_a_named_file_deleted_after_the_pull_makes_the_subject_not_installed(
     assert weights.installed(config, manifest, spec) is None
     with pytest.raises(WeightsError) as caught:
         weights.require_installed(config, manifest, spec)
-    # The sentence is about the FILE, not about a pin that did not move.
     assert "mmproj-dots.ocr-Q8_0.gguf" in str(caught.value)
     assert "now pins" not in str(caught.value)
 
@@ -394,9 +338,6 @@ def test_a_named_file_deleted_after_the_pull_makes_the_subject_not_installed(
 def test_missing_files_is_empty_for_a_spec_that_names_none(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.5-9b")
     assert weights.missing_files(tmp_path, manifest.spec("cuda-linux")) == ()
-
-
-# -------------------------------------------------------- the catalog subject
 
 
 def _windows_backend(vendor: str = "nvidia") -> Backend:
@@ -453,14 +394,9 @@ def test_the_catalog_subject_pulls_and_reports_installed(
     subject = catalog.find(config, _windows_backend(), "engine", "llama-cpp")
     assert subject is not None
     assert subject.installed() is None
-    # The catalog's `pull` takes the task runner's keywords and nothing else,
-    # so the fetch is monkeypatched at its own door rather than passed in.
     monkeypatch.setattr(llamacpp, "download", release.fetch)
     subject.pull(force=False, on_line=None, on_progress=None)
     assert subject.installed() is not None
-
-
-# ----------------------------------------------------- the engine, not started
 
 
 def test_llama_server_is_in_the_engine_table_and_names_the_crucible_id() -> None:
@@ -469,12 +405,9 @@ def test_llama_server_is_in_the_engine_table_and_names_the_crucible_id() -> None
 
 
 def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> None:
-    """`-m`, `--mmproj`, `-c 16384`, `--parallel 1`, `--alias`, loopback."""
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
     weights_dir = tmp_path / "dots"
-    # `None`: llama-server is not vLLM and has no KV pool to size
-    # (crucible/vram.py returns None for every engine but vllm).
     args = Residency._engine_args(
         manifest, spec, weights_dir, None, context=manifest.context_for(LLAMA_WINDOWS)
     )
@@ -494,7 +427,6 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
     assert command[command.index("--alias") + 1] == "dots-ocr"
     assert command[command.index("--host") + 1] == "127.0.0.1"
     assert command[command.index("--port") + 1] == "51234"
-    # NOT 8000, and nothing is adopted: the port is Crucible's choice.
     assert "8000" not in command
 
 
@@ -509,7 +441,6 @@ def test_a_text_model_gets_no_mmproj(tmp_path: Path) -> None:
 
 
 def test_the_fatal_lines_end_the_wait_early_and_each_has_a_name() -> None:
-    """Fact 4: `/v1/models` alone turns every failure into the full timeout."""
     assert fatal_reason("llama.cpp: hello")is None
     oom = fatal_reason("ggml_cuda_host_malloc: CUDA error: out of memory")
     assert oom is not None and oom[0] == PAGES_ENGINE_FAILED
@@ -522,14 +453,13 @@ def test_the_fatal_lines_end_the_wait_early_and_each_has_a_name() -> None:
 
 
 def test_a_fatal_line_in_the_log_raises_before_the_probe(tmp_path: Path) -> None:
-    """The early exit, without a process: the log is what it reads."""
     log = tmp_path / "engine.log"
     log.write_text(
         "llama_model_load: loading\nCUDA error: out of memory\n", encoding="utf-8"
     )
     engine = LlamaServerEngine(python=tmp_path / "llama-server.exe", log_path=log)
-    engine._port = 51234  # noqa: SLF001 - the readiness probe needs a url
-    engine._served_name = "dots-ocr"  # noqa: SLF001
+    engine._port = 51234
+    engine._served_name = "dots-ocr"
     with pytest.raises(Exception) as caught:
         engine.announced_ready()
     assert PAGES_ENGINE_FAILED in str(caught.value)
@@ -542,8 +472,8 @@ def test_a_taken_port_is_port_in_use_and_never_an_invitation_to_adopt(
     log = tmp_path / "engine.log"
     log.write_text("server: bind: address already in use\n", encoding="utf-8")
     engine = LlamaServerEngine(python=tmp_path / "llama-server.exe", log_path=log)
-    engine._port = 51234  # noqa: SLF001
-    engine._served_name = "dots-ocr"  # noqa: SLF001
+    engine._port = 51234
+    engine._served_name = "dots-ocr"
     with pytest.raises(Exception) as caught:
         engine.announced_ready()
     said = str(caught.value)
@@ -552,7 +482,6 @@ def test_a_taken_port_is_port_in_use_and_never_an_invitation_to_adopt(
 
 
 def test_the_stop_clock_is_thirty_seconds_and_the_deviation_is_written_down() -> None:
-    """Fact 6, and the reason the base class's never-SIGKILL rule is not this one."""
     assert GRACEFUL_STOP_SECONDS == 30.0
     source = Path(
         __import__("crucible.engines.llama_server", fromlist=["x"]).__file__
@@ -569,20 +498,7 @@ def test_stopping_an_engine_that_never_started_does_nothing(tmp_path: Path) -> N
     assert engine.pids == frozenset()
 
 
-# ------------------------------------------- the accelerator on this backend
-#
-# THE T7 DEFECT, 2026-09-14. The first real Windows run of section 8's button
-# got `409 accelerator_unreadable: cannot load 'dots-ocr': 'llama-windows' is
-# not a Crucible backend; the backends are 'cuda-linux' and 'mlx-darwin'` at
-# `POST /v1/jobs {"type": "load-model"}`. Windows had been made a backend
-# everywhere except in `accelerator.read_state`, whose two-arm `if` was the
-# last hand-written list of backends on the load path. These tests are the one
-# that was missing: a load that reaches the card on a fake `llama-windows`
-# accelerator and is not refused for being on Windows.
-
-
 def _fake_card(monkeypatch, *, free: int, total: int, apps=()) -> None:
-    """A Windows host WITH an NVIDIA driver, answering these figures."""
     monkeypatch.setattr(
         accelerator, "nvidia_smi_path", lambda: r"C:\Windows\System32\nvidia-smi.exe"
     )
@@ -593,7 +509,6 @@ def _fake_card(monkeypatch, *, free: int, total: int, apps=()) -> None:
 def test_the_guard_reads_a_llama_windows_card_instead_of_denying_the_backend(
     monkeypatch,
 ) -> None:
-    """T7's refusal, gone. `llama-windows` is a backend to the guard too."""
     _fake_card(monkeypatch, free=20 * GIB, total=24 * GIB)
     state = accelerator.guard(
         LLAMA_WINDOWS,
@@ -608,7 +523,6 @@ def test_the_guard_reads_a_llama_windows_card_instead_of_denying_the_backend(
 
 
 def test_the_refusal_for_a_backend_that_really_is_not_one_names_all_three() -> None:
-    """The list a fourth backend is added to, in ONE place."""
     with pytest.raises(accelerator.ProbeError) as caught:
         accelerator.read_state("cuda-windows", 0)
     said = str(caught.value)
@@ -616,7 +530,6 @@ def test_the_refusal_for_a_backend_that_really_is_not_one_names_all_three() -> N
 
 
 def test_a_cardless_windows_host_measures_system_memory(monkeypatch) -> None:
-    """3.5: *"nvidia-smi, or `cpu` with the machine's RAM as the figure"*."""
     monkeypatch.setattr(accelerator, "nvidia_smi_path", lambda: None)
     monkeypatch.setattr(
         accelerator, "probe_system_memory", lambda: (18 * GIB, 32 * GIB)
@@ -630,12 +543,6 @@ def test_a_cardless_windows_host_measures_system_memory(monkeypatch) -> None:
 def test_a_windows_driver_that_will_not_answer_is_unreadable_and_never_ram(
     monkeypatch,
 ) -> None:
-    """The one place the guard and `detect_windows` deliberately disagree.
-
-    Detection tolerates a broken driver because a server must start on
-    anything; the guard does not, because "I cannot see the card" turning into
-    "here is 32 GiB of RAM" would start a model on somebody else's GPU.
-    """
     monkeypatch.setattr(
         accelerator, "nvidia_smi_path", lambda: r"C:\Windows\System32\nvidia-smi.exe"
     )
@@ -663,17 +570,6 @@ def test_a_windows_driver_that_will_not_answer_is_unreadable_and_never_ram(
 def test_a_full_windows_card_is_refused_for_the_room_and_not_for_the_company(
     monkeypatch,
 ) -> None:
-    """CORRECTED by T7's second run on the live card, 2026-09-14.
-
-    This test used to assert `accelerator_busy` here, and that was the defect:
-    a Windows DESKTOP always shares its card, nvidia-smi on Windows names the
-    compositor and the shell and the browser, and "a foreign compute app holds
-    the card" refused every load this backend could ever be asked for. The
-    guard asks whether there is ROOM on this backend. Somebody else's 20 GiB
-    still refuses the load — by the name for a shortfall, with the figures,
-    and with the process REPORTED in the details rather than blamed in the
-    reason.
-    """
     _fake_card(
         monkeypatch,
         free=2 * GIB,
@@ -692,7 +588,6 @@ def test_a_full_windows_card_is_refused_for_the_room_and_not_for_the_company(
 
 
 def test_a_windows_card_with_room_beside_the_desktop_loads(monkeypatch) -> None:
-    """The load T7 could not perform: 20 GiB free with the shell on the card."""
     _fake_card(
         monkeypatch,
         free=20 * GIB,
@@ -718,13 +613,6 @@ def test_a_windows_card_with_room_beside_the_desktop_loads(monkeypatch) -> None:
 def test_a_llama_server_of_ours_that_outlived_its_run_is_accelerator_busy(
     monkeypatch,
 ) -> None:
-    """The one holder on this backend, and it is found by IMAGE NAME.
-
-    A `llama-server` Crucible did not start is a previous run's engine child
-    still on the card. There is room here (20 GiB against 6), so nothing but
-    the name catches it — which is the point: the pid of a crashed run is not
-    knowable.
-    """
     _fake_card(
         monkeypatch,
         free=20 * GIB,
@@ -747,19 +635,12 @@ def test_a_llama_server_of_ours_that_outlived_its_run_is_accelerator_busy(
     assert caught.value.code == "accelerator_busy"
     assert "pid 31337" in caught.value.message
     assert "never evicts" in caught.value.message
-    # explorer.exe is not a holder even here.
     assert [row["pid"] for row in caught.value.details["processes"]] == [31337]
 
 
 def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """T7's sequence, up to the point where a real card would be touched.
-
-    Engine installed, both GGUFs installed, a fake card with room: the
-    preflight of `{"type": "load-model", "model": "dots-ocr"}` returns rather
-    than refusing. Nothing here spawns a `llama-server`.
-    """
     payloads = {
         "server.zip": _zip_bytes({"llama-server.exe": b"MZ the server"}),
         "cudart.zip": _zip_bytes({"cudart64_12.dll": b"MZ the runtime"}),
@@ -782,9 +663,6 @@ def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(
 
 
 def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
-    """`-c` is composed in `Residency._engine_args` from the load's context, so
-    `params.context` reaches llama-server by the same path as vLLM's
-    `--max-model-len`."""
     manifest = load_manifest("qwen3.8-27b-4bit")
     spec = manifest.spec(LLAMA_WINDOWS)
     args = Residency._engine_args(manifest, spec, tmp_path, None, context=65536)
@@ -793,9 +671,6 @@ def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
 
 
 def test_mlx_lm_is_handed_no_context_flag(tmp_path: Path) -> None:
-    """mlx-lm takes no context flag and allocates KV on demand: a load's context
-    is recorded as the resident row's `max_model_len` (admission), and nothing
-    reaches the engine's argv."""
     manifest = load_manifest("qwen3.8-27b-8bit")
     spec = manifest.spec("mlx-darwin")
     args = Residency._engine_args(manifest, spec, tmp_path, None, context=131072)

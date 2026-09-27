@@ -1,5 +1,3 @@
-"""The job framework, end to end, through the echo job type."""
-
 from __future__ import annotations
 
 import base64
@@ -63,8 +61,6 @@ def test_echo_end_to_end(client: TestClient, auth: dict[str, str]) -> None:
     events = stream_events(client, auth, job_id)
     kinds = [event["event"] for event in events]
 
-    # Order is fixed: queued, the worker's start, then per input a progress and its
-    # artifact, then the final progress, then done.
     assert kinds == [
         "queued",
         "progress",
@@ -141,7 +137,6 @@ def test_cancel_a_running_job(client: TestClient, auth: dict[str, str]) -> None:
     inputs = {f"chunk{index}.bin": ALPHA for index in range(8)}
     job_id = submit(client, auth, inputs, delay_ms=400)
 
-    # Wait until the lane has actually picked it up, then cancel.
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if client.get(f"/v1/jobs/{job_id}", headers=auth).json()["status"] == "running":
@@ -282,7 +277,6 @@ def test_unknown_job_is_404(client: TestClient, auth: dict[str, str]) -> None:
 def test_artifact_traversal_is_refused(client: TestClient, auth: dict[str, str]) -> None:
     job_id = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=0)
     wait_for_terminal(client, auth, job_id)
-    # %2E%2E survives httpx's URL normalisation and reaches the route as "..".
     response = client.get(f"/v1/jobs/{job_id}/artifacts/%2E%2E", headers=auth)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_artifact_name"
@@ -291,15 +285,6 @@ def test_artifact_traversal_is_refused(client: TestClient, auth: dict[str, str])
 def test_the_lane_takes_one_job_at_a_time(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    """One job on the lane, and the second is REFUSED rather than queued behind it.
-
-    This test used to submit two and watch the second sit at `position: 1`. Owen
-    ruled that policy out on 2026-09-13 (ARCHITECTURE.md section 3): the client
-    owns the queue, the server owns admission. What it was really guarding — that
-    two jobs never share the lane — is unchanged and is what it still asserts;
-    only the shape of the server's answer has moved from a place in line to a
-    named refusal. The refusal's own body is `tests/test_admission.py`.
-    """
     first = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=400)
 
     deadline = time.monotonic() + 10.0
@@ -322,8 +307,6 @@ def test_the_lane_takes_one_job_at_a_time(
     assert refused.json()["error"]["details"]["job_id"] == first
 
     assert wait_for_terminal(client, auth, first)["status"] == "done"
-    # And the lane takes the next one the moment it is free, which is the second
-    # half of the ruling and the half a stuck `_running_id` would break.
     second = submit(client, auth, {"beta.bin": BETA}, delay_ms=0)
     assert wait_for_terminal(client, auth, second)["status"] == "done"
 
@@ -344,9 +327,6 @@ def test_bad_input_names_are_refused(
 def test_the_job_read_states_the_denominator_and_the_stamp(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    """`chunks_total` and `chunk_at` are on every job read — null for a job
-    whose artifacts are not chunks (echo's are files, not `<index>.flac`), so a
-    client reads the same shape for every type and null means what it says."""
     job_id = submit(client, auth, {"alpha.bin": ALPHA}, delay_ms=0)
     state = wait_for_terminal(client, auth, job_id)
     assert "chunks_total" in state and "chunk_at" in state

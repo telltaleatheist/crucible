@@ -1,12 +1,3 @@
-"""Operator tasks: `POST /v1/tasks` and the four routes around it.
-
-PHASE13-OPERATOR.md section 3.3 and 3.4. Nothing here touches the network, a
-GPU or a real env: the hub is `tests/fake_hub.py` (which drives the real
-`weights.pull`, stamp and all) and the installer is a fake console script that
-writes a config flag, which is exactly what the real one does at the end of a
-five-minute pip run.
-"""
-
 from __future__ import annotations
 
 import json
@@ -31,12 +22,8 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 MODEL = "qwen3.5-9b"
 
 
-# ------------------------------------------------------------------ fixtures
-
-
 @pytest.fixture
 def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
-    """Every `huggingface_hub` entry point `crucible/weights.py` calls."""
     fake = FakeHub()
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake.snapshot_download)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake.hf_hub_download)
@@ -47,13 +34,6 @@ def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
 def fake_installer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
-    """A `crucible` console script that flips a flag and prints as it goes.
-
-    A real script on disk, run as a real subprocess, because the thing under
-    test is the streaming of its lines and the SIGTERM that cancels it — both
-    of which a function call would prove nothing about. What it does NOT do is
-    build a venv: the env is `crucible/jobenv.py`'s and has its own tests.
-    """
     script = tmp_path / "fake-crucible"
     script.write_text(
         f"""#!{sys.executable}
@@ -109,9 +89,6 @@ print("fake installer: recorded in " + str(config.path), flush=True)
         encoding="utf-8",
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    # The conda env this suite runs in HAS a real `crucible` console script
-    # beside its interpreter, so `install_command()` would find it and a test
-    # would build a multi-gigabyte venv. Named rather than searched for.
     monkeypatch.setattr(tasks, "install_command", lambda: str(script))
     return script
 
@@ -127,7 +104,6 @@ def admit(client: TestClient, auth: dict[str, str], body: dict[str, Any]) -> str
 
 
 def watch(client: TestClient, auth: dict[str, str], task_id: str) -> list[dict]:
-    """Read the task's whole event stream, which ends at its terminal event."""
     with client.stream(
         "GET", f"/v1/tasks/{task_id}/events", headers=auth
     ) as stream:
@@ -144,9 +120,6 @@ def kinds(events: list[dict]) -> list[str]:
 
 def steps(events: list[dict]) -> list[str]:
     return [e["data"]["name"] for e in events if e["event"] == "step"]
-
-
-# ---------------------------------------------------------------- validation
 
 
 def test_a_pull_of_an_unknown_kind_is_refused_by_name(
@@ -172,7 +145,6 @@ def test_a_pull_of_an_installed_subject_is_refused_not_skipped(
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
 ) -> None:
-    """3.3 writes the asymmetry down: a single pull refuses, a module skips."""
     fake_weights(MODEL)
     with make_client() as client:
         response = post(client, auth, {"type": "pull", "kind": "model", "id": MODEL})
@@ -230,12 +202,6 @@ def test_an_install_of_a_built_env_is_refused_by_name(
 def test_env_installed_reads_the_env_and_not_the_flag(
     home: Path, fake_env: Path, make_client: Callable[..., TestClient]
 ) -> None:
-    """The fact is the directory, because `tts` has two envs behind one flag.
-
-    `enable_tts` is FALSE here and `enable_llm` is false too, so a reading that
-    consulted the flags would answer "neither". The llm env is on disk
-    (`fake_env`) and the answer follows the disk.
-    """
     from crucible.config import load_config
 
     with make_client(enable_llm=False, enable_tts=False):
@@ -243,7 +209,6 @@ def test_env_installed_reads_the_env_and_not_the_flag(
     assert config.enable_llm is False
     assert tasks.env_installed(config, FAKE_BACKEND, "llm", None) is True
     assert tasks.env_installed(config, FAKE_BACKEND, "tts", "higgs-v3") is False
-
 
 
 @pytest.mark.parametrize("installed", [False, True])
@@ -274,7 +239,6 @@ def test_native_windows_install_checks_the_llama_binary_not_a_nonexistent_venv(
 def test_adopt_refuses_a_config_from_another_home(
     home: Path, tmp_path: Path, make_client: Callable[..., TestClient]
 ) -> None:
-    """Identity is refused, capability is adopted (`Config.adopt`)."""
     from crucible.config import ConfigError, load_config, write_config
 
     with make_client() as client:
@@ -305,13 +269,6 @@ def test_adopt_refuses_a_config_from_another_home(
 
 
 def test_nothing_but_adopt_writes_to_a_frozen_config() -> None:
-    """`Config.adopt`'s docstring promises this; a grep is what keeps it true.
-
-    `object.__setattr__` on a frozen dataclass is the one escape hatch in the
-    package, and the whole argument for it is that it happens in exactly one
-    named place. A second one would make `Config` mutable in practice while
-    still claiming to be frozen, which is worse than not freezing it.
-    """
     package = Path(__file__).resolve().parent.parent / "crucible"
     offenders = [
         path.relative_to(package).as_posix()
@@ -368,9 +325,6 @@ def test_a_request_carrying_another_type_s_fields_is_refused(
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
-
-
-# ----------------------------------------------------------------- the pull
 
 
 def test_a_pull_reports_bytes_and_leaves_the_weights_stamped(
@@ -454,7 +408,6 @@ def test_a_cancelled_pull_stops_and_leaves_nothing_installed(
     home: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R6 does not apply: half a safetensors file is not partial work (3.3)."""
     slow = FakeHub(chunks=2000, delay=0.005)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", slow.snapshot_download)
     with make_client() as client:
@@ -489,7 +442,6 @@ def test_cancelling_a_finished_task_is_refused_by_name(
 def test_a_pull_runs_beside_a_job_because_it_is_disk_and_network(
     make_client: Callable[..., TestClient], auth: dict[str, str], hub: FakeHub
 ) -> None:
-    """3.3: only an install is gated on the four facts."""
     with make_client() as client, holding_the_card(client):
         response = post(client, auth, {"type": "pull", "kind": "model", "id": MODEL})
         assert response.status_code == 202
@@ -513,13 +465,9 @@ def test_a_pull_that_fails_says_so_with_the_hub_s_reason(
     assert "connection reset by peer" in failed["data"]["message"]
 
 
-# -------------------------------------------------------------- the install
-
-
 def test_an_install_streams_its_lines_reloads_and_makes_the_type_live(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    """3.4's requirement, end to end: live in `/v1/info` before `done`."""
     with make_client(enable_echo=True, enable_llm=False) as client:
         assert "load-model" not in client.get("/v1/info", headers=auth).json()["job_types"]
         events = run(client, auth, {"type": "install", "job_type": "llm"})
@@ -528,9 +476,6 @@ def test_an_install_streams_its_lines_reloads_and_makes_the_type_live(
 
     assert kinds(events)[-1] == "done"
     assert steps(events) == ["install llm", "reload"]
-    # `.get("line")` and not `["line"]`: since 0.6.0 a `progress` event is
-    # EITHER a line or the three byte fields, and the test beside this one is
-    # the one that reads the other kind.
     lines = [
         e["data"]["line"] for e in events
         if e["event"] == "progress" and "line" in e["data"]
@@ -545,15 +490,6 @@ def test_an_install_streams_its_lines_reloads_and_makes_the_type_live(
 def test_an_install_reports_its_download_in_the_shape_a_pull_does(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    """PHASE14 section 3.1: the SAME `progress` event the pull task emits.
-
-    An env install is a download now, and the operator page draws it with the
-    code that already draws a 19 GB weights pull — so the event carries
-    `bytes_done`, `bytes_total` and `file` and not a fourth shape. The second
-    assertion is the one that matters as much: the sentinel line must never
-    also arrive as prose, or a page would render `crucible-progress {...}` in
-    the log pane beside the bar it drew from it.
-    """
     with make_client(enable_echo=True, enable_llm=False) as client:
         events = run(client, auth, {"type": "install", "job_type": "llm"})
 
@@ -565,8 +501,6 @@ def test_an_install_reports_its_download_in_the_shape_a_pull_does(
         "bytes_total": 3000,
         "file": "cpython-3.12.14+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
     }
-    # Every byte event carries exactly the pull's three keys, and no line
-    # event carries the sentinel's text.
     assert all(set(row) == {"bytes_done", "bytes_total", "file"} for row in measured)
     lines = [row["line"] for row in progress if "line" in row]
     assert not [line for line in lines if line.startswith("crucible-progress")]
@@ -575,7 +509,6 @@ def test_an_install_reports_its_download_in_the_shape_a_pull_does(
 def test_the_reload_adopts_the_config_so_every_door_agrees(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    """`/v1/models` reads a flag, `POST /v1/jobs` reads the registry. Both move."""
     with make_client(enable_echo=True, enable_llm=False) as client:
         assert client.get("/v1/models", headers=auth).status_code == 400
         run(client, auth, {"type": "install", "job_type": "llm"})
@@ -616,7 +549,6 @@ def test_an_install_is_refused_while_any_of_the_four_facts_holds_the_card(
 def test_a_lease_refusal_carries_the_lease_s_own_fields(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    """Amendment from Foundry's review: the app's row shows this verbatim."""
     with make_client(enable_echo=True) as client:
         client.app.state.leases.open(
             kind="llm",
@@ -648,15 +580,8 @@ def test_the_install_command_is_named_when_there_is_none(
     assert "/bin" in str(caught.value)
 
 
-# ------------------------------------------------------- the reload's guard
-#
-# 3.4: the four facts gate the task at POST and are read AGAIN at the swap,
-# because minutes of pip pass in between. Each of the four is proved here
-# against the swap itself, which is the read the POST gate cannot cover.
-
-
 def reload_of(client: TestClient) -> Callable[[], list[str]]:
-    return client.app.state.tasks._reload  # the injected 3.4 swap
+    return client.app.state.tasks._reload
 
 
 def test_the_swap_happens_when_nothing_holds_the_card(
@@ -731,11 +656,6 @@ def test_a_holder_that_arrives_during_the_install_fails_the_task_by_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The window 3.4 is about: admitted at POST, held by the time pip is done.
-
-    The env is left on disk (R6) and the task says so rather than swapping the
-    registry underneath whatever arrived.
-    """
     block = tmp_path / "hold-the-installer"
     block.write_text("1", encoding="utf-8")
     monkeypatch.setenv("FAKE_INSTALL_BLOCK", str(block))
@@ -756,9 +676,6 @@ def test_a_holder_that_arrives_during_the_install_fails_the_task_by_name(
     assert events[-1]["data"]["code"] == "reload_refused"
     assert "a chat" in events[-1]["data"]["message"]
     assert "load-model" not in info["job_types"]
-
-
-# ------------------------------------------------------------------ modules
 
 
 def test_a_module_runs_its_entries_in_order_and_ends_done(
@@ -794,7 +711,6 @@ def test_a_module_skips_what_is_already_true(
     fake_weights: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A module says what must be TRUE, so an entry already true is skipped."""
     fake_weights(MODEL)
     monkeypatch.setattr(tasks, "env_installed", lambda *a, **k: True)
     with make_client(enable_echo=True, enable_llm=True) as client:
@@ -827,7 +743,6 @@ def test_a_module_stops_at_the_first_failure_and_keeps_what_finished(
     fake_installer: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R6: the pull that finished STAYS, and the failure names the step."""
     monkeypatch.setenv("FAKE_INSTALL_FAIL", "1")
     with make_client(enable_echo=True, enable_llm=False) as client:
         events = run(
@@ -850,7 +765,6 @@ def test_a_module_stops_at_the_first_failure_and_keeps_what_finished(
     assert events[-1]["event"] == "failed"
     assert events[-1]["data"]["code"] == "install_failed"
     assert "step 1 of 3" in events[-1]["data"]["message"]
-    # The install is entry 1, so the pull never ran and the module stopped.
     assert steps(events) == ["install llm"]
     assert row["installed"] is False
 
@@ -858,7 +772,6 @@ def test_a_module_stops_at_the_first_failure_and_keeps_what_finished(
 def test_a_module_of_pure_pulls_is_not_gated_on_the_card(
     make_client: Callable[..., TestClient], auth: dict[str, str], hub: FakeHub
 ) -> None:
-    """It names no job type, so it swaps no registry and is a pull (3.3)."""
     with make_client(enable_echo=True) as client, holding_the_card(client):
         events = run(
             client,
@@ -875,9 +788,6 @@ def test_a_module_of_pure_pulls_is_not_gated_on_the_card(
         )
     assert kinds(events)[-1] == "done"
     assert steps(events) == [f"pull model {MODEL}"]
-
-
-# ------------------------------------------------------------------- access
 
 
 def test_every_task_route_needs_the_token(client: TestClient) -> None:

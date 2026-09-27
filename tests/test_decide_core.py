@@ -1,11 +1,3 @@
-"""The decision's reading, without a socket (PHASE22-DECIDE.md section 3).
-
-snap's pure-function tests, ported: the legend, the letters, yes/no as A/B, the
-renormalisation, the expected-value score, the image layout, and the refusals a
-caller can act on. snap measured these semantics on a card (2026-09-22); what is
-asserted here is that Crucible's port did not move them.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -23,7 +15,6 @@ from crucible.decide import (
 )
 from crucible.errors import ApiError
 
-#: snap's worked example (`tests/unit/fake_llama.py` EXAMPLE_REQUEST).
 EXAMPLE = {
     "model": "qwen3.5-9b",
     "state": "Hi, I was charged twice for my subscription this month. Please fix it today.",
@@ -49,9 +40,6 @@ def _plans(body: dict = EXAMPLE) -> dict[str, decide.Plan]:
     return {p.name: p for p in decide.plan_all(DecideRequest.model_validate(body))}
 
 
-# ------------------------------------------------------------------ letters
-
-
 def test_26_options_are_a_to_z() -> None:
     labels = decide.assign_labels([f"opt{i}" for i in range(26)], "q")
     assert labels[0] == ("A", "opt0") and labels[-1] == ("Z", "opt25")
@@ -61,9 +49,9 @@ def test_27_options_are_too_many_options_by_name() -> None:
     body = {**EXAMPLE, "questions": {"big": {
         "type": "choice", "instructions": "y",
         "options": {f"o{i}": "d" for i in range(27)}}}}
-    request = DecideRequest.model_validate(body)  # the schema lets it through...
+    request = DecideRequest.model_validate(body)
     with pytest.raises(ApiError) as caught:
-        decide.plan_all(request)  # ...and the plan names it, before any pass
+        decide.plan_all(request)
     assert caught.value.status_code == 400
     assert caught.value.code == "too_many_options"
     assert "'big'" in caught.value.message
@@ -79,9 +67,6 @@ def test_choice_letters_follow_the_options_insertion_order() -> None:
     plan = _plans()["team"]
     assert plan.labels == (("A", "billing"), ("B", "technical"), ("C", "other"))
     assert plan.legend[0] == ("A", "billing: Payment and invoice issues")
-
-
-# ------------------------------------------------------------------ prompt
 
 
 def test_the_state_is_in_the_system_turn_and_the_question_is_the_user_turn() -> None:
@@ -106,9 +91,6 @@ def test_a_yesno_block_is_a_statement() -> None:
 
 @pytest.mark.parametrize("images", [[], [PNG, JPEG]])
 def test_the_prime_s_system_turn_is_every_question_s_byte_for_byte(images) -> None:
-    """The prefix property, in the one form every engine's cache can use: the
-    shared prefix is the WHOLE system turn, and it ends where the user turn
-    begins (mlx-lm's system segment, llama-server's last-user checkpoint)."""
     state = "a long shared state " * 50
     prime = decide.prime_messages(state, images)
     assert [m["role"] for m in prime] == ["system", "user"]
@@ -144,9 +126,6 @@ def test_the_state_is_only_in_the_system_turn_and_the_block_only_in_the_user_tur
 
 
 def test_the_prime_s_user_turn_is_fixed_and_never_empty() -> None:
-    """mlx-lm finds the system segment by rendering `system + [user ""]`; a
-    prime whose user turn WERE empty would never differ from that render, and
-    it would save no system segment at all."""
     assert decide.PRIME_USER_TEXT.strip()
     assert decide.prime_messages("x", [])[1]["content"] == decide.PRIME_USER_TEXT
     assert decide.prime_messages("y", [])[1] == decide.prime_messages("x", [])[1]
@@ -159,9 +138,6 @@ def test_render_state_non_string_is_compact_json() -> None:
 
 
 def test_images_open_the_user_turn_as_content_parts_then_the_question() -> None:
-    """Images cannot go in the system turn (Qwen3.5's template raises "System
-    message cannot contain images."), so they open the user turn, before the
-    question, and the system turn says where they are."""
     plan = _plans()["urgent"]
     system, user = decide.question_messages("the STATE text", [PNG, JPEG], plan)
     assert isinstance(system["content"], str)
@@ -185,7 +161,6 @@ def test_the_prime_with_images_differs_from_a_question_only_in_its_text() -> Non
         assert question[1]["content"][:-1] == prime[1]["content"][:-1]
         assert prime[1]["content"][-1] == {"type": "text", "text": decide.PRIME_USER_TEXT}
         assert question[1]["content"][-1]["text"].startswith("Statement:")
-    # An empty state (the images carry it) leaves `State:` and the note alone.
     assert decide.prime_messages("", [PNG])[0]["content"] == (
         decide.SYSTEM_PROMPT + "\n\nState:\n" + decide.IMAGES_NOTE
     )
@@ -197,9 +172,6 @@ def test_the_image_media_type_is_read_off_the_bytes() -> None:
     assert decide.image_format(b"GIF89a....") == "gif"
     assert decide.image_format(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "webp"
     assert decide.image_format(b"not an image") is None
-
-
-# ------------------------------------------------------------ the request
 
 
 @pytest.mark.parametrize(
@@ -242,9 +214,6 @@ def test_nine_images_are_too_many_images_by_name() -> None:
     assert decide.check_image_count(None) == 0
 
 
-# ---------------------------------------------------------------- the reading
-
-
 def test_k_is_the_labels_plus_the_margin_clamped_to_the_engine() -> None:
     assert decide.top_k(3, 32) == 7
     assert decide.top_k(26, 32) == 30
@@ -276,19 +245,14 @@ def test_the_example_math() -> None:
 
 
 def test_labels_are_matched_by_the_exact_letter_string() -> None:
-    """The filler " A" must never be read as label A."""
     dist = decide.label_distribution(
         _top({" A": 0.5, "A": 0.1, "B": 0.1}), _plans()["urgent"], "vllm")
     assert dist.probabilities["Yes"] == pytest.approx(0.5)
     assert dist.mass == pytest.approx(0.2)
 
 
-# -------------------------------------------------------- the log-probabilities
-
-
 def test_logprobs_are_ln_of_the_probabilities_in_option_order() -> None:
     plans = _plans()
-    # Returned out of option order on purpose: the answer is in OPTION order.
     team = decide.label_distribution(
         _top({"C": 0.05, "A": 0.6, "The": 0.1, "B": 0.25}), plans["team"], "vllm")
     answer = decide.answer(plans["team"], team, "refuse")
@@ -296,7 +260,6 @@ def test_logprobs_are_ln_of_the_probabilities_in_option_order() -> None:
     assert list(answer.logprobs) == ["billing", "technical", "other"]
     for option, p in answer.probabilities.items():
         assert answer.logprobs[option] == pytest.approx(math.log(p))
-    # The un-renormalised mass is recoverable, as the contract says.
     assert math.exp(answer.logprobs["billing"]) * answer.label_mass == pytest.approx(0.6)
 
     anger = decide.label_distribution(
@@ -320,16 +283,12 @@ def test_a_refuse_mode_answer_carries_no_missing_labels_key() -> None:
         assert "missing_labels" not in answer.model_dump(mode="json")
 
 
-# ---------------------------------------------------------------- report mode
-
-
 def test_report_mode_with_one_label_missing_never_invents_a_number() -> None:
     plans = _plans()
-    # anger: B ("Frustrated but civil") is outside the top-K.
     dist = decide.label_distribution(
         _top({"A": 0.3, "The": 0.4, "C": 0.1}), plans["anger"], "vllm", missing="report")
     assert dist.missing == ("Frustrated but civil",)
-    assert dist.mass == pytest.approx(0.4)  # the RETURNED letters' raw mass
+    assert dist.mass == pytest.approx(0.4)
     answer = decide.answer(plans["anger"], dist, "report")
     wire = answer.model_dump(mode="json")
     assert wire["missing_labels"] == ["Frustrated but civil"]
@@ -339,7 +298,6 @@ def test_report_mode_with_one_label_missing_never_invents_a_number() -> None:
     assert wire["logprobs"]["Frustrated but civil"] is None
     assert wire["logprobs"]["Calm"] == pytest.approx(math.log(0.75))
     assert wire["label_mass"] == pytest.approx(0.4)
-    # The expected value over the RETURNED levels: 1 x 0.75 + 3 x 0.25.
     assert wire["score"] == pytest.approx(1.5)
     assert wire["level"] == "Calm" and wire["confidence"] == pytest.approx(0.75)
 
@@ -352,7 +310,7 @@ def test_report_mode_with_several_labels_missing() -> None:
     dist = decide.label_distribution(
         _top({"D": 0.2, "B": 0.1, "Hmm": 0.5, "Well": 0.1}), item, "vllm", missing="report")
     answer = decide.answer(item, dist, "report")
-    assert answer.missing_labels == ["one", "three", "five"]  # option order
+    assert answer.missing_labels == ["one", "three", "five"]
     assert answer.label_mass == pytest.approx(0.3)
     assert answer.probabilities == pytest.approx(
         {"one": None, "two": 1 / 3, "three": None, "four": 2 / 3, "five": None})
@@ -429,9 +387,6 @@ def test_every_label_at_zero_is_refused() -> None:
     assert caught.value.code == "label_not_in_probs"
 
 
-# ------------------------------------------------------------------ the reply
-
-
 def _reply(tops: list[dict], usage: dict) -> dict:
     return {"choices": [{"logprobs": {"content": [{**tops[0], "top_logprobs": tops}]}}],
             "usage": usage}
@@ -439,10 +394,8 @@ def _reply(tops: list[dict], usage: dict) -> dict:
 
 VLLM_TOPS = [{"token": "A", "logprob": math.log(0.7), "bytes": [65]},
              {"token": "B", "logprob": math.log(0.2), "bytes": [66]}]
-#: llama-server b10970's `probs_vector_to_json` adds `id`.
 LLAMA_TOPS = [{"id": 32, "token": "A", "bytes": [65], "logprob": math.log(0.7)},
               {"id": 33, "token": "B", "bytes": [66], "logprob": math.log(0.2)}]
-#: mlx-lm 0.31.3's `_format_top_logprobs` has no `bytes`.
 MLX_TOPS = [{"id": 32, "token": "A", "logprob": math.log(0.7)},
             {"id": 33, "token": "B", "logprob": math.log(0.2)}]
 
@@ -495,9 +448,6 @@ def test_an_unreadable_reply_is_engine_error_naming_the_field(reply, fragment) -
     assert caught.value.status_code == 502 and caught.value.code == "engine_error"
     assert fragment in caught.value.message
     assert "vllm" in caught.value.message
-
-
-# ------------------------------------------------------------------- the body
 
 
 def test_a_question_body_states_every_knob_a_reading_depends_on() -> None:

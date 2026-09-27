@@ -1,16 +1,3 @@
-"""Crucible's page server for `mlx-darwin`, driven through the real engine class.
-
-The process under test is the one `MlxVlmEngine.command()` builds — the llm
-env's python running `crucible/engines/mlx_vlm_serve.py` — with a fake
-`mlx_vlm` on PYTHONPATH (`tests/fake_mlx_vlm`) that reproduces the call shapes
-of mlx-vlm 0.7.1 and "reads" every page as `page <h>x<w> row <i>`. What is
-proven here is everything around the model: the readiness contract, the wire,
-the refusals, the width and the same-shape rule, `finish_reason` and `usage`,
-and that a failed batch costs its rows and not the thread. What is NOT proven
-here is that a page is read — that was measured on the Mac Studio on
-2026-09-21 and is recorded in the server's module docstring.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -36,21 +23,18 @@ FAKE = Path(__file__).resolve().parent / "fake_mlx_vlm"
 
 
 def png(width: int, height: int) -> bytes:
-    """A real PNG, because the server decodes with real Pillow."""
     buffer = io.BytesIO()
     Image.new("RGBA", (width, height), (255, 255, 255, 255)).save(buffer, "PNG")
     return buffer.getvalue()
 
 
 def page_body(model: str, width: int = 100, height: int = 160, **overrides: Any) -> dict:
-    """`crucible.pages.request_body`'s shape, which is the one the server is for."""
     body = pages.request_body(pages.data_uri(png(width, height)), model=model)
     body.update(overrides)
     return body
 
 
 class ServedFake(MlxVlmEngine):
-    """The REAL engine class, pointed at the fake package; nothing else differs."""
 
     def __init__(self, python: Path, log_path: Path, batches: Path | None = None) -> None:
         super().__init__(python, log_path)
@@ -65,7 +49,6 @@ class ServedFake(MlxVlmEngine):
 
 @pytest.fixture
 def served(tmp_path: Path):
-    """A ready engine at width 2, and its weights dir (the served name)."""
     weights = tmp_path / "dots"
     weights.mkdir()
     batches = tmp_path / "batches.jsonl"
@@ -92,9 +75,6 @@ def post(engine: MlxVlmEngine, body: dict) -> tuple[int, dict]:
         return error.code, json.loads(error.read())
 
 
-# ------------------------------------------------------------- the contract
-
-
 def test_the_command_is_the_shipped_script_from_the_env_python(tmp_path: Path) -> None:
     engine = MlxVlmEngine(Path("/env/bin/python"), tmp_path / "x.log")
     command = engine.command(Path("/w/dots"), "/w/dots", 4321, ["--width", "2"])
@@ -104,7 +84,6 @@ def test_the_command_is_the_shipped_script_from_the_env_python(tmp_path: Path) -
 
 
 def test_a_manifest_that_forgot_the_width_is_refused_before_a_spawn(tmp_path: Path) -> None:
-    """Point 3: the width is the manifest's, and a missing one is named."""
     engine = MlxVlmEngine(Path(sys.executable), tmp_path / "x.log")
     with pytest.raises(EngineError) as caught:
         engine.command(tmp_path, str(tmp_path), 1, [])
@@ -113,7 +92,6 @@ def test_a_manifest_that_forgot_the_width_is_refused_before_a_spawn(tmp_path: Pa
 
 
 def test_ready_means_loaded_and_the_name_is_verbatim(served, tmp_path: Path) -> None:
-    """Points 1 and 2: /v1/models answers only after load, with the dir as given."""
     engine, name, _ = served
     with urllib.request.urlopen(f"{engine.base_url}/v1/models", timeout=5) as response:
         listed = json.loads(response.read())["data"]
@@ -125,7 +103,6 @@ def test_ready_means_loaded_and_the_name_is_verbatim(served, tmp_path: Path) -> 
 
 
 def test_models_refuses_until_the_weights_are_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The fake sleeps in load(); the socket must not exist meanwhile."""
     monkeypatch.setenv("CRUCIBLE_FAKE_MLX_VLM_LOAD_S", "2")
     weights = tmp_path / "dots"
     weights.mkdir()
@@ -141,9 +118,6 @@ def test_models_refuses_until_the_weights_are_in(tmp_path: Path, monkeypatch: py
     assert engine.pids == frozenset()
 
 
-# ------------------------------------------------------------------ the wire
-
-
 def test_a_page_comes_back_as_a_chat_completion_with_usage(served) -> None:
     engine, name, _ = served
     status, document = post(engine, page_body(name, width=112, height=168))
@@ -153,8 +127,6 @@ def test_a_page_comes_back_as_a_chat_completion_with_usage(served) -> None:
     assert choice["finish_reason"] == "stop"
     assert document["model"] == name
     assert document["usage"] == {
-        # 34 + (168 * 112) // 196, the fake's stated rule (112 and 168 are
-        # multiples of 28, so the grid IS the raw size here).
         "prompt_tokens": 34 + (168 * 112) // 196,
         "completion_tokens": len("page 168x112 row 0"),
         "total_tokens": 34 + (168 * 112) // 196 + len("page 168x112 row 0"),
@@ -163,8 +135,6 @@ def test_a_page_comes_back_as_a_chat_completion_with_usage(served) -> None:
 
 
 def test_a_page_cut_off_at_max_tokens_says_length(served) -> None:
-    """THE FIELD THE CONTRACT NEEDS. `batch_generate` throws it away; the
-    reader keeps it, and `pages.was_truncated` reads it."""
     engine, name, _ = served
     status, document = post(engine, page_body(name, max_tokens=5))
     assert status == 200, document
@@ -176,15 +146,10 @@ def test_a_page_cut_off_at_max_tokens_says_length(served) -> None:
 
 
 def test_an_rgba_png_is_read_as_rgb(served) -> None:
-    """The Mac's finding: a PNG that decodes to RGBA trips the image processor,
-    so every image is converted. The fake reports the shape it received."""
     engine, name, _ = served
     status, document = post(engine, page_body(name, width=56, height=84))
     assert status == 200
     assert document["choices"][0]["message"]["content"] == "page 84x56 row 0"
-
-
-# ------------------------------------------------------------- the refusals
 
 
 @pytest.mark.parametrize(
@@ -231,9 +196,6 @@ def test_a_fetchable_url_is_refused_this_reader_fetches_nothing(served) -> None:
     assert document["error"]["code"] == "not_a_data_uri"
 
 
-# ---------------------------------------------------------------- batching
-
-
 def _read_many(engine: MlxVlmEngine, bodies: list[dict]) -> list[tuple[int, dict]]:
     results: list[Any] = [None] * len(bodies)
 
@@ -249,31 +211,19 @@ def _read_many(engine: MlxVlmEngine, bodies: list[dict]) -> list[tuple[int, dict
 
 
 def test_concurrent_pages_are_batched_to_the_width_and_never_wider(served) -> None:
-    """Six same-shape pages at width 2: no batch wider than 2, and at least one
-    that IS 2 — a server that quietly read them one at a time would pass the
-    first assertion and fail the second."""
     engine, name, batches = served
     results = _read_many(engine, [page_body(name, width=112, height=168) for _ in range(6)])
     assert all(status == 200 for status, _ in results), results
     contents = sorted(r["choices"][0]["message"]["content"] for _, r in results)
-    # Every page answered from ITS OWN row of its batch.
     assert all(c.startswith("page 168x112 row ") for c in contents)
     recorded = [json.loads(line) for line in batches.read_text().splitlines()]
     assert sum(b["rows"] for b in recorded) == 6
     assert max(b["rows"] for b in recorded) <= 2
     assert any(b["rows"] == 2 for b in recorded), recorded
-    # Prefill and completion batch are BOTH the row count (the fake asserts
-    # they agree; this reads that they are the batch and not the width).
     assert all(b["batch_size"] == b["rows"] for b in recorded), recorded
 
 
 def test_two_raw_sizes_on_one_grid_share_a_batch_and_two_grids_do_not() -> None:
-    """THE LIVE-BOOK FINDING, both halves. Scans differ by a few pixels per
-    page and land on one processor grid, so they batch; rows of different
-    grids (different prompt lengths) must not, because the generator's
-    mixed-length path corrupts the shorter rows (measured 2026-09-21). The
-    batcher is driven directly, with the reader held on a gate, so the queue's
-    contents at the moment of each take are known rather than raced."""
     import threading
 
     taken: list[list[tuple[int, ...]]] = []
@@ -296,8 +246,6 @@ def test_two_raw_sizes_on_one_grid_share_a_batch_and_two_grids_do_not() -> None:
 
     logged: list[str] = []
     batcher = mlx_vlm_serve.Batcher(HeldReader(), width=3, log=logged.append)
-    # No image on these rows: the log line reads `image.width`, and a surprise
-    # there must cost the log line, never the row or the thread.
     batcher.submit(mlx_vlm_serve.Job(image=None, prompt="p", max_tokens=1, grid=(0,)))
     assert first_started.wait(10)
     grid_a, grid_b = (1, 90, 52), (1, 160, 92)
@@ -313,8 +261,6 @@ def test_two_raw_sizes_on_one_grid_share_a_batch_and_two_grids_do_not() -> None:
     gate.set()
     for job in waiting:
         assert job.done.wait(10)
-    # Oldest grid first, up to the width, skipping the other grid; then the
-    # other grid's lone row; then the leftover of the first.
     assert taken[1] == [grid_a, grid_a, grid_a], taken
     assert taken[2] == [grid_b], taken
     assert taken[3] == [grid_a], taken
@@ -322,8 +268,6 @@ def test_two_raw_sizes_on_one_grid_share_a_batch_and_two_grids_do_not() -> None:
 
 
 def test_the_grid_key_comes_from_the_processor_and_absorbs_pixel_jitter(served) -> None:
-    """Through the real server against the fake: 100 and 110 wide both round
-    to the 112 grid and read as the same page size; 130 does not."""
     engine, name, batches = served
     bodies = [page_body(name, width=100, height=168), page_body(name, width=110, height=168)]
     results = _read_many(engine, bodies)
@@ -342,7 +286,6 @@ def test_a_failed_batch_fails_its_rows_and_the_next_page_still_reads(tmp_path: P
     engine.start(weights, str(weights), find_free_port(), ["--width", "2"])
     try:
         engine.ready(60.0)
-        # 77 rounds to the 84-row grid, and the fake refuses THAT height.
         status, document = post(engine, page_body(str(weights), width=56, height=77))
         assert status == 500
         assert document["error"]["code"] == "engine_error"
@@ -354,9 +297,6 @@ def test_a_failed_batch_fails_its_rows_and_the_next_page_still_reads(tmp_path: P
         engine.stop()
 
 
-# ------------------------------------------- the parser, without a process
-
-
 def test_parse_request_reads_exactly_the_published_shape() -> None:
     image, prompt, max_tokens = mlx_vlm_serve.parse_request(page_body("m", width=30, height=40), "m")
     assert (image.height, image.width) == (40, 30)
@@ -366,14 +306,11 @@ def test_parse_request_reads_exactly_the_published_shape() -> None:
 
 
 def test_the_request_shape_the_server_reads_is_the_one_pages_publishes() -> None:
-    """One owner. If `crucible/pages.py` ever adds a field to the page request,
-    this server must learn it, and this is the test that says so."""
     published = set(pages.request_body("data:image/png;base64,AA==", model="m"))
     assert published <= mlx_vlm_serve.KNOWN_FIELDS, published - mlx_vlm_serve.KNOWN_FIELDS
 
 
 def test_a_missing_width_stops_the_process_by_name(tmp_path: Path) -> None:
-    """argparse's refusal, so the server never defaults it either."""
     import subprocess
 
     result = subprocess.run(

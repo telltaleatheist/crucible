@@ -1,15 +1,3 @@
-"""`crucible.workers.WorkerSession` — the worker that outlives a job.
-
-Run against `tests/fake_align_worker.py` as a **real subprocess**, spawned exactly
-the way the residency spawns the real one. Nothing here imports the worker: a
-worker's env has no `crucible` in it, and a test that imported it would be
-testing a relationship that does not exist at runtime.
-
-What is being asserted is the one thing a session has that `run_worker` does not:
-the process survives an exchange, the SAME process answers the next one, and it
-goes when it is asked — without ever being SIGKILLed.
-"""
-
 from __future__ import annotations
 
 import json
@@ -48,11 +36,7 @@ def session(tmp_path: Path, **kwargs) -> workers.WorkerSession:
     )
 
 
-# ---------------------------------------------------------------- it holds
-
-
 def test_one_process_answers_every_request(tmp_path: Path) -> None:
-    """The whole reason this class exists: hundreds of chunks, one model load."""
     held = session(tmp_path)
     loaded = held.start(LOAD, ready_silence_timeout=30.0)
     assert loaded.ready["dtype"] == "bfloat16"
@@ -64,7 +48,6 @@ def test_one_process_answers_every_request(tmp_path: Path) -> None:
     second = held.send(align("three", "four five"), ready_silence_timeout=30.0)
     assert first.ready["chunks"] == 1
     assert second.ready["chunks"] == 2
-    # The same process, after three exchanges.
     assert held.pids == pids
     assert held.alive
     held.stop()
@@ -97,10 +80,6 @@ def test_every_request_reaches_the_worker_on_the_same_stdin(tmp_path: Path) -> N
 def test_stopping_closes_stdin_first_and_the_worker_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The polite door: EOF on stdin ends the worker's own loop, so CUDA is
-    released the way its own code expects. SIGTERM is only the backstop."""
-    # Watched at `procgroup.ask_to_stop`, the one place the polite signal is
-    # sent on every platform — `os.killpg` does not exist on win32.
     signalled: list[int] = []
     real_ask = workers.procgroup.ask_to_stop
     monkeypatch.setattr(
@@ -119,9 +98,6 @@ def test_stopping_twice_is_not_an_error(tmp_path: Path) -> None:
     held.start(LOAD, ready_silence_timeout=30.0)
     held.stop()
     held.stop()
-
-
-# ---------------------------------------------------------------- it refuses
 
 
 def test_a_load_that_fails_is_reported_and_nothing_is_left_running(
@@ -155,8 +131,6 @@ def test_starting_twice_is_refused(tmp_path: Path) -> None:
 def test_a_worker_that_died_between_jobs_is_named_not_written_to(
     tmp_path: Path,
 ) -> None:
-    """A held process can go without anybody asking; the next send must say so
-    rather than write a request into a closed pipe."""
     held = session(tmp_path, environment={"CRUCIBLE_FAKE_ALIGN_DIE_AFTER": "0"})
     held.start(LOAD, ready_silence_timeout=30.0)
     with pytest.raises(workers.WorkerError) as caught:
@@ -192,8 +166,6 @@ def test_silence_before_ready_gives_up_by_name(tmp_path: Path) -> None:
 
 
 def test_a_load_delay_does_not_trip_the_silence_clock(tmp_path: Path) -> None:
-    """It is a silence timeout, not a deadline — and a model load is the one
-    thing that is legitimately quiet for a long time."""
     held = session(tmp_path, environment={"CRUCIBLE_FAKE_ALIGN_LOAD_DELAY_S": "1.5"})
     outcome = held.start(LOAD, ready_silence_timeout=5.0)
     held.stop()
@@ -211,7 +183,6 @@ def test_stopping_without_done_is_an_unfinished_answer(tmp_path: Path) -> None:
 def test_a_cancel_terminates_the_session_and_kills_it_for_reuse(
     tmp_path: Path,
 ) -> None:
-    """A cancel mid-exchange cannot leave a worker whose stdin is half a request."""
     held = session(tmp_path, environment={"CRUCIBLE_FAKE_ALIGN_SLOW_S": "5"})
     held.start(LOAD, ready_silence_timeout=30.0)
     calls = {"n": 0}
@@ -230,19 +201,11 @@ def test_a_cancel_terminates_the_session_and_kills_it_for_reuse(
 def test_a_worker_that_ignores_sigterm_is_reported_never_killed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Crucible does not SIGKILL a process that may be holding CUDA.
-
-    The real wait is three minutes; shortened here so the suite does not spend
-    them. What is asserted is that the timeout produces a named refusal rather
-    than an escalation.
-    """
     monkeypatch.setattr(workers, "STOP_TIMEOUT_SECONDS", 1.0)
     monkeypatch.setattr(workers, "STOP_ON_EOF_SECONDS", 1.0)
     held = session(
         tmp_path,
         environment={
-            # Refuses BOTH doors: it will not exit when stdin closes, and it
-            # ignores the SIGTERM that follows.
             "CRUCIBLE_FAKE_ALIGN_IGNORE_EOF": "1",
             "CRUCIBLE_FAKE_ALIGN_IGNORE_SIGTERM": "1",
         },
@@ -250,8 +213,6 @@ def test_a_worker_that_ignores_sigterm_is_reported_never_killed(
     held.start(LOAD, ready_silence_timeout=30.0)
     pids = set(held.pids)
     if workers.procgroup.platform_kind() == workers.procgroup.WIN32:
-        # win32 has no WSL2 wedge to protect: a worker deaf to both doors has
-        # its tree terminated and `stop()` returns (`crucible/procgroup.py`).
         held.stop()
         assert not held.alive
         return
@@ -259,10 +220,6 @@ def test_a_worker_that_ignores_sigterm_is_reported_never_killed(
         held.stop()
     assert "does not SIGKILL" in str(caught.value)
 
-    # This test made the process; this test cleans it up. Nothing in Crucible
-    # will, by design.
-    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
-    # this test installed would otherwise append it to the list being walked.
     for pid in list(pids):
         end_process_tree(pid)
 

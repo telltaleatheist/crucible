@@ -1,8 +1,3 @@
-"""The settings door: routes, upstreams, and a key that is never readable back.
-
-PHASE15-HOST.md sections 3.1, 3.2, 3.3 and 3.9.
-"""
-
 from __future__ import annotations
 
 import json
@@ -18,8 +13,6 @@ from crucible.config import load_config
 
 from .fake_upstream import ANTHROPIC_MODELS, OLLAMA_MODELS, FakeUpstream
 
-#: A key long enough to pass the door's own length check and distinctive enough
-#: that a grep for it cannot match anything else in a response.
 ANTHROPIC_KEY = "sk-ant-zzzTESTKEYzzz-9f2k3A9"
 OPENAI_KEY = "sk-proj-zzzOPENAIzzz-77bQ4z1"
 
@@ -82,18 +75,9 @@ def test_managed_sharing_rejects_non_dialable_authorities(settings_client, auth,
     assert response.json()["error"]["details"]["field"] == "tailscale_advertise"
 
 
-# --------------------------------------------------------------------- GET
-
-
 def test_the_document_names_every_class_and_every_upstream_configured_or_not(
     settings_client, auth
 ) -> None:
-    """3.1's shape, whole, on a server nobody has configured.
-
-    Three upstream cards are drawn whether or not anybody has a key, so all
-    three names are always present: a key that came and went would make "not
-    configured" and "this build does not know that upstream" one reading.
-    """
     body = settings_client.get("/v1/settings", headers=auth).json()
     assert set(body["routes"]) == set(capability.ROUTABLE_CLASSES)
     assert set(body["routes"]) == {
@@ -101,8 +85,6 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
     }
     for row in body["routes"].values():
         assert row["route"] == "local"
-    # The local selection is carried so a window can draw "translate: local,
-    # qwen3.8-27b-4bit" without a second call.
     assert body["routes"]["clean"]["model"] == "qwen3.5-9b"
     assert set(body["upstreams"]) == set(upstreams.UPSTREAM_NAMES)
     assert body["upstreams"] == {
@@ -117,26 +99,12 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
 def test_pages_is_not_routable_because_it_is_not_one_of_the_four(
     settings_client, auth
 ) -> None:
-    """`pages` is an `llm` job type and is NOT a routable class.
-
-    Declared on the class table rather than derived from `job_type == "llm"`:
-    the VLM sends page images and "forward it to Anthropic" is a different
-    feature nobody asked for.
-    """
     body = settings_client.get("/v1/settings", headers=auth).json()
     assert "pages" not in body["routes"]
     assert "pages" not in capability.ROUTABLE_CLASSES
 
 
-# --------------------------------------------------------------------- PUT
-
-
 def test_an_upstream_and_a_route_land_in_one_request(settings_client, auth) -> None:
-    """Section 5.2's move: paste a key and route a class, in one PUT.
-
-    Upstreams are applied before routes, which is the whole reason this works
-    in one call rather than two.
-    """
     body = put(
         settings_client,
         auth,
@@ -152,14 +120,12 @@ def test_an_upstream_and_a_route_land_in_one_request(settings_client, auth) -> N
         "route": "upstream",
         "model": "anthropic/claude-sonnet-5",
     }
-    # The other three are untouched — a patch is partial.
     assert document["routes"]["clean"]["route"] == "local"
 
 
 def test_the_key_hint_is_an_ellipsis_and_four_characters(
     settings_client, auth
 ) -> None:
-    """Pinned by the contract: clients render the hint verbatim."""
     document = put(
         settings_client, auth, {"upstreams": {"anthropic": {"key": ANTHROPIC_KEY}}}
     ).json()
@@ -170,11 +136,6 @@ def test_the_key_hint_is_an_ellipsis_and_four_characters(
 def test_the_whole_key_is_in_no_response_no_log_and_no_activity_row(
     settings_client, auth, caplog
 ) -> None:
-    """3.9's grep, run four ways. A key is write-only and this is what that means.
-
-    Every response body, every response HEADER, every log record emitted while
-    the write happened, and `/v1/activity`'s settings history.
-    """
     with caplog.at_level(logging.DEBUG):
         written = put(
             settings_client,
@@ -197,7 +158,6 @@ def test_the_whole_key_is_in_no_response_no_log_and_no_activity_row(
         assert ANTHROPIC_KEY not in response.text, response.url
         assert ANTHROPIC_KEY not in json.dumps(dict(response.headers))
     assert ANTHROPIC_KEY not in caplog.text
-    # And the history says WHAT changed without saying what it was set to.
     writes = reads[3].json()["settings"]["writes"]
     assert writes[0]["changed"] == [
         "upstreams.anthropic set",
@@ -236,9 +196,6 @@ def test_an_unknown_act_is_refused_before_anything_is_written(
     assert after["upstreams"]["anthropic"]["configured"] is False
 
 
-# ---------------------------------------------------------------- refusals
-
-
 def test_route_not_routable_names_the_class_and_the_field(
     settings_client, auth
 ) -> None:
@@ -264,7 +221,6 @@ def test_route_bad_model_covers_a_missing_slash_and_an_unknown_upstream(
 def test_route_upstream_unconfigured_refuses_a_route_the_server_cannot_serve(
     settings_client, auth
 ) -> None:
-    """*"the server never stores a route it cannot serve"* — 3.2."""
     body = put(settings_client, auth, {"routes": {"simplify": "openai/gpt-5"}})
     assert body.status_code == 409
     error = body.json()["error"]
@@ -293,7 +249,6 @@ def test_upstream_in_use_names_the_classes_and_is_avoidable_in_one_request(
     assert error["code"] == "upstream_in_use"
     assert error["details"]["field"] == "upstreams.anthropic"
     assert error["details"]["classes"] == ["simplify", "translate"]
-    # …and the caller re-routes first, in the same request if it likes.
     accepted = put(
         settings_client,
         auth,
@@ -309,11 +264,6 @@ def test_upstream_in_use_names_the_classes_and_is_avoidable_in_one_request(
 
 
 def test_a_refusal_applies_nothing(settings_client, auth) -> None:
-    """The whole point of resolving in memory before writing a byte.
-
-    A request that configures an upstream and then names an impossible route
-    must not leave the key behind: its sender believes the call failed.
-    """
     body = put(
         settings_client,
         auth,
@@ -345,7 +295,6 @@ def test_unknown_upstream_and_upstream_bad_field(settings_client, auth) -> None:
 
 
 def test_every_refusal_carries_a_dotted_field(settings_client, auth) -> None:
-    """Pinned by the contract: Foundry highlights one control from `details.field`."""
     patches = [
         {"nonsense": 1},
         {"routes": {"tts": "anthropic/x"}},
@@ -368,7 +317,6 @@ def test_every_refusal_carries_a_dotted_field(settings_client, auth) -> None:
 def test_the_allowance_is_written_and_recomputes_the_capability_rows(
     settings_client, auth, home: Path
 ) -> None:
-    """A reserve that eats the card turns classes off, and the record says so."""
     before = settings_client.get("/v1/capability", headers=auth).json()
     assert {row["capability"]: row["enabled"] for row in before["classes"]}["clean"]
     body = put(settings_client, auth, {"desktop_allowance_bytes": 25 * 1024 ** 3})
@@ -378,17 +326,12 @@ def test_the_allowance_is_written_and_recomputes_the_capability_rows(
     assert rows["clean"]["enabled"] is False
     assert "short by" in rows["clean"]["reason"]
     assert after["desktop_allowance_bytes"] == 25 * 1024 ** 3
-    # …and it is on disk, not only in memory.
     assert load_config(home).desktop_allowance_bytes == 25 * 1024 ** 3
-
-
-# ------------------------------------------------------------- capability
 
 
 def test_capability_says_the_route_and_keeps_the_local_answer(
     settings_client, auth
 ) -> None:
-    """3.3: `route` on every row, and the local sentence kept after routing."""
     before = {
         row["capability"]: row
         for row in settings_client.get("/v1/capability", headers=auth).json()[
@@ -418,7 +361,6 @@ def test_capability_says_the_route_and_keeps_the_local_answer(
     assert row["selected"] == "anthropic/claude-sonnet-5"
     assert row["reason"].startswith("routed to anthropic; ")
     assert capability.LOCAL_ANSWER_PREFIX + local_reason in row["reason"]
-    # Every other row is untouched and still says `local`.
     assert after["clean"]["route"] == "local"
     assert after["clean"]["reason"] == before["clean"]["reason"]
     assert after["tts"]["route"] == "local"
@@ -427,7 +369,6 @@ def test_capability_says_the_route_and_keeps_the_local_answer(
 def test_routing_back_to_local_restores_the_row_exactly(
     settings_client, auth
 ) -> None:
-    """Nothing is lost by routing away: the record is rebuilt from `decide()`."""
     before = settings_client.get("/v1/capability", headers=auth).json()["classes"]
     put(
         settings_client,
@@ -439,7 +380,7 @@ def test_routing_back_to_local_restores_the_row_exactly(
     )
     put(settings_client, auth, {"routes": {"simplify": "local"}})
     after = settings_client.get("/v1/capability", headers=auth).json()["classes"]
-    strip = lambda rows: [  # noqa: E731 - a local comparison, not an export
+    strip = lambda rows: [
         {k: v for k, v in row.items() if k != "route"} for row in rows
     ]
     assert strip(after) == strip(before)
@@ -448,13 +389,6 @@ def test_routing_back_to_local_restores_the_row_exactly(
 def test_the_operators_routes_survive_a_capability_rewrite(
     settings_client, auth, home: Path
 ) -> None:
-    """`crucible install`'s `_write_capability` must not unroute a server.
-
-    `write_config` writes the WHOLE document, so a rewrite that omitted the
-    two new tables would quietly delete somebody's key — and the door that
-    rewrites it is `crucible install`, which an operator runs months after
-    pasting one.
-    """
     from crucible.cli import _write_capability
 
     from .conftest import FAKE_BACKEND
@@ -479,14 +413,9 @@ def test_the_operators_routes_survive_a_capability_rewrite(
     after = load_config(home)
     assert after.route_model("translate") == "anthropic/claude-sonnet-5"
     assert after.upstream("anthropic").key == ANTHROPIC_KEY
-    # …and the rewritten record still says the class is routed, rather than
-    # putting the local row back over it.
     row = after.capability.row("translate")
     assert row.selected == "anthropic/claude-sonnet-5"
     assert row.reason.startswith("routed to anthropic; ")
-
-
-# ------------------------------------------------------------------- test
 
 
 def test_test_asks_the_upstream_what_it_serves(settings_client, auth, monkeypatch) -> None:
@@ -499,7 +428,6 @@ def test_test_asks_the_upstream_what_it_serves(settings_client, auth, monkeypatc
         )
         assert body.status_code == 200, body.text
         assert body.json() == {"models": ANTHROPIC_MODELS}
-        # The provider's own headers, not a bearer.
         assert upstream.headers_seen[-1]["x-api-key"] == ANTHROPIC_KEY
         assert upstream.headers_seen[-1]["anthropic-version"] == (
             upstreams.ANTHROPIC_VERSION
@@ -534,16 +462,9 @@ def test_test_refuses_unreachable_rejected_and_unconfigured(
             headers=auth,
             json={"key": OPENAI_KEY},
         )
-        # **502, NOT 401.** A 401 from a Crucible route means THIS server
-        # refused THIS client's bearer, and a client that saw one here would
-        # tell a person their Crucible token was wrong about a key the
-        # upstream rejected — measured by BookForge, 2026-09-14. The chat
-        # door already answers 502 for every non-2xx but 429 (7.2); this is
-        # the same decision at the other door.
         assert rejected.status_code == 502
         said = rejected.json()["error"]
         assert said["code"] == "upstream_rejected"
-        # And the sentence names WHO did what.
         assert "openai rejected the credential" in said["message"]
         assert "not Crucible's about your token" in said["message"]
         assert said["details"]["upstream_status"] == 401
@@ -555,9 +476,6 @@ def test_test_refuses_unreachable_rejected_and_unconfigured(
     assert unreachable.status_code == 502
     said = unreachable.json()["error"]
     assert said["code"] == "upstream_unreachable"
-    # It NAMES THE URL that did not answer, in the message and in details:
-    # "ollama did not answer" is unactionable when the operator has just
-    # typed an address.
     assert dead in said["message"]
     assert said["details"]["url"].startswith(dead)
 
@@ -568,17 +486,9 @@ def test_test_of_an_upstream_this_server_does_not_know(settings_client, auth) ->
     assert body.json()["error"]["code"] == "unknown_upstream"
 
 
-# ---------------------------------------------------------------- the file
-
-
 def test_a_config_naming_an_unconfigured_upstream_does_not_load(
     settings_client, home: Path
 ) -> None:
-    """A hand-edited config is refused at LOAD, by the same names.
-
-    A server that started holding a route it cannot serve would refuse one
-    capability for the rest of its life with a sentence about the wrong thing.
-    """
     from crucible.errors import ConfigError
 
     path = home / "config.toml"

@@ -1,10 +1,3 @@
-"""What the command line gained with `asr`: a flag, an installer, and one
-namespace of model ids across two manifest directories.
-
-`crucible init` refuses on win32 by design, so like `tests/test_cli.py` these run
-on Linux (in WSL on Owen's PC) and not on Windows.
-"""
-
 from __future__ import annotations
 
 import json
@@ -17,8 +10,6 @@ from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
-#: The whispers of Owen's three (2026-09-24); `qwen3-asr-1.7b` is the third,
-#: and has a context, so it is not in the "no context" loop below.
 ASR_MODELS = ["whisper-large-v3-turbo", "whisper-tiny"]
 
 
@@ -67,13 +58,6 @@ def test_doctor_says_nothing_about_asr_when_it_is_off(
 
 
 def test_the_mac_asr_recipe_installs_mlx_whisper_and_not_faster_whisper() -> None:
-    """The Mac stopped being a refusal on 2026-09-14: it has an `asr` recipe.
-
-    A recipe with a DIFFERENT headline package, which is the thing worth
-    asserting — `crucible doctor` reads that name to describe the env, and
-    before the table was keyed by backend it would have looked in the mlx
-    recipe for faster-whisper and refused an env that was perfectly good.
-    """
     from crucible import jobenv
 
     assert jobenv.worker_env("asr", "mlx-darwin").headline == "mlx-whisper"
@@ -96,10 +80,7 @@ def test_models_list_covers_both_manifest_directories(
         assert rows[model_id]["backend_supported"] is True
         assert rows[model_id]["installed"] is False
         assert "crucible models pull" in rows[model_id]["detail"]
-        # Whisper's window is 30 seconds of audio and is not a knob, so an ASR
-        # row has no context at all rather than a number nobody set.
         assert rows[model_id]["context_default"] is None
-    # cuda-linux serves 16384 — BookForge's launcher value, recovered 2026-09-15.
     assert rows["qwen3.5-9b"]["context_default"] == 16384
 
 
@@ -121,11 +102,6 @@ def test_one_id_declared_twice_is_refused_rather_than_resolved(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`crucible models pull <id>` is one question; two answers is not an answer."""
-    # The clash is made on the `models/` side, because an `asr/` manifest can
-    # no longer take an arbitrary id: the loader requires it to name its family
-    # (`whisper-` or `qwen3-asr-`), so the collision has to come from the other
-    # directory.
     clashing = tmp_path / "models-fixture"
     clashing.mkdir()
     (clashing / "whisper-tiny.toml").write_text(

@@ -1,22 +1,3 @@
-"""`tests.sh --changed` selects only the tests that name the change.
-
-PHASE20-CODE-NOT-ENVIRONMENTS.md 7, Owen 2026-09-18: *"If we change crucible's
-handshake logic, we don't need to re-run the GPU test. We can test the handshake
-logic we just built and assume the GPU works since it did last time we changed
-anything. If it breaks, we can debug from there."*
-
-THE WIDE LIST IS WHAT THAT DELETES. It existed to make the selector safe for a
-release to lean on — not knowing what a file affected was a reason to run
-everything — and under PHASE20 nothing leans on it: `ship.sh` runs no tests at
-all, and this is a person's tool for the branch they are on. A selector that
-answers "all 101 files" to a one-line change is a selector nobody runs, which
-is how the suite ended up on the deploy path to begin with.
-
-THESE TESTS RUN THE REAL SCRIPT against a repo of shims — its own git remote
-and tag in a tmp directory, ten invented test files, and a `python` that
-records its argv instead of being pytest. Nothing here runs a test of its own.
-"""
-
 from __future__ import annotations
 
 import os
@@ -34,9 +15,6 @@ pytestmark = pytest.mark.skipif(
     reason="the shims are `#!/bin/bash` scripts; the suite runs inside WSL",
 )
 
-#: The invented repo's test files and the one word each contains. Ten of them,
-#: because the "this name matches almost everything" threshold is a fraction of
-#: the total and a total of one makes every name look useless.
 INVENTED = {
     "tests/test_leases.py": "leases",
     "tests/test_settle.py": "leases",
@@ -62,13 +40,6 @@ def git(where: Path, *argv: str) -> str:
 
 @pytest.fixture
 def work(tmp_path: Path) -> Path:
-    """A tagged repo whose working tree is where the change is put.
-
-    `tests.sh` compares the last TAG to HEAD and then adds whatever `git status`
-    reports, so an uncommitted edit is the shortest way to say "this is what
-    changed" — and it is also the real case, since the selector is run before
-    the commit exists.
-    """
     origin = tmp_path / "origin.git"
     subprocess.run(["git", "init", "--quiet", "--bare", str(origin)], check=True)
 
@@ -87,9 +58,6 @@ def work(tmp_path: Path) -> Path:
     for relative, word in INVENTED.items():
         (repo / relative).write_text("# this one is about %s\n" % word, encoding="utf-8")
 
-    # A `python` that records rather than runs. If a selection ever reaches
-    # pytest from inside this fixture the recording says so, and no test of
-    # this repo's is run by a test of this repo's.
     shims = tmp_path / "shims"
     shims.mkdir()
     (shims / "python").write_text(
@@ -110,7 +78,6 @@ def work(tmp_path: Path) -> Path:
 
 
 def listing(work: Path) -> tuple[str, set[str]]:
-    """`--list` against the repo, and the set of files it says it would run."""
     environment = dict(os.environ)
     environment.update(
         CRUCIBLE_PYTEST_PYTHON=str(work.parent / "shims/python"),
@@ -132,13 +99,6 @@ def listing(work: Path) -> tuple[str, set[str]]:
 
 
 def test_a_version_bump_selects_nothing(work: Path) -> None:
-    """Two files carry the version and both are named by tests.
-
-    `tests/test_release_bits.py` names `crucible/__init__.py` the way this
-    repo's own release-tooling tests do, so the ordinary "a test that names it"
-    rule WOULD pick it up. A one-line version literal is not a behaviour change,
-    and a rule that runs tests for one runs tests on every single release.
-    """
     (work / "crucible/__init__.py").write_text('VERSION = "1.0.3"\n', encoding="utf-8")
     out, would = listing(work)
     assert would == set(), out
@@ -146,14 +106,12 @@ def test_a_version_bump_selects_nothing(work: Path) -> None:
 
 
 def test_a_real_change_to_a_module_selects_the_tests_that_name_it(work: Path) -> None:
-    """Exactly those, and no neighbours: the whole claim of `--changed`."""
     (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
     assert would == {"tests/test_leases.py", "tests/test_settle.py", "tests/test_api_client.py"}, out
 
 
 def test_a_version_bump_beside_a_real_change_still_selects_the_real_change(work: Path) -> None:
-    """The version-literal rule excuses ONE file, not the release it is part of."""
     (work / "crucible/__init__.py").write_text('VERSION = "1.0.3"\n', encoding="utf-8")
     (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
@@ -169,12 +127,6 @@ def test_a_version_bump_beside_a_real_change_still_selects_the_real_change(work:
     ],
 )
 def test_a_workflow_a_doc_and_a_recipe_select_nothing(work: Path, path: str, body: str) -> None:
-    """None of the three is Python, TypeScript or shell, so no test can be
-    running it. The workflow used to select the entire suite because CI
-    configuration "can change how anything runs" — true of the run CI does, and
-    nothing at all to do with the run a person is about to do on their branch.
-    The doc names `leases` on purpose: prose that mentions a module is still
-    prose."""
     (work / path).write_text(body, encoding="utf-8")
     out, would = listing(work)
     assert would == set(), out
@@ -182,14 +134,6 @@ def test_a_workflow_a_doc_and_a_recipe_select_nothing(work: Path, path: str, bod
 
 
 def test_no_live_keeper_is_ever_selected(work: Path) -> None:
-    """`scripts/keeper-live.sh`, `keeper-tts-live.sh` and `keeper-llm-live.sh`
-    are how this repo marks a check that needs a real model on a real card.
-
-    They are shell scripts, not pytest files, so the only way one could reach a
-    run is if the selector ever emitted something that is not `tests/test_*.py`
-    — which is exactly what to assert, because "we assume the GPU works since it
-    did last time" is the ruling this whole selector exists to carry out.
-    """
     (work / "scripts/keeper-tts-live.sh").write_text("#!/bin/bash\n: live, changed\n",
                                                      encoding="utf-8")
     out, would = listing(work)
@@ -199,7 +143,6 @@ def test_no_live_keeper_is_ever_selected(work: Path) -> None:
 
 
 def test_the_listing_gives_one_reason_per_selected_file(work: Path) -> None:
-    """A selector that cannot say why it chose a file cannot be argued with."""
     (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
     reasons = {}
@@ -213,9 +156,6 @@ def test_the_listing_gives_one_reason_per_selected_file(work: Path) -> None:
 
 
 def test_all_is_still_there_and_says_what_it_is_for() -> None:
-    """The narrow selector is the normal case; `--all` is the other one, and a
-    header that does not say when to reach for it is a header that leaves the
-    reader to guess whether narrow is safe."""
     text = TESTS_SH.read_text(encoding="utf-8")
     header = text[: text.index("set -uo pipefail")]
     assert "--all" in header
@@ -223,8 +163,6 @@ def test_all_is_still_there_and_says_what_it_is_for() -> None:
 
 
 def test_the_wide_list_is_gone() -> None:
-    """Not narrowed — gone. A list of files that fan out to the whole suite is
-    a list somebody adds to, and this selector's job is now to be small."""
     text = TESTS_SH.read_text(encoding="utf-8")
     for dead in ["is_wide", "everything=", "no test names it"]:
         assert dead not in text, "tests.sh still carries %r" % dead

@@ -1,21 +1,3 @@
-"""A module names CLASSES and the SERVER resolves them. PHASE15-HOST.md 5.3a.
-
-MEASURED, by Foundry against the Mac, 2026-09-14. `foundry.module.json`
-carried `qwen3.8-27b-4bit` and `dots-ocr` as RESOLVED ids, because
-`gen-modules.py` resolved a `[[needs]] class` at generation time — the
-cuda-linux answer, because the generator runs on a PC. Posted to the Mac,
-`validate_module` refused the WHOLE module `unknown_subject` (dots-ocr has no
-mlx-darwin block), and `qwen3.8-27b-4bit` is not what that machine's
-capability selected anyway (`qwen3.8-27b-8bit`). The generator was a second owner
-of a decision that is the server's: PHASE9 says the capability record is the
-one place a class is resolved, and the record is per machine.
-
-The two halves of the ruling are tested against each other here: a module
-with `pages` in it posted to a fake mlx-darwin server comes back **done with
-`unmet`**, not refused — because a Mac with no page reader is still a Mac
-Foundry can use for text.
-"""
-
 from __future__ import annotations
 
 import json
@@ -90,13 +72,9 @@ def post_module(
     )
 
 
-# ------------------------------------------------------------- what is valid
-
-
 def test_a_class_this_build_does_not_have_is_refused_whole(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    """A word this build has never heard of is the same defect everywhere."""
     response = post_module(
         client, auth, a_module(needs=[{"class": "transcribe-but-nicer"}])
     )
@@ -109,7 +87,6 @@ def test_a_class_this_build_does_not_have_is_refused_whole(
 def test_a_need_carrying_anything_but_a_class_is_refused(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    """An app that wants ONE model names it under `subjects`, which says so."""
     response = post_module(
         client,
         auth,
@@ -123,7 +100,6 @@ def test_a_need_carrying_anything_but_a_class_is_refused(
 def test_needs_are_validated_with_everything_else_in_one_refusal(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    """*"A module is validated WHOLE before anything starts."*"""
     response = post_module(
         client,
         auth,
@@ -136,9 +112,6 @@ def test_needs_are_validated_with_everything_else_in_one_refusal(
     assert len(problems) == 2
 
 
-# --------------------------------------------------------- what is resolved
-
-
 def test_a_class_resolves_to_what_THIS_card_selected_and_pulls_it(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
@@ -148,8 +121,6 @@ def test_a_class_resolves_to_what_THIS_card_selected_and_pulls_it(
     pulled: list[str] = []
 
     async def fake_pull(self: Any, task: Any, subject: Any) -> None:
-        # The DOWNLOAD is faked and nothing else: the resolution, the step
-        # event and the skip-if-installed are the shipping code's.
         pulled.append(subject.id)
 
     monkeypatch.setattr("crucible.tasks.TaskStore._pull", fake_pull)
@@ -164,16 +135,9 @@ def test_a_class_resolves_to_what_THIS_card_selected_and_pulls_it(
     assert finished["unmet"] == []
 
 
-
 def test_a_class_this_ENGINE_does_not_serve_is_unmet_and_the_module_is_DONE(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """The whole of 5.3a's ruling, in one assertion.
-
-    A Mac with no page reader is still a Mac Foundry can use for text, so
-    `pages` is `unmet` beside the pulls that did happen — never a refusal of
-    the module.
-    """
     with make_client(
         backend=FAKE_MAC_BACKEND,
         capability=record(
@@ -206,7 +170,6 @@ def test_a_class_this_ENGINE_does_not_serve_is_unmet_and_the_module_is_DONE(
 def test_the_unmet_reason_is_the_capability_row_s_OWN_sentence(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """Never a sentence written by the task: the row said why."""
     said = "disabled: the smallest candidate needs 24.0 GiB and there is 21.0"
     with make_client(
         capability=record(row("analysis", enabled=False, reason=said))
@@ -219,11 +182,6 @@ def test_the_unmet_reason_is_the_capability_row_s_OWN_sentence(
 def test_a_server_with_NO_capability_record_says_so_by_name(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """"Nothing has probed this card" and "this card cannot" differ.
-
-    They are different things for an operator to fix, so they are different
-    sentences — and neither of them refuses the module.
-    """
     with make_client(capability=None) as server:
         accepted = post_module(server, auth, a_module(needs=[{"class": "clean"}]))
         finished = wait_for(server, auth, accepted.json()["task_id"])
@@ -247,17 +205,6 @@ def test_a_stale_record_naming_a_model_this_backend_lacks_is_unmet_not_a_crash(
 def test_an_explicit_subject_this_backend_cannot_hold_is_STILL_unknown_subject(
     make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
-    """5.3a keeps this: an explicit id is a CHOICE, and a wrong one is wrong.
-
-    The asymmetry is the point. A class is "give me whatever serves this",
-    which a machine can answer with "nothing here does". An id is "give me
-    this one", which it cannot.
-    """
-    # `qwen3.5-9b-vl` has no mlx-darwin block (crucible/catalog.py
-    # `backends_declaring`). It replaced `faster-whisper-large-v3` here on
-    # 2026-09-24, the day Owen's asr lineup made every transcriber one id on
-    # both backends — which is how `faster-whisper-large-v3` had replaced
-    # `dots-ocr` on 2026-09-21, the day dots-ocr grew its mlx-darwin block.
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         response = post_module(
             mac, auth, a_module(subjects=[{"kind": "model", "id": "qwen3.5-9b-vl"}])
@@ -270,15 +217,10 @@ def test_an_explicit_subject_this_backend_cannot_hold_is_STILL_unknown_subject(
 def test_unmet_is_an_EMPTY_LIST_on_every_other_task(
     client: TestClient, auth: dict[str, str], fake_weights
 ) -> None:
-    """Empty and not absent: "nothing was unmet" and "this server predates
-    the field" must not be one reading."""
     fake_weights("qwen3.5-9b")
     listed = client.get("/v1/tasks", headers=auth).json()["tasks"]
     assert listed == []
     accepted = post_module(client, auth, a_module(needs=[]))
-    # A module that asks for nothing is refused, so the empty-list check goes
-    # through a task that runs: a pull of something already installed is
-    # refused too, so an install-free module with one subject it has.
     assert accepted.status_code == 400
 
     with_subject = post_module(

@@ -1,26 +1,3 @@
-"""`initial_prompt` inside the REAL asr workers, with their libraries stubbed.
-
-`tests/test_asr_api.py` proves the server puts `initial_prompt` in the request
-it hands a worker, using the fake workers' recorded requests. That stops at the
-envelope. What the key is FOR happens one step further in, in the kwargs each
-real worker passes to its library's `transcribe()` — and no fake can prove
-that, because a fake never calls `transcribe()`.
-
-So these run `crucible/jobs/asr/worker.py` and `mlx_worker.py` themselves, as
-real subprocesses exactly as the server runs them, with three things swapped out
-under them and nothing else:
-
-  * `faster_whisper`, or `mlx` + `mlx_whisper`, as tiny stub packages on
-    `PYTHONPATH` that record every `transcribe()` call's kwargs to a file and
-    count tokens by whitespace — the shapes are the libraries' own
-    (faster-whisper 1.2.1 `WhisperModel.hf_tokenizer.encode(...,
-    add_special_tokens=False).ids` and `max_length`; mlx-whisper 0.4.3
-    `ModelHolder.get_model`, `get_tokenizer(...).encode`, `dims.n_text_ctx`);
-  * ffmpeg, as a script that writes N seconds of f32le silence; and
-  * a `window_s` of 1, so three seconds of audio is three windows and "every
-    window gets the prompt" is something a test can count.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,9 +14,6 @@ MLX_WORKER = ASR_DIR / "mlx_worker.py"
 
 SECONDS = 3
 
-#: One stub per library, written into a directory put first on PYTHONPATH.
-#: Each records the kwargs of every `transcribe()` call, one JSON line each, to
-#: the file named by CRUCIBLE_STUB_CALLS.
 FASTER_WHISPER_STUB = '''
 import json, os
 
@@ -134,7 +108,6 @@ def stubs(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def ffmpeg(tmp_path: Path) -> str:
-    """An executable the worker can Popen by path, that emits silence."""
     script = tmp_path / "bin" / "ffmpeg_stub.py"
     _write(script, FFMPEG_STUB.format(seconds=SECONDS))
     if os.name == "nt":
@@ -160,7 +133,6 @@ def _request(ffmpeg: str, tmp_path: Path, **overrides: object) -> dict:
         "compute_type": "float16",
         "window_s": 1,
         "overlap_s": 0,
-        # Required since 2026-09-27 (speech only); null transcribes everything.
         "speech": None,
     }
     request.update(overrides)
@@ -170,7 +142,6 @@ def _request(ffmpeg: str, tmp_path: Path, **overrides: object) -> dict:
 def _run(
     worker: Path, request: dict, stubs: Path, tmp_path: Path
 ) -> tuple[list[dict], list[dict]]:
-    """The worker's messages, and every `transcribe()` call's kwargs."""
     calls = tmp_path / "calls.jsonl"
     environment = {
         **os.environ,
@@ -204,8 +175,6 @@ ENGINES = [
 def test_the_prompt_reaches_transcribe_in_every_window(
     worker: Path, engine: dict, stubs: Path, ffmpeg: str, tmp_path: Path
 ) -> None:
-    """Every window, not the first: each window is its own `transcribe()` call,
-    and each call starts its token history empty."""
     prompt = "Oathbringer. Kaladin, Shallan, Dalinar."
     messages, calls = _run(
         worker, _request(ffmpeg, tmp_path, initial_prompt=prompt, **engine),
@@ -220,7 +189,6 @@ def test_the_prompt_reaches_transcribe_in_every_window(
 def test_no_prompt_reaches_transcribe_as_none(
     worker: Path, engine: dict, stubs: Path, ffmpeg: str, tmp_path: Path
 ) -> None:
-    """None is each library's own default, so passing it is the old call."""
     messages, calls = _run(
         worker, _request(ffmpeg, tmp_path, **engine), stubs, tmp_path
     )
@@ -259,9 +227,6 @@ def test_a_prompt_that_is_not_a_nonblank_string_is_refused(
 def test_a_prompt_whisper_would_truncate_is_refused_before_any_window(
     worker: Path, engine: dict, stubs: Path, ffmpeg: str, tmp_path: Path
 ) -> None:
-    """Both libraries keep the LAST `448 // 2 - 1` = 223 prompt tokens; a
-    longer prompt would lose its beginning with no error. 223 fits, 224 does
-    not (the stubs count one token per word)."""
     fits = " ".join(["name"] * 223)
     messages, calls = _run(
         worker, _request(ffmpeg, tmp_path, initial_prompt=fits, **engine),

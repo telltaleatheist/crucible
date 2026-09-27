@@ -1,5 +1,3 @@
-"""`apply_chat_template`, in the shape 0.7.1 gives it."""
-
 from __future__ import annotations
 
 

@@ -1,14 +1,3 @@
-"""The `align` job type, end to end through the API.
-
-No GPU, no torch and no 1.7 GB of weights. What stands in for them is what the
-real code paths actually read — a stamped venv whose `bin/python` is a real
-interpreter, a stamped weights directory, monkeypatched accelerator probes, and
-`tests/fake_align_worker.py` spawned as a real subprocess in place of the real
-worker script. Everything else is the server: the preflight refusals, the
-exclusive lane, the worker envelope, the residency that holds the worker open
-across jobs, and the positional matching are exactly what would run on the PC.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -39,9 +28,6 @@ from .conftest import (
 MODEL = "qwen3-aligner"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_align_worker.py"
 
-#: Not real audio. Nothing in these tests decodes it — the fake worker never
-#: opens the file — but it must exist, because `ctx.inputs()` lists what is
-#: actually on disk and `_chunk_inputs` reads the names off it.
 AUDIO = base64.b64encode(b"not really a flac").decode("ascii")
 
 CHUNKS = [
@@ -55,16 +41,8 @@ INPUTS = {
 }
 
 
-# ------------------------------------------------------------------ fixtures
-
-
 @pytest.fixture
 def align_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A stamped `~/.crucible/envs/align` whose python is this interpreter.
-
-    A symlink and not a stub script: the worker is spawned with it for real, so
-    it has to be able to run a Python file.
-    """
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
@@ -89,7 +67,6 @@ def align_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def align_weights(home: Path) -> Callable[[str], Path]:
-    """Stamp the aligner as pulled at exactly the revision its manifest pins."""
 
     def stamp(model_id: str) -> Path:
         spec = load_align_manifest(model_id).spec(FAKE_BACKEND.kind)
@@ -115,12 +92,6 @@ def align_weights(home: Path) -> Callable[[str], Path]:
 
 
 def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """`align_env`, stamped for `mlx-darwin` instead.
-
-    A function and not a fixture, for `tests/test_asr_api.py`'s reason: the Mac
-    test builds its own client (it passes `backend=FAKE_MAC_BACKEND`), so it
-    needs this after the home exists and before the client starts.
-    """
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
@@ -236,9 +207,6 @@ def ready(
     return align_client
 
 
-# ------------------------------------------------------------------- listing
-
-
 def test_info_advertises_the_aligner(
     align_client: TestClient, auth: dict[str, str]
 ) -> None:
@@ -254,8 +222,6 @@ def test_info_advertises_the_aligner(
 def test_info_says_installed_once_the_aligner_is_pulled(
     align_client: TestClient, auth: dict[str, str], align_weights: Callable[[str], Path]
 ) -> None:
-    """`installed` is the puller's stamp at the pinned revision, and it is not
-    `resident`: pulled weights sit on disk with nothing serving them."""
     align_weights(MODEL)
     capabilities = align_client.get("/v1/info", headers=auth).json()["capabilities"]
     by_type = {entry["job_type"]: entry for entry in capabilities}
@@ -274,13 +240,9 @@ def test_align_is_off_unless_the_config_says_otherwise(
     assert "requires a model" in response.json()["error"]["message"]
 
 
-# ------------------------------------------------------------------ refusals
-
-
 def test_an_unsupported_language_is_refused_before_the_model_loads(
     align_client: TestClient, auth: dict[str, str]
 ) -> None:
-    """It does not fall back to English; it places words badly and says nothing."""
     response = submit(align_client, auth, params={**PARAMS, "language": "cy"})
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_params"
@@ -290,7 +252,6 @@ def test_an_unsupported_language_is_refused_before_the_model_loads(
 
 
 def test_every_one_of_the_eleven_languages_is_accepted() -> None:
-    """The list is the model's, so it is asserted as a list and not a spot check."""
     assert sorted(align_job.QWEN3_LANGUAGES) == [
         "de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "yue", "zh",
     ]
@@ -378,14 +339,6 @@ def test_the_mac_aligns_on_mps_and_nothing_had_to_be_told_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Mac stopped being a refusal on 2026-09-14.
-
-    The whole change on this side is one word in the load envelope: the same
-    engine, the same weights, the same bfloat16 off the manifest, and `mps`
-    instead of `cuda`. So `mps` is what this asserts — a run that passed but
-    had sent `cuda` would have died inside torch on a machine with no CUDA,
-    which is exactly the failure a table with no default is there to prevent.
-    """
     transcript = tmp_path / "sent-on-the-mac.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     monkeypatch.setattr(
@@ -407,8 +360,6 @@ def test_the_mac_aligns_on_mps_and_nothing_had_to_be_told_it(
 def test_the_align_device_table_has_no_default(
     make_client: Callable[..., TestClient],
 ) -> None:
-    """A backend nobody decided a device for is a refusal naming it, not a
-    `cuda` handed to whatever this is."""
     assert align_job.device_for("cuda-linux") == "cuda"
     assert align_job.device_for("mlx-darwin") == "mps"
     with pytest.raises(JobError) as caught:
@@ -438,21 +389,6 @@ def test_somebody_else_on_the_card_refuses_by_name(
 def test_a_held_card_refuses_align_before_the_job_is_queued(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """A streaming session holds the card without occupying the lane.
-
-    So a free lane is not a free card, and `JobStore.refuse_if_busy` would have
-    let this job in. An align load UNLOADS whatever is resident to make room —
-    `reclaimable_bytes` counts a session's voice as free memory, exactly as an
-    `llm` load does — and until the admission ruling the only thing stopping it
-    was `Residency._refuse_mutation_if_claimed`, firing inside the lane and
-    turning the job into a `failed` a minute later.
-
-    `llm` and `tts` have asked this question in their preflights since
-    PHASE3-TTS.md section 7; `align` became the third mutator of residency in
-    phase 4 and did not inherit it. The claim is taken directly here rather than
-    through a real session: what is under test is the preflight, and a session is
-    a great deal of machinery to stand up to set one string.
-    """
     residency = ready.app.state.residency
     residency.claim("a tts stream on sigma", may_mutate=False)
     try:
@@ -473,11 +409,6 @@ def test_a_held_card_refuses_align_before_the_job_is_queued(
     finally:
         residency.release("a tts stream on sigma")
 
-    # Released, and the proof is that the refusal MOVED rather than vanished: the
-    # same `unload-aligner` is now answered `aligner_not_resident`, which is the
-    # honest complaint about an empty card and is reached only past the claim.
-    # Asserted this way rather than by running a render, so no worker subprocess
-    # is left mid-job at teardown on any platform.
     after = ready.post(
         "/v1/jobs",
         headers=auth,
@@ -490,7 +421,6 @@ def test_a_held_card_refuses_align_before_the_job_is_queued(
 def test_a_chunk_with_no_audio_is_refused_rather_than_dropped(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """A book aligned with 1,399 of its 1,400 chunks reads as a complete answer."""
     events = run_job(ready, auth, inputs={"41.flac": {"inline_base64": AUDIO}})
     assert terminal(events)["event"] == "failed"
     error = terminal(events)["data"]["error"]
@@ -520,9 +450,6 @@ def test_an_input_not_named_by_index_is_refused(
     assert "not named <index>.<ext>" in terminal(events)["data"]["error"]["message"]
 
 
-# ---------------------------------------------------------------- it runs
-
-
 def test_a_run_produces_an_alignment(ready: TestClient, auth: dict[str, str]) -> None:
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "done", terminal(events)
@@ -543,13 +470,6 @@ def test_a_run_produces_an_alignment(ready: TestClient, auth: dict[str, str]) ->
 def test_a_result_is_placed_by_its_position_and_not_by_an_index(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """The worker reports no index at all, so position is the whole identity.
-
-    The fake derives its items from each chunk's TEXT, so an alignment that put
-    chunk 42's words under index 41 would be visible here — which is exactly the
-    mistake narrator's aligner made room for until results were dealt by
-    position.
-    """
     events = run_job(ready, auth)
     document = artifact(ready, auth, events)
     by_index = {row["index"]: row for row in document["chunks"]}
@@ -560,17 +480,12 @@ def test_a_result_is_placed_by_its_position_and_not_by_an_index(
 def test_a_cue_lands_per_chunk_before_the_artifact(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """A run killed at chunk 900 of 1,400 costs the 500 it had not reached."""
     events = run_job(ready, auth)
     kinds = [event["event"] for event in events]
     cues = [event["data"] for event in events if event["event"] == "cue"]
     assert [cue["index"] for cue in cues] == [41, 42]
     assert all("items" in cue for cue in cues)
-    # Every cue is out before the artifact event, which is the whole point.
     assert max(i for i, k in enumerate(kinds) if k == "cue") < kinds.index("artifact")
-    # AND EACH AS ITS CHUNK LANDS, not all at the end (2026-09-25: BookForge's
-    # align step saw nothing for five minutes, then everything). The first
-    # chunk's cue precedes the progress that says the last chunk is done.
     last_progress = max(
         i for i, e in enumerate(events)
         if e["event"] == "progress" and "aligned 2 of 2" in str(e["data"])
@@ -585,7 +500,6 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
     tmp_path: Path,
     ffmpeg: str,
 ) -> None:
-    """The dtype, the device, the ceiling and the language NAME never cross the wire."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     run_job(ready, auth, params={**PARAMS, "language": "yue"})
@@ -600,17 +514,13 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
     }
     assert align["max_audio_s"] == 300.0
     assert align["ffmpeg"] == ffmpeg
-    # The ISO code the client sent becomes the model's own English NAME.
     assert align["language"] == "Cantonese"
-    # A chunk carries its audio and its text and NOTHING ELSE — in particular no
-    # index, because position is the identity in both directions.
     assert all(set(chunk) == {"audio", "text"} for chunk in align["chunks"])
 
 
 def test_a_failed_chunk_is_reported_and_the_run_continues(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unlike `asr`, a hole here is visible: it is named, in the artifact."""
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_FAIL_CHUNK", "0")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "done"
@@ -619,7 +529,6 @@ def test_a_failed_chunk_is_reported_and_the_run_continues(
     rows = {row["index"]: row for row in document["chunks"]}
     assert "error" in rows[41] and "items" not in rows[41]
     assert "items" in rows[42]
-    # The failure reaches a watching client at the same moment as its neighbours.
     cues = {e["data"]["index"]: e["data"] for e in events if e["event"] == "cue"}
     assert "error" in cues[41]
 
@@ -627,7 +536,6 @@ def test_a_failed_chunk_is_reported_and_the_run_continues(
 def test_a_chunk_over_five_minutes_is_refused_and_not_split(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Splitting it would change the alignment and nothing would say so."""
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_LONG_CHUNK", "1")
     events = run_job(ready, auth)
     document = artifact(ready, auth, events)
@@ -639,12 +547,8 @@ def test_a_chunk_over_five_minutes_is_refused_and_not_split(
 def test_the_items_say_they_are_the_models_tokens(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """Crucible asserts nothing about words; the document says so in words."""
     document = artifact(ready, auth, run_job(ready, auth))
     assert document["items_are"].startswith("the model's own tokenization")
-
-
-# --------------------------------------------------------------- residency
 
 
 def test_the_model_is_loaded_once_and_held_across_jobs(
@@ -653,15 +557,6 @@ def test_the_model_is_loaded_once_and_held_across_jobs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The whole reason this type has a residency: hundreds of chunks, one load.
-
-    ACROSS jobs that is true only while something holds the card, since Owen's
-    unload ruling (2026-09-14, crucible/settle.py): an align job that ends with
-    nothing holding the aligner clears it, because the job really is done with
-    it. The holder here stands in for the lease the align door cannot take yet
-    — the RULING OWED in crucible/settle.py — and the companion test below is
-    what the same two jobs cost without one.
-    """
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     with holding_the_card(ready):
@@ -677,13 +572,6 @@ def test_an_unheld_aligner_is_cleared_and_the_next_job_pays_for_it(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The bill for not stating an intention, stated (crucible/settle.py).
-
-    Two align jobs, nothing holding the card between them, two loads of a 1.7 GB
-    checkpoint. That is the cost the RULING OWED names, measured rather than
-    described, so that the day the align door leases an aligner this test is the
-    one that changes.
-    """
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     run_job(ready, auth)
@@ -699,19 +587,6 @@ def test_an_aligner_lease_turns_a_book_aligned_chapter_by_chapter_into_one_load(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The two tests above, with the real holder instead of the stand-in.
-
-    The resident aligner exists precisely so that hundreds of chunks pay ONE
-    load of a 1.7 GB checkpoint (PHASE4-AUDIO.md section 2). Within one job that
-    was always true; across a book aligned chapter by chapter it stopped being
-    true the moment the card began clearing itself, because the only thing that
-    could hold it — a lease — named the resident MODEL. Since 2026-09-14 a lease
-    names the resident thing of any kind, and this is the same three jobs held by
-    one: three chapters, one `load`.
-
-    There is no `load-aligner` door, so the first job is what makes it resident
-    and the lease is taken on what that left (`AlignJobType._session`).
-    """
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     with holding_the_card(ready):
@@ -743,7 +618,6 @@ def test_an_aligner_lease_turns_a_book_aligned_chapter_by_chapter_into_one_load(
 def test_an_aligner_lease_refuses_what_would_evict_it_and_admits_its_own_work(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """An `align` on the leased aligner reuses it; anything else is refused."""
     with holding_the_card(ready):
         run_job(ready, auth)
         opened = ready.post(
@@ -760,7 +634,6 @@ def test_an_aligner_lease_refuses_what_would_evict_it_and_admits_its_own_work(
     assert error["details"]["kind"] == KIND_ALIGN
     assert "the resident aligner" in error["message"]
 
-    # And the work the lease was taken for is admitted, which is the point.
     assert submit(ready, auth).status_code == 202
 
 
@@ -781,7 +654,6 @@ def test_a_resident_aligner_lights_up_its_own_row(
 def test_the_accelerator_route_names_the_aligner_as_the_resident_kind(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """It read `resident.model_id` and the literal "llm" until phase 4."""
     with holding_the_card(ready):
         run_job(ready, auth)
         resident = ready.get("/v1/accelerator", headers=auth).json()["resident"]
@@ -816,12 +688,10 @@ def test_unloading_something_that_is_not_resident_is_refused_by_name(
 def test_a_resident_worker_that_died_is_loaded_again_rather_than_written_to(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A resident row can outlive its process; the next job must notice."""
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_DIE_AFTER", "1")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
     assert terminal(events)["data"]["error"]["code"] == "worker_failed"
-    # And the residency does not go on advertising a worker that is gone.
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
     monkeypatch.delenv("CRUCIBLE_FAKE_ALIGN_DIE_AFTER")
@@ -841,14 +711,10 @@ def test_a_load_that_fails_leaves_nothing_resident(
 def test_a_load_that_answers_with_results_is_refused(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A load produces no results; a worker that says otherwise is not trusted."""
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_LOAD_RESULT", "1")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
     assert "answered a load request with" in terminal(events)["data"]["error"]["message"]
-
-
-# ------------------------------------------------------------- it fails well
 
 
 def test_a_worker_that_dies_fails_the_job_with_its_log(
@@ -858,7 +724,6 @@ def test_a_worker_that_dies_fails_the_job_with_its_log(
     events = run_job(ready, auth)
     error = terminal(events)["data"]["error"]
     assert error["code"] == "worker_failed"
-    # PHASE4-AUDIO.md section 6: the error carries the log, not a pointer to it.
     assert "told to exit before saying anything" in error["message"]
 
 
@@ -868,15 +733,6 @@ def test_a_tidy_up_unload_that_also_fails_is_said_and_does_not_win(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """A CLEANUP FAILURE IS NOT AN OPERATION FAILURE — but it is not silent.
-
-    `_forget` swallows the unload's error on purpose: the caller is about to
-    raise the one error that explains what happened, and a `stop()` that also
-    failed must not replace it. That reason says nothing about saying so. A
-    `WorkerError` out of `unload` is a worker that did not go on SIGTERM, so its
-    memory is still on the card with no resident row left pointing at it, and
-    the only reader who can act on that is the one watching this server.
-    """
 
     def would_not_stop(self: Residency, subject_id: str) -> None:
         raise workers.WorkerError(f"{subject_id} did not exit after SIGTERM")
@@ -886,7 +742,6 @@ def test_a_tidy_up_unload_that_also_fails_is_said_and_does_not_win(
     capfd.readouterr()
     events = run_job(ready, auth)
 
-    # The worker's failure is still the one the client is told about.
     assert terminal(events)["event"] == "failed"
     assert terminal(events)["data"]["error"]["code"] == "worker_failed"
 
@@ -895,9 +750,6 @@ def test_a_tidy_up_unload_that_also_fails_is_said_and_does_not_win(
     notes = [row["data"]["message"] for row in events if row["event"] == "note"]
     assert [note for note in notes if said in note and "WorkerError" in note], events
 
-    # The refusal to stop was this job's tidy-up, not the server's shutdown:
-    # left patched, the lifespan's own `residency.shutdown()` would raise it
-    # again and fail the teardown rather than the thing under test.
     monkeypatch.undo()
 
 
@@ -913,7 +765,6 @@ def test_a_short_stream_fails_the_job(
 def test_a_library_printing_to_fd_1_is_refused_not_skipped(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Whose lesson it is: whisperx's logger, Owen's 401-chunk book, 2026-09-05."""
     monkeypatch.setenv(
         "CRUCIBLE_FAKE_ALIGN_JUNK_LINE", "whisperx.alignment - WARNING - Failed"
     )
@@ -927,12 +778,6 @@ def test_a_library_printing_to_fd_1_is_refused_not_skipped(
 def test_a_cancel_that_is_honoured_ends_the_job_and_the_residency(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of the cancel path: the worker DOES go when asked.
-
-    A cancel stops a held worker mid-exchange, so the session is gone; the
-    resident row has to go with it, or `/v1/health` advertises an aligner that is
-    not there until some later job happens to notice.
-    """
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_SLOW_S", "30")
     job_id = submit(ready, auth).json()["job_id"]
     deadline = time.monotonic() + 20.0
@@ -948,7 +793,6 @@ def test_a_cancel_that_is_honoured_ends_the_job_and_the_residency(
         events = parse_sse(line for line in stream.iter_lines())
     assert terminal(events)["event"] == "cancelled", terminal(events)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
-    # And the next job loads it again rather than sending into a closed pipe.
     monkeypatch.delenv("CRUCIBLE_FAKE_ALIGN_SLOW_S")
     assert terminal(run_job(ready, auth))["event"] == "done"
 
@@ -956,7 +800,6 @@ def test_a_cancel_that_is_honoured_ends_the_job_and_the_residency(
 def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Crucible never SIGKILLs a process that may hold CUDA. Nor does a cancel."""
     from crucible import workers
 
     monkeypatch.setattr(workers, "STOP_TIMEOUT_SECONDS", 1.0)
@@ -986,31 +829,16 @@ def test_a_cancel_stops_the_worker_and_does_not_sigkill_it(
 
     with ready.stream("GET", f"/v1/jobs/{job_id}/events", headers=auth) as stream:
         events = parse_sse(line for line in stream.iter_lines())
-    # The worker ignores SIGTERM, so the stop times out and says so by name
-    # rather than escalating. Either terminal state proves the point; what must
-    # never appear is a SIGKILL.
     if procgroup.platform_kind() == procgroup.WIN32:
-        # win32 has no WSL2 wedge to protect: the worker deaf to CTRL_BREAK has
-        # its tree terminated, so the cancel is simply a cancel
-        # (`crucible/procgroup.py`).
         assert terminal(events)["event"] == "cancelled", terminal(events)
     else:
         assert terminal(events)["event"] in ("cancelled", "failed")
         if terminal(events)["event"] == "failed":
             assert "does not SIGKILL" in terminal(events)["data"]["error"]["message"]
-    # And a cancelled run leaves nothing advertised as resident — whichever way
-    # it ended, the session is gone and the row must go with it.
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
-    # This test made the process; this test cleans it up. Nothing in Crucible
-    # will, by design.
-    # A SNAPSHOT: every `taskkill` below is itself a Popen, and the recorder
-    # this test installed would otherwise append it to the list being walked.
     for pid in list(pids):
         end_process_tree(pid)
-
-
-# ------------------------------------------------------------------- doctor
 
 
 def test_check_reports_what_is_missing_in_order(

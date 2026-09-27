@@ -1,12 +1,3 @@
-"""An `Engine` that serves a trivial OpenAI-shaped endpoint in-process.
-
-The load/unload state machine, the `warming` stream and the proxy are all
-testable without a GPU because the only thing the server needs from vLLM or
-mlx-lm is: a process that can be started and SIGTERMed, and an HTTP surface with
-`/v1/models` and `/v1/chat/completions`. This provides exactly that, in a thread,
-on a real loopback port — so the proxy's socket path is the real one.
-"""
-
 from __future__ import annotations
 
 import json
@@ -22,43 +13,19 @@ from typing import Any, Callable, Literal
 
 from crucible.engines import find_free_port
 
-#: What the fake completion answers with, so tests can assert on exact bytes.
 ANSWER = "Crucible is a server."
 DELTAS = ["Crucible ", "is ", "a ", "server."]
 
-#: A decision reader's probabilities: the messages a completion was sent, to
-#: `{token string: probability}` for the next token. Installed per engine with
-#: `FakeEngine(probs_for=...)`; tokens it leaves out are absent from the reply.
 ProbsFor = Callable[[list[dict[str, Any]]], dict[str, float]]
 
-#: vLLM 0.29.0's own default `--max-logprobs` (`vllm/config/model.py` L250).
-#: The fake refuses past it the way the engine does, so a reader that asks for
-#: more than the engine was started with fails here as it would on the card.
 FAKE_MAX_LOGPROBS = 20
 
-#: vLLM's prefix cache reuses whole KV blocks only, so a reported
-#: `cached_tokens` is a multiple of the block size (16 by default).
 FAKE_KV_BLOCK = 16
 
-#: How the fake's prefix cache decides what a prompt reuses.
-#: `blocks` is vLLM's: any common token prefix, in whole blocks.
-#: `segments` is mlx-lm 0.31.3's on a HYBRID model (Qwen3.5), whose recurrent
-#: state cannot be trimmed (`models/cache.py` `can_trim_prompt_cache`): only an
-#: entry that is an EXACT prefix of the new prompt is reused
-#: (`LRUPromptCache.fetch_nearest_cache`, `result.shorter`), and entries are
-#: saved only at segment ends — the system segment (through the opening of the
-#: user turn, `server.py` `_tokenize`) and the whole prompt, which ends in the
-#: template's end-of-turn and so is never a prefix of a different prompt.
 PrefixCache = Literal["blocks", "segments"]
 
-#: The tokens that carry whatever probability the installed letters leave over.
-#: `" A"` is here on purpose (snap's fake does the same): a reader that matched
-#: labels loosely would take the filler for label `A`.
 FILLER_TOKENS: tuple[tuple[str, float], ...] = (("The", 0.6), (" A", 0.4))
 
-#: The call a `finish_reason: "tool_calls"` completion says the model wants. Its
-#: `content` is null, which is the part worth proxying correctly: a body whose
-#: answer is not text at all still has to come back as the engine wrote it.
 TOOL_CALL = {
     "id": "call_fake",
     "type": "function",
@@ -69,87 +36,33 @@ TOOL_CALL = {
 class _Handler(BaseHTTPRequestHandler):
     served_name: str = "unset"
     last_request: dict[str, Any] | None = None
-    #: The request body exactly as it arrived on the wire. `last_request` says
-    #: what the engine understood; this says what Crucible actually sent, which
-    #: is the only way to ask whether the proxy is verbatim.
     last_request_bytes: bytes | None = None
-    #: What the completion stops for. A real engine's own word, which the proxy
-    #: must hand back untouched: Foundry turns `length` into a degradation rather
-    #: than a wrong answer (CLIENT-SURFACES.md section 6.2).
     finish_reason: str = "stop"
-    #: Answer any body carrying `response_format` with a 400 in the engine's own
-    #: shape — what vLLM does with a schema it cannot compile.
     reject_response_format: bool = False
-    #: Seconds to spend before answering a non-streamed completion, and seconds
-    #: between frames of a streamed one. A real engine is slow; a test that wants
-    #: to walk away mid-answer needs an answer that is still being written.
     answer_delay: float = 0.0
-    #: Keep streaming frames until somebody hangs up, rather than finishing.
     stream_forever: bool = False
-    #: `answer_delay` per request, from its body, when one number will not do: a
-    #: decision's prime answered at once and its questions held, so a test can
-    #: walk away with questions genuinely in flight. Bound per engine.
     delay_for: Callable[[dict[str, Any]], float] | None = None
-    #: How many non-streamed completions noticed their caller leave, in a
-    #: one-element list so the count can move. `aborted` says "at least one";
-    #: a decision with several requests in flight needs "every one".
     aborts: list[int] | None = None
-    #: Set when this engine notices the end of its connection go away: the
-    #: request it is still working on is for nobody. Bound per engine in
-    #: `FakeEngine.start`.
     aborted: threading.Event = threading.Event()
-    #: Every completion body this engine was sent, in arrival order. `ThreadingHTTPServer`
-    #: serves each connection on its own thread, so `last_request` is whichever
-    #: one finished last — no use at all to a test about concurrency.
     requests: list[dict[str, Any]] | None = None
-    #: How many bytes of body arrived for each of those, which is the only way to
-    #: say "nothing was truncated" about an 11 MB data URI without trusting the
-    #: JSON to have parsed.
     request_bytes: list[int] | None = None
-    #: Called once per completion, on the serving thread, before anything is
-    #: answered. A test that needs several requests to be genuinely in flight at
-    #: the same moment puts a `threading.Barrier.wait` here; nothing else can
-    #: tell "twelve at once" from "twelve quickly".
     on_post: Callable[[], None] | None = None
     lock: threading.Lock | None = None
-    #: How many completions, from the first, this engine reads and then answers
-    #: by resetting the connection. From the proxy's side that is exactly what a
-    #: keep-alive socket the engine already closed looks like: the request goes
-    #: out, nothing comes back, the socket dies (`ReadError`, or
-    #: `RemoteProtocolError` when the FIN wins the race with the RST). Bound per
-    #: engine in `FakeEngine.start`; a one-element list so the count can move.
     drops_left: list[int] | None = None
-    #: The decision reader's distribution (`ProbsFor`), or None: a fake that
-    #: answers no logprobs at all, which is what every chat-door test before
-    #: PHASE22 was written against. Bound per engine.
     probs_for: ProbsFor | None = None
-    #: The engine's `--max-logprobs`; a request past it is vLLM's 400.
     max_logprobs: int = FAKE_MAX_LOGPROBS
-    #: vLLM `--enable-prompt-tokens-details`: report `cached_tokens` or not.
     report_cached: bool = True
-    #: Every completion's rendered prompt text, for the prefix-cache emulation.
     prompts: list[str] | None = None
-    #: Which engine's prefix-cache rule the fake follows (`PrefixCache`).
     prefix_cache: str = "blocks"
-    #: `segments` mode's saved entries (rendered text), mlx-lm's trie in small.
     saved: list[str] | None = None
-    #: `("start"|"end", request index)` in order, and how many completions were
-    #: open at once at the most — the two things a concurrency test asks.
     events: list[tuple[str, int]] | None = None
     in_flight: list[int] | None = None
     max_in_flight: list[int] | None = None
 
-    def log_message(self, *args: Any) -> None:  # keep pytest output clean
+    def log_message(self, *args: Any) -> None:
         return
 
     def _peer_gone(self, timeout: float) -> bool:
-        """Wait up to `timeout` for the other end of this socket to close.
-
-        This is how a real engine learns its caller is gone: the TCP connection
-        closes under it. `MSG_PEEK` so nothing that did arrive is consumed —
-        readable-and-empty is EOF, readable-with-bytes is a client that is still
-        there.
-        """
         try:
             ready, _, _ = select.select([self.connection], [], [], timeout)
             if not ready:
@@ -212,8 +125,6 @@ class _Handler(BaseHTTPRequestHandler):
             if drop:
                 type(self).drops_left[0] -= 1
         if drop:
-            # RST rather than FIN: linger of zero makes `close` reset the
-            # connection, which is the incident's shape (an empty `ReadError`).
             self.connection.setsockopt(
                 socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
             )
@@ -221,10 +132,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if type(self).reject_response_format and "response_format" in body:
-            # vLLM's own refusal shape for a schema it will not compile. The
-            # proxy has to relay this as it stands: rewritten into a Crucible
-            # error, the client would be told the server refused when the engine
-            # did, and the schema it must fix would be gone.
             self._json(
                 400,
                 {
@@ -238,8 +145,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if body.get("model") != type(self).served_name:
-            # What a real engine does with a name it is not serving. Crucible's
-            # proxy must never let a request get this far.
             self._json(
                 404,
                 {"error": {"message": f"model {body.get('model')!r} not found"}},
@@ -266,10 +171,6 @@ class _Handler(BaseHTTPRequestHandler):
                         "finish_reason": None,
                     }
                 )
-            # The closing frame, which is where a streamed completion says why it
-            # stopped. Every OpenAI engine sends one; the fake used to skip it,
-            # which left "the proxy never touches finish_reason" untestable on
-            # the streaming half.
             self._frame({"index": 0, "delta": {}, "finish_reason": type(self).finish_reason})
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
@@ -279,10 +180,6 @@ class _Handler(BaseHTTPRequestHandler):
         if wants_logprobs and type(self).probs_for is not None:
             asked = body.get("top_logprobs")
             if isinstance(asked, int) and asked > type(self).max_logprobs:
-                # vLLM 0.29.0's refusal, word for word
-                # (`vllm/sampling_params.py` L821-827, rendered as the
-                # `ErrorResponse` of `vllm/entrypoints/serve/engine/protocol.py`
-                # L54-62).
                 self._json(
                     400,
                     {
@@ -332,17 +229,6 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _decision_reply(self, body: dict[str, Any], wants_logprobs: bool) -> dict[str, Any]:
-        """A one-token completion in vLLM 0.29.0's exact chat shape.
-
-        `choices[0].logprobs.content[0]` is the sampled token's
-        `ChatCompletionLogProbsContent` — `{token, logprob, bytes,
-        top_logprobs}` with each top entry `{token, logprob, bytes}`
-        (`vllm/entrypoints/openai/chat_completion/protocol.py` L81-95) — and
-        `logprobs` is null when the request did not ask. `usage` carries
-        `prompt_tokens_details.cached_tokens` when the engine was started with
-        `--enable-prompt-tokens-details`, and null in its place otherwise
-        (`UsageInfo`, `vllm/entrypoints/serve/engine/protocol.py` L110-115).
-        """
         msgs = body.get("messages", [])
         text = _rendered(msgs)
         n_prompt = max(1, len(text) // 4)
@@ -408,12 +294,6 @@ class _Handler(BaseHTTPRequestHandler):
         }
 
     def _wait_out_the_answer(self, delay: float) -> bool:
-        """Spend `delay` generating, watching for the caller to hang up.
-
-        Returns True if the caller went away first — a real engine would have
-        spent that whole time producing tokens for nobody, which on the exclusive
-        lane is time stolen from the next job.
-        """
         deadline = time.monotonic() + delay
         while time.monotonic() < deadline:
             if self._peer_gone(0.02):
@@ -424,11 +304,6 @@ class _Handler(BaseHTTPRequestHandler):
         return False
 
     def _stream_until_hung_up(self) -> None:
-        """Emit frames forever, the way an engine mid-generation does.
-
-        Nothing here ever sends `[DONE]`: the only thing that ends this stream is
-        somebody closing it, which is exactly the question the test is asking.
-        """
         while True:
             if self._peer_gone(type(self).answer_delay):
                 type(self).aborted.set()
@@ -438,12 +313,10 @@ class _Handler(BaseHTTPRequestHandler):
                     {"index": 0, "delta": {"content": "on "}, "finish_reason": None}
                 )
             except OSError:
-                # The write itself found the socket gone, which is the same news.
                 type(self).aborted.set()
                 return
 
     def _frame(self, choice: dict[str, Any]) -> None:
-        """One `chat.completion.chunk` SSE frame, flushed as a real engine does."""
         chunk = {
             "id": "chatcmpl-fake",
             "object": "chat.completion.chunk",
@@ -455,12 +328,6 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _rendered(messages: list[dict[str, Any]]) -> str:
-    """A stand-in for a chat template: every message, text parts in order.
-
-    An image part is rendered as its URL, so two requests with the same image
-    share the prefix and two with different images do not — which is what a
-    real prefix cache keyed on the image's tokens does.
-    """
     out: list[str] = []
     for message in messages:
         content = message.get("content")
@@ -476,18 +343,10 @@ def _rendered(messages: list[dict[str, Any]]) -> str:
     return "".join(out)
 
 
-#: What the fake's template closes a turn with. A saved whole-prompt entry ends
-#: in it, as a real one ends in `<|im_end|>…<|im_start|>assistant…`, so it is a
-#: prefix of no prompt but its own.
 END_OF_TURN = "<|end|>"
 
 
 def system_segment(messages: list[dict[str, Any]]) -> str | None:
-    """mlx-lm's system segment in the fake's rendering: the system messages and
-    the opening of the user turn (`<|user|>`), which is where `_tokenize`'s
-    `system + [user ""]` render first differs from the prompt. None when there
-    is no system message, or when the last message is not the user's (mlx-lm
-    does not segment such a prompt at all)."""
     if not messages or messages[-1].get("role") != "user":
         return None
     leading = []
@@ -510,11 +369,9 @@ def _common_prefix(a: str, b: str) -> int:
 
 
 class FakeEngine:
-    """Implements the Engine protocol against a threaded HTTP server."""
 
     name = "fake"
 
-    #: Set by a test to make `ready()` fail the way a real engine fails.
     def __init__(
         self,
         python: Path,
@@ -542,15 +399,12 @@ class FakeEngine:
         self._answer_delay = answer_delay
         self._stream_forever = stream_forever
         self._delay_for = delay_for
-        #: Set when a request this engine was serving lost its caller.
         self.aborted = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._port: int | None = None
         self._warmings = warmings
         self._fail_ready = fail_ready
-        #: When given, `ready()` blocks on it, so a test can look at the server
-        #: while a load is genuinely in flight.
         self._hold = hold
         self._on_post = on_post
         self._drop_requests = drop_requests
@@ -558,13 +412,8 @@ class FakeEngine:
         self._max_logprobs = max_logprobs
         self._report_cached = report_cached
         self._prefix_cache = prefix_cache
-        #: Set once `ready()` has been entered, so a test knows the lane has
-        #: reached the engine without polling on a sleep.
         self.warming_started = threading.Event()
         self.stopped = False
-        #: Exactly the argument list `start()` was handed — the manifest's
-        #: `engine_args` plus what Crucible always adds. A test that cares what
-        #: the engine was told reads this rather than guessing.
         self.args: list[str] = []
 
     @property
@@ -598,15 +447,11 @@ class FakeEngine:
                 ),
                 "aborts": [0],
                 "aborted": self.aborted,
-                # Per engine, not per class: two engines in one test (a load that
-                # evicts another) must not share a request log.
                 "requests": [],
                 "request_bytes": [],
                 "lock": threading.Lock(),
                 "on_post": self._on_post,
                 "drops_left": [self._drop_requests],
-                # staticmethod: a plain function stored on a class would be
-                # bound as a method and handed the handler as `messages`.
                 "probs_for": (
                     None if self._probs_for is None else staticmethod(self._probs_for)
                 ),
@@ -622,8 +467,6 @@ class FakeEngine:
         )
         self._handler = handler
         self.args = list(args)
-        # The port the caller found may have been taken; the fake binds its own
-        # and reports it, which is all the proxy reads.
         self._port = port if port else find_free_port()
         self._server = ThreadingHTTPServer(("127.0.0.1", self._port), handler)
         self._thread = threading.Thread(
@@ -666,7 +509,6 @@ class FakeEngine:
 
     @property
     def last_request_bytes(self) -> bytes | None:
-        """The last chat body as it arrived, before anything parsed it."""
         return getattr(self, "_handler", _Handler).last_request_bytes
 
     @property
@@ -678,7 +520,6 @@ class FakeEngine:
 
     @property
     def events(self) -> list[tuple[str, int]]:
-        """`("start"|"end", request index)` for every completion, in order."""
         handler = getattr(self, "_handler", None)
         if handler is None:
             raise RuntimeError("fake engine has not been started")
@@ -686,7 +527,6 @@ class FakeEngine:
 
     @property
     def aborts(self) -> int:
-        """How many non-streamed completions lost their caller mid-answer."""
         handler = getattr(self, "_handler", None)
         if handler is None:
             raise RuntimeError("fake engine has not been started")
@@ -694,7 +534,6 @@ class FakeEngine:
 
     @property
     def max_in_flight(self) -> int:
-        """The most completions this engine had open at one moment."""
         handler = getattr(self, "_handler", None)
         if handler is None:
             raise RuntimeError("fake engine has not been started")

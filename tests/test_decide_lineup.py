@@ -1,19 +1,3 @@
-"""The decision lineup (PHASE22-DECIDE.md section 2.9).
-
-Three things were built together and are held here:
-
-1. A `decide` capability class, with every qwen3.8 / qwen3.5 manifest as a
-   candidate and no size floor, and an EXPLICIT 9B floor on the four text classes
-   that used to get theirs by accident of what was in `models/`.
-2. `qwen3.5-4b` and `qwen3.5-0.8b`, pinned to the official repos — and
-   `qwen3.5-2b` between them since 2026-09-24.
-3. `serves`: what a BACKEND serves, separate from what the weights accept.
-
-The candidate lists of the four existing text classes are asserted EXACTLY, per
-backend, as they stood before the small tiers landed: adding a 4B must not move
-a floor that Owen ruled (docs/MODEL-CHOICE.md section 1).
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,15 +24,10 @@ def ids(name: str, backend: str) -> list[str]:
     return [c.id for c in BY_NAME[name].candidates(backend)]
 
 
-# ------------------------------------------------------------- the class
-
-
 def test_decide_is_a_class_an_act_and_not_routable() -> None:
     entry = BY_NAME["decide"]
     assert entry.job_type == "llm"
     assert entry.plainly == "decide"
-    # The door refuses every upstream id (`decide_needs_logprobs`), so a route
-    # would be a class that refuses all of its own work.
     assert entry.routable is False
     assert "decide" not in capability.ROUTABLE_CLASSES
     assert "decide" in capability.SELECTABLE_CLASSES
@@ -76,15 +55,7 @@ def test_the_nine_b_floor_is_explicit_on_the_four_text_classes() -> None:
         assert BY_NAME[name].min_params_b == NINE_B_FLOOR == 9, name
 
 
-# ---------------------------------------------- exact lists, before and after
-
-
 BEFORE = {
-    # What each text class offered on 2026-09-23 before the 4B and 0.8B landed.
-    # They must not move — with ONE deliberate exception the same day: the
-    # 8-bit 27B left cuda-linux (Owen: *"we shouldnt have an 8 bit 27b on here.
-    # waste of space, wont fit in the gpu"*), so the PC's translate list lost a
-    # row it could never select. The small tiers moved nothing.
     ("clean", CUDA_LINUX): ["qwen3.5-9b"],
     ("clean", MLX_DARWIN): ["qwen3.5-9b"],
     ("clean", LLAMA_WINDOWS): ["qwen3.5-9b"],
@@ -103,10 +74,7 @@ def test_the_text_classes_offer_exactly_what_they_did(backend: str) -> None:
 
 @pytest.mark.parametrize("backend", [CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS])
 def test_decide_offers_every_tier_best_first(backend: str) -> None:
-    # The `-vl` aliases (tests/test_weights_of.py) are in this list and in no
-    # text class's: same weights, served with the tower, dearer than the base.
     expected = {
-        # No 8-bit 27B in either form: Mac only since 2026-09-23.
         CUDA_LINUX: ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
                      "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
         MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
@@ -132,20 +100,13 @@ def test_the_nine_b_and_the_27bs_keep_their_classes_and_gain_decide() -> None:
 
 
 def test_a_floor_is_a_comparison_not_a_family(tmp_path: Path) -> None:
-    """The mutation this pins: take the floor off and the 4B walks into clean."""
     source = BY_NAME["clean"].candidates
     unfloored = capability.CatalogCandidates(source.load, source.families, None)
     assert "qwen3.5-4b" in [c.id for c in unfloored(CUDA_LINUX)]
     assert "qwen3.5-4b" not in ids("clean", CUDA_LINUX)
 
 
-# -------------------------------------------------------- the known-good fit
-
-
 def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:
-    """snap measured decisions on the 9B on this card (PHASE22 section 0). With
-    the 27Bs refused for this work, the 9B is the best candidate that fits —
-    and it is refused if the work is sized as sixteen independent states."""
     verdict = decide(
         BY_NAME["decide"],
         CUDA_LINUX,
@@ -161,18 +122,12 @@ def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:
 
 
 def test_a_six_gig_card_cannot_decide_even_on_the_0_8b() -> None:
-    """The 0.8B's cuda-linux block carries a 1.90 GiB image reserve borrowed
-    from the 9B as an upper bound; with it, 3 GiB of budget is not enough —
-    which is the direction a carried upper bound is allowed to err."""
     verdict = decide(
         BY_NAME["decide"], CUDA_LINUX, total_bytes=6 * GIB,
         desktop_allowance_bytes=3 * GIB, gpu_vendor="nvidia", chosen=None,
     )
     assert verdict.enabled is False
     assert "qwen3.5-0.8b" in verdict.reason
-
-
-# ------------------------------------------------------------ the manifests
 
 
 PINS = {
@@ -203,7 +158,6 @@ def test_the_small_tiers_are_pinned_to_the_official_repos(model_id: str) -> None
     for backend, (repo, revision) in PINS[model_id].items():
         spec = manifest.spec(backend)
         assert (spec.hf_repo, spec.revision) == (repo, revision)
-    # The engine that runs it is the one that can see; the Mac's cannot.
     assert manifest.modalities == ("text", "image")
     assert manifest.serves(CUDA_LINUX) == ("text", "image")
     assert manifest.serves(LLAMA_WINDOWS) == ("text", "image")
@@ -219,9 +173,6 @@ def test_the_0_8b_is_point_eight_and_not_rounded() -> None:
 
 
 def test_the_2b_is_full_precision_on_every_backend() -> None:
-    """Owen, 2026-09-24: *"full quant when possible"*. A 2B fits every machine
-    the catalog serves, so no block of it names a quantization — including
-    llama-windows, where the 4B and 0.8B pin Q8_0."""
     manifest = load_manifest("qwen3.5-2b")
     assert manifest.params_b == 2
     assert "--dtype" in (args := manifest.spec(CUDA_LINUX).engine_args)
@@ -236,9 +187,6 @@ def test_the_9b_and_27bs_are_untouched_text_everywhere() -> None:
         assert manifest.modalities == ("text",)
         for kind in manifest.backends:
             assert manifest.serves(kind) == ("text",)
-
-
-# ------------------------------------------------------------------- serves
 
 
 BASE = """
@@ -298,8 +246,6 @@ def test_serves_is_validated(extra: str, words: str) -> None:
 
 
 def test_the_engine_is_chosen_from_what_the_block_serves() -> None:
-    """On the Mac a text+image model served text is mlx-lm's, and the same
-    model served images there would be mlx-vlm's (the page server)."""
     served_text = parse(backend="mlx-darwin", engine="mlx-lm", extra='serves = ["text"]')
     assert served_text.spec("mlx-darwin").engine == "mlx-lm"
     with pytest.raises(ManifestError) as caught:
@@ -308,9 +254,7 @@ def test_the_engine_is_chosen_from_what_the_block_serves() -> None:
 
 
 def test_the_image_flag_rules_read_the_served_set() -> None:
-    # Text-served: `--language-model-only` is allowed on image-capable weights.
     parse(extra='serves = ["text"]\nengine_args = ["--language-model-only"]')
-    # Image-served: the same flag is refused.
     with pytest.raises(ManifestError) as caught:
         parse(extra='engine_args = ["--language-model-only"]')
     assert "--language-model-only" in str(caught.value)
@@ -321,7 +265,6 @@ def test_a_projector_on_a_block_that_serves_no_images_is_refused() -> None:
     with pytest.raises(ManifestError) as caught:
         parse(backend="llama-windows", engine="llama-server", extra=gguf)
     assert "names a vision projector" in str(caught.value)
-    # And the block that DOES serve images still needs it.
     with pytest.raises(ManifestError):
         parse(backend="llama-windows", engine="llama-server", extra='file = "demo.gguf"')
 

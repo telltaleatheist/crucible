@@ -1,12 +1,3 @@
-"""Per-model `[defaults]`: what a manifest may state, and who wins.
-
-PHASE2-LLM.md section 9. Three sources and one rule — **the request wins, the
-manifest fills gaps, and what neither states is the engine's** — checked here
-both as arithmetic (`crucible/sampling.py` in isolation) and through the real
-chat door with the fake engine, so the thing asserted is what the engine
-actually received.
-"""
-
 from __future__ import annotations
 
 import json
@@ -37,7 +28,7 @@ from crucible.sampling import (
 
 from .conftest import FAKE_BACKEND
 from .fake_engine import FakeEngine
-from .test_llm_api import (  # noqa: F401 — fixtures used by name
+from .test_llm_api import (
     MODEL,
     engines,
     fake_env,
@@ -71,11 +62,7 @@ def parse(defaults: str = ""):
     return parse_manifest(text, Path("demo-1b.toml"), "demo-1b")
 
 
-# --------------------------------------------------- what the manifest takes
-
-
 def test_a_manifest_with_no_defaults_table_states_none() -> None:
-    """Absent is a statement, and it is not the same as an empty table."""
     assert parse().defaults == NO_DEFAULTS
     assert parse().defaults.stated() == {}
 
@@ -103,8 +90,6 @@ thinking = false
 
 
 def test_an_integer_temperature_is_a_float_and_zero_is_allowed() -> None:
-    """TOML reads `temperature = 0` as an int, and zero is what a page reader
-    wants — refusing it on a type technicality would be the wrong answer."""
     defaults = parse("\n[defaults]\ntemperature = 0\n").defaults
     assert defaults.temperature == 0.0
     assert isinstance(defaults.temperature, float)
@@ -117,7 +102,6 @@ def test_an_unknown_key_is_refused_by_name() -> None:
 
 
 def test_an_empty_defaults_table_is_refused() -> None:
-    """A model that states nothing says so by having no table at all."""
     with pytest.raises(ManifestError) as caught:
         parse("\n[defaults]\n")
     assert "empty" in str(caught.value)
@@ -158,8 +142,6 @@ def test_a_wrong_type_is_refused(line: str, fragment: str) -> None:
 
 
 def test_the_row_carries_every_key_with_null_where_nothing_is_stated() -> None:
-    """Keys that came and went would make "this model states none" and "this
-    build predates the field" read the same."""
     row = parse("\n[defaults]\nthinking = false\n").defaults.to_dict()
     assert set(row) == set(DEFAULTS_KEYS)
     assert row["thinking"] is False
@@ -167,16 +149,9 @@ def test_the_row_carries_every_key_with_null_where_nothing_is_stated() -> None:
 
 
 def test_the_cleanup_model_ships_thinking_off() -> None:
-    """`qwen3.5-9b` is what BookForge and Foundry both clean text with, and a
-    bounded budget spent entirely on `reasoning` returns no content at all."""
     defaults = load_manifest("qwen3.5-9b").defaults
     assert defaults.thinking is False
-    # And nothing else: temperature and the rest stay the client's for this
-    # model, because both apps send their own per act.
     assert defaults.stated() == {"thinking": False}
-
-
-# ------------------------------------------------------------ the precedence
 
 
 def test_a_field_the_request_states_wins() -> None:
@@ -203,8 +178,6 @@ def test_a_field_neither_states_is_the_engines() -> None:
 
 
 def test_an_explicit_null_is_a_stated_value() -> None:
-    """A client that wrote the key made a decision. Treating null as an absence
-    would answer a stated request with a different number than it asked for."""
     applied = apply_defaults(
         {"max_tokens": None}, ModelDefaults(max_tokens=2048)
     )
@@ -232,7 +205,6 @@ def test_thinking_becomes_chat_template_kwargs() -> None:
 
 
 def test_thinking_is_merged_into_the_clients_own_template_kwargs() -> None:
-    """The table is the client's; this server owns exactly one key inside it."""
     applied = apply_defaults(
         {TEMPLATE_KWARGS: {"add_generation_prompt": True}},
         ModelDefaults(thinking=False),
@@ -267,14 +239,9 @@ def test_the_header_is_compact_json_in_a_stable_order() -> None:
 
 
 def test_the_body_object_is_untouched_when_nothing_applies() -> None:
-    """`changed is False` is what lets the proxy forward the client's own bytes,
-    which is what keeps a json_schema grammar a grammar nobody re-encoded."""
     body: dict[str, Any] = {"messages": []}
     applied = apply_defaults(body, NO_DEFAULTS)
     assert applied.body is body
-
-
-# ---------------------------------------------------------- through the door
 
 
 def load(client: TestClient, auth: dict[str, str]) -> None:
@@ -325,7 +292,6 @@ def test_the_request_wins_over_the_manifest_at_the_door(
     assert json.loads(response.headers[SAMPLING_HEADER])["thinking"] == (
         SOURCE_REQUEST
     )
-    # Nothing changed, so the client's own bytes went across untouched.
     assert json.loads(engines[0].last_request_bytes) == body
 
 
@@ -360,7 +326,6 @@ def test_a_streamed_completion_carries_the_same_header(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """The door where a body field could not have gone."""
     fake_weights(MODEL)
     load(llm_client, auth)
     with llm_client.stream(
@@ -387,8 +352,6 @@ def test_the_models_row_advertises_the_defaults(
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     assert rows[MODEL]["defaults"]["thinking"] is False
     assert rows[MODEL]["defaults"]["temperature"] is None
-    # A model that states none says so with every key null, never by omitting
-    # the field.
     assert rows["qwen3.8-27b-4bit"]["defaults"] == {key: None for key in DEFAULTS_KEYS}
 
 
@@ -399,7 +362,6 @@ def test_the_openai_listing_advertises_them_too(
     idle_card: None,
     engines: list[FakeEngine],
 ) -> None:
-    """Foundry reads this listing rather than `/v1/models`."""
     fake_weights(MODEL)
     load(llm_client, auth)
     entry = llm_client.get("/v1/openai/models", headers=auth).json()["data"][0]
@@ -414,8 +376,6 @@ def test_a_manifest_edited_under_a_running_engine_does_not_change_the_answer(
     engines: list[FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`max_model_len`'s rule, applied to the defaults: the record the engine
-    was loaded against is what the proxy applies."""
     fake_weights(MODEL)
     load(llm_client, auth)
     residency = llm_client.app.state.residency

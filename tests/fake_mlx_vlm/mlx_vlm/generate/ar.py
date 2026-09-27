@@ -1,16 +1,3 @@
-"""`mlx_vlm.generate.ar`'s batch surface, faithful to the calls the reader makes.
-
-`BatchGenerator.next()` returns `(prompt_responses, generation_responses)` and
-each generation response carries `uid`, `token`, `token_logprob` and
-`finish_reason` — `"stop"` on the row's last step (a stop token the reader must
-NOT append, exactly as upstream's `_generate_batch` skips it), `"length"` when
-the row reaches its own `max_tokens`, else None. One token per `next()` per
-live row, rows dropping out as they finish, which is the shape upstream has.
-
-What a row says: `page <height>x<width> row <index>` — the fake's whole
-"reading" — followed by a stop token.
-"""
-
 from __future__ import annotations
 
 import json
@@ -46,8 +33,6 @@ class BatchGenerator:
     def __init__(self, model, processor, *, prefill_batch_size, completion_batch_size,
                  compute_logprobs, max_tokens, greedy_sampling, prefill_step_size, **kwargs) -> None:
         assert greedy_sampling is True, "the reader decodes greedily"
-        # Upstream's invariant, and the one a smaller prefill batch broke on
-        # the Mac (1 of 12 pages right at prefill 1): both sizes are the batch.
         assert prefill_batch_size == completion_batch_size, "prefill and completion batch differ"
         self.batch_size = completion_batch_size
         self._live: list[dict[str, Any]] = []
@@ -56,9 +41,6 @@ class BatchGenerator:
         self._stepped = False
 
     def insert(self, prompts, max_tokens, prompt_kwargs=None, **kwargs) -> list[int]:
-        # THE ORDER THE READER MUST KEEP: every row before the first next().
-        # Inserting into a stepped generator is the continuous-insertion path
-        # that read one page in four correctly; the fake refuses it outright.
         assert not self._stepped, "insert() after next(): continuous insertion"
         if isinstance(max_tokens, int) or max_tokens is None:
             max_tokens = [max_tokens] * len(prompts)
@@ -83,8 +65,6 @@ class BatchGenerator:
 
     def next(self, **kwargs):
         if not self._stepped:
-            # The batch is complete the moment the first step runs; that is
-            # what a test reads to prove the width and the same-shape rule.
             self._stepped = True
             record = os.environ.get("CRUCIBLE_FAKE_MLX_VLM_BATCHES")
             if record:
