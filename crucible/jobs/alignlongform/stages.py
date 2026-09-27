@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ... import workers
+from ...alignmodels import AlignBackendSpec
 
 #: The `asr` worker's window, IMPORTED from that job type rather than copied.
 #:
@@ -58,6 +59,7 @@ from ... import workers
 #: copy agrees on the day it is written and silently stops agreeing later, and
 #: two different ideas of how long a window is would put every word in the
 #: second window at the wrong second.
+from ..align import start_aligner_session  # noqa: E402
 from ..asr import OVERLAP_SECONDS, WINDOW_SECONDS  # noqa: E402
 
 #: What the rough pass runs at. `float16` on the card, and the device is the
@@ -220,8 +222,7 @@ def align_chunks(
     chunk_texts: list[str],
     max_audio_s: float,
     log_path: Path,
-    backend_kind: str,
-    memory_bytes_estimate: int,
+    spec: AlignBackendSpec,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
@@ -231,32 +232,17 @@ def align_chunks(
     and not a simplification: an index a worker reports is an index a worker can
     get wrong, and narrator proved that on a 401-chunk book.
     """
-    session = workers.WorkerSession(
-        python=python,
-        script=Path(__file__).resolve().parents[1] / "align" / "worker.py",
-        log_path=log_path,
-        environment={
-            **workers.worker_environment(python.parent.parent),
-            **workers.torch_allocator_environment(backend_kind),
-        },
-    )
+    # LOAD AND ALIGN ON ONE PROCESS. The aligner is 1.7 GB of weights and a
+    # book is hundreds of chunks, so the worker is started once and fed the
+    # whole book on the same stdin — `align`'s own reason for having a session
+    # rather than a one-shot worker.
     try:
-        # LOAD AND ALIGN ON ONE PROCESS. The aligner is 1.7 GB of weights and a
-        # book is hundreds of chunks, so the worker is started once and fed the
-        # whole book on the same stdin — `align`'s own reason for having a
-        # session rather than a one-shot worker.
-        #
-        # `start` takes no `cancelled` hook, deliberately and not by oversight:
-        # a load is what the lane is waiting on, and a half-loaded model that was
-        # interrupted is a process holding VRAM nothing is tracking.
-        session.start(
-            {"op": "load", "model_dir": str(weights_dir),
-             "device": "cuda", "dtype": "bfloat16",
-             "memory_cap_bytes": workers.torch_memory_cap(
-                 backend_kind, memory_bytes_estimate
-             )},
-            ready_silence_timeout=900.0,
+        session = start_aligner_session(
+            python, weights_dir, spec, log_path, ready_silence_timeout=900.0
         )
+    except workers.WorkerError as exc:
+        raise StageFailed("align_failed", str(exc)) from None
+    try:
         outcome = session.send(
             {
                 "op": "align",

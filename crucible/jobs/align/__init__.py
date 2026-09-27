@@ -72,7 +72,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -160,6 +160,57 @@ def device_for(backend_kind: str) -> str:
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
 
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
+
+
+def start_aligner_session(
+    python: Path,
+    weights_dir: Path,
+    spec: AlignBackendSpec,
+    log_path: Path,
+    *,
+    ready_silence_timeout: float,
+    on_ready: Callable[[dict[str, Any]], None] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> workers.WorkerSession:
+    """Spawn the align worker and load `spec`'s checkpoint: the session's first
+    exchange, for every caller (the resident aligner, asr's word times,
+    align-longform's stage 3).
+
+    The device is this backend's (`device_for`), the dtype the manifest's, and
+    the CUDA cap the block's admitted share (`workers.torch_memory_cap`), so the
+    aligner can sit beside vLLM. A load that answers with results is not
+    trusted: the worker is stopped and the start refused.
+    """
+    session = workers.WorkerSession(
+        python=python,
+        script=WORKER_SCRIPT,
+        log_path=log_path,
+        environment={
+            **workers.worker_environment(python.parent.parent),
+            **workers.torch_allocator_environment(spec.backend),
+        },
+    )
+    outcome = session.start(
+        {
+            "op": "load",
+            "model_dir": str(weights_dir),
+            "device": device_for(spec.backend),
+            "dtype": spec.dtype,
+            "memory_cap_bytes": workers.torch_memory_cap(
+                spec.backend, spec.memory_bytes_estimate
+            ),
+        },
+        ready_silence_timeout=ready_silence_timeout,
+        on_ready=on_ready,
+        on_progress=on_progress,
+    )
+    if outcome.results:
+        session.stop()
+        raise workers.WorkerError(
+            f"{WORKER_SCRIPT.name} answered a load request with "
+            f"{len(outcome.results)} result(s); a load produces none"
+        )
+    return session
 
 
 class AlignChunk(BaseModel):
@@ -716,9 +767,6 @@ class AlignJobType:
                 spec,
                 weights_dir,
                 python,
-                WORKER_SCRIPT,
-                device=device_for(self._config.backend_kind),
-                dtype=spec.dtype,
                 max_audio_s=QWEN3_MAX_AUDIO_S,
                 timeout=DEFAULT_READY_TIMEOUT_SECONDS,
                 on_progress=ctx.warming,

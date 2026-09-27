@@ -285,8 +285,7 @@ class AlignLongformJobType:
                 chunk_texts=texts,
                 max_audio_s=params.chunk_s * 2,
                 log_path=self._config.logs_dir / f"alf-align-{job.id}.log",
-                backend_kind=self._config.backend_kind,
-                memory_bytes_estimate=aligner_spec.memory_bytes_estimate,
+                spec=aligner_spec,
                 cancelled=lambda: ctx.cancelled,
             )
 

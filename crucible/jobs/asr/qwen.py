@@ -119,8 +119,8 @@ from ...engines.vllm import run_dtype
 from ...ladder import card_for
 from ...errors import ApiError, JobError
 from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
-from ..align import WORKER_SCRIPT as ALIGN_WORKER_SCRIPT
 from ..align import device_for as align_device_for
+from ..align import start_aligner_session
 from ..base import Job, JobContext
 from . import loopguard, speechonly
 
@@ -950,36 +950,21 @@ class QwenAsrRun:
         if plan is None:  # unreachable: `run` plans it whenever timestamps are on
             raise JobError("worker_failed", "word timestamps without an aligner plan")
         device = align_device_for(self._config.backend_kind)
-        session = workers.WorkerSession(
-            python=plan.python,
-            script=ALIGN_WORKER_SCRIPT,
-            log_path=self._config.logs_dir / f"asr-{self._job.id}-aligner.log",
-            # Beside vLLM on the PC, so capped at its OWN admitted share, not the
-            # card (`workers.torch_memory_cap`).
-            environment=workers.torch_allocator_environment(
-                self._config.backend_kind
-            ),
-        )
+        log_path = self._config.logs_dir / f"asr-{self._job.id}-aligner.log"
         self._ctx.warming(
             f"loading {plan.manifest.id} on {device} at {plan.spec.dtype} for the "
-            f"word times; log {session.log_path}"
+            f"word times; log {log_path}"
         )
         try:
-            session.start(
-                {
-                    "op": "load",
-                    "model_dir": str(plan.weights_dir),
-                    "device": device,
-                    "dtype": plan.spec.dtype,
-                    "memory_cap_bytes": workers.torch_memory_cap(
-                        self._config.backend_kind, plan.spec.memory_bytes_estimate
-                    ),
-                },
+            self._align = start_aligner_session(
+                plan.python,
+                plan.weights_dir,
+                plan.spec,
+                log_path,
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
             )
         except workers.WorkerError as exc:
             raise JobError("worker_failed", str(exc)) from None
-        self._align = session
 
     def _send(
         self,
