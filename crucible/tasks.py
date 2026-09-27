@@ -253,16 +253,20 @@ class Task:
     #: predates the field" are not one reading.
     unmet: list[dict[str, str]] = field(default_factory=list)
     cancel_requested: bool = False
-    #: Started by `POST /v1/jobs` for a job waiting on it, not by a person
+    #: Started by `POST /v1/jobs` for a job that needs it, not by a person
     #: (2026-09-26, Owen's ruling; `crucible/installonsubmit.py`). Such a task
     #: may start while a job holds the card, and ends by TAKING UP what it
     #: installed rather than swapping the registry (`TaskStore.submit`).
     on_submit: bool = False
     #: The install's own one-line reason for failing, as `crucible install`
     #: printed it (`jobenv.failure_message`'s first line, #31), or None. What
-    #: a job waiting on this task fails with: a person reads one sentence
-    #: about pip, not "exited 1, see the stream".
+    #: the next submit that needed this task is told: a person reads one
+    #: sentence about pip, not "exited 1, see the stream".
     reason: str | None = None
+    #: What this task is doing, in words, for a task started for a job
+    #: ("installing the rvc environment (about 3.3 GB), then ..."): served as
+    #: `message`, null for every other task and once it ends.
+    describe: Callable[["Task"], str | None] | None = None
     #: The install subprocess, while one is running. A cancel SIGTERMs it.
     process: subprocess.Popen[str] | None = None
 
@@ -277,6 +281,7 @@ class Task:
             "started": self.started,
             "finished": self.finished,
             "unmet": self.unmet,
+            "message": None if self.describe is None else self.describe(self),
         }
 
 

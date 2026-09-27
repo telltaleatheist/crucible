@@ -369,8 +369,8 @@ def test_unpulled_weights_are_refused_by_name(
     response = submit(tts_client, auth, type="load-voice", model=VOICE)
     assert response.status_code == 409
     error = response.json()["error"]
-    assert error["code"] == "voice_not_installed"
-    assert "crucible voices pull deathstalker" in error["message"]
+    assert error["code"] == "installing"
+    assert "pulling the voice 'deathstalker'" in error["message"]
 
 
 def test_a_busy_accelerator_is_refused_by_name(

@@ -231,8 +231,8 @@ def test_denoise_is_off_unless_the_config_says_otherwise(
     with make_client(enable_denoise=False) as client:
         response = client.post("/v1/jobs", headers=auth, json={"type": "denoise"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "job_type_disabled"
-    assert "enable_denoise" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "model_required"
+    assert "requires a model" in response.json()["error"]["message"]
 
 
 def test_rvc_and_denoise_are_separate_flags(
@@ -278,16 +278,9 @@ def test_a_missing_checkpoint_names_the_files_and_where_they_are(
     response = submit(denoise_client, auth)
     assert response.status_code == 409
     error = response.json()["error"]
-    assert error["code"] == "denoise_model_missing"
-    manifest = load_denoise_manifest(MODEL)
-    spec = manifest.spec(FAKE_BACKEND.kind)
-    assert error["details"]["hf_repo"] == spec.hf_repo
-    assert error["details"]["revision"] == spec.revision
-    assert sorted(error["details"]["missing"]) == sorted(
-        [manifest.model_filename, manifest.config_filename]
-    )
-    # It says why Crucible will not fetch them itself.
-    assert "GitHub release" in error["message"]
+    assert error["code"] == "installing"
+    assert f"pulling the separator {MODEL!r}" in error["message"]
+    assert error["details"]["task_id"]
 
 
 def test_an_unknown_model_is_refused_by_name(

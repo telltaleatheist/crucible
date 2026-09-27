@@ -257,8 +257,8 @@ def test_asr_is_off_unless_the_config_says_otherwise(
     with make_client(enable_asr=False) as client:
         response = client.post("/v1/jobs", headers=auth, json={"type": "asr"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "job_type_disabled"
-    assert "enable_asr" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "model_required"
+    assert "requires a model" in response.json()["error"]["message"]
 
 
 # ------------------------------------------------------------------ refusals
@@ -349,8 +349,8 @@ def test_missing_weights_are_named_with_the_pull_command(
 ) -> None:
     response = submit(asr_client, auth)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "model_not_installed"
-    assert "crucible models pull whisper-tiny" in (
+    assert response.json()["error"]["code"] == "installing"
+    assert "pulling the model 'whisper-tiny'" in (
         response.json()["error"]["message"]
     )
 

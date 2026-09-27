@@ -57,9 +57,12 @@ DEFAULT_OPEN_PAIRING = True
 #: had ever deleted one.
 DEFAULT_RETENTION_DAYS = 7
 
-#: `[jobs] install_on_submit` — whether a job for a type this card can run but
-#: has not installed is ACCEPTED and waits for the server to install it, rather
-#: than refused.
+#: `[jobs] install_on_submit` — whether a job whose environment, model or voice
+#: this card can run but has not installed STARTS that install, answered
+#: `409 installing` with what is being installed and the task to watch, so the
+#: app submits again after it. False: the plain refusal, with the request that
+#: would install it. (2026-09-27: Crucible does not hold the job; the app
+#: queues.)
 #:
 #: TRUE by ruling (Owen, 2026-09-26): *"yes, we need to install a missing
 #: environment when a job is submitted"*, under his standing rule that Crucible
