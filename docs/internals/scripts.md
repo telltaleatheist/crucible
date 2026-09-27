@@ -109,9 +109,29 @@ different operator has a different list.
   restart. It returns the moment the record matches.
 - **Busy servers are not restarted.** Before a restart the machine's own `GET /v1/activity` is
   asked over loopback; `running`, `queued`, `streaming`, a chat in flight or a lease refuses
-  by name, `--interrupt` overrides. A resident model with nothing using it is not busy, and an
-  unreachable server is not busy (reported as `idle(<why>)`). A deploy on 2026-09-20 restarted
-  the PC six minutes into a 128-chunk render and lost all of it.
+  by name, `--interrupt` overrides. A resident model with nothing using it is not busy. A
+  deploy on 2026-09-20 restarted the PC six minutes into a 128-chunk render and lost all of it.
+- **The probe reads the machine the way the server does.** Home is `CRUCIBLE_HOME`, else
+  `$HOME/.crucible`; token, `port` and `host` come from that `config.toml` (`0.0.0.0` → loopback,
+  `::` → `[::1]`); the JSON is read with `<home>/server/bin/python`, else `python3`. Nothing
+  is hard-coded to `127.0.0.1:7100`.
+- **Not knowing is a refusal.** The probe answers `busy(...)`, `idle` / `idle(<why>)`, or
+  `unknown(<why>)`. Only a connection refused (curl exit 7: nothing listens) is `idle`; a
+  missing config or token, a curl timeout, an empty or non-JSON answer, a probe that would not
+  run over `wsl.exe`/`ssh`, all answer `unknown(<why>)`, and an unknown machine is left alone
+  (`<machine>(busy state unknown)`) unless `--interrupt`. Before this, every probe failure
+  read as idle and the machine was restarted.
+- **A partly reachable PC is unreachable.** `host:<a> guest:unreachable` used to fall into the
+  install branch (it is not equal to the release); now any reading containing `unreachable` is
+  reported "CANNOT BE ASKED" and skipped, and the run exits 1 naming it.
+- **A deploy never goes backwards by accident.** Every `x.y.z` in a machine's reading is
+  compared with `--release`; a newer one refuses before the confirmation prompt
+  ("re-run with --force to downgrade on purpose"), and `--force` prints `DOWNGRADE` beside
+  the machine.
+- **`pc` is refused up front off the PC.** Reading or installing the PC needs `wsl.exe` on
+  PATH and `LOCALAPPDATA`; a host with neither used to fail late (the guest read printing
+  `unreachable`, the install branch never reached). Now it fails before anything is read,
+  naming `--only mac`.
 - **Machines install in parallel**, each in a subshell whose verdict is a file
   (`<machine>.seconds` always, `<machine>.why` on failure) because a background status cannot
   name a machine. Every line is prefixed with its machine and stderr is merged into stdout so

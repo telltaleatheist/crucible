@@ -352,3 +352,53 @@ def test_a_failure_with_no_structured_body_is_reported_as_it_came():
     assert local.said(exc) == str(exc)
     assert local.said(ValueError("plain")) == "plain"
 
+
+
+def test_a_token_mismatch_names_both_files_the_log_and_the_recovery(tmp_path):
+    from crucible.host.paths import INSTALL_ONE_LINER
+
+    said = str(local.token_mismatch(tmp_path))
+    assert said.startswith("engine_token_mismatch:")
+    for name in ("pairing", "config.toml", "host.log"):
+        assert str(tmp_path / name) in said, name
+    assert "crucible init --force --config-from" in said
+    assert "crucible local shutdown" in said
+    assert INSTALL_ONE_LINER in said
+
+
+def test_the_door_is_also_tried_with_the_config_token_before_the_guest_is_asked(tmp_path, monkeypatch):
+    from urllib.error import HTTPError
+
+    (tmp_path / "pairing").write_text("crucible://engine@127.0.0.1:7100/#stale\n")
+    (tmp_path / "config.toml").write_text('[auth]\ntoken = "fresh"\n', encoding="utf-8")
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local, "_guest_tokens", lambda home: pytest.fail("the guest was asked although config.toml answered"))
+
+    def door(url, *, token=None, method="GET", timeout=3, headers=None):
+        if token != "fresh":
+            raise HTTPError(url, 401, "Unauthorized", {}, None)
+        return {"ok": True}
+
+    monkeypatch.setattr(local, "request", door)
+    answer, used = local.door_call("/local/stop", tmp_path, "stale", method="POST")
+    assert answer == {"ok": True}
+    assert used == "fresh"
+
+
+def test_a_wrong_controller_names_what_holds_the_port(monkeypatch):
+    from crucible.host import portholder
+
+    monkeypatch.setattr(portholder, "held_sentence", lambda port, run=None: f"port {port} is held by other.exe (pid 7); stop it or run `crucible local shutdown`")
+    said = str(local.wrong_controller("HTTP 404"))
+    assert said.startswith("wrong_controller:")
+    assert "other.exe (pid 7)" in said
+    assert "HTTP 404" in said
+
+
+def test_a_controller_that_does_not_start_names_its_log_and_the_reinstall(tmp_path):
+    from crucible.host.paths import INSTALL_ONE_LINER
+
+    said = str(local.controller_start_failed(tmp_path, 60))
+    assert said.startswith("controller_start_failed:")
+    assert str(tmp_path / "host.log") in said
+    assert INSTALL_ONE_LINER in said

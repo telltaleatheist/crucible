@@ -12,8 +12,9 @@ from typing import Any, Callable
 from .. import API_VERSION, VERSION
 from .. import peer as peer_module
 from ..pairing import parse_pairing_line
+from ..processlock import alive
 from . import door as door_module
-from . import installer, menu, outcome, startup, wslstate
+from . import installer, menu, outcome, portholder, startup, wslstate
 from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
 from .door import OrchestratorDoor, serve
 from .errors import HostError
@@ -21,7 +22,9 @@ from .log import HostLog
 from .menu import Distro, Engine, Owner
 from .paths import (
     CONSOLE_CMD,
+    DOOR_PORT,
     ENGINE_PORT,
+    INSTALL_ONE_LINER,
     console_cmd_path,
     crucible_root,
     door_url,
@@ -236,30 +239,8 @@ def acquire(home: Path) -> Path:
 
 
 HOST_CHILD_START_WAIT_SECONDS = 30.0
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-_ERROR_ACCESS_DENIED = 5
 
-
-def _alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
-        kernel.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-    return True
+_alive = alive
 
 
 def server_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
@@ -349,7 +330,7 @@ class Host:
         }
 
     def install_outcome(self) -> dict[str, object] | None:
-        recorded = outcome.read(self._c.home)
+        recorded = outcome.read_or_quarantine(self._c.home, self._c.log.write)
         return None if recorded is None else recorded.to_dict()
 
     def local_status(self) -> dict[str, object]:
@@ -489,11 +470,7 @@ class Host:
         except HostError as exc:
             self._c.log.write(f"engine: {exc.code}: {exc.message}")
             return "unreadable"
-        try:
-            previous = outcome.read(self._c.home)
-        except HostError as exc:
-            self._c.log.write(f"engine: {exc.code}: {exc.message}")
-            return "unreadable"
+        previous = outcome.read_or_quarantine(self._c.home, self._c.log.write)
         if declined:
             if previous is None or previous.state != outcome.DECLINED:
                 outcome.write(
@@ -619,6 +596,8 @@ class Host:
                 record = self._c.home / installer.CLEANUP_RECORD
                 if not record.exists():
                     return
+                if installer.quarantine_bad_cleanup_record(self._c.home, self._c.log.write) is not None:
+                    return
                 windows = self.stopped_windows_catalog()
                 token = engine_token(self._c)
                 if token is None:
@@ -661,7 +640,8 @@ class Host:
                 distro,
                 Engine.FAILED,
                 f"there is no {CONSOLE_CMD} in {host_pack_dir(env)}, so this host "
-                "has no server to start. Reinstall with install.ps1.",
+                "has no server to start. Reinstall from PowerShell with: "
+                f"{INSTALL_ONE_LINER}",
                 Owner.NONE,
             )
         config = self._c.home / "config.toml"
@@ -687,7 +667,8 @@ class Host:
         return Presence(
             distro,
             Engine.FAILED,
-            "the Windows engine did not answer within 30 s — open the log",
+            f"the Windows engine did not answer within {HOST_CHILD_START_WAIT_SECONDS:.0f} s; "
+            f"why is in {log_path(env)} and in {self._c.home / 'logs'}",
             Owner.NONE,
         )
 
@@ -875,10 +856,7 @@ class Host:
 
 
     def model(self) -> menu.MenuModel:
-        try:
-            recorded = outcome.read(self._c.home)
-        except HostError:
-            recorded = None
+        recorded = outcome.read_or_quarantine(self._c.home, self._c.log.write)
         return menu.menu_model(
             self._c.presence.distro,
             self._c.presence.engine,
@@ -1079,9 +1057,13 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
         host._door_server = serve(door)
         log.write("door: listening on 127.0.0.1:7101")
     except OSError as exc:
-        log.write(f"door: NOT listening ({exc}); shutting down this controller's owned child")
+        held = portholder.held_sentence(DOOR_PORT)
+        log.write(f"door: NOT listening ({exc}); {held}; shutting down this controller's owned child")
         host.quit()
-        raise HostError("host_door_unavailable", f"The local controller port is unavailable: {exc}") from exc
+        raise HostError(
+            "host_door_unavailable",
+            f"The local controller port is unavailable ({exc}): {held}. Its log is {log.path}.",
+        ) from exc
 
     threading.Thread(target=host.watch, name="crucible-watch", daemon=True).start()
 
@@ -1116,7 +1098,8 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
         walks: list[installer.EngineInstall],
     ) -> None:
         if context.presence.owner is Owner.WSL_UNIT:
-            if (context.home / installer.CLEANUP_RECORD).exists():
+            record = context.home / installer.CLEANUP_RECORD
+            if record.exists() and installer.quarantine_bad_cleanup_record(context.home, context.log.write) is None:
                 host._resume_model_cleanup(raise_errors=True)
             else:
                 host._verify_active_guest()
@@ -1160,7 +1143,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:
         with host._operation:
             host.check_restartable()
-            previous = outcome.read(context.home)
+            previous = outcome.read_or_quarantine(context.home, context.log.write)
             attempt = (
                 previous.attempts + 1
                 if previous is not None and previous.state == outcome.FAILED

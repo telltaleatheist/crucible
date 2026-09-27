@@ -9,7 +9,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import catalog, service
 from .errors import CrucibleError
+from .host.paths import LOG_NAME
 from .host.wsl_states import CRUCIBLE_DISTRO
+from .processlock import alive
 
 
 class UninstallError(CrucibleError):
@@ -69,7 +71,11 @@ GUEST_CRUCIBLE = "$HOME/.crucible/server/bin/crucible"
 
 WSL_TIMEOUT_SECONDS = 600.0
 
-TASKKILL_TIMEOUT_SECONDS = 60.0
+LOCAL_VERB: tuple[str, ...] = ("-m", "crucible.cli", "local")
+
+CONTROLLER_STEPS: frozenset[str] = frozenset({"stop-engine", "stop-controller"})
+
+FATAL_BEFORE_REMOVAL: frozenset[str] = CONTROLLER_STEPS | {"remove-sharing", "remove-service"}
 
 
 @dataclass(frozen=True)
@@ -238,27 +244,11 @@ def wsl_uninstall_argv(
     ]
 
 
-def taskkill_argv(pid: int) -> list[str]:
-    return ["taskkill.exe", "/PID", str(pid), "/T", "/F"]
+def local_argv(running_from: Path, action: str) -> list[str]:
+    return [str(running_from), *LOCAL_VERB, action]
 
 
-_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-
-
-def _alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+_alive = alive
 
 
 def read_host_pid(home: Path) -> int | None:
@@ -332,10 +322,13 @@ def plan(
             act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.Engine(home)))],
         ))
 
-    steps.append(_stop_step(mechanism, home, operator_home, runner))
+    steps.append(_stop_step(mechanism, home, operator_home, runner, running_from))
 
     if wsl_too:
         steps.append(_wsl_step(platform, runner, purge_weights=purge_weights))
+
+    if mechanism == STARTUP:
+        steps.append(_controller_step(home, runner, running_from))
 
     steps.append(_service_step(mechanism, home, operator_home, env, runner))
     if platform in ("win32", "darwin") and (home / "installation.json").is_file():
@@ -547,37 +540,73 @@ def _pack_step(home: Path, name: str, running_from: Path) -> Step | None:
     )
 
 
+def _no_controller(name: str, what: str, home: Path) -> Step:
+    return Step(
+        name=name,
+        what=what,
+        action=STOP,
+        target=str(home / "host.pid"),
+        refused=Refusal(
+            code="engine_not_running",
+            message=(
+                f"no live `crucible orchestrator` is recorded in {home / 'host.pid'}; "
+                "there is nothing to stop"
+            ),
+            fatal=False,
+        ),
+    )
+
+
+def _stop_engine_through_controller(
+    runner: service.Runner, running_from: Path, home: Path, pid: int
+) -> list[str]:
+    pairing = home / PAIRING_NAME
+    if not pairing.is_file():
+        return [f"no {pairing}: the controller (pid {pid}) owns no engine, so there is nothing to stop"]
+    return _run_or_raise(
+        runner,
+        local_argv(running_from, "stop"),
+        "stop_failed",
+        f"the controller (pid {pid}) would not stop its engine; its log is "
+        f"{home / LOG_NAME}. Run `crucible local stop` once it answers, then this "
+        "uninstall again",
+    )
+
+
+def _end_controller(
+    runner: service.Runner, running_from: Path, home: Path, pid: int
+) -> list[str]:
+    unfinished = (
+        f"the controller (pid {pid}) did not exit; its log is {home / LOG_NAME}. "
+        "Nothing was force-killed: its process tree holds the wsl.exe session that "
+        "keeps the Linux engine's distro up and, on a native PC, the engine itself. "
+        "Run `crucible local shutdown` once it answers; if it never exits, end pid "
+        f"{pid} alone (not its tree) in Task Manager, then run this uninstall again"
+    )
+    lines = _run_or_raise(runner, local_argv(running_from, "shutdown"), "stop_failed", unfinished)
+    if _alive(pid):
+        raise UninstallError(f"stop_failed: {unfinished}")
+    return lines
+
+
 def _stop_step(
-    mechanism: str, home: Path, operator_home: Path, runner: service.Runner
+    mechanism: str, home: Path, operator_home: Path, runner: service.Runner, running_from: Path
 ) -> Step:
     if mechanism == STARTUP:
+        what = (
+            "ask the controller to stop the engine it owns (the guest's unit or the "
+            "Windows child) and leave it stopped: a cooperative stop through "
+            "`crucible local stop`, so a job holding the GPU finishes its shutdown"
+        )
         pid = read_host_pid(home)
         if pid is None:
-            return Step(
-                name="stop-engine",
-                what="end the tray and the server it holds",
-                action=STOP,
-                target=str(home / "host.pid"),
-                refused=Refusal(
-                    code="engine_not_running",
-                    message=(
-                        f"no live `crucible orchestrator` is recorded in {home / 'host.pid'}; "
-                        "there is nothing to stop"
-                    ),
-                    fatal=False,
-                ),
-            )
+            return _no_controller("stop-engine", what, home)
         return Step(
             name="stop-engine",
-            what="end the tray and the server it holds (a tree kill, 4.1)",
+            what=what,
             action=STOP,
             target=f"pid {pid}",
-            act=lambda: _run_or_raise(
-                runner,
-                taskkill_argv(pid),
-                "stop_failed",
-                f"the tray (pid {pid}) would not stop",
-            ),
+            act=lambda: _stop_engine_through_controller(runner, running_from, home, pid),
         )
 
     definition = service.definition_path(mechanism, operator_home)
@@ -603,6 +632,23 @@ def _stop_step(
         action=STOP,
         target=label,
         act=lambda: service.stop(mechanism, home=operator_home, runner=runner),
+    )
+
+
+def _controller_step(home: Path, runner: service.Runner, running_from: Path) -> Step:
+    what = (
+        "end the tray and its controller through `crucible local shutdown`, after "
+        "the engine and the guest are stopped; its tree is never force-killed"
+    )
+    pid = read_host_pid(home)
+    if pid is None:
+        return _no_controller("stop-controller", what, home)
+    return Step(
+        name="stop-controller",
+        what=what,
+        action=STOP,
+        target=f"pid {pid}",
+        act=lambda: _end_controller(runner, running_from, home, pid),
     )
 
 
@@ -830,7 +876,7 @@ def run(plan_: Plan) -> Plan:
                 message=message or str(exc),
                 fatal=True,
             )
-            if step.name in ("remove-sharing", "stop-engine", "remove-service"):
+            if step.name in FATAL_BEFORE_REMOVAL:
                 break
     return plan_
 
@@ -860,7 +906,7 @@ __all__ = [
     "read_backend_kind",
     "read_host_pid",
     "run",
-    "taskkill_argv",
+    "local_argv",
     "wsl_list_argv",
     "wsl_uninstall_argv",
 ]

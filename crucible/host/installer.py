@@ -17,23 +17,50 @@ from .errors import HostError
 from ..errors import CrucibleError
 from .paths import ENGINE_PORT, engine_url
 from .runner import RunResult, Runner
-from .wsl_states import CRUCIBLE_DISTRO
+from .quarantine import quarantine
+from .wsl_states import CRUCIBLE_DISTRO, WSL_CONF_MARKER
 
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
 
+CLEANUP_RECORD_INVALID = "migration_cleanup_record_invalid"
+
+IMPORT_ARTEFACTS: frozenset[str] = frozenset({"ext4.vhdx"})
+
 
 def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
-    value = json.loads((home / CLEANUP_RECORD).read_text(encoding="utf-8"))
+    record = home / CLEANUP_RECORD
+    try:
+        value = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostError(CLEANUP_RECORD_INVALID, f"{record} is not a JSON document ({exc})") from exc
     if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("subjects"), list):
-        raise HostError("migration_cleanup_record_invalid", "The migration cleanup record is incompatible")
+        raise HostError(CLEANUP_RECORD_INVALID, f"{record} is not a migration cleanup record this build knows")
     result = set()
     for row in value["subjects"]:
         if (not isinstance(row, list) or len(row) != 2
                 or not all(isinstance(part, str) and part for part in row) or row[0] == "engine"):
-            raise HostError("migration_cleanup_record_invalid", "The migration cleanup record contains an invalid model subject")
+            raise HostError(CLEANUP_RECORD_INVALID, f"{record} names a model subject that is not one: {row!r}")
         result.add(tuple(row))
     return result
+
+
+def quarantine_bad_cleanup_record(home: Path, log: Callable[[str], None]) -> Path | None:
+    try:
+        cleanup_subjects(home)
+    except HostError as exc:
+        if exc.code != CLEANUP_RECORD_INVALID:
+            raise
+        aside = quarantine(home / CLEANUP_RECORD)
+        log(
+            f"model cleanup: {exc.message}. It was moved to {aside} and the cleanup "
+            "it described is dropped: the Windows copies of the models that moved "
+            f"into the guest stay under {home} and cost disk only. `crucible "
+            "uninstall --purge-weights` on this Windows side removes them with "
+            "everything else; nothing needs doing to keep using Crucible."
+        )
+        return aside
+    return None
 
 
 def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
@@ -522,8 +549,16 @@ class EngineInstall:
                 guest_argv(self._distro, ["cat", "/etc/wsl.conf"]),
                 timeout_s=QUICK_TIMEOUT_SECONDS,
             )
-            if not marked.ok or "# crucible-rootfs" not in marked.stdout:
-                raise self._fail("distro_unmarked", f'The existing "{self._distro}" distro is not marked as a Crucible image; it was left untouched')
+            if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
+                raise self._fail(
+                    "distro_unmarked",
+                    f'A WSL distro called "{self._distro}" already exists on this PC, '
+                    f"but Crucible did not make it: its /etc/wsl.conf has no "
+                    f'"{WSL_CONF_MARKER}" line. It was left untouched. If it is not '
+                    f"one you want to keep, remove it from PowerShell with: wsl "
+                    f"--unregister {self._distro}  (WARNING: that deletes every file "
+                    f"inside that distro), then {TRY_AGAIN_HINT}.",
+                )
             self._line(f'"{self._distro}" is already imported')
             self._finish("import-distro", f'"{self._distro}" was already there')
             return
@@ -532,14 +567,12 @@ class EngineInstall:
             UBUNTU_WSL_ROOTFS,
             UBUNTU_WSL_ROOTFS_URL,
             UBUNTU_WSL_SUMS_URL,
-            WSL_CONF_MARKER,
         )
         asset = UBUNTU_WSL_ROOTFS
         downloads, destination = self._home / "downloads", self._home / "wsl"
         downloads.mkdir(parents=True, exist_ok=True)
         destination.mkdir(parents=True, exist_ok=True)
-        if any(destination.iterdir()):
-            raise self._fail("distro_import_incomplete", f"{destination} is not empty but no distro is registered. Its files were kept for recovery")
+        self._clear_half_import(destination)
         archive = downloads / asset
         self._line(f"Downloading Ubuntu's own WSL image ({asset})")
         fetched = self._runner.download(
@@ -587,6 +620,36 @@ class EngineInstall:
         if not marked.ok or WSL_CONF_MARKER not in marked.stdout:
             raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
         self._finish("import-distro", f'Imported {asset} as "{self._distro}"')
+
+    def _clear_half_import(self, destination: Path) -> None:
+        left = sorted(entry.name for entry in destination.iterdir())
+        if not left:
+            return
+        remove_it = f'Remove-Item -Recurse -Force "{destination}"'
+        if not set(name.lower() for name in left) <= IMPORT_ARTEFACTS:
+            raise self._fail(
+                "distro_import_incomplete",
+                f'{destination} holds {left} and no "{self._distro}" distro is '
+                "registered, so an earlier import did not finish; the files were "
+                "kept because not all of them are ones an import writes. Remove the "
+                f"directory from PowerShell with: {remove_it}  then "
+                f"{TRY_AGAIN_HINT}.",
+            )
+        self._said(
+            f"wsl: an earlier import of \"{self._distro}\" was interrupted and left "
+            f"{left} in {destination} with no distro registered; removing them and "
+            "importing again"
+        )
+        try:
+            shutil.rmtree(destination)
+            destination.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise self._fail(
+                "distro_import_incomplete",
+                f"{destination} holds {left} from an interrupted import and could "
+                f"not be cleared ({exc}). Remove it from PowerShell with: "
+                f"{remove_it}  then {TRY_AGAIN_HINT}.",
+            )
 
 
     def guest_release(self) -> str | None:
@@ -869,12 +932,13 @@ class EngineInstall:
                 if self._share_lan is None else self._share_lan
             )
         except CrucibleError as exc:
-            raise self._fail(
-                "lan_door_failed",
-                f"this machine's LAN sharing record cannot be read ({exc}), so this "
-                "install will not guess whether to open the network door. Fix or delete "
-                "the file and run the install again.",
+            aside = quarantine(self._home / lan_door.RECORD)
+            self._said(
+                f"lan-door: this machine's LAN sharing record could not be read "
+                f"({exc}); it was moved to {aside}. Network sharing stays off; "
+                "`crucible lan enable` turns it back on."
             )
+            wanted = False
         if not wanted:
             self._finish(
                 "lan-door",

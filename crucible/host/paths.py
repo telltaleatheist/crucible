@@ -4,8 +4,13 @@ from pathlib import PurePath, PureWindowsPath
 from typing import Mapping
 
 from .errors import HostError
+from .wsl_states import RELEASE_REPOSITORY
 
 APPDATA_DIRNAME = "Crucible"
+
+INSTALL_ONE_LINER = (
+    f"irm https://github.com/{RELEASE_REPOSITORY}/releases/latest/download/install.ps1 | iex"
+)
 
 PACK_SUBDIR = "host"
 
