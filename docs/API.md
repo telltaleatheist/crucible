@@ -222,7 +222,7 @@ Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missin
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
-*Answers:* `202`, `422`
+*Answers:* `202`, `409`, `422`
 
 ### `GET /v1/jobs/{job_id}`
 
@@ -234,7 +234,7 @@ Get Job
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `404`, `422`
 
 ### `DELETE /v1/jobs/{job_id}`
 
@@ -363,7 +363,7 @@ Admit one operator task (pull, install, module, engine or engine-restart), or re
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
 
-*Answers:* `202`, `422`
+*Answers:* `202`, `409`, `422`
 
 ### `GET /v1/tasks/{task_id}`
 
@@ -700,6 +700,152 @@ One answer distribution per question, read off the resident model's next-token l
 
 Every schema the routes above refer to, for a reader following a nested field.
 
+### `Activity`
+
+`GET /v1/activity`: what this server is doing, in one read.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `server` | ActivityServer | yes | — | Who answered `GET /v1/activity`. |
+| `resident` | ActivityResident or null | yes | — |  |
+| `stopping` | object or null | yes | — |  |
+| `warming` | string or null | yes | — |  |
+| `claim` | object or null | yes | — |  |
+| `streaming` | object or null | yes | — |  |
+| `chat` | ActivityChat | yes | — | Chat completions in flight and the engine's admission limit. |
+| `settings` | ActivitySettings | yes | — | Recent writes through `PUT /v1/settings`. |
+| `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
+| `lease` | ActivityLease or null | yes | — |  |
+| `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
+| `running` | array of ActivityJob | yes | — |  |
+| `queued` | array of ActivityJob | yes | — |  |
+| `accelerator` | object or null | no | — |  |
+
+### `ActivityCatalog`
+
+Recent removals through `DELETE /v1/catalog/{kind}/{id}`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `removals` | array of object | yes | — |  |
+
+### `ActivityChat`
+
+Chat completions in flight and the engine's admission limit.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `in_flight` | integer | yes | — |  |
+| `max_in_flight` | integer or null | yes | — |  |
+| `max_in_flight_basis` | string or null | yes | — |  |
+| `rows` | array of ActivityChatRow | yes | — |  |
+
+### `ActivityChatRow`
+
+One chat completion in flight.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | integer | yes | — |  |
+| `act` | string or null | yes | — |  |
+| `model` | string | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `since` | string | yes | — |  |
+
+### `ActivityHeld`
+
+What keeps the resident subject on the card.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `fact` | string | yes | — |  |
+| `who` | string | yes | — |  |
+| `details` | Details | yes | — |  |
+
+### `ActivityJob`
+
+A running or queued job, as `GET /v1/activity` shows it.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `type` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `status` | string | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `progress` | integer or number | yes | — |  |
+| `message` | string or null | yes | — |  |
+| `created` | string | yes | — |  |
+| `started` | string or null | yes | — |  |
+| `client` | string or null | yes | — |  |
+
+### `ActivityLease`
+
+The open lease.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `lease_id` | string | yes | — |  |
+| `kind` | string | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `act` | string | yes | — |  |
+| `since` | string | yes | — |  |
+| `expires_at` | string | yes | — |  |
+
+### `ActivityResident`
+
+What is on the card.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `kind` | string | yes | — |  |
+| `id` | string | yes | — |  |
+| `since` | string | yes | — |  |
+| `memory_bytes_estimate` | integer or number or null | yes | — |  |
+| `engine_exit_code` | integer or null | yes | — |  |
+| `reference` | Reference | no | — |  |
+| `held_by` | ActivityHeld or null | yes | — |  |
+| `unclaimed_since` | string or null | yes | — |  |
+
+### `ActivityServer`
+
+Who answered `GET /v1/activity`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `name` | string | yes | — |  |
+| `version` | string | yes | — |  |
+| `api_version` | integer | yes | — |  |
+| `backend` | string | yes | — |  |
+| `uptime_s` | integer or number | yes | — |  |
+
+### `ActivitySettings`
+
+Recent writes through `PUT /v1/settings`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `writes` | array of object | yes | — |  |
+
+### `ActivitySlot`
+
+The one accelerated lane.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `busy` | integer | yes | — |  |
+| `of` | integer | yes | — |  |
+| `queue_depth` | integer | yes | — |  |
+| `accepts_work` | boolean | yes | — |  |
+
+### `ActivitySlots`
+
+Every lane this server admits work through.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `accelerated` | ActivitySlot | yes | — | The one accelerated lane. |
+
 ### `ArtifactRef`
 
 An artifact of a previous job on this server, taken as an input.
@@ -714,6 +860,16 @@ An artifact of a previous job on this server, taken as an input.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `file` | string | yes | — |  |
+
+### `CardHeldDetails`
+
+`server_busy` from the operator door: what holds the card, in the server's words.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `door` | `'operator'` | yes | — |  |
+| `fact` | string | yes | — |  |
+| `who` | string | yes | — |  |
 
 ### `ChoiceAnswer`
 
@@ -790,6 +946,24 @@ How big the prompts were.
 | `per_question` | Per Question | yes | — | `usage.prompt_tokens` for each question's prompt. |
 | `images` | integer | yes | — | How many images every prompt of this decision carried. |
 
+### `ErrorBody`
+
+What every refusal carries: branch on `code`, show a person `message`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `code` | string | yes | — |  |
+| `message` | string | yes | — |  |
+| `details` | object or null | no | — |  |
+
+### `ErrorEnvelope`
+
+Every error answer: one `error` object.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `error` | ErrorBody | yes | — | What every refusal carries: branch on `code`, show a person `message`. |
+
 ### `ForwardTiming`
 
 One request to the engine, timed by Crucible.
@@ -806,6 +980,22 @@ One request to the engine, timed by Crucible.
 | --- | --- | --- | --- | --- |
 | `detail` | array of ValidationError | no | — |  |
 
+### `JobBusyDetails`
+
+`server_busy` from the job door: the job that holds the lane.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `door` | `'job'` | yes | — |  |
+| `holder` | string or null | yes | — |  |
+| `job_id` | string | yes | — |  |
+| `type` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `status` | string | yes | — |  |
+| `since` | string | yes | — |  |
+| `progress` | integer or number | yes | — |  |
+| `message` | string or null | yes | — |  |
+
 ### `JobCreate`
 
 | field | type | required | default | what it is |
@@ -817,6 +1007,15 @@ One request to the engine, timed by Crucible.
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
+### `JobFailure`
+
+Why a job failed.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `code` | string | yes | — |  |
+| `message` | string | yes | — |  |
+
 ### `JobInput`
 
 One named input: an uploaded blob, inline base64 bytes, or a previous job's artifact.
@@ -826,6 +1025,35 @@ One named input: an uploaded blob, inline base64 bytes, or a previous job's arti
 | `blob_id` | string or null | no | — |  |
 | `inline_base64` | string or null | no | — |  |
 | `artifact` | ArtifactRef or null | no | — |  |
+
+### `JobStatus`
+
+`GET /v1/jobs/{id}`. A job type adds its own `done_extra` keys beside these.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `type` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `status` | string | yes | — |  |
+| `progress` | integer or number | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `error` | JobFailure or null | yes | — |  |
+| `artifacts` | array of string | yes | — |  |
+| `created` | string | yes | — |  |
+| `started` | string or null | yes | — |  |
+| `finished` | string or null | yes | — |  |
+| `client_ref` | string or null | yes | — |  |
+| `interrupted_at` | string or null | yes | — |  |
+| `held_by` | string or null | yes | — |  |
+| `held_since` | string or null | yes | — |  |
+| `chunks_done` | array of integer | yes | — |  |
+| `chunks_total` | integer or null | yes | — |  |
+| `chunk_at` | string or null | yes | — |  |
+| `resume_id` | string or null | yes | — |  |
+| `resumed` | boolean | yes | — |  |
+| `lease_id` | string or null | no | — |  |
+| `sampling` | object or null | no | — |  |
 
 ### `LeaseOpen`
 
@@ -845,6 +1073,17 @@ The weights that made the decision, as an artifact sidecar names them.
 | `id` | string | yes | — | The Crucible model id. |
 | `revision` | string | yes | — | The revision the resident engine was started on. |
 | `fingerprint` | string | yes | — | `<id>@<revision>`. |
+
+### `Ping`
+
+`GET /v1/ping`: enough for a client to tell a Crucible from anything else.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `crucible` | `True` | yes | — |  |
+| `name` | string | yes | — |  |
+| `api_version` | integer | yes | — |  |
+| `pairing_version` | integer | yes | — |  |
 
 ### `PollPairing`
 
@@ -877,6 +1116,24 @@ Place the state on an ordered scale. `score` is the expected level.
 | `type` | `'score'` | yes | — | `score`. |
 | `instructions` | string | yes | — | The question: "How frustrated is the customer?". |
 | `levels` | array of string | yes | — | The scale, lowest first, 2 to 10 unique levels. Level i (1-based) is the value the expected `score` is computed with. |
+
+### `ServerBusy`
+
+The `409 server_busy` envelope.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `error` | ServerBusyBody | yes | — | A `409 server_busy` refusal; `details.door` says which door refused. |
+
+### `ServerBusyBody`
+
+A `409 server_busy` refusal; `details.door` says which door refused.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `code` | `'server_busy'` | yes | — |  |
+| `message` | string | yes | — |  |
+| `details` | JobBusyDetails or CardHeldDetails | yes | — |  |
 
 ### `StartPairing`
 
@@ -925,6 +1182,40 @@ Place the state on an ordered scale. `score` is the expected level.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+
+### `VoiceInfo`
+
+One row of `GET /v1/voices`: a voice and where it stands on this server.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — |  |
+| `display` | string | yes | — |  |
+| `kind` | string or null | yes | — |  |
+| `language` | string or null | yes | — |  |
+| `narrator_engine` | string or null | yes | — |  |
+| `backend_supported` | boolean | yes | — |  |
+| `installed` | boolean | yes | — |  |
+| `resident` | boolean | yes | — |  |
+| `orphan` | boolean or null | yes | — |  |
+| `loadable` | boolean | yes | — |  |
+| `reason` | string or null | yes | — |  |
+| `revision` | string or null | yes | — |  |
+| `fingerprint` | string or null | yes | — |  |
+| `source` | string or null | yes | — |  |
+| `identity_basis` | string or null | yes | — |  |
+| `memory_bytes_estimate` | integer or number or null | yes | — |  |
+| `estimate_basis` | string or null | yes | — |  |
+| `serving` | object or null | yes | — |  |
+| `max_chars` | integer or null | yes | — |  |
+| `max_chars_basis` | string or null | yes | — |  |
+| `pace_basis` | string or null | yes | — |  |
+| `inherited_from` | string or null | yes | — |  |
+| `manifest` | string or null | yes | — |  |
+| `sample_rate` | integer or null | yes | — |  |
+| `takes` | integer | yes | — |  |
+| `needs_reference` | boolean | yes | — |  |
+| `pace` | object or null | yes | — |  |
 
 ### `YesNoAnswer`
 

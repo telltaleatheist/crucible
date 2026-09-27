@@ -8,31 +8,29 @@ from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from ... import upstreams
-from ...config import Config
 from ...engines import chat_admission
 from ...errors import ApiError
-from ...inflight import InFlight, read_act
+from ...inflight import read_act
 from ...sampling import SAMPLING_HEADER, apply_defaults
-from ...settle import Settlement
 from ..caller import client_agent
 from ..context import AppContext, Routers
 from ..proxy import (
     JSON_HEADERS,
-    _after_the_stream,
-    _caller_gone,
-    _chat_body,
-    _chat_over,
-    _chat_queue_full,
-    _engine_unreachable,
-    _forward_body,
-    _model_not_resident,
-    _post_unless_the_caller_leaves,
-    _proxy_stream,
-    _refuse_an_exited_engine,
-    _restore_model_id,
-    _sent_across_the_wire,
+    after_the_stream,
+    caller_gone,
+    chat_body,
+    chat_queue_full,
+    engine_unreachable,
+    forward_body,
+    model_not_resident,
+    post_unless_the_caller_leaves,
+    proxy_stream,
+    refuse_an_exited_engine,
+    restore_model_id,
+    sent_across_the_wire,
+    settle_after_chat,
 )
-from ..upstream import _forward_to_upstream, _routed_upstream_rows
+from ..upstream import forward_to_upstream, routed_upstream_rows
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -41,13 +39,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/openai/models")
     @openai.get("/models")
-    async def openai_models(request: Request) -> dict[str, Any]:
+    async def openai_models() -> dict[str, Any]:
         """The resident model in OpenAI's list shape, plus every upstream model a route
         names.
         """
-        live: Config = request.app.state.config
         resident = residency.resident_model
-        data: list[dict[str, Any]] = _routed_upstream_rows(live)
+        data: list[dict[str, Any]] = routed_upstream_rows(config)
         if resident is None:
             return {"object": "list", "data": data}
         return {
@@ -77,7 +74,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         `<upstream>/<id>` model, forwarded to that upstream.
         """
         raw = await request.body()
-        body = _chat_body(raw)
+        body = chat_body(raw)
         requested = body.get("model")
         if not isinstance(requested, str) or requested == "":
             raise ApiError(
@@ -87,30 +84,29 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "model that is resident",
             )
         if upstreams.split_model(requested) is not None:
-            return await _forward_to_upstream(
-                request, requested, body, client_agent=client_agent(request)
+            return await forward_to_upstream(
+                ctx, request, requested, body, client_agent=client_agent(request)
             )
         async with residency.settled_for("a chat request"):
             resident = residency.resident_model
             if resident is None or resident.model_id != requested:
-                raise _model_not_resident(requested, resident, "a chat request")
-            _refuse_an_exited_engine(residency, resident)
+                raise model_not_resident(requested, resident, "a chat request")
+            refuse_an_exited_engine(residency, resident)
 
             applied = apply_defaults(body, resident.defaults)
             sampling_headers = {SAMPLING_HEADER: applied.header()}
-            forwarded = _forward_body(raw, applied, resident)
+            forwarded = forward_body(raw, applied, resident)
             url = f"{resident.base_url}/v1/chat/completions"
-            client: httpx.AsyncClient = request.app.state.http
-            inflight: InFlight = request.app.state.inflight
+            client = ctx.http
+            inflight = ctx.inflight
             act = read_act(request.headers)
 
-            settlement: Settlement = request.app.state.settlement
-            chat_over = _chat_over(settlement)
+            chat_over = settle_after_chat(ctx.settlement)
 
             limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
             if limit is not None and len(inflight) >= limit:
                 wait = inflight.retry_after()
-                return _chat_queue_full(
+                return chat_queue_full(
                     resident=resident, limit=limit, basis=limit_basis, wait=wait
                 )
 
@@ -119,29 +115,29 @@ def register(routers: Routers, ctx: AppContext) -> None:
             )
         try:
             if body.get("stream") is True:
-                return await _proxy_stream(
+                return await proxy_stream(
                     client,
                     url,
                     forwarded,
                     resident,
                     sampling_headers,
-                    when_relayed=_after_the_stream(inflight, entry, chat_over),
+                    when_relayed=after_the_stream(inflight, entry, chat_over),
                 )
             try:
-                upstream = await _sent_across_the_wire(
-                    lambda: _post_unless_the_caller_leaves(
+                upstream = await sent_across_the_wire(
+                    lambda: post_unless_the_caller_leaves(
                         client, url, forwarded, request, JSON_HEADERS
                     ),
                     where=f"the engine serving {resident.model_id!r}",
                 )
             except httpx.HTTPError as exc:
-                raise _engine_unreachable(resident, exc) from None
+                raise engine_unreachable(resident, exc) from None
             if upstream is None:
-                response = _caller_gone(resident)
+                response = caller_gone(resident)
             else:
                 content = upstream.content
                 if upstream.status_code == 200:
-                    content = _restore_model_id(content, resident)
+                    content = restore_model_id(content, resident)
                 response = Response(
                     content=content,
                     status_code=upstream.status_code,

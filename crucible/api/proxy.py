@@ -16,6 +16,7 @@ from ..inflight import Entry, InFlight
 from ..residency import Residency
 from ..sampling import Applied
 from ..settle import Settlement
+from .deps import error_response
 
 PROXY_CONNECT_TIMEOUT = 10.0
 PROXY_READ_TIMEOUT = 900.0
@@ -31,7 +32,7 @@ WIRE_ATTEMPTS = 2
 JSON_HEADERS = {"Content-Type": "application/json"}
 
 
-def _chat_body(raw: bytes) -> dict[str, Any]:
+def chat_body(raw: bytes) -> dict[str, Any]:
     try:
         body = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -48,7 +49,7 @@ def _chat_body(raw: bytes) -> dict[str, Any]:
     return body
 
 
-def _forward_body(raw: bytes, applied: Applied, resident: Any) -> bytes:
+def forward_body(raw: bytes, applied: Applied, resident: Any) -> bytes:
     if not applied.changed and resident.engine_model_name == resident.model_id:
         return raw
     document = dict(applied.body)
@@ -70,19 +71,19 @@ async def _watch_for_disconnect(request: Request) -> None:
             )
 
 
-async def _post_unless_the_caller_leaves(
+async def post_unless_the_caller_leaves(
     client: httpx.AsyncClient,
     url: str,
     body: bytes,
     request: Request,
     headers: dict[str, str],
 ) -> httpx.Response | None:
-    return await _unless_the_caller_leaves(
+    return await unless_the_caller_leaves(
         client.post(url, content=body, headers=headers), request
     )
 
 
-async def _sent_across_the_wire(
+async def sent_across_the_wire(
     attempt: Callable[[], Awaitable[Any]], *, where: str
 ) -> Any:
     attempt_number = 0
@@ -107,26 +108,25 @@ async def _sent_across_the_wire(
             )
 
 
-def _attempts(exc: Exception) -> str:
+def attempts_note(exc: Exception) -> str:
     if isinstance(exc, LOST_ON_THE_WIRE):
         return f" on {WIRE_ATTEMPTS} attempts"
     return ""
 
 
-def _caller_gone(resident: Any) -> JSONResponse:
-    return JSONResponse(
-        status_code=499,
-        content=ApiError(
+def caller_gone(resident: Any) -> JSONResponse:
+    return error_response(
+        ApiError(
             499,
             "client_disconnected",
             f"the caller closed the connection before the engine serving "
             f"{resident.model_id!r} answered; the engine's request was cancelled "
             "with it",
-        ).body(),
+        )
     )
 
 
-def _refuse_an_exited_engine(residency: Residency, resident: Any) -> None:
+def refuse_an_exited_engine(residency: Residency, resident: Any) -> None:
     code = residency.engine_exit_code
     if code is None:
         return
@@ -139,7 +139,7 @@ def _refuse_an_exited_engine(residency: Residency, resident: Any) -> None:
     )
 
 
-def _model_not_resident(requested: str, resident: Any, answering: str) -> ApiError:
+def model_not_resident(requested: str, resident: Any, answering: str) -> ApiError:
     return ApiError(
         409,
         "model_not_resident",
@@ -152,7 +152,7 @@ def _model_not_resident(requested: str, resident: Any, answering: str) -> ApiErr
     )
 
 
-async def _unless_the_caller_leaves(
+async def unless_the_caller_leaves(
     work: Awaitable[Any], request: Request
 ) -> Any:
     task = asyncio.ensure_future(work)
@@ -181,17 +181,17 @@ async def _unless_the_caller_leaves(
     return None
 
 
-def _engine_unreachable(resident: Any, exc: Exception) -> ApiError:
+def engine_unreachable(resident: Any, exc: Exception) -> ApiError:
     return ApiError(
         502,
         "engine_unreachable",
         f"the engine serving {resident.model_id!r} at {resident.base_url} did not "
-        f"answer{_attempts(exc)}: {type(exc).__name__}: {exc}. Its log is "
+        f"answer{attempts_note(exc)}: {type(exc).__name__}: {exc}. Its log is "
         f"{resident.log_path}",
     )
 
 
-def _restore_model_id(raw: bytes, resident: Any) -> bytes:
+def restore_model_id(raw: bytes, resident: Any) -> bytes:
     if resident.engine_model_name == resident.model_id:
         return raw
     try:
@@ -216,10 +216,10 @@ def _restore_model_id(raw: bytes, resident: Any) -> bytes:
 
 
 def _restore_model_id_in_frame(frame: bytes, resident: Any) -> bytes:
-    return _set_model_in_frame(frame, resident.model_id)
+    return set_model_in_frame(frame, resident.model_id)
 
 
-def _set_model_in_frame(frame: bytes, model_id: str) -> bytes:
+def set_model_in_frame(frame: bytes, model_id: str) -> bytes:
     lines = frame.split(b"\n")
     changed = False
     for index, line in enumerate(lines):
@@ -240,7 +240,7 @@ def _set_model_in_frame(frame: bytes, model_id: str) -> bytes:
     return b"\n".join(lines) if changed else frame
 
 
-def _chat_over(settlement: Settlement) -> Callable[[], Awaitable[None]]:
+def settle_after_chat(settlement: Settlement) -> Callable[[], Awaitable[None]]:
     async def over() -> None:
         await asyncio.to_thread(
             settlement.settle_quietly, "the last chat completion finished"
@@ -249,7 +249,7 @@ def _chat_over(settlement: Settlement) -> Callable[[], Awaitable[None]]:
     return over
 
 
-def _after_the_stream(
+def after_the_stream(
     inflight: InFlight, entry: Entry, chat_over: Callable[[], Awaitable[None]]
 ) -> Callable[[], Awaitable[None]]:
     async def done() -> None:
@@ -259,7 +259,7 @@ def _after_the_stream(
     return done
 
 
-class _RelayResponse(StreamingResponse):
+class RelayResponse(StreamingResponse):
     def __init__(
         self,
         *args: Any,
@@ -279,7 +279,7 @@ class _RelayResponse(StreamingResponse):
             await self._when_relayed()
 
 
-async def _proxy_stream(
+async def proxy_stream(
     client: httpx.AsyncClient,
     url: str,
     body: bytes,
@@ -298,7 +298,7 @@ async def _proxy_stream(
         ),
     )
     try:
-        upstream = await _sent_across_the_wire(
+        upstream = await sent_across_the_wire(
             lambda: client.send(request, stream=True),
             where=f"the engine serving {resident.model_id!r}",
         )
@@ -306,7 +306,7 @@ async def _proxy_stream(
         raise ApiError(
             502,
             "engine_unreachable",
-            f"the resident engine at {url} did not answer{_attempts(exc)}: "
+            f"the resident engine at {url} did not answer{attempts_note(exc)}: "
             f"{type(exc).__name__}: {exc}. Its log is {log_path}",
         ) from None
 
@@ -335,7 +335,7 @@ async def _proxy_stream(
         if buffer:
             yield _restore_model_id_in_frame(buffer, resident)
 
-    return _RelayResponse(
+    return RelayResponse(
         relay(),
         upstream=upstream,
         when_relayed=when_relayed,
@@ -349,14 +349,14 @@ async def _proxy_stream(
     )
 
 
-def _chat_limit_of(residency: Residency) -> tuple[int | None, str | None]:
+def chat_limit_of(residency: Residency) -> tuple[int | None, str | None]:
     resident = residency.resident_model
     if resident is None:
         return (None, None)
     return chat_admission(resident.engine, resident.engine_args)
 
 
-def _chat_queue_full(
+def chat_queue_full(
     *,
     resident: Any,
     limit: int,
@@ -383,4 +383,4 @@ def _chat_queue_full(
         },
     )
     headers = {} if wait is None else {"Retry-After": str(wait)}
-    return JSONResponse(status_code=503, headers=headers, content=error.body())
+    return error_response(error, headers)

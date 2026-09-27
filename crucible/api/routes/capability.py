@@ -6,7 +6,6 @@ from fastapi import Request
 
 from ... import capability as capability_classes
 from ... import ladder
-from ...config import Config
 from ...errors import ApiError
 from ...installonsubmit import live_decisions
 from ...jobenv import INSTALLER_FOR
@@ -44,7 +43,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """What an install (`?job_type=`) or a pull (`?subject=`) would give this card,
         decided live and writing nothing.
         """
-        live: Config = request.app.state.config
         query = request.query_params
         job_type, subject = query.get("job_type"), query.get("subject")
         if (job_type is None) == (subject is None):
@@ -53,7 +51,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "invalid_request",
                 "name exactly one of ?job_type= (an install) or ?subject= (a pull)",
             )
-        decisions, card, pool = live_decisions(live, backend)
+        decisions, card, pool = live_decisions(config, backend)
         if job_type is not None:
             return capability_classes.install_plan(
                 job_type,
@@ -61,8 +59,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 card=card,
                 total_bytes=backend.gpu.vram_bytes,
                 pool=pool,
-                desktop_allowance_bytes=live.desktop_allowance_bytes,
-                desktop_basis=live.desktop_allowance_basis,
+                desktop_allowance_bytes=config.desktop_allowance_bytes,
+                desktop_basis=config.desktop_allowance_basis,
             )
         return capability_classes.subject_plan(
             subject, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool
@@ -74,8 +72,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         false` is an answer, not an error. A client-sized class may be sized with
         `?class=&context_tokens=&concurrency=`.
         """
-        live: Config = request.app.state.config
-        record = live.capability
+        record = config.capability
         if record is None:
             raise ApiError(
                 503,
@@ -89,8 +86,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         document["classes"] = capability_classes.served_rows(
             record,
             gpu_vendor=backend.gpu.vendor,
-            chosen={entry.capability: entry.model for entry in live.local_models},
-            routes={entry.capability: entry.model for entry in live.routes},
+            chosen={entry.capability: entry.model for entry in config.local_models},
+            routes={entry.capability: entry.model for entry in config.routes},
             capability_class=query.get("class"),
             context_tokens=query.get(capability_classes.CONTEXT_TOKENS_PARAM),
             concurrency=query.get(capability_classes.CONCURRENCY_PARAM),
@@ -99,7 +96,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         for row in document["classes"]:
             row["route"] = (
                 "upstream"
-                if live.route_model(row["capability"]) is not None
+                if config.route_model(row["capability"]) is not None
                 else "local"
             )
         return {**document, "job_types": installable_job_type_rows()}
