@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import signal
 import socket
 import subprocess
 import threading
@@ -36,6 +38,52 @@ STACK_LAUNCH_BINARY: dict[str, str] = {
 STACK_PORT_VARIABLE: dict[str, str] = {
     "sglang-omni": "HIGGS_SGL_PORT",
 }
+
+
+OWNER_MARKER_VARIABLE = "NARRATOR_HIGGS3_OWNER"
+LAUNCHED_SERVER_GRACE_SECONDS = 180.0
+LAUNCHED_SERVER_POLL_SECONDS = 1.0
+
+
+def processes_launched_by(owner_pid: int) -> frozenset[int]:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return frozenset()
+    marker = f"{OWNER_MARKER_VARIABLE}={owner_pid}".encode()
+    found = set()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            environ = (entry / "environ").read_bytes()
+        except OSError:
+            continue
+        if marker in environ.split(b"\0"):
+            found.add(int(entry.name))
+    return frozenset(found)
+
+
+def _wait_until_gone(owner_pid: int, seconds: float) -> frozenset[int]:
+    deadline = time.monotonic() + seconds
+    while True:
+        left = processes_launched_by(owner_pid)
+        if not left or time.monotonic() >= deadline:
+            return left
+        time.sleep(LAUNCHED_SERVER_POLL_SECONDS)
+
+
+def _terminate_groups(pids: frozenset[int]) -> None:
+    groups = set()
+    for pid in pids:
+        try:
+            groups.add(os.getpgid(pid))
+        except OSError:
+            continue
+    for group in groups:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except OSError:
+            continue
 
 
 def free_loopback_port() -> int:
@@ -563,7 +611,36 @@ class NarratorEngine(SubprocessEngine):
         return loaded
 
 
+    @property
+    def pids(self) -> frozenset[int]:
+        process = self._process
+        if process is None:
+            return frozenset()
+        return super().pids | processes_launched_by(process.pid)
+
     def stop(self) -> None:
+        process = self._process
+        owner = None if process is None else process.pid
+        self._quit_narrator()
+        if owner is not None:
+            self._outlive_launched_servers(owner)
+
+    def _outlive_launched_servers(self, owner: int) -> None:
+        left = _wait_until_gone(owner, LAUNCHED_SERVER_GRACE_SECONDS)
+        if not left:
+            return
+        _terminate_groups(left)
+        left = _wait_until_gone(owner, LAUNCHED_SERVER_GRACE_SECONDS)
+        if left:
+            raise EngineError(
+                f"{self.name}: the server narrator launched is still running "
+                f"(pids {sorted(left)}) {2 * LAUNCHED_SERVER_GRACE_SECONDS:.0f}s "
+                "after narrator stopped, and did not exit on SIGTERM. Crucible "
+                "does not SIGKILL a process holding CUDA; stop it by hand before "
+                "the next load."
+            )
+
+    def _quit_narrator(self) -> None:
         process = self._process
         if process is not None and process.poll() is None:
             try:
