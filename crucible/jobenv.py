@@ -334,7 +334,7 @@ def recipe_archive_bytes(path: Path) -> int:
         raise EnvError(
             f"recipe_unsized: {path.name} carries no `# archive-bytes:` line, so "
             "there is no telling what installing it needs. The measured sizes "
-            "are PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table and they go "
+            "are docs/internals/config-envs-weights.md's \"Archive sizes\" table and they go "
             "in the recipe's header; guessing one here would be a number "
             "somebody later believes"
         )
@@ -380,8 +380,8 @@ def refuse_without_room(*, job_type: str, recipe: Path, directory: Path) -> None
         f"env_disk: installing {job_type!r} needs at least "
         f"{required / 1_000_000_000:.1f} GB free and {filesystem} has "
         f"{free / 1_000_000_000:.1f} GB ({free} bytes of the {required} "
-        f"{recipe.name} states). That figure is the ARCHIVE size PHASE20 "
-        "measured for this recipe and an unpacked env is larger, so it is a "
+        f"{recipe.name} states). That figure is the ARCHIVE size measured "
+        "for this recipe (docs/internals/config-envs-weights.md, \"Archive sizes\") and an unpacked env is larger, so it is a "
         "floor and not an estimate. Free space on that drive, or move "
         "$CRUCIBLE_HOME to one that has it, before running this again"
     )

@@ -99,7 +99,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "named step: stop the server, remove the service, remove the job "
             "envs, the pairing file, the config and the working state — and "
             "then keep the weights, which are the expensive part "
-            "(PHASE15-HOST.md 3.5), unless --purge-weights says otherwise. "
+            "(docs/internals/host-and-platform.md, \"Uninstall\"), unless --purge-weights says otherwise. "
             "It asks nothing: the flags decide. It removes nothing outside "
             "$CRUCIBLE_HOME and the service entry it wrote, nothing it cannot "
             "name, and never the relocatable interpreter it is running from — "

@@ -51,7 +51,7 @@ fi
 for name in $(echo "$only" | tr ',' ' '); do
   case " $FLEET " in *" $name "*) continue ;; esac
   case "$name" in
-    wsl)     fail "there is no 'wsl' machine any more: the host drives the guest (PHASE15-HOST.md 4.3), so the PC is one entry. Use --only pc" ;;
+    wsl)     fail "there is no 'wsl' machine any more: the host drives the guest (docs/internals/scripts.md, \"Deploying\"), so the PC is one entry. Use --only pc" ;;
     windows) fail "'windows' and 'wsl' are one machine now, called pc. Use --only pc" ;;
     *)       fail "--only names '$name', which is not one of: $FLEET" ;;
   esac

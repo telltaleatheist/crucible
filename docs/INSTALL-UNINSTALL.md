@@ -163,7 +163,7 @@ Uninstall, weights kept:
 curl -fsSL .../install.sh | sh -s -- --uninstall
 ```
 
-This is `docs/MAC-PARITY-AUDIT-2026-09-14.md` §3's upgrade checklist reversed, and its
+This is `docs/history/MAC-PARITY-AUDIT-2026-09-14.md` §3's upgrade checklist reversed, and its
 warning still applies in this direction: the Mac's job envs were venvs PARENTED on a conda
 env. If that conda env still exists on the machine, removing it before `crucible uninstall`
 kills `<home>/envs` out from under the step that would have reported them.

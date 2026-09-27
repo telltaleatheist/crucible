@@ -95,7 +95,7 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "/tts/stream",
         "Streaming narration",
         "A long-lived session that takes text and gives audio back over SSE, instead of "
-        "one render per request (PHASE3-TTS.md section 7).",
+        "one render per request.",
     ),
     (
         "/uploads",
@@ -117,7 +117,7 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/peer",
         "Peers",
-        "Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an "
+        "Orchestrator and engine talking to each other (docs/internals/host-and-platform.md). Not an "
         "app-facing surface.",
     ),
     ("", "Everything else", ""),
@@ -314,7 +314,7 @@ def render(app: Any) -> str:
         "sometimes `details`. Crucible refuses by name and with numbers: branch on `code`,",
         "show a person the `message`.",
         "",
-        "The prose for WHY a field exists lives in the phase docs (`docs/PHASE*.md`); what",
+        "The prose for WHY a field exists lives in the internals docs (`docs/internals/*.md`); what",
         "is here is what you may send and what comes back.",
         "",
     ]

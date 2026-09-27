@@ -126,7 +126,7 @@ One server, two policies, no reason.
   polling is a *worse* queue than FIFO: the winner is whoever polls at the luckiest moment
   rather than whoever asked first. So the 409 carries `{holder, job_type, model, since,
   progress}` — which is also exactly the *"GPU busy: Foundry"* message Owen wants, for free.
-  The `client` field recorded on every job (section 5 of PHASE7-LANES) is what makes it
+  The `client` field recorded on every job (section 5 of docs/history/PHASE7-LANES.md) is what makes it
   nameable.
 - **A "card is free" edge signal** so clients need not poll at all. Two clients waking
   together is a millisecond race, which is fine: this is one person with three machines, not
@@ -237,7 +237,7 @@ The settled ownership, for reference:
 | the queue, ordering, priority, pins | **the client** | section 3 |
 | admission ("is there room now") | **the server** | only it can answer |
 | the guard and the retake decision | **the model + its inference** | Owen, 2026-09-13; PHASE6 |
-| chunking and the order of work | **the client** | PHASE3-TTS section 1 |
+| chunking and the order of work | **the client** | docs/history/PHASE3-TTS.md section 1 |
 | engine tuning (sampling, caps, bands) | **Crucible config** | never a wire field |
 | all text processing | **Foundry** | except `tts-punctuation.ts` |
 | scheduling, when hosted | **BookForge** | `foundry-host-queue.ts`: "scheduling crosses, execution does not" |
@@ -269,7 +269,7 @@ Sequenced by what unblocks what, not by severity.
 
 **Then — R4, the log contracts.** Phase 6 removes the guard-event scrape. The remaining 38
 are each "promote the fact to an event", sized by the audit's table and done as their
-owning feature travels. **PHASE8-LOGS.md** covers the transport.
+owning feature travels. **docs/history/PHASE8-LOGS.md** covers the transport.
 
 **Continuously — R1 and R2.** Every fix ships with the check that would have caught it, and
 no red guard is left standing.

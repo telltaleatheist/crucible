@@ -94,7 +94,7 @@ if "tts" not in caps:
     sys.exit("keeper: /info has no tts capability; is [jobs] enable_tts on?")
 if caps["tts"] != voices:
     sys.exit("keeper: /info's tts rows are not /voices' rows verbatim — one "
-             "voice, one description (PHASE3-TTS.md section 2)")
+             "voice, one description (docs/internals/api.md, 'Voices, streams, catalog')")
 print(row["revision"])
 print(row["sample_rate"])
 print(row.get("estimate_basis"))
@@ -176,7 +176,7 @@ if terminal[0] != "done":
     sys.exit(f"keeper: the render ended {terminal[0]}: {terminal[1]}")
 if "warming" not in kinds:
     sys.exit("keeper: the render never said `warming` — a render is supposed to "
-             "load its own voice (PHASE3-TTS.md section 6)")
+             "load its own voice (docs/internals/jobs-runtime.md, '10.1 tts render')")
 
 chunks = [d for k, d in events if k == "chunk"]
 if len(chunks) != 2:

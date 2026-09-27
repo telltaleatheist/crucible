@@ -213,7 +213,7 @@ def export_manifest(
     if not has_band and not uncertified:
         raise CardError(
             f"voice {manifest.id!r} states no pace band, so the file this would "
-            "write is an UNCERTIFIED voice (PHASE18 section 4.1) — a real state, "
+            "write is an UNCERTIFIED voice (docs/internals/voices.md, \"The voice schema\") — a real state, "
             "and one worth stating on purpose. Pass --uncertified to say so"
         )
     if has_band or packs:
@@ -236,7 +236,7 @@ _UNCERTIFIED_LINES = [
     "",
     "# NO [voice.pace]: nothing was measured on these weights, and this",
     "# file says so by omitting the table rather than by copying a",
-    "# predecessor's numbers (PHASE18 section 4.1).",
+    "# predecessor's numbers.",
 ]
 
 
@@ -324,7 +324,7 @@ def _header_lines(manifest: VoiceManifest) -> list[str]:
         "#",
         "# The MACHINE facts that file carried are not here: they belong to the",
         "# box that serves the voice, in its config.toml `[tts.<engine>]` table",
-        "# (PHASE21 section 2.3). The repo and revision are not here either —",
+        "# (docs/internals/voices.md, \"The repo manifest\"). The repo and revision are not here either —",
         "# this file IS the revision, and the local side pins it.",
         "",
         f"schema = {REPO_SCHEMA}",
@@ -435,7 +435,7 @@ def _dropped_arm_rows(manifest: VoiceManifest, arm: str) -> list[str]:
     if spec.path is not None:
         dropped.append(
             f"[voice.backends.{arm}] path = {spec.path} (identity "
-            f"{spec.identity!r}) -> this is a PHASE18 local voice and has no "
+            f"{spec.identity!r}) -> this is a local (path + identity) voice and has no "
             "repo to carry a manifest; it stays a `PUT /v1/voices/{id}` "
             "override"
         )

@@ -205,7 +205,7 @@ class PresenceWatcher:
         if probe.readable:
             self._log.write(
                 f'consent: "{self._distro}" is named in config.toml and its '
-                f"{probe.detail} — owner=wsl-unit (PHASE17 2.5)"
+                f"{probe.detail} — owner=wsl-unit (docs/internals/host-and-platform.md, \"Ownership\")"
             )
             return Presence(
                 distro,
@@ -217,7 +217,7 @@ class PresenceWatcher:
             f'consent: "{self._distro}" is named in config.toml, but '
             f"{UNIT_NAME} could not be read there ({probe.detail}), so the "
             "engine stays owner=found — consent is permission to manage a "
-            "unit, not evidence that there is one (PHASE17 2.5)"
+            "unit, not evidence that there is one (docs/internals/host-and-platform.md, \"Ownership\")"
         )
         return self.adopt(distro)
 

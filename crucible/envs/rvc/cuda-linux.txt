@@ -1,4 +1,4 @@
-# archive-bytes: 3300000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
+# archive-bytes: 3300000000  docs/internals/config-envs-weights.md "Archive sizes", measured 2026-09-18
 
 --extra-index-url https://download.pytorch.org/whl/cu128
 --find-links https://github.com/telltaleatheist/crucible/releases/expanded_assets/wheels

@@ -4,7 +4,7 @@ Covers `crucible/jobs/asr/`, `crucible/jobs/align/`, `crucible/jobs/alignlongfor
 `crucible/asrmodels.py`, `crucible/alignmodels.py`, `crucible/asrplan.py` and the manifests
 in `crucible/asr/*.toml` and `crucible/align/*.toml`.
 
-The Qwen3-ASR contract is [PHASE25-QWEN-ASR.md](../PHASE25-QWEN-ASR.md); the journal and
+The Qwen3-ASR plan was [history/PHASE25-QWEN-ASR.md](../history/PHASE25-QWEN-ASR.md) (not maintained); the journal and
 `resume` are [RESUMABLE-JOBS.md](../RESUMABLE-JOBS.md). The original design is
 [PHASE4-AUDIO.md](../PHASE4-AUDIO.md) sections 2 and 3. This file holds what the code alone
 does not say.
@@ -172,7 +172,7 @@ WhisperX's 18x and 39. The 0.6B is pinned by name; a larger sibling is a new mea
 Two per-job sessions: the ASR worker (`qwen_worker.py`) and the aligner (the `align` worker,
 only with `word_timestamps`), both started by the job and stopped in its `finally`. Not
 resident because the job needs both models on the card at once and `Residency` holds one
-thing; see PHASE25 section 3. vLLM runs in-process (not `vllm serve`) because the HTTP door
+thing; see `docs/history/PHASE25-QWEN-ASR.md` section 3. vLLM runs in-process (not `vllm serve`) because the HTTP door
 needs vLLM's `[audio]` extras the llm env lacks, and with `VLLM_ENABLE_V1_MULTIPROCESSING=0`
 so the engine core is not a grandchild holding the card.
 
@@ -219,7 +219,7 @@ no difference (8 vs 9 fillers). Neither engine applies `qwen_asr`'s
 
 ### Loop guard, token limit and re-decode
 
-See PHASE25 section 5 for the full rationale. The failure: a 180 s piece came back as one
+See `docs/history/PHASE25-QWEN-ASR.md` section 5 for the full rationale. The failure: a 180 s piece came back as one
 line repeated ~60 times until `max_new_tokens`, and the aligner stamped all 2,388 words at one
 instant, silently erasing three minutes.
 
@@ -298,7 +298,7 @@ set to the estimate over the card rounded up.
 
 Owen, 2026-09-27: *"Sending silences through an asr model produces hallucination and
 nonsense."* Off by default until measured against the Deathstalker book's 133 known dropped
-openings. Not combinable with `vad_filter: true`. Full contract: PHASE25 section 11.
+openings. Not combinable with `vad_filter: true`. Full contract: `docs/history/PHASE25-QWEN-ASR.md` section 11.
 
 - **Detector**: Silero VAD 6.2.1, run as a numpy port of `silero_vad/tinygrad_model.py` on the
   CPU, over weights read directly from the protobuf of `silero_vad_op18_ifless.onnx`

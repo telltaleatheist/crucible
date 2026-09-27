@@ -20,6 +20,7 @@ from .config import (
     desktop_reserve_words,
 )
 from .errors import ApiError, ConfigError
+from .upstreamrecord import UPSTREAM_DISPLAY
 from .upstreams import UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
@@ -130,6 +131,7 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
         "local_model_choices": _choices(config, installed),
         "routes": routes,
         "upstreams": upstreams,
+        "upstream_labels": dict(UPSTREAM_DISPLAY),
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
         "desktop_allowance_basis": config.desktop_allowance_basis,
         "desktop_reserve": desktop_reserve_words(

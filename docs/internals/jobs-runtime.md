@@ -17,7 +17,7 @@ implementation rules are repeated here.
   The apps that use it are. It grants and releases leases. That's it."* Crucible grants and
   releases leases. It never queues, never retries, and never resumes anything by itself.
 - **Unload when done.** Owen, 2026-09-14: *"Models should always be unloaded when we're done
-  with them. Every time."* This overrules PHASE5-APPS section 7's "no idle unload". The card is
+  with them. Every time."* This overrules the earlier "no idle unload" design. The card is
   not storage (see section 6).
 - **Idiot proof.** A missing env or model is installed on submit (section 8). A 12-hour master
   can go to `rvc` whole, and input names need no extension (section 10.3).
@@ -44,7 +44,7 @@ implementation rules are repeated here.
     as the thing NOT to do, because the flag's next effect would be an OOM mid-book.
   - `not_installed`: the card can hold it. `details.install` is the `POST /v1/tasks` body that
     installs it. It names the INSTALLER, which is not always the type: `denoise` is built by
-    installing `rvc`. No CLI command is ever shown (PHASE19).
+    installing `rvc`. No CLI command is ever shown.
   - `not_taken_up`: the flag is on but the running server did not take the type up
     (`api.take_up_enabled_types`).
 - `build_registry` hands every card-touching type the SAME `Residency` holder. That shared holder

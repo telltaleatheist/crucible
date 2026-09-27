@@ -64,8 +64,8 @@ One person, one chapter, both machines:
 2. **Compare the timestamps** — not eyeball the output, and not merely check
    that it ran. Within the tolerance BookForge's own coverage report already
    uses is the bar.
-3. Write the result into `docs/PHASE15-HOST.md` section 7c, whichever way it
-   goes. A disagreement is a finding about MPS and belongs in the manifest's
+3. Write the result into `docs/internals/asr-and-align.md`, "Align", whichever
+   way it goes. A disagreement is a finding about MPS and belongs in the manifest's
    comment; an agreement is what lets a reader stop wondering.
 
 The memory figure is no longer owed — it was measured on 2026-09-14 and the

@@ -181,7 +181,15 @@ page is a window onto the server's settings, not a copy of them.
 - **Keys are write-only.** A key is returned only as `key_hint`: `…` (U+2026) plus
   the last four characters. Foundry renders the hint verbatim. Keys never appear in
   a response, log line or activity row.
-- A route to an unconfigured upstream is never stored.
+- **Routes, never fallbacks** (Owen, 2026-09-14). Work goes to an upstream only because
+  a route the operator (or an app on the operator's behalf) set says so, visible on the
+  page and in `/v1/capability` before any request. Nothing is sent to an upstream because
+  something local failed.
+- A route to an unconfigured upstream is never stored, and a hand-edited `[routes]` table
+  that names one is refused when the config loads (`route_bad_model`,
+  `route_upstream_unconfigured`), so a server never starts with a route it cannot serve.
+- The document carries `upstream_labels` (`upstreamrecord.UPSTREAM_DISPLAY`), the display
+  name of each upstream, so the operator page has no copy of that table.
 - Setting a local model to null restores the automatic choice. A model that is not
   installed is **not** refused (Owen 2026-09-16). A model that does not fit is
   refused, with the arithmetic in the message.
@@ -222,6 +230,48 @@ page is a window onto the server's settings, not a copy of them.
 - An Anthropic stream that stops mid-message gets a closing `[DONE]`. An Ollama
   stream without `done: true` gets **no** `[DONE]`, because that last line is the
   only evidence the answer is complete.
+
+## Code, not environments
+
+Owen, 2026-09-18: *"the unit of deployment is the code."* A deploy ships Crucible's code and
+nothing that is published elsewhere; an environment is downloaded once, at install, from its
+publisher, and is never rebuilt, re-hosted or re-downloaded because code changed.
+
+- **A release carries only our code**: the wheel and sdist, the two SDK tarballs and the two
+  generated installers (`scripts.md`, "What a release carries"). No environment pack, no
+  rootfs, no re-hosted wheel.
+- **Everything else comes from its publisher, pinned by version and digest**: CPython from
+  python-build-standalone (`interpreter.py`), Crucible's own dependencies from PyPI
+  (`pyproject.toml`), a job env from PyPI and the indexes its recipe names
+  (`envs/<type>/<recipe>.txt`, exact pins), narrator from bookforge git at a commit, the WSL
+  image from Canonical with Canonical's `SHA256SUMS`, `llama-server` from ggml-org's release,
+  weights from Hugging Face.
+- **An upgrade** is `pip install` of the new wheel into the interpreter already there, then a
+  restart. A job env is touched only when its recipe's hash changed, and then by
+  `pip install -r` into the existing venv, never delete-and-rebuild (the plan below). A moved
+  narrator commit alone reinstalls that one line.
+- **Repair is install.** `crucible doctor` names a missing or drifted env and `crucible
+  install <job>` repairs it from its recipe: one path for a first install and a repair.
+- **A normal deploy runs no tests** (`scripts.md`, "Tests"). The tests that matter ran on the
+  branch before the merge; nothing that touches a GPU is on a release or deploy path.
+
+### Archive sizes (`# archive-bytes:`)
+
+Every recipe's first line is `# archive-bytes: <int> <citation>`, which the disk guard reads
+before a fresh build (`jobenv.refuse_without_room`). The figures are the sizes of the
+third-party wheels one install downloads, measured on 2026-09-18 when those wheels were last
+re-hosted as packs. They are archive sizes, so they are floors for the unpacked env.
+
+| env | archive bytes |
+|---|---|
+| `tts` (cuda-linux) | 5.3 GB |
+| `llm` (cuda-linux) | 3.3 GB |
+| `rvc` (cuda-linux) | 3.3 GB |
+| `align` (cuda-linux) | 2.9 GB |
+| `asr` (cuda-linux) | 1.3 GB |
+| every mlx-darwin env | 0.9 GB, the combined mlx total, which can only overstate |
+
+A recipe measured on its own replaces its row here and its header line together.
 
 ## Job environments (`jobenv.py`)
 
@@ -265,11 +315,11 @@ page is a window onto the server's settings, not a copy of them.
 - **Disk guard.** `refuse_without_room` runs only for a fresh build, before pip
   touches the network. It reads the recipe's `# archive-bytes: <int> <citation>`
   line. That comment line is data and must stay. The value is an archive size
-  (PHASE20 section 0, measured 2026-09-18), so it is a floor. Every mlx recipe
+  ("Archive sizes" above, measured 2026-09-18), so it is a floor. Every mlx recipe
   carries the combined mlx total (0.9 GB), which can only overstate. Replace it
   when one mlx env is measured on its own.
 - `recipe_index_urls` reads every index from the recipes, plus pip's default and
-  `HF_ENDPOINT`, for the network probe (PHASE19 2.12).
+  `HF_ENDPOINT`, for the network probe (`docs/history/PHASE19-AUTOMATIC-WSL.md` 2.12).
 - **Compiler.** The standalone CPython records `CC = clang`, and WSL Ubuntu has no
   clang. When the recorded compiler is missing, `build_environment` sets gcc, else
   cc, else clang, with the matching C++ compiler. This was measured on `diffq`
@@ -409,7 +459,7 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
     `denoise-models`. `force` replaces only this set's files.
 - **Pinned vs local.** A local voice path is never fetched, stamped or deleted. It
   is reported with `pulled = None` and may disappear between jobs.
-- **Aliases** (`[model] weights_of`, PHASE22 section 2.9, Owen 2026-09-23: *"One
+- **Aliases** (`[model] weights_of`, Owen 2026-09-23: *"One
   copy on disk, two fit rows in the catalog."*). An alias's weights are its base's
   folder and stamp. The alias owns only its `extra_files` (the llama-windows
   projector) and a record beside the base's stamp. Removing a base is refused
@@ -566,7 +616,7 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   The 2B is full precision everywhere (Owen 2026-09-24: *"full quant when
   possible"*). Images are served on cuda-linux and llama-windows, text only on
   mlx-darwin.
-  - The 0.8B's text half was measured (PHASE22 section 8a): 1.53 GiB weights,
+  - The 0.8B's text half was measured (2026-09-23): 1.53 GiB weights,
     0.75 GiB overhead, slope 18,023. The 2B's slope equals the 0.8B's exactly, and
     the 4B's equals the 9B's, because those pairs have identical attention
     configurations.

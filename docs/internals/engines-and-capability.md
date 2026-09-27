@@ -28,8 +28,15 @@ modules it re-exports, listed under "Where each part lives"), `memorybudget`,
   pool of system RAM, and the capability row says "slow" instead of disabling
   the class. The accelerator guard is stricter: a driver that is present but
   will not answer is `accelerator_unreadable`, never "use the RAM".
-- vLLM and SGLang have no win32 build, so a `cuda-linux` config found on a
-  Windows host is refused.
+- **A backend runs where its engine runs and nowhere else.** vLLM and SGLang
+  have no win32 build, so a `cuda-linux` config found on a Windows host is
+  refused, and `llama-windows` off win32 is refused the same way
+  (`backend_not_here`). The ASR and align backends are the ones that run their
+  engines (`asrmodels.ASR_BACKEND_ENGINES`, `alignmodels.ALIGN_BACKEND_ENGINES`);
+  Windows is never one of them. On `llama-windows` the Python job classes answer
+  `enabled: false` with the one sentence `capability.NEEDS_WSL_REASON`, the same
+  for every class so an app shows it once, and `crucible install` refuses them
+  `needs_wsl`.
 - WSL2's `nvidia-smi` lives at `/usr/lib/wsl/lib/nvidia-smi` and is not always
   on PATH in a non-login shell.
 - On Apple Silicon the "card" is unified memory: `vram_bytes` is the machine's RAM.
@@ -499,11 +506,18 @@ started exactly as `load-model` would).
   is never read from a listing. The CUDA build is two zips (the build plus
   `cudart`) unpacked into one directory. Every digest is checked before
   anything is placed, and a zip member that escapes the target is refused.
+  A pull stages the download beside the engine, verifies and unpacks it there,
+  writes the stamp, and only then swaps it in. A forced re-pull that fails
+  anywhere (a digest, a missing `llama-server.exe`, a directory held open by a
+  running server: `engine_replace_failed`) leaves the engine that was there
+  untouched and serving.
 - `ollamastore` lets `llama-windows` serve GGUFs already in Ollama's store
   (`OLLAMA_MODELS` is honoured). These are different bytes from the manifest's
   pin, so they carry their own provenance, `ollama:<tag>@sha256:<digest>`,
   and are never filed under the manifest fingerprint. The checks are: a model
-  layer exists, the blob exists, and the blob size matches. Blobs are not
+  layer exists, the blob exists, and the blob size matches. A tag whose model
+  reads images must also carry a projector layer: half a vision model loads
+  and then cannot see. Blobs are not
   hashed (up to 19 GB on the load path).
 
 ## The decision door (`decide`)
@@ -523,6 +537,14 @@ started exactly as `load-model` would).
 - base64 is strict (llama-server silently truncates at the first bad character).
 - The wrap serializer has **no return annotation**. An annotation replaces the
   answer schema in OpenAPI with `{}`.
+- Whether a model answers images **here** is its manifest's backend block
+  (`serves`), never the weights' modalities (`model_text_only` otherwise).
+- On vLLM the prefix cache of a hybrid (attention plus mamba) model works in 544-token
+  blocks (the engine sets the attention block to 544 so its page is at least
+  the mamba page; measured 2026-09-23: a 121-token prompt sent three times
+  cached nothing, a 1,345-token one cached 1,088 from the second send). The
+  prime buys reuse only in whole blocks, which is also how `decide`'s working
+  context is sized in `capabilityclasses`.
 - Refuse mode carries no `missing_labels` key. Report mode nulls a missing
   label and never invents a number.
 

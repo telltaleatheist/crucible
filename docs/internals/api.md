@@ -219,6 +219,8 @@ a field the SDK deliberately leaves unread is named there with the reason.
 
 ## Voices, streams, catalog
 
+- `/v1/info`'s `tts` capability rows are `/v1/voices`' rows verbatim, both built by
+  `jobs.voice_rows`: one voice, one description.
 - Every voice door and `POST /v1/tts/stream` share one `tts_enabled`
   dependency, so a server with tts off refuses them identically.
 - `PUT /v1/voices/{id}` takes either `{"pin": …}` or `{"voice": …}`, never both

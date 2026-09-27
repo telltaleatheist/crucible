@@ -553,7 +553,7 @@ what `pages` and `analysis` load.
 - **Docs:** `API.md` regenerates from the request model's docstrings (`release.sh` refuses a
   cut otherwise); `API-CLI.md` gains the verb; DESIGN.md §3's table gains the row
   (`decide` | state + questions | distributions | one forward pass at the resident model,
-  `PHASE22-DECIDE.md`) and DESIGN.md §4 the route; CLIENT-SURFACES.md names the door.
+  `PHASE22-DECIDE.md`) and DESIGN.md §4 the route; docs/history/CLIENT-SURFACES.md names the door.
 - **Capability / act:** a decision declares its act like a chat. Whether `decide` is its own
   capability class in the AI page (a model chosen for decisions) or rides on `analysis` is
   §7.2.

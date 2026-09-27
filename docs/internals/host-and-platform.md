@@ -3,11 +3,18 @@
 How Crucible lives on a machine: the Windows orchestrator (`crucible/host/`), the WSL guest,
 the service managers, LAN and Tailscale exposure, pairing, process lifetime, and uninstall.
 These are the constraints and measured facts a maintainer needs that the code cannot say by
-itself. Plans and rationale live in `docs/PHASE15-HOST.md`, `PHASE17-ORCHESTRATOR.md` and
-`PHASE19-AUTOMATIC-WSL.md`; this file is the short list of things that must stay true.
+itself. The phase documents that argued these rules out are in `docs/history/` and are not
+maintained; this file is the short list of things that must stay true.
 
 ## Standing owner rulings
 
+- **One server per machine; control is Windows's, data is the card's** (2026-09-14). The
+  engine answering `:7100` on a Windows machine is the WSL guest's when WSL is there and the
+  native `llama-windows` server when it is not, never both. The Windows host is the only thing
+  that installs, starts, stops, updates and reconfigures the guest; the guest has no installer
+  or settings page of its own. The host is never in the request path: apps talk to the engine
+  directly, because a relay would be two servers with two versions, two health states and a
+  hop on every stream.
 - **A local Crucible is a service, not an app's child** (2026-09-13). Nobody owns it, it
   survives the app that started it, and nothing can be orphaned that was never a child.
 - **Windows is the driver** (2026-09-18): *"windows is the driver; the thing moving wsl
@@ -207,6 +214,12 @@ them through `app`'s own globals so a patch on `app` still lands.
   (`_refuse_acting_on_a_found_engine`).
 - `NONE`: no engine.
 
+Restarting a `FOUND` engine is refused `engine_not_ours`: the orchestrator did not start it and
+has no unit it may name or child it may stop. The one guess available on the machine this was
+found on, `systemctl restart user@<uid>`, stops every process that uid owns in the distro (a
+5,000-step LoRA trainer, 2026-09-15), so it is never run in a distro Crucible did not import,
+consented or not. The refusal says to restart the engine where it was started.
+
 `Host.start` **pings before starting anything**: on a machine whose engine lives in a
 hand-installed distro, the distro probe answers `absent` and starting a child would put a
 second server on 7100. `poll` resolves an owner when it is `NONE` and something answers
@@ -271,6 +284,9 @@ are daemons.
 ### Orchestrator/engine relation (`peer.py`)
 
 - A claim is a **statement of fact**, never a permission check; the engine never consults it.
+- The peer door takes **this engine's own bearer token** (`peer_token_mismatch` otherwise). The
+  orchestrator reads it from the guest's pairing line, or it is the token in the config the
+  orchestrator wrote itself; there is no second credential for the relation.
 - Not persisted: it dies with the engine process and is re-asserted within one watch tick.
 - Same URL re-claiming succeeds; URLs are normalised only by trailing slash. `force` is never
   sent by an orchestrator. Releasing nothing is success; releasing another's claim is refused.
@@ -349,6 +365,13 @@ Try again appears only for outcome `cannot` or `failed`; a disabled restart line
   equal → nothing; newer → `guest_ahead_of_host`, left alone (never backwards). Runs in the
   distro the host claimed, only when the owner is `WSL_UNIT`, after the watch settles, and
   never raises out of its thread.
+- **The move installs no job types of its own.** It moves the subjects the Windows catalog
+  had; what each app needs beyond that is installed by the app's own coordinate step, which
+  posts its module (`POST /v1/tasks` `module`) on first connect to the guest.
+- **The move goes one way.** The `engine` task's only target is `wsl`
+  (`tasks/hostdoor.ENGINE_TARGETS`). Moving back to Windows is an explicit operator act, not a
+  task, and any other target is refused rather than half-done. A failed step leaves the Windows
+  engine running and untouched; the switch-over is the last step.
 - The LAN door step runs after the pairing switch (the guest must be answering) and before
   weights migration (a UAC prompt hours later has nobody in front of it); it follows the
   existing `landoor.json` preference when not told.

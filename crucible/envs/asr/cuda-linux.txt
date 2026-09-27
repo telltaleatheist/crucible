@@ -1,4 +1,4 @@
-# archive-bytes: 1300000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
+# archive-bytes: 1300000000  docs/internals/config-envs-weights.md "Archive sizes", measured 2026-09-18
 
 anyio==4.15.1
 av==18.1.0

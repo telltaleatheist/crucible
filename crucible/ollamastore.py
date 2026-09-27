@@ -159,7 +159,7 @@ def resident(root: Path, tag: str, *, wants_projector: bool = False) -> OllamaWe
         raise OllamaStoreError(
             f"{tag}: this model reads images and the tag has no "
             f"{PROJECTOR_MEDIA_TYPE} layer. Half a vision model is a model that "
-            "loads and then cannot see (PHASE15-HOST.md 3.10, fact 2)"
+            "loads and then cannot see (docs/internals/engines-and-capability.md, \"llama-server\")"
         )
     return OllamaWeights(tag=tag, model=model, projector=projector, root=root)
 

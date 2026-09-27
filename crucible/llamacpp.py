@@ -208,6 +208,74 @@ def _locate_server(target: Path) -> Path:
     return found[0]
 
 
+def _stage_release(
+    build: str,
+    staging: Path,
+    fetcher: Fetch,
+    on_line: Callable[[str], None] | None,
+    on_progress: "ProgressHook | None",
+) -> Path:
+    downloads = staging / "downloads"
+    unpacked = staging / "unpacked"
+    downloads.mkdir()
+    unpacked.mkdir()
+    archives: list[tuple[Asset, Path]] = []
+    for asset in assets_for(build):
+        if on_line is not None:
+            on_line(f"fetching {asset.name} ({asset.bytes / 1e6:.0f} MB)")
+        path = downloads / asset.name
+        fetcher(asset.url, path, on_progress)
+        measured = sha256_of(path)
+        if measured != asset.sha256:
+            raise EngineSubjectError(
+                "engine_sha_mismatch",
+                f"{asset.name} hashed {measured}, and the release published "
+                f"{asset.sha256}. Nothing is unpacked: these are not the "
+                "bytes ggml-org released, and a llama.cpp that is not the "
+                "pinned one is a server nobody can reason about. Run the pull "
+                "again; a second mismatch means the download is being altered "
+                "on its way here",
+            )
+        archives.append((asset, path))
+    for asset, path in archives:
+        if on_line is not None:
+            on_line(f"unpacking {asset.name}")
+        _unzip(path, unpacked)
+    server = _locate_server(unpacked)
+    if server != unpacked / LLAMA_SERVER_EXE:
+        shutil.move(str(server), str(unpacked / LLAMA_SERVER_EXE))
+    return unpacked
+
+
+def _swap_in(unpacked: Path, target: Path, staging: Path) -> None:
+    if not target.exists():
+        unpacked.rename(target)
+        return
+    retired = staging / "retired"
+    try:
+        target.rename(retired)
+    except OSError as exc:
+        raise EngineSubjectError(
+            "engine_replace_failed",
+            f"the new llama.cpp {LLAMA_CPP_RELEASE} is downloaded and verified, "
+            f"but {target} could not be moved aside ({type(exc).__name__}: {exc}). "
+            "A llama-server started from it is most likely still running. The "
+            "engine already there is untouched and still serves. Unload the "
+            "resident model (the operator page's Unload, or POST /v1/jobs "
+            '{"type": "unload-model"}), then pull the engine again',
+        ) from None
+    try:
+        unpacked.rename(target)
+    except OSError as exc:
+        retired.rename(target)
+        raise EngineSubjectError(
+            "engine_replace_failed",
+            f"the new llama.cpp could not be moved into {target} "
+            f"({type(exc).__name__}: {exc}). The engine that was there is back "
+            "in place and still serves; pull the engine again",
+        ) from None
+
+
 def pull(
     config: Config,
     build: str,
@@ -222,57 +290,28 @@ def pull(
         return existing
 
     target = engine_dir(config)
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
-
+    target.parent.mkdir(parents=True, exist_ok=True)
     fetcher = download if fetch is None else fetch
     started = time.monotonic()
     staging = Path(tempfile.mkdtemp(prefix="crucible-llamacpp-", dir=str(target.parent)))
     try:
-        archives: list[tuple[Asset, Path]] = []
-        for asset in assets_for(build):
-            if on_line is not None:
-                on_line(f"fetching {asset.name} ({asset.bytes / 1e6:.0f} MB)")
-            path = staging / asset.name
-            fetcher(asset.url, path, on_progress)
-            measured = sha256_of(path)
-            if measured != asset.sha256:
-                raise EngineSubjectError(
-                    "engine_sha_mismatch",
-                    f"{asset.name} hashed {measured}, and the release published "
-                    f"{asset.sha256}. Nothing is unpacked: these are not the "
-                    "bytes ggml-org released, and a llama.cpp that is not the "
-                    "pinned one is a server nobody can reason about",
-                )
-            archives.append((asset, path))
-        for asset, path in archives:
-            if on_line is not None:
-                on_line(f"unpacking {asset.name} into {target}")
-            _unzip(path, target)
-    except (PullCancelled, EngineSubjectError):
-        shutil.rmtree(staging, ignore_errors=True)
-        shutil.rmtree(target, ignore_errors=True)
-        raise
+        unpacked = _stage_release(build, staging, fetcher, on_line, on_progress)
+        size = directory_bytes(unpacked)
+        record = {
+            "subject": f"{ENGINE_KIND}/{LLAMA_CPP_ID}",
+            "tag": LLAMA_CPP_RELEASE,
+            "build": build,
+            "assets": [asset.name for asset in assets_for(build)],
+            "bytes": size,
+            "seconds": round(time.monotonic() - started, 1),
+            "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        (unpacked / STAMP_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        _swap_in(unpacked, target, staging)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
-    server = _locate_server(target)
-    if server != server_path(config):
-        shutil.move(str(server), str(server_path(config)))
-
     elapsed = time.monotonic() - started
-    size = directory_bytes(target)
-    record = {
-        "subject": f"{ENGINE_KIND}/{LLAMA_CPP_ID}",
-        "tag": LLAMA_CPP_RELEASE,
-        "build": build,
-        "assets": [asset.name for asset in assets_for(build)],
-        "bytes": size,
-        "seconds": round(elapsed, 1),
-        "pulled": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
-    stamp_path(config).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     if on_line is not None:
         on_line(
             f"llama.cpp {LLAMA_CPP_RELEASE} ({build}) is at {target} "

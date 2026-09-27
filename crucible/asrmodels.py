@@ -251,7 +251,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
                 f"{where}: {kind!r} is not an asr backend; the asr backends are "
                 f"{sorted(ASR_BACKEND_ENGINES)}, each with its own engine "
                 f"({ASR_BACKEND_ENGINES}). Windows is never a backend "
-                "(docs/PHASE15-HOST.md)"
+                "(docs/internals/engines-and-capability.md, \"Backends\")"
             )
         if not isinstance(block, dict):
             raise AsrManifestError(f"{where}: must be a table")

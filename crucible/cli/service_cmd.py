@@ -151,10 +151,10 @@ def cmd_service_status(args: argparse.Namespace) -> int:
 def add_parser(subparsers: argparse._SubParsersAction) -> None:
     service_parser = subparsers.add_parser(
         "service",
-        help="the machine service that runs `crucible serve` (PHASE11-SERVICE.md)",
+        help="the machine service that runs `crucible serve` (docs/internals/host-and-platform.md, \"Services\")",
         description=(
             "A local Crucible is a service and no app owns it (Owen, 2026-09-13; "
-            "PHASE5-APPS.md section 6.0). On cuda-linux that is a systemd USER "
+            "docs/internals/host-and-platform.md, \"Standing owner rulings\"). On cuda-linux that is a systemd USER "
             "unit, on mlx-darwin a launchd agent. Every verb is idempotent."
         ),
     )

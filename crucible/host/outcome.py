@@ -97,7 +97,7 @@ def read(home: Path) -> Outcome | None:
     except (OSError, json.JSONDecodeError) as exc:
         raise HostError(
             "wsl_outcome_invalid",
-            f"{file} exists and is not the JSON document PHASE19 2.2 describes "
+            f"{file} exists and is not the JSON document docs/internals/host-and-platform.md, \"Outcome file\", describes "
             f"({exc}). It records what happened to this machine's move.",
         ) from exc
     if not isinstance(raw, dict):

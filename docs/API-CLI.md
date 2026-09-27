@@ -1,7 +1,7 @@
 # `crucible api` — driving a server from a shell
 
 Built 2026-09-16, because there was no way to run a job from a command line. The
-3,100 lines already in `crucible/cli.py` are entirely operator and lifecycle —
+rest of the command line (the `crucible/cli/` package) is operator and lifecycle —
 `init`, `install`, `capability`, `models pull`, `serve`, `service`,
 `doctor`, `token`, `uninstall` — and **not one of them submits a job**. A
 fine-tuning script that wanted a retake ladder, a cleanup pass, a translation or
@@ -269,7 +269,7 @@ disambiguate.
 
 ## What a fine-tuning script calls
 
-### A batch of renders (the render door, PHASE3-TTS section 6)
+### A batch of renders (the render door, docs/history/PHASE3-TTS.md section 6)
 
 `params.json`:
 
