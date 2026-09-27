@@ -749,7 +749,7 @@ Pick one of named options. Labelled A, B, C… in the order given.
 
 ### `DecideRequest`
 
-`POST /v1/decide` — PHASE22-DECIDE.md section 2.2. One forward pass per question at the RESIDENT model; nothing is decoded and nothing is loaded to answer it.
+`POST /v1/decide`: one forward pass per question at the resident model, nothing decoded or loaded.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
