@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""One field out of a task document, for `scripts/testrun-phase15.sh`.
-
-`python task_field.py <file.json> state` prints the state;
-`python task_field.py <file.json> error.code` prints the refusal's name, or an
-empty line when there is no error. Dotted paths only, no defaults, no jq: the
-test runner is POSIX sh on Windows and `jq` is not a thing this machine has.
-
-A document that will not parse prints NOTHING and exits 0, because the caller
-polls: an answer that has not arrived yet is not an error, and the caller
-decides when it has waited long enough. Every OTHER kind of wrongness — a
-missing key, a path through something that is not an object — also prints
-nothing, and the caller's own assertion is what names it. This script makes no
-judgements; it reads one field.
-"""
 
 from __future__ import annotations
 

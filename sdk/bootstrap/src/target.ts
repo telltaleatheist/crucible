@@ -1,13 +1,3 @@
-/**
- * Where a command runs: inside a WSL distro, or on this machine.
- *
- * Windows is never a backend (DESIGN.md section 2), so on win32 every command
- * goes through `wsl.exe -d <distro> --exec …` and the distro is REQUIRED — there
- * is no default distro here on purpose, for the reason BookForge's `local.ts`
- * gives: "the default distro" is whatever `wsl --set-default` last said, and a
- * server read from the wrong guest is a wrong server. On darwin and linux the
- * command runs as it is. Anything else is refused by name.
- */
 import { BootstrapRefusal } from './errors.js';
 import type { RunResult, Runner, StreamOptions } from './runner.js';
 import { wslArgv } from './wsl.js';
@@ -34,7 +24,6 @@ export function resolveTarget(runner: Runner, distro: string | undefined): Targe
   );
 }
 
-/** Describe a target for a message: `WSL distro "Ubuntu"` or `this machine`. */
 export function describeTarget(target: Target): string {
   return target.kind === 'wsl' ? `WSL distro "${target.distro}"` : 'this machine';
 }
@@ -44,11 +33,6 @@ export interface TargetRunOptions {
   env?: Readonly<Record<string, string>>;
 }
 
-/**
- * The argv that runs `argv` on the target, with `env` set for it. Inside a
- * distro the environment travels as `env K=V … argv` — a program, not a shell,
- * so nothing is expanded on the way in.
- */
 export function commandFor(
   target: Target,
   argv: readonly string[],
@@ -82,10 +66,6 @@ export function streamOn(
     : { timeoutMs: options.timeoutMs, onLine: options.onLine, env: command.env });
 }
 
-/**
- * A probe that could not run at all — spawn error or timeout — is a refusal
- * about the transport, not an answer about the thing probed. Named per target.
- */
 export function refuseIfUnrun(target: Target, result: RunResult, what: string): void {
   if (result.failure === null) return;
   if (target.kind === 'wsl') {

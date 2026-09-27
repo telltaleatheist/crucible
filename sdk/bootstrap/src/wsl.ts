@@ -1,50 +1,8 @@
-/**
- * Crossing from Windows into the guest — the facts, each with a test.
- *
- * docs/FROM-FOUNDRY-WSL-VLLM.md section 2, carried verbatim:
- *
- * - **Always `wsl.exe -d <distro> --exec …`, never the implicit shell.** Without
- *   `--exec`, wsl.exe joins the arguments and runs them through the distro's
- *   default shell, which pre-expands `$var` and `$(...)` before bash ever sees
- *   the script — `f=hi; echo $f` prints an empty line. `--` does NOT help; only
- *   `--exec` means "no shell" (memory `wsl-exe-implicit-shell-trap`).
- *
- * - **wsl.exe halves backslashes once before bash exists**, deterministic and
- *   quote-blind. Anything carrying a backslash is doubled here, in
- *   {@link wslArgv}, so what arrives is what was meant. Nothing this package
- *   sends carries one today (guest paths are forward-slash, the token is
- *   urlsafe base64); the rule is applied anyway, because the first caller that
- *   sends one will not be thinking about it.
- *
- * - **`toWslPath` maps `C:\a\b` → `/mnt/c/a/b` and refuses UNC.** A `\\server\share`
- *   path has no `/mnt` mapping and is refused rather than mangled into something
- *   that resolves to nothing.
- *
- * - **`realpath.native` catches MAPPED drives WSL2 does not automount.** `Z:\x`
- *   passes every string test on its way to a `/mnt/z` that does not exist; only
- *   the filesystem can tell `Z:` (a share wearing a letter) from `C:`
- *   (memory `wsl-cannot-see-network-drives`). {@link guestPathFor} asks it.
- *
- * - **A prebuilt environment never crosses `/mnt/c` at all.** It used to be
- *   downloaded on the Windows side and handed to the distro's own tar as
- *   `/mnt/c/…` — never through `\\wsl$`, whose 9P redirector flattens the
- *   symlink thicket a Python install is. As of PHASE14 the GUEST fetches it
- *   with its own `curl` into its own filesystem, which is faster still, keeps
- *   the permission bits, and puts the gigabytes on the disk they live on.
- *   `pack.ts` owns that, and `guestUnpackArgv` is deleted rather than kept as
- *   a second way in.
- */
 import { BootstrapRefusal } from './errors.js';
 import type { Runner } from './runner.js';
 
 export const WSL_EXE = 'wsl.exe';
 
-/**
- * The transport's own rule, once: wsl.exe halves backslashes before bash
- * exists, deterministic and quote-blind, so anything carrying one is doubled
- * here. Both spellings of the crossing go through it — a second copy would be
- * a second answer the first time one of them was edited.
- */
 function forTheTransport(argv: readonly string[]): string[] {
   return argv.map((arg) => arg.replace(/\\/g, '\\\\'));
 }
@@ -55,17 +13,7 @@ export function wslArgv(distro: string, argv: readonly string[]): string[] {
   return [WSL_EXE, '-d', distro, '--exec', ...forTheTransport(argv)];
 }
 
-/**
- * `wsl.exe -d <distro> -u root --exec <argv…>` — the guest, entered as root.
- *
- * NOT an escalation. `-u root` is which user wsl.exe starts the guest as, so
- * there is no password, no sudo and no elevation prompt; measured on Owen's PC
- * on 2026-09-14 (`wsl.exe -d Ubuntu -u root --exec id -u` prints `0`).
- *
- * It is a separate function rather than an option on {@link wslArgv}, because
- * a boolean parameter would make every other call site's `false` look like a
- * choice somebody weighed.
- */
+/** `wsl.exe -d <distro> -u root --exec <argv…>`: the guest entered as root, with no elevation. */
 export function wslRootArgv(distro: string, argv: readonly string[]): string[] {
   if (argv.length === 0) throw new Error('wslRootArgv: nothing to exec');
   return [WSL_EXE, '-d', distro, '-u', 'root', '--exec', ...forTheTransport(argv)];
@@ -78,18 +26,14 @@ export function wslListArgv(): string[] {
 
 export interface WslDistro {
   name: string;
-  /** 1 or 2. Only 2 has the GPU passthrough a Crucible needs. */
+  /** WSL version, 1 or 2. */
   version: number;
   default: boolean;
   /** `Running` or `Stopped`, as wsl.exe spelled it. */
   state: string;
 }
 
-/**
- * Parse `wsl.exe -l -v`'s table (already decoded from UTF-16). The header row
- * is skipped by content, not position, because some builds print a blank line
- * first. A row is `[*] NAME STATE VERSION`.
- */
+/** Parse `wsl.exe -l -v`'s table, already decoded from UTF-16. */
 export function parseWslList(text: string): { distros: WslDistro[]; default: string | null } {
   const distros: WslDistro[] = [];
   let fallbackDefault: string | null = null;
@@ -112,11 +56,7 @@ export function parseWslList(text: string): { distros: WslDistro[]; default: str
   return { distros, default: fallbackDefault };
 }
 
-/**
- * A Windows path as the distro sees it: `C:\a\b` → `/mnt/c/a/b`. Pure — the
- * mapped-drive question is {@link networkPathBehind}'s, and asking it here would
- * make the conversion untestable without a disk.
- */
+/** A Windows path as the distro sees it: `C:\a\b` → `/mnt/c/a/b`. */
 export function toWslPath(windowsPath: string): string {
   const normalised = windowsPath.replace(/\\/g, '/');
   if (normalised.startsWith('//')) {
@@ -135,11 +75,7 @@ export function toWslPath(windowsPath: string): string {
   return `/mnt/${drive[1].toLowerCase()}${normalised.slice(2)}`;
 }
 
-/**
- * The UNC path a Windows path really lives on, or null if it is on a local disk.
- * A path that cannot be resolved answers null: "I could not tell" must not read
- * as "it is a network drive".
- */
+/** The UNC path a Windows path really lives on, or null if it is on a local disk. */
 export function networkPathBehind(runner: Runner, windowsPath: string): string | null {
   let resolved: string;
   try {
@@ -163,12 +99,7 @@ export function guestPathFor(runner: Runner, windowsPath: string): string {
   return toWslPath(windowsPath);
 }
 
-/**
- * One argument, safe inside a `bash -c` string: single quotes, with the only
- * character they cannot contain spliced back in the standard way. Guards
- * word-splitting in the guest; the transport's backslash-halving is
- * {@link wslArgv}'s.
- */
+/** Quote one argument for a `bash -c` string. */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }

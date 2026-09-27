@@ -1,53 +1,14 @@
-# GENERATED FILE  -  do not edit.
-# Written by sdk/bootstrap/scripts/gen-install-scripts.ts from src/steps.ts
-# and src/wsl-states.ts, so a hand install and an app-driven install cannot
-# differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install
-#
-# Install Crucible on Windows: the HOST, and nothing else.
-#
-# PHASE15-HOST.md 4.4. This script used to walk the WSL states itself and
-# then run install.sh inside an imported distribution. It no longer does,
-# and that is the point of the phase: `crucible orchestrator` owns that sequence
-# (4.3), it can carry a reboot across because it starts at login, and the
-# page drives it as a task (4.7)  -  an app that asks for an install talks
-# to the SAME implementation through the host loopback door. Two walks of
-# one table was the thing being removed.
-#
-# So: download the pinned CPython, unpack it to
-# %LOCALAPPDATA%\Crucible\host\, pip-install this release's wheel and the
-# tray into it, register the Startup item, start the host, and STOP.
-#
-#   irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
-#
-# And to take it off again, keeping the weights (the -Uninstall branch
-# below): download it to a file first, because `irm | iex` has no way to
-# pass a switch.
-#
-#   irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 -OutFile install.ps1
-#   .\install.ps1 -Uninstall            # weights kept
-#   .\install.ps1 -Uninstall -WslToo    # and the guest engine with it
-#
-# No admin. Everything here is per-user and idempotent: run it again after
-# a failure and it resumes from whatever is already on disk.
-
 [CmdletBinding()]
 param(
   [string]$Release = '',
-  # An operator rollback: install this EXACT older release over a newer host
-  # runtime already on this machine. Must name the same version as -Release;
-  # there is no other way down (INSTALL-UNINSTALL.md 6.5.4).
   [string]$RollbackTo = '',
   [string]$Root = "$env:LOCALAPPDATA\Crucible",
-  # The inverse. `crucible uninstall` does the work inside the home; this
-  # script removes the host runtime, because this script is what unpacked it.
   [switch]$Uninstall,
   [switch]$PurgeWeights,
   [switch]$DryRun,
   [switch]$WslToo
 )
 
-# Continue, not Stop: every call below is a native program whose exit code
-# is checked explicitly, and Windows PowerShell 5.1 turns a native command writing to stderr into a terminating error under Stop.
 $ErrorActionPreference = "Continue"
 $Root = [System.IO.Path]::GetFullPath($Root)
 $env:CRUCIBLE_HOME = $Root
@@ -59,18 +20,7 @@ $Cmd = Join-Path $HostDir "crucible.cmd"
 $Pythonw = Join-Path $HostDir "pythonw.exe"
 
 function Say($m) { Write-Host "crucible: $m" }
-# `exit` under `irm | iex` closes the whole PowerShell window, so the person
-# never sees why it stopped (flagged by the A2 fix-up, 2026-09-26). From a
-# file, `exit 1` keeps the exit code callers check; pasted, a `throw` stops
-# the script and leaves the window, and the red line, on screen.
 function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; if ($PSCommandPath) { exit 1 } else { throw "crucible: $m" } }
-# A native program, with its stderr as plain text (#34, fresh install on
-# kylies-pc, 2026-09-26). Under Windows PowerShell 5.1 a native program's
-# stderr, once redirected (ssh, an app reading the output), arrives as
-# ErrorRecords, and a blank one prints as a bare
-# "System.Management.Automation.RemoteException". Every native call a person
-# may see goes through here: records become their text, blank lines go, and
-# $LASTEXITCODE is still the program's.
 function Native([scriptblock]$Command) {
   & $Command 2>&1 | ForEach-Object {
     if ($_ -is [System.Management.Automation.ErrorRecord]) { "$($_.Exception.Message)" } else { "$_" }
@@ -83,9 +33,6 @@ foreach ($target in @($HostDir, $Partial, $Previous, $DownloadDir)) {
   if (-not $absolute.StartsWith($Root.TrimEnd("\") + "\", [System.StringComparison]::OrdinalIgnoreCase)) { Die "unsafe_install_path: $absolute is outside $Root" }
 }
 
-# --- 0. this machine can hold the host -----------------------------------
-# 64-bit x86 only: the pinned interpreter is
-# x86_64-pc-windows-msvc-install_only and there is no second pin (4.4).
 if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
   Die "unsupported_platform: the Crucible Windows host is 64-bit x86 only."
 }
@@ -93,12 +40,6 @@ if (-not $env:LOCALAPPDATA) {
   Die "host_no_localappdata: LOCALAPPDATA is not set, so there is no per-user place to install into."
 }
 
-# --- the inverse, which exits ---------------------------------------------
-# `crucible uninstall` stops the tray, removes the Startup item and takes
-# %LOCALAPPDATA%\Crucible apart step by named step  -  everything except the
-# interpreter it is itself running from. THIS script unpacked that, so this
-# script removes it, after the verb has returned. Weights are kept unless
-# -PurgeWeights; -WslToo runs the guest's own uninstall first.
 if ($Uninstall) {
   if (-not (Test-Path $Cmd)) {
     Die "not_installed: there is no $Cmd on this machine, so there is no Crucible host here to remove."
@@ -138,24 +79,11 @@ if ($Uninstall) {
   exit 0
 }
 
-# python-build-standalone publishes gzip, which every tar reads.
-#
-# NAMED, NOT LOOKED UP. `tar` used to be resolved through PATH, and PATH
-# is the CALLERS: launched from a Git Bash shell this found
-# C:\Program Files\Git\usr\bin\tar.exe and refused a Windows 11 box
-# whose System32 bsdtar was fine. Measured 2026-09-17 deploying 0.6.8 via
-# scripts/deploy.sh. The tar Windows GUARANTEES is the one this uses.
 $Tar = Join-Path $env:SystemRoot "System32\tar.exe"
 if (-not (Test-Path $Tar)) {
   Die "guest_missing_tool: there is no $Tar on this machine. Windows 10 1803+ and Windows 11 ship a bsdtar there, and the interpreter archive cannot be unpacked without one."
 }
 
-# --- 1. which release -----------------------------------------------------
-# Asked only when nobody named one. -Uninstall returned long before here,
-# so taking Crucible off a machine still needs no network.
-# THE POINTER IS `releases/latest` (INSTALL-UNINSTALL.md 6.5.1): the promoted
-# release, not the newest tag created, which between a cut and its promotion
-# is an unverified candidate.
 if (-not $Release) {
   $feed = "https://api.github.com/repos/telltaleatheist/crucible/releases/latest"
   $feedRaw = & curl.exe -fsSL --retry 3 -H "Accept: application/vnd.github+json" "$feed"
@@ -167,10 +95,6 @@ if (-not $Release) {
 if ($RollbackTo -and $RollbackTo -ne $Release) { Die "rollback_version_mismatch: -RollbackTo names $RollbackTo and the release being installed is $Release; a rollback names the exact Crucible you want back" }
 Say "release $Release"
 
-# --- 2. the pinned interpreter --------------------------------------------
-# THE SAME TABLE `install.sh` READS (sdk/bootstrap/src/interpreter.ts), and
-# the same rule: pinned by version AND digest, downloaded ONCE. The stamp
-# carries the digest, so an upgrade skips this whole block.
 $PyAsset = 'cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz'
 $PySha = '6be524fa6752af802146a4adc7d098565425b0b1c166e19a5a7a4c8cccb86bf6'
 $PyVersion = '3.11.16'
@@ -184,12 +108,6 @@ if (Test-Path $Stamp) {
     if ($line -match "^release=(.+)$") { $haveRelease = $Matches[1].Trim() }
   }
 }
-# --- 2a. never over a newer release ---------------------------------------
-# INSTALL-UNINSTALL.md 6.5.4, the same rule and the same refusal names the
-# POSIX installer and installRuntime() use. [version] compares number by
-# number, which is the thing a string comparison gets wrong at 1.0.10.
-# An unstamped runtime is not read as older: a version nobody recorded
-# cannot be compared with one.
 if ($haveRelease) {
   $onDisk = $null; $wanted = $null
   if ([version]::TryParse($haveRelease, [ref]$onDisk) -and [version]::TryParse($Release, [ref]$wanted) -and $wanted -lt $onDisk) {
@@ -213,9 +131,6 @@ if ($have -eq $PySha -and (Test-Path $PythonExe)) {
     Die "runtime_sha_mismatch: $PyAsset hashes $got, this installer pins $PySha. The download was deleted"
   }
 
-  # --- 2b. unpack beside, prove it runs, THEN move -------------------------
-  # `install_only` archives carry ONE top-level python/ directory and that
-  # directory IS the interpreter, so what moves is $Partial\python.
   if (Test-Path $Partial) { Remove-Item $Partial -Recurse -Force }
   New-Item -ItemType Directory -Force -Path $Partial | Out-Null
   & $Tar -xzf $archive -C $Partial
@@ -246,10 +161,6 @@ if ($have -eq $PySha -and (Test-Path $PythonExe)) {
   Say "host: python $PyVersion at $HostDir"
 }
 
-# --- 3. the wheel, which IS the deploy ------------------------------------
-# It always installs. One megabyte, and re-running it is how a half-finished
-# install is repaired. pip runs from the tree at its FINAL path, which is
-# what makes Scripts\*.exe launchers correct without being rewritten.
 New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
 $Wheel = "crucible-$Release-py3-none-any.whl"
 $WheelPath = Join-Path $DownloadDir $Wheel
@@ -288,27 +199,10 @@ if (Test-Path -LiteralPath $Cmd) {
 Say "host: installing Crucible into $HostDir (about a minute)"
 Native { & $PythonExe -m pip install --quiet --disable-pip-version-check --no-warn-script-location --upgrade --no-input $WheelPath } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }
-# The tray, which is not a dependency of the wheel: pyproject.toml is what
-# every Crucible installs from, and a headless Linux server must not carry
-# a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.
 Native { & $PythonExe -m pip install --quiet --disable-pip-version-check --no-warn-script-location pystray pillow } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }
 Remove-Item $WheelPath -Force
 
-# --- 4. the console shim --------------------------------------------------
-# pip does not write a shebang script into Scripts\ on Windows; it writes
-# Scripts\crucible.exe, a launcher BINARY. That one works here  -  pip ran
-# from this very directory  -  but everything else in Crucible spells the
-# console entry point `<host>\crucible.cmd` (crucible/host/paths.py's
-# CONSOLE_CMD), so the shim is written beside python.exe.
-#
-# CRLF, not LF: cmd.exe's batch parser is line-oriented on CRLF, and an
-# LF-only .cmd can swallow its own last line  -  a shim that silently does
-# nothing rather than one that reports a syntax error.
-#
-# `%~dp0` is the directory of the running batch file, WITH a trailing
-# backslash, quoted because %LOCALAPPDATA% holds the user's name and a user
-# called "Owen Morgan" would otherwise split the command in two.
 $shim = "@echo off`r`n""%~dp0python.exe"" -m crucible.cli %*`r`n"
 [System.IO.File]::WriteAllText($Cmd, $shim, [System.Text.Encoding]::ASCII)
 & $Cmd --version | Out-Null
@@ -316,40 +210,17 @@ if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: $Cmd would not run" }
 Set-Content -Path $Stamp -Encoding ascii -Value @("python_sha256=$PySha", "python_version=$PyVersion", "release=$Release")
 Say "host: $Release installed at $HostDir (Python $PyVersion)"
 
-# --- 6. start at login ----------------------------------------------------
-# The host OWNS that shortcut (4.1). This script asks for it by verb rather
-# than writing a .lnk of its own, so there is one spelling of what it points
-# at and one place that changes when it moves.
 foreach ($action in @("register", "install-cli", "install-desktop")) {
   $said = @(Native { & $Cmd local $action })
   if ($LASTEXITCODE -ne 0) { $said | Show; Die "local setup failed: $action (exit $LASTEXITCODE). Run this installer again; it carries on from where it stopped." }
 }
 
-# --- 7. start the host, and stop ------------------------------------------
-# pythonw, not the .cmd: a tray program has no console window (4.1).
 Say "starting the tray"
 $Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
 Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","orchestrator"
 $said = @(Native { & $Cmd local start })
 if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }
 
-# --- 8. what happens next, read rather than asserted ----------------------
-# PHASE19-AUTOMATIC-WSL.md 2.7. This script used to end by saying the Linux
-# engine was "available from its console", which stopped being true the
-# moment the tray began starting the move by itself at every start (2.3).
-#
-# It has no logic of its own and decides nothing about the move: the tray
-# runs the move and publishes it, and `crucible.host.installwatch` READS that
-# (the door of 2.6, and wsl-outcome.json) and says it in plain words.
-#
-# THE CONSOLE IS THE APP (#6, #7, fresh install on kylies-pc, 2026-09-26).
-# This used to wait ten seconds, say "the app you installed from will show
-# its progress" and exit - and twelve seconds later the move stopped for a
-# restart that only host.log mentioned. A person at a console now watches
-# every step here until the move ends: done, a restart owed (and how to do
-# it), cannot, or failed. An APP that ran this script watches the move
-# itself through the same door, so it still gets the short ending.
-# It is an app when it runs a saved crucible-install.ps1 with its output piped.
 Say "Crucible is ready in your notification area."
 $FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq 'crucible-install.ps1') -and [Console]::IsOutputRedirected)
 $Watch = @('-m', 'crucible.host.installwatch', '--home', $Root, '--since', $Began)

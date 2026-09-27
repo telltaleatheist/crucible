@@ -33,7 +33,7 @@ test('install.sh and install.ps1 on disk ARE what the generator writes (npm run 
  * the two halves are two sequences, and only one of them is the step list.
  */
 function installHalf(sh: string): string {
-  const at = sh.indexOf('# --- host-facts');
+  const at = sh.indexOf('say "host-facts"');
   assert.ok(at > 0, 'the install half starts at host-facts');
   return sh.slice(at);
 }

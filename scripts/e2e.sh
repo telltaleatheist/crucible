@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# End-to-end: a real crucible server, the real TypeScript client, on this host.
-#
-# Starts a throwaway server (its own CRUCIBLE_HOME, a free port, echo enabled),
-# exports CRUCIBLE_URL and CRUCIBLE_TOKEN, runs the SDK's e2e suite, stops the
-# server with SIGTERM, and exits with the suite's code. Trust the exit code.
-#
-#   ./scripts/e2e.sh
-#
-# Requires: `crucible` on PATH (pip install -e .), node 20+, npm, python3.
-# Runs on Linux and macOS. On Windows use scripts/e2e-from-windows.sh, which
-# puts the server in WSL and keeps the client native.
-
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +9,6 @@ ROOT=""
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
-    # `wait` reaps it and suppresses bash's async "Terminated" notice.
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
@@ -71,8 +58,6 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 [ "$UP" = "1" ] || { echo "e2e: the server never answered $BASE/v1/ping" >&2; cat "$ROOT/serve.log" >&2; exit 2; }
-
-# ------------------------------------------------------------------- the suite
 
 cd "$SDK"
 npm ci --no-audit --no-fund

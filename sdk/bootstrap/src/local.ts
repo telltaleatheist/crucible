@@ -1,4 +1,3 @@
-/** Local installation discovery and lifecycle. The installation owns its paths. */
 import * as path from 'node:path';
 import { processRunner, type Runner } from './runner.js';
 

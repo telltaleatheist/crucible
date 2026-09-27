@@ -1,53 +1,4 @@
 #!/usr/bin/env bash
-# Cut one release: the Python sdist, the Python wheel, the SDK tarball and the
-# bootstrap tarball, under a single tag `v<version>`.
-#
-#   ./scripts/release.sh                 # release main
-#   ./scripts/release.sh --dry-run       # build and check, create nothing
-#   ./scripts/release.sh --branch <name> # release a branch (see below)
-#
-# A RELEASE CARRIES OUR CODE AND NOTHING THAT IS PUBLISHED ELSEWHERE
-# (PHASE20-CODE-NOT-ENVIRONMENTS.md section 1). One version, one tag, one
-# release, seven assets:
-#
-#   crucible-<ver>.tar.gz              the server sdist
-#   crucible-<ver>-py3-none-any.whl    the server wheel — THE deploy
-#   crucible-<ver>-py3-none-any.whl.sha256  its digest, one line, which is what
-#                                      install.sh and install.ps1 check the
-#                                      download against before pip sees it
-#   crucible-client-<ver>.tgz          the TypeScript SDK, installable by URL
-#   crucible-bootstrap-<ver>.tgz       the app-side installer/ensurer (PHASE5-APPS.md 6.0),
-#                                      peer-depending on the client at this exact version
-#   install.sh                         the standalone installer for Linux/WSL and macOS
-#   install.ps1                        the same for Windows: the HOST, and stop
-#
-# WHAT IS NO LONGER HERE, and where it comes from instead: the interpreter
-# (python-build-standalone, pinned by digest in `crucible/interpreter.py` and
-# `sdk/bootstrap/src/interpreter.ts`), every job environment (PyPI and the
-# mirrors, through `crucible/envs/<type>/<recipe>.txt`), and the WSL image
-# (Canonical's `cloud-images.ubuntu.com/wsl/`). Before PHASE20 a tag uploaded
-# ~190 MB of those per release, rebuilt because our 1 MB of code changed.
-#
-# The two installers are GENERATED from bootstrap's own step list
-# (PHASE14-ENVPACKS.md 4a), so an app-driven install and a hand install cannot
-# differ. A stale one refuses the cut. Since PHASE15-HOST.md 4.4, `install.ps1`
-# no longer walks the WSL states itself: it installs `crucible host` and stops,
-# and the host owns the sequence from there — for the page's engine switch
-# (4.7), for an app's `install()` and for a hand install alike.
-#
-# The version is read from seven places and every one of them must agree:
-# crucible/__init__.py, pyproject.toml, sdk/ts/package.json, sdk/ts/src/version.ts (which
-# the SDK reports in its User-Agent), sdk/bootstrap/package.json, its @crucible/client
-# peer pin, and sdk/bootstrap/src/version.ts. A mismatch is a refusal, not a warning:
-# a bootstrapper is never paired with a server nobody tested it against.
-#
-# If the tag already exists — locally, on the remote, or as a release — this
-# refuses. Re-cutting a version is how two different sets of bytes end up with
-# one name.
-#
-# Runs on Git Bash (Windows), Linux and macOS. Requires: git, gh (logged in),
-# node 20+, npm, python with the `build` module.
-
 set -euo pipefail
 
 RELEASE_BRANCH="main"
@@ -56,17 +7,25 @@ REPO_SLUG="telltaleatheist/crucible"
 branch_override=""
 dry_run=0
 
+usage() {
+  cat <<'USAGE'
+Cut one release under a single tag v<version>: the sdist, the wheel and its
+.sha256, the client and bootstrap tarballs, install.sh and install.ps1.
+
+  ./scripts/release.sh                 release main
+  ./scripts/release.sh --dry-run       build and check, create nothing
+  ./scripts/release.sh --branch <name> release a branch about to merge
+USAGE
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1; shift ;;
     --branch)
-      # The one legitimate use: the first release of a feature branch the lead
-      # is about to merge, so the tarball URL exists before the merge. The
-      # branch is named in the release notes, so nobody has to guess later.
       [ $# -ge 2 ] || { echo "release: --branch needs a branch name" >&2; exit 2; }
       branch_override="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      usage
       exit 0 ;;
     *) echo "release: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -85,8 +44,6 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 python -c 'import build' 2>/dev/null || fail "python has no \`build\` module (pip install build)"
 gh auth status >/dev/null 2>&1 || fail "gh is not logged in (gh auth login)"
 
-# ------------------------------------------------------------------ the tree
-
 WANTED_BRANCH="${branch_override:-$RELEASE_BRANCH}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "$WANTED_BRANCH" ] \
@@ -100,8 +57,6 @@ git fetch --quiet origin "$BRANCH"
 REMOTE_SHA="$(git rev-parse "origin/$BRANCH")"
 [ "$HEAD_SHA" = "$REMOTE_SHA" ] \
   || fail "HEAD ($(git rev-parse --short HEAD)) is not origin/$BRANCH ($(git rev-parse --short "origin/$BRANCH")); push first"
-
-# ----------------------------------------------------------------- the version
 
 PY_VERSION="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
 SDK_VERSION="$(node -p "require('./sdk/ts/package.json').version")"
@@ -138,22 +93,11 @@ VERSION="$PY_VERSION"
 TAG="v$VERSION"
 echo "release: $TAG from $BRANCH ($(git rev-parse --short HEAD))"
 
-# THE APP MODULES carry this version too — `modules/<app>.module.json` names it
-# as `<version>+<content hash>`, and apps vendor those bytes verbatim. They are
-# GENERATED, so a bump that does not regenerate them ships a release whose
-# module files name the release before it. That is exactly what v0.6.3 shipped:
-# the seven version places above all agreed and nothing looked at `modules/`.
 echo "release: the generated app modules match the manifests"
 python scripts/gen-modules.py --check >/dev/null   || fail "modules/*.module.json are stale; run 'python scripts/gen-modules.py' and commit them (this is what shipped stale in v0.6.3)"
 
-# THE API REFERENCE IS GENERATED TOO, from the FastAPI app this release ships.
-# A field added to a request model and not regenerated ships a reference that
-# does not mention it, which is the same failure as a stale module manifest and
-# harder to notice, because nothing downstream breaks — a reader is just wrong.
 echo "release: the API reference matches the app"
 python scripts/gen-api-docs.py --check >/dev/null   || fail "docs/API.md is stale; run 'python scripts/gen-api-docs.py' and commit it"
-
-# ------------------------------------------------------------- refuse a re-cut
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   fail "tag $TAG already exists locally; a version is cut once"
@@ -164,8 +108,6 @@ fi
 if gh release view "$TAG" --repo "$REPO_SLUG" >/dev/null 2>&1; then
   fail "release $TAG already exists; a version is cut once"
 fi
-
-# -------------------------------------------------------------------- building
 
 OUT="$REPO/dist"
 rm -rf "$OUT"
@@ -179,18 +121,10 @@ echo "release: building the sdk"
 ( cd sdk/ts && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
 ( cd sdk/ts && npm pack --silent --pack-destination "$OUT" >/dev/null )
 
-# The bootstrap's dev dependency on the client is `file:../ts`, which `npm ci`
-# links in place — so the client must already be built, and it is, just above.
 echo "release: building the bootstrap"
 ( cd sdk/bootstrap && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null )
 ( cd sdk/bootstrap && npm pack --silent --pack-destination "$OUT" >/dev/null )
 
-# THE TWO STANDALONE INSTALLERS (PHASE14-ENVPACKS.md 4a) are GENERATED from
-# bootstrap's own step list, so that an app-driven install and a hand install
-# cannot differ. A committed script that no longer matches that list is two
-# answers to "how is Crucible installed", which is the shape
-# docs/ARCHITECTURE.md section 1 is about - so a stale one refuses the cut
-# rather than shipping beside a bootstrapper it disagrees with.
 echo "release: the generated installers match bootstrap's step list"
 ( cd sdk/bootstrap && npm run gen:install -- --check >/dev/null ) \
   || fail "sdk/bootstrap/scripts/install.sh|.ps1 are stale; run 'npm run gen:install' in sdk/bootstrap and commit them"
@@ -200,7 +134,6 @@ for asset in "$INSTALL_SH" "$INSTALL_PS1"; do
   [ -f "$asset" ] || fail "expected asset $asset was not generated"
 done
 
-
 SDIST="$OUT/crucible-$VERSION.tar.gz"
 WHEEL="$OUT/crucible-$VERSION-py3-none-any.whl"
 TGZ="$OUT/crucible-client-$VERSION.tgz"
@@ -209,16 +142,10 @@ for asset in "$SDIST" "$WHEEL" "$TGZ" "$BOOT"; do
   [ -f "$asset" ] || fail "expected asset $asset was not built"
 done
 
-# THE WHEEL'S DIGEST, BESIDE THE WHEEL. Both installers fetch this one line and
-# compare it before pip is allowed near the download (PHASE20 section 3): the
-# interpreter is pinned by a digest in our source, and our own code cannot be,
-# so the release is what vouches for it. One line, the digest first, the shape
-# `sha256sum` writes and `awk '{print $1}'` reads.
 WHEEL_SHA="$WHEEL.sha256"
 if command -v sha256sum >/dev/null 2>&1; then
   ( cd "$OUT" && sha256sum "$(basename "$WHEEL")" > "$(basename "$WHEEL_SHA")" )
 else
-  # macOS has no sha256sum; `shasum -a 256` writes the same two columns.
   ( cd "$OUT" && shasum -a 256 "$(basename "$WHEEL")" > "$(basename "$WHEEL_SHA")" )
 fi
 [ -s "$WHEEL_SHA" ] || fail "could not write $WHEEL_SHA"
@@ -232,8 +159,6 @@ if [ "$dry_run" = "1" ]; then
   echo "release: --dry-run, so $TAG was not created"
   exit 0
 fi
-
-# ------------------------------------------------------------------- the release
 
 NOTES_HEADER="Server \`crucible\` $VERSION, TypeScript client \`@crucible/client\` $VERSION, and app-side bootstrapper \`@crucible/bootstrap\` $VERSION."
 if [ -n "$branch_override" ]; then
@@ -250,10 +175,6 @@ npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-client
 npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-bootstrap-$VERSION.tgz
 \`\`\`"
 
-# ------------------------------------------- what this release does NOT carry
-#
-# SAID OUT LOUD ON THE PAGE, because a reader who remembers the old releases
-# will look for the environment archives and find none. PHASE20 section 1.
 NOTES_HEADER="$NOTES_HEADER
 
 ### Environments

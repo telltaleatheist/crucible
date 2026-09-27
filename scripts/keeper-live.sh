@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Live keeper: start a real crucible server on a free port with a throwaway home,
-# then drive ping / info / auth refusals / an echo job over HTTP with curl.
-#
-# Exits 0 only if every check passed. Trust the exit code.
-#
-#   ./scripts/keeper-live.sh
-#
-# Requires: the `crucible` console script on PATH (pip install -e .), curl, python3.
-
 set -euo pipefail
 
 PASSED=0
@@ -22,7 +13,6 @@ bad()  { FAILED=$((FAILED + 1)); printf 'FAIL  %s\n' "$*" >&2; }
 cleanup() {
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill -TERM "$SERVER_PID" 2>/dev/null || true
-    # `wait` both reaps the server and suppresses bash's async "Terminated" notice.
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
@@ -47,8 +37,6 @@ print(s.getsockname()[1])
 s.close()')"
 
 echo "keeper: home=$CRUCIBLE_HOME port=$PORT"
-
-# ---------------------------------------------------------------- init + serve
 
 crucible init --enable-echo --host 127.0.0.1 --port "$PORT" --name "crucible@keeper" >"$WORK/init.txt"
 log "$(head -n 2 "$WORK/init.txt" | tr '\n' ' ')"
@@ -83,18 +71,14 @@ for _ in $(seq 1 120); do
 done
 [ "$UP" = "1" ] || { echo "keeper: server never answered on $BASE/ping" >&2; cat "$WORK/serve.log" >&2; exit 2; }
 
-# ------------------------------------------------------------------- checks
-
 AUTH=(-H "Authorization: Bearer $TOKEN" -H "X-Crucible-Api: 1")
 
-# 1. ping, unauthenticated
 if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("crucible") is True and d.get("api_version")==1 else 1)' "$WORK/ping.json"; then
   ok "GET /ping without auth"
 else
   bad "GET /ping did not identify as crucible api 1: $(cat "$WORK/ping.json")"
 fi
 
-# 2. info, authenticated
 CODE="$(curl -sS -o "$WORK/info.json" -w '%{http_code}' "${AUTH[@]}" "$BASE/info")"
 if [ "$CODE" = "200" ] && python3 - "$WORK/info.json" <<'PY'
 import json, sys
@@ -110,7 +94,6 @@ else
   bad "GET /info returned $CODE: $(cat "$WORK/info.json")"
 fi
 
-# 3. wrong token is 401
 CODE="$(curl -sS -o "$WORK/401.json" -w '%{http_code}' -H "Authorization: Bearer wrong" -H "X-Crucible-Api: 1" "$BASE/info")"
 if [ "$CODE" = "401" ] && grep -q '"unauthorized"' "$WORK/401.json"; then
   ok "wrong token is 401 unauthorized"
@@ -118,7 +101,6 @@ else
   bad "wrong token returned $CODE: $(cat "$WORK/401.json")"
 fi
 
-# 4. missing api version header is 426
 CODE="$(curl -sS -o "$WORK/426.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/info")"
 if [ "$CODE" = "426" ] && grep -q 'api_version' "$WORK/426.json"; then
   ok "missing X-Crucible-Api header is 426"
@@ -126,7 +108,6 @@ else
   bad "missing api version returned $CODE: $(cat "$WORK/426.json")"
 fi
 
-# 5. wrong api version is 426 naming both
 CODE="$(curl -sS -o "$WORK/426b.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" -H "X-Crucible-Api: 99" "$BASE/info")"
 if [ "$CODE" = "426" ] && python3 - "$WORK/426b.json" <<'PY'
 import json, sys
@@ -140,7 +121,6 @@ else
   bad "api version 99 returned $CODE: $(cat "$WORK/426b.json")"
 fi
 
-# 6. unknown job type is refused by name
 CODE="$(curl -sS -o "$WORK/badtype.json" -w '%{http_code}' "${AUTH[@]}" -H 'Content-Type: application/json' -d '{"type":"summon"}' "$BASE/jobs")"
 if [ "$CODE" = "400" ] && grep -q 'unknown_job_type' "$WORK/badtype.json"; then
   ok "unknown job type is 400 unknown_job_type"
@@ -148,7 +128,6 @@ else
   bad "unknown job type returned $CODE: $(cat "$WORK/badtype.json")"
 fi
 
-# 7. echo, end to end
 head -c 65536 /dev/urandom >"$WORK/payload.bin"
 python3 - "$WORK/payload.bin" "$WORK/job.json" <<'PY'
 import base64, json, sys
@@ -215,7 +194,6 @@ PY
   fi
 fi
 
-# 8. health
 CODE="$(curl -sS -o "$WORK/health.json" -w '%{http_code}' "${AUTH[@]}" "$BASE/health")"
 if [ "$CODE" = "200" ] && grep -q '"queue_depth"' "$WORK/health.json"; then
   ok "GET /health"

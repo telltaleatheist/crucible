@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-# Measure what a resident model actually costs, so the manifest's
-# `memory_bytes_estimate` is a number somebody read off a machine.
-#
-#   ./scripts/measure-llm-memory.sh [model-id]
-#
-# Two readings, both with the model resident:
-#   at rest        — the engine has answered /v1/models and generated one token
-#   under context  — after a completion that has filled `context_default` tokens
-#
-# On both backends the figure is memory **used** minus what was in use before the
-# engine started — `nvidia-smi memory.used` on cuda-linux, unified memory in use
-# on mlx-darwin — which is the engine's share of the accelerator and nothing
-# else. (Not memory *available*: macOS reclaims inactive pages to make room, so a
-# delta in available memory understates it. Not the engine process's RSS either;
-# see the note by the figure at the bottom.)
-#
-# Needs the host ready (env installed, model pulled) and refuses by name if not.
-
 set -euo pipefail
 
 MODEL="${1:-qwen3.5-9b}"
@@ -30,11 +12,6 @@ cleanup() {
     wait "$SERVER_PID" 2>/dev/null || true
   fi
   if [ -n "$ROOT" ] && [ -d "$ROOT" ]; then
-    # A failed measurement's whole value is the engine log, and it lives in the
-    # throwaway home this script is about to delete. On a non-zero exit, keep it
-    # and say where. (Measured 2026-09-12: the 9B's first load on the PC failed
-    # with `UVA is not available`, and the log carrying that line went into the
-    # bin with the temp directory. Finding out cost another load.)
     if [ "$status" -ne 0 ] && [ -d "$ROOT/home/logs" ]; then
       KEPT="${TMPDIR:-/tmp}/crucible-measure-failed.$$"
       mkdir -p "$KEPT"
@@ -77,9 +54,6 @@ PY
 }
 
 engine_rss() {
-  # The engine subprocess and everything it forked, found by the weights path on
-  # its command line. That path is under this run's throwaway CRUCIBLE_HOME, so
-  # it cannot match anything else on the machine.
   local total=0 rss
   for pid in $(pgrep -f "models/$MODEL/$BACKEND" || true); do
     rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
@@ -113,13 +87,6 @@ sleep 5
 REST="$(card)"; REST_RSS="$(engine_rss)"
 echo "  at rest:      card $((REST / 1024 / 1024)) MiB (+$(( (REST - BEFORE) / 1024 / 1024 )) MiB), engine rss $((REST_RSS / 1024 / 1024)) MiB"
 
-# A prompt that fills context_default tokens of KV — sized with the model's OWN
-# tokenizer, out of the llm env, so the reading is for the context the manifest
-# promises and not for whatever a word-count guess happened to produce.
-#
-# ONE encode and a slice. Growing a string and re-encoding it once per word is
-# O(n^2) in the token count: seconds at 12288, minutes of pure tokenizer at the
-# 98304 of `qwen3.8-27b-4bit`, with nothing on the accelerator to show for it.
 "$REAL_HOME/envs/llm/bin/python" - \
   "$MODEL" "$CONTEXT" "$REAL_HOME/models/$MODEL/$BACKEND" "$WORK/big.json" <<'PY'
 import json, sys
@@ -128,8 +95,8 @@ from transformers import AutoTokenizer
 model, context, weights, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 tokenizer = AutoTokenizer.from_pretrained(weights)
 lead = "Here is a list. Reply with only the word OK.\n"
-# Leave room for the chat template's own tokens and the 16-token answer.
-budget = context - 96
+template_and_answer_tokens = 96
+budget = context - template_and_answer_tokens
 filler = " ".join(f"item{index}" for index in range(budget))
 content = tokenizer.decode(tokenizer(lead + filler)["input_ids"][:budget])
 total = len(tokenizer(content)["input_ids"])
@@ -159,16 +126,6 @@ PY
 LOADED="$(card)"; LOADED_RSS="$(engine_rss)"
 echo "  under context: card $((LOADED / 1024 / 1024)) MiB (+$(( (LOADED - BEFORE) / 1024 / 1024 )) MiB), engine rss $((LOADED_RSS / 1024 / 1024)) MiB"
 
-# The engine's share of the machine, on both backends: what was in use with the
-# model resident and a full-context request in flight, minus what was in use
-# before it started.
-#
-# On mlx-darwin this used to report the engine process's RSS instead. RSS is a
-# FLOOR, not the requirement — MLX memory-maps the weights and not every page
-# stays resident — and on `qwen3.8-27b-4bit` the gap is not small: RSS read
-# 14_643 MiB where mlx's own allocator peaked at 31.55 GiB and this delta read
-# 32_116 MiB. Writing the RSS into a manifest would have understated that model
-# by 2.2x. The delta is printed with the RSS beside it so both are on the record.
 MEASURED=$((LOADED - BEFORE))
 echo
 echo "memory_bytes_estimate = $MEASURED   # $((MEASURED / 1024 / 1024)) MiB, $(python3 -c "print(f'{$MEASURED/1e9:.2f}')") GB"

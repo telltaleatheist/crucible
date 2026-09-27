@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# The WSL2 half of scripts/e2e-from-windows.sh: start and stop a throwaway
-# crucible server inside the guest.
-#
-# It lives in the repo rather than being assembled as a quoted string on the
-# Windows side, because a command that crosses Git Bash -> wsl.exe -> bash is
-# quoted three times and gets one of them wrong. This runs entirely in Linux.
-#
-#   wsl-serve.sh start <home> <crucible-bin>   # prints port=<n> and token=<t>
-#   wsl-serve.sh stop  <home>                  # SIGTERM, wait, remove the home
-#   wsl-serve.sh log   <home>                  # the server's stdout+stderr
-#
-# The server is detached with setsid: wsl.exe tears down the session it started
-# when it exits, and a plain `nohup ... &` dies with it. Stopping is always
-# SIGTERM — nothing here ever SIGKILLs a process in the guest.
-
 set -euo pipefail
 
 command="${1:-}"
@@ -44,7 +29,6 @@ s.close()')"
     ' wsl-serve "$home" "$crucible" "$port" </dev/null >"$home/serve.log" 2>&1 &
     disown
 
-    # The child writes its own pid, so wait for the file rather than guess.
     for _ in $(seq 1 40); do
       [ -s "$home/pid" ] && break
       sleep 0.25

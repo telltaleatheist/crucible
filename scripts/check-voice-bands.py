@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-"""Every voice manifest's safe band, against BookForge's authoritative overlay.
-
-WHY THIS EXISTS. On 2026-09-13 an audit found `thirdreich` advertising a band of
-600-1000 here while BookForge's `electron/data/higgs-safe-bands.json` said
-500-700. The overlay was right: it is 620 renders at n=32/rung, pooled by the
-character count the packer actually emits, and it explicitly supersedes the
-n=16/rung sweep this repo's manifest was written from. Pooled correctly, 700-800
-is a 12.5% failure zone and 800-900 is 18.8%.
-
-Crucible does not pack. It ADVERTISES the band and the client packs to it
-(PHASE3-TTS.md section 2) — so a wrong band here is a defect in somebody else's
-audio, produced silently, with nothing failing. That is the worst shape a bug can
-have and it is exactly what two copies of one fact produce.
-
-WHY A SCRIPT AND NOT A TEST. Crucible must run on a machine that has never heard
-of BookForge — that is the whole point of the server — so it cannot read the
-overlay at runtime or import it in its suite. The manifest is therefore genuinely
-authoritative FOR CRUCIBLE, and this is the thing that keeps it honest where both
-repos happen to sit side by side. Run it after touching any band, and before a
-release.
-
-    python scripts/check-voice-bands.py [--bookforge PATH]
-
-Exit 0 when every voice agrees or is absent from one side; exit 1 with a diff
-otherwise. A voice the overlay does not mention is NOT an error — the overlay is
-a sparse set of corrections, not a census.
-"""
 
 from __future__ import annotations
 
@@ -40,11 +13,6 @@ OVERLAY = Path("electron/data/higgs-safe-bands.json")
 
 
 def overlay_bands(bookforge: Path) -> dict[str, tuple[int, int]]:
-    """`{voice: (min, max)}` from the overlay, which is the authority.
-
-    Keys whose value is not a band (`_README` and any future note) are skipped
-    rather than refused: the file is a document as much as a table.
-    """
     path = bookforge / OVERLAY
     if not path.exists():
         raise SystemExit(
@@ -69,7 +37,9 @@ def manifest_bands() -> dict[str, tuple[int | None, int | None]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Check every voice manifest's safe band against BookForge's authoritative overlay.",
+    )
     parser.add_argument("--bookforge", type=Path, default=DEFAULT_BOOKFORGE)
     args = parser.parse_args()
 
@@ -80,8 +50,6 @@ def main() -> int:
     checked = 0
     for voice, want in sorted(authority.items()):
         if voice not in mine:
-            # Not an error. BookForge may carry a voice this build has no
-            # manifest for; `crucible voices` simply will not offer it.
             continue
         checked += 1
         got = mine[voice]

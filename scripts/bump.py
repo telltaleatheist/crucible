@@ -1,36 +1,3 @@
-"""Set this release's version everywhere it is written, and regenerate what derives from it.
-
-    python scripts/bump.py patch          # 0.6.7 -> 0.6.8
-    python scripts/bump.py minor          # 0.6.7 -> 0.7.0
-    python scripts/bump.py 0.7.0          # exactly that
-    python scripts/bump.py patch --commit # and commit the result
-
-SEVEN FILES SAY THE VERSION and `scripts/release.sh` refuses to cut a tag unless
-all seven agree — a good rule that, until now, was enforced against seven hand
-edits. Every release began by finding them again. This finds them once, and the
-list lives beside the refusal that depends on it.
-
-WHAT THIS WILL NOT DO IS SEARCH AND REPLACE. One other place in the tree names
-0.6.7 and must keep naming it: `docs/PHASE14-ENVPACKS.md` records a MEASUREMENT
-of the v0.6.6 -> v0.6.7 pack decision. A measurement is about the versions it was
-taken on; a bump that rewrote that sentence would turn a fact into a lie,
-quietly, and the next reader would have no way to tell. (There were three such
-files. The other two, `scripts/plan_packs.py` and
-`.github/workflows/envpacks.yml`, went with the packs themselves — PHASE20
-section 6.) So each place below is matched by its own anchored pattern and must
-match EXACTLY ONCE — a file that has changed shape refuses the bump instead of
-being edited by guesswork.
-
-The generated files that carry the version — `modules/*.module.json` — are
-regenerated here, because v0.6.3 shipped them stale: the seven agreed and nothing
-looked at `modules/`. The two standalone installers are NOT regenerated, and do
-not need to be: since c04ef2c they resolve the newest release at run time and
-contain no version at all.
-
-The check that this worked is not this script's own opinion. It is
-`scripts/release.sh --dry-run`, which is the gate the cut itself uses.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -43,9 +10,6 @@ REPO = Path(__file__).resolve().parents[1]
 
 SEMVER = r"(\d+\.\d+\.\d+)"
 
-#: Every authored place that states the version, each with the one pattern that
-#: finds it. The description is what a refusal says, so it names the consequence
-#: rather than the file.
 PLACES: list[tuple[str, str, str]] = [
     ("crucible/__init__.py", rf'^VERSION = "{SEMVER}"$',
      "the server's own version, and the one every other place is checked against"),
@@ -63,9 +27,6 @@ PLACES: list[tuple[str, str, str]] = [
      "the version the bootstrapper names itself"),
 ]
 
-#: Regenerated after the bump, in order. Each is a generator that `release.sh`
-#: independently checks with `--check`, so a failure here is a cut that would
-#: have been refused anyway — just later, and after a tag was nearly created.
 GENERATORS: list[tuple[list[str], str]] = [
     ([sys.executable, "scripts/gen-modules.py"], "modules/*.module.json name this release"),
     ([sys.executable, "scripts/gen-api-docs.py"], "docs/API.md matches this app"),
@@ -78,7 +39,6 @@ def fail(message: str) -> None:
 
 
 def read_current() -> str:
-    """The version, from the one file that defines it, refusing if the seven disagree."""
     found: dict[str, str] = {}
     for relative, pattern, description in PLACES:
         text = (REPO / relative).read_text(encoding="utf-8")
@@ -123,8 +83,10 @@ def write_places(current: str, version: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description="Set this release's version in all seven places and regenerate what derives from it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("version", help="major, minor, patch, or an explicit x.y.z")
     parser.add_argument("--commit", action="store_true",
                         help="commit the bump (the message names the version and nothing else)")

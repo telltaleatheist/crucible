@@ -1,53 +1,14 @@
-/**
- * THE STEP LIST — one owner for what installing a Crucible is.
- *
- * `install()` runs this list. `scripts/gen-install-scripts.ts` reads the same
- * list and writes `install.sh` and `install.ps1` from it. That is the whole
- * reason this module exists: PHASE14-ENVPACKS.md 4a says an app-driven install
- * and a hand install "cannot differ", and the only way to mean that is for both
- * to be spellings of one list rather than two lists somebody keeps in sync.
- *
- * What is shared, exactly:
- *
- * - the step NAMES, their ORDER, and what each is for;
- * - the skip rules (an existing config keeps its token; a matching interpreter
- *   digest is not re-downloaded);
- * - every argv-shaped step, once — `renderArgv` produces the array `install()`
- *   spawns and `renderSh` produces the shell line, from the same words;
- * - the paths, the curl flags, the tar flags, the interpreter pin and the URL
- *   shapes, which live in `runtime.ts`, `interpreter.ts` and `release.ts` and
- *   are imported by both sides.
- *
- * Three steps are PROGRAMS rather than single commands — probing the host,
- * putting the server runtime in place, granting linger. Those carry their shell
- * in `sh`, beside the TypeScript that performs them, and the tests assert that
- * both use the same constants. Their iteration is spelled twice because two
- * languages; the facts they iterate over are spelled once.
- */
 import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from './interpreter.js';
 import { wheelAssetName, wheelShaAssetName, RELEASE_REPO } from './release.js';
 import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from './runtime.js';
 
 /**
- * A word in a step's argv: a literal, one of the values the install carries,
- * or — for the generated script only — a raw shell fragment.
- *
- * `{ sh }` exists because the HAND install has two things an app-driven one
- * does not: flags a person typed (`--host 0.0.0.0` on a droplet) and a job
- * type read out of `$1`. Both are shell words that cannot be a literal or a
- * ref, and spelling the command a second time in the generator to hold them
- * would be the second copy this module exists to prevent. `renderArgv`
- * REFUSES one by name: there is no shell on the TypeScript side to expand it,
- * and a `$BIND` reaching `spawn()` as a literal argument would be an argument
- * called `$BIND`.
+ * A word in a step's argv: a literal, an install value, or a raw shell fragment for the generated
+ * script.
  */
 export type Word = string | { ref: RefName } | { sh: string };
 
-/**
- * The values a step's argv can refer to. `install()` substitutes what it
- * measured; the generated script substitutes its own shell variable, which is
- * why there is a fixed, named set rather than free-form interpolation.
- */
+/** The values a step's argv can refer to. */
 export type RefName = 'crucible' | 'release' | 'backend' | 'home' | 'token' | 'user';
 
 /** How the generated scripts spell each ref. */
@@ -64,11 +25,11 @@ export type SkipRule = 'config-exists' | 'interpreter-stamp-matches' | 'root-onl
 
 export interface StepDef {
   name: string;
-  /** One sentence: the script's comment, and the step's `detail` when it is skipped. */
+  /** One sentence describing the step, used as a skipped step's `detail`. */
   what: string;
-  /** The argv, as the TARGET sees it. Null for the three steps that are programs. */
+  /** The argv as the target sees it; null for the steps that are programs. */
   words: readonly Word[] | null;
-  /** POSIX sh for the generated installer. Present for every step. */
+  /** POSIX sh for the generated installer. */
   sh: string;
   /** Why `install()` may not run it. */
   skip: SkipRule | null;
@@ -81,31 +42,21 @@ export interface StepPlan {
   enableFlags: readonly string[];
   /** `crucible install <type> …` argv, one per installable type. */
   installs: readonly { type: string; argv: readonly string[] }[];
-  /**
-   * `--host`/`--port` for `crucible init`, already spelled.
-   *
-   * `Word[]` and not `string[]` since the droplet route (PHASE15's
-   * `docs/INSTALL-UNINSTALL.md`): a rented Linux box is reached over the
-   * network, so `install.sh` takes `--host 0.0.0.0` from the operator and
-   * passes it through as `{ sh: '$BIND' }`. `install()` still pushes plain
-   * strings, which is what an app has.
-   */
+  /** `--host`/`--port` words for `crucible init`. */
   bind: readonly Word[];
-  /** Whether the linger step is part of this install (install.sh's native-Linux user unit). */
+  /** Whether the linger step is part of this install. */
   linger: boolean;
 }
 
-/** `$VAR` spelled for sh, quoted. */
 function v(ref: RefName): string {
   return `"$${SHELL_VARIABLE[ref]}"`;
 }
 
-/** One argument, safe in sh. The same rule as `wsl.ts`'s `shellQuote`, for literals. */
 function q(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** A step's words as one shell line. Refs become `"$VAR"`; literals are quoted. */
+/** A step's words as one shell line; refs become `"$VAR"`, literals are quoted. */
 export function renderSh(words: readonly Word[]): string {
   return words
     .map((word) => {
@@ -132,9 +83,6 @@ export function renderArgv(words: readonly Word[], values: Readonly<Partial<Reco
   });
 }
 
-// ------------------------------------------------------- the three programs
-
-/** The host probe, sh side: the SAME script `probeGuest()` runs, with its output eval'd. */
 export function hostFactsSh(): string {
   return `crucible_probe() {\n`
     + `  ${guestProbeScript(undefined)}\n`
@@ -144,67 +92,17 @@ export function hostFactsSh(): string {
     + `GUEST_USER="$(printf '%s\\n' "$probe_out" | sed -n 's/^user=//p')"\n`
     + `free_kib="$(printf '%s\\n' "$probe_out" | sed -n 's/^free_kib=//p')"\n`
     + `stamp_python_sha="$(printf '%s\\n' "$probe_out" | sed -n 's/^python_sha256=//p')"\n`
-    // WHAT IS ALREADY ON THIS DISK, which is what the never-older gate compares
-    // against (INSTALL-UNINSTALL.md 6.5.4). Empty means unstamped, and an
-    // unstamped tree is reinstalled whole.
     + `stamp_release="$(printf '%s\\n' "$probe_out" | sed -n 's/^release=//p')"\n`
     + `missing="$(printf '%s\\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\\n' ' ')"\n`
     + `if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; the interpreter is fetched with curl and unpacked with tar"; fi\n`;
 }
 
-/**
- * The server runtime, sh side: the interpreter half and then the wheel half.
- *
- * Same pin, same curl flags, same tar flags, same paths, same order as
- * `installRuntime()` — every one of them interpolated from the constants that
- * function uses.
- *
- * TWO HALVES, AND ONLY THE SECOND ONE RUNS ON AN UPGRADE (PHASE20 section 4).
- * The interpreter is a publisher's bytes pinned by digest, so a tree whose
- * stamp names that digest IS those bytes and there is nothing a second download
- * could correct. The wheel always installs: it is the deploy, it is one
- * megabyte, and re-running it is how a half-finished install is repaired.
- *
- * THEY ARE TWO FUNCTIONS BECAUSE `--from-source` REPLACES ONE OF THEM. The
- * generated `install.sh` can take a git ref instead of a release, and what that
- * changes is the wheel and nothing else — the interpreter is the same pinned
- * CPython either way, which is what makes `--from-source` stop needing a
- * `python3` on the machine at all.
- *
- * There is no manifest to parse and no jq to parse it with. The one thing this
- * reads off the network that is not bytes is `<wheel>.sha256`, one line.
- */
 export function serverSh(): string {
   return serverPreludeSh() + wheelFetchSh() + interpreterSh() + wheelInstallSh();
 }
 
-/**
- * The prefix `crucible/interpreter.py` puts in front of a progress line, and
- * the three fields `parse_progress_line` accepts. WRITTEN HERE AND PARSED
- * THERE, and tied by `tests/test_host.py`'s
- * `test_install_sh_emits_the_progress_wire_interpreter_py_parses`.
- *
- * PHASE19 2.12 asked for one of two things: stream `install.sh`'s own progress
- * lines, or have it emit a parseable byte line. This is the second, and the
- * reason is that the WIRE already exists and already has an owner —
- * `crucible/interpreter.py` declares it, writes it from Python and parses it,
- * and `crucible/tasks.py` already lifts it out of an install's output. A shell
- * that prints the same three fields joins a protocol rather than inventing
- * one; the alternative, parsing curl's own meter, is CR-separated,
- * locale-shaped and version-dependent, and there is no owner of that shape at
- * all.
- */
 export const PROGRESS_PREFIX = 'crucible-progress ';
 
-/**
- * `curl` into a file, printing `bytes_done` / `bytes_total` while it runs.
- *
- * The total comes from a HEAD; a server that will not give a `Content-Length`
- * yields `null`, which is exactly what the wire means by "the size is not
- * known yet" (`HostProgressData` says so) and not a number invented to fill
- * the field. The done figure is the file's own size, because that is the one
- * thing POSIX sh can measure about a download in flight.
- */
 export function progressFetchSh(destination: string, url: string): string {
   return `  total="$(curl -fsSLI -m 20 ${url} | tr -d '\\r' `
     + `| awk 'tolower($1) == "content-length:" { print $2 }' | tail -n 1)"\n`
@@ -221,16 +119,7 @@ export function progressFetchSh(destination: string, url: string): string {
     + `  wait "$fetch_pid" || die "runtime_download_failed: $py_url"\n`;
 }
 
-/**
- * What both halves stand on: the paths, the pin for this backend, the
- * never-older gate, and `crucible_quiesce`. Emitted once, before the wheel is
- * fetched, so the gate still refuses before anything downloads.
- */
 export function serverPreludeSh(): string {
-  // The pin, per backend, as a `case` — the generated script is run on a
-  // machine whose backend is `$BACKEND` and cannot be known here. Only the two
-  // POSIX backends: the Windows interpreter is `install.ps1`'s, from the same
-  // table.
   const cases = (['cuda-linux', 'mlx-darwin'] as const).map((backend) => {
     const pin = interpreterFor(backend);
     return `  ${backend}) py_asset='${pin.asset}'; py_sha='${pin.sha256}'; py_version='${pin.version}'; py_url='${interpreterUrl(pin)}' ;;\n`;
@@ -243,11 +132,6 @@ export function serverPreludeSh(): string {
     + cases
     + `  *) die "unsupported_platform: no interpreter is pinned for $BACKEND" ;;\n`
     + `esac\n`
-    // NEVER OVER A NEWER RELEASE (INSTALL-UNINSTALL.md 6.5.4). Checked before
-    // either half, because the wheel install is the thing that would take this
-    // machine back a version. Number by number in awk, because a string
-    // comparison puts 1.0.10 before 1.0.2 and this is the one question here
-    // that has to get that right. Exit 0 means older.
     + `crucible_older() {\n`
     + `  awk -v a="$1" -v b="$2" 'BEGIN { split(a, x, "."); split(b, y, ".");\n`
     + `    for (i = 1; i <= 3; i++) { if ((x[i]+0) < (y[i]+0)) exit 0; if ((x[i]+0) > (y[i]+0)) exit 1 } exit 1 }'\n`
@@ -258,29 +142,6 @@ export function serverPreludeSh(): string {
     + quiesceSh();
 }
 
-/**
- * `crucible_quiesce`: stop the running server before its tree is replaced,
- * WITH THE NEW RELEASE'S CODE (2026-09-26, kylies-pc, fresh-install #39).
- *
- * The old line was `"$dest/bin/crucible" local shutdown || true`: the
- * INSTALLED binary, whose ways of reaching root are whatever the old release
- * knew. 1.0.48's only root door was `wsl.exe -u root`, interop was broken in
- * that guest, so it could not stop the unit; `|| true` swallowed that, pip
- * wrote 1.0.49 under the running 1.0.48, and `local start` then rightly
- * refused the stale engine (`engine_version_stale`). A fix to how Crucible
- * stops itself could never help the upgrade that ships it.
- *
- * So the verified wheel is unpacked beside the tree (`pip install --target`,
- * no dependencies: they are the installed tree's) and ITS `local shutdown`
- * runs, on the installed interpreter. That works for the interpreter half
- * too, which runs this before it moves the old tree aside. When the new code
- * cannot be staged (no wheel yet: `--from-source`; or a release whose CLI
- * needs a package the old tree lacks) the installed binary is asked, as
- * before. And when both fail, `quiesced` stays 0 and the wheel half asks
- * AGAIN with the freshly installed binary before anything is started
- * (`crucible_quiesce_after`), so the switch is never left to a stale
- * process and a refusal names what happened in plain words.
- */
 export function quiesceSh(): string {
   return `quiesced=0\n`
     + `crucible_quiesce() {\n`
@@ -306,7 +167,6 @@ export function quiesceSh(): string {
     + `}\n`;
 }
 
-/** The interpreter half: fetch, verify, unpack, swap. Only when the pin moved. */
 export function interpreterSh(): string {
   return `if [ -n "$stamp_release" ] && [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
     + `  say "server: python $py_version is already at $dest"\n`
@@ -318,21 +178,12 @@ export function interpreterSh(): string {
     + `  if [ "$got_sha" != "$py_sha" ]; then rm -f "$downloads/$py_asset"; die "runtime_sha_mismatch: $py_asset hashes $got_sha and this installer pins $py_sha. The download was deleted"; fi\n`
     + `  rm -rf "$partial" && mkdir -p "$partial"\n`
     + `  tar ${TAR_ARGS.join(' ')} "$downloads/$py_asset" -C "$partial" || die "runtime_unpack_failed: tar would not open $downloads/$py_asset"\n`
-    // `install_only` archives carry ONE top-level `python/` directory and that
-    // directory IS the interpreter, so the swap moves `python/` rather than the
-    // archive's root.
     + `  [ -x "$partial/python/bin/python3" ] || die "runtime_unpack_failed: $py_asset unpacked without a python/bin/python3"\n`
     + `  ${activateRuntimeSh('"$dest"', '"$partial/python"', 'crucible_quiesce || return 1')} || die "runtime_unpack_failed: the previous runtime was preserved"\n`
     + `  rm -rf "$partial" "$downloads/$py_asset"\n`
     + `fi\n`;
 }
 
-/**
- * The wheel half, first part: fetch it and verify it against the release's own
- * `<wheel>.sha256`. BEFORE the interpreter half since #39 (2026-09-26), so a
- * verified copy of the new code is on disk for `crucible_quiesce` to stop the
- * old server with, whichever half gets to it first.
- */
 export function wheelFetchSh(): string {
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE`;
   return `wheel="${wheelAssetName('$RELEASE')}"\n`
@@ -345,23 +196,9 @@ export function wheelFetchSh(): string {
     + `if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi\n`;
 }
 
-/**
- * The wheel half, second part: pip it into the interpreter, stamp what is now
- * there.
- *
- * THE SERVER IS SHUT DOWN FIRST, because this rewrites its own `site-packages`
- * under it, and by the NEW code (`crucible_quiesce`, #39). A no-op on a
- * machine where nothing is running; `service-install` later in the sequence
- * starts it again. When neither release's code could stop it, it is asked
- * once more by the binary just installed, and refused by name if that fails
- * too, rather than `|| true` leaving a stale server for `local start` to find.
- */
 export function wheelInstallSh(): string {
   return `crucible_quiesce || say "server: the running server did not stop; installing $RELEASE and stopping it with that"\n`
     + `"$dest/bin/python3" -m pip install --upgrade --no-input "$downloads/$wheel" || die "runtime_install_failed: pip would not install $wheel"\n`
-    // The tray's two packages, on the platform that has a desktop. Declared in
-    // `interpreter.ts` rather than in `pyproject.toml`, so a headless Linux
-    // server never carries a GUI toolkit — see DESKTOP_PACKAGES.
     + `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "runtime_install_failed: the desktop packages would not install"; fi\n`
     + `rm -f "$downloads/$wheel"\n`
     + `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$RELEASE" > "$dest/${STAMP_NAME}"\n`
@@ -370,13 +207,6 @@ export function wheelInstallSh(): string {
     + `crucible_quiesce_after\n`;
 }
 
-/**
- * Linger, sh side. A systemd USER unit dies with the last session without it.
- * Native Linux only: inside WSL the server is a SYSTEM unit, which has no
- * linger question. We are usually not root in a hand install, so: try as
- * ourselves, then `sudo -n` (which never prompts), and if that is refused
- * print the one line a person must run.
- */
 export function lingerSh(): string {
   return `if [ "$MECHANISM" = systemd ] && ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then\n`
     + `  if loginctl show-user "$GUEST_USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then\n`
@@ -392,17 +222,6 @@ export function lingerSh(): string {
     + `fi\n`;
 }
 
-/**
- * `crucible install <type>` over a shell variable — the hand install's
- * `--install <type>` loop.
- *
- * The COMMAND comes from `renderSh` and is therefore the same one
- * `installSteps` gives `install()`; only the iteration is spelled twice,
- * which is this module's standing rule for its programs. `tts` carries its
- * narrator engine as `tts=<engine>`, because cuda-linux names one venv per
- * engine and `crucible install tts` refuses without it — the same refusal an
- * app gets from `planJobTypes`.
- */
 export function installJobTypesSh(): string {
   const crucible: Word = { ref: 'crucible' };
   const plain = renderSh([crucible, 'install', { sh: '"$type"' }]);
@@ -429,20 +248,6 @@ export function installJobTypesSh(): string {
     + `fi\n`;
 }
 
-/**
- * `install.sh --uninstall`, whole: the CLI verb, and then the runtime.
- *
- * TWO HALVES, AND THE SPLIT IS NOT ARBITRARY. `crucible uninstall`
- * (`crucible/uninstall.py`) stops the server, removes the service and takes
- * `CRUCIBLE_HOME` apart step by named step — everything except the
- * relocatable interpreter it is itself running from, which it cannot unlink
- * without pulling `site-packages` out from under a live process. THIS script
- * unpacked that interpreter, so this script removes it, after the verb has
- * returned. One owner per artefact, and the order is the only one that works.
- *
- * `--dry-run` is passed through and the runtime removal becomes a sentence, so
- * the wrapper's dry run is as complete a description as the verb's.
- */
 export function uninstallSh(): string {
   const crucible: Word = { ref: 'crucible' };
   const verb = renderSh([crucible, 'uninstall', { sh: '$UNINSTALL_FLAGS' }]);
@@ -455,8 +260,6 @@ export function uninstallSh(): string {
     + `if [ "$PURGE_WEIGHTS" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --purge-weights"; fi\n`
     + `if [ "$DRY_RUN" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --dry-run"; fi\n`
     + `${verb} || die "step_failed: uninstall"\n`
-    + `# The runtime, which the verb deliberately leaves: it is the interpreter\n`
-    + `# that just ran, and this script is what unpacked it.\n`
     + `say "server"\n`
     + `if [ "$DRY_RUN" = 1 ]; then\n`
     + `  say "server: would remove $CRUCIBLE_HOME/${SERVER_SUBDIR} and $CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
@@ -473,20 +276,7 @@ export function uninstallSh(): string {
     + `fi\n`;
 }
 
-// ------------------------------------------------------------- the sequence
-
-/**
- * The sequence, by name. PHASE14 section 4:
- *
- *     host-facts       what this machine is; the conda walk is DELETED
- *     server           the pinned interpreter (once) + this release's wheel, into <CRUCIBLE_HOME>/server
- *     init             <server>/bin/crucible init --token …   (skipped when a config exists)
- *     install-<type>   <server>/bin/crucible install <type>   (none in the standalone installer)
- *     env-patch-llm    <server>/bin/crucible env patch llm
- *     service-install  <server>/bin/crucible service install
- *     linger           native-Linux systemd hosts
- *     capability-write <server>/bin/crucible capability --write
- */
+/** The install sequence, as named steps. */
 export function installSteps(plan: StepPlan): StepDef[] {
   const crucible: Word = { ref: 'crucible' };
   const steps: StepDef[] = [
@@ -510,12 +300,6 @@ export function installSteps(plan: StepPlan): StepDef[] {
       name: 'init',
       what: 'write config.toml with a token this side minted',
       words: [crucible, 'init', '--token', { ref: 'token' }, ...plan.bind, ...plan.enableFlags],
-      // The token is minted HERE unless the caller brought one. `--token` on
-      // the command line is the droplet's case: an operator who is about to
-      // paste a connect code into two apps on two machines would rather state
-      // the secret than read it back out of a terminal. An empty `$TOKEN` is
-      // the ordinary path and mints, which is what every install before the
-      // flag existed did.
       sh: `if [ -f "$CRUCIBLE_HOME/config.toml" ]; then\n`
         + `  say "init: $CRUCIBLE_HOME/config.toml exists; its token is kept"\n`
         + `else\n`
@@ -539,13 +323,6 @@ export function installSteps(plan: StepPlan): StepDef[] {
       timeout: 'envMs',
     });
   }
-  // THE llm ENV's SITE-PACKAGES PATCHES, BEFORE THE SERVICE STARTS (PHASE22
-  // section 2.6.1). An upgrade installs a new wheel and never rebuilds an env
-  // whose recipe did not move, so `install_env`'s own patch step does not run
-  // for it; this is that step without the pip. It runs while the server is
-  // down (the `server` step shut it), so no engine starts on an unpatched env.
-  // Exit 0 with no env installed, and on backends whose llm engine carries no
-  // patch (vLLM, llama.cpp): the command reports `not_applicable` and moves on.
   const patchWords: Word[] = [crucible, 'env', 'patch', 'llm'];
   steps.push({
     name: 'env-patch-llm',
@@ -591,10 +368,6 @@ export function installSteps(plan: StepPlan): StepDef[] {
     skip: null,
     timeout: 'quickMs',
   });
-  // launchd/systemd accepting a start request does not prove the API is ready.
-  // The local lifecycle owner waits for the paired identity and authenticated
-  // info response, with a bounded timeout and explicit failures. Both callers
-  // of this shared sequence must finish that check before reporting success.
   const readyWords: Word[] = [crucible, 'local', 'start', '--json'];
   steps.push({
     name: 'local-start',

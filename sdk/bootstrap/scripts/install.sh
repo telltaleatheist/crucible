@@ -1,48 +1,4 @@
 #!/bin/sh
-# GENERATED FILE — do not edit.
-# Written by sdk/bootstrap/scripts/gen-install-scripts.ts from src/steps.ts
-# and src/wsl-states.ts, so a hand install and an app-driven install cannot
-# differ (PHASE14-ENVPACKS.md 4a). Regenerate: npm run gen:install
-#
-# Install a Crucible on this machine (Linux x86_64, macOS arm64, or inside a
-# WSL2 distro). Downloads the pinned CPython from python-build-standalone,
-# pip-installs the release's wheel into it, initialises it, installs the
-# service, and prints the line that pairs an app with it.
-#
-#   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh
-#
-# On a rented Linux box with a GPU, where the server is reached over the
-# network and the bearer token is the lock:
-#
-#   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh \
-#     | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm
-#
-# And to take it off again, keeping the weights:
-#
-#   curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh -s -- --uninstall
-#
-# CRUCIBLE_RELEASE=<version> or --release <version> installs a NAMED release,
-# and that is the one override there is. It still downloads that release from
-# GitHub -- it takes the CHOICE off the channel, not the install off the
-# network (INSTALL-UNINSTALL.md 6.5.2). Given neither, this asks the release
-# channel what its latest is and installs that.
-# Everything here is idempotent: run it again after a failure.
-#
-# THERE IS NO BAKED DEFAULT AND NO FALLBACK, and that is the point. This file
-# used to carry the version it was GENERATED at, which is wrong in the one
-# situation that matters: the documented way to get this script is
-# `releases/latest/download/install.sh`, so the copy you run is whichever one
-# GitHub calls latest. Every release is cut `--prerelease --latest=false` and
-# becomes latest only when promote_release.py says so, so on 2026-09-16 that
-# URL served the v0.6.0 script, which then installed 0.6.0 --
-# six versions behind, silently, with nothing in the output looking wrong.
-# Asking at RUN time cannot drift that way, and a channel that will not
-# answer is `release_channel_unreadable` rather than a quiet older install.
-#
-# AND IT NEVER GOES BACKWARDS. `<home>/server/.crucible` records which release is
-# on this disk; installing an older one over it is refused by name
-# (INSTALL-UNINSTALL.md 6.5.4), and the one way down is --rollback-to naming
-# the exact version.
 
 set -eu
 
@@ -51,9 +7,6 @@ RELEASE="${CRUCIBLE_RELEASE:-}"
 say() { printf 'crucible: %s\n' "$*"; }
 die() { printf 'crucible: %s\n' "$*" >&2; exit 1; }
 
-# --- arguments -----------------------------------------------------------
-# The flags a person types. An app never reaches this file: it calls
-# `install()`, which walks the SAME step list (PHASE14 4a).
 usage() {
   cat <<'USAGE'
 crucible install.sh — install or remove a Crucible on this machine.
@@ -115,32 +68,15 @@ done
 if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then
   die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"
 fi
-# An uninstall removes what is on this disk and installs nothing, so a
-# rollback version handed to one is a flag that would be silently ignored.
 if [ "$UNINSTALL" = 1 ] && [ -n "$ROLLBACK_TO" ]; then
   die "flag_needs_install: --rollback-to names a release to INSTALL and means nothing with --uninstall"
 fi
 
-# --- backend -------------------------------------------------------------
-# Two backends and no third. Windows is never one: on Windows this script
-# runs INSIDE the WSL2 distro that install.ps1 imported.
 case "$(uname -s)/$(uname -m)" in
   Linux/x86_64)  BACKEND=cuda-linux; SHA_TOOL="sha256sum";     MECHANISM=systemd ;;
   Darwin/arm64)  BACKEND=mlx-darwin; SHA_TOOL="shasum -a 256"; MECHANISM=launchd ;;
   *) die "unsupported_platform: $(uname -s)/$(uname -m) is not a Crucible backend (cuda-linux on Linux x86_64, mlx-darwin on Apple Silicon)" ;;
 esac
-# --- which release -------------------------------------------------------
-# Asked only when nobody named one, and NOT asked at all for --uninstall,
-# which removes what is on this disk and must work with no network.
-# The failure is loud: no fallback to a version this script was built beside,
-# because installing a silently-wrong release is the defect being fixed.
-# THE POINTER IS `releases/latest`, AND NOT `releases?per_page=1`.
-# INSTALL-UNINSTALL.md 6.5.1: every cut is created --prerelease
-# --latest=false and becomes the channel latest only when
-# promote_release.py --publish flips it, after its packs and a fresh-install
-# smoke have been verified. `per_page=1` answers "the newest TAG created",
-# which on every day between a cut and its promotion is the unverified
-# candidate that gate exists to keep off people machines.
 newest_release() {
   curl -fsSL --retry 3 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/telltaleatheist/crucible/releases/latest" |
     grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4
@@ -157,9 +93,6 @@ else
   say "release $RELEASE, backend $BACKEND"
 fi
 
-# --- uninstall -----------------------------------------------------------
-# The inverse, and then this script exits: `crucible uninstall` does the
-# nine steps inside CRUCIBLE_HOME and this removes the interpreter it unpacked.
 if [ "$UNINSTALL" = 1 ]; then
   say "uninstall"
   CRUCIBLE_HOME="${CRUCIBLE_HOME:-$HOME/.crucible}"
@@ -171,8 +104,6 @@ if [ "$UNINSTALL" = 1 ]; then
   if [ "$PURGE_WEIGHTS" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --purge-weights"; fi
   if [ "$DRY_RUN" = 1 ]; then UNINSTALL_FLAGS="$UNINSTALL_FLAGS --dry-run"; fi
   "$CRUCIBLE" 'uninstall' $UNINSTALL_FLAGS || die "step_failed: uninstall"
-  # The runtime, which the verb deliberately leaves: it is the interpreter
-  # that just ran, and this script is what unpacked it.
   say "server"
   if [ "$DRY_RUN" = 1 ]; then
     say "server: would remove $CRUCIBLE_HOME/server and $CRUCIBLE_HOME/downloads"
@@ -191,8 +122,6 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-# --- host-facts ----------------------------------------------------------
-# read this host: CRUCIBLE_HOME, the user, free disk, the tools an install needs
 say "host-facts"
 crucible_probe() {
   h="${CRUCIBLE_HOME:-$HOME/.crucible}"; echo "home=$h"; echo "user=$(id -un)"; d="$h"; while [ ! -d "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; echo "free_kib=$(df -Pk "$d" | awk 'NR==2 {print $4}')"; for t in curl tar; do command -v "$t" >/dev/null 2>&1 || echo "missing=$t"; done; c="$h/server/bin/crucible"; if test -x "$c"; then echo "crucible=$c"; echo "version=$("$c" --version 2>&1 | head -1)"; fi; s="$h/server/.crucible"; if test -f "$s"; then cat "$s"; fi; exit 0
@@ -206,9 +135,6 @@ stamp_release="$(printf '%s\n' "$probe_out" | sed -n 's/^release=//p')"
 missing="$(printf '%s\n' "$probe_out" | sed -n 's/^missing=//p' | tr '\n' ' ')"
 if [ -n "$missing" ]; then die "guest_missing_tool: this machine has no $missing; the interpreter is fetched with curl and unpacked with tar"; fi
 
-# --- prerequisites -------------------------------------------------------
-# Named, and never guessed around. A missing one is a refusal here rather
-# than a job type that refuses its first request a week later.
 say "prerequisites"
 if [ "$BACKEND" = cuda-linux ]; then
   command -v nvidia-smi >/dev/null 2>&1 || die "no_nvidia_smi: there is no nvidia-smi on PATH. cuda-linux runs vLLM, SGLang and torch on an NVIDIA card; a box without the driver is not this backend"
@@ -244,8 +170,6 @@ else
   say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"
 fi
 
-# --- server --------------------------------------------------------------
-# download the pinned interpreter (once) and pip-install this release's wheel into it
 say "server"
 dest="$CRUCIBLE_HOME/server"
 partial="$dest.partial"
@@ -359,8 +283,6 @@ else
   crucible_quiesce_after
 fi
 
-# --- init ----------------------------------------------------------------
-# write config.toml with a token this side minted
 say "init"
 if [ -f "$CRUCIBLE_HOME/config.toml" ]; then
   say "init: $CRUCIBLE_HOME/config.toml exists; its token is kept"
@@ -371,9 +293,6 @@ else
   "$CRUCIBLE" 'init' '--token' "$TOKEN" $BIND || die "step_failed: init"
 fi
 
-# --- install-job-types ---------------------------------------------------
-# `--install <type>`, from its recipe. Empty on a bare run, which
-# is 4a: a Crucible that serves nothing until somebody asks.
 if [ -n "$JOB_TYPES" ]; then
   for entry in $JOB_TYPES; do
     case "$entry" in
@@ -389,33 +308,21 @@ if [ -n "$JOB_TYPES" ]; then
   done
 fi
 
-# --- env-patch-llm -------------------------------------------------------
-# apply the llm environment's site-packages patches before the service starts
 say "env-patch-llm"
 "$CRUCIBLE" 'env' 'patch' 'llm' || die "step_failed: env-patch-llm"
 
-# --- service-install -----------------------------------------------------
-# write the systemd unit (or the launchd plist) and start it
 say "service-install"
 "$CRUCIBLE" 'service' 'install' || die "step_failed: service-install"
 
-# --- local-register ------------------------------------------------------
-# publish and configure the local Crucible register
 say "local-register"
 "$CRUCIBLE" 'local' 'register' || die "step_failed: local-register"
 
-# --- local-install-cli ---------------------------------------------------
-# publish and configure the local Crucible install-cli
 say "local-install-cli"
 "$CRUCIBLE" 'local' 'install-cli' || die "step_failed: local-install-cli"
 
-# --- local-install-desktop -----------------------------------------------
-# publish and configure the local Crucible install-desktop
 say "local-install-desktop"
 "$CRUCIBLE" 'local' 'install-desktop' || die "step_failed: local-install-desktop"
 
-# --- linger --------------------------------------------------------------
-# make the service survive a logout
 say "linger"
 if [ "$MECHANISM" = systemd ] && ! grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
   if loginctl show-user "$GUEST_USER" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
@@ -430,16 +337,11 @@ if [ "$MECHANISM" = systemd ] && ! grep -qi microsoft /proc/sys/kernel/osrelease
   fi
 fi
 
-# --- capability-write ----------------------------------------------------
-# record what this card can hold
 say "capability-write"
 "$CRUCIBLE" 'capability' '--write' || die "step_failed: capability-write"
 
-# --- local-start ---------------------------------------------------------
-# wait for the paired engine to answer with authenticated identity
 say "local-start"
 "$CRUCIBLE" 'local' 'start' '--json' || die "step_failed: local-start"
 
-# --- done ----------------------------------------------------------------
 say "installed. Pair an app with the line below."
 "$CRUCIBLE" token --url

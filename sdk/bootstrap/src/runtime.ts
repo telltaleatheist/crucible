@@ -1,40 +1,3 @@
-/**
- * The server runtime: a pinned CPython at `<CRUCIBLE_HOME>/server/` with the
- * release's wheel installed into it.
- *
- * PHASE20-CODE-NOT-ENVIRONMENTS.md section 3. This file was `pack.ts`, which
- * downloaded a `crucible-env-server-<backend>-<version>.tar.zst` from our own
- * release — an archive we rebuilt and re-uploaded on every tag, ~55 MB of
- * somebody else's interpreter per backend, for a 1 MB change to our code. The
- * interpreter now comes from its publisher once (`interpreter.ts`) and the
- * deploy is the wheel.
- *
- * Four rules, each with a reason and a test:
- *
- * 1. **Everything happens INSIDE the guest, with the guest's `curl` and `pip`.**
- *    Never onto `/mnt/c` and across the 9p mount: that is slow and it loses the
- *    permission bits a Python tree needs. On macOS and Linux "the guest" is the
- *    machine.
- *
- * 2. **The interpreter is fetched only when its digest is not the one stamped.**
- *    An upgrade is therefore a wheel install and nothing else, which is the
- *    whole ruling: a deploy ships code.
- *
- * 3. **Every download is checked against a digest before it is used.** The
- *    interpreter against `interpreter.ts`'s pin; the wheel against the
- *    `<wheel>.sha256` the release publishes beside it. A mismatch deletes the
- *    file and refuses by name — `runtime_sha_mismatch` — because the next run
- *    must start clean rather than pip-install bytes nobody vouched for.
- *
- * 4. **Never over a newer release.** `<home>/server/.crucible` records
- *    `release=`, so this knows what is on the disk before it writes to it, and
- *    an older release over a newer one is `install_would_downgrade` before
- *    anything downloads (INSTALL-UNINSTALL.md §6.5.4). The one legitimate
- *    downgrade is an operator rollback and it names its exact version.
- *
- * The interpreter unpack is `tar -xzf … -C <dest>.partial` followed by a swap,
- * so a half-unpacked tree is never at the path everything else runs from.
- */
 import { compareReleases } from './channel.js';
 import { BootstrapRefusal } from './errors.js';
 import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl, type StandalonePython } from './interpreter.js';
@@ -46,37 +9,19 @@ import { shellQuote } from './wsl.js';
 /** `<CRUCIBLE_HOME>/server` — where the interpreter and the wheel live. */
 export const SERVER_SUBDIR = 'server';
 
-/**
- * Where the WINDOWS host's runtime goes, under `%LOCALAPPDATA%\Crucible\`
- * (PHASE15-HOST.md 4.4). Beside `wsl\` and `downloads\`, which `distro.ts`
- * already puts there. `crucible/host/paths.py` spells the same word on the
- * Python side and `install.ps1` is generated from this one.
- */
+/** The Windows host runtime's directory under `%LOCALAPPDATA%\Crucible\`. */
 export const HOST_SUBDIR = 'host';
 /** `<CRUCIBLE_HOME>/downloads` — an archive lands here and is deleted after use. */
 export const DOWNLOADS_SUBDIR = 'downloads';
-/** The half-unpacked tree's suffix. Swapped onto the real path only when tar exits 0. */
 export const PARTIAL_SUFFIX = '.partial';
 
 /**
- * `<CRUCIBLE_HOME>/server/.crucible` — three `key=value` lines saying what this
- * tree IS: which interpreter digest, which python version, which release.
- * A tree whose stamp names no release is reinstalled whole.
+ * `<CRUCIBLE_HOME>/server/.crucible`: `key=value` lines naming the interpreter digest, python
+ * version and release.
  */
 export const STAMP_NAME = '.crucible';
 
-/** Shared activation transaction used by app installs and the generated install.sh.
- * Arguments are shell expressions (already quoted), never untrusted raw paths.
- *
- * `$partial` is the unpacked `python/` directory, so the tree that lands at
- * `$dest` is the interpreter itself and `$dest/bin/crucible` is what the wheel
- * install then puts inside it.
- */
 export function activateRuntimeSh(dest: string, partial: string, stop?: string): string {
-  // `stop` is how the running server is quiesced before its tree moves aside.
-  // The generated install.sh passes `crucible_quiesce || return 1`, which stops
-  // it with the NEW release's code (fresh-install #39, 2026-09-26); the
-  // default is the installed binary's own shutdown, as it always was.
   const quiesce = stop
     ?? 'if [ -x "$_crucible_dest/bin/crucible" ]; then "$_crucible_dest/bin/crucible" local shutdown || return 1; fi';
   return `activate_crucible_runtime() {\n`
@@ -96,41 +41,22 @@ export function activateRuntimeSh(dest: string, partial: string, stop?: string):
     + `}\nactivate_crucible_runtime`;
 }
 
-/**
- * curl's arguments, one owner for both the TypeScript and the generated
- * `install.sh`. `-f` so an HTML error page is never saved as an archive, `-L`
- * for the release redirect, `--retry` for a flaky minute, `--create-dirs` so
- * nothing has to mkdir first.
- *
- * `--continue-at -` is GONE with the parts it was for. Everything fetched here
- * is tens of megabytes and digest-checked the moment it lands, so a truncated
- * file is deleted and fetched whole rather than appended to — which is also the
- * only way to be sure a proxy that ignored the range did not build a corrupt
- * archive.
- */
+/** curl's arguments, shared by `install()` and the generated `install.sh`. */
 export const CURL_ARGS: readonly string[] = ['-fL', '--retry', '3', '--retry-delay', '2', '--create-dirs'];
 
-/** tar's, likewise. `-z`, because python-build-standalone publishes `.tar.gz`. */
+/** tar's arguments, shared likewise. */
 export const TAR_ARGS: readonly string[] = ['-xzf'];
 
-/** The sha256 tool, per platform. macOS has no `sha256sum`; every Linux does. */
+/** The sha256 tool's argv for this platform. */
 export function shaArgv(platform: NodeJS.Platform, file: string): string[] {
   return platform === 'darwin' ? ['shasum', '-a', '256', file] : ['sha256sum', file];
 }
 
-/**
- * The tools an install needs, probed before anything is fetched.
- *
- * `zstd` is not among them any more, and its absence is the measure of what
- * changed: it was here for the 8 GB environment archives, and nothing this
- * installer touches is compressed with it. python-build-standalone publishes
- * gzip, which every `tar` reads.
- */
 export const REQUIRED_TOOLS: readonly string[] = ['curl', 'tar'];
 
 const PROBE_TIMEOUT_MS = 60_000;
 
-/** What the one guest probe answers. Every field measured; nothing inferred from a missing one. */
+/** What the one guest probe answers. */
 export interface GuestFacts {
   /** `$CRUCIBLE_HOME`, or `$HOME/.crucible`, as the guest resolved it. */
   home: string;
@@ -138,7 +64,7 @@ export interface GuestFacts {
   user: string;
   /** Free bytes on the filesystem `home` is (or would be) on. */
   freeBytes: number;
-  /** Tools from {@link REQUIRED_TOOLS} that are not there. Empty on a healthy guest. */
+  /** Tools from {@link REQUIRED_TOOLS} that are not there. */
   missingTools: string[];
   /** The server runtime already installed, or null. */
   server: InstalledRuntime | null;
@@ -149,7 +75,10 @@ export interface InstalledRuntime {
   crucible: string;
   /** `<home>/server/bin/python3`. */
   python: string;
-  /** What `crucible --version` printed, or null when the tree is there and the binary would not answer. */
+  /**
+   * What `crucible --version` printed, or null when the tree is there and the binary would not
+   * answer.
+   */
   version: string | null;
   /** The INTERPRETER's sha256 the stamp records, or null when there is no stamp. */
   pythonSha256: string | null;
@@ -157,18 +86,11 @@ export interface InstalledRuntime {
   release: string | null;
 }
 
-/**
- * ONE script, exit 0 always, `key=value` lines out — the same shape the conda
- * probe used, for the same reason: a guest that answers nothing and a guest
- * that answers "no" must be told apart, and an exit code cannot carry five
- * facts. No backslash and no host-side `$`; with `--exec` the guest's bash is
- * the first thing that reads it.
- */
+/** The one guest probe script: always exits 0 and prints `key=value` lines. */
 export function guestProbeScript(home: string | undefined): string {
   const where = home === undefined ? 'h="${CRUCIBLE_HOME:-$HOME/.crucible}"; ' : `h=${shellQuote(home)}; `;
   return `${where}`
     + 'echo "home=$h"; echo "user=$(id -un)"; '
-    // df of the nearest EXISTING ancestor: ~/.crucible may not be there yet.
     + 'd="$h"; while [ ! -d "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done; '
     + 'echo "free_kib=$(df -Pk "$d" | awk \'NR==2 {print $4}\')"; '
     + `for t in ${REQUIRED_TOOLS.join(' ')}; do command -v "$t" >/dev/null 2>&1 || echo "missing=$t"; done; `
@@ -193,7 +115,7 @@ function parseKeyValues(stdout: string): { single: Map<string, string>; missing:
   return { single, missing };
 }
 
-/** Ask the target what it has. Refuses only when the probe could not run at all. */
+/** Ask the target what it has; refuses only when the probe could not run. */
 export async function probeGuest(runner: Runner, target: Target, home: string | undefined): Promise<GuestFacts> {
   const result = await runOn(runner, target, ['bash', '-c', guestProbeScript(home)], { timeoutMs: PROBE_TIMEOUT_MS });
   refuseIfUnrun(target, result, 'read this host');
@@ -222,7 +144,6 @@ export async function probeGuest(runner: Runner, target: Target, home: string | 
   return { home: guestHome, user, freeBytes: Number(freeKib) * 1024, missingTools: missing, server };
 }
 
-/** The tools refusal, with the command for the platform that is missing them. */
 export function refuseMissingTools(target: Target, platform: NodeJS.Platform, missing: readonly string[]): void {
   if (missing.length === 0) return;
   const command = platform === 'darwin'
@@ -276,15 +197,11 @@ export interface RuntimeInstallOptions {
   backend: ServerBackend;
   /** `<CRUCIBLE_HOME>`, as the target spells it. */
   home: string;
-  /** The runtime already there, from {@link probeGuest} — a matching digest skips the interpreter. */
-  installed: InstalledRuntime | null;
   /**
-   * An operator rollback: the EXACT older release being put back, or null.
-   *
-   * REQUIRED AND EXPLICITLY NULL rather than optional, because it is the one
-   * thing that opens the never-older gate and a caller that forgot to think
-   * about it must say so in the type. See §6.5.4.
+   * The runtime already there, from {@link probeGuest} — a matching digest skips the interpreter.
    */
+  installed: InstalledRuntime | null;
+  /** An operator rollback: the exact older release being put back, or null. */
   rollbackTo: string | null;
   timeoutMs: number;
   onLine: (line: string, stream: 'stdout' | 'stderr') => void;
@@ -299,15 +216,7 @@ export interface RuntimeInstallResult {
   ran: string[][];
 }
 
-/**
- * Put the pinned interpreter and this release's wheel at `<home>/server`.
- *
- * Idempotent in the half that costs anything: a `.crucible` stamp whose
- * `python_sha256` is the pin's, beside a `bin/python3` that exists, means the
- * interpreter step does nothing. The wheel install always runs — it IS the
- * deploy, it is one megabyte, and re-running it is how a half-finished install
- * is repaired.
- */
+/** Put the pinned interpreter and this release's wheel at `<home>/server`. */
 export async function installRuntime(
   runner: Runner,
   target: Target,
@@ -317,11 +226,6 @@ export async function installRuntime(
   const paths = runtimePaths(options.home, pin, options.release);
   const ran: string[][] = [];
 
-  // NEVER OVER A NEWER RELEASE (INSTALL-UNINSTALL.md §6.5.4). The stamp's
-  // `release=` is what this disk already holds, and writing an older tree over
-  // it is how one app's set-up button silently took another app's engine back a
-  // version. Checked BEFORE any guest command, so a refused downgrade downloads
-  // nothing and leaves nothing half-written.
   if (options.installed !== null && options.installed.release !== null
     && compareReleases(options.installed.release, options.release) > 0) {
     if (options.rollbackTo === null) {
@@ -382,10 +286,6 @@ export async function installRuntime(
           + `for ${pin.asset}. The archive was deleted; run the install again.`,
       );
     }
-    // `install_only` archives carry ONE top-level `python/` directory and that
-    // directory IS the interpreter, so the SWAP moves `python/` rather than the
-    // archive's root — everything one level deeper would put `bin/python3`
-    // where nothing looks for it.
     await run(
       'unpack-python',
       `rm -rf ${shellQuote(paths.partial)} && mkdir -p ${shellQuote(paths.partial)}`
@@ -398,8 +298,6 @@ export async function installRuntime(
     );
   }
 
-  // THE DEPLOY. Its digest comes from the release, beside the bytes, because
-  // this side pins an interpreter and never a version of our own code.
   await run(
     'fetch-wheel',
     `rm -f ${shellQuote(paths.wheel)}`
@@ -433,17 +331,6 @@ export async function installRuntime(
     );
   }
 
-  // The server is shut down before its own `site-packages` is rewritten under
-  // it. `local shutdown` is a no-op on a machine where nothing is running, and
-  // `service-install` later in the sequence is what starts it again.
-  //
-  // AND WHEN THE INSTALLED BINARY COULD NOT STOP IT, THE NEW ONE IS ASKED
-  // (fresh-install #39, 2026-09-26). This was `|| true` and nothing after it:
-  // 1.0.48's shutdown could not reach root in a guest whose interop was broken,
-  // pip wrote the new release under the still-running old server, and
-  // `local start` then refused it as `engine_version_stale`. The release just
-  // installed knows its own ways to stop the service, so it gets a second go
-  // before anything is started, and a failure there fails this step by name.
   const desktop = runner.platform === 'darwin'
     ? ` && ${shellQuote(paths.python)} -m pip install ${DESKTOP_PACKAGES.map(shellQuote).join(' ')}`
     : '';

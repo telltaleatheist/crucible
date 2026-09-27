@@ -1,21 +1,3 @@
-/**
- * `detectHost()` — what this machine can run a Crucible with, measured.
- *
- * On win32 the facts are the GUEST's, read through `wsl.exe`: the card the
- * guest's `nvidia-smi` sees, the space on its disk, the server runtime it already
- * has. On darwin and linux they are the machine's own. Every null carries a
- * named refusal in `refusals`, with the command the host must run; nothing is
- * inferred from a null.
- *
- * **There is no conda here any more** (PHASE14-ENVPACKS.md section 0). The
- * server's interpreter is downloaded from python-build-standalone and the
- * release's wheel is pip-installed into it, so the thing this file used to do,
- * walk `~/anaconda3 | ~/miniconda3 | ~/miniforge3` looking for an env named
- * `crucible` and refuse on every fresh machine, is deleted rather than kept as
- * a second path. What replaces it is `runtime.ts`'s probe: either
- * `<CRUCIBLE_HOME>/server/bin/crucible` is there or it is not, and if it is
- * not, `install()` downloads it.
- */
 import { BootstrapRefusal } from './errors.js';
 import { CRUCIBLE_DISTRO, listDistros } from './distro.js';
 import { backendFor, type ServerBackend } from './release.js';
@@ -43,48 +25,37 @@ export interface WslFacts {
 export interface GpuFacts {
   vendor: 'nvidia' | 'apple';
   name: string;
-  /** Total memory. On Apple Silicon that is the machine's unified memory. */
+  /** Total memory; unified memory on Apple Silicon. */
   vramBytes: number;
 }
 
 export interface HostFacts {
   platform: NodeJS.Platform;
-  /** The backend this host is: `cuda-linux` or `mlx-darwin`. Windows is never one. */
+  /** The backend this host is: `cuda-linux` or `mlx-darwin`. */
   backend: ServerBackend;
   /** win32 only; null elsewhere. */
   wsl: WslFacts | null;
-  /**
-   * win32 only: the first row of PHASE14 4c's table that matches this machine,
-   * with the sentence and the action. `wsl_ready` when nothing is wrong.
-   */
+  /** win32 only: the first WSL state table row that matches this machine. */
   wslState: WslState | null;
   gpu: GpuFacts | null;
   /** `<CRUCIBLE_HOME>`, the guest user, free disk, missing tools — one probe. */
   guest: GuestFacts | null;
-  /** The server runtime already installed, or null. A null is a STATE, not a refusal: `install()` fixes it. */
+  /** The server runtime already installed, or null. */
   server: InstalledRuntime | null;
-  /** One named refusal per null above, with the command that clears it. Empty when nothing is missing. */
+  /** One named refusal per null above, with the command that clears it. */
   refusals: BootstrapRefusal[];
 }
 
 export interface DetectOptions {
-  /**
-   * win32: the app's own WSL distro setting. The `crucible` distro wins over it
-   * when it exists; when neither is there, the distro wsl.exe marks default is
-   * probed and `wsl.probed` says so.
-   */
+  /** win32: the app's own WSL distro setting. */
   distro?: string;
-  /** `CRUCIBLE_HOME`, as the target spells it. Omit to let the guest resolve it. */
+  /** `CRUCIBLE_HOME`, as the target spells it. */
   home?: string;
-  /** The release the 4c network probe checks reachability of. Defaults to this package's version. */
+  /** The release the 4c network probe checks reachability of. */
   release?: string;
 }
 
-/**
- * WHICH DISTRO detectHost reads through. Not `resolveDistro()`'s strict rule:
- * this verb is how an app LEARNS what is on the machine, so it falls back to
- * nothing but it does say out loud which guest it asked.
- */
+/** Which distro `detectHost` reads through. */
 export function pickProbeDistro(listed: { distros: WslDistro[]; default: string | null }, named: string | undefined): string {
   if (listed.distros.some((entry) => entry.name === CRUCIBLE_DISTRO)) return CRUCIBLE_DISTRO;
   if (named !== undefined && named.trim() !== '') return named;
@@ -144,13 +115,12 @@ export async function detectHost(options: DetectOptions = {}, runner: Runner = p
   return { platform, backend, wsl, wslState, gpu, guest, server: guest?.server ?? null, refusals };
 }
 
-// ---------------------------------------------------------------------- GPU
+const NO_NVIDIA_SMI_EXIT = 3;
 
-/** Exit 3 = no nvidia-smi anywhere it is looked for. Anything else is nvidia-smi's own exit. */
 export const NVIDIA_SMI_SCRIPT =
   `for s in "$(command -v nvidia-smi)" ${WSL_NVIDIA_SMI}; do `
   + 'if [ -n "$s" ] && test -x "$s"; then exec "$s" --query-gpu=name,memory.total --format=csv,noheader,nounits; fi; '
-  + 'done; exit 3';
+  + `done; exit ${NO_NVIDIA_SMI_EXIT}`;
 
 async function nvidiaGpu(runner: Runner, target: Target, refusals: BootstrapRefusal[]): Promise<GpuFacts | null> {
   const result = await runOn(runner, target, ['bash', '-c', NVIDIA_SMI_SCRIPT], { timeoutMs: PROBE_TIMEOUT_MS });
@@ -159,7 +129,7 @@ async function nvidiaGpu(runner: Runner, target: Target, refusals: BootstrapRefu
   const driverCommand = target.kind === 'wsl'
     ? 'Install the NVIDIA Windows driver (GeForce/Studio, R470 or newer) from https://www.nvidia.com/drivers — WSL2 receives CUDA through it. Do NOT install a driver inside the distro.'
     : 'Install the NVIDIA driver for this Linux host (Ubuntu: sudo ubuntu-drivers install), then reboot.';
-  if (result.code === 3) {
+  if (result.code === NO_NVIDIA_SMI_EXIT) {
     refusals.push(new BootstrapRefusal(
       'no_nvidia_driver',
       `no nvidia-smi inside ${where}: looked on PATH and at ${WSL_NVIDIA_SMI}.`,
@@ -224,7 +194,7 @@ async function appleGpu(runner: Runner, target: Target, refusals: BootstrapRefus
   return { vendor: 'apple', name: chip, vramBytes: Number(memsize) };
 }
 
-/** The `crucible` console script beside an interpreter. Guest-spelled: always `/`. */
+/** The `crucible` console script beside an interpreter. */
 export function consoleScriptBeside(pythonPath: string): string {
   const slash = pythonPath.lastIndexOf('/');
   if (slash < 0) throw new Error(`not an absolute interpreter path: ${pythonPath}`);
