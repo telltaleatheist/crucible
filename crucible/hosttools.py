@@ -69,7 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .errors import CrucibleError
+from .errors import ApiError, CrucibleError
 
 PATH_ENV = "PATH"
 
@@ -244,6 +244,40 @@ def which(tool: str) -> str | None:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return shutil.which(tool, path=os.pathsep.join(_searched_entries(search_path())))
+
+
+def ffmpeg_path() -> str | None:
+    """Where ffmpeg is on this host, or None.
+
+    The one probe every job type asks, module-level so a test replaces it once
+    and asserts on the refusal rather than on whatever the machine running the
+    suite has installed.
+    """
+    return which("ffmpeg")
+
+
+def ffprobe_path() -> str | None:
+    """Where ffprobe is on this host, or None. `ffmpeg_path`'s twin."""
+    return which("ffprobe")
+
+
+def require_ffmpeg(job_type: str, why: str) -> str:
+    """ffmpeg's path, or `409 ffmpeg_missing` before the job is queued.
+
+    `why` finishes the sentence "there is no ffmpeg on this server's PATH, and
+    <job_type> ..." with what the type does through it, so a host without
+    ffmpeg refuses every type by the same name and each says its own reason.
+    """
+    found = ffmpeg_path()
+    if found is None:
+        raise ApiError(
+            409,
+            "ffmpeg_missing",
+            f"there is no ffmpeg on this server's PATH, and {job_type} {why} "
+            + searched_note(),
+            {"path": search_path()},
+        )
+    return found
 
 
 def worker_path(inherited: str) -> str:

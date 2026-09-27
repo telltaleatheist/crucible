@@ -137,9 +137,7 @@ from ...asrmodels import (
     QWEN_PIECE_MAX_SECONDS,
     AsrManifest,
     AsrManifestError,
-    RENAMED_ASR_IDS,
     load_all_asr_manifests,
-    retired_asr_id_note,
 )
 from ...config import Config
 from ...errors import ApiError, JobError
@@ -148,8 +146,10 @@ from ...errors import ApiError, JobError
 from ...manifests import fingerprint
 from ..align import QWEN3_LANGUAGES
 from ...journal import Identity
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from . import qwen, speechonly
+from .document import progress_decoding, transcript_document, worker_failed
 
 __all__ = ["AsrJobType", "AsrParams"]
 
@@ -601,36 +601,6 @@ class AsrParams(BaseModel):
 # ------------------------------------------------------------------ helpers
 
 
-def adopt_renamed_asr_weights(config: Config) -> list[str]:
-    """Move weights pulled under a RENAMED asr id into the new id's folder.
-
-    Run once per server start, before anything is served (`crucible serve`).
-    Owen's lineup ruling of 2026-09-24 renamed four ids (`RENAMED_ASR_IDS`) and
-    the store is laid out by id, so without this a Mac that had pulled
-    `mlx-whisper-large-v3-turbo` would read `whisper-large-v3-turbo` as not
-    installed and download the same 1.6 GB again beside the old copy. The
-    store moves a directory only when its stamp names the new block's exact
-    pin (`weights.adopt_renamed`), so this never puts different bytes under an
-    id. Idempotent: once moved there is nothing under the old id to find.
-
-    A rename whose target this build does not ship is a defect in THIS build,
-    not weather, and is refused by name.
-    """
-    manifests = load_all_asr_manifests()
-    lines: list[str] = []
-    for old_id, new_id in sorted(RENAMED_ASR_IDS.items()):
-        manifest = manifests.get(new_id)
-        if manifest is None:
-            raise AsrManifestError(
-                f"RENAMED_ASR_IDS maps {old_id!r} to {new_id!r}, and this build "
-                f"ships no such asr manifest (it ships {sorted(manifests)})"
-            )
-        lines.extend(
-            weights.adopt_renamed(config, old_id, manifest, manifest.backends)
-        )
-    return lines
-
-
 def _manifests() -> dict[str, AsrManifest]:
     try:
         return load_all_asr_manifests()
@@ -646,15 +616,11 @@ def _known(model_id: str) -> AsrManifest:
     manifests = _manifests()
     manifest = manifests.get(model_id)
     if manifest is None:
-        # A removed id is refused like any other unknown id — it is NOT an
-        # alias (Owen, 2026-09-24) — and the sentence says what replaced it,
-        # so a client reading the refusal can fix its call in one edit.
-        note = retired_asr_id_note(model_id)
         raise ApiError(
             400,
             "unknown_model",
             f"no ASR manifest for model {model_id!r}; this build ships "
-            f"{sorted(manifests)}" + ("" if note is None else f". {note}"),
+            f"{sorted(manifests)}",
             {"model": model_id, "offered": sorted(manifests)},
         )
     return manifest
@@ -724,18 +690,6 @@ def _python_for(config: Config, engine: str, backend_kind: str, model_id: str) -
         ) from None
 
 
-def ffmpeg_path() -> str | None:
-    """Where ffmpeg is on this host, or None.
-
-    A module-level probe, for the reason `crucible/accelerator.py` gives about
-    its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite. The
-    search itself goes through `crucible/hosttools.py`, which is the one owner of
-    *which PATH was searched* — the fact every refusal below has to name.
-    """
-    return hosttools.which("ffmpeg")
-
-
 def _require_ffmpeg() -> str:
     """ffmpeg's path, or a refusal by name before the job is queued.
 
@@ -745,18 +699,12 @@ def _require_ffmpeg() -> str:
     host that should be a 409 at submit time rather than a job that dies a minute
     in.
     """
-    found = ffmpeg_path()
-    if found is None:
-        raise ApiError(
-            409,
-            "ffmpeg_missing",
-            "there is no ffmpeg on this server's PATH, and asr decodes every input "
-            "through it — faster-whisper's own PyAV decoder silently truncates some "
-            "m4b files, which ends a transcript hours early with no error. "
-            + hosttools.searched_note(),
-            {"path": hosttools.search_path()},
-        )
-    return found
+    return hosttools.require_ffmpeg(
+        "asr",
+        "decodes every input through it — faster-whisper's own PyAV decoder "
+        "silently truncates some m4b files, which ends a transcript hours early "
+        "with no error.",
+    )
 
 
 # ------------------------------------------------------------------ job type
@@ -817,15 +765,6 @@ class AsrJobType:
                 )
             )
         return rows
-
-    def retired_model_note(self, model: str) -> str | None:
-        """What replaced an asr id this build removed, for `unknown_model`.
-
-        Read by `jobs.resolve_model` when a request names an id this type does
-        not serve. Never resolves anything: the old ids are not aliases (Owen,
-        2026-09-24), and a request naming one is refused either way.
-        """
-        return retired_asr_id_note(model)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         """The `model` block of a transcript's provenance sidecar.
@@ -888,7 +827,7 @@ class AsrJobType:
         envs transcribes with `qwen3-asr-1.7b`. Each env's own detail is kept,
         so a reader learns which one is missing.
         """
-        if ffmpeg_path() is None:
+        if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
                 detail="there is no ffmpeg on PATH, and asr decodes every input "
@@ -927,21 +866,10 @@ class AsrJobType:
 
     def _spec_for(self, model_id: str) -> tuple[AsrManifest, Any]:
         """The manifest and this host's block, or `backend_unsupported` by name."""
-        backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"ASR model {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        return manifest, manifest.spec(backend_kind)
+        return manifest, worker_type.require_block(
+            manifest, model_id, self._backend.kind, "ASR model"
+        )
 
     def _require_runnable(
         self, model_id: str, params: AsrParams
@@ -956,21 +884,20 @@ class AsrJobType:
         """
         backend_kind = self._backend.kind
         manifest, spec = self._spec_for(model_id)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
+        worker_type.refuse_if_larger_than_host(
+            self._backend,
+            model_id,
             # The LEAST it can run in: one piece at a time for a Qwen3-ASR
             # model with a width ladder (Owen, 2026-09-26: "yes, fewer at once
             # before quantizing for asr too"), so "never on this host" is not
             # said about a card that fewer pieces at once would fit.
-            need_bytes=(
+            (
                 qwen.floor_bytes(
                     manifest, spec, backend_kind, with_aligner=params.word_timestamps
                 )
                 if spec.engine in QWEN_ASR_ENGINES
                 else spec.memory_bytes_estimate
             ),
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
         )
         # What no precision works around: vLLM measured not starting on this
         # card (fresh-install #48). A card merely without bf16 runs Qwen3-ASR
@@ -981,19 +908,11 @@ class AsrJobType:
             card=ladder.card_for(self._config.home, self._backend.gpu),
         )
         python = _python_for(self._config, spec.engine, backend_kind, model_id)
-        try:
-            installed = weights.require_installed(self._config, manifest, spec)
-        except weights.WeightsError as exc:
-            raise ApiError(
-                409,
-                "model_not_installed",
-                str(exc),
-                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-            ) from None
+        weights_dir = worker_type.require_weights(self._config, manifest, spec, model_id)
         aligner = None
         if spec.engine in QWEN_ASR_ENGINES and params.word_timestamps:
             aligner = qwen.plan_aligner(self._config, spec, backend_kind)
-        return manifest, spec, python, installed.path, aligner
+        return manifest, spec, python, weights_dir, aligner
 
     def _need_bytes(self, manifest: Any, spec: Any, params: AsrParams) -> int:
         """What THIS job needs: the aligner is on the card only with timestamps,
@@ -1231,19 +1150,7 @@ class AsrJobType:
         ctx.warming(state.detail)
         speech = params.speech_settings(self._speech_detector(ctx, params))
 
-        # Zeros rather than absent fields: every `stage` line carries the same
-        # three numbers, so a consumer reads one shape and never has to ask
-        # whether this particular event happens to have them. A `total_s` of 0
-        # is what "the container has not been probed yet" looks like, and it is
-        # what BookForge's own decode line reports before ffprobe answers.
-        ctx.progress(
-            0.0,
-            f"decoding {audio.name}",
-            stage="decoding",
-            processed_s=0.0,
-            total_s=0.0,
-            cues=0,
-        )
+        progress_decoding(ctx, f"decoding {audio.name}")
 
         if spec.engine in QWEN_ASR_ENGINES:
             document = qwen.QwenAsrRun(
@@ -1308,10 +1215,8 @@ class AsrJobType:
         )
 
         windows = outcome.ready["windows"]
-        try:
+        with worker_failed():
             results = workers.require_positional_results(outcome, windows, "window")
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
 
         failures = [
             f"window {index} ({index * WINDOW_SECONDS}s): {result['error']}"
@@ -1435,7 +1340,7 @@ class AsrJobType:
                 cues=message["cues"],
             )
 
-        try:
+        with worker_failed():
             return workers.run_worker(
                 python=python,
                 script=_for_engine(
@@ -1456,8 +1361,6 @@ class AsrJobType:
                 on_progress=on_progress,
                 cancelled=lambda: ctx.cancelled,
             )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
 
     # ----------------------------------------------------------- transcript
 
@@ -1484,7 +1387,8 @@ class AsrJobType:
         region holding its middle, so no word is stretched across removed
         audio.
         """
-        timeline = _timeline(outcome.ready, speech)
+        with worker_failed(ValueError):
+            timeline = speechonly.timeline_for(outcome.ready, speech)
         segments: list[dict[str, Any]] = []
         for index, result in enumerate(results):
             offset = index * float(WINDOW_SECONDS)
@@ -1516,8 +1420,7 @@ class AsrJobType:
             ):
                 continue
             deduplicated.append(segment)
-        if timeline is not None:
-            deduplicated = [_to_source(segment, timeline) for segment in deduplicated]
+        deduplicated = [speechonly.to_source(segment, timeline) for segment in deduplicated]
 
         # Every window detects the language independently when none was given.
         # The first window's answer is the document's, because that is the one
@@ -1525,50 +1428,26 @@ class AsrJobType:
         # answer on any real book and the disagreement is not something Crucible
         # is in a position to adjudicate.
         first = results[0]
-        return {
-            "model": model,
-            "revision": spec.revision,
-            "hf_repo": spec.hf_repo,
-            "language": first["language"],
-            "language_probability": first["language_probability"],
-            "language_requested": params.language,
-            "vad_filter": params.vad_filter,
-            "word_timestamps": params.word_timestamps,
+        return transcript_document(
+            model=model,
+            spec=spec,
+            engine={},
+            language=first["language"],
+            language_probability=first["language_probability"],
+            language_requested=params.language,
+            vad_filter=params.vad_filter,
+            word_timestamps=params.word_timestamps,
             # null when none was sent, so the document names the rule it was
             # made under whichever way the client spelled "no prompt".
-            "initial_prompt": params.initial_prompt,
-            "duration_s": outcome.ready["duration_s"],
-            "window_s": WINDOW_SECONDS,
-            "overlap_s": OVERLAP_SECONDS,
-            "windows": outcome.ready["windows"],
-            **speechonly.report(speech, timeline),
-            "segments": deduplicated,
-        }
-
-
-# ------------------------------------------------------------ speech only
-
-
-def _timeline(
-    ready: dict[str, Any], speech: dict[str, Any] | None
-) -> speechonly.Timeline | None:
-    """The worker's `kept` table as a timeline, or None when speech_only is off."""
-    if speech is None:
-        return None
-    try:
-        return speechonly.Timeline.from_ready(ready)
-    except ValueError as exc:
-        raise JobError("worker_failed", str(exc)) from None
-
-
-def _to_source(segment: dict[str, Any], timeline: speechonly.Timeline) -> dict[str, Any]:
-    """One segment, and its words, from the shortened timeline to the source's."""
-    moved = dict(segment)
-    moved["start"], moved["end"] = timeline.span(segment["start"], segment["end"])
-    if "words" in segment:
-        words = []
-        for word in segment["words"]:
-            start, end = timeline.word(word["start"], word["end"])
-            words.append({**word, "start": start, "end": end})
-        moved["words"] = words
-    return moved
+            initial_prompt=params.initial_prompt,
+            prompt={},
+            duration_s=outcome.ready["duration_s"],
+            layout={
+                "window_s": WINDOW_SECONDS,
+                "overlap_s": OVERLAP_SECONDS,
+                "windows": outcome.ready["windows"],
+            },
+            speech=speech,
+            timeline=timeline,
+            segments=deduplicated,
+        )

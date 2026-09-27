@@ -72,11 +72,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ... import accelerator, hosttools, jobenv, weights, workers
+from ... import accelerator, hosttools, weights, workers
 from ...alignmodels import (
     AlignBackendSpec,
     AlignManifest,
@@ -93,6 +93,7 @@ from ...residency import (
     Residency,
     describe_resident,
 )
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = ["AlignJobType", "AlignParams", "UnloadAlignerJobType"]
@@ -160,6 +161,57 @@ def device_for(backend_kind: str) -> str:
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
 
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
+
+
+def start_aligner_session(
+    python: Path,
+    weights_dir: Path,
+    spec: AlignBackendSpec,
+    log_path: Path,
+    *,
+    ready_silence_timeout: float,
+    on_ready: Callable[[dict[str, Any]], None] | None = None,
+    on_progress: Callable[[dict[str, Any]], None] | None = None,
+) -> workers.WorkerSession:
+    """Spawn the align worker and load `spec`'s checkpoint: the session's first
+    exchange, for every caller (the resident aligner, asr's word times,
+    align-longform's stage 3).
+
+    The device is this backend's (`device_for`), the dtype the manifest's, and
+    the CUDA cap the block's admitted share (`workers.torch_memory_cap`), so the
+    aligner can sit beside vLLM. A load that answers with results is not
+    trusted: the worker is stopped and the start refused.
+    """
+    session = workers.WorkerSession(
+        python=python,
+        script=WORKER_SCRIPT,
+        log_path=log_path,
+        environment={
+            **workers.worker_environment(python.parent.parent),
+            **workers.torch_allocator_environment(spec.backend),
+        },
+    )
+    outcome = session.start(
+        {
+            "op": "load",
+            "model_dir": str(weights_dir),
+            "device": device_for(spec.backend),
+            "dtype": spec.dtype,
+            "memory_cap_bytes": workers.torch_memory_cap(
+                spec.backend, spec.memory_bytes_estimate
+            ),
+        },
+        ready_silence_timeout=ready_silence_timeout,
+        on_ready=on_ready,
+        on_progress=on_progress,
+    )
+    if outcome.results:
+        session.stop()
+        raise workers.WorkerError(
+            f"{WORKER_SCRIPT.name} answered a load request with "
+            f"{len(outcome.results)} result(s); a load produces none"
+        )
+    return session
 
 
 class AlignChunk(BaseModel):
@@ -260,31 +312,13 @@ def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> An
         ) from None
 
 
-def ffmpeg_path() -> str | None:
-    """Where ffmpeg is on this host, or None.
-
-    A module-level probe, for the reason `crucible/accelerator.py` gives about
-    its own: a test replaces it and asserts on the refusal, instead of asserting
-    on whatever happens to be installed on the machine running the suite. The
-    search goes through `crucible/hosttools.py`, the one owner of *which PATH
-    was searched* — which is what the refusals below have to name.
-    """
-    return hosttools.which("ffmpeg")
-
-
 def _require_ffmpeg() -> str:
-    found = ffmpeg_path()
-    if found is None:
-        raise ApiError(
-            409,
-            "ffmpeg_missing",
-            "there is no ffmpeg on this server's PATH, and align decodes every "
-            "chunk through it to 16 kHz mono float32 — the rate the model's "
-            "feature extractor was trained at, which is why it is not something a "
-            "client is asked to do. " + hosttools.searched_note(),
-            {"path": hosttools.search_path()},
-        )
-    return found
+    return hosttools.require_ffmpeg(
+        "align",
+        "decodes every chunk through it to 16 kHz mono float32 — the rate the "
+        "model's feature extractor was trained at, which is why it is not "
+        "something a client is asked to do.",
+    )
 
 
 def _align_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
@@ -378,15 +412,10 @@ class AlignJobType:
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
 
     def check(self, backend: Any) -> JobTypeStatus:
-        try:
-            env = jobenv.env_status(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend.kind), backend.kind
-            )
-        except jobenv.EnvError as exc:
-            return JobTypeStatus(ready=False, detail=str(exc))
-        if not env.installed:
-            return JobTypeStatus(ready=False, detail=env.detail)
-        if ffmpeg_path() is None:
+        env = worker_type.env_or_status(self._config, JOB_TYPE, backend.kind)
+        if isinstance(env, JobTypeStatus):
+            return env
+        if hosttools.ffmpeg_path() is None:
             return JobTypeStatus(
                 ready=False,
                 detail=f"{env.detail}; but there is no ffmpeg on PATH, and align "
@@ -396,13 +425,9 @@ class AlignJobType:
             manifests = _manifests()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
-        installed = [
-            manifest.id
-            for manifest in manifests.values()
-            if manifest.supports(backend.kind)
-            and weights.installed(self._config, manifest, manifest.spec(backend.kind))
-            is not None
-        ]
+        installed = worker_type.installed_ids(
+            self._config, manifests.values(), backend.kind
+        )
         if not installed:
             return JobTypeStatus(
                 ready=False,
@@ -426,49 +451,16 @@ class AlignJobType:
         """
         backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"aligner {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        spec = manifest.spec(backend_kind)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
-            need_bytes=spec.memory_bytes_estimate,
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
+        spec = worker_type.require_block(manifest, model_id, backend_kind, "aligner")
+        worker_type.refuse_if_larger_than_host(
+            self._backend, model_id, spec.memory_bytes_estimate
         )
-        try:
-            python = jobenv.require_env(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend_kind), backend_kind
-            )
-        except jobenv.EnvError as exc:
-            raise ApiError(
-                409,
-                "env_missing",
-                f"cannot run {model_id!r}: {exc}",
-                {
-                    "model": model_id,
-                    "env": str(self._config.home / "envs" / JOB_TYPE),
-                },
-            ) from None
-        try:
-            installed = weights.require_installed(self._config, manifest, spec)
-        except weights.WeightsError as exc:
-            raise ApiError(
-                409,
-                "model_not_installed",
-                str(exc),
-                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-            ) from None
-        return manifest, spec, python, installed.path
+        python = worker_type.require_worker_python(
+            self._config, JOB_TYPE, backend_kind, model_id
+        )
+        return manifest, spec, python, worker_type.require_weights(
+            self._config, manifest, spec, model_id
+        )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one
@@ -734,9 +726,6 @@ class AlignJobType:
                 spec,
                 weights_dir,
                 python,
-                WORKER_SCRIPT,
-                device=device_for(self._config.backend_kind),
-                dtype=spec.dtype,
                 max_audio_s=QWEN3_MAX_AUDIO_S,
                 timeout=DEFAULT_READY_TIMEOUT_SECONDS,
                 on_progress=ctx.warming,

@@ -97,34 +97,25 @@ from __future__ import annotations
 import os
 import sys
 
-# ---- fd 1 is results, stderr is everything else. Before any other import. ----
-_RESULTS_FD = os.dup(1)
-os.dup2(2, 1)
-_RESULTS = os.fdopen(_RESULTS_FD, "w", encoding="utf-8", buffering=1)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import workerio  # noqa: E402
+
+sys.path.pop(0)
+workerio.claim_stdout()
 
 import json  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+
+from workerio import cap_memory, fail, memory_line, send  # noqa: E402
 
 #: The loaded separator and the model instance whose `output_dir` each request
 #: re-points. A dict and not bare names so the load op can be idempotent about
 #: saying what is loaded, exactly as the aligner's `_STATE` is.
 _STATE: dict = {"separator": None, "model_instance": None, "model_filename": None}
 
-
-#: `send` is called from the heartbeat thread as well as the main one, and two
-#: writes interleaved on one line would be a line the server cannot parse.
-_SEND_LOCK = threading.Lock()
-
 #: Seconds between "still separating" frames (`_Heartbeat`).
 HEARTBEAT_SECONDS = 30.0
-
-
-def send(message_type: str, **fields: object) -> None:
-    """One JSON object, one line, flushed, on the real fd 1."""
-    with _SEND_LOCK:
-        _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
-        _RESULTS.flush()
 
 
 class _Heartbeat:
@@ -164,70 +155,9 @@ class _Heartbeat:
             )
 
 
-def fail(message: str) -> None:
-    send("failed", message=message)
-
-
 def require(request: dict, key: str, kind):
     """One required key, or a refusal naming it. Every key is required."""
-    if key not in request:
-        raise KeyError(f"the denoise request has no {key!r}; every key is required")
-    value = request[key]
-    kinds = kind if isinstance(kind, tuple) else (kind,)
-    wrong = not isinstance(value, kinds) or (
-        isinstance(value, bool) and bool not in kinds
-    )
-    if wrong:
-        raise KeyError(
-            f"the denoise request's {key!r} must be "
-            f"{'/'.join(k.__name__ for k in kinds)}, got {type(value).__name__}"
-        )
-    return value
-
-
-# --------------------------------------------------------- the torch allocator
-#
-# Crucible's `workers` note has the measurement. On CUDA the server spawns this
-# worker with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and sends its
-# admitted share as `memory_cap_bytes`. This worker is held across inputs of
-# different lengths, which is how a caching allocator strands blocks until the
-# card spills into system memory.
-
-
-def cap_memory(torch, memory_cap_bytes):
-    """Cap this process's CUDA reservation at its admitted share, before any weights.
-
-    `None` is not CUDA (the server sends a cap only there), so nothing is set.
-    Past the cap the allocator frees its cache and retries; a true overrun is an
-    OOM naming the fraction, in this job's report, not a card paging the host.
-    """
-    if memory_cap_bytes is None:
-        return None
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            f"a CUDA memory cap of {memory_cap_bytes} bytes was sent and this "
-            "process sees no CUDA device"
-        )
-    total = torch.cuda.get_device_properties(0).total_memory
-    fraction = min(1.0, memory_cap_bytes / total)
-    torch.cuda.set_per_process_memory_fraction(fraction, 0)
-    return fraction
-
-
-def memory_line(torch, label):
-    """allocated / peak / reserved on CUDA to the engine log, then a fresh peak."""
-    if not torch.cuda.is_available():
-        return
-    gib = 1024 ** 3
-    print(
-        f"crucible memory {label}: allocated "
-        f"{torch.cuda.memory_allocated(0) / gib:.2f} GiB, peak "
-        f"{torch.cuda.max_memory_allocated(0) / gib:.2f} GiB, reserved "
-        f"{torch.cuda.memory_reserved(0) / gib:.2f} GiB",
-        file=sys.stderr,
-        flush=True,
-    )
-    torch.cuda.reset_peak_memory_stats(0)
+    return workerio.require(request, key, kind, "denoise", "every key is required")
 
 
 # -------------------------------------------------------------------- loading

@@ -26,7 +26,7 @@ RATE = worker.SAMPLE_RATE
 def wire(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     """The worker's fd 1, as a buffer a test can read."""
     buffer = io.StringIO()
-    monkeypatch.setattr(worker, "_RESULTS", buffer)
+    monkeypatch.setattr(worker.workerio, "_RESULTS", buffer)
     return buffer
 
 

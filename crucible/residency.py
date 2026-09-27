@@ -1392,10 +1392,7 @@ class Residency:
         spec: AlignBackendSpec,
         weights_dir: Path,
         python: Path,
-        script: Path,
         *,
-        device: str,
-        dtype: str,
         max_audio_s: float,
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
@@ -1410,6 +1407,8 @@ class Residency:
         same bar `engine.ready()` sets for vLLM, met the way this worker can meet
         it.
         """
+        from .jobs.align import device_for, start_aligner_session
+
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
         self.refuse_if_stopping(f"load {manifest.id}")
 
@@ -1420,31 +1419,19 @@ class Residency:
         self._evict(say, manifest.id)
 
         log_path = engine_log_path(self._config.home, manifest.id)
-        # A plain-torch worker held across windows of different lengths: the
-        # allocator setting and its admitted share (`workers`'s note says why).
-        session = WorkerSession(
-            python=python,
-            script=script,
-            log_path=log_path,
-            environment=torch_allocator_environment(spec.backend),
-        )
-
+        device = device_for(spec.backend)
+        dtype = spec.dtype
         self.begin_warming(manifest.id)
         say(
             f"loading {manifest.id} ({spec.engine}) on {device} at {dtype}; "
             f"log {log_path}"
         )
         try:
-            outcome = session.start(
-                {
-                    "op": "load",
-                    "model_dir": str(weights_dir),
-                    "device": device,
-                    "dtype": dtype,
-                    "memory_cap_bytes": torch_memory_cap(
-                        spec.backend, spec.memory_bytes_estimate
-                    ),
-                },
+            session = start_aligner_session(
+                python,
+                weights_dir,
+                spec,
+                log_path,
                 ready_silence_timeout=timeout,
                 on_ready=lambda message: say(
                     f"{manifest.id} loaded in {message['seconds']:.1f}s on "
@@ -1454,15 +1441,6 @@ class Residency:
             )
         finally:
             self.end_warming()
-        if outcome.results:
-            # `start` already stopped nothing — the worker is alive and holding
-            # the card — so this refuses loudly rather than letting a worker that
-            # answered a load with chunk results go on to answer a book.
-            session.stop()
-            raise WorkerError(
-                f"{script.name} answered a load request with "
-                f"{len(outcome.results)} result(s); a load produces none"
-            )
 
         self._session = session
         self._resident = ResidentAligner(

@@ -12,8 +12,7 @@
 # to know which machine it was talking to before it could name a transcriber.
 # Owen's ruling of that day made it one id with a block per backend, the shape
 # `qwen3-asr-1.7b` and every `models/<id>.toml` already have. The old ids are
-# GONE, not aliases: a request naming one is `unknown_model`, and the message
-# names this id (`crucible/asrmodels.py`, RENAMED_ASR_IDS).
+# GONE, not aliases: a request naming one is `unknown_model`.
 #
 # The two blocks are STILL different bytes, and that has not stopped being
 # true: faster-whisper is CTranslate2, which has no Metal backend, and

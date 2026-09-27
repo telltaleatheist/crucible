@@ -95,7 +95,7 @@ from pydantic import (
     model_validator,
 )
 
-from ... import accelerator, hosttools, jobenv, rvcbase, weights, workers
+from ... import accelerator, hosttools, rvcbase, weights, workers
 from ...config import Config
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
@@ -105,6 +105,7 @@ from ...rvcmodels import (
     RvcManifestError,
     load_all_rvc_manifests,
 )
+from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
 __all__ = ["RvcJobType", "RvcParams", "rvc_base_dir"]
@@ -209,20 +210,14 @@ def rvc_base_dir(config: Config) -> Path:
     return rvcbase.base_root(config)
 
 
-#: The two programs urvc calls by itself: `_add_ffmpeg_paths` in its
-#: `core/generate/common.py` wants BOTH on PATH, and without them reaches for
-#: `static_ffmpeg`, which the recipe no longer carries (#25, 2026-09-26).
-FFMPEG_TOOLS: tuple[str, ...] = ("ffmpeg", "ffprobe")
-
-
 def ffmpeg_paths() -> dict[str, str | None]:
     """Where ffmpeg and ffprobe are on this host, each or None.
 
-    A module-level probe, for the reason `jobs/asr/__init__.py` gives about its
-    own: a test replaces it. The search is `hosttools`', which looks in
-    Crucible's own `tools/bin` first and is the one owner of what was searched.
+    The two programs urvc calls by itself: `_add_ffmpeg_paths` in its
+    `core/generate/common.py` wants BOTH on PATH, and without them reaches for
+    `static_ffmpeg`, which the recipe no longer carries (#25, 2026-09-26).
     """
-    return {tool: hosttools.which(tool) for tool in FFMPEG_TOOLS}
+    return {"ffmpeg": hosttools.ffmpeg_path(), "ffprobe": hosttools.ffprobe_path()}
 
 
 def _require_ffmpeg() -> dict[str, str]:
@@ -557,14 +552,9 @@ class RvcJobType:
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
 
     def check(self, backend: Any) -> JobTypeStatus:
-        try:
-            env = jobenv.env_status(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend.kind), backend.kind
-            )
-        except jobenv.EnvError as exc:
-            return JobTypeStatus(ready=False, detail=str(exc))
-        if not env.installed:
-            return JobTypeStatus(ready=False, detail=env.detail)
+        env = worker_type.env_or_status(self._config, JOB_TYPE, backend.kind)
+        if isinstance(env, JobTypeStatus):
+            return env
         absent_tools = [tool for tool, path in ffmpeg_paths().items() if path is None]
         if absent_tools:
             return JobTypeStatus(
@@ -592,13 +582,9 @@ class RvcJobType:
             manifests = _manifests()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
-        installed = [
-            manifest.id
-            for manifest in manifests.values()
-            if manifest.supports(backend.kind)
-            and weights.installed(self._config, manifest, manifest.spec(backend.kind))
-            is not None
-        ]
+        installed = worker_type.installed_ids(
+            self._config, manifests.values(), backend.kind
+        )
         if not installed:
             # A NOTE IN `crucible doctor`, NOT A PROBLEM (2026-09-26, #40, as
             # denoise does): the env, the tools and the base assets are all
@@ -626,49 +612,16 @@ class RvcJobType:
         """
         backend_kind = self._backend.kind
         manifest = _known(model_id)
-        if not manifest.supports(backend_kind):
-            raise ApiError(
-                400,
-                "backend_unsupported",
-                f"RVC model {model_id!r} has no {backend_kind} block; "
-                f"{manifest.path.name} declares {sorted(manifest.backends)}",
-                {
-                    "model": model_id,
-                    "backend": backend_kind,
-                    "declared": sorted(manifest.backends),
-                },
-            )
-        spec = manifest.spec(backend_kind)
-        accelerator.refuse_if_larger_than_host(
-            model_id=model_id,
-            need_bytes=spec.memory_bytes_estimate,
-            host_total_bytes=self._backend.gpu.vram_bytes,
-            host_name=self._backend.gpu.name,
+        spec = worker_type.require_block(manifest, model_id, backend_kind, "RVC model")
+        worker_type.refuse_if_larger_than_host(
+            self._backend, model_id, spec.memory_bytes_estimate
         )
-        try:
-            python = jobenv.require_env(
-                self._config.home, jobenv.worker_env(JOB_TYPE, backend_kind), backend_kind
-            )
-        except jobenv.EnvError as exc:
-            raise ApiError(
-                409,
-                "env_missing",
-                f"cannot run {model_id!r}: {exc}",
-                {
-                    "model": model_id,
-                    "env": str(self._config.home / "envs" / JOB_TYPE),
-                },
-            ) from None
-        try:
-            installed = weights.require_installed(self._config, manifest, spec)
-        except weights.WeightsError as exc:
-            raise ApiError(
-                409,
-                "model_not_installed",
-                str(exc),
-                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-            ) from None
-        return manifest, spec, python, installed.path
+        python = worker_type.require_worker_python(
+            self._config, JOB_TYPE, backend_kind, model_id
+        )
+        return manifest, spec, python, worker_type.require_weights(
+            self._config, manifest, spec, model_id
+        )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         if model is None:  # unreachable: resolve_model requires one

@@ -596,6 +596,38 @@ class Timeline:
         return sum(last - first for first, last in self.kept) / float(SAMPLE_RATE)
 
 
+def timeline_for(ready: dict, speech) -> "Timeline | None":
+    """The worker's `kept` table as a timeline, or None when speech_only was
+    off. ValueError when it was on and the worker reported no table."""
+    if speech is None:
+        return None
+    return Timeline.from_ready(ready)
+
+
+def span(timeline, start: float, end: float) -> tuple:
+    """A stretch in source seconds (`Timeline.span`); unchanged with no timeline."""
+    if timeline is None:
+        return start, end
+    return timeline.span(start, end)
+
+
+def to_source(segment: dict, timeline) -> dict:
+    """One segment, and its words, from the shortened timeline to the source's:
+    the segment end by end, each word into the region holding its middle.
+    The segment itself when there is no timeline."""
+    if timeline is None:
+        return segment
+    moved = dict(segment)
+    moved["start"], moved["end"] = timeline.span(segment["start"], segment["end"])
+    if "words" in segment:
+        words = []
+        for word in segment["words"]:
+            start, end = timeline.word(word["start"], word["end"])
+            words.append({**word, "start": start, "end": end})
+        moved["words"] = words
+    return moved
+
+
 def report(speech, timeline) -> dict:
     """`speech_only`, `speech` and `removed`: three keys every transcript has.
 

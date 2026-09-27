@@ -809,10 +809,10 @@ def test_a_render_with_no_ffmpeg_is_refused_before_it_is_queued(
     all encode a real FLAC and are skipped on a machine with no ffmpeg — and a
     machine with no ffmpeg is exactly where this refusal has to be right.
     """
-    from crucible.jobs import asr as asr_jobs
+    from crucible import hosttools
 
     fake_weights("deathstalker")
-    monkeypatch.setattr(asr_jobs, "ffmpeg_path", lambda: None)
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: None)
     response = submit(
         tts_client,
         auth,

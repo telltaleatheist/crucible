@@ -11,8 +11,7 @@
 # Until 2026-09-24 this model was two ids, `faster-whisper-tiny` (cuda-linux)
 # and `mlx-whisper-tiny` (mlx-darwin). Owen's ruling of that day made it one id
 # with a block per backend; the old ids are GONE, not aliases, and a request
-# naming one is `unknown_model` with this id in the message
-# (`crucible/asrmodels.py`, RENAMED_ASR_IDS). The two blocks are still
+# naming one is `unknown_model`. The two blocks are still
 # different bytes — CTranslate2 has no Metal backend, so the Mac reads
 # `mlx-community`'s own conversion — and a transcript's provenance sidecar
 # names the backend, engine, repo and revision that produced it;

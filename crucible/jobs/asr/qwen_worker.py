@@ -98,37 +98,20 @@ tidy away.
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import sys
-import threading
-import time
-import wave
 
-#: fd 1, once `claim_stdout` has moved it out of every library's reach.
-_RESULTS = None
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import workerio  # noqa: E402
 
+sys.path.pop(0)
 
-def claim_stdout() -> None:
-    """fd 1 is results, stderr is everything else — before any engine import.
+import json  # noqa: E402
+import time  # noqa: E402
+import wave  # noqa: E402
 
-    The first thing `main` does. vLLM logs to stdout through its own handler at
-    import time and tqdm writes progress bars; either would land in the middle
-    of a JSON line otherwise. It is a function rather than module-level code
-    (the other workers' form) only so the pure parts of this file can be
-    imported by a test without taking the test runner's stdout: nothing above
-    it imports anything that prints, and `vllm` and `mlx_audio` are imported
-    only inside the `load` op, long after `main` has called this.
-    """
-    global _RESULTS
-    results_fd = os.dup(1)
-    os.dup2(2, 1)
-    _RESULTS = os.fdopen(results_fd, "w", encoding="utf-8", buffering=1)
+from workerio import SAMPLE_RATE, decode, fail, send  # noqa: E402
 
-#: Both models work at 16 kHz mono. Not a parameter: it is the rate the feature
-#: extractor was trained at.
-SAMPLE_RATE = 16_000
 
 #: `qwen_asr` 0.0.6's `MIN_ASR_INPUT_SECONDS`: a piece shorter than this is
 #: zero-padded at its tail to this length, because the audio tower has nothing
@@ -148,8 +131,6 @@ MIN_PIECE_SECONDS = 0.5
 SEARCH_SECONDS = 10.0
 ENERGY_WINDOW_MS = 100.0
 
-DECODE_REPORT_SECONDS = 1.0
-
 ENGINES = ("vllm", "mlx-audio", "qwen-asr")
 
 _STATE: dict = {
@@ -168,79 +149,19 @@ _STATE: dict = {
 }
 
 
-def send(message_type: str, **fields: object) -> None:
-    """One JSON object, one line, flushed, on the real fd 1."""
-    _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
-    _RESULTS.flush()
-
-
-def fail(message: str) -> None:
-    send("failed", message=message)
-
-
 def require(request: dict, key: str, kind):
     """One required key of the stated type, or a refusal naming it."""
-    if key not in request:
-        raise KeyError(
-            f"the qwen asr request has no {key!r}; every parameter is required "
-            "because every one of them changes the transcript"
-        )
-    value = request[key]
-    kinds = kind if isinstance(kind, tuple) else (kind,)
-    wrong = not isinstance(value, kinds) or (
-        isinstance(value, bool) and bool not in kinds
+    return workerio.require(
+        request,
+        key,
+        kind,
+        "qwen asr",
+        "every parameter is required because every one of them changes the "
+        "transcript",
     )
-    if wrong:
-        names = "/".join(getattr(k, "__name__", str(k)) for k in kinds)
-        raise KeyError(
-            f"the qwen asr request's {key!r} must be {names}, got "
-            f"{type(value).__name__}"
-        )
-    return value
 
 
-# ------------------------------------------------------------------- decoding
-
-
-def decode(ffmpeg: str, source: str, on_progress):
-    """Any container -> mono float32 at 16 kHz, through ffmpeg. Raises on failure.
-
-    The same decode every `asr` and `align` worker uses, for their reason: PyAV
-    silently truncates some assembled m4b files. stderr is drained on a thread
-    so an error-spewing decode cannot fill the pipe and deadlock.
-    """
-    import numpy
-
-    process = subprocess.Popen(
-        [
-            ffmpeg, "-nostdin", "-v", "error", "-i", source, "-map", "0:a:0",
-            "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "f32le", "-",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    errors: list = []
-
-    def drain() -> None:
-        for block in iter(lambda: process.stderr.read(65536), b""):
-            errors.append(block)
-
-    pump = threading.Thread(target=drain, daemon=True)
-    pump.start()
-    buffer = bytearray()
-    while True:
-        block = process.stdout.read(1 << 20)
-        if not block:
-            break
-        buffer += block
-        on_progress(len(buffer) / (SAMPLE_RATE * 4))
-    process.stdout.close()
-    code = process.wait()
-    pump.join(timeout=5)
-    if code != 0:
-        tail = b"".join(errors).decode("utf-8", "replace").strip()[-500:]
-        raise RuntimeError(f"ffmpeg exited {code} on {source}: {tail}")
-    return numpy.frombuffer(buffer, dtype=numpy.float32)
+# ------------------------------------------------------------------ splitting
 
 
 def split_points(wav, max_piece_s: float, joins=()) -> list:
@@ -524,21 +445,6 @@ def load(request: dict) -> None:
 # ---------------------------------------------------------------------- split
 
 
-def _speechonly():
-    """`speechonly.py` from this file's own directory (no `crucible` here).
-
-    Imported when a `split` asks for it, never at module load, so a test that
-    imports this file for its pure parts does not need this directory on its
-    path.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import speechonly
-
-    return speechonly
-
-
 def split(request: dict) -> None:
     """Cut `source` (or one stretch of it) into pieces, each written with overlap.
 
@@ -559,17 +465,10 @@ def split(request: dict) -> None:
     overlap_s = float(require(request, "overlap_s", (int, float)))
     if overlap_s < 0:
         raise ValueError(f"overlap_s is {overlap_s}; it is seconds of real audio, at least 0")
-    speech = _speechonly().from_request(request)
+    speechonly = workerio.load_sibling("speechonly", __file__)
+    speech = speechonly.from_request(request)
     os.makedirs(out_dir, exist_ok=True)
-
-    last = [0.0]
-
-    def progress(decoded_s: float) -> None:
-        now = time.time()
-        if now - last[0] < DECODE_REPORT_SECONDS:
-            return
-        last[0] = now
-        send("progress", stage="decoding", processed_s=round(decoded_s, 1))
+    progress = workerio.decode_reporter()
 
     # The cache is keyed by the source AND the speech settings: a re-cut must
     # read the same (shortened) signal its first cut did, and every time it
@@ -583,7 +482,7 @@ def split(request: dict) -> None:
         if samples <= 0:
             raise RuntimeError(f"{source} decoded to zero length")
         if speech is not None:
-            wav, kept = _speechonly().cut_for_worker(wav, speech, source, progress)
+            wav, kept = speechonly.cut_for_worker(wav, speech, source, progress)
         _STATE["decoded_source"], _STATE["decoded"] = key, (wav, samples, kept)
     total_samples = int(wav.shape[0])
     total = total_samples / float(SAMPLE_RATE)
@@ -599,7 +498,7 @@ def split(request: dict) -> None:
         if kept is None
         else [
             point - region_first
-            for point in _speechonly().joins(kept)
+            for point in speechonly.joins(kept)
             if region_first < point < region_last
         ]
     )
@@ -794,7 +693,7 @@ OPS = {"load": load, "split": split, "transcribe": transcribe}
 
 
 def main() -> int:
-    claim_stdout()
+    workerio.claim_stdout()
     for line in sys.stdin:
         if not line.strip():
             continue

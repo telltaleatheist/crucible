@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ... import accelerator, jobenv, weights
+from ... import accelerator, hosttools, jobenv, weights
 from ...alignmodels import load_all_align_manifests
 from ...asrmodels import load_all_asr_manifests
 from ...config import Config
@@ -196,7 +196,13 @@ class AlignLongformJobType:
                 "are in params, as text.",
             )
         audio = next(iter(inputs.values()))
-        ffmpeg = _require_ffmpeg()
+        ffmpeg = hosttools.ffmpeg_path()
+        if ffmpeg is None:
+            raise JobError(
+                "ffmpeg_missing",
+                "align-longform decodes the audiobook and cuts its windows with ffmpeg, "
+                "and there is none on this host's PATH.",
+            )
 
         aligner = load_all_align_manifests()[job.model or ALIGNER_MODEL]
         aligner_spec = aligner.backends[self._config.backend_kind]
@@ -279,8 +285,7 @@ class AlignLongformJobType:
                 chunk_texts=texts,
                 max_audio_s=params.chunk_s * 2,
                 log_path=self._config.logs_dir / f"alf-align-{job.id}.log",
-                backend_kind=self._config.backend_kind,
-                memory_bytes_estimate=aligner_spec.memory_bytes_estimate,
+                spec=aligner_spec,
                 cancelled=lambda: ctx.cancelled,
             )
 
@@ -352,16 +357,3 @@ def _build_cues(params: Any, chunk_plan: Any, aligned: list[dict[str, Any]]) -> 
                 kind=sentence.kind,
             ))
     return out
-
-
-def _require_ffmpeg() -> str:
-    from ... import hosttools
-
-    found = hosttools.which("ffmpeg")
-    if found is None:
-        raise JobError(
-            "ffmpeg_missing",
-            "align-longform decodes the audiobook and cuts its windows with ffmpeg, and there "
-            "is none on this host's PATH.",
-        )
-    return found

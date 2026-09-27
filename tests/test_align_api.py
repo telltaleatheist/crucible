@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, procgroup, jobenv, workers
+from crucible import accelerator, hosttools, procgroup, jobenv, workers
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
@@ -174,7 +174,7 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def ffmpeg(monkeypatch: pytest.MonkeyPatch) -> str:
-    monkeypatch.setattr(align_job, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     return "/usr/bin/ffmpeg"
 
 
@@ -364,7 +364,7 @@ def test_no_ffmpeg_is_refused_before_the_job_is_queued(
     idle_card: None,
 ) -> None:
     align_weights(MODEL)
-    monkeypatch.setattr(align_job, "ffmpeg_path", lambda: None)
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: None)
     response = submit(align_client, auth)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "ffmpeg_missing"
@@ -392,7 +392,7 @@ def test_the_mac_aligns_on_mps_and_nothing_had_to_be_told_it(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
-    monkeypatch.setattr(align_job, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/opt/homebrew/bin/ffmpeg")
     monkeypatch.setattr(align_job, "WORKER_SCRIPT", FAKE_WORKER)
     _mac_env(home, monkeypatch)
     _mac_weights(home, MODEL)
@@ -1028,12 +1028,12 @@ def test_check_reports_what_is_missing_in_order(
     config = load_config(home)
     job_type = align_job.AlignJobType(config, FAKE_BACKEND, Residency(config))
 
-    monkeypatch.setattr(align_job, "ffmpeg_path", lambda: None)
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: None)
     status = job_type.check(FAKE_BACKEND)
     assert status.ready is False
     assert "no ffmpeg on PATH" in status.detail
 
-    monkeypatch.setattr(align_job, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     status = job_type.check(FAKE_BACKEND)
     assert status.ready is False
     assert "no aligner is installed" in status.detail

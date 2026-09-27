@@ -119,10 +119,11 @@ from ...engines.vllm import run_dtype
 from ...ladder import card_for
 from ...errors import ApiError, JobError
 from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
-from ..align import WORKER_SCRIPT as ALIGN_WORKER_SCRIPT
 from ..align import device_for as align_device_for
+from ..align import start_aligner_session
 from ..base import Job, JobContext
 from . import loopguard, speechonly
+from .document import progress_decoding, transcript_document, worker_failed
 
 QWEN_WORKER_SCRIPT = Path(__file__).resolve().parent / "qwen_worker.py"
 
@@ -392,9 +393,7 @@ class Piece:
 
     def where(self) -> str:
         """Where this piece is, in the SOURCE's seconds: what a reader can find."""
-        start, end = self.start_s, self.end_s
-        if self.timeline is not None:
-            start, end = self.timeline.span(start, end)
+        start, end = speechonly.span(self.timeline, self.start_s, self.end_s)
         return (
             f"{start:.1f}-{end:.1f}s "
             f"({loopguard.clock(start)}-{loopguard.clock(end)})"
@@ -926,12 +925,10 @@ class QwenAsrRun:
             f"loading {self._model} on {engine} at {request['dtype']}{pace}; log "
             f"{session.log_path}"
         )
-        try:
+        with worker_failed():
             outcome = session.start(
                 request, ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS
             )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
         self._asr = session
         ready = outcome.ready
         self._ctx.warming(
@@ -950,36 +947,19 @@ class QwenAsrRun:
         if plan is None:  # unreachable: `run` plans it whenever timestamps are on
             raise JobError("worker_failed", "word timestamps without an aligner plan")
         device = align_device_for(self._config.backend_kind)
-        session = workers.WorkerSession(
-            python=plan.python,
-            script=ALIGN_WORKER_SCRIPT,
-            log_path=self._config.logs_dir / f"asr-{self._job.id}-aligner.log",
-            # Beside vLLM on the PC, so capped at its OWN admitted share, not the
-            # card (`workers.torch_memory_cap`).
-            environment=workers.torch_allocator_environment(
-                self._config.backend_kind
-            ),
-        )
+        log_path = self._config.logs_dir / f"asr-{self._job.id}-aligner.log"
         self._ctx.warming(
             f"loading {plan.manifest.id} on {device} at {plan.spec.dtype} for the "
-            f"word times; log {session.log_path}"
+            f"word times; log {log_path}"
         )
-        try:
-            session.start(
-                {
-                    "op": "load",
-                    "model_dir": str(plan.weights_dir),
-                    "device": device,
-                    "dtype": plan.spec.dtype,
-                    "memory_cap_bytes": workers.torch_memory_cap(
-                        self._config.backend_kind, plan.spec.memory_bytes_estimate
-                    ),
-                },
+        with worker_failed():
+            self._align = start_aligner_session(
+                plan.python,
+                plan.weights_dir,
+                plan.spec,
+                log_path,
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
             )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
-        self._align = session
 
     def _send(
         self,
@@ -990,7 +970,7 @@ class QwenAsrRun:
     ) -> workers.WorkerOutcome:
         if session is None:  # unreachable: every caller runs after its start
             raise JobError("worker_failed", f"no session for {request['op']!r}")
-        try:
+        with worker_failed():
             return session.send(
                 request,
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
@@ -998,8 +978,6 @@ class QwenAsrRun:
                 cancelled=lambda: self._ctx.cancelled,
                 on_result=on_result,
             )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
 
     def _stop_all(self) -> None:
         """Both sessions off the card, whatever happened. Never replaces the error.
@@ -1032,15 +1010,10 @@ class QwenAsrRun:
 
         def on_progress(message: dict[str, Any]) -> None:
             if level == 0:
-                # Decode drives no fraction, for `asr`'s reason: none of the
-                # transcript exists yet.
-                self._ctx.progress(
-                    0.0,
+                progress_decoding(
+                    self._ctx,
                     f"decoding {self._audio.name}: {float(message['processed_s']):.0f}s",
-                    stage="decoding",
-                    processed_s=float(message["processed_s"]),
-                    total_s=0.0,
-                    cues=0,
+                    float(message["processed_s"]),
                 )
 
         outcome = self._send(
@@ -1058,19 +1031,15 @@ class QwenAsrRun:
             on_progress,
         )
         count = int(outcome.ready["pieces"])
-        try:
+        with worker_failed():
             results = workers.require_positional_results(outcome, count, "piece")
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
         if level == 0:
             self._duration_s = float(outcome.ready["duration_s"])
             self._source_s = self._duration_s
             kept = ""
-            if self._speech is not None:
-                try:
-                    self._timeline = speechonly.Timeline.from_ready(outcome.ready)
-                except ValueError as exc:
-                    raise JobError("worker_failed", str(exc)) from None
+            with worker_failed(ValueError):
+                self._timeline = speechonly.timeline_for(outcome.ready, self._speech)
+            if self._timeline is not None:
                 self._source_s = self._timeline.total_samples / float(
                     speechonly.SAMPLE_RATE
                 )
@@ -1200,10 +1169,8 @@ class QwenAsrRun:
             on_progress,
             on_result,
         )
-        try:
+        with worker_failed():
             results = workers.require_positional_results(outcome, len(todo), "piece")
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
         for piece, result in zip(todo, results):
             piece.text = str(result["text"])
             piece.tokens = int(result["tokens"])
@@ -1230,8 +1197,8 @@ class QwenAsrRun:
         """
         rows = []
         for piece in sorted(pieces, key=lambda p: p.start_s):
-            start, end = self._span(piece.start_s, piece.end_s)
-            audio_start, audio_end = self._span(
+            start, end = speechonly.span(self._timeline, piece.start_s, piece.end_s)
+            audio_start, audio_end = speechonly.span(self._timeline, 
                 piece.audio_start_s, piece.audio_start_s + piece.audio_duration_s
             )
             rows.append(
@@ -1315,10 +1282,8 @@ class QwenAsrRun:
                     "chunks": [{"audio": p.wav, "text": p.text} for p in batch],
                 },
             )
-            try:
+            with worker_failed():
                 landed = workers.require_positional_results(outcome, len(batch), "piece")
-            except workers.WorkerError as exc:
-                raise JobError("worker_failed", str(exc)) from None
             results += landed
             for piece, result in zip(batch, landed):
                 if "error" not in result:
@@ -1354,20 +1319,6 @@ class QwenAsrRun:
 
     # ------------------------------------------------------------- document
 
-    def _span(self, start: float, end: float) -> tuple[float, float]:
-        """A stretch on the pieces' timeline, in the source's seconds."""
-        if self._timeline is None:
-            return start, end
-        return self._timeline.span(start, end)
-
-    def _word(self, start: float, end: float) -> tuple[float, float]:
-        """A word on the pieces' timeline, in the source's seconds: both ends in
-        the kept region holding its middle, so the aligner can never stretch a
-        word across a removed stretch (`speechonly.Timeline.word`)."""
-        if self._timeline is None:
-            return start, end
-        return self._timeline.word(start, end)
-
     def _document(self) -> dict[str, Any]:
         """The transcript. Everything was done on the pieces' timeline (the
         shortened signal's, with `speech_only`); every time is moved to the
@@ -1375,23 +1326,18 @@ class QwenAsrRun:
         never saw two timelines."""
         segments = []
         for piece in sorted(self._finished, key=lambda p: p.start_s):
-            start, end = self._span(piece.start_s, piece.end_s)
             row: dict[str, Any] = {
-                "start": start,
-                "end": end,
+                "start": piece.start_s,
+                "end": piece.end_s,
                 "text": piece.text,
             }
             if self._word_timestamps:
                 words = []
                 for item in piece.items:
-                    word_start, word_end = self._word(
-                        piece.audio_start_s + float(item["start"]),
-                        piece.audio_start_s + float(item["end"]),
-                    )
                     words.append(
                         {
-                            "start": word_start,
-                            "end": word_end,
+                            "start": piece.audio_start_s + float(item["start"]),
+                            "end": piece.audio_start_s + float(item["end"]),
                             "word": str(item["text"]),
                             # whisper's four keys, and the fourth is null on
                             # purpose: the aligner places words, it does not
@@ -1401,44 +1347,48 @@ class QwenAsrRun:
                         }
                     )
                 row["words"] = words
-            segments.append(row)
+            segments.append(speechonly.to_source(row, self._timeline))
         redecoded = []
         for entry in self._redecoded:
-            start, end = self._span(entry["start"], entry["end"])
+            start, end = speechonly.span(self._timeline, entry["start"], entry["end"])
             redecoded.append({**entry, "start": start, "end": end})
         aligner = self._aligner
-        return {
-            "model": self._model,
-            "revision": self._spec.revision,
-            "hf_repo": self._spec.hf_repo,
-            "engine": self._spec.engine,
-            "dtype": self._run_dtype(),
-            "aligner": (
-                {
-                    "model": aligner.manifest.id,
-                    "revision": aligner.spec.revision,
-                    "hf_repo": aligner.spec.hf_repo,
-                }
-                if aligner is not None
-                else None
-            ),
-            "language": self._language,
+        return transcript_document(
+            model=self._model,
+            spec=self._spec,
+            engine={
+                "engine": self._spec.engine,
+                "dtype": self._run_dtype(),
+                "aligner": (
+                    {
+                        "model": aligner.manifest.id,
+                        "revision": aligner.spec.revision,
+                        "hf_repo": aligner.spec.hf_repo,
+                    }
+                    if aligner is not None
+                    else None
+                ),
+            },
+            language=self._language,
             # Asserted by the caller, not detected: this engine is always told
             # the language (docs/PHASE25 section 2), so 1.0 is the assertion —
             # the mlx-whisper worker's rule for a named language.
-            "language_probability": 1.0,
-            "language_requested": self._language,
-            "vad_filter": False,
-            "word_timestamps": self._word_timestamps,
-            "initial_prompt": None,
-            "context": self._context,
-            "duration_s": self._source_s,
-            "piece_max_s": self._piece_s,
-            "overlap_s": self._overlap_s,
-            "pieces": len(self._finished) + self._silent,
-            "silent_pieces": self._silent,
-            "redecoded": redecoded,
-            **speechonly.report(self._speech, self._timeline),
-            "segments": segments,
-        }
+            language_probability=1.0,
+            language_requested=self._language,
+            vad_filter=False,
+            word_timestamps=self._word_timestamps,
+            initial_prompt=None,
+            prompt={"context": self._context},
+            duration_s=self._source_s,
+            layout={
+                "piece_max_s": self._piece_s,
+                "overlap_s": self._overlap_s,
+                "pieces": len(self._finished) + self._silent,
+                "silent_pieces": self._silent,
+                "redecoded": redecoded,
+            },
+            speech=self._speech,
+            timeline=self._timeline,
+            segments=segments,
+        )
 

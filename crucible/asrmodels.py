@@ -107,12 +107,8 @@ is replaced rather than bent, so here is what took its place:
   two transcripts made on two machines are told apart the way two llm renders
   always were.
 - **The old ids are GONE, not aliases.** A request naming one is refused
-  `unknown_model`, naming the three that exist and — for the four that were
-  renamed — the id that replaced it (`RENAMED_ASR_IDS`, `RETIRED_ASR_IDS`).
-  Weights already pulled under a renamed id are MOVED to the new id's folder
-  once, at server start, and only when their stamp matches the new block's pin
-  exactly (`jobs/asr`'s `adopt_renamed_asr_weights`); anything left under an
-  id nothing declares is reported by `crucible doctor` with its size and path
+  `unknown_model` like any other unknown id. Weights left under an id nothing
+  declares are reported by `crucible doctor` with their size and path
   (`catalog.stranded_weights`), never deleted behind the operator's back.
 
 Why this is not `crucible/manifests.py`
@@ -206,48 +202,6 @@ ASR_LINEUP: frozenset[str] = frozenset(
         "whisper-large-v3-turbo", "whisper-tiny",
     }
 )
-
-#: Ids that were RENAMED on 2026-09-24, old -> new. NOT aliases: a request
-#: naming an old id is refused `unknown_model` exactly like any other unknown
-#: id, and this table only lets the refusal say what replaced it. It also tells
-#: `jobs/asr`'s `adopt_renamed_asr_weights` which folders under `~/.crucible/models/` hold
-#: bytes the new id pins — the same repo at the same revision, moved rather
-#: than downloaded again.
-RENAMED_ASR_IDS: dict[str, str] = {
-    "faster-whisper-large-v3-turbo": "whisper-large-v3-turbo",
-    "mlx-whisper-large-v3-turbo": "whisper-large-v3-turbo",
-    "faster-whisper-tiny": "whisper-tiny",
-    "mlx-whisper-tiny": "whisper-tiny",
-}
-
-#: Ids REMOVED on 2026-09-24 with nothing in their place (Owen: "every other
-#: whisper size is removed"). Listed so a refusal can say "retired" rather than
-#: leave a client wondering whether it misspelled one.
-RETIRED_ASR_IDS: frozenset[str] = frozenset(
-    f"{engine}-{size}"
-    for engine in ("faster-whisper", "mlx-whisper")
-    for size in ("base", "small", "medium", "large-v3", "distil-large-v3")
-)
-
-
-def retired_asr_id_note(model_id: str) -> str | None:
-    """A sentence about an id this build removed, or None for any other id.
-
-    For `unknown_model`'s message only. It never resolves anything: the
-    request is refused either way.
-    """
-    renamed = RENAMED_ASR_IDS.get(model_id)
-    if renamed is not None:
-        return (
-            f"{model_id!r} was renamed {renamed!r} on 2026-09-24, one id on "
-            "every backend; the old id is not an alias"
-        )
-    if model_id in RETIRED_ASR_IDS:
-        return (
-            f"{model_id!r} was retired on 2026-09-24: the asr job offers "
-            f"exactly {sorted(ASR_LINEUP)}"
-        )
-    return None
 
 #: FULL PRECISION, both machines. Owen, 2026-09-24: bf16, unquantised, for
 #: Qwen3-ASR-1.7B on the PC and on the Mac; "do not use the 8-bit MLX build".
