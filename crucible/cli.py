@@ -19,6 +19,8 @@
                         Every verb above acts on THIS machine's installation and
                         takes no address; these take --url and --token. See
                         crucible/apiclient.py and docs/API-CLI.md.
+    crucible pair       connect to another computer's Crucible by its address
+                        and keep its pairing line; then `api --server <name>`
 
 Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
 """
@@ -3536,8 +3538,11 @@ def build_parser() -> argparse.ArgumentParser:
     # in WSL or on the Mac. Imported here rather than at module scope for
     # `local`'s and `sharing`'s reason — `build_parser` is the only caller and a
     # CLI's import time is its `--help` time.
-    from .apiclient import add_parser as add_api_parser
+    from .apiclient import add_pair_parser, add_parser as add_api_parser
     add_api_parser(subparsers)
+    # FRESH-INSTALL #4: connect to another computer's Crucible by address, the
+    # apps' connect door, so nobody copies a `token --url` line across by hand.
+    add_pair_parser(subparsers)
     return parser
 
 

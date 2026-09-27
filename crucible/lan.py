@@ -11,8 +11,36 @@ addresses to that loopback. This module owns it, on exactly the terms
 - `reconcile` repairs an opted-in door after the addresses change,
 - an existing forward is adopted only with `--adopt`,
 - and status proves CONFIGURATION plus authenticated local engine access, never
-  a remote client's route — nothing here has tested that a friend's laptop can
-  actually reach this machine, and it says `not_tested` rather than implying it.
+  a remote client's route. See "WHAT IS CHECKED" below for how far that goes.
+
+WHAT IS CHECKED, AND WHAT CANNOT BE FROM HERE (FRESH-INSTALL #46, 2026-09-26)
+------------------------------------------------------------------------------
+kylies-pc reported `"state": "configured"` and `"remote_reachability":
+"not_tested"` while its Ethernet was on the Public profile and nothing on the LAN
+could reach it. Owen asked for a test from outside. What this PC can honestly
+test about itself:
+
+- **Not a dial to its own LAN address as proof of reachability.** A connection
+  from this PC to its own address never leaves the machine and Windows Firewall
+  does not filter it, so it answers whatever the firewall says. It IS used, for
+  the one thing it proves: the forward carries a connection to the engine
+  (`forward_answers`).
+- **Not a dial from the WSL guest.** Its packets arrive on the vEthernet
+  adapter and are judged by THAT adapter's profile, not the Ethernet's.
+- **What IS read: Windows' own decision inputs, per interface** — each offered
+  address's network category, the firewall's effective settings for that
+  profile (on/off, "block all incoming", group policy ignoring local rules),
+  and whether "Crucible engine (LAN)" is enabled for it
+  (`host/landoor.admits`). That is what Windows itself decides from.
+- **What stays unknowable from here:** a router that keeps its devices apart
+  (guest Wi-Fi does) and third-party firewalls. The final test is the other
+  computer connecting — `crucible pair <address>` there, which is also the
+  step that pairs it — and the result says so in `checked`.
+
+A Public network is never covered by widening the rule (the module docstring of
+`host/landoor.py` says why). It is named, in plain words, and the person is
+asked whether to mark it Private; yes adds `Set-NetConnectionProfile` to the
+same single administrator prompt.
 
 WHY THIS IS NOT `--host 0.0.0.0`
 ---------------------------------
@@ -96,15 +124,14 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .backend import LLAMA_WINDOWS
 from .config import crucible_home
 from .errors import CrucibleError
 from .host import landoor
 from .host.paths import ENGINE_PORT
-from .host.runner import ProcessRunner, Runner
-from .interfaces import InterfaceError, ipv4_addresses
+from .host.runner import ProcessRunner, RunResult, Runner
 from .sharing import Engine
 
 RECORD = "landoor.json"
@@ -112,6 +139,43 @@ RECORD = "landoor.json"
 #: Long enough to contain a UAC prompt a person has to notice and click. The
 #: read-only probes keep `landoor`'s own short timeout; this one covers a human.
 ELEVATION_TIMEOUT = 180.0
+
+#: The dial through the forward (`forward_answers`). Short: it is this PC to
+#: itself.
+FORWARD_TIMEOUT = 5.0
+
+#: How a caller hears what is happening WHILE it happens (FRESH-INSTALL #44):
+#: the CLI prints to stderr; the installer and the tray pass their own line.
+Say = Callable[[str], None]
+
+#: Asked once, before the one prompt, with the Public networks that keep other
+#: computers out. True marks them Private in the same prompt. None: never asked.
+AskPrivate = Callable[[Sequence[landoor.NetworkInterface]], bool]
+
+#: #44, said the moment the prompt is raised and not two minutes later.
+PROMPT_WAITING = (
+    "Windows is asking for administrator permission in a prompt on THIS PC's "
+    "screen. Waiting up to 3 minutes for someone at this PC to click Yes."
+)
+
+#: #44, for the operator who is not at the screen. Windows' OpenSSH gives an
+#: administrator's session its full rights, which `read_network` sees as
+#: `elevated`, and then no prompt is raised at all.
+REMOTE_NOTE = (
+    "You are connected to this PC remotely, and that prompt appears only on the "
+    "PC's own screen. Either someone at the PC clicks Yes, or connect with an "
+    "administrator account: an administrator's remote (SSH) session already has "
+    "the rights, so this then runs with no prompt."
+)
+
+#: #46: what the result can and cannot vouch for, in every `enable`/`status`.
+CHECKED = (
+    "Checked on this PC: the port forward reaches the engine, and Windows "
+    "Firewall's own settings for each network. Not checkable from this PC: a "
+    "router that keeps its devices apart (guest Wi-Fi often does) or another "
+    "firewall program. The final test is the other computer connecting: "
+    "`crucible pair <this PC's address>` on it, which also pairs it."
+)
 
 
 class LanError(CrucibleError):
@@ -219,29 +283,177 @@ def _refuse_a_native_engine(engine: Engine, port: int) -> None:
     )
 
 
-def _authorities(port: int) -> list[str]:
-    """Every address the forward listens on, as `host:port`.
-
-    The portproxy listens on `0.0.0.0`, so EVERY non-loopback address of this
-    machine genuinely reaches the engine and every one of them is reported —
-    the same answer `pairing.reachable_urls` already gives for a wildcard bind.
-    Picking a subset would mean deciding which of a person's networks is "the"
-    LAN, which is a guess this codebase does not get to make.
-    """
+def _network(runner: Runner) -> landoor.NetworkFacts:
     try:
-        addresses = ipv4_addresses()
-    except InterfaceError as exc:
+        return landoor.read_network(runner)
+    except (ValueError, KeyError, TypeError) as exc:
         raise LanError(f"lan_addresses_unreadable: {exc}") from exc
-    if not addresses:
+
+
+def _candidates(facts: landoor.NetworkFacts) -> list[landoor.NetworkInterface]:
+    """The addresses another machine could dial. FRESH-INSTALL #47.
+
+    Until 2026-09-26 this was every non-loopback IPv4 address, and kylies-pc's
+    pairing lines included 192.168.96.1, WSL's own vEthernet adapter, which no
+    other machine can use. "Picking a subset would be a guess" was the reason
+    for listing everything; it is not a guess to leave out an adapter that
+    exists only inside this PC, and `landoor.offered` names exactly which.
+    """
+    found = landoor.offered(facts)
+    if not found:
         raise LanError(
-            "lan_no_addresses: this machine has no non-loopback IPv4 address, so "
-            "opening a forward would publish nothing an app could dial"
+            "lan_no_addresses: this PC is not connected to any network another "
+            "computer could reach it on (only its own internal adapters have "
+            "addresses). Connect it to your home network, then run this again"
         )
-    return [f"{address}:{port}" for address in addresses]
+    return found
+
+
+def _networks(facts: landoor.NetworkFacts) -> list[dict[str, Any]]:
+    """Per offered address: which network, and would Windows let a LAN peer in."""
+    rows = []
+    for interface in landoor.offered(facts):
+        admitted, why = landoor.admits(interface, facts)
+        rows.append({
+            "address": interface.address,
+            "interface": interface.alias,
+            "network": interface.network,
+            "category": interface.category,
+            "admitted": admitted,
+            "why": why,
+        })
+    return rows
+
+
+def _forward_answers(runner: Runner, address: str, port: int) -> bool:
+    """Does the forward carry a connection to the engine? See "WHAT IS CHECKED".
+
+    `/v1/ping` needs no token. From this PC to its own address, so this proves
+    the forward and the engine behind it, and nothing about the firewall.
+    """
+    return runner.get(f"http://{address}:{port}/v1/ping", timeout_s=FORWARD_TIMEOUT) == 200
+
+
+def _remote(env: Mapping[str, str]) -> bool:
+    """Is the person driving this over SSH, away from the PC's screen? #44."""
+    return bool(env.get("SSH_CONNECTION") or env.get("SSH_CLIENT"))
+
+
+def _verdict(networks: list[dict[str, Any]], forward: bool) -> tuple[str, str, str | None]:
+    """(state, remote_reachability, the plain next step or None)."""
+    blocked = [row for row in networks if not row["admitted"]]
+    if not forward:
+        first = networks[0]["address"] if networks else "this PC's address"
+        return "degraded", "forward_not_answering", (
+            f"The port forward is in place but did not reach the engine from "
+            f"{first} on this PC itself. Windows' IP Helper service carries that "
+            "forward; restarting this PC normally brings it back. Then run "
+            "`crucible lan status`."
+        )
+    if not blocked:
+        return "configured", "admitted_by_windows", None
+    public = [row for row in blocked if row["category"] == "Public"]
+    if public:
+        names = ", ".join(
+            f'"{row["network"] or row["interface"]}"' for row in public
+        )
+        return "degraded", "blocked_by_windows" if len(blocked) == len(networks) else "partly_blocked", (
+            f"Other computers on {names} cannot reach Crucible: Windows has that "
+            "network marked Public, which keeps them out. If it is your home or "
+            "office network, run `crucible lan enable` again and answer yes when "
+            "it asks to mark it Private (or add --make-private). On a cafe, hotel "
+            "or other shared network, leave it Public."
+        )
+    return "degraded", "blocked_by_windows" if len(blocked) == len(networks) else "partly_blocked", (
+        "Other computers cannot reach Crucible on "
+        + "; ".join(f'{row["address"]}: {row["why"]}' for row in blocked)
+        + "."
+    )
+
+
+def _say(say: Say | None, line: str) -> None:
+    if say is not None:
+        say(line)
+
+
+def _apply(runner: Runner, commands: list[list[str]], *, elevated: bool,
+           say: Say | None) -> RunResult | None:
+    """Make the changes: straight through when this session is already an
+    administrator, else under ONE prompt that is announced as it is raised.
+
+    #44 (kylies-pc, 2026-09-26): 126 s passed with the prompt on a screen
+    nobody was at, and nothing on the operator's side said so. None comes back
+    for the straight-through path, where there is no prompt to diagnose.
+    """
+    if elevated:
+        _say(say, "This session already has administrator rights, so Windows "
+                  "will not show a prompt.")
+        for argv in commands:
+            runner.run(argv, timeout_s=ELEVATION_TIMEOUT)
+        return None
+    _say(say, PROMPT_WAITING)
+    if _remote(runner.env):
+        _say(say, REMOTE_NOTE)
+    return runner.run(elevated_argv(commands), timeout_s=ELEVATION_TIMEOUT)
+
+
+def _prompt_failed(result: RunResult | None, runner: Runner) -> LanError | None:
+    """The prompt was not answered Yes, in the words a person needs. #44.
+
+    None when the prompt is not what went wrong (no prompt was raised, or it
+    exited 0), and the caller says what it found instead.
+    """
+    if result is None:
+        return None
+    remote = f" {REMOTE_NOTE}" if _remote(runner.env) else ""
+    if result.failure is not None and "timed out" in result.failure:
+        return LanError(
+            "lan_admin_prompt_unanswered: nobody answered the administrator "
+            "prompt on this PC's screen within 3 minutes, so nothing was "
+            f"changed. Someone at this PC has to click Yes.{remote}"
+        )
+    if result.code not in (0, None):
+        return LanError(
+            "lan_admin_prompt_declined: the administrator prompt on this PC's "
+            "screen was answered No (or closed), so nothing was changed. Run this "
+            "again and click Yes on it"
+        )
+    return None
+
+
+def _not_applied(result: RunResult | None, runner: Runner, detail: str) -> LanError:
+    """Why `enable`'s rows are not there."""
+    return _prompt_failed(result, runner) or LanError(
+        "lan_verification_failed: the rows are not both there after asking "
+        f"for them ({detail}). If the administrator prompt was "
+        "dismissed, nothing was changed; run this again and accept it"
+    )
+
+
+def _ask_on_terminal(public: Sequence[landoor.NetworkInterface]) -> bool:
+    """The CLI's `AskPrivate`: one plain question on stderr, one line of stdin.
+
+    Stdout stays the JSON document. Anything but yes is no.
+    """
+    names = ", ".join(interface.label for interface in public)
+    plural = len(public) > 1
+    print(
+        f"\nThis PC's network{'s' if plural else ''} {names} "
+        f"{'are' if plural else 'is'} marked Public, so Windows keeps the other "
+        "computers on it out.\n"
+        "If it is your home or office network, Crucible can mark it Private so "
+        "they can use this PC.\n"
+        "Say no on a cafe, hotel, airport or any other shared network.\n"
+        f"Mark {names} as Private? [y/N] ",
+        end="", file=sys.stderr, flush=True,
+    )
+    answer = sys.stdin.readline()
+    return answer.strip().lower() in ("y", "yes")
 
 
 def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_PORT,
-           adopt: bool = False) -> dict[str, Any]:
+           adopt: bool = False, ask_private: AskPrivate | None = None,
+           say: Say | None = None) -> dict[str, Any]:
     if type(port) is not int or not 1 <= port <= 65535:
         raise LanError("lan_bad_port: expected a port from 1 to 65535")
     _require_windows(runner)
@@ -268,14 +480,29 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
             "lan_unowned: a port forward for this port already exists and "
             "Crucible did not create it; use --adopt to take ownership of it"
         )
-    authorities = _authorities(port)
+    facts = _network(runner)
+    candidates = _candidates(facts)
+    # #46: a Public network with nothing admitting TCP on it is named and, if
+    # the person says it is theirs, marked Private in the SAME prompt as the
+    # rows. Asked BEFORE anything is written: a question is not a mutation.
+    shut = [
+        interface for interface in candidates
+        if interface.profile == "Public" and not landoor.admits(interface, facts)[0]
+    ]
+    to_mark = list(shut) if shut and ask_private is not None and ask_private(shut) else []
     record: dict[str, Any] = {
         "schema_version": 1,
         "port": port,
         "rule": landoor.RULE_NAME,
-        "authorities": authorities,
+        # Every candidate, for now: a half-finished enable overstates.
+        "authorities": [f"{interface.address}:{port}" for interface in candidates],
         "state": "pending",
     }
+    if to_mark:
+        # Recorded so `status` can say which network Crucible changed. It is
+        # NOT reverted by `disable`: the person said the network is theirs,
+        # and that stays true when Crucible stops sharing on it.
+        record["made_private"] = [interface.label for interface in to_mark]
     # Durable intent before a mutation, exactly as `sharing.enable` does it: a
     # publish that dies half way leaves a record `reconcile` can finish from.
     _write(home, record)
@@ -286,16 +513,11 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
             (door.firewall, landoor.firewall_add_argv(port)),
         )
         if not present
-    ]
-    if missing:
-        runner.run(elevated_argv(missing), timeout_s=ELEVATION_TIMEOUT)
+    ] + [landoor.make_private_argv(interface) for interface in to_mark]
+    result = _apply(runner, missing, elevated=facts.elevated, say=say) if missing else None
     after = landoor.detect(runner, port)
     if not (after.forward and after.firewall):
-        raise LanError(
-            "lan_verification_failed: the rows are not both there after asking "
-            f"for them ({after.detail}). If the administrator prompt was "
-            "dismissed, nothing was changed; run this again and accept it"
-        )
+        raise _not_applied(result, runner, after.detail)
     # THE ROWS EXIST NOW, AND THE RECORD SAYS SO BEFORE THE PUBLISH IS TRIED.
     #
     # This is the durable-intent write completed, not repeated: the first one
@@ -309,20 +531,35 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = ENGINE_POR
     # on. A half-finished enable must overstate what it did, never understate:
     # the record is what `disable` uses to know what there is to clean up.
     record["state"] = "open"
-    record["private_network"] = after.private_network
+    _write(home, record)
+    # Read again: the prompt may have changed a network's category, and what
+    # is published is only what Windows now admits (#46, #47).
+    networks = _networks(_network(runner))
+    authorities = [f"{row['address']}:{port}" for row in networks if row["admitted"]]
+    record["authorities"] = authorities
+    record["private_network"] = bool(authorities)
     _write(home, record)
     engine.advertise("lan_advertise", authorities)
-    record["state"] = "configured" if after.private_network is not False else "degraded"
+    forward = _forward_answers(runner, candidates[0].address, port)
+    state, reachability, following = _verdict(networks, forward)
+    record["state"] = state
     _write(home, record)
-    return {
+    report: dict[str, Any] = {
         **record,
         "urls": [f"http://{authority}" for authority in authorities],
         "detail": after.detail,
-        "remote_reachability": "not_tested",
+        "networks": networks,
+        "forward_answers": forward,
+        "remote_reachability": reachability,
+        "checked": CHECKED,
     }
+    if following is not None:
+        report["next"] = following
+    return report
 
 
-def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
+def disable(home: Path, runner: Runner, engine: Engine, *,
+            say: Say | None = None) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled"}
@@ -331,12 +568,23 @@ def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     # and the rows are retained so a retry still knows what it has to clean up.
     engine.advertise("lan_advertise", [])
     port = record["port"]
-    runner.run(
-        elevated_argv([landoor.remove_argv(port), landoor.firewall_remove_argv(port)]),
-        timeout_s=ELEVATION_TIMEOUT,
+    try:
+        elevated = _network(runner).elevated
+    except LanError:
+        # Only decides prompt-or-not; not knowing means the prompt, which is
+        # the path that works for everyone.
+        elevated = False
+    result = _apply(
+        runner, [landoor.remove_argv(port), landoor.firewall_remove_argv(port)],
+        elevated=elevated, say=say,
     )
     after = landoor.detect(runner, port)
     if after.forward or after.firewall:
+        refused = _prompt_failed(result, runner)
+        if refused is not None:
+            # #44: the prompt was not answered Yes; say that, not "still has".
+            # The record is kept either way, so a retry knows what to remove.
+            raise refused
         raise LanError(
             "lan_verification_failed: Windows still has "
             + " and ".join(
@@ -357,20 +605,41 @@ def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     engine.verify()
     door = landoor.detect(runner, record["port"])
     published = engine.request("GET", "settings").get("lan_advertise")
-    current = _authorities(record["port"])
+    facts = _network(runner)
+    networks = _networks(facts)
+    current = [f"{row['address']}:{record['port']}" for row in networks if row["admitted"]]
     addresses_match = published == record["authorities"] == current
-    configured = door.forward and door.firewall and door.private_network is not False
-    return {
+    forward = bool(networks) and _forward_answers(runner, networks[0]["address"], record["port"])
+    state, reachability, following = _verdict(networks, forward)
+    configured = door.forward and door.firewall and state == "configured"
+    if not (door.forward and door.firewall) and following is None:
+        following = (
+            "Windows no longer has both of Crucible's rows (" + door.detail + "). "
+            "Run `crucible lan enable` to put them back."
+        )
+    elif not addresses_match and following is None:
+        following = (
+            "This PC's addresses changed since sharing was turned on, so the "
+            "addresses other computers were given are out of date. Run "
+            "`crucible lan reconcile` to update them."
+        )
+    report: dict[str, Any] = {
         **record,
         "state": "configured" if configured and addresses_match else "degraded",
         "forward": door.forward,
         "firewall": door.firewall,
-        "private_network": door.private_network,
+        "private_network": bool(current),
         "published": published,
         "addresses_match": addresses_match,
         "detail": door.detail,
-        "remote_reachability": "not_tested",
+        "networks": networks,
+        "forward_answers": forward,
+        "remote_reachability": reachability,
+        "checked": CHECKED,
     }
+    if following is not None:
+        report["next"] = following
+    return report
 
 
 def reconcile(home: Path, runner: Runner | None = None, *,
@@ -391,6 +660,10 @@ def reconcile(home: Path, runner: Runner | None = None, *,
     return enable(home, runner, engine, port=record["port"], adopt=True)
 
 
+def _to_stderr(line: str) -> None:
+    print(f"crucible: {line}", file=sys.stderr, flush=True)
+
+
 def command(args: argparse.Namespace) -> int:
     home = crucible_home()
     runner = ProcessRunner(sys.platform, os.environ)
@@ -400,14 +673,27 @@ def command(args: argparse.Namespace) -> int:
             return 0
         engine = Engine(home, "lan")
         if args.lan_action == "enable":
-            result = enable(home, runner, engine, port=args.port, adopt=args.adopt)
+            # #46: --make-private answers the Public-network question up front;
+            # at a terminal it is asked; with neither, nobody is asked and a
+            # Public network is reported in `next`, never changed.
+            if args.make_private:
+                ask: AskPrivate | None = lambda _public: True
+            elif sys.stdin is not None and sys.stdin.isatty():
+                ask = _ask_on_terminal
+            else:
+                ask = None
+            result = enable(home, runner, engine, port=args.port, adopt=args.adopt,
+                            ask_private=ask, say=_to_stderr)
         elif args.lan_action == "reconcile":
             result = reconcile(home, runner)
         elif args.lan_action == "disable":
-            result = disable(home, runner, engine)
+            result = disable(home, runner, engine, say=_to_stderr)
         else:
             result = status(home, runner, engine)
         print(json.dumps(result, indent=2))
+        if result.get("next"):
+            # The JSON is for a script; this line is for the person (#46).
+            print(f"crucible: {result['next']}", file=sys.stderr)
         return 1 if result.get("state") == "degraded" else 0
     except (CrucibleError, OSError, ValueError) as exc:
         print(f"crucible: {exc}", file=sys.stderr)
@@ -428,5 +714,11 @@ def add_parser(subparsers: Any) -> None:
                 "--adopt",
                 action="store_true",
                 help="take ownership of a port forward that already exists",
+            )
+            action.add_argument(
+                "--make-private",
+                action="store_true",
+                help="if this PC's network is marked Public, mark it Private "
+                     "without asking (only for your own home or office network)",
             )
         action.set_defaults(func=command)
