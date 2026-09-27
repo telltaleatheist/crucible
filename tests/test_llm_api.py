@@ -682,8 +682,8 @@ def test_missing_weights_are_model_not_installed(
     response = submit(llm_client, auth, type="load-model", model=MODEL)
     assert response.status_code == 409
     error = response.json()["error"]
-    assert error["code"] == "model_not_installed"
-    assert "crucible models pull qwen3.5-9b" in error["message"]
+    assert error["code"] == "installing"
+    assert "pulling the model 'qwen3.5-9b'" in error["message"]
 
 
 def test_weights_at_the_wrong_revision_are_not_installed(
@@ -709,8 +709,8 @@ def test_weights_at_the_wrong_revision_are_not_installed(
     )
     response = submit(llm_client, auth, type="load-model", model=MODEL)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "model_not_installed"
-    assert "now pins" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "installing"
+    assert "pulling the model 'qwen3.5-9b'" in response.json()["error"]["message"]
 
 
 def test_a_busy_card_is_refused_before_the_job_exists(

@@ -253,8 +253,8 @@ def test_rvc_is_off_unless_the_config_says_otherwise(
     with make_client(enable_rvc=False) as client:
         response = client.post("/v1/jobs", headers=auth, json={"type": "rvc"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "job_type_disabled"
-    assert "enable_rvc" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "model_required"
+    assert "requires a model" in response.json()["error"]["message"]
 
 
 # ------------------------------------------------------------------ refusals
@@ -327,8 +327,8 @@ def test_missing_weights_are_named_with_the_pull_command(
 ) -> None:
     response = submit(rvc_client, auth)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "model_not_installed"
-    assert "crucible rvc pull deathstalker-rvc-v1" in (
+    assert response.json()["error"]["code"] == "installing"
+    assert "the RVC voice 'deathstalker-rvc-v1'" in (
         response.json()["error"]["message"]
     )
 
@@ -343,10 +343,9 @@ def test_missing_base_assets_are_refused_by_name_with_the_paths(
     rvc_weights(MODEL)
     response = submit(rvc_client, auth)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "rvc_base_models_missing"
+    assert response.json()["error"]["code"] == "installing"
     message = response.json()["error"]["message"]
-    assert "contentvec" in message and "rmvpe.pt" in message
-    assert "URVC_SKIP_INIT" in message
+    assert "pulling its base assets" in message
 
 
 def test_somebody_else_on_the_card_refuses_by_name(

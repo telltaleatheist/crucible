@@ -270,8 +270,8 @@ def test_align_is_off_unless_the_config_says_otherwise(
     with make_client(enable_align=False) as client:
         response = client.post("/v1/jobs", headers=auth, json={"type": "align"})
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "job_type_disabled"
-    assert "enable_align" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "model_required"
+    assert "requires a model" in response.json()["error"]["message"]
 
 
 # ------------------------------------------------------------------ refusals
@@ -352,8 +352,8 @@ def test_missing_weights_are_named_with_the_pull_command(
 ) -> None:
     response = submit(align_client, auth)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "model_not_installed"
-    assert "crucible models pull qwen3-aligner" in response.json()["error"]["message"]
+    assert response.json()["error"]["code"] == "installing"
+    assert "pulling the model 'qwen3-aligner'" in response.json()["error"]["message"]
 
 
 def test_no_ffmpeg_is_refused_before_the_job_is_queued(

@@ -85,7 +85,7 @@ from . import decide as decide_core
 from .decide import DecideRequest, DecideResponse
 from .engines import chat_admission, decide_reading
 from .inflight import Entry, InFlight, read_act, require_act_name
-from .installonsubmit import InstallOnSubmit, live_decisions
+from .installonsubmit import PULLABLE_REFUSALS, InstallOnSubmit, live_decisions
 from .leases import CARD_EFFECTS, Leases, require_ttl
 from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
@@ -639,9 +639,6 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # download thread and a pip subprocess, and both want telling
             # before the process goes. A task's cancel is cooperative and
             # returns in milliseconds (`crucible/tasks.py`).
-            # The install-on-submit driver first: it follows a task and would
-            # otherwise watch it be cancelled and fail its waiting jobs for it.
-            await app.state.installs.stop()
             await app.state.tasks.stop()
             await store.stop()
             await app.state.http.aclose()
@@ -861,31 +858,36 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         take_up=take_up_installed,
     )
 
-    async def admit_installed(job: Job) -> None:
-        """Admit a job whose install has landed, as `POST /v1/jobs` would have.
+    def decide_here(job_type: str) -> ApiError:
+        """Decide this card and record it, for a server that never had. **Loop only.**
 
-        The same refusals in the same order, now that there is a plugin to ask:
-        the model, the lease, the clearance, `preflight`. Then onto the lane
-        BEHIND whatever is there (`JobStore.enqueue_admitted`): this job was
-        answered 202 when it was submitted, so it is not refused `server_busy`.
-        A refusal here fails the job, or, for somebody else holding the card
-        for now, keeps it waiting (`installonsubmit.TRANSIENT_REFUSALS`).
+        Owen, 2026-09-27, on a server with no capability record: *"Yes, it
+        should automatically be checked"*. `job_type_disabled` / `undecided`
+        used to send the operator to `crucible capability`, a command. The
+        server now makes the walk that command and `crucible install` make
+        (`cli._decide_here`: this card's size, vendor, the ladder's measured
+        facts via `ladder.card_for`, the config's choices) and writes the record
+        the way they do (`cli._write_capability`). No flag is changed: like
+        `crucible capability --write`, deciding turns nothing on; installing
+        does. Returns the refusal the recorded card now gives.
         """
-        plugin = registry.get(job.type)
-        if plugin is None:
-            take_up_enabled_types(config)
-            plugin = registry.get(job.type)
-        if plugin is None:
-            raise disabled_error(job.type, config)
-        model = resolve_model(plugin, job.model)
-        async with residency.settled_for(f"a {job.type} job"):
-            app.state.leases.refuse_if_leased(job.type, model)
-            plugin.preflight(model, job.params)
-            app.state.store.enqueue_admitted(job)
+        from . import cli  # cli imports this module
 
-    app.state.installs = InstallOnSubmit(
-        config, backend, app.state.store, app.state.tasks, admit=admit_installed
-    )
+        try:
+            cli._write_capability(config, backend, cli._decide_here(config, backend), {})
+            config.adopt(load_config(config.home))
+            print(
+                "crucible: no capability record; decided this card and recorded it",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported; the old refusal stands
+            print(
+                f"crucible: could not decide this card: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+        return disabled_error(job_type, config)
+
+    app.state.installs = InstallOnSubmit(config, backend, app.state.tasks)
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
@@ -1977,8 +1979,6 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             "position": store.position(job),
             "progress": job.progress,
             "message": job.message,
-            # Null unless it waits for its install (2026-09-26).
-            "waiting_for": store.waiting_for(job),
             "created": job.created,
             "started": job.started,
             "client": job.client,
@@ -2248,11 +2248,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 },
             },
             "running": [] if running is None else [_activity_row(store, running)],
-            # Then every job waiting for its install, which is queued too and
-            # not yet on the lane (2026-09-26, `crucible/installonsubmit.py`).
-            "queued": [
-                _activity_row(store, job) for job in [*queued, *store.parked()]
-            ],
+            "queued": [_activity_row(store, job) for job in queued],
         }
 
         if accelerator_probe:
@@ -2949,41 +2945,41 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         `align` on the leased aligner are admitted, because they run against
         what is already resident rather than loading it again.
 
-        **A TYPE THIS CARD CAN RUN AND HAS NOT INSTALLED IS INSTALLED, not
-        refused** (Owen, 2026-09-26: *"yes, we need to install a missing
-        environment when a job is submitted"*). When the refusal would be
-        `job_type_disabled` with `reason: not_installed`, the job is accepted
-        with a 202 and waits, `queued` with `position: null` and a
-        `waiting_for` that says in words what it waits for, while the server
-        runs the operator page's install as a task, with the base weights the
-        type needs and the model the job names. It then runs; if the install
-        fails, it fails with the install's own reason. A type the card cannot
-        run is still refused at once. `[jobs] install_on_submit = false` turns
-        this off. `crucible/installonsubmit.py` has the whole of it.
+        **A MISSING ENVIRONMENT OR MODEL IS INSTALLED FOR THE CALLER, and the
+        job is refused while it installs** (Owen, 2026-09-26: *"yes, we need to
+        install a missing environment when a job is submitted"*; 2026-09-27:
+        *"Crucible isn't responsible for queuing. The apps that use it are."*).
+        A type this card can run and has not installed, or a declared model or
+        voice (and `rvc`'s base assets) not yet pulled, starts the operator
+        page's install as a task and answers `409 installing`: a sentence
+        saying what is being installed, how big, and to submit again after it,
+        with the task to watch in `details.task_id`. No job is created and
+        nothing waits here; the app's queue retries. A second submit while it
+        runs gets the same answer with the same task, never a second install.
+        A server that never decided its card decides and records it first. A
+        type the card cannot run is refused as before. `[jobs]
+        install_on_submit = false` turns the install off (the refusal then
+        carries `details.install`). `crucible/installonsubmit.py`.
         """
         store: JobStore = request.app.state.store
         leases: Leases = request.app.state.leases
+        installs: InstallOnSubmit = request.app.state.installs
         try:
             plugin = resolve(store.registry, body.type, config)
         except ApiError as refusal:
-            if refusal.code != "job_type_disabled" or not config.install_on_submit:
+            if refusal.code != "job_type_disabled":
                 raise
-            installs: InstallOnSubmit = request.app.state.installs
-            # Raises `refusal` itself for every case an install cannot fix,
-            # and a sharper refusal for a card that cannot run it after all.
-            need = installs.plan(body.type, body.model, refusal)
-            job = store.create(
-                body.type, body.model, body.params,
-                client=_client_agent(request), client_ref=body.client_ref,
-                hold=body.hold,
-            )
-            try:
-                _materialise_inputs(config, store, job, body.inputs)
-            except ApiError:
-                store.discard(job)
-                raise
-            installs.park(job, need)
-            return {"job_id": job.id}
+            if (refusal.details or {}).get("reason") == "undecided" and installs.installable(
+                body.type
+            ):
+                # Nothing ever measured this card: decide it now (2026-09-27).
+                refusal = decide_here(body.type)
+            if not config.install_on_submit:
+                raise refusal from None
+            # Raises `refusal` itself for every case an install cannot fix, a
+            # sharper refusal for a request or card it cannot serve, and
+            # otherwise starts (or finds) the install and raises `installing`.
+            raise installs.start(installs.plan(body.type, body.model, refusal)) from None
         if body.model is not None:
             # An upstream model is never resident and never on the lane, so
             # `load-model` naming one is the same mistake a lease on one is,
@@ -3044,40 +3040,49 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # resident engine without occupying the lane, and the job types that
             # would talk to it or move it refuse `engine_in_use` from here
             # (crucible/residency.py).
-            plugin.preflight(model, body.params)
-
-            job = store.create(
-                body.type, model, body.params,
-                client=_client_agent(request), client_ref=body.client_ref,
-                hold=body.hold,
-            )
+            #
+            # ITS WEIGHTS MAY NOT BE HERE (Owen, 2026-09-27: *"Yes, it should
+            # try to pull the model"*). On a missing-weights refusal the pull is
+            # worked out AFTER this block, which holds the card's lock and must
+            # stay short: a declared, pullable model, voice or base asset this
+            # card can run is pulled for the caller and the job is refused
+            # `installing`, exactly as a missing env is. Only these refusals
+            # ask, so a job whose weights are here pays nothing for it.
+            missing_weights: ApiError | None = None
             try:
-                _materialise_inputs(config, store, job, body.inputs)
-                # `enqueue` asks admission again and is the authority on it;
-                # nothing awaits between here and the check above — the body of
-                # `settled_for` must not — so the two are one atomic stretch on
-                # the event loop. Inside the same `try` so that a refusal from
-                # either leaves no half-built job behind.
-                store.enqueue(job)
-            except ApiError:
-                store.discard(job)
-                raise
+                plugin.preflight(model, body.params)
+            except ApiError as refusal:
+                if not (
+                    config.install_on_submit and refusal.code in PULLABLE_REFUSALS
+                ):
+                    raise
+                missing_weights = refusal
+            else:
+                job = store.create(
+                    body.type, model, body.params,
+                    client=_client_agent(request), client_ref=body.client_ref,
+                    hold=body.hold,
+                )
+                try:
+                    _materialise_inputs(config, store, job, body.inputs)
+                    # `enqueue` asks admission again and is the authority on it;
+                    # nothing awaits between here and the check above — the body of
+                    # `settled_for` must not — so the two are one atomic stretch on
+                    # the event loop. Inside the same `try` so that a refusal from
+                    # either leaves no half-built job behind.
+                    store.enqueue(job)
+                except ApiError:
+                    store.discard(job)
+                    raise
+        if missing_weights is not None:
+            need = installs.pulls_for(body.type, model, missing_weights)
+            if need is None:
+                raise missing_weights
+            raise installs.start(need)
         return {"job_id": job.id}
 
     @private.get("/jobs/{job_id}")
     async def get_job(request: Request, job_id: str) -> dict[str, Any]:
-        """One job's state: `status`, `progress`, `position`, `error`, `artifacts`.
-
-        `waiting_for` (2026-09-26, install-on-submit) is null unless the job is
-        `queued` waiting for its install, when it says what for: `message` in
-        words ("installing the rvc environment (about 3.3 GB), then pulling its
-        base assets (about 900 MB); your job starts after it"), `plan` (the
-        install modal's sentences for this card, since an API caller has no
-        modal), `task_id`, `steps`, the task's current `step`, `progress` (0..1
-        while a step reports bytes) and its last output `line`. `reason` is
-        `install`, or `card` once installed while somebody else holds the
-        card. The job's own stream carries the same object as `waiting` events.
-        """
         store: JobStore = request.app.state.store
         job = store.get(job_id)
         return _job_state(store, job)
@@ -4813,7 +4818,6 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "status",
         "progress",
         "position",
-        "waiting_for",
         "error",
         "artifacts",
         "created",
@@ -4836,11 +4840,6 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "position": store.position(job),
-        # WHAT A `queued` JOB WAITS FOR, when it is its install (2026-09-26,
-        # `crucible/installonsubmit.py`): `message` in words, `plan` the install
-        # modal's sentences for this card, and the task's `step` and `progress`.
-        # Null for every job that is not waiting for one.
-        "waiting_for": store.waiting_for(job),
         "error": job.error,
         "artifacts": list(job.artifacts),
         "created": job.created,

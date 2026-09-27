@@ -774,22 +774,8 @@ export interface JobStatus {
   readonly model: string | null;
   readonly status: JobState;
   readonly progress: number | null;
-  /**
-   * 0 while running, 1-based place in line while queued, `null` once terminal
-   * — and `null` while queued waiting for its install (see `waitingFor`).
-   */
+  /** 0 while running, 1-based place in line while queued, `null` once terminal. */
   readonly position: number | null;
-  /**
-   * What a `queued` job is waiting for when it is its install; `null` for
-   * every other job, and on a server before install-on-submit.
-   *
-   * Owen, 2026-09-26: *"yes, we need to install a missing environment when a
-   * job is submitted"*. A job for a type this card can run and has not
-   * installed is accepted, and the server installs it (the env, the base
-   * weights, the model the job names) before running it. `message` says so
-   * in words; show it.
-   */
-  readonly waitingFor: WaitingFor | null;
   readonly error: JobFailure | null;
   readonly artifacts: readonly string[];
   readonly created: string | null;
@@ -857,41 +843,6 @@ export interface JobStatus {
   readonly chunkAt: string | null;
 }
 
-/**
- * What a job waits for before it can run: its install (2026-09-26).
- *
- * Informational throughout: a caller shows `message` and waits for the job's
- * own `done`/`failed`, which is where the install's outcome lands (a failed
- * install fails the job with the install's own one-line reason).
- */
-export interface WaitingFor {
-  /**
-   * `install` — the server is installing (or pulling) what the job needs;
-   * `card` — installed, and the card is held by somebody else for now.
-   */
-  readonly reason: string;
-  /** The operator task doing the work (`GET /v1/tasks/{id}`), or null. */
-  readonly taskId: string | null;
-  /** In words, e.g. "installing the rvc environment (about 3.3 GB), then pulling its base assets (about 900 MB); your job starts after it". */
-  readonly message: string;
-  /**
-   * The install modal's sentences for this card (`GET /v1/capability/plan`):
-   * the card by name and what it will run, at what precision. An API caller
-   * has no modal, so they arrive here.
-   */
-  readonly plan: string | null;
-  /** The task's steps this job needs, in order. */
-  readonly steps: readonly string[];
-  /** The step the task is on, or null before it starts. */
-  readonly step: { readonly name: string | null; readonly index: number | null; readonly total: number | null } | null;
-  /** 0..1 while a step reports bytes (a pull), else null. */
-  readonly progress: number | null;
-  /** The step's last output line (pip), or null. */
-  readonly line: string | null;
-  /** When the job started waiting (ISO-8601). */
-  readonly since: string | null;
-}
-
 /** `DELETE /v1/jobs/{id}`. A running job ends `cancelled` at its next checkpoint. */
 export interface CancelResult {
   readonly jobId: string;
@@ -907,7 +858,6 @@ export interface CancelResult {
 export type JobEvent =
   | { readonly id: number; readonly event: 'queued'; readonly data: QueuedData }
   | { readonly id: number; readonly event: 'warming'; readonly data: WarmingData }
-  | { readonly id: number; readonly event: 'waiting'; readonly data: WaitingFor }
   | { readonly id: number; readonly event: 'progress'; readonly data: ProgressData }
   | { readonly id: number; readonly event: 'chunk'; readonly data: ChunkData }
   | { readonly id: number; readonly event: 'artifact'; readonly data: ArtifactData }
@@ -947,8 +897,6 @@ export interface UnknownEvent {
 
 export interface QueuedData {
   readonly position: number | null;
-  /** Present when the job was admitted to wait for its install (2026-09-26). */
-  readonly waitingFor: WaitingFor | null;
 }
 
 /**
@@ -2906,6 +2854,40 @@ export interface TaskStatus {
    * beside the pulls it made.
    */
   readonly unmet: readonly UnmetNeed[];
+  /**
+   * What the task is doing, in words, when `POST /v1/jobs` started it for a
+   * job ("installing the rvc environment (about 3.3 GB), then pulling its base
+   * assets (about 900 MB)"); `null` for every other task, once it ends, and on
+   * a server before install-on-submit (2026-09-26).
+   */
+  readonly message: string | null;
+}
+
+/**
+ * `details` of a `409 installing` refusal from `POST /v1/jobs` (2026-09-27).
+ *
+ * The job's environment, model, voice or base assets were missing and this
+ * card can run them, so the server started installing them and did NOT take
+ * the job: Crucible does not queue, the app does. Show `message`, watch
+ * `taskId` (`task()` / `taskEvents()`), and submit the job again after it
+ * ends. A second submit while it runs gets the same task, never a second
+ * install. Read it off `CrucibleApiError.details`; every field is
+ * informational.
+ */
+export interface InstallingDetails {
+  readonly job_type: string;
+  readonly task_id: string;
+  /** `installing` (that task is this job's install) or `task_busy` (another task has the lane; submit again after it and the install starts). */
+  readonly reason: 'installing' | 'task_busy';
+  /** In words, e.g. "pulling its base assets (about 900 MB), 40%, then pulling the RVC voice 'sigma' (about 55 MB)". */
+  readonly message: string;
+  /** The install modal's sentences for this card (`GET /v1/capability/plan`), or null. */
+  readonly plan: string | null;
+  readonly steps: readonly string[];
+  readonly step: { readonly name: string | null; readonly index: number | null; readonly total: number | null } | null;
+  /** 0..1 while the step reports bytes, else null. */
+  readonly progress: number | null;
+  readonly line: string | null;
 }
 
 /** One step of a task. For a `module`, one per entry plus the reload. */
