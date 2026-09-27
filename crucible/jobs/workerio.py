@@ -38,6 +38,46 @@ def fail(message: str) -> int:
     return 1
 
 
+def _parsed(line: str, label: str):
+    try:
+        request = json.loads(line)
+    except json.JSONDecodeError as exc:
+        fail(f"the {label} request is not JSON: {exc}")
+        return None
+    if not isinstance(request, dict):
+        fail(f"the {label} request must be a JSON object, got {type(request).__name__}")
+        return None
+    return request
+
+
+def read_request(label: str):
+    line = sys.stdin.readline()
+    if not line.strip():
+        fail(f"the {label} worker was given no request on stdin")
+        return None
+    return _parsed(line, label)
+
+
+def serve(label: str, ops: dict) -> int:
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request = _parsed(line, label)
+        if request is None:
+            return 1
+        op = request.get("op")
+        handler = ops.get(op)
+        if handler is None:
+            return fail(f"the {label} request's op is {op!r}; this worker takes {sorted(ops)}")
+        try:
+            handler(request)
+        except KeyError as exc:
+            return fail(str(exc.args[0]))
+        except Exception as exc:
+            return fail(f"{type(exc).__name__}: {exc}")
+    return 0
+
+
 def require(request: dict, key: str, kind, label: str, why: str):
     if key not in request:
         raise KeyError(f"the {label} request has no {key!r}; {why}")

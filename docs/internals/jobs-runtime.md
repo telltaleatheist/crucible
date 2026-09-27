@@ -1,8 +1,10 @@
 # Jobs runtime internals
 
 How the job lane, its records, the card's holders and the worker job types behave, and why.
-Covers `crucible/jobs/` (registry, `base`, `queue`, `worker_type`, `workerio`, and the `tts`,
-`rvc`, `denoise`, `llm`, `echo` types), `journal`, `workers`, `installonsubmit`, `inflight`,
+Covers `crucible/jobtypes.py` (the job-type catalog), `crucible/jobs/` (registry,
+`registry_table`, `binding`, `template`, `unload`, `leaseonload`, `base`, `queue`, `worker_type`,
+`workerio`, and the `tts`, `rvc`, `denoise`, `llm`, `echo` types), `journal`, `workers`,
+`installonsubmit`, `inflight`,
 `leases`, `settle`, `ttsstream`, `rvcbase`, `rvcmodels`, `denoisemodels`, and the catalog files
 `crucible/rvc/*.toml`, `crucible/rvcbase/*.toml`, `crucible/denoise/*.toml`.
 
@@ -34,6 +36,84 @@ implementation rules are repeated here.
   reader must never take `null` to mean `false`.
 
 ## 2. The registry (`crucible/jobs/__init__.py`)
+
+### One catalog of job types (`crucible/jobtypes.py`, `crucible/jobs/registry_table.py`)
+
+Every job type is one frozen `JobTypeSpec` in `crucible/jobtypes.py`: its public name, its
+`Family`, its `CardEffect` (what it does to the card), whether it leaves its subject resident
+(`leaves_it_resident`, the loads), and whether it keeps a resume journal (`journal_identity`).
+A `Family` is the `[jobs] enable_<name>` flag and `CapabilityClass.job_type`: its `Env` (the
+installer; `worker` says whether the env runs a `crucible/jobs/*/worker.py`), the capability
+class names it covers (checked against `crucible/classnames.py` when the module loads, and
+against `capability.CLASSES` when `crucible.jobs` loads), the refusal codes a pull fixes, the
+base subjects it needs, and whether the catalog lists every model it can serve. Whether a type
+is an unload, and of what, is `spec.unloads` (the card effect's `takes_off`).
+
+Each job package exports `JOB_TYPES`: a `JobTypeBinding(spec, build)` per type it implements,
+where `build(Wiring)` makes the type from the config, backend, the shared `Residency` and the
+lease register. `crucible/jobs/registry_table.py` lists every package's bindings in one tuple
+and refuses to load unless they cover `JOB_TYPE_SPECS` exactly, in order. `build_registry` is
+that table filtered by the family flags; it also refuses a type whose `name` is not its spec's
+or whose `journal_identity` disagrees with its spec.
+
+Every former per-type table is a derivation, under its old name:
+
+| Old name | Derived from |
+| --- | --- |
+| `jobs.ALL_JOB_TYPES`, `jobs.CAPABILITIES` | spec name to family name |
+| `build_registry`'s `enable_*` mapping | `family.flag` |
+| `leases.CARD_EFFECTS` | `spec.card` |
+| `settle.LEAVES_IT_RESIDENT` | `spec.leaves_it_resident` |
+| `installonsubmit.BASE_SUBJECTS` | `family.base_subject_kinds` (ids from `catalog`) |
+| `installonsubmit.PULLABLE_REFUSALS`, `INSTALLABLE_REFUSALS` | `family.pullable_refusals` |
+| `installonsubmit.CATALOG_IS_COMPLETE` | `family.catalog_is_complete` |
+| `InstallOnSubmit.installable` (was `startswith("unload-")`) | `spec.installable` |
+| `jobenv.WORKER_JOB_TYPES`, `JOB_TYPES_SERVED_BY_ENV`, `INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR` | `ENVS` and each family's `env` |
+
+`WORKER_HEADLINE_PACKAGE` and `SMOKE_IMPORT` stay in `jobenv`: they are facts about envs and
+backends, not job types. `INSTALLER_FOR["pages"]` stays a literal there, because `pages` is a
+capability class, not a job family.
+
+The catalog is a leaf outside `crucible/jobs/` on purpose. `crucible.leases` must not import
+`crucible.residency` (`tests/test_layering.py`), and `crucible.jobenv` is imported by
+`residency`. Importing anything under `crucible/jobs/` runs `crucible/jobs/__init__.py`,
+which imports `residency` and every job package. A table there could be read by neither.
+
+### The job template (`crucible/jobs/template.py`, `unload.py`, `leaseonload.py`)
+
+- `ManifestCatalog[T]` is a manifest loader plus the four questions every type asked of it:
+  `all()` (the loader's error becomes `500 <kind>_manifests_unreadable`), `known(id)` (`400
+  unknown_model`, or `unknown_voice`), `memory_estimate`, `provenance` (`{id, revision,
+  fingerprint}`) and `descriptors`. Each type passes a lambda, not the loader itself, so a test
+  that patches the loader on the type's module still reaches it.
+- `parse_params(model, params, job_type, lead=None)` is the one `400 invalid_params`
+  sentence: `"<job_type> params are not valid: <loc>: <msg>; ..."`, or `"<lead>: ..."` where a
+  type has more to say (denoise explains why it takes no params).
+- Each type has a `requirements(model, params)` step: everything preflight refuses, ending in
+  the accelerator guard (`card_guard`). `preflight` calls it directly; `run` calls it through
+  `as_job_error(...)`, which turns the same `ApiError` into a `JobError` with the same code and
+  message. So each type calls the guard once in its source, not once per door. Types whose
+  run-time guard happens later than the preflight check (the tts render, align and denoise,
+  which load inside a claim or a session) keep the guard in one `_guard` method both sides call.
+- `ResidentWorker` is the `_session`/`_forget` pair align and denoise shared: reuse the resident
+  session when its process is alive, forget a dead one, guard, load, and say "a bug in
+  residency.py" if a load published no session.
+- `leaseonload.LeaseOnLoad` and `open_lease_for_load` are the `params.lease` of `load-model`
+  and `load-voice` (were `jobs.llm.LeaseOnLoad` / `_open_lease_for_load`, still re-exported).
+- `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
+  The kind comes from `spec.unloads`, the noun from `cardkinds.KIND_NOUNS`, and the codes stay
+  `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`). The four copies had drifted;
+  the rulings (2026-09-27):
+  - progress is reported only after `await_clearance` returns (llm reported `unloading` before
+    the wait, so a wait that then failed left a 0 % progress line on a job that never started);
+  - `invalid_params` has the one `parse_params` format (unload-denoiser said
+    `"<name> takes no params: <pydantic text>"`);
+  - every type catches a `KeyError` from `Residency.unload` (the subject went between the check
+    and the unload) as `<noun>_not_resident`, and names a failed stop by what failed:
+    `engine_failed` for an engine, `worker_failed` for a worker session (llm only knew the
+    first, align and denoise only the second);
+  - `check()` names the resident of its own kind (`resident: <id>` or `no <noun> is resident`);
+    unload-model used to name whatever held the card.
 
 - `resolve` tells "that type does not exist" apart from "it exists but is off".
   `disabled_error` builds the one `400 job_type_disabled` sentence for all four doors that
@@ -101,22 +181,28 @@ ladder or the CLI:
 
 ### Admission
 
-- `refuse_if_busy` answers "is there room now" and nothing else. It reads `_pending` as well as
-  `_running_id`. `enqueue` appends and wakes the lane, but the lane task cannot run until the
-  current handler yields. A check of `_running_id` alone would therefore admit a second job in
-  that window. The check and the append run in one synchronous stretch on the event loop, and
-  `enqueue` repeats the check because it is where the append happens.
+- The lane is a single slot, not a queue: `LaneSlot` (`JobStore._admitted`) holds at most the
+  one admitted job id, and `admit` refuses a second. `queue_depth` is 0 or 1, `position()` is
+  0 (running), 1 (admitted) or null, and `queued()` is empty or that one job; the names and the
+  `queued` event's `position` field stay because clients read them. `JobStore._pending` is the
+  same slot under its old name (with `append`/`remove`), kept only for tests.
+- `refuse_if_busy` answers "is there room now" and nothing else. It reads the admitted slot as
+  well as `_running_id`. `enqueue` admits and wakes the lane, but the lane task cannot run until
+  the current handler yields. A check of `_running_id` alone would therefore admit a second job
+  in that window. The check and the admit run in one synchronous stretch on the event loop, and
+  `enqueue` repeats the check because it is where the admit happens.
 - The refusal is `409 server_busy` with facts (`busy_details`): holder, job, state, `since`
   (`started` for a running job, `created` for an admitted one) and the latest progress line.
   A bare "busy" makes clients poll, and polling rewards luck rather than who asked first.
-  `Job.busy_details()` builds them (`jobs.queue.busy_details` delegates to it); it is also what
+  `Job.busy()` builds them as a `BusyHolder` and `Job.busy_details()` is its `to_dict()`
+  (`jobs.queue.busy_details` delegates to it); it is also what
   `POST /v1/tasks` reads through `Settlement.holder()`, which is why `settle` needs no import of
   the queue.
 - `position`, `queue_depth` and cancel are unchanged. Under the admission rule they only take
   the values 0, 1 or null.
 - `discard` forgets a created job that was never admitted. A leftover record would sit at
-  `queued` forever, and `position()` would raise.
-- `_lane_lock` guards `_pending` and `_running_id` together, because the settlement reads the
+  `queued` forever, with no position.
+- `_lane_lock` guards the admitted slot and `_running_id` together, because the settlement reads the
   lane from a worker thread. The move from queued to running happens in one step under that
   lock. Without it, there was an instant (while the record was being persisted) when a job
   admitted before a clearance was on neither side, so the card could be cleared under it.
@@ -144,6 +230,17 @@ ladder or the CLI:
   artifact as chunk N, so a resume is a set difference on `chunks_done` rather than filename
   parsing. `expect_chunks` sets the denominator `chunks_total`, and `last_chunk_at` gives a
   pace from two reads of the record.
+
+### Shapes
+
+- `Job.failure` is a `JobFailure(code, message)`; `Job.error` is its `to_dict()`, the
+  `{"code", "message"}` the record, the `failed` event and `GET /v1/jobs/{id}` carry.
+- `hold`/`hold_record` build a `HoldRecord` and answer its `to_dict()`.
+- `Reaped.why` is a `ReapReason` (`fetched`, `aged`, `released`), a `str` enum whose values are
+  the strings `job_reaped` has always carried.
+- The resume note reads the journal manifest through `JournalProgress.of(manifest)`;
+  `crucible/journal.py` still hands out the manifest as a dict.
+- `SECONDS_PER_DAY` names the retention arithmetic.
 
 ### Durability and restart
 
@@ -290,8 +387,9 @@ intention, and the fix is a lease on the client side, never an exception here.
 - A lease names the RESIDENT THING, of any kind. The server reads the kind off
   `Residency.resident` at open time. The client never sends a kind, because there is only ever
   one candidate.
-- `CARD_EFFECTS` is the one table of what each job type does to the card (`makes_resident`,
-  `reuses_named`, `unloads`). `Lease.evicted_by` derives every (lease, job) answer from it.
+- `CARD_EFFECTS` is what each job type does to the card (`makes_resident`,
+  `reuses_what_it_names`, `takes_off`), derived from each `JobTypeSpec.card` in
+  `crucible/jobtypes.py` (section 2). `Lease.evicted_by` derives every (lease, job) answer from it.
   Under a voice lease, a `tts` render of the leased voice is ADMITTED (it reuses the voice). A
   render under a model lease is refused. A type with no row, asked for while a lease is open,
   is refused `lease_scope_unknown`; the tests require every type to have a row.
@@ -399,6 +497,12 @@ request goes in on stdin and newline-delimited JSON comes back on fd 1.
     2026-09-26 on a 3090 Ti: with varying input lengths, reserved memory climbed from 7.7 GB to
     over 21 GB and spilled into Windows shared memory. With the setting and the cap it held at
     5.6–5.9 GB. vLLM, faster-whisper and rvc are excluded.
+- The stdin loop is written once. A one-shot worker (asr, mlx asr, rvc) calls
+  `workerio.read_request(label)`, which answers `failed` for no request, a line that is not
+  JSON, or JSON that is not an object, and returns None so `main` exits 1. A session worker
+  (align, denoise, qwen asr) calls `workerio.serve(label, OPS)`: blank lines are skipped, and the
+  first unreadable request, unknown op, `KeyError` from `require` or other exception from a
+  handler is answered `failed` and ends the worker with exit 1; end of input exits 0.
 - `workerio` imports only the standard library at load (numpy only inside `decode`), because no
   worker env has `crucible`. Workers load it by path (`load_sibling`) and never leave
   `crucible/jobs/` on `sys.path`, where `queue.py` would shadow the stdlib `queue`.

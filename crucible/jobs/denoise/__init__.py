@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 
-from ... import accelerator, workers
+from ... import workers
 from ...backend import CUDA_LINUX
 from ...config import Config
 from ...denoisemodels import (
@@ -21,17 +20,27 @@ from ...denoisemodels import (
 from ...denoisemodels import installed as model_installed
 from ...denoisemodels import missing as missing_model_files
 from ...errors import ApiError, JobError
-from ...manifests import fingerprint
+from ...jobtypes import DENOISE_JOB, RVC_ENV, UNLOAD_DENOISER
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_DENOISE,
     Residency,
-    describe_resident,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
+from ..template import (
+    ManifestCatalog,
+    ResidentWorker,
+    as_job_error,
+    parse_params,
+    require_model,
+    run_model,
+)
+from ..unload import UnloadJobType, UnloadParams
 
 __all__ = [
+    "JOB_TYPES",
     "DenoiseJobType",
     "DenoiseParams",
     "UnloadDenoiserJobType",
@@ -39,9 +48,16 @@ __all__ = [
     "denoise_models_dir_for",
 ]
 
-JOB_TYPE = "denoise"
+JOB_TYPE = DENOISE_JOB.name
 
-ENV_JOB_TYPE = "rvc"
+ENV_JOB_TYPE = RVC_ENV.name
+
+UnloadDenoiserParams = UnloadParams
+
+NO_PARAMS = (
+    "denoise takes no params — every separation knob is an engine default this "
+    "server does not put on the wire (PHASE4-AUDIO.md section 4.2)"
+)
 
 OUTPUT_FORMAT = "WAV"
 
@@ -68,46 +84,23 @@ class DenoiseParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _manifests() -> dict[str, DenoiseManifest]:
-    try:
-        return load_all_denoise_manifests()
-    except DenoiseManifestError as exc:
-        raise ApiError(
-            500,
-            "denoise_manifests_unreadable",
-            f"this server cannot read its denoise manifests: {exc}",
-        ) from None
+MANIFESTS: ManifestCatalog[DenoiseManifest] = ManifestCatalog(
+    lambda: load_all_denoise_manifests(),
+    DenoiseManifestError,
+    unreadable_code="denoise_manifests_unreadable",
+    what="denoise manifests",
+    unknown="denoise manifest for",
+)
 
 
-def _known(model_id: str) -> DenoiseManifest:
-    manifests = _manifests()
-    manifest = manifests.get(model_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_model",
-            f"no denoise manifest for {model_id!r}; this build ships "
-            f"{sorted(manifests)}",
-        )
-    return manifest
-
-
-def _params(params: dict[str, Any]) -> DenoiseParams:
-    try:
-        return DenoiseParams.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            "denoise takes no params — every separation knob is an engine "
-            "default this server does not put on the wire (PHASE4-AUDIO.md "
-            "section 4.2): "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
+def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
+    return MANIFESTS.descriptors(
+        config.backend_kind,
+        installed=lambda manifest, spec: model_installed(config.home, manifest, spec)
+        is not None,
+        resident=lambda model_id: residency.is_resident(KIND_DENOISE, model_id),
+        source=lambda spec: f"{spec.hf_repo}:{spec.model_path}",
+    )
 
 
 def _missing_files(config: Config, manifest: DenoiseManifest) -> list[str]:
@@ -147,24 +140,9 @@ def _require_model_files(config: Config, manifest: DenoiseManifest) -> Path:
     )
 
 
-def _denoise_provenance(
-    backend_kind: str, model: str | None
-) -> dict[str, Any] | None:
-    if model is None:
-        return None
-    manifest = _known(model)
-    spec = manifest.backends.get(backend_kind)
-    if spec is None:
-        return {"id": model, "revision": None, "fingerprint": None}
-    return {
-        "id": model,
-        "revision": spec.revision,
-        "fingerprint": fingerprint(model, spec.revision),
-    }
-
-
-class DenoiseJobType:
+class DenoiseJobType(ResidentWorker):
     name = JOB_TYPE
+    resident_kind = KIND_DENOISE
 
     def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
         self._config = config
@@ -176,50 +154,16 @@ class DenoiseJobType:
     def residency(self) -> Residency:
         return self._residency
 
-    def _owned_pids(self) -> frozenset[int]:
-        return self._residency.owned_pids()
-
-
     def describe_models(self) -> list[ModelDescriptor]:
-        backend_kind = self._config.backend_kind
-        rows: list[ModelDescriptor] = []
-        for manifest in _manifests().values():
-            if manifest.supports(backend_kind):
-                spec = manifest.spec(backend_kind)
-                revision, source, estimate = (
-                    spec.revision,
-                    f"{spec.hf_repo}:{spec.model_path}",
-                    spec.memory_bytes_estimate,
-                )
-                installed = (
-                    model_installed(self._config.home, manifest, spec) is not None
-                )
-            else:
-                revision, source, estimate, installed = "", "", 0, False
-            rows.append(
-                ModelDescriptor(
-                    id=manifest.id,
-                    revision=revision,
-                    source=source,
-                    installed=installed,
-                    resident=self._residency.is_resident(KIND_DENOISE, manifest.id),
-                    vram_bytes=estimate,
-                )
-            )
-        return rows
+        return _descriptors(self._config, self._residency)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        return _denoise_provenance(self._config.backend_kind, model)
+        return MANIFESTS.provenance(self._config.backend_kind, run_model(model, self.name))
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
-        if not manifest.supports(self._config.backend_kind):
-            return 0
-        return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+        return MANIFESTS.memory_estimate(
+            run_model(model, self.name), self._config.backend_kind
+        )
 
     def check(self, backend: Any) -> JobTypeStatus:
         env = worker_type.env_or_status(
@@ -231,7 +175,7 @@ class DenoiseJobType:
         if isinstance(env, JobTypeStatus):
             return env
         try:
-            manifests = _manifests()
+            manifests = MANIFESTS.all()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
         installed = [
@@ -262,11 +206,14 @@ class DenoiseJobType:
         )
 
 
-    def _require_runnable(
+    def _resident_session(self) -> workers.WorkerSession | None:
+        return self._residency.separator_session
+
+    def requirements(
         self, model_id: str
     ) -> tuple[DenoiseManifest, DenoiseBackendSpec, Path, Path]:
         backend_kind = self._backend.kind
-        manifest = _known(model_id)
+        manifest = MANIFESTS.known(model_id)
         spec = worker_type.require_block(manifest, model_id, backend_kind, "denoise model")
         worker_type.refuse_if_larger_than_host(
             self._backend, model_id, spec.memory_bytes_estimate
@@ -278,37 +225,28 @@ class DenoiseJobType:
         return manifest, spec, python, root
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        _params(params)
-        _manifest, spec, _python, _root = self._require_runnable(model)
+        model = require_model(model, self.name)
+        parse_params(DenoiseParams, params, self.name, lead=NO_PARAMS)
+        _manifest, spec, _python, _root = self.requirements(model)
         self._residency.refuse_if_claimed(f"denoising with {model!r}")
         if self._residency.is_resident(KIND_DENOISE, model):
             return
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
-            need_bytes=spec.memory_bytes_estimate,
-            owned_pids=self._owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
-        )
+        self._guard(model, spec.memory_bytes_estimate)
 
 
     def run(self, job: Job, ctx: JobContext) -> None:
         DenoiseParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-
-        try:
-            manifest, spec, python, root = self._require_runnable(model)
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        model = run_model(job.model, self.name)
+        manifest, spec, python, root = as_job_error(self.requirements, model)
 
         source = self._input(ctx)
         output_dir = ctx.scratch / "stems"
-        session = self._session(ctx, manifest, spec, root, python, model)
+        session = self._session(
+            ctx,
+            model,
+            spec.memory_bytes_estimate,
+            lambda: self._load(ctx, manifest, spec, root, python),
+        )
 
         request = {
             "op": "separate",
@@ -366,70 +304,27 @@ class DenoiseJobType:
         )
 
 
-    def _session(
+    def _load(
         self,
         ctx: JobContext,
         manifest: DenoiseManifest,
         spec: DenoiseBackendSpec,
         model_file_dir: Path,
         python: Path,
-        model: str,
-    ) -> workers.WorkerSession:
-        session = self._residency.separator_session
-        if session is not None and self._residency.is_resident(KIND_DENOISE, model):
-            if session.alive:
-                return session
-            ctx.warming(
-                f"the resident {model} worker is gone (its log is "
-                f"{session.log_path}); loading it again"
-            )
-            self._forget(ctx, model)
-
-        try:
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
-                owned_pids=self._owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-                reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
-        ctx.warming(state.detail)
-
+    ) -> None:
         began = time.perf_counter()
-        try:
-            self._residency.load_separator(
-                manifest,
-                spec,
-                model_file_dir,
-                python,
-                WORKER_SCRIPT,
-                use_autocast=self._backend.kind == CUDA_LINUX,
-                environment=dict(ENGINE_ENVIRONMENT),
-                timeout=DEFAULT_READY_TIMEOUT_SECONDS,
-                on_progress=ctx.warming,
-            )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
+        self._residency.load_separator(
+            manifest,
+            spec,
+            model_file_dir,
+            python,
+            WORKER_SCRIPT,
+            use_autocast=self._backend.kind == CUDA_LINUX,
+            environment=dict(ENGINE_ENVIRONMENT),
+            timeout=DEFAULT_READY_TIMEOUT_SECONDS,
+            on_progress=ctx.warming,
+        )
         self._loaded_seconds[ctx.job.id] = round(time.perf_counter() - began, 2)
-        loaded = self._residency.separator_session
-        if loaded is None:
-            raise JobError(
-                "worker_failed",
-                f"{model} loaded but no session was published; this is a bug in "
-                "crucible/residency.py",
-            )
-        return loaded
-
-    def _forget(self, ctx: JobContext, model: str) -> None:
-        try:
-            self._residency.unload(model)
-        except (KeyError, workers.WorkerError) as exc:
-            line = f"could not take {model} off the card: {type(exc).__name__}: {exc}"
-            print(f"crucible: {line}", file=sys.stderr)
-            ctx.note(line)
 
     @staticmethod
     def _input(ctx: JobContext) -> Path:
@@ -484,102 +379,25 @@ class DenoiseJobType:
         return primary
 
 
-class UnloadDenoiserParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class UnloadDenoiserJobType:
-    name = "unload-denoiser"
-
+class UnloadDenoiserJobType(UnloadJobType):
     def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
-        self._config = config
-        self._backend = backend
-        self._residency = residency
-
-    @property
-    def residency(self) -> Residency:
-        return self._residency
-
-    def describe_models(self) -> list[ModelDescriptor]:
-        rows: list[ModelDescriptor] = []
-        for manifest in _manifests().values():
-            backend_kind = self._config.backend_kind
-            supported = manifest.supports(backend_kind)
-            spec = manifest.spec(backend_kind) if supported else None
-            rows.append(
-                ModelDescriptor(
-                    id=manifest.id,
-                    revision=spec.revision if spec else "",
-                    source=f"{spec.hf_repo}:{spec.model_path}" if spec else "",
-                    installed=(
-                        model_installed(self._config.home, manifest, spec) is not None
-                        if spec
-                        else False
-                    ),
-                    resident=self._residency.is_resident(KIND_DENOISE, manifest.id),
-                    vram_bytes=spec.memory_bytes_estimate if spec else 0,
-                )
-            )
-        return rows
-
-    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        return _denoise_provenance(self._config.backend_kind, model)
-
-    def vram_estimate(self, model: str | None) -> int:
-        return 0
-
-    def check(self, backend: Any) -> JobTypeStatus:
-        separator = self._residency.resident_separator
-        return JobTypeStatus(
-            ready=True,
-            detail=(
-                f"resident: {separator.separator_id}"
-                if separator
-                else "no separator is resident"
-            ),
+        super().__init__(
+            UNLOAD_DENOISER,
+            residency,
+            describe=lambda: _descriptors(config, residency),
+            provenance=lambda model: MANIFESTS.provenance(config.backend_kind, model),
         )
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a separator")
-        try:
-            UnloadDenoiserParams.model_validate(params)
-        except ValidationError as exc:
-            raise ApiError(
-                400, "invalid_params", f"{self.name} takes no params: {exc}"
-            ) from None
-        if self._residency.being_cleared(model):
-            return
-        self._residency.refuse_if_claimed(f"unloading {model!r}")
-        if not self._residency.is_resident(KIND_DENOISE, model):
-            raise ApiError(
-                409,
-                "separator_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_DENOISE, "no separator is"),
-                {"requested": model, "resident": self._residency.resident_id},
-            )
 
-    def run(self, job: Job, ctx: JobContext) -> None:
-        UnloadDenoiserParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a separator")
-        if self._residency.await_clearance(model):
-            ctx.progress(0.0, f"unloading {model}")
-            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
-            ctx.done_extra(resident=self._residency.resident_id)
-            return
-        if not self._residency.is_resident(KIND_DENOISE, model):
-            raise JobError(
-                "separator_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_DENOISE, "no separator is"),
-            )
-        ctx.progress(0.0, f"unloading {model}")
-        try:
-            self._residency.unload(model)
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
-        ctx.progress(1.0, f"{model} is unloaded")
-        ctx.done_extra(resident=self._residency.resident_id)
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        DENOISE_JOB,
+        lambda wiring: DenoiseJobType(wiring.config, wiring.backend, wiring.residency),
+    ),
+    JobTypeBinding(
+        UNLOAD_DENOISER,
+        lambda wiring: UnloadDenoiserJobType(
+            wiring.config, wiring.backend, wiring.residency
+        ),
+    ),
+)

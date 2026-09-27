@@ -6,7 +6,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...errors import JobError
+from ...jobtypes import ECHO_JOB
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
 
 _SLICE_SECONDS = 0.02
 
@@ -18,7 +20,7 @@ class EchoParams(BaseModel):
 
 
 class EchoJobType:
-    name = "echo"
+    name = ECHO_JOB.name
 
     def describe_models(self) -> list[ModelDescriptor]:
         return []
@@ -65,3 +67,8 @@ class EchoJobType:
             slice_seconds = min(_SLICE_SECONDS, remaining)
             time.sleep(slice_seconds)
             remaining -= slice_seconds
+
+
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(ECHO_JOB, lambda wiring: EchoJobType()),
+)

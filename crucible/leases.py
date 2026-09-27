@@ -6,36 +6,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
+from .cardkinds import KIND_NOUNS
 from .clock import now as _utcnow
 from .errors import ApiError
+from .jobtypes import JOB_TYPE_SPECS, CardEffect
 
 MIN_TTL_SECONDS = 30
 MAX_TTL_SECONDS = 3600
 
-
-@dataclass(frozen=True)
-class CardEffect:
-    makes_resident: str | None = None
-    reuses_what_it_names: bool = False
-    takes_off: str | None = None
-
-
-CARD_EFFECTS: dict[str, CardEffect] = {
-    "load-model": CardEffect(makes_resident=KIND_LLM),
-    "load-voice": CardEffect(makes_resident=KIND_TTS),
-    "tts": CardEffect(makes_resident=KIND_TTS, reuses_what_it_names=True),
-    "align": CardEffect(makes_resident=KIND_ALIGN, reuses_what_it_names=True),
-    "denoise": CardEffect(makes_resident=KIND_DENOISE, reuses_what_it_names=True),
-    "unload-model": CardEffect(takes_off=KIND_LLM),
-    "unload-voice": CardEffect(takes_off=KIND_TTS),
-    "unload-aligner": CardEffect(takes_off=KIND_ALIGN),
-    "unload-denoiser": CardEffect(takes_off=KIND_DENOISE),
-    "echo": CardEffect(),
-    "asr": CardEffect(),
-    "rvc": CardEffect(),
-    "align-longform": CardEffect(),
-}
+CARD_EFFECTS: dict[str, CardEffect] = {spec.name: spec.card for spec in JOB_TYPE_SPECS}
 
 
 def require_ttl(ttl_seconds: int) -> int:
@@ -200,7 +179,8 @@ class Leases:
                 f"{job_type!r} is a job type crucible/leases.py has no ruling "
                 "about: nothing says what it does to the card, so this server "
                 "cannot tell whether the open lease should refuse it. Give it a "
-                "row in CARD_EFFECTS",
+                "JobTypeSpec in crucible/jobtypes.py, which CARD_EFFECTS is "
+                "derived from",
                 {"type": job_type},
             )
         if not held.evicted_by(job_type, model):

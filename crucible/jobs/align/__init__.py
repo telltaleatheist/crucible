@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ... import accelerator, hosttools, weights, workers
+from ... import hosttools, weights, workers
 from ...alignmodels import (
     AlignBackendSpec,
     AlignManifest,
@@ -17,19 +16,36 @@ from ...alignmodels import (
 from ...backend import CUDA_LINUX, MLX_DARWIN
 from ...config import Config
 from ...errors import ApiError, JobCancelled, JobError
-from ...manifests import fingerprint
+from ...jobtypes import ALIGN_JOB, UNLOAD_ALIGNER
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_ALIGN,
     Residency,
-    describe_resident,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
+from ..template import (
+    ManifestCatalog,
+    ResidentWorker,
+    as_job_error,
+    parse_params,
+    require_model,
+    run_model,
+)
+from ..unload import UnloadJobType, UnloadParams
 
-__all__ = ["AlignJobType", "AlignParams", "UnloadAlignerJobType"]
+__all__ = ["JOB_TYPES", "AlignJobType", "AlignParams", "UnloadAlignerJobType"]
 
-JOB_TYPE = "align"
+JOB_TYPE = ALIGN_JOB.name
+
+UnloadAlignerParams = UnloadParams
+
+FFMPEG_WHY = (
+    "decodes every chunk through it to 16 kHz mono float32 — the rate the "
+    "model's feature extractor was trained at, which is why it is not "
+    "something a client is asked to do."
+)
 
 QWEN3_MAX_AUDIO_S = 300.0
 
@@ -166,98 +182,28 @@ class AlignParams(BaseModel):
         return QWEN3_LANGUAGES[self.language]
 
 
-def _manifests() -> dict[str, AlignManifest]:
-    try:
-        return load_all_align_manifests()
-    except AlignManifestError as exc:
-        raise ApiError(
-            500,
-            "align_manifests_unreadable",
-            f"this server cannot read its align manifests: {exc}",
-        ) from None
-
-
-def _known(model_id: str) -> AlignManifest:
-    manifests = _manifests()
-    manifest = manifests.get(model_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_model",
-            f"no align manifest for {model_id!r}; this build ships {sorted(manifests)}",
-        )
-    return manifest
-
-
-def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> Any:
-    try:
-        return model.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            f"{job_type} params are not valid: "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
-
-
-def _require_ffmpeg() -> str:
-    return hosttools.require_ffmpeg(
-        "align",
-        "decodes every chunk through it to 16 kHz mono float32 — the rate the "
-        "model's feature extractor was trained at, which is why it is not "
-        "something a client is asked to do.",
-    )
-
-
-def _align_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
-    if model is None:
-        return None
-    manifest = _known(model)
-    spec = manifest.backends.get(backend_kind)
-    if spec is None:
-        return {"id": model, "revision": None, "fingerprint": None}
-    return {
-        "id": model,
-        "revision": spec.revision,
-        "fingerprint": fingerprint(model, spec.revision),
-    }
+MANIFESTS: ManifestCatalog[AlignManifest] = ManifestCatalog(
+    lambda: load_all_align_manifests(),
+    AlignManifestError,
+    unreadable_code="align_manifests_unreadable",
+    what="align manifests",
+    unknown="align manifest for",
+)
 
 
 def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
-    backend_kind = config.backend_kind
-    rows: list[ModelDescriptor] = []
-    for manifest in _manifests().values():
-        if manifest.supports(backend_kind):
-            spec = manifest.spec(backend_kind)
-            revision, source, estimate = (
-                spec.revision,
-                spec.hf_repo,
-                spec.memory_bytes_estimate,
-            )
-            installed = weights.installed(config, manifest, spec) is not None
-        else:
-            revision, source, estimate, installed = "", "", 0, False
-        rows.append(
-            ModelDescriptor(
-                id=manifest.id,
-                revision=revision,
-                source=source,
-                installed=installed,
-                resident=residency.is_resident(KIND_ALIGN, manifest.id),
-                vram_bytes=estimate,
-            )
-        )
-    return rows
+    return MANIFESTS.descriptors(
+        config.backend_kind,
+        installed=lambda manifest, spec: weights.installed(config, manifest, spec)
+        is not None,
+        resident=lambda model_id: residency.is_resident(KIND_ALIGN, model_id),
+    )
 
 
-class AlignJobType:
+class AlignJobType(ResidentWorker):
 
     name = JOB_TYPE
+    resident_kind = KIND_ALIGN
 
     def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
         self._config = config
@@ -273,17 +219,12 @@ class AlignJobType:
         return _descriptors(self._config, self._residency)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        return _align_provenance(self._config.backend_kind, model)
+        return MANIFESTS.provenance(self._config.backend_kind, run_model(model, self.name))
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
-        if not manifest.supports(self._config.backend_kind):
-            return 0
-        return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+        return MANIFESTS.memory_estimate(
+            run_model(model, self.name), self._config.backend_kind
+        )
 
     def check(self, backend: Any) -> JobTypeStatus:
         env = worker_type.env_or_status(self._config, JOB_TYPE, backend.kind)
@@ -296,7 +237,7 @@ class AlignJobType:
                 "decodes every chunk through it. " + hosttools.searched_note(),
             )
         try:
-            manifests = _manifests()
+            manifests = MANIFESTS.all()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
         installed = worker_type.installed_ids(
@@ -313,11 +254,15 @@ class AlignJobType:
         return JobTypeStatus(ready=True, detail=f"{env.detail}; installed: {installed}")
 
 
-    def _require_runnable(
+    def _resident_session(self) -> workers.WorkerSession | None:
+        return self._residency.aligner_session
+
+    def requirements(
         self, model_id: str
-    ) -> tuple[AlignManifest, AlignBackendSpec, Path, Path]:
+    ) -> tuple[str, AlignManifest, AlignBackendSpec, Path, Path]:
+        ffmpeg = hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
         backend_kind = self._backend.kind
-        manifest = _known(model_id)
+        manifest = MANIFESTS.known(model_id)
         spec = worker_type.require_block(manifest, model_id, backend_kind, "aligner")
         worker_type.refuse_if_larger_than_host(
             self._backend, model_id, spec.memory_bytes_estimate
@@ -325,43 +270,40 @@ class AlignJobType:
         python = worker_type.require_worker_python(
             self._config, JOB_TYPE, backend_kind, model_id
         )
-        return manifest, spec, python, worker_type.require_weights(
+        return ffmpeg, manifest, spec, python, worker_type.require_weights(
             self._config, manifest, spec, model_id
         )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        _params(AlignParams, params, self.name)
-        _require_ffmpeg()
-        _, spec, _, _ = self._require_runnable(model)
+        model = require_model(model, self.name)
+        parse_params(AlignParams, params, self.name)
+        _, _, spec, _, _ = self.requirements(model)
         self._residency.refuse_if_claimed(f"aligning with {model!r}")
         if self._residency.is_resident(KIND_ALIGN, model):
             return
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
-            need_bytes=spec.memory_bytes_estimate,
-            owned_pids=self._residency.owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
-        )
+        self._guard(model, spec.memory_bytes_estimate)
 
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = AlignParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-
-        try:
-            ffmpeg = _require_ffmpeg()
-            manifest, spec, python, weights_dir = self._require_runnable(model)
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        model = run_model(job.model, self.name)
+        ffmpeg, manifest, spec, python, weights_dir = as_job_error(self.requirements, model)
 
         audio = self._chunk_inputs(ctx, params)
-        session = self._session(ctx, manifest, spec, weights_dir, python, model)
+        session = self._session(
+            ctx,
+            model,
+            spec.memory_bytes_estimate,
+            lambda: self._residency.load_aligner(
+                manifest,
+                spec,
+                weights_dir,
+                python,
+                max_audio_s=QWEN3_MAX_AUDIO_S,
+                timeout=DEFAULT_READY_TIMEOUT_SECONDS,
+                on_progress=ctx.warming,
+            ),
+        )
 
         request = {
             "op": "align",
@@ -487,141 +429,26 @@ class AlignJobType:
             )
         return by_index
 
-    def _session(
-        self,
-        ctx: JobContext,
-        manifest: AlignManifest,
-        spec: AlignBackendSpec,
-        weights_dir: Path,
-        python: Path,
-        model: str,
-    ) -> workers.WorkerSession:
-        session = self._residency.aligner_session
-        if session is not None and self._residency.is_resident(KIND_ALIGN, model):
-            if session.alive:
-                return session
-            ctx.warming(
-                f"the resident {model} worker is gone (its log is "
-                f"{session.log_path}); loading it again"
-            )
-            self._forget(ctx, model)
 
-        try:
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
-                owned_pids=self._residency.owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-                reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
-        ctx.warming(state.detail)
-
-        try:
-            self._residency.load_aligner(
-                manifest,
-                spec,
-                weights_dir,
-                python,
-                max_audio_s=QWEN3_MAX_AUDIO_S,
-                timeout=DEFAULT_READY_TIMEOUT_SECONDS,
-                on_progress=ctx.warming,
-            )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
-        loaded = self._residency.aligner_session
-        if loaded is None:
-            raise JobError(
-                "worker_failed",
-                f"{model} loaded but no session was published; this is a bug in "
-                "crucible/residency.py",
-            )
-        return loaded
-
-    def _forget(self, ctx: JobContext, model: str) -> None:
-        try:
-            self._residency.unload(model)
-        except (KeyError, workers.WorkerError) as exc:
-            line = f"could not take {model} off the card: {type(exc).__name__}: {exc}"
-            print(f"crucible: {line}", file=sys.stderr)
-            ctx.note(line)
-
-
-class UnloadAlignerParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class UnloadAlignerJobType:
-
-    name = "unload-aligner"
-
+class UnloadAlignerJobType(UnloadJobType):
     def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
-        self._config = config
-        self._backend = backend
-        self._residency = residency
-
-    @property
-    def residency(self) -> Residency:
-        return self._residency
-
-    def describe_models(self) -> list[ModelDescriptor]:
-        return _descriptors(self._config, self._residency)
-
-    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        return _align_provenance(self._config.backend_kind, model)
-
-    def vram_estimate(self, model: str | None) -> int:
-        return 0
-
-    def check(self, backend: Any) -> JobTypeStatus:
-        aligner = self._residency.resident_aligner
-        return JobTypeStatus(
-            ready=True,
-            detail=(
-                f"resident: {aligner.aligner_id}"
-                if aligner
-                else "no aligner is resident"
-            ),
+        super().__init__(
+            UNLOAD_ALIGNER,
+            residency,
+            describe=lambda: _descriptors(config, residency),
+            provenance=lambda model: MANIFESTS.provenance(config.backend_kind, model),
         )
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs an aligner")
-        _params(UnloadAlignerParams, params, self.name)
-        if self._residency.being_cleared(model):
-            return
-        self._residency.refuse_if_claimed(f"unloading {model!r}")
-        if not self._residency.is_resident(KIND_ALIGN, model):
-            raise ApiError(
-                409,
-                "aligner_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_ALIGN, "no aligner is"),
-                {"requested": model, "resident": self._residency.resident_id},
-            )
 
-    def run(self, job: Job, ctx: JobContext) -> None:
-        UnloadAlignerParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs an aligner")
-        if self._residency.await_clearance(model):
-            ctx.progress(0.0, f"unloading {model}")
-            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
-            ctx.done_extra(resident=self._residency.resident_id)
-            return
-        if not self._residency.is_resident(KIND_ALIGN, model):
-            raise JobError(
-                "aligner_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_ALIGN, "no aligner is"),
-            )
-        ctx.progress(0.0, f"unloading {model}")
-        try:
-            self._residency.unload(model)
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
-        ctx.progress(1.0, f"{model} is unloaded")
-        ctx.done_extra(resident=self._residency.resident_id)
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        ALIGN_JOB,
+        lambda wiring: AlignJobType(wiring.config, wiring.backend, wiring.residency),
+    ),
+    JobTypeBinding(
+        UNLOAD_ALIGNER,
+        lambda wiring: UnloadAlignerJobType(
+            wiring.config, wiring.backend, wiring.residency
+        ),
+    ),
+)

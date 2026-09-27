@@ -14,29 +14,31 @@ from .config import Config
 from .errors import ApiError
 from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 from .jobs import ALL_JOB_TYPES
+from .jobtypes import FAMILIES, spec_of
 from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
 from .voices import NARRATOR_ENGINE_SAMPLING, load_all_voices
 
 INSTALLING = "installing"
 
+BASE_SUBJECT_IDS: dict[str, str] = {"rvc-base": catalog.RVC_BASE_ID}
+
 BASE_SUBJECTS: dict[str, tuple[tuple[str, str], ...]] = {
-    "rvc": (("rvc-base", catalog.RVC_BASE_ID),),
+    family.name: tuple((kind, BASE_SUBJECT_IDS[kind]) for kind in family.base_subject_kinds)
+    for family in FAMILIES
+    if family.base_subject_kinds
 }
 
-PULLABLE_REFUSALS = frozenset(
-    {
-        "model_not_installed",
-        "voice_not_installed",
-        "rvc_base_models_missing",
-        "denoise_model_missing",
-    }
+PULLABLE_REFUSALS: frozenset[str] = frozenset().union(
+    *(family.pullable_refusals for family in FAMILIES)
 )
 
 ENV_REFUSALS = frozenset({"env_missing"})
 
 INSTALLABLE_REFUSALS = PULLABLE_REFUSALS | ENV_REFUSALS
 
-CATALOG_IS_COMPLETE = frozenset({"rvc", "denoise", "asr", "align"})
+CATALOG_IS_COMPLETE: frozenset[str] = frozenset(
+    family.name for family in FAMILIES if family.catalog_is_complete
+)
 
 PACE_AFTER_SECONDS = 3.0
 
@@ -89,10 +91,8 @@ class InstallOnSubmit:
 
     @staticmethod
     def installable(job_type: str) -> bool:
-        capability = ALL_JOB_TYPES.get(job_type)
-        if capability is None or job_type.startswith("unload-"):
-            return False
-        return INSTALLER_FOR.get(capability) in INSTALLABLE_JOB_TYPES
+        spec = spec_of(job_type)
+        return spec is not None and spec.installable
 
     def plan(self, job_type: str, model: str | None, refusal: ApiError) -> Need:
         details = refusal.details or {}

@@ -8,9 +8,9 @@ import shutil
 import sys
 import threading
 import uuid
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +23,19 @@ from .base import (
     CANCELLED,
     DONE,
     FAILED,
+    INTERRUPTED,
     QUEUED,
     RUNNING,
-    INTERRUPTED,
     TERMINAL_STATES,
     Job,
     JobContext,
+    JobFailure,
     JobType,
 )
 
 REAP_INTERVAL_SECONDS = 60.0
+
+SECONDS_PER_DAY = 86_400.0
 
 
 def _params_for_artifact(params: dict[str, Any], index: int | None) -> dict[str, Any]:
@@ -56,12 +59,88 @@ def _params_sha256(params: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+class ReapReason(str, Enum):
+    FETCHED = "fetched"
+    AGED = "aged"
+    RELEASED = "released"
+
+
 @dataclass(frozen=True)
 class Reaped:
     job_id: str
-    why: str
+    why: ReapReason
     when: str
     detail: str
+
+
+@dataclass(frozen=True)
+class HoldRecord:
+    job_id: str
+    status: str
+    held: bool
+    held_by: str | None
+    held_since: str | None
+    gc_at: str | None
+    artifacts: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "held": self.held,
+            "held_by": self.held_by,
+            "held_since": self.held_since,
+            "gc_at": self.gc_at,
+            "artifacts": list(self.artifacts),
+        }
+
+
+@dataclass(frozen=True)
+class JournalProgress:
+    units_done: int
+    units_total: int | None
+    sentence: str
+    last_saved: Any
+    writers: tuple[Any, ...]
+
+    @classmethod
+    def of(cls, manifest: dict[str, Any]) -> "JournalProgress":
+        done = manifest.get("units_done") or 0
+        return cls(
+            units_done=done,
+            units_total=manifest.get("units_total"),
+            sentence=manifest.get("progress") or f"{done:,} unit(s) done",
+            last_saved=manifest.get("last_saved"),
+            writers=tuple(row.get("job_id") for row in manifest.get("jobs") or []),
+        )
+
+    @property
+    def resumed_from(self) -> Any:
+        return self.writers[-2] if len(self.writers) >= 2 else None
+
+
+class LaneSlot:
+    def __init__(self) -> None:
+        self.job_id: str | None = None
+
+    def admit(self, job_id: str) -> None:
+        if self.job_id is not None and self.job_id != job_id:
+            raise RuntimeError(
+                f"the lane already holds job {self.job_id}; it admits one job at a time"
+            )
+        self.job_id = job_id
+
+    def release(self, job_id: str) -> None:
+        if self.job_id != job_id:
+            raise ValueError(f"job {job_id} is not the one the lane holds")
+        self.job_id = None
+
+    def take(self) -> str | None:
+        job_id, self.job_id = self.job_id, None
+        return job_id
+
+    append = admit
+    remove = release
 
 
 def busy_details(job: Job) -> dict[str, Any]:
@@ -76,7 +155,7 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
         self._reaped: dict[str, Reaped] = {}
         self._consumed_blobs: dict[str, str] = {}
-        self._pending: deque[str] = deque()
+        self._admitted = LaneSlot()
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._running_id: str | None = None
@@ -131,8 +210,15 @@ class JobStore:
         return job.status
 
     @property
+    def _pending(self) -> LaneSlot:
+        return self._admitted
+
+    def _retention_seconds(self) -> float:
+        return float(self._config.retention_days) * SECONDS_PER_DAY
+
+    @property
     def queue_depth(self) -> int:
-        return len(self._pending) + (1 if self._running_id is not None else 0)
+        return int(self._admitted.job_id is not None or self._running_id is not None)
 
     @property
     def running_id(self) -> str | None:
@@ -147,13 +233,14 @@ class JobStore:
             running = self.running
             if running is not None and running.id != job_id:
                 return running
-            for pending_id in self._pending:
-                if pending_id != job_id:
-                    return self._jobs[pending_id]
+            admitted = self._admitted.job_id
+            if admitted is not None and admitted != job_id:
+                return self._jobs[admitted]
             return None
 
     def queued(self) -> list[Job]:
-        return [self._jobs[job_id] for job_id in self._pending]
+        admitted = self._admitted.job_id
+        return [] if admitted is None else [self._jobs[admitted]]
 
     def get(self, job_id: str) -> Job:
         job = self._jobs.get(job_id)
@@ -165,39 +252,39 @@ class JobStore:
                 404,
                 "job_reaped",
                 reaped.detail,
-                {"job_id": job_id, "reaped_at": reaped.when, "why": reaped.why},
+                {"job_id": job_id, "reaped_at": reaped.when, "why": reaped.why.value},
             )
         raise ApiError(404, "unknown_job", f"no job {job_id} on this server")
 
     def position(self, job: Job) -> int | None:
         if job.status == RUNNING:
             return 0
-        if job.status == QUEUED:
-            return self._pending.index(job.id) + 1
+        if job.status == QUEUED and job.id == self._admitted.job_id:
+            return 1
         return None
 
 
     def refuse_if_busy(self) -> None:
         holder = self.running
         if holder is None:
-            if not self._pending:
+            if self._admitted.job_id is None:
                 return
-            holder = self._jobs[self._pending[0]]
+            holder = self._jobs[self._admitted.job_id]
 
         who = "an unnamed client" if holder.client is None else repr(holder.client)
         what = holder.type if holder.model is None else f"{holder.type} {holder.model!r}"
-        details = busy_details(holder)
+        busy = holder.busy()
         doing = "" if not holder.message else f" — {holder.message}"
         raise ApiError(
             409,
             "server_busy",
             f"this server is busy with job {holder.id} ({what}), {holder.status} "
-            f"since {details['since']}, submitted by {who}, "
+            f"since {busy.since}, submitted by {who}, "
             f"{holder.progress:.0%} done"
             f"{doing}. Crucible admits one job at a time and does not queue: the "
             "client owns the queue, the server owns admission (ARCHITECTURE.md "
             "section 3). Read GET /v1/activity to see when it is finished.",
-            details,
+            busy.to_dict(),
         )
 
 
@@ -233,12 +320,12 @@ class JobStore:
     def enqueue(self, job: Job) -> None:
         self.refuse_if_busy()
         with self._lane_lock:
-            self._pending.append(job.id)
+            self._admitted.admit(job.id)
         self.append_event(job, "queued", {"position": self.position(job)})
         self._wake.set()
 
     def discard(self, job: Job) -> None:
-        if job.id in self._pending:
+        if job.id == self._admitted.job_id:
             raise RuntimeError(
                 f"job {job.id} is on the lane and cannot be discarded; cancel it"
             )
@@ -280,22 +367,21 @@ class JobStore:
         return self.hold_record(job)
 
     def hold_record(self, job: Job) -> dict[str, Any]:
-        horizon = float(self._config.retention_days) * 86_400.0
         gc_at: str | None = None
         if job.finished is not None:
             finished = datetime.fromisoformat(str(job.finished))
             gc_at = datetime.fromtimestamp(
-                finished.timestamp() + horizon, tz=timezone.utc
+                finished.timestamp() + self._retention_seconds(), tz=timezone.utc
             ).isoformat()
-        return {
-            "job_id": job.id,
-            "status": job.status,
-            "held": job.held,
-            "held_by": job.held_by,
-            "held_since": job.held_since,
-            "gc_at": gc_at,
-            "artifacts": list(job.artifacts),
-        }
+        return HoldRecord(
+            job_id=job.id,
+            status=job.status,
+            held=job.held,
+            held_by=job.held_by,
+            held_since=job.held_since,
+            gc_at=gc_at,
+            artifacts=tuple(job.artifacts),
+        ).to_dict()
 
     def release(self, job: Job) -> bool:
         was = job.held
@@ -305,7 +391,7 @@ class JobStore:
         if job.status in TERMINAL_STATES:
             self._reap_one(
                 job,
-                "released",
+                ReapReason.RELEASED,
                 _now(),
                 "its hold was released: the chain that held it is complete",
             )
@@ -316,7 +402,7 @@ class JobStore:
 
     def reap(self) -> list[Reaped]:
         now = _now()
-        horizon = float(self._config.retention_days) * 86_400.0
+        horizon = self._retention_seconds()
         taken: list[Reaped] = []
         for job in list(self._jobs.values()):
             try:
@@ -348,7 +434,7 @@ class JobStore:
         if job.collected:
             return self._reap_one(
                 job,
-                "fetched",
+                ReapReason.FETCHED,
                 now,
                 f"its {len(job.artifacts)} artifact(s) and their sidecars "
                 "had all been fetched",
@@ -356,7 +442,7 @@ class JobStore:
         if self._age_seconds(job, now) > horizon:
             return self._reap_one(
                 job,
-                "aged",
+                ReapReason.AGED,
                 now,
                 f"it finished at {job.finished} and this server keeps a "
                 f"finished job for {self._config.retention_days} day(s) "
@@ -373,7 +459,7 @@ class JobStore:
         return (now - datetime.fromisoformat(job.finished)).total_seconds()
 
     def _reap_one(
-        self, job: Job, why: str, now: datetime, because: str
+        self, job: Job, why: ReapReason, now: datetime, because: str
     ) -> Reaped | None:
         when = now.isoformat()
         detail = (
@@ -386,7 +472,7 @@ class JobStore:
             shutil.rmtree(job.dir)
         except OSError as exc:
             print(
-                f"crucible: could not reap job {job.id} ({why}) at {job.dir}: "
+                f"crucible: could not reap job {job.id} ({why.value}) at {job.dir}: "
                 f"{type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
@@ -424,7 +510,7 @@ class JobStore:
             when = now.isoformat()
             because = (
                 f"it belongs to no job this process is running, and it was "
-                f"last written {age / 86_400.0:.1f} day(s) ago — past this "
+                f"last written {age / SECONDS_PER_DAY:.1f} day(s) ago — past this "
                 f"server's {self._config.retention_days}-day window "
                 "([jobs] retention_days)"
             )
@@ -441,7 +527,7 @@ class JobStore:
             taken.append(
                 Reaped(
                     job_id=entry.name,
-                    why="aged",
+                    why=ReapReason.AGED,
                     when=when,
                     detail=f"job {entry.name} was reaped at {when} because "
                     f"{because}",
@@ -559,7 +645,7 @@ class JobStore:
             progress=float(document.get("progress") or 0.0),
             started=document.get("started"),
             finished=finished,
-            error=document.get("error"),
+            failure=JobFailure.from_dict(document.get("error")),
             artifacts=list(document.get("artifacts") or []),
             client=document.get("client"),
             client_ref=document.get("client_ref"),
@@ -584,7 +670,7 @@ class JobStore:
     def _persist(self, job: Job) -> None:
         try:
             job.dir.mkdir(parents=True, exist_ok=True)
-            document = json.dumps(self._record_of(job), indent=2) + chr(10)
+            document = json.dumps(self._record_of(job), indent=2) + "\n"
             path = job.dir / self.RECORD_NAME
             temporary = path.with_suffix(".json.writing")
             temporary.write_text(document, encoding="utf-8")
@@ -655,7 +741,7 @@ class JobStore:
         job.cancel_requested = True
         if job.status == QUEUED:
             with self._lane_lock:
-                self._pending.remove(job.id)
+                self._admitted.release(job.id)
             self._finish(job, CANCELLED)
             return CANCELLED
         return "cancelling"
@@ -663,7 +749,7 @@ class JobStore:
 
     async def _run_lane(self) -> None:
         while True:
-            if not self._pending:
+            if self._admitted.job_id is None:
                 self._wake.clear()
                 try:
                     self.reap()
@@ -682,7 +768,9 @@ class JobStore:
                     pass
                 continue
             with self._lane_lock:
-                job_id = self._pending.popleft()
+                job_id = self._admitted.take()
+                if job_id is None:
+                    continue
                 job = self._jobs[job_id]
                 cancelled = job.cancel_requested
                 if not cancelled:
@@ -708,16 +796,16 @@ class JobStore:
         loop = asyncio.get_running_loop()
         ctx = JobContext(self, job, loop)
         status = DONE
-        error: dict[str, str] | None = None
+        error: JobFailure | None = None
         try:
             await asyncio.to_thread(plugin.run, job, ctx)
         except JobCancelled:
             status = CANCELLED
         except JobError as exc:
-            status, error = FAILED, {"code": exc.code, "message": exc.message}
+            status, error = FAILED, JobFailure(exc.code, exc.message)
         except Exception as exc:
             status = FAILED
-            error = {"code": "job_failed", "message": f"{type(exc).__name__}: {exc}"}
+            error = JobFailure("job_failed", f"{type(exc).__name__}: {exc}")
         else:
             if job.cancel_requested:
                 status = CANCELLED
@@ -743,20 +831,17 @@ class JobStore:
             return
         if not job.resumed:
             return
-        done = before.get("units_done") or 0
-        total = before.get("units_total")
-        sentence = before.get("progress") or f"{done:,} unit(s) done"
-        previous = [row.get("job_id") for row in before.get("jobs") or []]
+        progress = JournalProgress.of(before)
         self.append_event(
             job,
             "note",
             {
-                "message": f"resumed: {sentence}, from journal {job.resume_id} "
-                f"(last saved {before.get('last_saved')})",
+                "message": f"resumed: {progress.sentence}, from journal {job.resume_id} "
+                f"(last saved {progress.last_saved})",
                 "resume_id": job.resume_id,
-                "resumed_from": previous[-2] if len(previous) >= 2 else None,
-                "units_done": done,
-                "units_total": total,
+                "resumed_from": progress.resumed_from,
+                "units_done": progress.units_done,
+                "units_total": progress.units_total,
             },
         )
 
@@ -793,13 +878,11 @@ class JobStore:
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         job.status = FAILED
         job.finished = utcnow()
-        job.error = {
-            "code": "queue_failed",
-            "message": (
-                f"the job lane could not finish this job: {type(exc).__name__}: "
-                f"{exc}. This is a bug in Crucible, not in the request."
-            ),
-        }
+        job.failure = JobFailure(
+            "queue_failed",
+            f"the job lane could not finish this job: {type(exc).__name__}: "
+            f"{exc}. This is a bug in Crucible, not in the request.",
+        )
         try:
             self.append_event(job, "failed", {"error": job.error})
         except Exception:
@@ -809,10 +892,10 @@ class JobStore:
             self._journals.ended(job.resume_id, job.id, FAILED)
         self._running_id = None
 
-    def _finish(self, job: Job, status: str, error: dict[str, str] | None = None) -> None:
+    def _finish(self, job: Job, status: str, error: JobFailure | None = None) -> None:
         job.status = status
         job.finished = utcnow()
-        job.error = error
+        job.failure = error
         self._persist(job)
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, status)
@@ -824,7 +907,7 @@ class JobStore:
             )
         elif status == FAILED:
             self._restamp_provenance(job)
-            self.append_event(job, "failed", {"error": error})
+            self.append_event(job, "failed", {"error": job.error})
         else:
             self._restamp_provenance(job)
             self.append_event(job, "cancelled", {"status": CANCELLED})

@@ -51,6 +51,49 @@ class JobTypeStatus:
     awaiting_weights: bool = False
 
 
+@dataclass(frozen=True)
+class JobFailure:
+    code: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
+
+    @classmethod
+    def from_dict(cls, document: Any) -> "JobFailure | None":
+        if not isinstance(document, dict):
+            return None
+        return cls(
+            code=str(document.get("code", "")), message=str(document.get("message", ""))
+        )
+
+
+@dataclass(frozen=True)
+class BusyHolder:
+    holder: str | None
+    job_id: str
+    type: str
+    model: str | None
+    status: str
+    since: str
+    progress: float
+    message: str | None
+    door: str = "job"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "door": self.door,
+            "holder": self.holder,
+            "job_id": self.job_id,
+            "type": self.type,
+            "model": self.model,
+            "status": self.status,
+            "since": self.since,
+            "progress": self.progress,
+            "message": self.message,
+        }
+
+
 @dataclass
 class Job:
     id: str
@@ -63,7 +106,7 @@ class Job:
     progress: float = 0.0
     started: str | None = None
     finished: str | None = None
-    error: dict[str, str] | None = None
+    failure: JobFailure | None = None
     artifacts: list[str] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested: bool = False
@@ -81,6 +124,10 @@ class Job:
     held_since: str | None = None
     resume_id: str | None = None
     resumed: bool = False
+
+    @property
+    def error(self) -> dict[str, str] | None:
+        return None if self.failure is None else self.failure.to_dict()
 
     @property
     def held(self) -> bool:
@@ -103,18 +150,20 @@ class Job:
             for name in self.artifacts
         )
 
+    def busy(self) -> BusyHolder:
+        return BusyHolder(
+            holder=self.client,
+            job_id=self.id,
+            type=self.type,
+            model=self.model,
+            status=self.status,
+            since=self.started if self.started is not None else self.created,
+            progress=self.progress,
+            message=self.message,
+        )
+
     def busy_details(self) -> dict[str, Any]:
-        return {
-            "door": "job",
-            "holder": self.client,
-            "job_id": self.id,
-            "type": self.type,
-            "model": self.model,
-            "status": self.status,
-            "since": self.started if self.started is not None else self.created,
-            "progress": self.progress,
-            "message": self.message,
-        }
+        return self.busy().to_dict()
 
 
 OPTIONAL_JOB_TYPE_MEMBERS: frozenset[str] = frozenset({"journal_identity"})
