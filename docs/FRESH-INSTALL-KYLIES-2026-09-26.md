@@ -401,3 +401,47 @@ for 30 s before its recovery recipe started the unit. An upgrade should hand the
   1.0.49's own sudo door. The engine is 1.0.49 and the token is unchanged.
 - **Should be:** the shutdown before an upgrade uses the NEW code's door (install the wheel to a
   staging path first, or stop the unit with the new binary).
+
+## Step 2 done: rvc + sigma (22:31-22:33), and the first real job
+
+- `install rvc`: 106 s, 125 packages; diffq came from the wheels release, nothing compiled (#30 fix
+  confirmed). `rvc pull-base`: 8 s, 0.60 GB, 4 files verified. `rvc pull sigma`: 5 s, 0.15 GB.
+
+### 40. `install rvc` enables denoise too, and doctor then calls a correct rvc install unhealthy
+- **What:** the rvc env serves denoise, so install turned on `[jobs] enable_denoise`, but it pulls no
+  separator. The next `doctor` said `unhealthy` because "denoise: NOT READY".
+- **Should be:** a job type enabled without its weights is a note, not a PROBLEM; or install doesn't
+  enable denoise until a separator is pulled.
+
+### 41. The HuggingFace "unauthenticated requests" warning on every pull
+Harmless (the repos are public) and scary. Suppress it, or say in one line that it's fine.
+
+### 42. `install rvc` does not reach the RUNNING server
+- **What:** install wrote `enable_rvc = true`, but the server that was already running still answered
+  `job_type_disabled` until a restart. The error said "Install it with `crucible install rvc`",
+  which had just been done.
+- **Should be:** install makes the running server re-read its job types (or restarts it), and the
+  refusal distinguishes "not installed" from "installed, server not restarted".
+
+### 43. The guest PATH carries Windows' winget ffmpeg.exe, and interop is broken
+`command -v ffmpeg.exe` finds `/mnt/c/.../Gyan.FFmpeg.../bin/ffmpeg.exe`, which can't run while
+WSLInterop is missing (#38). Anything probing for it gets "Exec format error". #25 (our own ffmpeg)
+removes the question.
+
+### 44. `lan enable` waits two minutes on an invisible prompt
+- **What:** 126 s, then `lan_verification_failed`. The UAC prompt appeared on a console nobody was at,
+  and nothing on the operator's side said "waiting for the administrator prompt on this PC's screen".
+- **Should be:** say so the moment the prompt is raised, and for a remote-only operator, offer a way
+  that doesn't need someone at the screen, or say plainly that it needs one.
+
+### 45. rvc input NAMES need the file extension
+- **What:** `--input c000=chunk.flac` is refused `invalid_inputs` ("every rvc input needs a file
+  extension"); the name must be `c000.flac`. The extension is on the path; the name is what matters.
+- **Should be:** take the extension from the uploaded file when the name has none, or say in the
+  error that it's the input NAME that needs it.
+
+### The first real job (22:38, measured from owens-pc over SSH, local engine)
+60 s of 48 kHz 24-bit FLAC through sigma (rmvpe, -2, index 0.3, protect 0.1): **24.6 s wall** with a
+cold load, about 2.4x real time on the GTX 1660 SUPER. Output: 48 kHz, **16-bit** (the input was
+24-bit), 2,879,040 samples against 2,880,000, **20 ms short**. The caller's join (resample, then trim
+or pad to the input's exact frame count) makes the joined master sample-exact regardless.
