@@ -1,9 +1,3 @@
-"""Private controller-to-engine lifetime channel, inherited only by owned children.
-
-The controller owns the stdin writer. Closing it requests graceful ASGI shutdown;
-controller death closes it too. No console signals or public shutdown route are
-needed, and the application's lifespan closes resident model workers before exit.
-"""
 from __future__ import annotations
 
 import logging
@@ -19,10 +13,6 @@ def run_owned_server(app: Any, *, host: str, port: int, log_level: str) -> None:
     import uvicorn
 
     descriptor = sys.stdin.fileno()
-    # THE SAME KEEP-ALIVE AS THE OTHER DOOR, from the one constant. An owned
-    # engine answers the same clients `crucible serve` does, so uvicorn's 5 s
-    # default would put the 2026-09-20 ECONNRESET back on this door alone —
-    # which is the shape a second statement of one number always takes.
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -36,13 +26,9 @@ def run_owned_server(app: Any, *, host: str, port: int, log_level: str) -> None:
 
     def watch_controller() -> None:
         try:
-            # Any byte or EOF means stop. os.read avoids a buffered stdin lock
-            # held by a daemon thread during Python interpreter shutdown.
             os.read(descriptor, 1)
         except OSError:
-            pass  # A lost inherited pipe is also a lost controller.
-        # Uvicorn's early should_exit return skips lifespan shutdown when set
-        # before startup completes. Preserve a pending stop until it is ready.
+            pass
         while not server.started:
             if finished.wait(0.01):
                 return

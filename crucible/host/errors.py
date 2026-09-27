@@ -1,18 +1,7 @@
-"""Every refusal the host makes, by the name PHASE15-HOST.md section 4 gives it.
-
-Same rule as `crucible/errors.py`: there is no error here that means "something
-went wrong". A `HostError` carries a CODE a person can search for and an app can
-switch on, and the door (4.3) puts that same code on the wire verbatim — which
-is why the codes are listed in one place rather than spelled at each raise.
-"""
-
 from __future__ import annotations
 
 from ..errors import CrucibleError
 
-#: Every code this package raises, with what it means. The door's `error` event
-#: carries one of these or one of the 4c state codes (`crucible/host/wsl_states.py`),
-#: and `sdk/bootstrap/src/hostdoor.ts` is the client that reads them.
 HOST_ERROR_CODES: dict[str, str] = {
     "host_door_unavailable": "The local controller could not bind its control port; its owned child was stopped.",
     "host_windows_only": (
@@ -76,12 +65,6 @@ HOST_ERROR_CODES: dict[str, str] = {
         '"never". It is the one way to keep a machine native on purpose '
         "(PHASE19 1), so a value nobody defined is refused rather than ignored."
     ),
-    # The sentences a PERSON reads for the three restart codes are
-    # `installer.REBOOT_SENTENCE`, `REBOOT_STILL_OWED_SENTENCE` and
-    # `REBOOT_AGAIN_SENTENCE`. All three name "Update and restart", because WSL
-    # is installed by Windows' servicing step and a restart that skips or
-    # postpones waiting updates installs nothing (#14, Owen's ruling,
-    # 2026-09-26), and all three say someone must sign in afterwards (#8).
     "wsl_reboot_required": (
         "WSL was enabled and Windows must restart to install it. The person is "
         'told to choose "Update and restart", because Windows installs WSL in '
@@ -115,8 +98,6 @@ HOST_ERROR_CODES: dict[str, str] = {
 
 
 class HostError(CrucibleError):
-    """A host refusal. `code` is a key of `HOST_ERROR_CODES` or a 4c state code."""
-
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code

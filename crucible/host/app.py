@@ -1,25 +1,3 @@
-"""`crucible orchestrator` — the wiring. PHASE15-HOST.md section 4.
-
-Everything this file does is decided somewhere else: `presence.py` decides what
-state the machine is in, `menu.py` decides what the menu says, `installer.py`
-decides what an install is, `door.py` decides who may ask for one. This is the
-loop that holds them, and it is deliberately dull.
-
-THE SHAPE, IN ORDER
---------------------
-1. One host per machine (`host_already_running`): a second tray would boot the
-   same distro twice and watch the first one's recoveries.
-2. The Startup item, written if absent — 4.1 makes these verbs the ONE owner of
-   that file and `install.ps1` calls the verb rather than writing a `.lnk`.
-3. Presence: distro present → boot the guest; absent → start the
-   `llama-windows` server as a child (section 0's amendment: Windows IS a
-   backend, and the machine has an engine either way).
-4. The pairing file, so an app on this machine never asks anybody to type a
-   token.
-5. The door, on loopback.
-6. The tray, and a watch every 15 s.
-"""
-
 from __future__ import annotations
 
 import os
@@ -58,26 +36,10 @@ from .runner import ProcessRunner, Runner
 from ..tasks import HOST_DOOR_ENV
 from .wsl_states import CRUCIBLE_DISTRO
 
-#: A second tray is refused by a file, not by a mutex: the file NAMES the
-#: process that holds it, so "another one is running" is a sentence with a pid
-#: in it rather than a silent exit.
 LOCK_NAME = "host.pid"
 
-#: The release the guest install fetches. The host ships AT the server's
-#: version — the one legitimate default in here, for `install.ts`'s reason:
-#: the bootstrapper ships at the server's version, so the default IS the
-#: answer rather than a guess at one.
 DEFAULT_RELEASE = VERSION
 
-#: How long the guest carry waits for the watch loop's FIRST settled
-#: measurement before saying, in the log, that it never came.
-#:
-#: Composed from the watch's own numbers rather than chosen, because the thing
-#: being waited for is one watch tick: the first one is `WATCH_SECONDS` away,
-#: and it may spend the recovery (`RECIPE_TIMEOUT_SECONDS`) and the wait for
-#: the engine to answer (`BOOT_WAIT_SECONDS`) before it returns a presence. Past that the presence is not going to settle, and a
-#: thread that waited forever would be a carry nobody can tell from a carry
-#: that decided nothing.
 PRESENCE_SETTLE_CEILING_SECONDS = (
     presence_module.WATCH_SECONDS
     + presence_module.RECIPE_TIMEOUT_SECONDS
@@ -92,28 +54,16 @@ INSTALL_SH_URL = (
 
 @dataclass
 class HostContext:
-    """Everything the loop holds. One object, so a test can build one."""
-
     runner: Runner
     log: HostLog
     home: Path
     watcher: PresenceWatcher
     presence: Presence
     release: str = DEFAULT_RELEASE
-    #: PHASE17 3.2: what this orchestrator calls itself, on its `/v1/ping`
-    #: and in the claim it makes. Composed once, at startup, from the machine
-    #: name — the same shape `crucible init` gives a server.
     name: str = ""
 
 
 def orchestrator_name() -> str:
-    """`crucible-orchestrator@<machine>` — PHASE17 3.2.
-
-    Lower-cased, because a name that differs from the same machine's engine
-    name only by the case Windows reports is a name two log lines disagree
-    about. The hostname and nothing assembled: `socket.gethostname()` is what
-    `crucible init` reads for the engine's own name.
-    """
     import socket
 
     return f"crucible-orchestrator@{socket.gethostname().lower()}"
@@ -127,7 +77,6 @@ number, and the true number is zero. PHASE17 1: "what accelerator does the
 thing that plays nothing have" has exactly one honest answer.
 """
 
-#: PHASE15 4.1a's owner enum, as PHASE17 3.2 spells it on the wire.
 OWNER_ON_THE_WIRE = {
     Owner.WSL_UNIT: peer_module.OWNER_WSL_UNIT,
     Owner.HOST_CHILD: peer_module.OWNER_CHILD,
@@ -136,14 +85,6 @@ OWNER_ON_THE_WIRE = {
 
 
 def engine_token(context: "HostContext") -> str | None:
-    """The ENGINE's bearer, from whichever source this machine's owner says.
-
-    PHASE15 4.1a's rule, reused verbatim and for the same reason there is no
-    fallback between the two sources: a guest engine's token lives in the line
-    the orchestrator COPIED out of the distro, and a host-mode child's is the
-    one in the config the orchestrator itself wrote. Reading the wrong one
-    gives a 401 against a door that is working perfectly.
-    """
     owner = context.presence.owner
     if owner in (Owner.WSL_UNIT, Owner.FOUND):
         line = _guest_line(context)
@@ -157,7 +98,6 @@ def engine_token(context: "HostContext") -> str | None:
     if owner is Owner.HOST_CHILD:
         return read_token(context.home)
     if owner is Owner.NONE and (context.home / "engine.stopped").exists():
-        # A deliberately stopped engine must remain controllable after login.
         try:
             return parse_pairing_line((context.home / "pairing").read_text(encoding="utf-8").strip()).token
         except (OSError, ValueError) as exc:
@@ -166,16 +106,6 @@ def engine_token(context: "HostContext") -> str | None:
 
 
 def engine_token_detail(context: "HostContext") -> str:
-    """WHY `engine_token` came back empty, in the words of this machine.
-
-    The door used to answer every empty token with one sentence -
-    *"this host has no config yet"* - which is true for exactly one of the
-    ways this can happen and was measured being wrong about another: on
-    2026-09-17 a host whose config was perfectly good owned no engine, and
-    every authenticated door refused with a message pointing at a file that
-    was not the problem. A refusal that names the wrong cause costs more
-    than one that names none.
-    """
     owner = context.presence.owner
     if owner in (Owner.WSL_UNIT, Owner.FOUND):
         return (
@@ -198,12 +128,6 @@ def engine_token_detail(context: "HostContext") -> str:
 
 
 def read_token(home: Path) -> str | None:
-    """The engine token out of the host's own config, or None before there is one.
-
-    Parsed with the stdlib's TOML reader and not with a regex: a token is a
-    quoted string and `tomllib` is what `crucible/config.py` reads the same
-    file with, so the two cannot disagree about escaping.
-    """
     import tomllib
 
     path = Path(home) / "config.toml"
@@ -220,34 +144,14 @@ def read_token(home: Path) -> str | None:
     return token if isinstance(token, str) and token else None
 
 
-#: PHASE17 2.5 — the table and key a person writes to CONSENT to this
-#: orchestrator managing a distro Crucible did not import. `[orchestrator]`
-#: because that is what the process reading it IS, and `distro` because the
-#: value is a distro's name: the setting is read by the orchestrator, about
-#: the orchestrator's own reach, and it belongs to no server.
 CONSENT_TABLE = "orchestrator"
 CONSENT_KEY = "distro"
 
-#: PHASE19 1 — the ONE way to keep a machine native on purpose.
-#: `[orchestrator] wsl = "never"` in the Windows config. It is Crucible's
-#: setting and neither app offers it, because the apps' setup has no choice to
-#: make (section 3): every Windows machine that CAN host WSL2 is moved, and one
-#: that cannot is told so in a sentence.
 WSL_KEY = "wsl"
 WSL_NEVER = "never"
 
 
 def declined_wsl(home: Path) -> bool:
-    """Has somebody written `[orchestrator] wsl = "never"` on this machine?
-
-    Read with `tomllib` and refused when present and unusable, for
-    `consented_distro`'s two reasons: it is the same document
-    `crucible/config.py` reads, and a person who wrote something into this key
-    meant to decide something. A value that is neither absent nor `"never"` is
-    a decision this build cannot carry out, and an orchestrator that shrugged
-    and moved the machine anyway would be doing the opposite of what the file
-    says.
-    """
     import tomllib
 
     path = Path(home) / "config.toml"
@@ -278,28 +182,6 @@ def declined_wsl(home: Path) -> bool:
 
 
 def consented_distro(home: Path) -> str | None:
-    """The distro this orchestrator was GIVEN permission to manage, or None.
-
-    PHASE17 2.5. Without it the orchestrator manages only the distro Crucible
-    imported (`crucible`), and every other engine on the machine is `found` —
-    watched, never claimed, never acted on (PHASE15 4.1a). That rule is right
-    for a machine nobody has spoken about and wrong for Owen's PC, where the
-    engine has lived in `Ubuntu` since before any of this existed: the
-    orchestrator can see it, can read its pairing line, could restart its unit
-    — and refuses, because it cannot tell that distro apart from a stranger's.
-    Consent is how a person tells it apart, by name, once, in the one file on
-    the Windows side that is already the orchestrator's own.
-
-    Read with `tomllib` and not a regex, for `read_token`'s reason: this is
-    the same document `crucible/config.py` reads, and two parsers for one file
-    are two opinions about escaping.
-
-    **A value that is present and unusable is REFUSED, never ignored.** A
-    person who wrote `distro = 4` is a person who meant to grant something,
-    and an orchestrator that shrugged at it would silently be the unconsented
-    one while its config said otherwise — a fact with two owners and nothing
-    comparing them (`docs/ARCHITECTURE.md`). Absent is the only quiet answer.
-    """
     import tomllib
 
     path = Path(home) / "config.toml"
@@ -337,7 +219,6 @@ def consented_distro(home: Path) -> str | None:
 
 
 def acquire(home: Path) -> Path:
-    """One controller per installation; PID reuse cannot block the kernel lock."""
     home.mkdir(parents=True, exist_ok=True)
     lock = home / LOCK_NAME
     from ..processlock import ProcessLock
@@ -354,8 +235,12 @@ def acquire(home: Path) -> Path:
     return lock
 
 
+HOST_CHILD_START_WAIT_SECONDS = 30.0
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+
+
 def _alive(pid: int) -> bool:
-    """Is this pid a live process? A stale lock must not wedge the tray."""
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -363,10 +248,9 @@ def _alive(pid: int) -> bool:
         kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel.OpenProcess.restype = wintypes.HANDLE
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x1000, False, pid)
+        handle = kernel.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            # Access denied is not proof the process has exited.
-            return ctypes.get_last_error() == 5
+            return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
         kernel.CloseHandle(handle)
         return True
     try:
@@ -379,48 +263,22 @@ def _alive(pid: int) -> bool:
 
 
 def server_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
-    """Launch the owned engine directly, with a private graceful-stop pipe."""
     return [str(host_pack_dir(env) / "python.exe"), "-m", "crucible.cli", "serve", "--controller-stdin"]
-
 
 
 def server_environment(
     env: "os._Environ[str] | dict[str, str]",
 ) -> dict[str, str]:
-    """The child server's environment: this one, plus where the door is.
-
-    4.7's engine task is the server handing the move to THIS process, and it
-    refuses `engine_move_needs_host` when there is nothing to hand it to. The
-    fact "a host started me" is not one a server can probe for — 127.0.0.1:
-    7101 can be answered by something that is not a host, and a host
-    restarting its own door is still the host — so it is STATED, here, by the
-    only thing that knows it.
-
-    The token is deliberately NOT passed. The door's bearer is the engine's
-    own token, which the child already holds in its config; a copy in an
-    environment variable would be a secret with two owners.
-    """
     environment = dict(env)
     environment[HOST_DOOR_ENV] = door_url("")
     return environment
 
 
 def init_argv(env: "os._Environ[str] | dict[str, str]") -> list[str]:
-    """The first-run `crucible init` for the host-mode server.
-
-    `--backend llama-windows` and NOT `none`: section 0's amendment. This
-    machine runs an engine, it just runs llama.cpp rather than vLLM.
-    """
     return [str(console_cmd_path(env)), "init", "--backend", "llama-windows"]
 
 
 def open_console(home: Path, log: HostLog) -> None:
-    """4.2's Open console: the pairing line's URL with `#token=`.
-
-    The DEFAULT browser, deliberately. PHASE13 5.3's hardened-window rule is
-    about not putting a token into something that will navigate away with it;
-    a browser the person chose is the one place a URL belongs.
-    """
     from ..pairing import read_pairing_file
 
     line = read_pairing_file(home)
@@ -430,7 +288,6 @@ def open_console(home: Path, log: HostLog) -> None:
             "server on this machine to open yet"
         )
         return
-    # `crucible://name@host:port/#token` -> `http://host:port/#token=...`
     from urllib.parse import urlsplit
 
     parts = urlsplit(line)
@@ -440,33 +297,17 @@ def open_console(home: Path, log: HostLog) -> None:
 
 
 def open_log(log: HostLog) -> None:
-    """4.2's Open log. The default handler for a `.log`, which is Notepad."""
     if sys.platform == "win32":
-        os.startfile(str(log.path))  # type: ignore[attr-defined]  # noqa: S606
+        os.startfile(str(log.path))
         return
     log.write(f"the log is {log.path}")
 
 
 def _step(name: str, index: int, total: int = 2) -> "installer.Event":
-    """One `step` event, in the shape `crucible/tasks.py` relays verbatim.
-
-    Spelled here rather than inline so the restart cannot drift from the
-    move's shape: 4.7 says *"a relay that reshapes is a second owner of the
-    shape"*, and two sequences emitting two nearly-identical dicts is how a
-    shape acquires a second owner without anybody deciding to give it one.
-    """
     return installer.Event("step", {"name": name, "index": index, "total": total})
 
 
 class Host:
-    """The orchestrator's loop. Started by `crucible orchestrator`, stopped by Quit.
-
-    It is the ORCHESTRATOR (PHASE17): the one process on this machine with a
-    role of its own, managing exactly one engine and serving no job types. The
-    class and its package keep the name `host` — PHASE17 section 7 records why
-    the rename stops at the wire.
-    """
-
     def __init__(self, context: HostContext) -> None:
         self._c = context
         self._icon: object | None = None
@@ -477,40 +318,12 @@ class Host:
         self._paused = (context.home / "engine.stopped").exists()
         self._cleanup_running = False
         self._cleanup_retry_at = 0.0
-        #: Set by `watch` after its first full pass, and read by the guest
-        #: carry. `start()` decides a presence but does not always DECIDE AN
-        #: OWNER — its `both recipes were spent` branch and its paused branch
-        #: both leave `Owner.NONE`, and `poll` is what turns that into the
-        #: owner an answering engine has. Anything gated on the owner has to
-        #: wait for the tick that settles it.
         self._presence_settled = threading.Event()
-        #: The door this orchestrator serves, once `run()` has built it.
-        #:
-        #: PHASE19 2.3 is why the tray holds it: the tray's own move must take
-        #: the SAME claim a `POST /install` takes, or the two callers would be
-        #: two owners of "one install on a machine" — a POST arriving during
-        #: the tray's run would claim successfully and then block on
-        #: `_operation`, which is a 409 the caller never receives.
         self._install_door: "door_module.OrchestratorDoor | None" = None
-        #: Whether THIS process holds a claim on this machine's engine
-        #: (PHASE17 2.1). Not "whether the engine is claimed" — that is the
-        #: engine's fact and it is read from `/v1/info`, never mirrored here.
         self._claimed = False
 
-    # -------------------------------------------------------------- presence
 
     def start(self) -> Presence:
-        """Boot whichever server this machine runs, and say which.
-
-        **The ping comes FIRST on a machine with no Crucible distro**, and
-        that order is the fix the first real run demanded (2026-09-15). Owen's
-        PC runs a Crucible inside `Ubuntu`, installed by hand long before any
-        of this: the distro probe truthfully answers `absent`, and the old
-        order read that as "no server here" and spawned the `llama-windows`
-        child onto a port another Crucible already held. Section 0 is one
-        server per machine, and the cheapest way to keep that true is to look
-        before starting anything.
-        """
         distro, detail = self._c.watcher.probe_distro()
         self._c.log.write(f"presence: {detail}")
         if distro is Distro.PRESENT:
@@ -528,7 +341,6 @@ class Host:
         return self._c.presence
 
     def presence(self) -> dict[str, object]:
-        """`OrchestratorPort`. The measurement, as the watcher left it (PHASE19 2.6)."""
         return {
             "distro": self._c.presence.distro.value,
             "engine": self._c.presence.engine.value,
@@ -537,7 +349,6 @@ class Host:
         }
 
     def install_outcome(self) -> dict[str, object] | None:
-        """`OrchestratorPort`. `wsl-outcome.json`, or None (PHASE19 2.2/2.6)."""
         recorded = outcome.read(self._c.home)
         return None if recorded is None else recorded.to_dict()
 
@@ -566,7 +377,6 @@ class Host:
             return self.local_status()
 
     def stop_windows_for_move(self) -> None:
-        """Called only after the guest has the config and installed subjects."""
         if self._c.presence.owner is Owner.HOST_CHILD:
             self.release_claim()
             self._c.watcher.stop_child()
@@ -574,7 +384,6 @@ class Host:
             raise HostError("engine_not_ours", "Cannot replace an unmanaged engine")
 
     def finish_wsl_move(self) -> None:
-        """Publish the guest only after Windows can authenticate to that guest."""
         from ..local import request
         self._c.watcher.release()
         watcher = PresenceWatcher(self._c.runner, self._c.log, distro=CRUCIBLE_DISTRO)
@@ -594,19 +403,6 @@ class Host:
                 or server.get("api_version") != 1 or not isinstance(machine, dict)
                 or machine.get("backend") != "cuda-linux"):
             raise HostError("engine_move_failed", "Windows is not reaching the authenticated WSL engine with the expected API")
-        # THE COMMIT. Everything above is a read that can fail while changing
-        # nothing. Everything from here changes this host's idea of who owns
-        # the engine, and four of these steps can still fail. A HALF-APPLIED
-        # move is the dangerous outcome: a guest watcher in place while
-        # presence still says HOST_CHILD would leave Windows believing WSL
-        # owns an engine it never took, and `_verify_active_guest` gates model
-        # DELETION on exactly that pair. So the commit is undone as a whole —
-        # the discipline settings.py states for its own door: validated as a
-        # whole, and only then written.
-        #
-        # The region ends at `claim()`, because that is the step that makes
-        # the move TRUE. A failure after it is a live WSL engine with
-        # something else wrong, and rolling back there would be the lie.
         was = (self._c.watcher, self._c.presence, self._paused)
         was_pairing = (self._c.home / "pairing").read_text(encoding="utf-8")
         was_stopped = self._c.home.joinpath("engine.stopped").exists()
@@ -623,11 +419,6 @@ class Host:
             if not self.claim():
                 raise HostError("engine_move_failed", "The guest could not be claimed by its Windows controller")
         except Exception:
-            # STATE FIRST, then the release. The guest may well be up; this
-            # host simply is not adopting it, and releasing the watcher we
-            # booted is part of not adopting it — but a release that threw
-            # would abandon the undo half-done and lose the original failure
-            # with it, which is the very outcome this block exists to prevent.
             self._c.watcher, self._c.presence, self._paused = was
             self._c.home.joinpath("pairing").write_text(was_pairing, encoding="utf-8")
             if was_stopped:
@@ -648,40 +439,6 @@ class Host:
     def carry_guest_to_this_release(
         self, *, settle_ceiling_s: float = PRESENCE_SETTLE_CEILING_SECONDS
     ) -> None:
-        """ONE RELEASE PER MACHINE, and this host is what makes it true.
-
-        Owen, 2026-09-18: *"windows is the driver; the thing moving wsl
-        forward."* `install.ps1` upgrades the Windows half; until this existed,
-        nothing upgraded the other one, because the install sequence ran on
-        `POST /install` and on a WSL-owned machine that sequence reported the
-        engine already there rather than installing anything
-        (`installer.EngineInstall.upgrade_guest` records the measurement).
-
-        ONLY WHEN THE ENGINE IS THE GUEST'S. On a machine whose engine is the
-        Windows one there is no guest to carry, and on one this host did not
-        claim there is no guest of OURS — `Owner.WSL_UNIT` is the single
-        question, asked of the presence the watcher already measured.
-
-        AND IT WAITS FOR THAT MEASUREMENT, which is the whole of the first real
-        `ship.sh patch --deploy` (1.0.3, 2026-09-19). This runs on a thread
-        started at the end of `main`, and on Owen's PC the owner did not become
-        `wsl-unit` until the watch loop's first tick seven seconds later
-        (`consent: "Ubuntu" is named … owner=wsl-unit`, 02:04:59, against a tray
-        that started at 02:04:52). The question above was asked in that gap, got
-        the `Owner.NONE` `start()` leaves when it decides no owner, and returned
-        — silently, so the log did not even say a carry had happened. The guest
-        stayed on 1.0.2 and `install.ps1` then refused the whole install.
-        `_presence_settled` is the fact being waited for and the watch loop is
-        what sets it; a sleep loop on `presence.owner` would be this thread
-        deciding for itself when a measurement is finished.
-
-        IT NEVER RAISES OUT OF THE THREAD. A guest that is ahead, unreadable or
-        simply unreachable is a LINE IN THE LOG and a host that carries on
-        supervising the engine it has; the alternative is a tray that dies on
-        startup because a VM was busy. Everything it decided is named, so the
-        log says which of the four answers this machine got — the fourth being
-        "there was nothing here to carry", which used to be the silent one.
-        """
         if not self._presence_settled.wait(settle_ceiling_s):
             self._c.log.write(
                 f"guest release: presence never settled within "
@@ -690,10 +447,6 @@ class Host:
             )
             return
         if self._c.presence.owner is not Owner.WSL_UNIT:
-            # PHASE19 2.3: ONE THREAD, ONE WAIT, TWO BRANCHES. The owner this
-            # thread already waited for is the same fact the engine decision
-            # needs, and a second thread asking it would be two owners of "what
-            # does this tray do at start" (2.12).
             self._c.log.write(
                 f"guest release: no guest to carry "
                 f"(owner={self._c.presence.owner.value})"
@@ -706,14 +459,6 @@ class Host:
             release=self._c.release,
             home=self._c.home,
             install_sh_url=INSTALL_SH_URL.format(release=self._c.release),
-            # IN THE DISTRO THIS HOST CLAIMED, which is the watcher's and not a
-            # default. Measured on 1.0.4 (2026-09-19 03:10): the carry left this
-            # off, took `EngineInstall`'s `CRUCIBLE_DISTRO`, and ran `install.sh`
-            # inside "crucible" on a machine whose engine this host had claimed
-            # in "Ubuntu" seconds earlier — `step_failed: install.sh exited
-            # 4294967295 inside "crucible": There is no distribution with the
-            # supplied name.` A guest carried is the guest that was claimed, so
-            # this asks the one object that knows which guest that is.
             distro=self._c.watcher.distro,
         )
         try:
@@ -721,7 +466,7 @@ class Host:
         except HostError as exc:
             self._c.log.write(f"guest release: {exc.code}: {exc.message}")
             return
-        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
+        except Exception as exc:
             self._c.log.write(f"guest release: could not be read or carried: {exc}")
             return
         if carried is None:
@@ -730,43 +475,8 @@ class Host:
             self._c.log.write(f"guest release: carried the guest to {carried}")
             self._refresh()
 
-    # -------------------------------------------- PHASE19 2.3 the decision
 
     def decide_engine(self) -> str:
-        """Should this machine be moving to the Linux engine, and is it?
-
-        PHASE19-AUTOMATIC-WSL.md 2.3. Called from the carry thread, AFTER
-        `_presence_settled`, on a machine whose engine is not a guest of ours.
-        Returns the decision it made, by name, so the log and a test say the
-        same word.
-
-        THE TABLE, IN ITS ORDER, AND NOTHING IS TRIED TWICE:
-
-            owner is found                      -> `found`, nothing. PHASE17
-                                                   4.1a: an engine this
-                                                   orchestrator did not start is
-                                                   watched and never acted on.
-            `[orchestrator] wsl = "never"`      -> `declined`, recorded once.
-            outcome is a transient `cannot`     -> re-checked by what is live
-                                                   (FRESH-INSTALL #16/#18); live
-                                                   now is the move, resumed.
-            outcome is `cannot`                 -> `cannot`, nothing. A person
-                                                   changes the BIOS, the VPN or
-                                                   the distro and presses Try
-                                                   again (2.5): the tray menu or
-                                                   `crucible orchestrator
-                                                   --try-again`.
-            outcome is `failed`, attempts >= 2  -> `failed`, nothing.
-            outcome is `reboot-pending`         -> the move, resumed (2.4).
-            otherwise                           -> probe the table; a row the
-                                                   tray cannot carry is written
-                                                   as `cannot` and stops, and a
-                                                   row it can is the move.
-
-        IT NEVER RAISES OUT OF THE THREAD, for `carry_guest_to_this_release`'s
-        reason: a tray that died at startup because a VM was busy is worse than
-        a machine that keeps its Windows engine and says why in the log.
-        """
         owner = self._c.presence.owner
         if owner is Owner.FOUND:
             self._c.log.write(
@@ -802,16 +512,9 @@ class Host:
             and previous.state == outcome.CANNOT
             and previous.code in outcome.TRANSIENT_CANNOT_CODES
         ):
-            # FRESH-INSTALL #16/#18 (kylies-pc, 2026-09-26). The machine was
-            # fixed by one more restart, and the tray came back, logged "no
-            # installed distributions" and did NOTHING, because the file still
-            # said `cannot`. A `cannot` whose cause goes away by itself (a
-            # restart servicing still owed) is re-checked here, at every start,
-            # by what is live; nothing is enabled and no prompt is raised by
-            # the check. Live now is the move, resumed.
             try:
                 live = wslstate.probe_live(self._c.runner)
-            except Exception as exc:  # noqa: BLE001 - never raise out of the thread
+            except Exception as exc:
                 self._c.log.write(f"engine: the WSL re-check crashed: {type(exc).__name__}: {exc}")
                 return outcome.CANNOT
             self._c.log.write(
@@ -826,11 +529,9 @@ class Host:
             and previous.state == outcome.CANNOT
             and previous.code in outcome.FIRMWARE_CANNOT_CODES
         ):
-            # Virtualization was off in the firmware. After somebody turns it
-            # on and restarts, the move goes on by itself (outcome.py says why).
             try:
                 live = wslstate.probe_live(self._c.runner)
-            except Exception as exc:  # noqa: BLE001 - never raise out of the thread
+            except Exception as exc:
                 self._c.log.write(f"engine: the virtualization re-check crashed: {type(exc).__name__}: {exc}")
                 return outcome.CANNOT
             self._c.log.write(
@@ -859,10 +560,6 @@ class Host:
             )
             return outcome.FAILED
         if previous is not None and previous.state == outcome.DONE:
-            # The presence says otherwise — this branch runs on a machine whose
-            # engine is NOT the guest's — so the record is history that has been
-            # overtaken. It is not a reason to refuse: the sequence is
-            # idempotent and the machine is the fact.
             self._c.log.write(
                 f"engine: the last move finished at {previous.at} and this "
                 "machine's engine is not the guest's now; walking the sequence "
@@ -871,15 +568,6 @@ class Host:
         return self._move("resumed" if previous is not None and previous.state == outcome.REBOOT_PENDING else "started")
 
     def _move(self, why: str) -> str:
-        """Run the move, under the SAME claim a `POST /install` takes.
-
-        2.3: "The move runs through the SAME `_sequence` the door's
-        `POST /install` runs, under the same `host._operation` lock, emitting
-        the same events; the tray is simply the first caller." The claim is the
-        door's, not a second one here, so a `POST /install` that arrives while
-        this is in flight gets the existing `host_install_running` 409 and
-        attaches (2.6) rather than queueing behind a lock it cannot see.
-        """
         door = self._install_door
         if door is None:
             self._c.log.write(
@@ -900,18 +588,15 @@ class Host:
         except HostError as exc:
             self._c.log.write(f"engine: {exc.code}: {exc.message}")
             return outcome.classify(exc.code)
-        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
+        except Exception as exc:
             self._c.log.write(f"engine: the move crashed: {type(exc).__name__}: {exc}")
             return outcome.FAILED
         finally:
             door.release()
-            # Every ending changes what the menu offers (Try again, the
-            # restart line), not only success.
             self._refresh()
         return outcome.DONE
 
     def stopped_windows_catalog(self) -> CatalogPort:
-        """Deletion is allowed only after ownership and authenticated guest proof."""
         from ..backend import detect_backend
         from ..config import load_config
         self._verify_active_guest()
@@ -929,7 +614,6 @@ class Host:
             raise HostError("migration_cleanup_not_ready", "The authenticated endpoint is not the WSL engine; Windows models are kept")
 
     def _resume_model_cleanup(self, *, raise_errors: bool = False) -> None:
-        """Resume an interrupted retirement using the retained native catalog."""
         try:
             with self._operation:
                 record = self._c.home / installer.CLEANUP_RECORD
@@ -958,7 +642,6 @@ class Host:
             self._cleanup_running = False
 
     def _hold(self) -> None:
-        """7b.4c: hold the distro the engine is in, or it goes away by itself."""
         if self._c.presence.owner is Owner.WSL_UNIT:
             name = self._c.watcher.distro
         elif (
@@ -967,12 +650,10 @@ class Host:
         ):
             name = self._c.watcher.found.distro
         else:
-            # A host-mode child is a Windows process; there is no VM to hold.
             return
         self._c.watcher.hold(name)
 
     def _start_host_mode(self, distro: Distro) -> Presence:
-        """The `llama-windows` server, as this process's child."""
         env = dict(self._c.runner.env)
         cmd = console_cmd_path(env)
         if not Path(str(cmd)).is_file():
@@ -996,7 +677,7 @@ class Host:
         self._c.watcher.respawn_host_mode(
             server_argv(env), server_environment(env)
         )
-        if self._c.watcher._wait_for_ping(30.0):  # noqa: SLF001 - one object, one loop
+        if self._c.watcher._wait_for_ping(HOST_CHILD_START_WAIT_SECONDS):
             return Presence(
                 distro,
                 Engine.RUNNING,
@@ -1010,22 +691,8 @@ class Host:
             Owner.NONE,
         )
 
-    # ----------------------------------------------------------- the relation
 
     def claim(self) -> bool:
-        """Tell this machine's engine that this orchestrator manages it.
-
-        **A `found` engine is NEVER claimed** (PHASE15 4.1a, PHASE17 2.1).
-        The orchestrator did not start it, has no unit it may name and no
-        child it may kill, so a claim would be a statement that is not true:
-        `managed_by` would name a door that refuses every verb the field
-        implies. It is watched, and that is the whole of the relation with it.
-
-        A claim that fails is a LINE IN THE LOG and never a crash. An engine
-        that will not be claimed is still an engine, and a tray that died
-        telling it so would take the watch with it; the next down-to-up edge
-        tries again.
-        """
         owner = self._c.presence.owner
         if owner is Owner.FOUND:
             self._c.log.write(
@@ -1062,12 +729,6 @@ class Host:
         return True
 
     def release_claim(self) -> None:
-        """Drop the claim on the way out (PHASE17 2.2).
-
-        A tray that exits leaving `managed_by` pointing at a door that no
-        longer answers is PHASE15 3.6's "a file that exists and disagrees is
-        worse than none", one layer up.
-        """
         if not self._claimed:
             return
         token = engine_token(self._c)
@@ -1082,13 +743,7 @@ class Host:
             )
             self._c.log.write(f"claim: released {engine_url()}")
         except peer_module.PeerCallFailed as exc:
-            # Quitting is not a thing that fails. An engine that could not be
-            # told is an engine whose `managed_by` is stale until it restarts,
-            # which is a display and not a behaviour.
             if exc.code == "peer_unreachable":
-                # #26 (kylies-pc, 2026-09-26): an upgrade stops the engine and
-                # THEN quits the tray, so there is nobody left to tell. That is
-                # the claim ending with its engine, not a failure to report.
                 self._c.log.write("claim: the engine is already stopped; nothing to release")
             else:
                 self._c.log.write(f"claim: release did not land: {exc.code}: {exc.message}")
@@ -1101,24 +756,9 @@ class Host:
 
     @property
     def name(self) -> str:
-        """`OrchestratorPort`. What `/v1/ping` on the door calls this process."""
         return self._c.name
 
     def info(self) -> dict[str, Any]:
-        """PHASE17 3.2 - this orchestrator, and its engine READ THROUGH.
-
-        The engine's `/v1/info` is re-read on EVERY request and nothing is
-        cached. A cached capability list is this system's one defect in a
-        third place: the engine pulls a model, the orchestrator keeps
-        answering yesterday's list, and a client picks a model the engine has
-        and is told it does not.
-
-        When the engine cannot be read, `capabilities` is `[]` and the
-        engine's `name` and `backend` are `null` - the orchestrator does not
-        invent an answer for a server that did not give one. `engine.url`
-        still names where it should be, because that is a fact about this
-        machine rather than about the engine's health.
-        """
         import platform as platform_module
 
         owner = self._c.presence.owner
@@ -1162,15 +802,12 @@ class Host:
             },
             "role": peer_module.ROLE_ORCHESTRATOR,
             "local_lifecycle_version": 1,
-            # ZERO, and that is the DEFINITION of the role rather than a
-            # property of this machine. An orchestrator serves none.
             "job_types": [],
             "engine": engine,
             "capabilities": capabilities,
         }
 
     def check_restartable(self) -> None:
-        """`OrchestratorPort`. 4.1a's rule, refused before anything opens."""
         if self._c.presence.owner is Owner.FOUND:
             raise HostError(
                 "engine_not_ours",
@@ -1184,12 +821,6 @@ class Host:
             )
 
     def restart_engine(self, emit: Callable[[installer.Event], None]) -> None:
-        """PHASE17 4.2 - restart by the owner-appropriate means.
-
-        ONE implementation, two callers: the door's `POST /restart` and the
-        tray's own Restart item both arrive here, so a person and a page
-        cannot get two different restarts.
-        """
         self.check_restartable()
         self._c.home.joinpath("engine.stopped").unlink(missing_ok=True)
         self._paused = False
@@ -1201,10 +832,6 @@ class Host:
             emit(_step("respawn the Windows engine", 1))
             came_back = self._respawn_child()
         else:
-            # No engine at all. A restart from here is a START, which is what
-            # a person pressing Restart on a stopped machine is asking for,
-            # and `start()` is the one place that decides which server this
-            # machine runs.
             emit(_step("start this machine's engine", 1))
             self.start()
             came_back = self._c.presence.engine is Engine.RUNNING
@@ -1235,21 +862,17 @@ class Host:
         self._c.presence = Presence(
             self._c.presence.distro, Engine.RUNNING, "restarted", owner
         )
-        # A restarted engine has forgotten who manages it (PHASE17 2.3), so
-        # the claim is re-asserted here rather than waited for.
         self._claimed = False
         self.claim()
         self._refresh()
         emit(installer.Event("done", {"engine": engine_url()}))
 
     def _respawn_child(self) -> bool:
-        """`host-mode-respawn`, as a RESTART: stop this one, then start one."""
         self._c.watcher.stop_child()
         env = dict(self._c.runner.env)
         self._c.watcher.respawn_host_mode(server_argv(env), server_environment(env))
-        return self._c.watcher._wait_for_ping(30.0)  # noqa: SLF001 - one object, one loop
+        return self._c.watcher._wait_for_ping(HOST_CHILD_START_WAIT_SECONDS)
 
-    # ------------------------------------------------------------------ menu
 
     def model(self) -> menu.MenuModel:
         try:
@@ -1264,13 +887,6 @@ class Host:
         )
 
     def try_again(self) -> None:
-        """PHASE19 2.5's Try again, from the tray (FRESH-INSTALL #16, 2026-09-26).
-
-        The same move and the same claim as `POST /install`: `_move` runs it
-        under the door's claim, so a press while a move is already running is
-        the one in flight rather than a second walk. On a thread, because the
-        menu handler is the icon's own loop.
-        """
         threading.Thread(
             target=self._move, args=("tried again from the tray menu",),
             name="crucible-try-again", daemon=True,
@@ -1281,20 +897,12 @@ class Host:
         if item_id == menu.OPEN_CONSOLE:
             open_console(self._c.home, self._c.log)
         elif item_id == menu.INSTALL_ENGINE:
-            # 4.7: the tray does NOT run the sequence. The switch is a control
-            # on the page, the page posts the task, the server relays to this
-            # host's door. One door, one sequence, one place a person watches.
             open_console(self._c.home, self._c.log)
         elif item_id == menu.TRY_AGAIN:
             self.try_again()
         elif item_id == menu.RESTART_ENGINE:
             if self._refuse_acting_on_a_found_engine("restart"):
                 return
-            # PHASE17 4.2: ONE restart, whether a person clicks it or the page
-            # posts `engine-restart`. Before this the tray called `boot()`,
-            # which on a RUNNING engine pings, succeeds and changes nothing —
-            # a button that did nothing precisely when it was most obviously
-            # pressed. The events go to the log, because a tray has no stream.
             self.restart_engine(
                 lambda event: self._c.log.write(f"restart {event.event}: {event.data}")
             )
@@ -1310,14 +918,6 @@ class Host:
         self._refresh()
 
     def _refuse_acting_on_a_found_engine(self, verb: str) -> bool:
-        """An engine the host did not start is one it does not act on.
-
-        The menu already disables both verbs (4.2's model), and this is the
-        second half of the same rule: a disabled item is a drawing, and the
-        thing that must not happen is the ACT. `systemctl stop
-        crucible` sent into somebody's own distro because a click arrived
-        anyway is exactly the class of surprise this host exists to avoid.
-        """
         if self._c.presence.owner is not Owner.FOUND:
             return False
         self._c.log.write(
@@ -1347,7 +947,6 @@ class Host:
         self._mark_stopped()
 
     def _mark_stopped(self) -> None:
-        """What every stop records, wherever the stop itself was made."""
         self._c.home.mkdir(parents=True, exist_ok=True)
         self._c.home.joinpath("engine.stopped").write_text("Stopped by the operator\n", encoding="utf-8")
         self._paused = True
@@ -1365,10 +964,8 @@ class Host:
 
         tray.update(self._icon, self.model(), self.on_click)
 
-    # ----------------------------------------------------------------- watch
 
     def watch(self) -> None:
-        """4.1's watch. One recovery per down-edge, then a state with a name."""
         while not self._stop.wait(self._c.watcher.watch_s):
             with self._operation:
                 if not self._paused:
@@ -1376,16 +973,6 @@ class Host:
                     self._c.presence = self._c.watcher.poll(
                         self._c.presence.distro, self._c.presence.owner
                     )
-                    # 7b.4c: the hold is what keeps the VM there at all, so it is
-                    # taken again the tick after it dies rather than at the next login.
-                    #
-                    # AND TAKEN THE FIRST TIME BY A TICK, TOO (fresh-install #23,
-                    # 2026-09-26). `start()` holds only an owner it decided, and
-                    # an owner is often decided later, by this loop: a boot that
-                    # outlived its wait (39 s of cloud-init on Canonical's image),
-                    # a guest that came up after a failed move. `rehold` retakes
-                    # only a hold that existed, so such a guest was never held,
-                    # and WSL stopped the distro ~25 s after the last session.
                     if self._c.watcher.held_distro is None:
                         self._hold()
                     self._c.watcher.rehold()
@@ -1400,44 +987,13 @@ class Host:
                             f"watch: {before.value} -> {self._c.presence.engine.value} — "
                             f"{self._c.presence.detail}"
                         )
-                        # PHASE17 2.3: a claim is LIVE state and an engine that
-                        # restarted has forgotten. Every down-to-up edge re-asserts
-                        # it, which is why nothing has to be remembered on disk — the
-                        # relation is re-stated within one 15-second tick instead.
                         if self._c.presence.engine is Engine.RUNNING:
                             self._claimed = False
                             self.claim()
                         self._refresh()
-                # THE ONE PLACE THE PRESENCE BECOMES KNOWN, and the paused
-                # branch reaches it too: a host the operator stopped has a
-                # presence — stopped, owned by nobody — and a waiter told that
-                # can act on it. `start()` does not set this, deliberately; it
-                # is what leaves `Owner.NONE` behind for `poll` to resolve, so
-                # a waiter released by `start()` would be released into exactly
-                # the unmeasured owner this exists to prevent.
                 self._presence_settled.set()
 
     def quit(self, *, handover: bool = False) -> None:
-        """THE stop. PHASE17 4.4 — one implementation, two callers.
-
-        `menu.QUIT` and the door's `POST /quit` both arrive here, for 4.2's
-        reason one verb over: a person and a script must not get two different
-        shutdowns. A second copy of these four steps living behind the door
-        would be the two-owners shape that the whole of PHASE17 is about, and
-        the half that drifted would be the half nobody watches — the script's.
-
-        It LOGS, and that is not decoration. 4.4's measurement is a tray that
-        was sent `taskkill /PID`, stayed up for 25 s and wrote **nothing**, so
-        "did the stop run at all" was unanswerable from the one artefact a
-        console-less `pythonw` leaves. Now every stop says so before it acts.
-
-        `handover` is an UPGRADE's quit (`local shutdown` sends
-        `X-Crucible-Handover: 1` with its `/quit`; fresh-install #35,
-        2026-09-26). Everything is the
-        same except the hold: a bounded one is left behind for the next tray
-        (`PresenceWatcher.hand_over`), because the engine this quit leaves
-        running is only running while something holds its distro.
-        """
         owner = self._c.presence.owner
         claim = "released" if self._claimed else "not held, so nothing to release"
         engine = (
@@ -1450,60 +1006,35 @@ class Host:
             f"claim is {claim} and the engine is {engine}"
         )
         self._stop.set()
-        # BEFORE the hold and before the child: while the engine is still
-        # answering. A release sent to a server this process is about to stop
-        # would be a release nobody hears.
         self.release_claim()
-        # The hold goes first: it is this process's session, and a wsl.exe
-        # left running after the tray is gone is a VM nothing owns. Taken for
-        # a `found` engine's distro too (`_hold`), so it is let go for one too
-        # — the hold is THIS process's session whoever started the engine in
-        # it, and the distro stays up as long as the engine's own session does.
         if handover:
             self._c.watcher.hand_over()
         else:
             self._c.watcher.release()
         if owner is Owner.HOST_CHILD:
-            # In host mode the server is this process's child and 4.2's Quit
-            # label already said it goes too. An engine the host FOUND is not
-            # its child even though the distro probe said `absent`, which is
-            # why this asks the owner and not the distro.
             self._c.watcher.stop_child()
-        # Stop recovery immediately, but do not let the main thread exit until
-        # cleanup finishes: HTTP request threads are daemon threads.
         self._shutdown_complete.set()
         if self._icon is None:
             self._c.log.write("quit: shutdown complete; controller loop signalled")
             return
-        self._icon.stop()  # type: ignore[attr-defined]
+        self._icon.stop()
 
 
 def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
-    """`crucible orchestrator`. Returns an exit code; never raises past here."""
     env = os.environ
     from ..config import crucible_home
     home = crucible_home()
     log = HostLog(Path(str(log_path(env))), Path(str(previous_log_path(env))))
-    # Children start in CRUCIBLE_HOME, not in this process's own directory
-    # inside the installation — see ProcessRunner. A wsl.exe that inherits the
-    # latter holds a handle on `Crucible\host` and blocks the next upgrade.
     runner = ProcessRunner(sys.platform, env, cwd=str(home))
     log.write(f"crucible orchestrator {VERSION} starting; CRUCIBLE_HOME={home}")
     acquire(home)
 
-    # The Startup item, if absent. 4.1 makes these verbs its ONE owner, and a
-    # host that has been started by hand is a host that should still be there
-    # after the next login.
     try:
         outcome = startup.install(runner)
         log.write(f"startup: {outcome.detail}")
     except HostError as exc:
         log.write(f"startup: NOT written — {exc.code}: {exc.message}")
 
-    # PHASE17 2.5, BEFORE the watcher, because consent decides which distro
-    # the watcher is about. A malformed setting is named and then not used:
-    # the tray still runs, unconsented, which is the behaviour of every
-    # machine that never wrote one.
     consented: str | None = None
     try:
         consented = consented_distro(home)
@@ -1534,11 +1065,6 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     else:
         host.start()
     _write_pairing(context)
-    # AFTER the presence and AFTER the pairing file, because the claim needs
-    # both: the owner decides whether a claim is made at all (a `found` engine
-    # is never claimed), and on a machine whose engine is a guest's, the only
-    # place that engine's token exists on the Windows side is the line the
-    # pairing step just copied.
     host.claim()
 
     door = OrchestratorDoor(
@@ -1548,10 +1074,6 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
         token_detail=lambda: engine_token_detail(context),
         orchestrator=host,
     )
-    # BEFORE the socket and long before the carry thread: the tray's own move
-    # (PHASE19 2.3) runs under this door's claim, so that a `POST /install`
-    # arriving mid-move is refused 409 and attaches rather than queueing behind
-    # a lock it cannot see.
     host._install_door = door
     try:
         host._door_server = serve(door)
@@ -1565,12 +1087,6 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
 
     from ..local import publish_installation
     publish_installation(home)
-    # AFTER the record that says what THIS half is, because the guest's release
-    # is only worth comparing against a host release something has published.
-    # ON A THREAD, because carrying a guest is a pip run inside a VM and the
-    # tray has to appear in the meantime — and a daemon one, so quitting the
-    # host does not wait for it. It is started after the watch thread and waits
-    # on it: the owner it asks about is the watch's to settle, not `start()`'s.
     threading.Thread(
         target=host.carry_guest_to_this_release,
         name="crucible-guest-release",
@@ -1586,24 +1102,12 @@ def run(argv: list[str] | None = None, *, headless: bool = False) -> int:
     from . import tray
 
     icon = tray.make_icon(host.model(), host.on_click)
-    host._icon = icon  # noqa: SLF001 - one object, one loop
+    host._icon = icon
     icon.run()
     return 0
 
 
 def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer.Event], None]], None]:
-    """Bind the install sequence to THIS host's two servers.
-
-    The catalogs are built per RUN and not once at startup, because the token
-    they both use is the one the config has at the moment the move begins —
-    and `migrate-config`, a few steps earlier in that same run, is what makes
-    the guest's token the Windows one. A port that captured a token at tray
-    start would be a port holding a token the guest never had.
-
-    `None` for either side is a fact rather than a fallback: a machine with no
-    Windows config has no Windows engine, so there is no catalog to move from
-    and `migrate-weights` says exactly that.
-    """
     def install_sequence(
         emit: Callable[[installer.Event], None],
         *,
@@ -1612,8 +1116,6 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
         walks: list[installer.EngineInstall],
     ) -> None:
         if context.presence.owner is Owner.WSL_UNIT:
-            # Port 7100 now belongs to the destination. It must never be read
-            # as the Windows source on a retry after an interrupted cleanup.
             if (context.home / installer.CLEANUP_RECORD).exists():
                 host._resume_model_cleanup(raise_errors=True)
             else:
@@ -1656,38 +1158,14 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
         walk.run()
 
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:
-        """The move, and the ONE place its ending is recorded (PHASE19 2.2).
-
-        Both callers reach it — the tray's start-time decision (2.3) and the
-        door's `POST /install` (2.5) — so `wsl-outcome.json` is written at every
-        terminal point of a move and at no terminal point of anything else. The
-        carry (`carry_guest_to_this_release`) deliberately does NOT come
-        through here: a guest that is ahead or unreadable is not a move that
-        failed, and recording it as one would make the tray refuse a machine
-        that is perfectly well.
-
-        WHETHER THIS IS A RESUME IS READ OFF THE FILE, not passed in. The
-        previous outcome is the one owner of "where did this machine get to",
-        and a parameter would let the two callers disagree about it — `Try
-        again` pressed after a reboot is as much a resume as the tray's own.
-        """
-        # A watch recovery during migration could start a second engine.
         with host._operation:
             host.check_restartable()
             previous = outcome.read(context.home)
-            # 2.2: a `failed` is retried ONCE. The count is of consecutive
-            # failures, so anything else resets it — a machine that failed,
-            # was fixed and then failed again gets its retry back.
             attempt = (
                 previous.attempts + 1
                 if previous is not None and previous.state == outcome.FAILED
                 else 1
             )
-            # THE RESTART BUDGET (FRESH-INSTALL #19, 2026-09-26). Only a
-            # `reboot-pending` carries its count on; a `cannot` that is being
-            # tried again (a person's Try again, or the tray's re-probe of a
-            # transient one) starts a fresh budget, because somebody or
-            # something has changed the machine since.
             restarts = 0
             rebooted = True
             if previous is not None and previous.state == outcome.REBOOT_PENDING:
@@ -1717,12 +1195,6 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
                 )
 
             def emit_recorded(event: installer.Event) -> None:
-                # THE RECORD BEFORE THE REPORT (FRESH-INSTALL #9, 2026-09-26).
-                # The terminal `failed` event used to go out first and the file
-                # was written only when the exception unwound, so whoever read
-                # the stream (the console, an app) could look for
-                # `wsl-outcome.json` before it existed. The file is the one
-                # owner of the ending, so it is written before anybody is told.
                 if event.event == "failed":
                     code = event.data.get("code")
                     message = event.data.get("message")
@@ -1743,7 +1215,7 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
             except HostError as exc:
                 record(outcome.classify(exc.code), exc.code, exc.message)
                 raise
-            except Exception as exc:  # noqa: BLE001 - an ending is always recorded
+            except Exception as exc:
                 record(outcome.FAILED, "task_failed", f"{type(exc).__name__}: {exc}")
                 raise
             record(outcome.DONE, None, None)
@@ -1752,14 +1224,6 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
 
 
 def _booted_since(previous: outcome.Outcome) -> bool:
-    """Has Windows booted since this outcome was written? (FRESH-INSTALL #19)
-
-    A restart that did not happen spends nothing from the restart budget: a
-    tray restarted by an upgrade (kylies-pc went through three releases in one
-    evening) or a Fast Startup "shut down" would otherwise count as restarts
-    that failed to commit WSL. Unknown on either side is taken as "yes", which
-    is how the move behaved before the boot time was read at all.
-    """
     boot = wslstate.booted_at()
     at = previous.at_epoch()
     if boot is None or at is None:
@@ -1768,15 +1232,6 @@ def _booted_since(previous: outcome.Outcome) -> bool:
 
 
 def _guest_line(context: HostContext) -> str | None:
-    """The line the GUEST wrote, copied — 3.6, and not a second composition.
-
-    *"The Windows file is the host's COPY of the guest's line, because the
-    guest's own home is inside the distro where no Windows app looks."* The
-    old code composed a line here out of the host's OWN `config.toml`, which
-    on a machine whose engine is the guest's is a different token entirely —
-    a file that exists and disagrees, which 3.6 says is worse than none
-    because it points an app at a door with the wrong key.
-    """
     owner = context.presence.owner
     if owner is Owner.WSL_UNIT:
         return context.watcher.read_guest_pairing(
@@ -1788,11 +1243,6 @@ def _guest_line(context: HostContext) -> str | None:
 
 
 def _host_mode_line(context: HostContext) -> str | None:
-    """The host-mode child's line, composed from the config the host wrote.
-
-    The one case where composing is right: this server's config IS the host's
-    config, so there is one owner of those four facts and not two.
-    """
     from ..pairing import pairing_line
 
     import tomllib
@@ -1814,15 +1264,6 @@ def _host_mode_line(context: HostContext) -> str | None:
 
 
 def _write_pairing(context: HostContext) -> None:
-    """3.6: the Windows-side pairing file, ACL'd to this user.
-
-    WHERE THE LINE COMES FROM IS DECIDED BY WHO OWNS THE ENGINE, and that is
-    the correction the first real run forced. Two owners, two sources, and no
-    fallback between them: a guest engine's line is READ out of the guest, a
-    host-mode child's line is COMPOSED from the host's own config, and when
-    there is no engine at all there is no file — which 3.6 calls a fact an app
-    knows how to handle.
-    """
     from ..pairing import PairingFileError, write_pairing_file
 
     owner = context.presence.owner

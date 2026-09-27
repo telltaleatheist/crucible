@@ -1,17 +1,3 @@
-"""Try again, for a person with no app: `crucible orchestrator --try-again`.
-
-FRESH-INSTALL #16 (kylies-pc, 2026-09-26). PHASE19 2.5 made Try again a button
-in the apps, and kylies-pc had no app. The one retry left was
-`POST http://127.0.0.1:7101/install` with `{"target": "wsl"}` and the engine's
-bearer, which nobody would ever find. This is that same call, made by the
-product: the SAME door, the SAME move and the same claim as an app's button,
-so a person and an app cannot get two different retries. The desktop tray's
-Try again item (`crucible/desktop.py`) calls it too.
-
-It follows the move to its end and says how it ended, from `wsl-outcome.json`
-(2.2), because "it started" is not an answer a person can act on.
-"""
-
 from __future__ import annotations
 
 import json
@@ -24,30 +10,20 @@ from typing import Callable
 from . import outcome
 from .errors import HostError
 
-#: The orchestrator's door (PHASE17 3.2). `/install` is 2.5's Try again.
 DOOR = "http://127.0.0.1:7101"
 INSTALL_URL = DOOR + "/install"
 EVENTS_URL = DOOR + "/install/events"
 
-#: How long one read of the move's stream may be silent. The distro import is
-#: 28 s with no line (FRESH-INSTALL #26); a guest pip line can take minutes.
 STREAM_READ_TIMEOUT_SECONDS = 30 * 60.0
 
-#: How long to wait for a controller this call had to start.
 CONTROLLER_START_SECONDS = 90.0
 
 Say = Callable[[str], None]
 
-#: What to do when the tray's door answers but refuses, in words (#16).
 _SIGN_OUT = "Sign out of Windows and sign back in, then try again."
 
 
 def bearer(home: Path) -> str | None:
-    """The engine's token, as the door checks it, from this machine's own files.
-
-    The pairing file first (the host's copy of whichever engine is live, 3.6),
-    then the host's own config (a native engine that has not written one yet).
-    """
     from ..pairing import parse_pairing_line
 
     try:
@@ -60,7 +36,6 @@ def bearer(home: Path) -> str | None:
 
 
 def _opener() -> urllib.request.OpenerDirector:
-    # Local door; the invoking shell's proxy must not route it (local.py's rule).
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -74,7 +49,6 @@ def _controller_up() -> bool:
 
 
 def _ensure_controller(home: Path, say: Say) -> None:
-    """Start the controller when it is not running, as the tray does."""
     if _controller_up():
         return
     say("Starting Crucible's controller first.")
@@ -94,7 +68,6 @@ def _ensure_controller(home: Path, say: Say) -> None:
 
 
 def _describe(envelope: dict[str, object], say: Say) -> None:
-    """One plain line per step and per WSL fact; pip's own lines stay out."""
     event, data = envelope.get("event"), envelope.get("data")
     if not isinstance(data, dict):
         return
@@ -108,13 +81,11 @@ def _describe(envelope: dict[str, object], say: Say) -> None:
         if isinstance(text, str) and text.startswith("wsl: "):
             say(text[len("wsl: "):])
     elif event == "failed":
-        # The outcome's own sentence follows this (cli.py prints it); the code
-        # is here only so an app log can be searched for it.
         say(f"Setting up the Linux engine stopped ({data.get('code')}).")
 
 
 def _follow(response: object, say: Say) -> None:
-    for raw in response:  # type: ignore[attr-defined]
+    for raw in response:
         line = raw.decode("utf-8", "replace").strip()
         if not line:
             continue
@@ -127,15 +98,7 @@ def _follow(response: object, say: Say) -> None:
 
 
 def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
-    """Run the move once more through the door, follow it, return how it ended.
-
-    A move already in flight (the tray's own, at start) answers 409
-    `host_install_running`, and this then ATTACHES to it (2.6) instead of
-    failing: the person asked for the move, and there it is.
-    """
     _ensure_controller(home, say)
-    # A controller that has just started writes its config and pairing within
-    # seconds (`local.act`'s fresh-install wait); the door needs that token.
     deadline = time.monotonic() + CONTROLLER_START_SECONDS
     token = bearer(home)
     while token is None and time.monotonic() < deadline:
@@ -168,6 +131,6 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
             with _opener().open(attach, timeout=STREAM_READ_TIMEOUT_SECONDS) as response:
                 _follow(response, say)
         except urllib.error.HTTPError as again:
-            if again.code != 404:  # 404: it ended between the two calls
+            if again.code != 404:
                 raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {again.code}). {_SIGN_OUT}") from again
     return outcome.read(home)

@@ -1,28 +1,3 @@
-"""The pairing line: a whole connect door in one string.
-
-    crucible://crucible%40mac-studio@192.168.68.20:7100/#bXktdG9rZW4
-
-PHASE13-OPERATOR.md section 2.1 is the contract and this module is its producer.
-The consumer is `parsePairing` in `@crucible/client`, in another language, which
-is the one place in Crucible where one rule has two implementations — so the
-rule is written in the doc rather than in either of them, and the two are tested
-against the same literal line from both ends.
-
-WHY THE NAME IS PERCENT-ENCODED
--------------------------------
-A server's name contains an `@`: `config.default_server_name()` builds
-`crucible@<hostname>`, and that is what an operator sees everywhere else. Put
-it raw into a URI's userinfo and the authority has two `@` — which some parsers
-split at the first and some at the last. A format whose meaning depends on the
-parser is not a format, so the name (and the token, for the day a token is made
-of something other than urlsafe base64) is written as RFC 3986 userinfo:
-unreserved characters pass, everything else is `%XX`.
-
-`urllib.parse.quote(value, safe="")` is exactly that set — Python's
-`always_safe` is letters, digits, `_ . - ~` — and it emits uppercase hex, which
-is what RFC 3986 says to produce.
-"""
-
 from __future__ import annotations
 
 import os
@@ -37,14 +12,10 @@ from urllib.parse import quote, unquote, urlsplit
 from .errors import CrucibleError
 from .interfaces import ipv4_addresses
 
-#: The scheme an app's connect door recognises. Not `http`, deliberately: the
-#: line carries a secret in its fragment and must never be something a browser
-#: will navigate to by accident out of a chat window.
 SCHEME = "crucible"
 
 
 def _authority(host: str, port: int) -> str:
-    """`host:port`, with IPv6 bracketed as a URI requires."""
     if ":" in host and not host.startswith("["):
         return f"[{host}]:{port}"
     return f"{host}:{port}"
@@ -53,47 +24,11 @@ def _authority(host: str, port: int) -> str:
 def reachable_urls(
     host: str, port: int, advertise: Sequence[str] = ()
 ) -> list[str]:
-    """The bind address, made into addresses something else can dial.
-
-    A **wildcard** bind (`0.0.0.0`, `::`, or an empty host) is not an address,
-    so it becomes one URL per non-loopback IPv4 interface, in the order the OS
-    lists them (`crucible/interfaces.py`).
-
-    A **concrete** bind becomes exactly one URL, and that includes
-    `127.0.0.1`: the operator stated it, it is where the server really is, and
-    an app on the same machine reaches it there. Substituting a LAN address for
-    a loopback bind would hand out a URL nothing answers on.
-
-    AND THEN THE DECLARED ONES, APPENDED - `[server] advertise`.
-
-    Everything above answers "where am I" by looking at this machine, and that
-    is complete only while the server's reachability is its own. It is not, when
-    something outside creates it: the engine in WSL binds 127.0.0.1, correctly
-    reports 127.0.0.1, and is reachable from another machine anyway because
-    `tailscale serve` on the Windows side forwards into the guest. From inside
-    there is nothing to see - no interface, no socket, no route - so no amount
-    of looking finds it and it has to be said.
-
-    APPENDED, NEVER SUBSTITUTED, and the order matters. The derived line comes
-    first because an app on THIS machine should take it: loopback needs no
-    network and cannot be intercepted. The declared line is for the app that is
-    somewhere else. Both are true at once, and a console offering only one is
-    wrong for exactly one of its two readers - which is the state this field was
-    added to end, where the PC's console handed out `127.0.0.1` and a Mac could
-    do nothing with it.
-
-    Deduplicated, preserving that order: an operator who advertises an address
-    the server already derives has stated something true, and the answer to that
-    is one line rather than a refusal.
-    """
     if host in ("0.0.0.0", "::", ""):
         derived = [f"http://{_authority(address, port)}" for address in ipv4_addresses()]
     else:
         derived = [f"http://{_authority(host, port)}"]
     for authority in advertise:
-        # A bare host takes the server's own port: a forward that keeps the
-        # number is the overwhelmingly common one, and `_authority` decides how
-        # a bracketed IPv6 literal is spelled.
         url = (
             f"http://{authority}"
             if _has_port(authority)
@@ -105,11 +40,6 @@ def reachable_urls(
 
 
 def _has_port(authority: str) -> bool:
-    """Does this authority already name a port?
-
-    A bracketed IPv6 literal carries colons that are not a port separator, so
-    the question is only ever about what follows the closing bracket.
-    """
     tail = authority.rsplit("]", 1)[-1] if authority.startswith("[") else authority
     head, separator, port = tail.rpartition(":")
     if separator != ":" or not port.isdigit():
@@ -118,14 +48,6 @@ def _has_port(authority: str) -> bool:
 
 
 def pairing_line(name: str, url: str, token: str) -> str:
-    """One `crucible://` line for one URL of one server.
-
-    `url` is a `reachable_urls` entry; only its authority is used, because the
-    scheme is this line's own and a path would have nowhere to go. The trailing
-    `/` before the fragment is part of the format: without it the fragment
-    would be read as part of the authority by a lenient parser and as a syntax
-    error by a strict one.
-    """
     authority = urlsplit(url).netloc
     if authority == "":
         raise ValueError(
@@ -138,35 +60,17 @@ def pairing_line(name: str, url: str, token: str) -> str:
 
 
 def pairing_lines(name: str, urls: list[str], token: str) -> list[str]:
-    """One line per URL, in the same order. The `pairing` field of `/v1/setup`."""
     return [pairing_line(name, url, token) for url in urls]
 
 
 @dataclass(frozen=True)
 class Pairing:
-    """The four facts a pairing line carries, read back out of one."""
-
     name: str
     url: str
     token: str
 
 
 def parse_pairing_line(line: str) -> Pairing:
-    """The inverse of {@link pairing_line}. Raises `ValueError` on anything else.
-
-    Added by PHASE17, which needs the TOKEN out of a line for the first time:
-    the orchestrator claims its engine with the engine's own bearer, and on a
-    machine whose engine is a guest's, the only place that token exists on the
-    Windows side is the line the orchestrator copied (PHASE15 3.6, 4.1a).
-
-    `rsplit` on the LAST `@` is the half of the contract the reader owes —
-    {@link pairing_line} percent-encodes the name precisely so a name
-    containing `@` cannot make the authority ambiguous, and
-    `crucible/host/presence.py`'s `pairing_line_authority` already reads it
-    the same way. The URL comes back as `http://<authority>`, which is where
-    the server is; the line itself carries no scheme for it, because a
-    Crucible is HTTP and the `crucible://` scheme belongs to the line.
-    """
     parts = urlsplit(line.strip())
     if parts.scheme != SCHEME:
         raise ValueError(
@@ -184,36 +88,12 @@ def parse_pairing_line(line: str) -> Pairing:
     return Pairing(name=unquote(name), url=f"http://{authority}", token=token)
 
 
-# ------------------------------------------------------------ the pairing FILE
-#
-# PHASE15-HOST.md 3.6. The line above is a string; this is where it is written
-# down so an app on the same machine can read it and never ask a person to type
-# a token. One line, trailing newline, user-only.
-#
-# WHERE, per platform, is 3.6's table and not this file's invention:
-#
-#   linux / darwin / inside the WSL guest   <CRUCIBLE_HOME>/pairing
-#   win32                                   %LOCALAPPDATA%\Crucible\pairing
-#
-# and `CRUCIBLE_HOME` in the environment overrides the directory on every
-# platform. On Windows the host runs WITH `CRUCIBLE_HOME` set to
-# `%LOCALAPPDATA%\Crucible`, so the two rules agree rather than compete.
-
-
-#: The file's name, everywhere. One word, one owner.
 PAIRING_FILENAME = "pairing"
 
-#: `icacls` is how a Windows file is given an ACL of one user. It ships with
-#: Windows, which is the whole reason it is used instead of pywin32: this pack
-#: (PHASE15 4.4) carries an interpreter, a wheel and a tray, and a COM/ACL
-#: dependency for one file that is written once is a dependency to build,
-#: pin and ship forever.
 ICACLS_TIMEOUT_SECONDS = 30.0
 
 
 class PairingFileError(CrucibleError):
-    """The pairing file could not be written with the permissions it needs."""
-
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
@@ -221,19 +101,10 @@ class PairingFileError(CrucibleError):
 
 
 def pairing_file_path(home: Path) -> Path:
-    """`<home>/pairing`. The caller resolves `home`; 3.6 says which it is."""
     return Path(home) / PAIRING_FILENAME
 
 
 def icacls_argv(path: Path, user: str) -> Sequence[str]:
-    """`icacls <file> /inheritance:r /grant:r <user>:(R,W)` — 4.4's exact line.
-
-    `/inheritance:r` REMOVES the inherited entries rather than adding one:
-    a file under `%LOCALAPPDATA%` inherits Administrators and SYSTEM, and a
-    grant without the removal would be a file with a token in it that three
-    principals can read. `/grant:r` replaces rather than accumulates, so
-    running this twice leaves one entry and not two.
-    """
     return [
         "icacls",
         str(path),
@@ -244,7 +115,6 @@ def icacls_argv(path: Path, user: str) -> Sequence[str]:
 
 
 def _windows_user(env: Mapping[str, str]) -> str:
-    """`%USERNAME%`, read and never assembled. Refused by name when unset."""
     user = env.get("USERNAME")
     if user is None or user.strip() == "":
         raise PairingFileError(
@@ -263,23 +133,6 @@ def write_pairing_file(
     env: Mapping[str, str] | None = None,
     run: "object | None" = None,
 ) -> Path:
-    """Write the pairing line to `<home>/pairing`, readable by this user only.
-
-    On linux and darwin that is mode 0600, created 0600 from the outset so the
-    token is never briefly world-readable — the same rule and the same reason
-    as `config.write_config`.
-
-    On Windows a mode is not a thing, so the ACL is set with `icacls` (4.4).
-    **If that fails the file is DELETED**, because a pairing file is a bearer
-    token on disk and a token that everybody on the machine can read is worse
-    than no pairing file at all: the absent case is a fact an app knows how to
-    handle (3.6: "an absent file means no local server"), and the readable case
-    is a silent credential leak.
-
-    `run` is the subprocess runner, injectable, defaulting to
-    `subprocess.run` — the one legitimate default here, because it is the
-    platform's own and not a guess at a value.
-    """
     return write_pairing_line(
         pairing_file_path(Path(home)), line, platform=platform, env=env, run=run,
         private_directory=True,
@@ -295,16 +148,6 @@ def write_pairing_line(
     run: "object | None" = None,
     private_directory: bool = False,
 ) -> Path:
-    """`write_pairing_file`'s rules, at any path.
-
-    Split out 2026-09-26 for `crucible pair` (FRESH-INSTALL #4), which saves
-    ANOTHER machine's line on this one and must hold it exactly as carefully:
-    a pairing line is a bearer token whichever server it names.
-
-    `private_directory` makes the directory 0700 on POSIX. True for a
-    directory Crucible owns; never for one a person named, which may be
-    `/tmp` and is not this function's to lock.
-    """
     environment = os.environ if env is None else env
     path = Path(path)
     directory = path.parent
@@ -315,7 +158,7 @@ def write_pairing_line(
         path.write_text(body, encoding="utf-8", newline="\n")
         user = _windows_user(environment)
         runner = subprocess.run if run is None else run
-        completed = runner(  # type: ignore[operator]
+        completed = runner(
             list(icacls_argv(path, user)),
             capture_output=True,
             text=True,
@@ -332,7 +175,6 @@ def write_pairing_line(
             )
         return path
 
-    # POSIX: 0600 from the outset, under a 0700 home.
     if private_directory:
         os.chmod(directory, 0o700)
     handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -343,11 +185,6 @@ def write_pairing_line(
 
 
 def read_pairing_file(home: Path) -> str | None:
-    """The line, or None when there is none.
-
-    None is a FACT and not a fallback (3.6): "no local server" is what the
-    caller does something about, and it is never an error and never a retry.
-    """
     path = pairing_file_path(Path(home))
     if not path.is_file():
         return None
