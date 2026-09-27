@@ -103,6 +103,7 @@ os.dup2(2, 1)
 _RESULTS = os.fdopen(_RESULTS_FD, "w", encoding="utf-8", buffering=1)
 
 import json  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 
 #: The loaded separator and the model instance whose `output_dir` each request
@@ -111,10 +112,56 @@ import time  # noqa: E402
 _STATE: dict = {"separator": None, "model_instance": None, "model_filename": None}
 
 
+#: `send` is called from the heartbeat thread as well as the main one, and two
+#: writes interleaved on one line would be a line the server cannot parse.
+_SEND_LOCK = threading.Lock()
+
+#: Seconds between "still separating" frames (`_Heartbeat`).
+HEARTBEAT_SECONDS = 30.0
+
+
 def send(message_type: str, **fields: object) -> None:
     """One JSON object, one line, flushed, on the real fd 1."""
-    _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
-    _RESULTS.flush()
+    with _SEND_LOCK:
+        _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
+        _RESULTS.flush()
+
+
+class _Heartbeat:
+    """A `progress` frame every HEARTBEAT_SECONDS while `separate()` runs.
+
+    2026-09-27 (training-pc-1, after an asr job was cancelled for sending no
+    event for ten minutes): audio-separator's `separate()` reports nothing until
+    it returns, and on a multi-hour input that is longer than BookForge's
+    went-quiet clock. It offers no progress callback to hook, so this says the
+    one true thing there is to say, how long it has been separating, from a
+    thread beside it. It proves the process is alive, not that the separator is
+    moving; the server's own silence timeout is unchanged for a worker that
+    stops sending even these.
+    """
+
+    def __init__(self, began: float) -> None:
+        self._began = began
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> "_Heartbeat":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(HEARTBEAT_SECONDS):
+            send(
+                "progress",
+                stage="separating",
+                processed=0,
+                total=1,
+                elapsed_s=round(time.perf_counter() - self._began, 1),
+            )
 
 
 def fail(message: str) -> None:
@@ -341,7 +388,8 @@ def separate(request: dict) -> None:
     send("progress", stage="separating", processed=0, total=1)
     began = time.perf_counter()
     try:
-        separator.separate(source)
+        with _Heartbeat(began):
+            separator.separate(source)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"audio-separator failed on {os.path.basename(source)}: "

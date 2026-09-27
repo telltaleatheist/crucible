@@ -553,9 +553,11 @@ class DenoiseJobType:
             )
 
         def on_progress(message: dict[str, Any]) -> None:
+            elapsed = message.get("elapsed_s")
             ctx.progress(
                 0.0,
-                f"separating {source.name} through {manifest.model_filename}",
+                f"separating {source.name} through {manifest.model_filename}"
+                + (f", {float(elapsed):.0f}s so far" if elapsed is not None else ""),
                 stage=message["stage"],
             )
 
