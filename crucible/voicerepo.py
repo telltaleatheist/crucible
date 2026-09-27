@@ -4,9 +4,9 @@ import logging
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
-from .narratorengines import HIGGS_V3, declared_tts_footprints
+from .narratorengines import HIGGS_V3, EngineFootprint, declared_tts_footprints
 from .tomltable import (
     HF_REPO_PATTERN,
     REVISION_PATTERN,
@@ -18,10 +18,13 @@ from .voices import (
     MAX_CHARS_BASES,
     PACE_BASES,
     PINS_FILE,
+    SERVING_KEYS,
     VoiceError,
-    _parse,
+    VoiceManifest,
     home_voices_dir,
+    parse_document,
     voices_dir,
+    voices_dir_is_overridden,
 )
 
 REPO_MANIFEST_NAME = "crucible-voice.toml"
@@ -119,7 +122,7 @@ def home_pins_path() -> Path:
     return home_voices_dir() / PINS_FILE
 
 
-def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
+def parse_pins(text: str, path: Path) -> dict[str, Pin]:
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -161,9 +164,17 @@ def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
     return pins
 
 
-def load_pins() -> dict[str, Pin]:
-    from .voices import voices_dir_is_overridden
+_parse_pins = parse_pins
 
+
+def packaged_pins() -> dict[str, Pin]:
+    path = packaged_pins_path()
+    if not path.is_file():
+        return {}
+    return parse_pins(_read(path), path)
+
+
+def load_pins() -> dict[str, Pin]:
     roots = (
         (packaged_pins_path(),)
         if voices_dir_is_overridden()
@@ -177,7 +188,7 @@ def load_pins() -> dict[str, Pin]:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise VoiceError(f"could not read {path}: {exc}") from exc
-        pins.update(_parse_pins(text, path))
+        pins.update(parse_pins(text, path))
     return pins
 
 
@@ -197,7 +208,7 @@ def write_home_pin(voice_id: str, hf_repo: str, revision: str) -> Pin:
     }
     document = {key: document[key] for key in sorted(document)}
     text = tomli_w.dumps(document)
-    written = _parse_pins(text, path)
+    written = parse_pins(text, path)
     if voice_id not in written:
         raise VoiceError(f"{path.name}: writing the pin for {voice_id!r} lost it")
 
@@ -336,10 +347,18 @@ def _repo_pace(
     )
 
 
+class VoiceDocument(TypedDict):
+    display: str
+    kind: str
+    narrator_engine: str
+    language: str
+    sample_rate: int
+
+
 @dataclass(frozen=True)
 class RepoManifest:
     schema: int
-    voice: dict[str, Any]
+    voice: VoiceDocument
     pace: dict[str, Any] | None
     pace_basis: str | None
     measured_from: str | None
@@ -355,7 +374,57 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise VoiceError(f"{path.name}: not valid TOML: {exc}") from exc
+    schema = _check_top_level(path, document)
+    voice = document["voice"]
+    scalars = {
+        key: value for key, value in voice.items()
+        if key not in ("pace", "arms", "takes")
+    }
+    _check_no_machine_facts(f"{path.name} [voice]", scalars)
+    check_table(
+        f"{path.name} [voice]", scalars, _REPO_VOICE_REQUIRED, {}, error=VoiceError
+    )
 
+    pace: dict[str, Any] | None = None
+    pace_basis: str | None = None
+    measured_from: str | None = None
+    inherited_from: str | None = None
+    if "pace" in voice:
+        if not isinstance(voice["pace"], dict):
+            raise VoiceError(f"{path.name}: [voice.pace] must be a table")
+        pace, pace_basis, measured_from, inherited_from = _repo_pace(
+            f"{path.name} [voice.pace]", voice["pace"]
+        )
+    arms, bases = _repo_arms(path, voice)
+
+    takes = voice.get("takes")
+    if takes is not None and not isinstance(takes, list):
+        raise VoiceError(
+            f"{path.name}: [[voice.takes]] must be a non-empty list of tables; a "
+            "voice with no ladder simply omits it and gets take 0"
+        )
+
+    return RepoManifest(
+        schema=schema,
+        voice=VoiceDocument(
+            display=scalars["display"],
+            kind=scalars["kind"],
+            narrator_engine=scalars["narrator_engine"],
+            language=scalars["language"],
+            sample_rate=scalars["sample_rate"],
+        ),
+        pace=pace,
+        pace_basis=pace_basis,
+        measured_from=measured_from,
+        inherited_from=inherited_from,
+        arms=arms,
+        max_chars_basis=bases,
+        takes=takes,
+        path=path,
+    )
+
+
+def _check_top_level(path: Path, document: dict[str, Any]) -> int:
     unknown = sorted(set(document) - {"schema", "voice"})
     if unknown:
         raise VoiceError(
@@ -383,30 +452,14 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
 
     if "voice" not in document:
         raise VoiceError(f"{path.name}: missing the [voice] table")
-    voice = document["voice"]
-    if not isinstance(voice, dict):
+    if not isinstance(document["voice"], dict):
         raise VoiceError(f"{path.name}: [voice] must be a table")
+    return schema
 
-    scalars = {
-        key: value for key, value in voice.items()
-        if key not in ("pace", "arms", "takes")
-    }
-    _check_no_machine_facts(f"{path.name} [voice]", scalars)
-    check_table(
-        f"{path.name} [voice]", scalars, _REPO_VOICE_REQUIRED, {}, error=VoiceError
-    )
 
-    pace: dict[str, Any] | None = None
-    pace_basis: str | None = None
-    measured_from: str | None = None
-    inherited_from: str | None = None
-    if "pace" in voice:
-        if not isinstance(voice["pace"], dict):
-            raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-        pace, pace_basis, measured_from, inherited_from = _repo_pace(
-            f"{path.name} [voice.pace]", voice["pace"]
-        )
-
+def _repo_arms(
+    path: Path, voice: dict[str, Any]
+) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
     if "arms" not in voice:
         raise VoiceError(
             f"{path.name}: missing every [voice.arms.<backend>] table; a voice "
@@ -429,78 +482,32 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
         check_table(where, block, _ARM_REQUIRED, _ARM_OPTIONAL, error=VoiceError)
         bases[arm] = _check_arm_cap(where, block)
         arms[arm] = {k: v for k, v in block.items() if k != "max_chars_basis"}
-
-    takes = voice.get("takes")
-    if takes is not None and not isinstance(takes, list):
-        raise VoiceError(
-            f"{path.name}: [[voice.takes]] must be a non-empty list of tables; a "
-            "voice with no ladder simply omits it and gets take 0"
-        )
-
-    return RepoManifest(
-        schema=schema,
-        voice=scalars,
-        pace=pace,
-        pace_basis=pace_basis,
-        measured_from=measured_from,
-        inherited_from=inherited_from,
-        arms=arms,
-        max_chars_basis=bases,
-        takes=takes,
-        path=path,
-    )
+    return arms, bases
 
 
-def merge(repo: RepoManifest, pin: Pin, footprint: Any):
-    engine = repo.voice["narrator_engine"]
-    document: dict[str, Any] = {
-        "voice": {
-            "id": pin.id,
-            **repo.voice,
-            "pace": dict(repo.pace) if repo.pace is not None else {},
-            "serving": {
-                "max_num_seqs": footprint.max_num_seqs,
-                "max_num_seqs_note": footprint.max_num_seqs_note,
-                **(
-                    {}
-                    if footprint.mem_fraction is None
-                    else {
-                        "mem_fraction": footprint.mem_fraction,
-                        "mem_fraction_note": footprint.mem_fraction_note,
-                    }
-                ),
-                **(
-                    {}
-                    if footprint.context_length is None
-                    else {
-                        "context_length": footprint.context_length,
-                        "context_length_note": footprint.context_length_note,
-                    }
-                ),
-            },
-            "backends": {
-                arm: {
-                    "hf_repo": pin.hf_repo,
-                    "revision": pin.revision,
-                    "memory_bytes_estimate": footprint.memory_bytes_estimate,
-                    "estimate_basis": footprint.estimate_basis,
-                    **(
-                        {}
-                        if footprint.estimate_note is None
-                        else {"estimate_note": footprint.estimate_note}
-                    ),
-                    **block,
-                }
-                for arm, block in repo.arms.items()
-            },
-        }
+def merge(repo: RepoManifest, pin: Pin, footprint: EngineFootprint) -> VoiceManifest:
+    facts = footprint.to_dict()
+    serving = {key: value for key, value in facts.items() if key in SERVING_KEYS}
+    machine = {key: value for key, value in facts.items() if key not in SERVING_KEYS}
+    voice: dict[str, Any] = {
+        "id": pin.id,
+        **repo.voice,
+        "pace": dict(repo.pace) if repo.pace is not None else {},
+        "backends": {
+            arm: {
+                "hf_repo": pin.hf_repo,
+                "revision": pin.revision,
+                **machine,
+                **block,
+            }
+            for arm, block in repo.arms.items()
+        },
     }
+    if repo.voice["narrator_engine"] == HIGGS_V3:
+        voice["serving"] = serving
     if repo.takes is not None:
-        document["voice"]["takes"] = repo.takes
-    if engine != HIGGS_V3:
-        del document["voice"]["serving"]
-
-    manifest = _parse(document, repo.path, pin.id)
+        voice["takes"] = repo.takes
+    manifest = parse_document({"voice": voice}, repo.path, pin.id)
     backends = {
         arm: replace(spec, max_chars_basis=repo.max_chars_basis[arm])
         for arm, spec in manifest.backends.items()
@@ -559,7 +566,16 @@ def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
     cached = _cache_path(home, pin)
     if cached.is_file():
         return _read(cached), cached
+    _download(home, pin, cached)
+    if not cached.is_file():
+        raise VoiceError(
+            f"voice_manifest_unreadable: {pin.hf_repo}@{pin.revision[:12]} was "
+            f"fetched but there is no {cached}"
+        )
+    return _read(cached), cached
 
+
+def _download(home: Path, pin: Pin, cached: Path) -> None:
     try:
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import (
@@ -609,12 +625,6 @@ def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
             f"voice_manifest_unreadable: could not fetch {REPO_MANIFEST_NAME} from "
             f"{pin.hf_repo}@{pin.revision[:12]}: {type(exc).__name__}: {exc}"
         ) from exc
-    if not cached.is_file():
-        raise VoiceError(
-            f"voice_manifest_unreadable: {pin.hf_repo}@{pin.revision[:12]} was "
-            f"fetched but there is no {cached}"
-        )
-    return _read(cached), cached
 
 
 def _read(path: Path) -> str:
@@ -647,7 +657,7 @@ def footprint_unset(engine: str) -> str:
     )
 
 
-def voice_for_pin(pin: Pin) -> Any:
+def voice_for_pin(pin: Pin) -> VoiceManifest:
     from .config import crucible_home, tts_engine_footprints
     from .errors import ConfigError
 
@@ -694,8 +704,8 @@ def _say_once(voice_id: str, pin: Pin, why: str) -> None:
     )
 
 
-def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
-    voices: dict[str, Any] = {}
+def load_pinned() -> tuple[dict[str, VoiceManifest], dict[str, tuple[Pin, str]]]:
+    voices: dict[str, VoiceManifest] = {}
     refused: dict[str, tuple[Pin, str]] = {}
     for voice_id, pin in load_pins().items():
         try:
@@ -706,5 +716,5 @@ def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
     return voices, refused
 
 
-def pinned_voices() -> dict[str, Any]:
+def pinned_voices() -> dict[str, VoiceManifest]:
     return load_pinned()[0]

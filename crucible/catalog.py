@@ -11,11 +11,11 @@ from .asrmodels import load_all_asr_manifests
 from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
-from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .jobs.base import utcnow
+from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS, Residency
 from .rvcmodels import load_all_rvc_manifests
-from .voices import load_all_voices
+from .voicecatalog import declared_voice_backends, declared_voice_ids, load_all_voices
 
 KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise", "engine")
 
@@ -47,43 +47,60 @@ class Subject:
 
 
 def subjects(config: Config, backend: Backend) -> list[Subject]:
-    found: list[Subject] = []
+    return [
+        *_model_subjects(config, backend),
+        *_voice_subjects(config, backend),
+        *_rvc_subjects(config, backend),
+        _rvc_base_subject(config),
+        *_engine_subjects(config, backend),
+        *_denoise_subjects(config, backend),
+    ]
 
+
+def _model_subjects(config: Config, backend: Backend) -> list[Subject]:
+    found: list[Subject] = []
     for job_type, loaded in (
         ("llm", load_all_manifests()),
         ("asr", load_all_asr_manifests()),
         ("align", load_all_align_manifests()),
     ):
         for manifest in loaded.values():
-            if not manifest.supports(backend.kind):
-                continue
-            spec = manifest.spec(backend.kind)
-            base_id = getattr(manifest, "weights_of", None)
-            found.append(
-                Subject(
-                    kind="model",
-                    id=manifest.id,
-                    name=getattr(manifest, "display", None),
-                    job_type=job_type,
-                    expected_bytes=(
-                        None
-                        if base_id is None or manifest.extra_files(backend.kind)
-                        else 0
-                    ),
-                    source=f"hf:{spec.hf_repo}",
-                    pull_command=manifest.pull_command,
-                    installed=_installed_weights(config, manifest, spec),
-                    pull=_pull_weights(config, manifest, spec),
-                    remove=_remove_weights(config, manifest, spec),
-                    shares_weights_of=base_id,
-                    missing_files=(
-                        None
-                        if base_id is None
-                        else _missing_extras(config, manifest, backend.kind)
-                    ),
-                )
-            )
+            if manifest.supports(backend.kind):
+                found.append(_model_subject(config, backend, job_type, manifest))
+    return found
 
+
+def _model_subject(
+    config: Config, backend: Backend, job_type: str, manifest: Any
+) -> Subject:
+    spec = manifest.spec(backend.kind)
+    base_id = getattr(manifest, "weights_of", None)
+    return Subject(
+        kind="model",
+        id=manifest.id,
+        name=getattr(manifest, "display", None),
+        job_type=job_type,
+        expected_bytes=(
+            None
+            if base_id is None or manifest.extra_files(backend.kind)
+            else 0
+        ),
+        source=f"hf:{spec.hf_repo}",
+        pull_command=manifest.pull_command,
+        installed=_installed_weights(config, manifest, spec),
+        pull=_pull_weights(config, manifest, spec),
+        remove=_remove_weights(config, manifest, spec),
+        shares_weights_of=base_id,
+        missing_files=(
+            None
+            if base_id is None
+            else _missing_extras(config, manifest, backend.kind)
+        ),
+    )
+
+
+def _voice_subjects(config: Config, backend: Backend) -> list[Subject]:
+    found: list[Subject] = []
     for voice in load_all_voices().values():
         if not voice.supports(backend.kind):
             continue
@@ -104,7 +121,11 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 remove=_remove_weights(config, voice, spec),
             )
         )
+    return found
 
+
+def _rvc_subjects(config: Config, backend: Backend) -> list[Subject]:
+    found: list[Subject] = []
     for model in load_all_rvc_manifests().values():
         if not model.supports(backend.kind):
             continue
@@ -123,42 +144,49 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
                 remove=_remove_weights(config, model, spec),
             )
         )
+    return found
 
+
+def _rvc_base_subject(config: Config) -> Subject:
     assets = rvcbase.load_rvc_base()
-    found.append(
-        Subject(
-            kind="rvc-base",
-            id=RVC_BASE_ID,
-            name=f"{assets.id}'s base assets",
-            job_type="rvc",
-            expected_bytes=assets.total_bytes,
-            source=f"hf:{assets.hf_repo}",
-            pull_command=rvcbase.PULL_COMMAND,
-            installed=lambda: rvcbase.installed(config, assets),
-            pull=lambda **kwargs: rvcbase.pull(config, assets, **kwargs),
-            remove=lambda: weights.remove_files(
-                rvcbase.base_root(config), assets.targets
-            ),
-        )
+    return Subject(
+        kind="rvc-base",
+        id=RVC_BASE_ID,
+        name=f"{assets.id}'s base assets",
+        job_type="rvc",
+        expected_bytes=assets.total_bytes,
+        source=f"hf:{assets.hf_repo}",
+        pull_command=rvcbase.PULL_COMMAND,
+        installed=lambda: rvcbase.installed(config, assets),
+        pull=lambda **kwargs: rvcbase.pull(config, assets, **kwargs),
+        remove=lambda: weights.remove_files(
+            rvcbase.base_root(config), assets.targets
+        ),
     )
 
-    if backend.kind == llamacpp_backend():
-        build = llamacpp.build_for(backend.gpu.vendor)
-        found.append(
-            Subject(
-                kind=llamacpp.ENGINE_KIND,
-                id=llamacpp.LLAMA_CPP_ID,
-                name=f"llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build})",
-                job_type="llm",
-                expected_bytes=llamacpp.expected_bytes(build),
-                source=f"github:ggml-org/llama.cpp@{llamacpp.LLAMA_CPP_RELEASE}",
-                pull_command="crucible install llm",
-                installed=_installed_engine(config, build),
-                pull=_pull_engine(config, build),
-                remove=lambda: llamacpp.remove(config),
-            )
-        )
 
+def _engine_subjects(config: Config, backend: Backend) -> list[Subject]:
+    if backend.kind != llamacpp_backend():
+        return []
+    build = llamacpp.build_for(backend.gpu.vendor)
+    return [
+        Subject(
+            kind=llamacpp.ENGINE_KIND,
+            id=llamacpp.LLAMA_CPP_ID,
+            name=f"llama.cpp {llamacpp.LLAMA_CPP_RELEASE} ({build})",
+            job_type="llm",
+            expected_bytes=llamacpp.expected_bytes(build),
+            source=f"github:ggml-org/llama.cpp@{llamacpp.LLAMA_CPP_RELEASE}",
+            pull_command="crucible install llm",
+            installed=_installed_engine(config, build),
+            pull=_pull_engine(config, build),
+            remove=lambda: llamacpp.remove(config),
+        )
+    ]
+
+
+def _denoise_subjects(config: Config, backend: Backend) -> list[Subject]:
+    found: list[Subject] = []
     for separator in denoisemodels.load_all_denoise_manifests().values():
         if not separator.supports(backend.kind):
             continue
@@ -278,7 +306,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_align_manifests(),
             }
         ),
-        "voice": sorted(_declared_voice_ids()),
+        "voice": sorted(declared_voice_ids()),
         "rvc": sorted(load_all_rvc_manifests()),
         "rvc-base": [RVC_BASE_ID],
         "denoise": sorted(denoisemodels.load_all_denoise_manifests()),
@@ -286,55 +314,32 @@ def declared_ids() -> dict[str, list[str]]:
     }
 
 
-def _declared_voice_ids() -> set[str]:
-    from .voicerepo import _parse_pins, packaged_pins_path
-    from .voices import _engine_voices, _voices_in, voices_dir
-
-    pins_path = packaged_pins_path()
-    pinned = _parse_pins(pins_path.read_text(encoding="utf-8"), pins_path) if pins_path.is_file() else {}
-    return {*pinned, *_engine_voices(), *_voices_in(voices_dir())}
-
-
-def _declared_voice_backends(voice_id: str) -> dict[str, Any]:
-    import tempfile
-    from types import SimpleNamespace
-
-    from .voicerepo import _parse_pins, fetch_repo_manifest, packaged_pins_path, parse_repo_manifest
-    from .voices import _engine_voices, _voices_in, voices_dir
-
-    shipped = {**_engine_voices(), **_voices_in(voices_dir())}
-    if voice_id in shipped:
-        return {voice_id: shipped[voice_id]}
-    pins_path = packaged_pins_path()
-    pins = _parse_pins(pins_path.read_text(encoding="utf-8"), pins_path) if pins_path.is_file() else {}
-    pin = pins.get(voice_id)
-    if pin is None:
-        return {}
-    scratch = Path(tempfile.gettempdir()) / "crucible-declared-voices"
-    text, where = fetch_repo_manifest(scratch, pin)
-    repo = parse_repo_manifest(text, where)
-    return {voice_id: SimpleNamespace(backends=dict(repo.arms))}
-
-
-def backends_declaring(kind: str, subject_id: str) -> list[str]:
-    loaders: dict[str, Any] = {
-        "model": (
-            load_all_manifests,
-            load_all_asr_manifests,
-            load_all_align_manifests,
-        ),
-        "voice": (lambda: _declared_voice_backends(subject_id),),
-        "rvc": (load_all_rvc_manifests,),
-        "denoise": (denoisemodels.load_all_denoise_manifests,),
-    }
+def _backends_in(
+    subject_id: str, *loads: Callable[[], dict[str, Any]]
+) -> list[str]:
     found: set[str] = set()
-    for load in loaders.get(kind, ()):
+    for load in loads:
         manifest = load().get(subject_id)
         if manifest is not None:
             found.update(manifest.backends)
-    if kind not in loaders:
-        return sorted(BACKEND_ENGINES)
     return sorted(found)
+
+
+def backends_declaring(kind: str, subject_id: str) -> list[str]:
+    if kind == "model":
+        return _backends_in(
+            subject_id,
+            load_all_manifests,
+            load_all_asr_manifests,
+            load_all_align_manifests,
+        )
+    if kind == "voice":
+        return declared_voice_backends(subject_id)
+    if kind == "rvc":
+        return _backends_in(subject_id, load_all_rvc_manifests)
+    if kind == "denoise":
+        return _backends_in(subject_id, denoisemodels.load_all_denoise_manifests)
+    return sorted(BACKEND_ENGINES)
 
 
 def stranded_weights(config: Config) -> list[dict[str, Any]]:

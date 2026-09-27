@@ -11,9 +11,9 @@ from typing import Any, Callable, Iterator
 
 from .. import procgroup
 from ..accelerator import proc_entries
-from ..errors import JobCancelled
+from ..errors import EngineError, JobCancelled
 from ..narratorengines import HIGGS_V3, VoicesDocumentView
-from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine, find_free_port
+from .base import LOG_TAIL_LINES, SubprocessEngine, find_free_port
 
 MODULE = "narrator.serve"
 
