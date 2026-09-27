@@ -69,11 +69,17 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
         enable_denoise: bool = False,
         token: str = TOKEN,
         backend: Backend = FAKE_BACKEND,
-        desktop_allowance_bytes: int = 3 * 1024 ** 3,
+        desktop_allowance_bytes: int | None = None,
         capability: Any = None,
         open_pairing: bool = DEFAULT_OPEN_PAIRING,
         tts_engines: Any = None,
     ) -> FastAPI:
+        if desktop_allowance_bytes is None:
+            desktop_allowance_bytes = (
+                3 * 1024 ** 3
+                if capability is None
+                else capability.desktop_allowance_bytes
+            )
         write_config(
             home,
             name="crucible@test",

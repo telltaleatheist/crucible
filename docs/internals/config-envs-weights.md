@@ -91,7 +91,18 @@ only when they are non-empty.
   never become an empty record, because that would read as "probed and nothing
   fit". `backend_kind` and `total_bytes` are the inputs the decision was made on,
   which is how `crucible doctor` notices a swapped GPU. TOML has no null, so
-  `selected = ""` and `shortfall_bytes = 0` are used instead.
+  `selected = ""` and `shortfall_bytes = 0` are used instead. `desktop_allowance_bytes`
+  is stored twice, in `[accelerator]` (the authority) and in the record (the input it
+  was decided on); `load_config` refuses a record whose `backend_kind` or
+  `desktop_allowance_bytes` disagrees with the authority (`_record_agrees`), naming
+  both values and `crucible capability --write`, which is the command that rewrites
+  the record. `load_config(..., tolerate_stale_record=True)` is for that command and
+  for `doctor`, which report the disagreement instead.
+- `tts_engine_footprints` raises the `ConfigError` for a missing or unreadable file
+  rather than answering `{}`; `voicerepo.voice_for_pin` turns it into one
+  `config_unreadable` refusal for that pin, and `footprint_unset` names the command
+  that writes a `[tts.<engine>]` table (`crucible init --force` for the engines
+  `declared_tts_footprints` knows).
 - `[routes]`: no entry means the class runs locally. `"local"` is never written.
   Upstreams are validated first, then routes, in the same order a `PUT
   /v1/settings` applies them.
@@ -572,6 +583,12 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   alias owns no folder.
 - `Removals` is kept in memory only and records the last 20 deletions with who
   asked.
+- `locate_installed` and `remove_subject` are the door's questions in the door's
+  order (unknown kind, unknown id, not installed, held), each a `RemoveRefused` with
+  the route's status and code. `remove_subject` takes a `holder` callback so the
+  server can answer "resident, leased or named by a task" and the CLI, with no
+  server, can answer "nobody". The `subject_unknown` text points at
+  `crucible api catalog` (there is no top-level `crucible catalog`).
 
 ## Tasks (`tasks.py`)
 
@@ -632,7 +649,15 @@ version field itself.
   `--json` flag.
 - **Refusals are printed verbatim** to stderr with exit code 1. For example,
   `server_busy` is kept as-is so it can be searched for. Transport failures and
-  client refusals have their own codes.
+  client refusals have their own codes. Two refusals are mapped to a sentence
+  instead of the JSON (`_next_step`): `unauthorized` names the host and
+  `crucible pair <address>`, and the `api_version_*` codes say which side is older
+  from `details.server_api_version` / `client_api_version`. `error_in` is the one
+  parser of the `{"error": ...}` body, shared with `_pair_call`.
+- `server_unreachable` names the resolved connection (`unreachable`): the server's
+  name, its URL and which flag or variable named it, then the next step on that host
+  (`crucible doctor`, and `crucible lan enable` there for a remote refusal). It never
+  says "the local engine" for a `--server`, `--pairing` or `$CRUCIBLE_PAIRING` target.
 - **Connection.** Exactly one source: `--url` with `--token`; `--pairing`;
   `--pairing-file`, `$CRUCIBLE_PAIRING` or `--server NAME`; or nothing, meaning the
   local engine. `--url` without `--token` is refused and never falls back to the

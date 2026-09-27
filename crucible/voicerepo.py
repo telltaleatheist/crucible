@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -629,24 +630,74 @@ def _read(path: Path) -> str:
         raise VoiceError(f"could not read {path}: {exc}") from exc
 
 
+def footprint_unset(engine: str) -> str:
+    from .backend import CUDA_LINUX, MLX_DARWIN
+    from .config import config_path, crucible_home, declared_tts_footprints
+
+    written_by_init = {
+        entry.engine
+        for arm in (CUDA_LINUX, MLX_DARWIN)
+        for entry in declared_tts_footprints(arm)
+    }
+    if engine in written_by_init:
+        return (
+            f"`crucible init --force` on this machine writes the [tts.{engine}] "
+            "table for its backend (pass `--token <token>` from `crucible token "
+            "--show` to keep the token apps already hold)"
+        )
+    return (
+        f"no Crucible command writes a [tts.{engine}] table yet: measure the "
+        f"engine here, then add [tts.{engine}] to {config_path(crucible_home())} "
+        "with the keys [tts.higgs-v3] carries (memory_bytes_estimate, "
+        "estimate_basis, max_num_seqs, max_num_seqs_note)"
+    )
+
+
 def voice_for_pin(pin: Pin) -> Any:
     from .config import crucible_home, tts_engine_footprints
+    from .errors import ConfigError
 
     home = crucible_home()
     text, path = fetch_repo_manifest(home, pin)
     repo = parse_repo_manifest(text, path)
     engine = repo.voice["narrator_engine"]
-    footprint = tts_engine_footprints(home).get(engine)
+    try:
+        footprint = tts_engine_footprints(home).get(engine)
+    except ConfigError as exc:
+        raise VoiceError(
+            f"config_unreadable: voice {pin.id!r} cannot be sized because this "
+            f"machine's config did not read: {exc}"
+        ) from exc
     if footprint is None:
         raise VoiceError(
             f"engine_footprint_unset: voice {pin.id!r} is served by {engine!r} "
             f"and this server's config states no [tts.{engine}] table, so there "
             "is no memory estimate and no serving width for it. A voice's facts "
             "travel with its weights and a BOX's facts stay with the box "
-            "(PHASE21 section 2.3) — nothing here is defaulted. Run `crucible "
-            "init` on this machine, or write the table into config.toml by hand"
+            f"(PHASE21 section 2.3) — nothing here is defaulted. "
+            f"{footprint_unset(engine)}"
         )
     return merge(repo, pin, footprint)
+
+
+_REFUSALS_SAID: set[tuple[str, str]] = set()
+
+_log = logging.getLogger(__name__)
+
+
+def _say_once(voice_id: str, pin: Pin, why: str) -> None:
+    key = (voice_id, why)
+    if key in _REFUSALS_SAID:
+        return
+    _REFUSALS_SAID.add(key)
+    _log.warning(
+        "voice %r is pinned to %s@%s in %s but not served: %s",
+        voice_id,
+        pin.hf_repo,
+        pin.revision[:12],
+        pin.path,
+        " ".join(why.split()),
+    )
 
 
 def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
@@ -657,6 +708,7 @@ def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
             voices[voice_id] = voice_for_pin(pin)
         except VoiceError as exc:
             refused[voice_id] = (pin, str(exc))
+            _say_once(voice_id, pin, str(exc))
     return voices, refused
 
 

@@ -4,25 +4,15 @@ import argparse
 import sys
 
 from .. import API_VERSION, KEEP_ALIVE_SECONDS, VERSION, pairing
-from ..errors import ConfigError, NoViableBackend
 from . import common, token
-from .common import EXIT_OK, _backend_mismatch, _fail
+from .common import EXIT_OK, _fail
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
     try:
-        config = common.load_config()
-    except ConfigError as exc:
+        config, backend = common.here()
+    except common.Refusal as exc:
         return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            _backend_mismatch(config.backend_kind, backend)
-            + f" ({config.path}); re-run `crucible init --force` on this host"
-        )
 
     host = args.host if args.host is not None else config.host
     port = args.port if args.port is not None else config.port

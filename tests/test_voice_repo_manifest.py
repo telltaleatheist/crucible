@@ -826,3 +826,74 @@ def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
     for arm in merged.backends:
         assert packaged.spec(arm).max_chars_basis is None
         assert merged.spec(arm).max_chars_basis == "measured"
+
+
+def test_a_missing_config_is_a_config_error_and_not_an_empty_footprint_table(
+    tmp_path: Path,
+) -> None:
+    from crucible.config import ConfigError, tts_engine_footprints
+
+    with pytest.raises(ConfigError) as caught:
+        tts_engine_footprints(tmp_path / "nowhere")
+    assert "`crucible init`" in str(caught.value)
+
+
+def test_a_pin_with_no_config_is_one_unserved_voice_with_the_config_s_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible import voicerepo
+
+    monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
+    monkeypatch.delenv(VOICES_DIR_ENV, raising=False)
+    a_pin(tmp_path)
+    a_cached_manifest(tmp_path)
+    served, refused = voicerepo.load_pinned()
+    assert PINNED_ID not in served
+    _pin, why = refused[PINNED_ID]
+    assert why.startswith("config_unreadable:")
+    assert "`crucible init`" in why
+
+
+def test_the_footprint_advice_names_the_command_that_writes_the_table(
+    host: Path,
+) -> None:
+    from crucible.voicerepo import footprint_unset
+
+    said = footprint_unset("higgs-v3")
+    assert "`crucible init --force`" in said
+    assert "by hand" not in said
+    other = footprint_unset("some-new-engine")
+    assert str(host / "config.toml") in other
+    assert "memory_bytes_estimate" in other
+
+
+def test_an_unserved_pin_s_reason_is_logged_once_and_carried(
+    host: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from crucible import voicerepo
+
+    a_pin(host)
+
+    def down(_pin: Pin) -> None:
+        raise VoiceError(
+            "voice_manifest_unreadable: could not fetch crucible-voice.toml from "
+            f"{REPO}@{SHA[:12]}: ConnectionError: hub is down\nsecond line"
+        )
+
+    monkeypatch.setattr(voicerepo, "voice_for_pin", down)
+    voicerepo._REFUSALS_SAID.clear()
+    with caplog.at_level(logging.WARNING, logger="crucible.voicerepo"):
+        served, refused = voicerepo.load_pinned()
+        voicerepo.load_pinned()
+    assert served == {}
+    assert refused[PINNED_ID][1].startswith("voice_manifest_unreadable: could not fetch")
+    said = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "crucible.voicerepo" and f"voice {PINNED_ID!r}" in r.getMessage()
+    ]
+    assert len(said) == 1, said
+    assert "hub is down second line" in said[0]
+    assert REPO in said[0]

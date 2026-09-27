@@ -93,10 +93,44 @@ def test_the_bearer_token_is_what_the_server_checks(
 ) -> None:
     assert cli.main(["api", "--url", base, "--token", "not-the-token", "info"]) == 1
     captured = capsys.readouterr()
-    assert "HTTP 401" in captured.err
-    refusal = json.loads(captured.err.split("\n", 1)[1])
-    assert refusal["error"]["code"] == "unauthorized"
-    assert refusal["error"]["message"] == "bearer token is not this server's token"
+    assert "HTTP 401 unauthorized" in captured.err
+    assert "bearer token is not this server's token" in captured.err
+    assert "not accepted by 127.0.0.1" in captured.err
+    assert "`crucible pair <address>`" in captured.err
+    assert "{" not in captured.err, "a mapped refusal is a sentence, not the JSON"
+
+
+def test_an_api_version_refusal_says_which_side_is_older(
+    capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    import urllib.error
+    from email.message import Message
+
+    def refusal(server: int, client: int) -> urllib.error.HTTPError:
+        body = json.dumps({"error": {
+            "code": "api_version_mismatch",
+            "message": f"client speaks API version {client}, this server speaks {server}",
+            "details": {"server_api_version": server, "client_api_version": client},
+        }}).encode("utf-8")
+        return urllib.error.HTTPError(
+            "http://kylies-pc:7100/v1/info", 426, "Upgrade Required", Message(),
+            io.BytesIO(body),
+        )
+
+    remote = apiclient.Connection(
+        url="http://kylies-pc:7100", token="t", name="kylies-pc",
+        source="--server kylies-pc",
+    )
+    assert apiclient.report_http_error(refusal(server=1, client=2), remote) == 1
+    older_there = capsys.readouterr().err
+    assert "kylies-pc is older" in older_there
+    assert "Update Crucible on kylies-pc" in older_there
+
+    assert apiclient.report_http_error(refusal(server=3, client=1), remote) == 1
+    older_here = capsys.readouterr().err
+    assert "this computer is older" in older_here
+    assert "Update Crucible here" in older_here
 
 
 def test_submit_returns_the_job_id_and_does_not_wait(
@@ -361,7 +395,24 @@ def test_an_address_nothing_answers_on_is_not_a_refusal(
     capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert cli.main(["api", "--url", "http://127.0.0.1:1", "--token", "t", "ping"]) == 1
-    assert "server_unreachable" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "server_unreachable" in err
+    assert "http://127.0.0.1:1" in err and "from --url/--token" in err
+    assert "local engine" not in err
+    assert "`crucible doctor`" in err and "`crucible lan enable`" in err
+
+
+def test_an_unreachable_pairing_names_the_machine_it_dialled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv(
+        apiclient.PAIRING_ENV, "crucible://kylies-pc@127.0.0.1:1/#not-a-real-token"
+    )
+    assert cli.main(["api", "ping"]) == 1
+    err = capsys.readouterr().err
+    assert "server_unreachable: kylies-pc at http://127.0.0.1:1" in err
+    assert f"from ${apiclient.PAIRING_ENV}" in err
+    assert "On kylies-pc, run `crucible doctor`" in err
 
 
 def test_a_closed_pipe_is_success_and_not_an_unreachable_server(
