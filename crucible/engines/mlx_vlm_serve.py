@@ -1,170 +1,47 @@
-"""Crucible's own page server for `mlx-darwin`: dots.ocr through mlx-vlm, IN PROCESS.
-
-Run out of the llm env as `python <this file> --model <dir> --host --port --width N`
-by `crucible/engines/mlx_vlm.py`. It is **standalone** — no `crucible` import —
-for `jobs/asr/mlx_worker.py`'s reason: the env it runs in has no `crucible`
-installed and never will.
-
-WHY THIS EXISTS INSTEAD OF `python -m mlx_vlm server`
-------------------------------------------------------
-mlx-vlm's own HTTP server never puts the image into the prompt for `dots_ocr`:
-measured on the Mac Studio on 2026-09-14 (0.6.10 and 0.7.1 alike), the server
-logged `prompt_tokens=216` — the text alone — where the in-process path makes
-3,464 for the same page, and answered every page as one `Picture` block. The
-in-process path is correct, so this process IS the in-process path behind the
-OpenAI surface the proxy already speaks: `GET /v1/models` and
-`POST /v1/chat/completions` with one `image_url` data-URI part. Nothing about
-the wire changes; a client cannot tell which engine read its page.
-
-BATCHING, AND WHAT IS AND IS NOT VALIDATED (Mac Studio, 2026-09-21)
---------------------------------------------------------------------
-Two shapes were tried on four real 739x1259 book pages against
-`mlx-community/dots.ocr-bf16`:
-
-* **Continuous insertion** — one `BatchGenerator`, each page prefilled on its
-  own and `insert()`ed while others were mid-generation — read page one
-  correctly and produced garbage for the other three (one an 8192-token
-  runaway, one a 7-token page). NOT USED, and do not reintroduce it without
-  the byte comparison below passing.
-* **Static micro-batches** — every row of a batch inserted BEFORE the first
-  `next()`, which is exactly `mlx_vlm.generate.ar._generate_batch`'s own
-  order — matched `batch_generate` byte for byte on all four pages. That is
-  the path here. `read_batch()` is that function with one difference: it
-  keeps each row's `finish_reason` and token count, which `batch_generate`
-  throws away and which the page contract needs (`finish_reason: "length"`
-  is what tells a client to re-read a cut-off page at the full ceiling).
-
-So the queue is drained `--width` rows at a time: the oldest waiting row and
-up to width-1 more OF THE SAME GRID. Width 1 is serial, and the number is the
-manifest's (`models/dots-ocr.toml`), not this file's.
-
-THE GRID, NOT THE PIXELS, AND A LIVE BOOK IS WHY. The first release batched
-only rows of identical image size. On Owen's first whole book through the Mac
-(2026-09-21) the pages were scans, every one a few pixels off its neighbours
-— 1698x1067, 1709x1060, 1685x1089 — so with eleven pages waiting the oldest
-rarely had a twin: 28 of 48 batches were ONE row, the book read at ~14 s/page,
-and pages queued behind that serial drain aged past Foundry's request timeout
-and killed the run at page 76 of 384. What a batch actually needs is rows of
-EQUAL PROMPT LENGTH, and the processor decides that: it resizes every image
-to the patch grid (patch 14, merged 2x2, so multiples of 28), and 722x1255,
-739x1267 and 739x1259 all become the same 90x52 grid and the same 1,385
-tokens. So rows are keyed by the processor's own `image_grid_thw`, asked of
-the processor itself at submit time — measured 2026-09-21: four pages of
-three raw sizes and one grid, batched, text identical to each read alone.
-
-ROWS OF DIFFERENT LENGTHS MUST NOT SHARE A BATCH, and that was measured too,
-the same day, because it looked like it should work: each row reaches the
-language model with its own embeddings, and `BatchGenerator` sorts by length
-and builds a mixed prompt batch. Two 1,385-token pages batched with two
-3,895-token pages: the two long ones read correctly and the two short ones
-ran to the 8192 ceiling as garbage. The generator's mixed-length path does
-not carry these per-row embeddings faithfully, and this file does not use it.
-
-THE VISION TOWER RUNS ONE IMAGE AT A TIME, AND THE METAL WATCHDOG IS WHY.
-Upstream embeds a whole batch in one `get_input_embeddings` call. Twelve
-739x1259 pages (1,385 prompt tokens each) survive that; twelve 1300x2232 pages
-(3,895 tokens each — the size a 468x760 pt paperback is at 200 dpi) do not:
-macOS kills the command buffer with `[METAL] Command buffer execution failed:
-Impacting Interactivity (kIOGPUCommandBufferCallbackErrorImpactingInteractivity)`,
-measured 2026-09-21, whatever the language model's prefill batch was. So
-`read_batch()` runs `prepare_inputs` + `get_input_embeddings` per row and hands
-each row its own embeddings; the language model still prefills and decodes the
-rows as one batch. Cost: ~15% on small pages (6.5 vs 5.7 s/page at width 8);
-the same text on every page tried. What it buys: twelve 200-dpi paperback pages
-at width 12 read in 14.5 s/page against 20.2 serial, peak 13.96 GB, no watchdog.
-
-A PREFILL BATCH SMALLER THAN THE ROW COUNT IS NOT A KNOB. `BatchGenerator`
-takes `prefill_batch_size` separately from `completion_batch_size`, and setting
-it lower was tried as the watchdog fix: with twelve rows, prefill 1 read ONE
-page correctly and prefill 4 read four, the rest garbage or 8192-token
-runaways — prompts joining a live decode batch, the continuous-insertion
-failure wearing a different flag. Prefill 12 read all twelve identically to
-serial. `prefill_batch_size == completion_batch_size == len(batch)` is
-upstream's invariant and this file keeps it.
-
-WHAT IS REFUSED, BY NAME
-------------------------
-This is a page reader, and the request it reads is the one `crucible/pages.py`
-publishes as `pages_engine.request`. Anything else is a misconfiguration, not
-weather, and is refused in a sentence rather than quietly answered
-differently:
-
-* `temperature` other than 0 (dots is decoded greedily here; there is no
-  sampler on this path), `top_p` other than 1, `n` other than 1,
-  `stream: true`, and any sampling field this file does not understand;
-* a `messages` list that is not exactly one user turn carrying exactly one
-  `image_url` (a `data:image/...;base64,` URI) and exactly one `text` part;
-* a `model` that is not the one loaded.
-
-THE PRIVATE NAMES, PINNED. `read_batch()` calls four names from
-`mlx_vlm.generate.ar` that upstream does not export (`BatchGenerator`,
-`_split_prompt_kwargs_per_row`, `_chunked_prefill_enabled`,
-`DEFAULT_PREFILL_STEP_SIZE`) plus `_default_prefill_step_size_for_offload`
-where present. That is deliberate and it is safe only because
-`envs/llm/mlx-darwin.txt` pins mlx-vlm to one exact version; `_check_upstream()`
-refuses to start if any of them is missing, so a moved pin fails at load by
-name rather than at the first page.
-"""
-
 from __future__ import annotations
 
 import os
 import sys
 
-# THIS FILE LIVES BESIDE `mlx_vlm.py`, THE ENGINE CLASS, and python puts a
-# script's own directory first on `sys.path` — so run as a file, `import
-# mlx_vlm` below would find Crucible's engine module and not the library, and
-# fail on its first relative import. Measured, not feared: the first run of
-# `tests/test_mlx_vlm_serve.py` did exactly that. Only the script directory is
-# removed, and only when this file is the program; imported as
-# `crucible.engines.mlx_vlm_serve` (the tests do), nothing is touched.
-if __name__ == "__main__":
-    _HERE = os.path.dirname(os.path.abspath(__file__))
+def _stop_engine_module_shadowing_mlx_vlm_library() -> None:
+    engines_dir = os.path.dirname(os.path.abspath(__file__))
     sys.path[:] = [
-        entry for entry in sys.path if os.path.abspath(entry or os.getcwd()) != _HERE
+        entry for entry in sys.path if os.path.abspath(entry or os.getcwd()) != engines_dir
     ]
 
-import argparse  # noqa: E402
-import base64  # noqa: E402
-import binascii  # noqa: E402
-import io  # noqa: E402
-import json  # noqa: E402
-import signal  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-import uuid  # noqa: E402
-from dataclasses import dataclass, field  # noqa: E402
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
-from typing import Any, Callable  # noqa: E402
 
-#: The one media-type family a page arrives as. `crucible/pages.py`'s
-#: `data_uri()` writes `data:image/png;base64,`; JPEG is accepted too because
-#: it is a picture, not a different request.
+if __name__ == "__main__":
+    _stop_engine_module_shadowing_mlx_vlm_library()
+
+import argparse
+import base64
+import binascii
+import io
+import json
+import signal
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Callable
+
 DATA_URI_PREFIX = "data:image/"
 
-#: The request fields this reader understands. Anything else is refused, so a
-#: client that thinks it set `top_k` learns that it did not.
 KNOWN_FIELDS = frozenset(
     {"model", "messages", "temperature", "top_p", "n", "max_tokens", "stream", "user"}
 )
 
 
 class Refusal(Exception):
-    """A request this reader will not answer, with the HTTP status it earns."""
-
     def __init__(self, status: int, code: str, message: str) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
 
 
-# ------------------------------------------------------------------- the rows
-
-
 @dataclass
 class Row:
-    """One page's answer, in the batch's order."""
-
     text: str
     finish_reason: str
     prompt_tokens: int
@@ -173,13 +50,9 @@ class Row:
 
 @dataclass
 class Job:
-    """One request waiting for the reader thread."""
-
-    image: Any  # PIL.Image.Image, RGB
+    image: Any
     prompt: str
     max_tokens: int
-    #: The processor's `image_grid_thw` for this image — the batching key.
-    #: Equal grid means equal prompt length, which is what a batch needs.
     grid: tuple[int, ...]
     done: threading.Event = field(default_factory=threading.Event)
     row: Row | None = None
@@ -187,10 +60,6 @@ class Job:
 
 
 class Reader:
-    """The mlx-vlm calls, behind one method, so the server above is testable
-    with a fake `mlx_vlm` package on PYTHONPATH and the real one is exercised
-    on a Mac."""
-
     def __init__(self, model_dir: str) -> None:
         import mlx_vlm
 
@@ -199,21 +68,12 @@ class Reader:
         self.model, self.processor = mlx_vlm.load(model_dir)
 
     def grid_of(self, image: Any) -> tuple[int, ...]:
-        """The processor's `image_grid_thw` for one image, as the batching key.
-
-        Asked of the processor rather than recomputed from its rules, so the
-        key cannot drift from what `prepare_inputs` will do to the same image.
-        It is the resize-and-patch half of that call done a second time on
-        the CPU, in the request's own thread; measured well under a second
-        against a 14-to-25-second read, and the price of an exact key.
-        """
         out = self.processor.image_processor(images=[image], return_tensors="np")
         grid = out["image_grid_thw"]
         first = grid[0] if hasattr(grid, "__getitem__") else grid
         return tuple(int(v) for v in (first.tolist() if hasattr(first, "tolist") else first))
 
     def _check_upstream(self) -> None:
-        """Every private name `read_batch` depends on, or a refusal naming it."""
         from mlx_vlm.generate import ar
 
         missing = [
@@ -235,13 +95,6 @@ class Reader:
             )
 
     def _embed(self, job: Job) -> tuple[Any, Any, dict[str, Any]]:
-        """One row through the processor and the vision tower.
-
-        `(input_ids, embedding, gen_kwargs)` for ONE image — the per-image
-        half of the module docstring's watchdog finding. `mx.eval` so the
-        tower's work is done here, one image at a time, and not deferred
-        into the language model's first step as one twelve-image buffer.
-        """
         import mlx.core as mx
         from mlx_vlm.prompt_utils import apply_chat_template
         from mlx_vlm.utils import prepare_inputs, should_add_special_tokens
@@ -280,13 +133,6 @@ class Reader:
         return input_ids, embedding, gen_kwargs
 
     def read_batch(self, jobs: list[Job]) -> list[Row]:
-        """`mlx_vlm.generate.ar._generate_batch`, with the finish reasons kept
-        and the vision tower run per image.
-
-        Every row is inserted before the first `next()`, and the language
-        model prefills and decodes all of them as one batch — the order the
-        2026-09-21 byte comparisons validated at widths 1 to 16.
-        """
         import mlx.core as mx
         from mlx_vlm.generate import ar
 
@@ -311,8 +157,6 @@ class Reader:
         generator = ar.BatchGenerator(
             model.language_model,
             processor,
-            # BOTH n. See the module docstring: a smaller prefill batch reads
-            # that many pages correctly and the rest as garbage.
             prefill_batch_size=n,
             completion_batch_size=n,
             compute_logprobs=False,
@@ -349,8 +193,6 @@ class Reader:
             answers.append(
                 Row(
                     text=detokenizer.text,
-                    # A row the generator never finished is a bug in the loop
-                    # above, not a page; say so rather than call it "stop".
                     finish_reason=finish[uid],
                     prompt_tokens=int(input_ids.shape[1]),
                     completion_tokens=len(tokens[uid]),
@@ -360,17 +202,7 @@ class Reader:
         return answers
 
 
-# ---------------------------------------------------------------- the batcher
-
-
 class Batcher:
-    """Drains the queue `width` same-shape rows at a time on one thread.
-
-    ONE thread, because there is one accelerator and the reader holds it for a
-    whole batch; a second thread would not overlap anything, it would
-    interleave two batches' allocations.
-    """
-
     def __init__(self, reader: Reader, width: int, log: Callable[[str], None]) -> None:
         if width < 1:
             raise ValueError(f"--width must be at least 1, not {width}")
@@ -391,7 +223,6 @@ class Batcher:
         return self._reader.grid_of(image)
 
     def _take(self) -> list[Job]:
-        """The oldest waiting row and up to width-1 more of its grid."""
         with self._lock:
             while not self._waiting:
                 self._lock.wait()
@@ -407,17 +238,13 @@ class Batcher:
             started = time.monotonic()
             try:
                 rows = self._reader.read_batch(batch)
-            except Exception as exc:  # the model raised; the rows are told, the thread lives
+            except Exception as exc:
                 self._log(f"batch of {len(batch)} failed: {exc!r}")
                 for job in batch:
                     job.error = exc
                     job.done.set()
                 continue
             elapsed = time.monotonic() - started
-            # HAND THE ROWS BACK BEFORE SAYING ANYTHING ABOUT THEM. The log line
-            # below reads the images and the rows; a surprise there must cost
-            # a log line, never a page — and never this thread, which is the
-            # only one there is.
             for job, row in zip(batch, rows):
                 job.row = row
                 job.done.set()
@@ -439,16 +266,7 @@ class Batcher:
         )
 
 
-# ---------------------------------------------------------------- the request
-
-
 def decode_image(uri: str) -> Any:
-    """The PIL image a data URI carries, as RGB.
-
-    `.convert("RGB")` always: a PNG that decodes to RGBA or a palette trips
-    the image processor (the Mac's finding, 2026-09-21), and it is the same
-    picture either way.
-    """
     from PIL import Image
 
     if not uri.startswith(DATA_URI_PREFIX):
@@ -471,7 +289,6 @@ def decode_image(uri: str) -> Any:
 
 
 def parse_request(body: dict[str, Any], served: str) -> tuple[Any, str, int]:
-    """(image, prompt, max_tokens) from a chat body, or a refusal by name."""
     unknown = sorted(set(body) - KNOWN_FIELDS)
     if unknown:
         raise Refusal(
@@ -535,7 +352,6 @@ def parse_request(body: dict[str, Any], served: str) -> tuple[Any, str, int]:
 
 
 def completion_document(served: str, row: Row) -> dict[str, Any]:
-    """The OpenAI chat-completion shape, non-streaming, one choice."""
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -556,15 +372,12 @@ def completion_document(served: str, row: Row) -> dict[str, Any]:
     }
 
 
-# ----------------------------------------------------------------- the server
-
-
 class _Handler(BaseHTTPRequestHandler):
     served: str = ""
     batcher: Batcher | None = None
     log: Callable[[str], None] = lambda line: None
 
-    def log_message(self, *_args: object) -> None:  # noqa: D102 - stderr is the log
+    def log_message(self, *_args: object) -> None:
         return
 
     def _send(self, status: int, document: dict[str, Any]) -> None:
@@ -581,7 +394,7 @@ class _Handler(BaseHTTPRequestHandler):
             {"error": {"code": refusal.code, "message": str(refusal), "type": "invalid_request_error"}},
         )
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path in ("/v1/models", "/models"):
             self._send(
                 200, {"object": "list", "data": [{"id": self.served, "object": "model"}]}
@@ -589,7 +402,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._refuse(Refusal(404, "not_found", f"no route {self.path}"))
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.path not in ("/v1/chat/completions", "/chat/completions"):
             self._refuse(Refusal(404, "not_found", f"no route {self.path}"))
             return
@@ -612,7 +425,7 @@ class _Handler(BaseHTTPRequestHandler):
         assert self.batcher is not None
         try:
             grid = self.batcher.key_of(image)
-        except Exception as exc:  # the processor refused this image: say so, keep serving
+        except Exception as exc:
             self._send(
                 500,
                 {"error": {"code": "engine_error", "message": f"the processor could not grid this image: {exc!r}", "type": "server_error"}},
@@ -632,7 +445,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description="Crucible's own page server for mlx-darwin: dots.ocr through mlx-vlm, in process."
+    )
     parser.add_argument("--model", required=True, help="the weights directory, reported verbatim")
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
@@ -648,9 +463,6 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"[mlx_vlm_serve] {line}\n")
         sys.stderr.flush()
 
-    # LOAD BEFORE BIND. A 200 from /v1/models must mean the weights are in
-    # memory — that is the readiness contract `engines/mlx_vlm.py` relies on
-    # and the one property that lets it skip a confirm() completion.
     started = time.monotonic()
     reader = Reader(args.model)
     log(f"loaded {args.model} in {time.monotonic() - started:.1f}s; width {args.width}")
@@ -658,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _Handler.served = args.model
     _Handler.batcher = batcher
-    _Handler.log = staticmethod(log)  # type: ignore[assignment]
+    _Handler.log = staticmethod(log)
     server = ThreadingHTTPServer((args.host, args.port), _Handler)
     server.daemon_threads = True
 
