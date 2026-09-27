@@ -1,133 +1,17 @@
-# Qwen3.5 9B — Owen's cleanup model.
-#
-# memory_bytes_estimate is what the whole engine holds when the model is resident
-# and a request has filled `context_default` tokens of KV: weights + KV + the
-# engine's own allocator overhead. Each block says whether its number was COMPUTED
-# from the repo's config.json or MEASURED on the host.
-
 [model]
 id = "qwen3.5-9b"
 family = "qwen3.5"
 params_b = 9
-# THE ONE CONTEXT THIS MODEL SERVES, on every backend — 2026-09-15.
-#
-# It was 12288, and 12288 had NO source. Chased on 2026-09-15 it turned out to be
-# BookForge's `numCtxMaxForModel` 32B tier (`>15B or unrecognized`, commented
-# "tuned for 32B Q4_K_M") reaching a 9B. That function's own `<=15B` tier is
-# 16384 and this model's id matches it, so the number was the right function's
-# WRONG TIER, carried across without the tier.
-#
-# Four independent records say 16384 for these weights and none says 12288:
-#   * `numCtxMaxForModel`'s `<=15B` tier (bookforge `electron/ai-bridge.ts`).
-#   * `electron/scripts/vllm/serve_text_vllm.sh` — `VLLM_TEXT_MAX_MODEL_LEN
-#     :-16384` in its first commit and unchanged since. The server that ran.
-#   * `electron/text-server.ts`'s pinned `qwen35-9b-bf16` profile: the same
-#     checkpoint at the same revision, max-model-len 16384.
-#   * Foundry's `CTX_MAX = 16384` (`src/clean/runner.ts`) — the ceiling of
-#     clean-text, which is the act that actually runs through this model.
-#
-# Being BELOW that ceiling is the defect, not a slower answer: Foundry sizes a
-# request as `max_model_len - (ceil(chars/2.5) + 256)`, so 12288 spends a long
-# block's budget 4096 tokens short of what the client was built to ask for.
-#
-# WHY IT IS HERE AND NOT REPEATED PER BACKEND. `cuda-linux` and `mlx-darwin`
-# each carried their own 16384 override for a few hours on 2026-09-15, written
-# one at a time as each was disproved, which left 12288 standing at model level
-# as "`llama-windows`'s number alone". That last claim does not survive either:
-# the `<=15B` tier's stated premise is *"Q4_K_M weights are <= ~9.5 GiB, leaving
-# room for a taller KV cache"*, and the Q8_0 GGUF the llama-windows block names
-# is 9.53 GB — the tier's own premise, met almost exactly. With no claimant left,
-# 12288 must not stay as the inherited default: a backend added later would
-# inherit a number nothing argues for, which is how it reached two backends in
-# the first place.
 context_default = 16384
 
-# What the WEIGHTS support, read from the hub on 2026-09-16:
-#   Qwen/Qwen3.5-9B @ c202236235762e1c871ad0ccb60c8ee5ba337b9a
-#   config.json `text_config.max_position_embeddings` = 262144
-# It is the wall behind context_default above and behind any backend
-# block's override; both are checked against it at load. It is also what
-# stops the card-derived ceiling running away — see
-# docs/FITS-AND-THE-CARD.md section 6.3.
 trained_context = 262144
-# Text, and that is a fact about this server rather than about the weights.
-# Qwen3.5-9B has a vision tower; the cuda-linux block below starts vLLM with
-# `--skip-mm-profiling`, so nothing on the card is reserved for an image, and the
-# mlx-darwin block is served by mlx-lm, which serves text. A client that put a
-# page in a content part would reach an engine with no reservation behind it, so
-# `image` is not on offer — and the loader refuses the pair rather than leaving
-# that to a reviewer (crucible/manifests.py, PHASE3-VLM.md section 3).
 modalities = ["text"]
-# The two display facts (PHASE9-CAPABILITY.md, "The local form"): what a picker
-# prints, and the sentence under it. Required here because the [local] table
-# below feeds a lineup that is drawn on a screen.
 display = "Qwen 3.5 · 9B"
 description = "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision."
 
-# What a chat request that states nothing is answered with (PHASE2-LLM.md
-# section 9). A field the REQUEST states always wins; this only fills gaps.
-#
-# `thinking = false` — and this is the model's own property, not a preference.
-# Qwen3.5 reasons before it answers, and with a bounded budget it spends the
-# whole of it on `reasoning` and returns a message with **no `content` at all**.
-# The cleanup pass is the one that meets this: it is `qwen3.5-9b` that BookForge
-# and Foundry both use for clean-text (BookForge's `cleanTextModel`, Foundry's
-# clean/translate/simplify surface), it sends a `num_predict` budget sized for a
-# rewrite rather than for a reasoning trace, and both apps have carried
-# `chat_template_kwargs: {enable_thinking: false}` in their own code for exactly
-# this reason — BookForge's crucible provider sends it on EVERY cleanup request
-# (`electron/ai-bridge.ts`), and Foundry gates the same field on a regex over
-# the model name (`/^qwen3(\.|:|-|$)/i`), which is a rule that breaks the day a
-# model is renamed.
-#
-# That is one fact with two owners in two repos, and the owner it belongs to is
-# the thing that knows which weights are loaded (ARCHITECTURE.md R1, DESIGN.md
-# section 3.1). So it is declared here. Nothing is retired on the wire: an app
-# that goes on sending the field is stating it, and a stated field wins.
-#
-# Nothing else is set. Temperature, top_p and the rest are the CLIENT's for this
-# model — Foundry sends its own per act, and a number invented here would
-# quietly change a shipping app's output.
 [defaults]
 thinking = false
 
-# ------------------------------------------------------------ the local form
-#
-# What a machine with NO Crucible runs for the same class — Foundry's Ollama
-# fallback (PHASE9-CAPABILITY.md, "The local form: one catalog, two doors").
-# The bf16 and not the q8_0 Owen also keeps, because bf16 is the clean-text
-# ruling (`cleanTextModel = qwen3.5:9b-bf16` in app-settings.json on both
-# machines) and a model's local form is the same weights as its served form,
-# not a smaller cousin.
-#
-# Every number, with where it came from and when:
-#   tag             `qwen3.5:9b-bf16` — published: ollama.com/library/qwen3.5:9b-bf16
-#                   answers 200 (2026-09-14). `ollama show` reports quantization
-#                   F16, which is the GGUF's dtype label; the name is Ollama's.
-#   download_bytes  19_321_189_044 — `GET localhost:11434/api/tags` `size` on
-#                   Owen's PC, 2026-09-14, and the sum of the tag's manifest
-#                   layers (model 19_321_177_152 + license 11_355 + params 65 +
-#                   the config blob). `ollama list` prints it as "19 GB".
-#   needs_bytes     20_821_189_044 — download + 1_500_000_000, DECLARED. The
-#                   1.5 GB is Foundry's own `OVERHEAD_GB` (app/electron/
-#                   llm-catalog.ts): KV at an ordinary context plus the runner's
-#                   buffers, chosen to err small. Nothing here was watched on a
-#                   card, and `needs_basis` says so all the way to the screen.
-#   minimum_for     THE FLOOR FOR TRANSLATE AND SIMPLIFY, moved here from
-#                   models/qwen3.8-27b-4bit.toml on 2026-09-16. Owen's tile rule
-#                   is unchanged in shape — *"translation and simplify tiles do
-#                   not light unless the machine can run"* the floor model — and
-#                   what changed is WHICH model that is: *"they cant pick smaller
-#                   than 9b… i think 9b could do an ok job at translation."*
-#
-#                   THE LIST IS CARRIED ACROSS UNCHANGED, not widened. `analysis`
-#                   is still absent because the reason it was absent has not
-#                   moved: Owen named translate and simplify, and Foundry's own
-#                   stopgap gave analysis no floor either. Adding it here would
-#                   put a GATE on a tile that has never had one, which is a
-#                   change to what Foundry draws and not a consequence of this
-#                   ruling. `clean` is absent for the same reason — it is the act
-#                   this model was always for, and it has never been gated.
 [local]
 kind = "ollama"
 tag = "qwen3.5:9b-bf16"
@@ -140,122 +24,7 @@ minimum_for = ["translate", "simplify"]
 engine = "vllm"
 hf_repo = "Qwen/Qwen3.5-9B"
 revision = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-# MEASURED on Owen's PC (RTX 3090 Ti, 24564 MiB = 23.99 GiB) inside WSL2,
-# vLLM 0.29.0 / torch 2.13.0+cu130, 2026-09-12, with the engine_args below.
-# nvidia-smi sampled every 2 s across the whole run:
-#   card before the engine started      1_192 MiB
-#   weights on the card                 17.66 GiB  (vLLM's "Model loading took")
-#   non-KV demand                       19.02 GiB  (weights + non-torch + the
-#                                                   profiled activation peak +
-#                                                   0.09 GiB of CUDA graphs)
-#   KV pool at util 0.84                 1.09 GiB  = 27,443 tokens, so 2.23
-#                                                   requests of 12288 in flight
-#   card at rest, model resident       20_986 MiB
-#   card PEAK, during an 11,622-token completion
-#                                      21_172 MiB  (3_140 MiB still free)
-#   => the engine's share at that peak 19_980 MiB  = 19.52 GiB = 20.95 GB
-# The figure below is that last line: the engine's share of the card with the
-# desktop excluded, which is what the guard must be able to give it. It is 6.3%
-# above the number this line used to compute — the same direction and nearly the
-# same size as the mlx block's 6%.
-#
-# Read `--gpu-memory-utilization` before changing it. It is a fraction of the
-# card's TOTAL, it is a BUDGET rather than a demand, and vLLM sizes the KV pool
-# to fill whatever is left of it: KV = util x 23.99 GiB - 19.02 GiB. So a bigger
-# number does not make the model fit better, it makes the KV pool bigger and the
-# card fuller. vLLM also does NOT subtract the Windows desktop — it only checks
-# that free >= requested at startup — so the desktop's 1-3 GiB is spent on top
-# of this budget, not inside it.
-#
-# 0.85 is what this line used to say, unexercised. Measured, it is the wrong
-# shape twice over: at 0.85 with vLLM's default `--max-num-seqs` the card went to
-# 24_173 MiB of 24_564 with 139 MiB free and CUDA-graph capture paged at 87 s for
-# ONE of 51 graphs (Owen felt it as the machine thrashing). 0.84 with
-# `--max-num-seqs 16` leaves 3_140 MiB free at the measured peak, and would still
-# leave about 1 GiB against the 3 GiB desktop the config declares an allowance
-# for. Going the other way, 0.79 does not start at all: the KV pool comes out at
-# -0.07 GiB and vLLM refuses with `No available memory for the cache blocks`.
-# The whole usable window on this card is roughly 0.80 to 0.88.
-#
-# Owen's ruling, 2026-09-12: "we dont need a big kv cache ... just dont fill the
-# card to the top with kv cache." Smaller util is the lever, and the context
-# below is now the one the working launcher served rather than the one Ollama
-# was capped at.
 memory_bytes_estimate = 20_950_548_480
-# `--max-num-seqs 16`: the number of CUDA graphs vLLM captures follows it. At the
-# default the 9B captured 51 graphs; at 16 it captures 7 piecewise + 2 full, in
-# 5 s and 0.09 GiB. Sixteen concurrent requests is also more than this one-model
-# lane will see, and it is the number BookForge's own text server runs on this
-# card (electron/text-server.ts, measured 2026-09-08).
-#
-# `--skip-mm-profiling`: Qwen3.5-9B is multimodal, and vLLM's memory profile
-# otherwise budgets for one image of the maximum feature size — a capability the
-# `llm` job type does not offer at all (images are phase 3's `vlm-pages`, a
-# different model on a different lane). MEASURED as an A/B at util 0.79, the same
-# run either way: with multimodal profiling the KV pool came out at -1.97 GiB and
-# the profiling run took 60.78 s; with `--skip-mm-profiling`, -0.07 GiB and
-# 0.86 s. So it is worth 1.90 GiB of the budget, and without it NO utilisation
-# that leaves the card headroom has a KV pool at all.
-#
-# It does not make the engine text-only, it only stops it RESERVING for an image.
-# Nothing in Crucible sends one today. If the `llm` proxy is ever given image
-# input, this line must come out and the utilisation be measured again.
-#
-# `--language-model-only`: AND THIS IS THE LINE THAT MAKES IT TEXT-ONLY. It is
-# BookForge's, carried across rather than re-derived, and it was missing here
-# until 2026-09-15 — the one knob the Foundry/BookForge handover lost.
-# `electron/scripts/vllm/serve_text_vllm.sh` serves this same checkpoint with
-# `--limit-mm-per-prompt '{"image":0,"video":0}'` and says why in its own header:
-# *"the multimodal limits are set to zero and vLLM skips loading and profiling
-# it."* Crucible carried the PROFILING half above and not the LOADING half, so
-# until this line the vision tower was read onto the card on every load and sat
-# there for the life of the engine, unreachable by a lane that sends only text.
-#
-# WHAT IT IS WORTH, read from the pinned weights themselves rather than guessed
-# (`model.safetensors.index.json` at revision c2022362, every `model.visual.*`
-# tensor's byte length summed out of the shard headers, 2026-09-15):
-#
-#     total weights          19_306_216_416 B   17.98 GiB
-#     the vision tower          912_020_960 B    0.85 GiB
-#     language model only    18_394_195_456 B   17.13 GiB
-#
-# 0.85 GiB on a card whose whole usable utilisation window is 0.80-0.88, and
-# whose measured KV pool at 0.84 is 1.09 GiB. Freeing the tower at the same
-# utilisation very nearly DOUBLES the pool, which is the number that decides how
-# many of Foundry's twelve in-flight requests decode instead of queue.
-#
-# WHY THIS SPELLING AND NOT BOOKFORGE'S. `--language-model-only` is vLLM 0.29's
-# own name for exactly BookForge's intent — `MultiModalConfig.language_model_only`:
-# *"disables all multimodal inputs by setting all modality limits to 0.
-# Equivalent to setting --limit-mm-per-prompt to 0 for every modality."* The
-# difference is that BookForge's spelling ENUMERATES the modalities it knows
-# about, so a checkpoint that grows a third one is quietly half-covered; this one
-# enumerates nothing. Same decision, stated where it cannot go out of date.
-#
-# THE MECHANISM IS REAL AND WAS READ, not assumed (vllm 0.29.0 in the pinned llm
-# env): `config/multimodal.py`'s `get_limit_per_prompt` returns 0 for every
-# modality under this flag and 999 without it; `model_executor/models/
-# interfaces.py:374` wraps a tower whose every modality is limited to 0 in
-# `no_init_weights`, so its parameters are never allocated; and
-# `model_executor/models/qwen3_5.py:513` is where THIS checkpoint builds
-# `self.visual` inside that context manager. Without the flag the tower loads.
-#
-# `--skip-mm-profiling` STAYS, and is now expected to be redundant rather than
-# wrong: with every limit at 0 there is no dummy image left to profile. It is a
-# measured line (the A/B above) and unmeasuring it on a deduction is not
-# something to do in the same change that adds a flag. The next load on a card
-# is what should retire it.
-#
-# `memory_bytes_estimate` ABOVE STILL STANDS, and nothing is owed on it. An
-# earlier draft of this comment called it stale because it was measured with the
-# tower resident; that was wrong, and the reason is the arithmetic written
-# fifty lines up. `--gpu-memory-utilization` is a BUDGET, not a demand, and vLLM
-# sizes the KV pool to fill whatever the budget leaves: KV = util x 23.99 GiB -
-# non-KV. Take 0.85 GiB of vision tower out of non-KV at a FIXED utilisation and
-# the pool grows by 0.85 GiB; the engine's share of the card does not move. That
-# is the whole point of the change — it buys DEPTH, not headroom — and it is why
-# the measured peak share of 19.52 GiB is still what the guard must be able to
-# give. What the tower fix changes is the 1.09 GiB pool, which roughly doubles.
 engine_args = [
     "--dtype", "bfloat16",
     "--gpu-memory-utilization", "0.84",
@@ -263,77 +32,8 @@ engine_args = [
     "--skip-mm-profiling",
     "--language-model-only",
 ]
-# THE MOST A LOAD MAY ASK FOR HERE (`params.context`, vLLM's `--max-model-len`).
-# COMPUTED 2026-09-23, LOAD TEST OWED, from the MEASURED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B):
-#   non-KV       18_038_862_643 + 1_476_395_008 = 19_515_257_651 B (18.17 GiB,
-#                the calibrated intercept, tower already out)
-#   left for KV  22_535_995_392 - 19_515_257_651 = 3_020_737_741 B (2.81 GiB)
-#   / 40_337 B/token (measured) = 74_887 tokens -> 65536
-#   at 65536     19_515_257_651 + 2_643_525_632 = 22_158_783_283 B = 20.64 GiB
-# The 0.84 above is inert at any context for the reason the 27B-4bit's
-# manifest gives: the [memory] terms plan every load (`crucible/vram.py`), and
-# the plan's `--kv-cache-memory-bytes` follows the loaded context.
 max_context = 65536
 
-# ------------------------------------------------- the same number, taken apart
-#
-# docs/FITS-AND-THE-CARD.md section 2. `memory_bytes_estimate` above answers ONE
-# question -- does this model fit at 16384 -- and the class about to run is not
-# always asking it. Every term here is quoted from the measurement above, and the
-# parser checks that they add back up to it.
-#
-#   weights_bytes       17.66 GiB, "weights on the card", MEASURED
-#   overhead_bytes      19.02 - 17.66 GiB, the non-KV demand less the weights:
-#                       vLLM's non-torch allocation, the profiled activation
-#                       peak and 0.09 GiB of CUDA graphs. MEASURED.
-#   kv_bytes_per_token  32_768, COMPUTED from config.json the way the
-#                       llama-windows block below sets out: 8 full-attention
-#                       layers x 2 x 4 kv heads x 256 head_dim x 2 B. The other
-#                       24 layers are gated-delta-net, per-SEQUENCE, and do not
-#                       grow with length.
-#
-# CALIBRATED ON THE CARD, 2026-09-18 (docs/MEASUREMENTS.md, and section 4 of
-# docs/FITS-AND-THE-CARD.md is the method). Every term below was read off this
-# 3090 Ti; none of it is computed any more, and both of the numbers that changed
-# had been wrong in a way nothing here could have noticed.
-#
-# THE SLOPE WAS 23% LIGHT, exactly as this comment used to predict it might be.
-# Two loads at the same context and different utilisations give it with no
-# architectural knowledge at all -- vLLM reports the pool it allocated AND the
-# token count that pool bought, so bytes-per-token is a division:
-#
-#   util 0.84 -> 1.94 GiB of KV = 51,738 tokens        40_259 B/token
-#   util 0.90 -> 3.37 GiB of KV = 89,680 tokens        40_346 B/token
-#   the slope between them, (3.37-1.94)/(89,680-51,738) 40_470 B/token
-#   and pinned exactly by stating the pool in bytes:
-#   --kv-cache-memory-bytes 2_800_000_000 -> 69,416 tokens  40_337 B/token
-#
-# The last line is the figure below, because it is the only one of the four
-# whose numerator is exact rather than a 2-decimal GiB. The four agree to 0.5%.
-# The computed 32_768 -- 8 full-attention layers x 2 x 4 kv heads x 256 head_dim
-# x 2 B -- is 23.1% under it, which is the same error, in the same direction and
-# within a point of the same size as the 24% the 27B-4bit block measured on
-# 2026-09-12. Two models checked, two computed slopes light. Do not compute this.
-#
-# THE INTERCEPT FELL BY EXACTLY THE VISION TOWER. It was 19.02 GiB here (17.66
-# weights + 1.36 overhead) and measures 18.17 GiB now -- a difference of
-# 0.845 GiB where the cuda-linux comment above measures the tower at 0.85 GiB.
-# `--language-model-only` landed on 2026-09-15 and these terms were never
-# re-taken, so they have been overstating this model by a whole vision tower
-# ever since. Measured as `Total non KV cache memory` across the two loads:
-# 18.21 and 18.14 GiB, so 18.175 +/- 0.035 GiB, stable to 0.4% run-to-run.
-#
-# WHY THE TERMS NO LONGER ADD UP TO `memory_bytes_estimate` (they come to 3.7%
-# under it, inside the parser's 5%): the estimate was measured on 2026-09-12
-# with the tower resident and it has deliberately NOT been re-taken here. It
-# feeds the accelerator guard's "does this model fit", where being 0.7 GiB
-# conservative is the safe direction, and lowering a guard is not something to
-# do in the same change that lands a calibration. The next load that watches the
-# whole card end to end is what should replace it.
-#
-# `basis` is now `measured` for all three terms, which is what section 4 says
-# this calibration is for: it turns the row measured for real rather than by
-# declaration.
 [backends.cuda-linux.memory]
 weights_bytes = 18_038_862_643
 overhead_bytes = 1_476_395_008
@@ -345,121 +45,14 @@ measured_at_context = 16384
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.5-9B-bf16"
 revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
-# MEASURED on Owen's Mac Studio (M1 Ultra, 64 GB), mlx-lm 0.31.3 / mlx 0.32.2,
-# 2026-09-12, via mlx's own allocator:
-#   after load                      active 17.91 GB, peak 17.91 GB
-#   after a 12198-token completion  active 17.91 GB, PEAK 20.38 GB
-# The peak is the figure: it is what the machine must be able to give while a
-# full-context request is in flight. (The engine process's RSS reads lower,
-# 17.86 GB, because MLX memory-maps the weights and not every page stays
-# resident — RSS is a floor, not the requirement. Computed weights + KV would
-# have said 19.22 GB, 6% under the truth.)
-#
-# THE ESTIMATE IS THAT MEASURED PEAK PLUS THE KV THE WIDER CONTEXT BELOW ADDS.
-# The measurement was taken at 12198 tokens; this backend now declares 16384, so
-# the 4186 tokens between them owe their KV and nothing else:
-#
-#   per token, from config.json (32 layers, `full_attention_interval` 4, so 8
-#   full-attention layers; the other 24 are gated-delta-net, whose recurrent
-#   state is per-SEQUENCE and does not grow with length):
-#       2 (K and V) x 4 kv heads x 256 head_dim x 2 bytes = 4096 B per layer
-#       4096 x 8 full layers                              = 32_768 B per token
-#   (4186 tokens) x 32_768 B                              = 137_166_848 B
-#   20_378_749_158 + 137_166_848                          = 20_515_916_006
-#
-# That formula is not invented here: it is the one already written out in
-# models/qwen3.8-27b.toml, which derives 65_536 B/token for the 27B from the
-# same config fields and says the two share an attention shape. The 9B has half
-# the layers, so half the per-token KV.
-#
-# WHAT IS COMPUTED AND WHAT IS NOT. The 137 MB is exact. What is REASONED is
-# that nothing else in the measured peak moves: the 1.16 GB by which the peak
-# exceeded computed weights+KV is activations and allocator overhead, and
-# mlx-lm prefills a prompt in fixed-size chunks, so a longer context is MORE
-# chunks rather than bigger ones. That is the design mlx-lm is known to have and
-# it is consistent with the measurement, but it was not re-read from mlx-lm's
-# source for this change and no new load was taken — Owen holds both cards.
-# If that reasoning is wrong and the whole 2.47 GB rise scaled with length, the
-# honest upper bound would be 21.23 GB. The gap between the two is 0.7 GB on a
-# machine with 43 GB spare, so it changes no admission decision today; the next
-# load on the Mac should re-take the peak and replace this line with a
-# measurement, the way the 27B block says its own computed pair is a floor.
 memory_bytes_estimate = 20_515_916_006
-# NOTE WHAT `context_default` DOES AND DOES NOT DO ON THIS BACKEND. mlx-lm has no
-# `--max-model-len` and `Residency._engine_args` sends that flag to vLLM only, so
-# the model's 16384 never reaches the engine: mlx-lm takes its context from the
-# model's own config (`max_position_embeddings` 262144). It is the number Crucible
-# REPORTS as `max_model_len`/`context_default` and that clients size against, and
-# on 64 GB the machine was never the constraint. So it enables nothing the Mac
-# could not already do — it stops the server UNDER-REPORTING what it serves.
-# THE BATCH, STATED -- AND WHY THESE NUMBERS. COMPUTED 2026-09-24, MEASUREMENT OWED.
-# mlx-lm 0.31.3 batches (engines/mlx_lm.py, `chat_concurrency_flag`): one
-# `BatchGenerator` decodes up to `--decode-concurrency` sequences at once and
-# prefills up to `--prompt-concurrency` prompts per forward. The chat door admits
-# `--decode-concurrency + 1`, read off this argv, and that is the pool a client
-# sizes from `/v1/activity`. Crucible states all three flags (house rule: no
-# library defaults; `MlxLmEngine.start` refuses an argv without them).
-#
-# The bound is NOT Crucible's 61 GiB budget but the tighter one mlx-lm wires to:
-# Metal's `max_recommended_working_set_size`, 55_662_788_608 B (51.84 GiB) on the
-# M1 Ultra, read with `mx.device_info()` 2026-09-24 (`server.py` L1893-1895 sets
-# the wired limit to it). Past it the Mac pages. Every term, per sequence at the
-# 8192 tokens that is the widest class default this model serves (clean,
-# generate, decide; translate is 4096):
-#   KV            8192 x kv_bytes_per_token (the [memory] table below)
-#   recurrent     gated-delta state, float32 (`models/gated_delta.py` L279:
-#                 `mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)`), per sequence
-#                 and flat in length: linear layers x v heads x 128 x 128 x 4 B
-#   conv          linear layers x 3 x (2 x 16 x 128 + v heads x 128) x 2 B
-# held by the decode batch AND by each of the `--prompt-cache-size` finished
-# sequences mlx-lm keeps for prefix reuse (worst case: every one a full 8192).
-# Prefill is taken at the measured `overhead_bytes` per prompt in flight, i.e.
-# `--prompt-concurrency - 1` extra copies of it -- the worst case, since only
-# part of that residual is a per-step transient.
-# THIS MODEL: 24 gated-delta layers x 32 v heads (config.json read 2026-09-24).
-#   per sequence  268_435_456 KV + 50_331_648 recurrent + 1_179_648 conv
-#               = 319_946_752 B
-#   weights + overhead                        19_979_045_094
-#   + 3 extra prefills (x 2_069_045_094)       6_207_135_282
-#   + 16 in flight                             5_119_148_032
-#   + 10 cached                                3_199_467_520
-#                                          = 34_504_795_928 B = 32.14 GiB of 51.84
-# 19.7 GiB spare. 32 in flight would also fit (36.90 GiB); 16 is chosen because
-# decode on this card stops being bandwidth-bound somewhere in that range and a
-# wider batch past the knee only lengthens every request -- the measurement
-# owed (docs/PHASE22-DECIDE.md, "mlx-lm batches") picks between 8, 16 and 32.
-# MEASURED BESIDE IT: the engine's own "Prompt Cache: 10 sequences, 2.49 GB"
-# (engine-qwen3.5-9b.log, 2026-09-24 13:56) at ~1-2k-token cleanup chunks, about
-# twice what these terms give at that length -- so read the cache term as the
-# softer one. At twice every per-sequence term the total is 39.9 GiB, still
-# inside.
 engine_args = [
     "--decode-concurrency", "16",
     "--prompt-concurrency", "4",
     "--prompt-cache-size", "10",
 ]
-# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from the terms below against
-# the Studio's 48.0 GiB (64 GiB less the 25% allowance = 51_539_607_552 B): 17_910_000_000 + 2_069_045_094 = 19_979_045_094 B fixed, + 131072
-# x 32_768 (4_294_967_296) = 24_274_012_390 B = 22.61 GiB. The memory would
-# afford 963_151 tokens; 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample. ADMISSION on this backend, as the note above
-# says of context_default: mlx-lm is handed no context and allocates KV on
-# demand, so this is the resident row's `max_model_len`, not an engine cap.
 max_context = 131072
 
-# ------------------------------------------------- the same number, taken apart
-#
-# The terms the comment above already computes, written down. `weights_bytes` is
-# mlx's own "after load active 17.91 GB"; `overhead_bytes` is the rest of the
-# measured 20_378_749_158 peak once the KV of the 12198 tokens it was taken at is
-# removed -- the activations and allocator slack that comment calls "the 1.16 GB
-# by which the peak exceeded computed weights+KV".
-#
-# THE ASSUMPTION IS THE BLOCK'S OWN, NOT A NEW ONE: that the residual does not
-# grow with context, because mlx-lm prefills in fixed-size chunks. The comment
-# above states it, states that it was reasoned rather than re-read from mlx-lm's
-# source, and gives the honest upper bound if it is wrong (21.23 GB). Writing it
-# as a constant intercept here changes nothing about that, except that it is now
-# somewhere a calibration run can overwrite.
 [backends.mlx-darwin.memory]
 weights_bytes = 17_910_000_000
 overhead_bytes = 2_069_045_094
@@ -467,35 +60,6 @@ kv_bytes_per_token = 32_768
 basis = "computed"
 measured_at_context = 16384
 
-# ---------------------------------------------------------------------------
-# PHASE15-HOST.md sections 0 and 3.10: the same weights the cuda-linux block
-# names (`Qwen/Qwen3.5-9B`), quantized to Q8_0 by unsloth, run by llama.cpp on
-# Windows. Read from the HuggingFace API on 2026-09-14:
-#
-#   hf_repo/revision  unsloth/Qwen3.5-9B-GGUF @ 3885219b6810b007914f3a7950a8d1b469d598a5
-#                     (`base_model: Qwen/Qwen3.5-9B`, so this is a quantization
-#                     of the bf16 weights above and not a different model)
-#   file              Qwen3.5-9B-Q8_0.gguf   9_527_502_048 B  (tree API, LFS size)
-#
-# Q8_0 and not Q4: this is the CLEANUP model, and cleanup is the one act where
-# a wrong word is silently wrong — the output reads fine and says something
-# else. 9.5 GB of Q8 fits the same 24 GB card the bf16 needs 20.9 GB for, so
-# there is nothing to buy by going lower here.
-#
-# No `mmproj`, and the loader would refuse one: `[model] modalities` is
-# `["text"]`. Qwen3.5-9B has a vision tower and this server does not offer it
-# on any backend (the cuda-linux block says why).
-#
-# memory_bytes_estimate: the file plus 1.5 GB for KV at `context_default` and
-# llama.cpp's own buffers. The 12288 -> 16384 move at model level (2026-09-15)
-# does not disturb it: this checkpoint's KV is 32_768 B/token (8 full-attention
-# layers x 2 x 4 kv heads x 256 head_dim x 2 B; the other 24 layers are
-# gated-delta-net, whose state is per-SEQUENCE and does not grow with length),
-# so the extra 4096 tokens cost 134_217_728 B — 0.13 GB inside a 1.5 GB
-# allowance. Same estimate, and now it is a checked one rather than an
-# unexamined one — Foundry's `OVERHEAD_GB`, the same number the
-# `[local]` table above declares, and DECLARED for the same reason: nothing
-# has watched this on a Windows card.
 [backends.llama-windows]
 engine = "llama-server"
 hf_repo = "unsloth/Qwen3.5-9B-GGUF"
@@ -503,22 +67,8 @@ revision = "3885219b6810b007914f3a7950a8d1b469d598a5"
 file = "Qwen3.5-9B-Q8_0.gguf"
 memory_bytes_estimate = 11_027_502_048
 engine_args = ["--parallel", "1"]
-# THE MOST A LOAD MAY ASK FOR HERE, composed as llama-server's `-c`. COMPUTED 2026-09-23, LOAD TEST OWED,
-# from the DECLARED terms below against the 3090 Ti's 21.0 GiB (24_564 MiB less the 3 GiB allowance = 22_535_995_392 B): 9_527_502_048 + 963_129_088
-# = 10_490_631_136 B fixed, + 131072 x 32_768 (exact f16 KV on llama.cpp) =
-# 14_785_598_432 B = 13.77 GiB. The memory would afford 367_595 tokens;
-# 131072 is the cap, not the memory: a longer prefill is not worth its time, and it is ample.
 max_context = 131072
 
-# ------------------------------------------------- the same number, taken apart
-#
-# `declared`, and that is the honest word for it: nobody has watched this on a
-# Windows card and nobody worked the overhead out. `weights_bytes` is the GGUF's
-# own size from the tree API; `kv_bytes_per_token` is the 32_768 the comment
-# above computes from config.json; `overhead_bytes` is what is LEFT of Foundry's
-# 1.5 GB `OVERHEAD_GB` once that KV is taken out of it at this context -- so the
-# three terms come back to exactly the estimate above rather than approximately.
-# The first load on a Windows card replaces all of this.
 [backends.llama-windows.memory]
 weights_bytes = 9_527_502_048
 overhead_bytes = 963_129_088

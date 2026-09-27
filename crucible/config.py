@@ -1,15 +1,3 @@
-"""Config and the bearer token.
-
-Everything Crucible keeps on disk lives under one root:
-
-    <CRUCIBLE_HOME>/config.toml      mode 0600, holds the token
-    <CRUCIBLE_HOME>/jobs/<id>/       job scratch (inputs/, artifacts/)
-    <CRUCIBLE_HOME>/uploads/         blobs from POST /uploads
-
-`CRUCIBLE_HOME` defaults to `~/.crucible` and is read from the environment on every
-call, so a test (or a second server on one host) can point it somewhere else.
-"""
-
 from __future__ import annotations
 
 import os
@@ -30,90 +18,17 @@ from .upstreams import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
 CRUCIBLE_HOME_ENV = "CRUCIBLE_HOME"
 DEFAULT_HOST = "127.0.0.1"
 
-#: Whether reaching an engine is the whole of the authorisation.
-#:
-#: THE ONE OWNER OF THIS FACT. `_open_pairing` returns it for an absent key,
-#: `write_config` writes it for a config that states nothing, and the test
-#: fixture builds servers with it. Flipping this line flips the product, which
-#: is the property a default is supposed to have and did not when three files
-#: each said `True` on their own account.
-#:
-#: TRUE by ruling (Owen, 2026-09-17): *"ollama allows anybody to connect if they
-#: can reach it. make that the case with crucible servers as well"*. See
-#: `crucible/connect.py` for what that does and does not expose.
 DEFAULT_OPEN_PAIRING = True
 
-#: `[jobs] retention_days` — how long a FINISHED job's directory survives.
-#:
-#: THE ONE OWNER OF THIS FACT, on `DEFAULT_OPEN_PAIRING`'s terms: `_retention_days`
-#: returns it for an absent key, `write_config` writes it for a config that
-#: states nothing, and `JobStore.reap` reads it off the loaded Config.
-#:
-#: SEVEN by ruling (Owen, 2026-09-18), and it is a backstop rather than the
-#: normal path: a job whose artifacts the client has fetched is reaped as soon
-#: as the fetch is complete, and this is what catches the job nobody came back
-#: for. Measured the day it was ruled: 9.3 GB in 88 job directories on the PC
-#: since 09-12, 60 of them with an empty `artifacts/`, and nothing in Crucible
-#: had ever deleted one.
 DEFAULT_RETENTION_DAYS = 7
 
-#: `[jobs] install_on_submit` — whether a job whose environment, model or voice
-#: this card can run but has not installed STARTS that install, answered
-#: `409 installing` with what is being installed and the task to watch, so the
-#: app submits again after it. False: the plain refusal, with the request that
-#: would install it. (2026-09-27: Crucible does not hold the job; the app
-#: queues.)
-#:
-#: TRUE by ruling (Owen, 2026-09-26): *"yes, we need to install a missing
-#: environment when a job is submitted"*, under his standing rule that Crucible
-#: is idiot proof and a caller need not know an environment exists
-#: (`crucible/installonsubmit.py`). An operator who wants every install to be
-#: his own act sets it false, and the refusal carries the install request
-#: instead. Absent means true, on `DEFAULT_RETENTION_DAYS`'s terms.
 DEFAULT_INSTALL_ON_SUBMIT = True
 
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
-#: VRAM the host's own desktop holds that is not anybody's job. A headless Linux
-#: box wants 0; a Windows machine running WSL2 wants about 3 GiB, because the
-#: desktop compositor, the browser and the editor are all on the same card and
-#: the WSL2 driver shim does not list them as compute apps. The accelerator guard
-#: subtracts this before calling unaccounted VRAM "somebody else's job"
-#: (crucible/accelerator.py). It is a declared fact about the host, written by
-#: `crucible init`, not a fudge factor the code picks.
-#:
-#: **This is the `cuda-linux` number and only that one.** See
-#: `default_desktop_allowance_bytes` below for why the Mac cannot share it.
-#:
-#: SINCE 2026-09-26 IT IS A CEILING AND A FALLBACK, NOT WHAT EVERY CARD GETS.
-#: 3 GiB was chosen for owens-pc — a 24 GB 3090 Ti that also streams and runs a
-#: heavy desktop — and on kylies-pc (GTX 1660 SUPER, 6 GB) it held back half the
-#: card. Owen, 2026-09-26: *"WE use 3 gb for desktop. kylies pc doesnt use that
-#: much. i dont think it uses almost any gpu regularly. it only has 1 monitor
-#: connected and its low resolution"*. So `crucible init` on an NVIDIA card now
-#: MEASURES the desktop (`ladder.measure_desktop_reserve`) and keeps what it saw
-#: plus headroom, never more than this; this figure is what a card gets when it
-#: cannot be measured. The operator never has to know the key exists.
 DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
 
-#: `[accelerator] desktop_allowance_basis` — WHERE THE RESERVE CAME FROM, in the
-#: same three words the rest of Crucible uses for a number's provenance:
-#:
-#:   "measured"  Crucible sampled this card's desktop (`crucible init`, or
-#:               `crucible capability --measure-desktop`) and the note says what
-#:               it saw and when.
-#:   "declared"  Crucible's own rule for this backend, with nothing measured:
-#:               3 GiB on an NVIDIA card it could not sample, 25% of unified
-#:               memory on a Mac (`default_desktop_allowance_bytes`).
-#:   "stated"    A person said so — `--desktop-allowance-bytes`, the Settings
-#:               page.
-#:
-#: NOTHING EVER CHANGES A STATED RESERVE ON ITS OWN (Owen, 2026-09-26).
-#: owens-pc keeps 3 GiB deliberately because it streams: a measurement that
-#: happened to run while he was not streaming must not lower it. Only the
-#: deliberate verb (`crucible capability --measure-desktop`) replaces a stated
-#: reserve, and it says old and new.
 DESKTOP_BASIS_MEASURED = "measured"
 DESKTOP_BASIS_DECLARED = "declared"
 DESKTOP_BASIS_STATED = "stated"
@@ -123,57 +38,16 @@ DESKTOP_BASES: tuple[str, ...] = (
     DESKTOP_BASIS_STATED,
 )
 
-#: The share of unified memory `mlx-darwin` reserves for the machine itself.
-#:
-#: A discrete card and a unified pool are not the same question wearing different
-#: numbers. On `cuda-linux` the desktop's appetite is roughly CONSTANT — a
-#: compositor and a browser want about the same VRAM on a 12 GB card as on a
-#: 24 GB one — so a fixed byte count is the honest shape. On `mlx-darwin` the
-#: allowance has to cover the entire operating system and every app on it, out of
-#: the same pool the model allocates from, and that scales with the machine: 3 GiB
-#: is defensible on a 16 GB Mac mini and absurd on a 192 GB Studio.
-#:
-#: 25% is not picked. It is the complement of Metal's own
-#: `recommendedMaxWorkingSetSize`, which Apple reports as ~75% of physical memory
-#: on Apple Silicon — the working set the platform itself says a GPU process may
-#: take before the system starts suffering.
-#:
-#: The check that this is right is Owen's own long-standing configuration, which
-#: predates the rule: he translates with a 4-bit 27B on the Mac and has for
-#: months. A flat 3 GiB allowance leaves 60.8 GB "available" on his 64 GB Studio,
-#: a best-first walk selects the **bf16** 27B at 55.5 GB, and macOS is left 8.5 GB.
-#: At 25% the walk sees 48 GB, refuses bf16 and selects the 4-bit — which is what
-#: he already runs. PHASE9-CAPABILITY.md section 1.1 records that disagreement:
-#: the rule was wrong, not the operator.
 MLX_DESKTOP_ALLOWANCE_FRACTION = 0.25
 
 
 def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
-    """This backend's default host reserve, given the pool it is reserving from.
-
-    `crucible init` calls this AFTER detection, because the answer depends on
-    which backend was found and how big its pool is — an argparse default cannot
-    know either. An explicit `--desktop-allowance-bytes` still wins over it: this
-    is the default for an operator who does not state one, not a ceiling.
-
-    This is the DECLARED reserve (basis "declared"). On an NVIDIA card `crucible
-    init` measures instead where it can (2026-09-26,
-    `ladder.measure_desktop_reserve`), and this answer is what it falls back to.
-    """
     if backend_kind == "mlx-darwin":
         return int(total_bytes * MLX_DESKTOP_ALLOWANCE_FRACTION)
     return DEFAULT_DESKTOP_ALLOWANCE_BYTES
 
 
 def desktop_reserve_words(allowance_bytes: int, basis: str) -> str:
-    """The reserve in plain words: `kept 0.6 GiB for this PC's desktop (measured)`.
-
-    ONE SENTENCE FOR ONE FACT (ARCHITECTURE.md R1): `crucible capability`,
-    `crucible doctor`, `crucible init` and the install modal
-    (`capability.install_plan`) all print this, so a person reads the same
-    words wherever they look. The basis is said because "0.6 GiB" and "3.0 GiB"
-    mean different things when one was seen and the other assumed.
-    """
     said = {
         DESKTOP_BASIS_MEASURED: "measured",
         DESKTOP_BASIS_DECLARED: "not measured; Crucible's default",
@@ -182,30 +56,16 @@ def desktop_reserve_words(allowance_bytes: int, basis: str) -> str:
     return f"kept {allowance_bytes / 1024 ** 3:.1f} GiB for this PC's desktop ({said})"
 
 
-#: Where a Windows server keeps everything, under `%LOCALAPPDATA%`.
-#:
-#: PHASE15-HOST.md section 3.5: *"On Windows the server's home is
-#: `%LOCALAPPDATA%\\Crucible\\` and every subject lives under it."* Not
-#: `~/.crucible`, because on Windows a dot-directory in the user profile is
-#: roamed by some configurations and backed up by others, and this directory
-#: holds tens of gigabytes of GGUF that must never leave the machine. It is
-#: also the directory the host runtime is installed beside (section 4.4), so the
-#: engine and the weights it reads are under one root.
 WINDOWS_HOME_DIRNAME = "Crucible"
 
 
 def crucible_home() -> Path:
-    """The root of this server's state. Honours $CRUCIBLE_HOME on every platform."""
     override = os.environ.get(CRUCIBLE_HOME_ENV)
     if override is not None and override != "":
         return Path(override).expanduser()
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
         if local is None or local == "":
-            # Not a fallback to `~/.crucible`: a Windows session without
-            # LOCALAPPDATA is broken in a way that would make every path this
-            # server writes wrong, and putting tens of gigabytes somewhere
-            # else quietly is worse than saying so.
             raise ConfigError(
                 "%LOCALAPPDATA% is not set, so this Windows host cannot say "
                 f"where Crucible's home is. Set {CRUCIBLE_HOME_ENV} to a "
@@ -220,7 +80,6 @@ def config_path(home: Path | None = None) -> Path:
 
 
 def mint_token() -> str:
-    """A 32-byte urlsafe bearer token."""
     return secrets.token_urlsafe(TOKEN_BYTES)
 
 
@@ -230,14 +89,6 @@ def default_server_name() -> str:
 
 @dataclass(frozen=True)
 class RouteRecord:
-    """One `[routes]` entry: a capability class, and the upstream model it runs on.
-
-    PHASE15-HOST.md section 2. There is no record for a class that runs
-    LOCALLY: an absent key and `route = "local"` mean the same thing and
-    `"local"` is never written, so "is this class routed" is one question with
-    one answer — is there a record — rather than a value that could be spelled
-    two ways.
-    """
 
     capability: str
     model: str
@@ -245,48 +96,18 @@ class RouteRecord:
 
 @dataclass(frozen=True)
 class LocalModelRecord:
-    """One `[local_models]` entry: a class, and the local model an APP chose.
-
-    The mirror of `RouteRecord` above, with the same absence rule: no record
-    means the class takes whatever `capability` decides best-first, and
-    "automatic" is never written as a value, so "did anyone choose" is one
-    question with one answer rather than a value spelled two ways.
-
-    INTENT.md gives the APP the choice of its own models — BookForge its
-    voices, Foundry its reading and language models — and Crucible the running
-    of them. This table is where that choice is kept so it survives a restart.
-    Whether the choice still FITS is not recorded here: that is a fact about a
-    card, `capability` owns it, and a stored answer would go stale the first
-    time the config moved to another machine.
-    """
 
     capability: str
     model: str
 
 @dataclass(frozen=True)
 class CapabilityRow:
-    """One capability class's verdict, as `crucible capability` decided it.
-
-    A row is a RECORD, not an authority. `[jobs] enable_*` stays the single owner
-    of what this server offers (ARCHITECTURE.md R1); this says what the numbers
-    were when somebody decided it, so a refusal can name the number that turned
-    the class off instead of telling an operator to flip a flag that will OOM
-    (PHASE9-CAPABILITY.md section 2.1).
-
-    `selected` is `""` rather than absent when nothing fit, and `shortfall_bytes`
-    is `0` rather than absent when something did: TOML has no null, and a key that
-    comes and goes would make "no candidate fit" and "this config predates the
-    field" the same reading.
-    """
 
     capability: str
     enabled: bool
     selected: str
     reason: str
     shortfall_bytes: int
-    #: The same verdict for somebody who is not an operator — see
-    #: `capability.Decision.summary`. A bare phrase starting with the verb, so
-    #: the CALLER supplies the subject it is the only one that knows.
     summary: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -302,14 +123,6 @@ class CapabilityRow:
 
 @dataclass(frozen=True)
 class CapabilityRecord:
-    """`[capability]` — what the card was, and what was decided from it.
-
-    The three scalars are the INPUTS to the decision, kept so a reader can tell a
-    stale record from a current one. `crucible doctor` compares `total_bytes`
-    against the card it detects now, which is how a swapped GPU is noticed
-    without anybody writing down a date: the number that matters is the one the
-    decision was made on, not the day it was made.
-    """
 
     backend_kind: str
     total_bytes: int
@@ -331,47 +144,18 @@ class CapabilityRecord:
         }
 
 
-#: A TTS ENGINE'S FOOTPRINT ON THIS BOX, and the two bases it may be stated on.
-#: The same two words `crucible/voices.py` uses of a voice, because it is the
-#: same claim about the same kind of number: `"measured"` is somebody watched
-#: the card, `"declared"` is the engine's own configured reservation and owes a
-#: note saying whose.
 TTS_ESTIMATE_BASES = frozenset({"measured", "declared"})
 
 
 @dataclass(frozen=True)
 class EngineFootprint:
-    """`[tts.<engine>]` — what serving ONE narrator engine costs on THIS machine.
-
-    PHASE21-VOICES-FROM-HF.md section 2.3. Until 2026-09-19 these five values
-    sat in every voice manifest, and all seven shipped manifests carried the
-    same numbers on the same arms — 19_000_000_000 on every `cuda-linux` block,
-    12_133_000_000 on every `mlx-darwin` one, `max_num_seqs = 16` on every
-    voice. Identical across seven voices is the proof they are facts about a BOX
-    and an ENGINE rather than about a voice, and a fact in seven files is a fact
-    with seven owners: mistborn's estimate could be edited without deathstalker's
-    and nothing would notice.
-
-    So they live here, once per engine, on the machine they are true of. A voice
-    that comes out of its own repo (section 2.2) carries none of them, and the
-    server it is being served on supplies them — which is also why a server with
-    no such table cannot serve that engine's voices and says `engine_footprint_
-    unset` rather than reaching for a number.
-    """
 
     engine: str
     memory_bytes_estimate: int
     estimate_basis: str
-    #: Required when `estimate_basis` is `"declared"` and REFUSED when it is
-    #: `"measured"`, exactly as `crucible/voices.py` requires and refuses it: a
-    #: declared number came from somewhere and a reader has to be able to find
-    #: out where, while a note beside a measured one reads as an excuse.
     estimate_note: str | None
     max_num_seqs: int
     max_num_seqs_note: str
-    #: SGLang's `--mem-fraction-static` and the engine's context in tokens, or
-    #: None for narrator's own launcher defaults (0.60 and 4096). Each owes its
-    #: note when stated.
     mem_fraction: float | None = None
     mem_fraction_note: str | None = None
     context_length: int | None = None
@@ -386,9 +170,6 @@ class EngineFootprint:
             document["estimate_note"] = self.estimate_note
         document["max_num_seqs"] = self.max_num_seqs
         document["max_num_seqs_note"] = self.max_num_seqs_note
-        # Written only when stated, unlike the `/v1/voices` row's null: this
-        # document is a config FILE, and a key written back as null would be a
-        # line an operator has to delete before the default applies again.
         for key in (
             "mem_fraction", "mem_fraction_note",
             "context_length", "context_length_note",
@@ -414,115 +195,24 @@ class Config:
     enable_tts: bool
     enable_align: bool
     enable_rvc: bool
-    #: `denoise` shares the `rvc` env, and it still gets a flag of its own: a
-    #: host may have the env and the RVC models and no separator checkpoint, or
-    #: the other way round, and one flag for both would advertise a job type
-    #: whose first request refuses.
     enable_denoise: bool
     desktop_allowance_bytes: int
-    #: `[accelerator] desktop_allowance_basis` — where `desktop_allowance_bytes`
-    #: came from (`DESKTOP_BASES`).
     desktop_allowance_basis: str
-    #: ADDRESSES SOMETHING ELSE FORWARDS TO THIS SERVER FROM, stated because
-    #: they cannot be derived.
-    #:
-    #: `reachable_urls` answers "where am I" by looking at the bind and, for a
-    #: wildcard, at this machine's own interfaces. That is right and it is
-    #: complete for a server whose reachability is its own. It is NOT complete
-    #: when something outside the server's world creates the reachability: the
-    #: engine in WSL binds 127.0.0.1, correctly says so, and is reachable from
-    #: another machine anyway because `tailscale serve` on the Windows side
-    #: forwards into the guest. The guest cannot see that and never will.
-    #:
-    #: So the fact is DECLARED, once, here — and it is added to what the server
-    #: derives, never substituted for it. The loopback line is what an app on
-    #: this machine needs; this is what an app on another machine needs; both
-    #: are true at the same time and the console offers both.
-    #:
-    #: Empty is the normal case: a server whose bind is already reachable
-    #: (0.0.0.0 on a Mac) enumerates its interfaces and needs no help.
-    #:
-    #: DEFAULTED, and placed here with the other defaulted fields for the
-    #: reason dataclasses require: a field with a default cannot precede one
-    #: without. It was briefly required, which broke every construction of a
-    #: Config that is not the parser -- `Config.__init__() missing 1 required
-    #: positional argument` in four llama-engine tests. `()` is the honest
-    #: default anyway: nothing forwards here unless somebody says so.
     advertise: tuple[str, ...] = ()
-    # A host-owned projection, kept separate from operator-authored addresses.
     tailscale_advertise: tuple[str, ...] = ()
-    #: The SAME shape for the LAN door (`crucible lan`), and separate from
-    #: `tailscale_advertise` for the same reason that one is separate from
-    #: `advertise`: each is owned by a different thing, and one list holding
-    #: two owners' entries cannot be withdrawn by either without guessing
-    #: which rows were whose. Disabling the LAN door must not silently drop
-    #: a tailnet address.
     lan_advertise: tuple[str, ...] = ()
-    #: `[auth] open_pairing` — whether reaching this engine is the whole of the
-    #: authorisation (Owen, 2026-09-17; see `crucible/connect.py`). TRUE is the
-    #: ruled default and what an absent key means, so every config written before
-    #: this field reads as open, which is the behaviour that was asked for. Set it
-    #: false to put the approval step back.
     open_pairing: bool = True
-    #: `[jobs] retention_days` — how many days a FINISHED job's directory and
-    #: its record survive when nothing fetched its artifacts. See
-    #: `DEFAULT_RETENTION_DAYS` for the ruling and `JobStore.reap` for what
-    #: reads it. Absent means the ruled seven.
     retention_days: int = DEFAULT_RETENTION_DAYS
-    #: `[accelerator] desktop_allowance_note` — what was seen and when, or why.
     desktop_allowance_note: str = ""
-    #: `[jobs] install_on_submit` — see `DEFAULT_INSTALL_ON_SUBMIT`. Read by
-    #: `POST /v1/jobs` on every request, so turning it off needs no restart.
     install_on_submit: bool = DEFAULT_INSTALL_ON_SUBMIT
-    #: What `crucible capability` decided on this host, or None when nothing has
-    #: decided anything here yet — a config written by `crucible init` alone.
-    #: None is a REPORTED state, not a
-    #: guess: the refusal in `crucible/jobs/__init__.py` says "no selection has
-    #: been recorded here" rather than inventing a reason for a disabled type.
     capability: CapabilityRecord | None = None
-    #: `[routes]` — where each routable class's work runs (PHASE15-HOST.md
-    #: section 2). Empty means every class is local.
     routes: tuple[RouteRecord, ...] = ()
-    #: `[upstreams.*]` — the services this server may forward a chat to on the
-    #: operator's account. PRESENT MEANS CONFIGURED: `load_config` refuses an
-    #: entry missing its one field, so nothing downstream has to ask twice.
     upstreams: tuple[UpstreamRecord, ...] = ()
-    #: `[local_models]` — the local model an app CHOSE for a class, where it
-    #: chose one. Empty means every class is decided automatically.
     local_models: tuple[LocalModelRecord, ...] = ()
-    #: `[tts.<engine>]` — this box's serving footprint per narrator engine
-    #: (PHASE21 section 2.3). Empty means nobody has stated one here; a voice
-    #: that needs one is refused by name rather than defaulted.
     tts_engines: tuple[EngineFootprint, ...] = ()
-    #: `(st_mtime_ns, st_size)` of config.toml as it was when THIS document was
-    #: read — taken BEFORE the read, so a write that lands between the stat and
-    #: the parse leaves the stamp older than the content and the next
-    #: `follow_file()` re-reads once more rather than missing it. None only for
-    #: a Config built by hand (tests); `load_config` always sets it.
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
-        """Re-read config.toml if it moved since this document was read.
-
-        THE FILE IS THE AUTHORITY AND THE PROCESS FOLLOWS IT. `adopt()` below
-        exists because a `PUT /v1/settings` or an install *through the server*
-        rewrites the file and then adopts it — but `crucible install` and
-        `crucible capability --write` run in their OWN process, write the same
-        file, and had no way to tell a running server. Measured on the Mac on
-        2026-09-21: `crucible install llm --force` wrote `pages: yes` into
-        config.toml at 13:33 and `GET /v1/capability` went on answering the
-        13:31 document — "ships none with a mlx-darwin block" — until the
-        service was restarted, while the CLI on the same machine said yes. The
-        same defect had already shipped the other way round in 1.0.16, where
-        install restarted the service BEFORE writing the record. Either order
-        leaves the server one write behind its own file; this removes the
-        order from the question.
-
-        One stat per call, a parse only when the stamp moved. Returns whether
-        anything was adopted. A file that will not parse raises `ConfigError`
-        and this document is left as it was: the last good record goes on
-        being served rather than a half-written one, and the caller says so.
-        """
         try:
             current = self.path.stat()
         except FileNotFoundError as exc:
@@ -537,45 +227,30 @@ class Config:
         return True
 
     def engine_footprint(self, narrator_engine: str) -> EngineFootprint | None:
-        """This box's `[tts.<engine>]` row, or None because none was written."""
         for entry in self.tts_engines:
             if entry.engine == narrator_engine:
                 return entry
         return None
 
     def route_model(self, capability: str) -> str | None:
-        """The upstream model this class runs on, or None because it runs local."""
         for entry in self.routes:
             if entry.capability == capability:
                 return entry.model
         return None
 
     def local_model(self, capability: str) -> str | None:
-        """The local model an app chose for this class, or None for automatic.
-
-        None is not "nothing fits" — that is `capability`'s answer and it says
-        so with an arithmetic reason. None here is the narrower fact that
-        nobody has stated a preference, which is the common case.
-        """
         for entry in self.local_models:
             if entry.capability == capability:
                 return entry.model
         return None
 
     def upstream(self, name: str) -> UpstreamRecord | None:
-        """This upstream's record, or None because nobody configured it."""
         for entry in self.upstreams:
             if entry.name == name:
                 return entry
         return None
 
     def classes_routed_to(self, name: str) -> tuple[str, ...]:
-        """Every class whose route names this upstream, in `[routes]` order.
-
-        What `upstream_in_use` reports: a caller removing a key is owed the list
-        of things that would stop working, in one refusal, rather than one
-        refusal per attempt.
-        """
         return tuple(
             entry.capability
             for entry in self.routes
@@ -583,51 +258,6 @@ class Config:
         )
 
     def adopt(self, fresh: "Config") -> None:
-        """Take on a re-read of this same file, in place. **One Config per process.**
-
-        PHASE13-OPERATOR.md section 3.4. `crucible install` rewrites `[jobs]` and
-        `[capability]` while this server is running, and a client that asked for
-        the install must see the new job type before the task says `done`. So the
-        config has to change under a live app — and the only honest way to do
-        that is for there to go on being exactly ONE config object.
-
-        **Why not simply hand out a new one.** Every route in `crucible/api.py`
-        closes over this object; so do `Residency`, `JobStore`, every job-type
-        plugin and the streaming manager. Replacing the app's reference would
-        leave all of those reading the old flags while `/v1/setup` read the new
-        ones — one fact with two owners and nothing comparing them, which is the
-        whole of ARCHITECTURE.md section 1. Rebinding every holder is the same
-        bug with more places to forget.
-
-        **Why this is not a licence to mutate a frozen dataclass.** `frozen=True`
-        stays, and `object.__setattr__` appears exactly here, in a method whose
-        name says what it is for. Nothing else in the package writes to a Config,
-        and a test asserts that
-        (`tests/test_tasks_api.py`). The immutability being
-        protected is *"a config is not edited field by field from wherever"*, and
-        that is intact: this replaces the whole document at once, from a file.
-
-        **AND SINCE 2026-09-21 THE SERVER ALSO CALLS THIS ON ITS OWN**, from
-        `follow_file()` above, whenever the file's stamp moves under it — so a
-        write from another process (`crucible install`, `crucible capability
-        --write`) reaches a live server the same way a settings write does.
-
-        **ROUTES AND UPSTREAMS TRAVEL THE SAME WAY** (PHASE15-HOST.md section
-        2), and they are why this method matters twice as much as it did: a
-        `PUT /v1/settings` writes the file and then adopts it, so the chat door
-        forwards to the key that was pasted a millisecond ago without a
-        restart. The loop below is over `__dataclass_fields__` rather than a
-        list of names for exactly this reason — a field added to `Config` is
-        adopted on the day it is added, and a phase that forgot to extend a
-        hand-written list would leave half the server reading the old document.
-
-        IDENTITY IS REFUSED, CAPABILITY IS ADOPTED. A fresh config from a
-        different path or home is not a re-read of this one, it is a different
-        server, and adopting it would silently move where this process keeps its
-        jobs. The token, the name, the host and the port are adopted, because
-        `crucible init --force` is the only thing that changes them and it tells
-        the operator every client will need the new one.
-        """
         if fresh.path != self.path or fresh.home != self.home:
             raise ConfigError(
                 f"refusing to adopt a config from {fresh.path} into the one this "
@@ -655,17 +285,6 @@ class Config:
 
 
 def _open_pairing(table: dict[str, Any]) -> bool:
-    """`[auth] open_pairing`, defaulting to TRUE when the key is absent.
-
-    Absent means open, and that is not a fallback hiding a missing value: it is
-    the ruled default stated once. A config written before this field existed
-    describes a server whose behaviour is now open, and reading it as closed
-    would make every existing machine disagree with the ruling.
-
-    A non-boolean is REFUSED rather than coerced. `open_pairing = "false"` is a
-    string, is truthy, and would silently open a door its operator just tried to
-    shut — which is the one mistake this field must never make quietly.
-    """
     auth = table.get("auth")
     if not isinstance(auth, dict) or "open_pairing" not in auth:
         return DEFAULT_OPEN_PAIRING
@@ -680,16 +299,6 @@ def _open_pairing(table: dict[str, Any]) -> bool:
 
 
 def _retention_days(table: dict[str, Any]) -> int:
-    """`[jobs] retention_days`, defaulting to the ruled seven when absent.
-
-    Absent means seven on `_open_pairing`'s terms rather than as a fallback
-    hiding a missing value.
-
-    ZERO AND NEGATIVE ARE REFUSED, not read as "never reap". Retention is how
-    long a finished job survives, and a server that kept nothing would delete a
-    job's artifacts before the client that submitted it could fetch them.
-    Turning reaping off is not a setting; a long window is how you ask for one.
-    """
     section = table.get("jobs")
     if section is None:
         raise ConfigError("config is missing the [jobs] section")
@@ -706,7 +315,6 @@ def _retention_days(table: dict[str, Any]) -> int:
 
 
 def _desktop_basis(table: dict[str, Any]) -> str:
-    """`[accelerator] desktop_allowance_basis`, one of `DESKTOP_BASES`."""
     value = _require(table, "accelerator", "desktop_allowance_basis", str)
     if value not in DESKTOP_BASES:
         raise ConfigError(
@@ -717,7 +325,6 @@ def _desktop_basis(table: dict[str, Any]) -> str:
 
 
 def _desktop_note(table: dict[str, Any]) -> str:
-    """`[accelerator] desktop_allowance_note`, empty when absent."""
     section = table.get("accelerator") or {}
     if "desktop_allowance_note" not in section:
         return ""
@@ -725,12 +332,6 @@ def _desktop_note(table: dict[str, Any]) -> str:
 
 
 def _install_on_submit(table: dict[str, Any]) -> bool:
-    """`[jobs] install_on_submit`, true when absent (2026-09-26, Owen's ruling).
-
-    Absent is the ruled default rather than a fallback: every config in
-    existence was written before the key. A quoted string is refused, for
-    `_open_pairing`'s reason: `"false"` would read as true.
-    """
     section = table.get("jobs")
     if section is None:
         raise ConfigError("config is missing the [jobs] section")
@@ -740,15 +341,6 @@ def _install_on_submit(table: dict[str, Any]) -> bool:
 
 
 def _kept_install_on_submit(home: Path) -> bool:
-    """What the config.toml already on disk says, for a rewrite that did not say.
-
-    `write_config` is called by rewriters that rebuild the whole document from
-    their own arguments (`crucible install`'s capability step, the settings
-    door). One that predates this key would put an operator's `false` back to
-    true on the next install, which is the one moment it matters. So a caller
-    that passes nothing keeps the file's value; an unreadable or absent file
-    gets the ruled default.
-    """
     try:
         with open(config_path(home), "rb") as handle:
             value = tomllib.load(handle).get("jobs", {}).get("install_on_submit")
@@ -758,18 +350,6 @@ def _kept_install_on_submit(home: Path) -> bool:
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
-    """`[server] advertise` — authorities something forwards to this server on.
-
-    ABSENT IS THE NORMAL CASE and means "nothing does", which is why this is
-    not `_require`: almost every server's reachability is its own, and only one
-    whose address is manufactured outside itself has anything to declare.
-
-    Each entry is an AUTHORITY — `host` or `host:port` — not a URL. The scheme
-    is this server's own and a path would have nowhere to go, which is the same
-    reasoning `pairing_line` gives for using only a URL's authority. A bare host
-    takes the server's port, because the overwhelmingly common case is a
-    forward that keeps the number.
-    """
     server = table.get("server")
     if not isinstance(server, dict) or "advertise" not in server:
         return ()
@@ -787,10 +367,6 @@ def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
             raise ConfigError(
                 "config [server] advertise: an empty entry names no address"
             )
-        # REFUSED, NOT TRIMMED. A scheme here means somebody believes this
-        # field takes URLs, and quietly dropping it would leave them believing
-        # it — including the day they write `https://`, which this would
-        # silently serve over http.
         if "://" in authority:
             raise ConfigError(
                 f"config [server] advertise: {entry!r} carries a scheme; entries "
@@ -825,7 +401,6 @@ def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
         raise ConfigError(f"config is missing {section}.{key}")
     value = table[section][key]
     wrong_type = not isinstance(value, kind)
-    # bool is a subclass of int; a bool where an int is wanted is still wrong.
     if kind is int and isinstance(value, bool):
         wrong_type = True
     if wrong_type:
@@ -836,7 +411,6 @@ def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
     return value
 
 
-#: Every capability flag, in the order `crucible init` writes them.
 CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_echo",
     "enable_llm",
@@ -848,7 +422,6 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
 )
 
 
-#: The scalars of `[capability]`, and the keys of one `[[capability.classes]]`.
 _CAPABILITY_REQUIRED: dict[str, type] = {
     "backend_kind": str,
     "total_bytes": int,
@@ -865,17 +438,6 @@ _CAPABILITY_ROW_REQUIRED: dict[str, type] = {
 
 
 def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
-    """`[capability]`, or None when this config has never had one written.
-
-    ABSENT means "nobody has decided". It becomes None and stays None — it must
-    never become an empty record, because an empty record reads as "the card was
-    probed and nothing fit", which is a different and false statement about the
-    host.
-
-    PRESENT and malformed is a refusal, like every other table in this file: a
-    `[capability]` block with a misspelled key must not load with that class
-    silently missing and have a refusal claim no selection was ever run.
-    """
     section = table.get("capability")
     if section is None:
         return None
@@ -954,18 +516,6 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
 
 
 def _upstream_records(table: dict[str, Any]) -> tuple[UpstreamRecord, ...]:
-    """`[upstreams.*]`, in `UPSTREAM_NAMES` order, or a refusal naming the fault.
-
-    ABSENT IS THE ONLY WAY TO BE UNCONFIGURED. An entry that exists carries the
-    one field its upstream takes, or the config does not load — there is no
-    `[upstreams.anthropic]` with no key, because a record like that would make
-    `configured` a second fact beside the record's own existence and the two
-    would eventually disagree (ARCHITECTURE.md R1).
-
-    A whole `[upstreams]` table is optional: every config written before this
-    phase has none, and "this server forwards nowhere" is the honest reading of
-    that rather than a missing piece.
-    """
     section = table.get("upstreams")
     if section is None:
         return ()
@@ -1008,17 +558,6 @@ def _upstream_records(table: dict[str, Any]) -> tuple[UpstreamRecord, ...]:
 def _route_records(
     table: dict[str, Any], upstreams: tuple[UpstreamRecord, ...]
 ) -> tuple[RouteRecord, ...]:
-    """`[routes]`, validated against the upstreams that were just read.
-
-    A hand-edited config is refused HERE, with the same three names
-    `PUT /v1/settings` refuses by (PHASE15-HOST.md section 3.2), because a
-    server that started holding a route it cannot serve would spend the rest of
-    its life refusing one capability with a sentence about the wrong thing.
-
-    The order matters: upstreams first, then routes, exactly as one PUT applies
-    them, so a config file and a patch cannot disagree about whether a route is
-    servable.
-    """
     from .capability import ROUTABLE_CLASSES
 
     section = table.get("routes")
@@ -1063,18 +602,6 @@ def _route_records(
 
 
 def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
-    """`[local_models]`, validated as classes that can have a selection.
-
-    A hand-edited config is refused HERE for the reason `[routes]` is: a server
-    that started holding a selection for a class which cannot have one would
-    answer every settings read with a fact nothing can act on.
-
-    What is NOT asked here is whether the model exists on this backend or fits
-    this card. Both are questions about a machine this process has not probed
-    yet, `capability` is their one owner, and answering them twice is how two
-    doors come to disagree (ARCHITECTURE.md R1). A selection naming a model
-    this backend cannot run is reported BY `capability`, with its own reason.
-    """
     from .capability import BY_NAME, CLASSES
 
     section = table.get("local_models")
@@ -1106,35 +633,12 @@ def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
     return tuple(found)
 
 
-#: `[tts.<engine>]`'s keys. `estimate_note` is the one optional, on the pairing
-#: rule `EngineFootprint.estimate_note` states.
 _TTS_ENGINE_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
     "estimate_basis": str,
     "max_num_seqs": int,
     "max_num_seqs_note": str,
 }
-#: AND THE TWO SERVING LEVERS ADDED 2026-09-19, each with its required note.
-#: They are here rather than in the repo manifest because `[voice.serving]` is
-#: REFUSED in a repo manifest by name (PHASE21 section 2.3,
-#: `voicerepo._REFUSED_IN_REPO`): what sizes the server narrator starts is a
-#: property of the BOX and the ENGINE, and a repo published once cannot know
-#: which card it will be served on. So a voice that comes out of its own repo
-#: gets them from the machine, exactly as it already gets `max_num_seqs` and
-#: the memory estimate.
-#:
-#: `mem_fraction` is unambiguously a machine fact — it is a share of one card's
-#: VRAM. `context_length` is the arguable one: the ladder wants 8192 because
-#: its own bank tops at 2,008 characters, which is a fact about a CORPUS. It is
-#: here anyway, because a context is paid for in the same VRAM as the fraction
-#: and a repo that demanded 8192 on a card that cannot hold it would be a voice
-#: that refuses to load on the machine it was published for. A screening voice
-#: states both in its OWN `voices/<id>.toml`, which is an override written on
-#: the machine it runs on and is the shape that fits.
-#:
-#: See `crucible/voices.py:_SERVING_OPTIONAL` for what each number does and the
-#: measurements behind them; the rules are the same and are checked there too,
-#: because a packaged manifest may state them directly.
 _TTS_ENGINE_OPTIONAL: dict[str, type] = {
     "estimate_note": str,
     "mem_fraction": object,
@@ -1145,13 +649,6 @@ _TTS_ENGINE_OPTIONAL: dict[str, type] = {
 
 
 def _tts_engine_lever(where: str, block: dict[str, Any], key: str) -> Any:
-    """One optional serving lever, or None — and its note, which it owes.
-
-    `voices.py:_check_serving_extra`'s rule stated again for the machine's own
-    table, because a number here reconfigures the server narrator starts and a
-    person reading `[tts.<engine>]` has to be able to find out where it came
-    from. A note with no number is the leftover of a number somebody deleted.
-    """
     note = block.get(f"{key}_note")
     value = block.get(key)
     if value is None:
@@ -1171,19 +668,6 @@ def _tts_engine_lever(where: str, block: dict[str, Any], key: str) -> Any:
 
 
 def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
-    """`[tts.*]`, validated here and nowhere else.
-
-    ONE PARSER, TWO ENTRY POINTS. `load_config` reads it into `Config` for a
-    server that is running, and `tts_engine_footprints()` reads it off the
-    document for `crucible/voicerepo.py`, which merges a repo manifest without
-    ever holding a Config. Both call this, so a hand-edited table is refused the
-    same way whichever door found it.
-    """
-    # Imported here rather than at module scope: `crucible/voices.py` reads
-    # `crucible_home()` out of this module, and `crucible/manifests.py` is the
-    # owner of what "every required key, no unknown key" means for a TOML table
-    # in this repo — one checker, in its own vocabulary, refusing with this
-    # module's error type.
     from .manifests import check_table
     from .voices import NARRATOR_ENGINE_SAMPLING
 
@@ -1284,51 +768,6 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
 
 
 def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
-    """What `crucible init` writes into `[tts.*]` for a backend, or nothing.
-
-    PHASE21-VOICES-FROM-HF.md section 2.3, and section 9's ruling 2 is still
-    Owen's: either init copies today's declared numbers per backend (this, the
-    recommended shape) or the table is left unset until `crucible capability`
-    measures one and nothing serves a pinned voice until then. **THE WRITE IS
-    THIS ONE FUNCTION** so that taking the second option is deleting a call,
-    not unpicking a writer.
-
-    ── Where these numbers come from, and why they are not measurements ───────
-
-    Every one of them is READ OFF THE SEVEN PACKAGED MANIFESTS AS OF 2026-09-19,
-    which is what section 2.3 asks for — the point of this table is that the
-    numbers stop being repeated once per voice, not that they change. They were
-    identical in all seven files on each arm, which is the evidence they are
-    facts about a box and an engine:
-
-      cuda-linux  19_000_000_000  SGLang-Omni's CONFIGURED RESERVATION on the
-                  3090 Ti — `--mem-fraction-static 0.60 holds ~19 GB at 16 in
-                  flight` (BookForge `electron/data/higgs-models.json`
-                  `serving.sglang._memFractionStaticNote`, owens-pc RTX 3090 Ti,
-                  2026-09-05). Nobody watched the card, so the basis is
-                  `declared` and it owes this note.
-
-      mlx-darwin  12_133_000_000  the one recorded MLX figure for Higgs v3
-                  weights of this shape — 11.3 GiB peak at a 900-character chunk,
-                  from deathstalker's MLX cap certificate (mlx-audio 0.4.8 /
-                  mlx 0.32.0 on owens-mac-studio, 2026-09-05). A sibling
-                  measurement carried across, which is exactly what `declared`
-                  means.
-
-      both        max_num_seqs 16 — vllm-omni's OWN stage-0 value in
-                  `higgs_multimodal_qwen3.yaml`, and a measured ceiling at the
-                  shipped fractions: 16 concurrent at 0.35 + 0.10 ran
-                  11,387-11,584 chars/min over three runs on owens-pc
-                  (2026-09-05) while 32 filled the card and stalled.
-
-    A BACKEND THAT SERVES NO NARRATOR ENGINE GETS NOTHING — `llama-windows`
-    returns an empty tuple, and its config carries no `[tts.*]` table at all,
-    which is the honest record of a box that cannot serve a voice.
-
-    These are a STARTING POINT and are meant to be overwritten: the note on each
-    says the measurement is owed, and a person or `crucible capability` may
-    rewrite the table on the machine it is wrong about.
-    """
     from .backend import CUDA_LINUX, MLX_DARWIN
 
     if backend_kind == CUDA_LINUX:
@@ -1393,16 +832,6 @@ def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
 
 
 def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:
-    """`[tts.*]` off this installation's config, by engine. Empty when there is none.
-
-    A MISSING CONFIG IS AN EMPTY ANSWER HERE, and that is not a fallback hiding
-    one. The caller is `crucible/voicerepo.py`, merging a manifest on a machine
-    that may have no config at all — a test, or `crucible voices check` run on a
-    laptop — and what it does with the emptiness is refuse the voice by name
-    (`engine_footprint_unset`). Raising here would turn "this box has not been
-    told its footprint" into "there is no Crucible here", which is a different
-    thing and not this function's to say.
-    """
     try:
         _root, _path, table = _read_document(home)
     except ConfigError:
@@ -1411,12 +840,6 @@ def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint
 
 
 def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
-    """The home, the path and the parsed document — or a ConfigError saying why.
-
-    One reader, because `own_engine_backend` below asks a question about the
-    same document and a second `tomllib.load` beside this one would be two
-    opinions about what "unreadable" means for one file.
-    """
     root = home if home is not None else crucible_home()
     path = config_path(root)
     if not path.exists():
@@ -1431,20 +854,6 @@ def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
 
 
 def own_engine_backend(home: Path | None = None) -> str | None:
-    """The backend kind of the engine THIS installation runs, or None for none.
-
-    `[server]` IS THE QUESTION. An installation whose config has no `[server]`
-    section serves nothing — Owen's PC is the case: the Windows half's
-    `config.toml` is an orchestrator's, `[orchestrator] distro = "Ubuntu"` and
-    no server at all, because the engine on that machine lives in the guest and
-    belongs to the guest's installation. "No engine here" is a FACT about such a
-    config and this is where it is stated, so a caller asking whether an engine
-    is its own gets an answer rather than an exception it has to interpret.
-
-    Unreadable is still an error. A config that is absent, will not parse, or
-    names a `[server]` without a `[backend] kind` raises `ConfigError` exactly
-    as `load_config` does: not knowing is not the same answer as none.
-    """
     _root, _path, table = _read_document(home)
     if "server" not in table:
         return None
@@ -1452,14 +861,12 @@ def own_engine_backend(home: Path | None = None) -> str | None:
 
 
 def load_config(home: Path | None = None) -> Config:
-    """Read config.toml. Raises ConfigError naming the missing piece."""
-    # The stamp is taken BEFORE the document is read — see `Config.stamp`.
     stamped = config_path(home if home is not None else crucible_home())
     try:
         before = stamped.stat()
         stamp: tuple[int, int] | None = (before.st_mtime_ns, before.st_size)
     except FileNotFoundError:
-        stamp = None  # `_read_document` says so, in its own words
+        stamp = None
     root, path, table = _read_document(home)
 
     upstreams = _upstream_records(table)
@@ -1515,60 +922,20 @@ def write_config(
     enable_denoise: bool,
     desktop_allowance_bytes: int,
     retention_days: int,
-    #: Where `desktop_allowance_bytes` came from, and what was seen
-    #: (`DESKTOP_BASES`).
     desktop_allowance_basis: str,
     desktop_allowance_note: str,
-    #: None keeps what the file on disk says (`_kept_install_on_submit`),
-    #: so a rewriter written before the key cannot turn an operator's
-    #: `false` back on.
     install_on_submit: bool | None = None,
     capability: CapabilityRecord | None = None,
-    #: `[routes]` and `[upstreams.*]`, defaulted to empty. **Every caller
-    #: that REWRITES an existing config must pass the loaded values**, or the
-    #: rewrite silently unroutes a server — `cli._write_capability` does, and a
-    #: test pins it.
     routes: tuple[RouteRecord, ...] = (),
-    #: `[local_models]`, on the same terms as `routes` above: defaulted to
-    #: empty, and written only when there is one.
     local_models: tuple[LocalModelRecord, ...] = (),
     upstreams: tuple[UpstreamRecord, ...] = (),
     advertise: tuple[str, ...] = (),
     tailscale_advertise: tuple[str, ...] = (),
     lan_advertise: tuple[str, ...] = (),
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
-    #: `[tts.<engine>]`, on the same terms as `routes` above: defaulted to
-    #: empty, written only when there is one, and **a caller that REWRITES an
-    #: existing config must pass the loaded values** or the rewrite silently
-    #: takes this box's serving footprint away and every repo-manifest voice
-    #: stops loading with `engine_footprint_unset`.
     tts_engines: tuple[EngineFootprint, ...] = (),
-    #: Whole top-level tables to copy in VERBATIM, or None.
-    #:
-    #: `crucible init --config-from` (PHASE15-HOST.md 4.3) is the one caller:
-    #: when the Windows host moves a Crucible into the WSL guest it carries
-    #: `[routes]` and `[upstreams]` across, and those tables' SHAPE belongs to
-    #: section 2 and to whatever reads them — not to this writer, which would
-    #: otherwise have to grow a parameter per upstream and a second
-    #: declaration of a document somebody else owns. Copied and never merged
-    #: key by key: a key this build does not know about is still the
-    #: operator's, and dropping it silently on an upgrade is how a
-    #: configuration quietly stops meaning what it said.
     carried_tables: dict[str, Any] | None = None,
 ) -> Path:
-    """Write config.toml at mode 0600 under a 0700 home. Returns the path.
-
-    `capability` is optional and the default writes NO `[capability]` table, which
-    is the honest record for `crucible init`: init takes the operator's
-    `--enable-*` flags at their word and probes nothing, so it has no verdict to
-    write down. `crucible capability --write` and `crucible install` are the two
-    doors that have one.
-
-    **A key lands in this file and nowhere else.** The document is created at
-    0600 under a 0700 home before a byte of it is written, which is the same
-    protection the token has had since phase 1 — PHASE15-HOST.md section 2:
-    *"a key here is no worse than the token"*.
-    """
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
     path = config_path(home)
@@ -1584,24 +951,15 @@ def write_config(
             "enable_align": enable_align,
             "enable_rvc": enable_rvc,
             "enable_denoise": enable_denoise,
-            # Written always, for `retention_days`'s reason below: the
-            # operator who wants installs to be his own act must find the
-            # switch in the file.
             "install_on_submit": (
                 _kept_install_on_submit(home)
                 if install_on_submit is None
                 else install_on_submit
             ),
-            # Written always, unlike `routes` and `local_models` below: this is
-            # not "there is one of these", it is a number every server has, and
-            # an operator changing how long his renders survive should find the
-            # key already in the file rather than have to know it exists.
             "retention_days": retention_days,
         },
         "accelerator": {
             "desktop_allowance_bytes": desktop_allowance_bytes,
-            # Written always, like `retention_days`: every reserve has a basis,
-            # and a reader of the file should find it beside the number.
             "desktop_allowance_basis": desktop_allowance_basis,
         },
     }
@@ -1621,18 +979,10 @@ def write_config(
     if lan_advertise:
         document["server"]["lan_advertise"] = list(lan_advertise)
     if routes:
-        # Only when there is one. An empty `[routes]` table and no table at all
-        # read the same, and writing the empty one would put a section in every
-        # config on earth to say nothing.
         document["routes"] = {entry.capability: entry.model for entry in routes}
     if tts_engines:
-        # Only when there is one, for the reason `routes` gives just above. A
-        # backend that serves no narrator engine — `llama-windows` — writes no
-        # table here, which is the honest record of a box that cannot serve a
-        # voice at all.
         document["tts"] = {entry.engine: entry.to_dict() for entry in tts_engines}
     if local_models:
-        # Only when there is one, for the reason `routes` gives just above.
         document["local_models"] = {
             entry.capability: entry.model for entry in local_models
         }
@@ -1645,9 +995,6 @@ def write_config(
             )
             for entry in upstreams
         }
-    # Carried tables go in AFTER `routes`/`upstreams`, so a caller that states a
-    # table twice — once as the typed parameter, once as a carried copy — is
-    # refused rather than silently having one of the two win.
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
@@ -1657,8 +1004,6 @@ def write_config(
                 "else."
             )
         document[table_name] = table
-    # Serialize before touching the installed file, then replace atomically.
-    # A failed write/reinstall must not truncate the token and provider keys.
     import tempfile
     data = tomli_w.dumps(document).encode("utf-8")
     fd, temporary = tempfile.mkstemp(prefix="config-", suffix=".tmp", dir=home)
@@ -1679,13 +1024,3 @@ def config_mode(path: Path) -> str:
     return oct(stat.S_IMODE(path.stat().st_mode))
 
 
-# THE PAIRING FILE lives in `crucible/pairing.py` and nowhere else.
-#
-# It was briefly written twice — once here (POSIX, `os.chmod` 0600) and once
-# there (both platforms, with `icacls` on Windows) — because two builds of
-# PHASE15 section 3.6 landed on two branches. Two writers of one file is two
-# answers to "who may read this token", so the POSIX-only one is gone and
-# `pairing.write_pairing_file` / `pairing.pairing_file_path` are the names.
-# `crucible init` and `crucible service install` call them through
-# `cli._write_pairing_file`, which is what turns (name, port, token) into the
-# loopback LINE those functions write.

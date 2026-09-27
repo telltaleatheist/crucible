@@ -1,114 +1,7 @@
-# crucible `rvc` env — cuda-linux (ultimate-rvc on an NVIDIA card, Linux or WSL2).
-#
 # archive-bytes: 3300000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's table, measured 2026-09-18
-#   What `crucible install rvc` refuses on a disk with less (`env_disk`,
-#   PHASE19-AUTOMATIC-WSL.md 2.12 and ruling 6). An ARCHIVE size — what this
-#   recipe weighed while it was re-hosted as a pack — so the unpacked env is
-#   LARGER and this number is a floor, never an estimate.
-#
-# Installed by `crucible install rvc` into ~/.crucible/envs/rvc/ as a venv built
-# from the server's own interpreter.
-#
-# THE ONE DIRECT REFERENCE IN THE REPO, AND WHY IT IS NOT AN INDULGENCE
-# ---------------------------------------------------------------------
-# `generate convert-dir` — the warm-model batch command this whole job type is
-# built on, the one that loads the model once and converts a directory — exists
-# ONLY in Owen's fork. The `ultimate-rvc` on PyPI has `generate convert`, one
-# file per process, which for a 1,400-sentence book is 1,400 model loads.
-#
-# Both call themselves version 0.5.11, which is exactly why this is pinned to a
-# COMMIT and not a branch: `pip list` would report `0.5.11` for either, so the
-# version is not an identity here. `crucible doctor` checks this line against
-# `pip freeze`, which writes a git install back out in this same form
-# (crucible/workerenv.py, `recipe_direct_refs`).
-#
-# The commit is the one installed in Owen's working `bookforge-urvc` env, read
-# from its `direct_url.json` on 2026-09-13.
-#
-# A RESOLVED SET, read from a real install
-# ----------------------------------------
-# What follows is `pip freeze` from `crucible install rvc --force` (audio-separator in) on
-# Owen's PC (WSL2, Ubuntu, python 3.11.16) on 2026-09-13: every package pip
-# resolved, at the version it resolved. The earlier notice that this file was a
-# CHOSEN set and not a measured one is discharged by that install; `crucible
-# doctor` checks the env against exactly these lines.
-#
-# One deliberate departure from that env while doing so: it holds
-# `torchaudio==2.7.1+cpu` beside a CUDA torch, which is where a hand-built env
-# drifted to rather than a decision anybody made. This asks for the matching
-# CUDA build at the same version as torch, because a CPU torchaudio silently
-# moves resampling off the card.
-#
-# THE BASE ASSETS ARE NOT HERE
-# ----------------------------
-# ultimate-rvc also needs a contentvec embedder and an rmvpe pitch predictor
-# before it can convert anything. They are the engine's, not any model's, they
-# are about 540 MB, and they are NOT installed by this recipe: BookForge ships
-# them on a GitHub release (which DESIGN.md section 5 refuses as a weights
-# source) and urvc's own first-run downloader is precisely what `URVC_SKIP_INIT`
-# turns off. `crucible/jobs/rvc/__init__.py` refuses a job by name
-# (`rvc_base_models_missing`) when they are not under `~/.crucible/rvc-base/`,
-# and says which files it wanted.
 
-
-
-# --- the torch trio, all cu128, all at one version ---
-
-# --- what ultimate-rvc loads, at the versions Owen's working env holds ---
-
-# --- the `denoise` job type's engine, in this same env ---
-# PHASE4-AUDIO.md section 4.2. `denoise` is a separate job type and NOT a
-# separate env: audio-separator is torch, this env already holds the exact torch
-# it wants, and BookForge runs the two out of one env today for the same reason
-# (`electron/denoise-bridge.ts` reaches for the RVC env's python). A second venv
-# would be a second 3 GB torch on disk to run the same card.
-#
-# 0.31.1 is the version BookForge's resident worker was written and verified
-# against — `electron/scripts/separator_worker.py` says so, having read that
-# release's `cli.py` to confirm every separation parameter it leaves alone is an
-# argparse default identical to the constructor default. Read against this
-# recipe's other pins from PyPI metadata on 2026-09-13, every one compatible:
-# torch>=2.3 (here 2.7.0), numpy>=2 (2.2.5), librosa>=0.10 (0.10.2),
-# rotary-embedding-torch>=0.6.1,<0.7.0 (0.6.5), scipy>=1.13 and onnxruntime via
-# its `gpu` extra, which this env already carries as onnxruntime-gpu.
-#
-# THE PIN IS COMPATIBLE, NOT RESOLVED. Nobody has run pip against this file; the
-# notice at the top of this recipe covers this line too. audio-separator also
-# pulls `onnx-weekly` and `onnx2torch-py313`, neither of which it pins, so the
-# first real install is what turns this into a freeze.
-# torch/torchaudio/torchvision here are CUDA 12.8 builds (`+cu128`), which live on
-# PyTorch's own index, not PyPI. `pip freeze` prints the local version but not the
-# index it came from; without this line the resolved set is unresolvable.
 --extra-index-url https://download.pytorch.org/whl/cu128
-#
-# PREBUILT WHEELS, FROM CRUCIBLE'S OWN RELEASE (2026-09-26, kylies-pc). diffq
-# 0.2.4 is on PyPI only as source, and its C extension needs a compiler. A stock
-# Ubuntu WSL guest has none at all (no gcc, cc or clang), so `crucible install
-# rvc` failed on a fresh machine. The wheel was built once, with Crucible's own
-# CPython on Ubuntu 24.04 (glibc 2.39), and published on the `wheels` release;
-# the pin below stays `diffq==0.2.4`, and pip takes the wheel from this page
-# over PyPI's sdist. sha256 8582b364...d43, in the release notes. Owen:
-# "downloading from gh releases is probably the most trustworthy/correct way".
 --find-links https://github.com/telltaleatheist/crucible/releases/expanded_assets/wheels
-
-# --- the env's own ffmpeg and sox ---
-# urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and
-# `crucible/jobs/rvc/worker.py` puts this env's bin dir at the front of the
-# child's PATH for exactly that reason. These are ultimate-rvc's own declared
-# dependencies; they are pinned here so `crucible doctor` checks the two tools
-# that decision depends on rather than trusting them to be there.
-#
-# static_ffmpeg IS GONE (2026-09-26, fresh-install #25). It downloaded ffmpeg
-# from its author's GitHub the first time urvc asked, and nothing else in
-# this env imports it. Owen's fork only reaches for it when there is no ffmpeg
-# and ffprobe on PATH (`core/generate/common.py`, `_add_ffmpeg_paths`), and
-# every worker now gets Crucible's pinned build first on PATH: `crucible
-# install` places it in ~/.crucible/tools/bin (`crucible/hosttools.py`,
-# `ensure_ffmpeg`), and `crucible/workers.py` prepends that directory. Its own
-# dependencies (twine and its tree, `progress`) are still pinned below: they
-# are harmless, and trimming them is its own piece of work with its own install
-# to prove it, as `mlx-darwin.txt` says. static-sox stays: urvc's convert path
-# never calls it, and removing it is not what this change is about.
 
 absl-py==2.5.0
 annotated-types==0.8.0
@@ -178,13 +71,6 @@ nvidia-nvjitlink-cu12==12.8.61
 nvidia-nvtx-cu12==12.8.55
 onnx-weekly==1.24.0.dev20260914
 onnx2torch-py313==1.6.0
-# 1.26.0, NOT the 1.27.0 the 2026-09-13 freeze resolved (2026-09-26). 1.27.0 is
-# a CUDA 13 build: its libonnxruntime_providers_cuda.so needs libcudart.so.13 and
-# libcublas.so.13, and this env's torch and nvidia-* wheels are CUDA 12.8, so
-# `import audio_separator` failed on the PC with "libcudart.so.13: cannot open
-# shared object file" and denoise never ran there. Read off each wheel's NEEDED
-# entries: 1.22.0 through 1.26.0 link libcudart.so.12, and 1.27.0 is the first
-# on 13. 1.26.0 is the newest that matches.
 onnxruntime-gpu==1.26.0
 packaging==26.3
 pedalboard==0.9.16

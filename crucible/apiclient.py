@@ -1,71 +1,3 @@
-"""`crucible api …` — the CLIENT half of the command line.
-
-ONE BINARY, TWO KINDS OF VERB, AND THE DIFFERENCE IS THE ADDRESS
-----------------------------------------------------------------
-Everything already in `crucible/cli.py` acts on **this machine's installation**:
-`init` writes config.toml, `install` pips an env's recipe, `service` writes a
-unit, `models pull` puts weights on this disk. None of them takes a `--url`,
-because there is nothing to point them at — the subject is the filesystem they
-are running on.
-
-The verbs in this module are a **client**. They speak HTTP to a server at a URL
-with a bearer token, and that server may be this machine's, the one inside WSL,
-or the Mac across the tailnet. `--url` and `--token` are what make them
-different in kind rather than merely different in subject, and a reader coming
-from the operator half should expect exactly that asymmetry.
-
-They are not a second program. `crucible/launcher.py` writes ONE shim onto PATH
-and records it in launcher.json, and `crucible/uninstall.py` removes that one; a
-second binary would be a second launcher, a second PATH entry and a second thing
-an upgrade can leave stale — which is what `cli_launcher_conflict` already cost
-twice this week. It is also what Ollama does: `ollama serve` and `ollama pull`
-are operator verbs, `ollama run` is inference, one binary, and nobody finds it
-confusing. docs/INTENT.md is explicit that Crucible should be like Ollama.
-
-WHY THE NAMESPACE IS SPELLED `api`
-----------------------------------
-Because `crucible models` and `crucible voices` are ALREADY TAKEN, by verbs that
-list the manifests this BUILD carries. A client's "models" is a different fact
-with a different owner — what one particular server holds right now — and two
-verbs with one word is the shape ARCHITECTURE.md R1 exists to stop. Behind
-`api` the two can never be confused: `crucible models list` reads this build,
-`crucible api models` asks a server. The word also tells a reader the one thing
-they must know before typing it, which is that a request is about to leave this
-process.
-
-OUTPUT IS DATA, ALWAYS, AND THERE IS NO `--json` FLAG
-------------------------------------------------------
-Owen's stated purpose for this surface is a fine-tuning script driving it, so
-every command writes JSON to stdout and nothing else:
-
-  * a command that makes one request prints one indented JSON document;
-  * a command that FOLLOWS a stream prints one compact JSON object per line
-    (JSONL) as each event arrives, then the subject's final state as a last
-    line.
-
-A flag would mean two output shapes to keep working and a script that forgot it
-would get prose. Human-readable and machine-readable are the same thing here.
-
-REFUSALS ARE PRINTED VERBATIM, WITH THE CODE
----------------------------------------------
-The server answers a refusal as `{"error": {"code", "message", "details"?}}`
-(crucible/errors.py). This module prints that body to stderr unchanged and exits
-1. It never paraphrases: a code renamed on the way past is a code nobody can
-grep for, in this repo or in the server's own source. When the body is not that
-shape — a proxy's HTML, say — the raw bytes are printed, also unchanged.
-
-WHAT IS DELIBERATELY NOT HERE
-------------------------------
-`POST /v1/pairing/start` and `/poll` are the REQUESTING app's half of the
-connect dance; a CLI that already holds the token has nothing to do with them.
-A CLI that does NOT hold it — owens-pc wanting kylies-pc, FRESH-INSTALL #4 —
-is a requesting app, and `crucible pair <address>` (below, a top-level verb)
-is that half, saving the line for `--server`. `/v1/peer*` is the
-orchestrator's relation to its engine (PHASE17), authenticated under its own
-names for its own reason, and a client borrowing that door would be a second
-claimant. Everything else the API serves has a verb below.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -89,21 +21,13 @@ from .config import crucible_home
 from .errors import ConfigError, CrucibleError
 from .pairing import parse_pairing_line
 
-#: The pairing line from the environment: the one source a process listing does
-#: not show (argv does). See `resolve`.
 PAIRING_ENV = "CRUCIBLE_PAIRING"
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
 
-#: Long enough for a 27B to answer a non-streamed completion, which is the
-#: slowest single response this client ever waits on. The event streams set no
-#: read timeout at all — see `follow`.
 REQUEST_TIMEOUT_SECONDS = 900.0
 
-#: The connect is a separate budget from the read, for the reason
-#: `crucible/api.py`'s proxy gives: a server that is not there should say so in
-#: seconds, and a server that is thinking may take fifteen minutes.
 CONNECT_NOTE = (
     "Crucible answers /v1/ping without a token; try that first if this is the "
     "wrong address"
@@ -111,62 +35,24 @@ CONNECT_NOTE = (
 
 
 class ClientRefusal(CrucibleError):
-    """Something this CLI will not do, named. Never a server's refusal."""
-
-
-# ------------------------------------------------------------------ connection
+    ...
 
 
 @dataclass(frozen=True)
 class Connection:
-    """Where the request goes and what it carries. Resolved once per command."""
 
     url: str
     token: str
-    #: The server's name when the source knew it (the pairing file and
-    #: config.toml both do), None when the operator only gave --url/--token.
-    #: Reported, never checked: /v1/info is where identity is asserted, and a
-    #: second comparison here would be a second owner of "is this the right
-    #: server".
     name: str | None
     source: str
 
 
 def resolve(args: argparse.Namespace) -> Connection:
-    """The address and token, from exactly one of three places, named.
-
-    THE ORDER IS NOT A FALLBACK CHAIN. Each source is chosen explicitly and the
-    combinations that do not make sense are refused rather than silently
-    resolved:
-
-      --url + --token   a server anywhere. Both or neither.
-      --pairing <line>  a `crucible://name@host:port/#token` line, which is what
-                        `crucible token --url` prints and what an app's connect
-                        door takes. One string carries all three facts.
-      --pairing-file <path>, or $CRUCIBLE_PAIRING
-                        the same line, from a file or the environment, so it is
-                        never in argv (2026-09-26: a runner's `ps` printed the
-                        Mac's token in full, because `--pairing "$(cat f)"`
-                        puts the file's contents on the command line). Exactly
-                        one pairing source; two are refused, not ranked.
-      (nothing)         THIS machine's installed engine, through
-                        `crucible/local.py:connection`, which is already the one
-                        owner of "where is the local engine and what is its
-                        token" and which knows that on Windows the answer is the
-                        WSL guest's pairing file rather than config.toml.
-
-    **`--url` without `--token` is refused by name and never falls back to the
-    local token.** Sending this machine's bearer to an address the operator
-    typed is a credential leak with a one-character typo as its cause, and
-    silently doing it would be the worst kind of helpfulness.
-    """
     given_url = getattr(args, "url", None)
     given_token = getattr(args, "token", None)
     given_pairing = getattr(args, "pairing", None)
     pairing_file = getattr(args, "pairing_file", None)
     pairing_env = os.environ.get(PAIRING_ENV) or None
-    # `--server NAME` is `--pairing-file` at the place `crucible pair` saved it
-    # (FRESH-INSTALL #4, 2026-09-26): a name to type, never a path or a token.
     given_server = getattr(args, "server", None)
 
     sources = [
@@ -247,10 +133,6 @@ def resolve(args: argparse.Namespace) -> Connection:
             source="--url/--token",
         )
 
-    # Nothing stated: the installed engine. Imported here rather than at module
-    # scope so that `crucible api --url ... ` on a machine with no installation
-    # works — `local` reads config.toml on import of nothing, but `connection`
-    # does, and a remote-only user should never be refused for a local file.
     from .local import LocalError, connection as local_connection
 
     try:
@@ -263,17 +145,7 @@ def resolve(args: argparse.Namespace) -> Connection:
     return Connection(url=url.rstrip("/"), token=token, name=name, source="local")
 
 
-# ------------------------------------------------------------------- transport
-
-
 def _headers(connection: Connection) -> dict[str, str]:
-    """Every request's three headers. `require_auth` and `require_api_version`.
-
-    The User-Agent is what `_client_agent` records against a job and shows on
-    the bench, so a render started from a terminal is distinguishable from one
-    BookForge started. It is not a claim of an ACT — that is `X-Crucible-Act`,
-    which only the two doors that take one send, and only when told to.
-    """
     return {
         "Authorization": f"Bearer {connection.token}",
         API_HEADER: str(API_VERSION),
@@ -282,14 +154,6 @@ def _headers(connection: Connection) -> dict[str, str]:
 
 
 def _opener() -> urllib.request.OpenerDirector:
-    """The default opener, proxies and all.
-
-    Deliberately NOT `local.py`'s `ProxyHandler({})`. That module talks only to
-    127.0.0.1, where a shell's proxy variables are noise; this one is built to
-    reach the Mac across a tailnet, which is precisely the case a proxy exists
-    for. `no_proxy` is the operator's lever for the loopback case and urllib
-    already honours it.
-    """
     return urllib.request.build_opener()
 
 
@@ -303,11 +167,6 @@ def _open(
     extra_headers: dict[str, str] | None = None,
     timeout: float | None = REQUEST_TIMEOUT_SECONDS,
 ) -> Any:
-    """One HTTP call, returning the open response. The caller reads it.
-
-    Open rather than read, because an SSE follow and a 40 MB artifact download
-    both need the body as a stream and neither should go through memory.
-    """
     headers = _headers(connection)
     if content_type is not None:
         headers["Content-Type"] = content_type
@@ -327,12 +186,6 @@ def call(
     json_body: Any = None,
     extra_headers: dict[str, str] | None = None,
 ) -> Any:
-    """One JSON request, one parsed answer. `None` for a 204.
-
-    A 204 is a real answer here — `DELETE /v1/leases/{id}` and
-    `DELETE /v1/catalog/{kind}/{id}` both succeed with no body — so it returns
-    None rather than an empty dict, and the caller prints what it means.
-    """
     body = None if json_body is None else json.dumps(json_body).encode("utf-8")
     with _open(
         connection,
@@ -353,24 +206,6 @@ def call(
 def follow(
     connection: Connection, path: str, *, last_event_id: int = 0
 ) -> Iterator[dict[str, Any]]:
-    """An SSE stream, yielded event by event as it arrives.
-
-    `Last-Event-ID` is the server's own resume (PHASE3-TTS.md section 7): a
-    stream reattached with it is replayed what it missed and follows live from
-    there. It is sent whenever the caller names an id, and the caller names one
-    by passing `--since <the last id it printed>`.
-
-    **No automatic reconnect.** A follow that dies has had something happen to
-    it — the tunnel, the server, the process — and quietly starting again would
-    turn an outage into a pause nobody sees. The command prints the ids it
-    delivers, so resuming is re-running with `--since`, which is a decision a
-    person or a script makes with the failure in front of them.
-
-    `timeout=None`: a job stream is silent between a `progress` and the next
-    one, and a 25-minute render legitimately says nothing for minutes at a
-    time. The server sends a keepalive comment every 15 s
-    (`KEEPALIVE_SECONDS`), which is what actually detects a dead socket here.
-    """
     extra = {"Accept": "text/event-stream"}
     if last_event_id:
         extra["Last-Event-ID"] = str(last_event_id)
@@ -383,7 +218,7 @@ def follow(
                     yield current
                     current = {}
                 continue
-            if line.startswith(":"):  # the server's keepalive comment
+            if line.startswith(":"):
                 continue
             field, _, value = line.partition(":")
             if value.startswith(" "):
@@ -399,11 +234,6 @@ def follow(
 
 
 def download(connection: Connection, path: str, destination: Path | None) -> int:
-    """An artifact's bytes to a file, or to stdout when `destination` is None.
-
-    Returns the byte count. Copied in chunks because a long-form align's
-    artifacts are tens of megabytes and a render's FLACs arrive by the hundred.
-    """
     with _open(connection, "GET", path) as response:
         if destination is None:
             written = 0
@@ -422,17 +252,6 @@ def download(connection: Connection, path: str, destination: Path | None) -> int
 
 
 def upload(connection: Connection, source: Path) -> dict[str, Any]:
-    """`POST /v1/uploads` — one file, as multipart, returning its blob record.
-
-    The body is assembled here rather than with `requests` or `httpx` because
-    this is the only multipart request the whole client makes and neither
-    library is worth carrying for it; `python-multipart` is the SERVER's
-    dependency and parses rather than writes. The field name is `file`, which
-    is what `api.py:upload`'s `UploadFile` parameter is called.
-
-    The file is read whole. Uploads here are a job's inputs — a chunk of audio,
-    a page image — and the server writes them to disk in one pass anyway.
-    """
     if not source.is_file():
         raise ClientRefusal(f"input_missing: {source} is not a file")
     boundary = uuid.uuid4().hex
@@ -456,30 +275,18 @@ def upload(connection: Connection, source: Path) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
-# ---------------------------------------------------------------------- output
-
-
 def emit(value: Any) -> None:
-    """One JSON document on stdout. The answer to a command that made a request."""
     json.dump(value, sys.stdout, indent=2, sort_keys=False)
     sys.stdout.write("\n")
     sys.stdout.flush()
 
 
 def emit_line(value: Any) -> None:
-    """One compact JSON object on stdout. A line of a followed stream."""
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 
 def report_http_error(exc: urllib.error.HTTPError) -> int:
-    """Print the server's refusal to stderr, unchanged, and return exit 1.
-
-    Unchanged is the whole point. `crucible/errors.py` gives every refusal a
-    `code`, and several carry a `details.field` naming exactly what was wrong;
-    a client that turned `server_busy` into "try again later"
-    would have deleted the one string a person can search this repo for.
-    """
     raw = exc.read()
     try:
         body = json.loads(raw.decode("utf-8"))
@@ -495,12 +302,7 @@ def report_http_error(exc: urllib.error.HTTPError) -> int:
     return EXIT_REFUSED
 
 
-# ------------------------------------------------------------ argument helpers
-
-
 def read_text_argument(raw: str, flag: str) -> str:
-    """Text, or `@path/to.txt` for a file's contents. `read_json_argument`'s rule
-    for flags that take prose: a window's text or a decision's state."""
     if raw.startswith("@"):
         path = Path(raw[1:])
         if not path.is_file():
@@ -510,12 +312,6 @@ def read_text_argument(raw: str, flag: str) -> str:
 
 
 def read_json_argument(raw: str, flag: str) -> Any:
-    """`{"a": 1}` or `@path/to.json`. One spelling for every JSON-taking flag.
-
-    `@` because that is what curl, gh and this repo's own tools use, and a
-    fine-tuning script's `chunks` list is thousands of sentences long — far past
-    what a shell will take as one argument on Windows.
-    """
     if raw.startswith("@"):
         path = Path(raw[1:])
         if not path.is_file():
@@ -531,7 +327,6 @@ def read_json_argument(raw: str, flag: str) -> Any:
 
 
 def split_assignment(raw: str, flag: str) -> tuple[str, str]:
-    """`name=value`, refused by name when it is not."""
     name, separator, value = raw.partition("=")
     if separator != "=" or name == "" or value == "":
         raise ClientRefusal(
@@ -540,23 +335,6 @@ def split_assignment(raw: str, flag: str) -> tuple[str, str]:
     return name, value
 
 
-# --------------------------------------------------------------- job following
-#
-# A followed job and a followed task are the same three steps — print the
-# events, decide on the terminal one, print the final state — over two stores
-# whose routes differ only in their path. The difference that matters is which
-# words end them, so that is the parameter and the rest is shared.
-
-#: The one terminal status that is not a failure.
-#:
-#: There is no copy of `api.py`'s TERMINAL_EVENTS here, and there does not need
-#: to be: the server's stream ENDS at a terminal event, so a `follow` that runs
-#: out of events has already reached one and nothing has to recognise which. The
-#: status is then read off the job document, and this is the only word that
-#: means it went well. Not imported from `crucible.api` — that module drags
-#: FastAPI and uvicorn in behind it, and a CLI whose `--help` takes two seconds
-#: is a CLI people stop using. tests/test_api_client.py proves the word by
-#: running a real job to completion rather than by restating it.
 SUCCEEDED = "done"
 
 
@@ -567,13 +345,6 @@ def follow_to_the_end(
     *,
     since: int,
 ) -> tuple[int, dict[str, Any]]:
-    """Print every event as a line, then the final state. Returns (exit, state).
-
-    The final state is fetched rather than inferred from the terminal event,
-    because the state document carries `artifacts` and `error` and the event
-    carries neither in full — and a `--artifacts-dir` run has to know the names
-    before it can ask for them.
-    """
     for event in follow(connection, events_path, last_event_id=since):
         emit_line(event)
     state = call(connection, "GET", state_path)
@@ -582,15 +353,7 @@ def follow_to_the_end(
     return (EXIT_OK if status == SUCCEEDED else EXIT_REFUSED), state
 
 
-# -------------------------------------------------------------------- commands
-#
-# Every command below is `(connection, args) -> int`. The wrapper in `command`
-# resolves the connection, catches the two error kinds this surface has, and
-# owns the exit code, so nothing here has to repeat a try/except.
-
-
 def cmd_get(path: str) -> Callable[[Connection, argparse.Namespace], int]:
-    """A read with no arguments. Fourteen of the routes are exactly this."""
 
     def run(connection: Connection, args: argparse.Namespace) -> int:
         emit(call(connection, "GET", path))
@@ -600,19 +363,9 @@ def cmd_get(path: str) -> Callable[[Connection, argparse.Namespace], int]:
 
 
 def cmd_capability(connection: Connection, args: argparse.Namespace) -> int:
-    """`GET /v1/capability`, optionally paying for a live accelerator probe.
-
-    The query parameter is the server's (`?accelerator_probe=true`), and it
-    costs an `nvidia-smi` — which is why it is a flag and not the default.
-    """
     params: list[tuple[str, str]] = []
     if args.accelerator_probe:
         params.append(("accelerator_probe", "true"))
-    # A CLIENT-SIZED CLASS (`generate`) is decided at the size the caller
-    # states, for this call alone. Passed through as typed: the server is the
-    # one that validates and refuses by name (`capability_class_required`,
-    # `capability_not_client_sized`, `invalid_working_context`,
-    # `context_over_limit`), so this door has no second copy of the rules.
     if args.capability_class is not None:
         params.append(("class", args.capability_class))
     if args.context_tokens is not None:
@@ -631,14 +384,6 @@ def cmd_catalog_remove(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_voice_write(connection: Connection, args: argparse.Namespace) -> int:
-    """`PUT /v1/voices/{id}` — the manifest document, as the file holds it.
-
-    The whole document goes, never a patch: `voices/<id>.toml` is read as one
-    table and a half-sent manifest is a voice with no pace or no weights, which
-    the server would have to either refuse or invent. The answer is the voice's
-    own `/v1/voices` row after the write, so a caller sees what the file was
-    shaped into rather than an echo of what it sent.
-    """
     document = read_json_argument(args.manifest, "--manifest")
     emit(call(
         connection, "PUT", f"/v1/voices/{args.voice_id}", json_body=document,
@@ -647,26 +392,12 @@ def cmd_voice_write(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_voice_remove(connection: Connection, args: argparse.Namespace) -> int:
-    """`DELETE /v1/voices/{id}` — this machine's overlay manifest, not the weights.
-
-    A 204, so the printed object is this command's own, `cmd_catalog_remove`'s
-    shape. It says `manifest` because that is the thing that went: a voice that
-    was shadowing a packaged one is still there afterwards, reverted, and the
-    8 GB it pulled is still on the card's disk — `api catalog-remove voice <id>`
-    is the door for those.
-    """
     call(connection, "DELETE", f"/v1/voices/{args.voice_id}")
     emit({"removed": {"manifest": args.voice_id}})
     return EXIT_OK
 
 
 def cmd_settings(connection: Connection, args: argparse.Namespace) -> int:
-    """`GET /v1/settings`, or `PUT` when `--patch` is given.
-
-    One command for both because the answer is the same document either way —
-    `put_settings` returns the whole settings document AFTER the write, so a
-    caller never has to guess what took.
-    """
     if args.patch is None:
         emit(call(connection, "GET", "/v1/settings"))
         return EXIT_OK
@@ -680,9 +411,6 @@ def cmd_upstream_test(connection: Connection, args: argparse.Namespace) -> int:
     body = None if args.body is None else read_json_argument(args.body, "--body")
     emit(call(
         connection, "POST", f"/v1/settings/upstreams/{args.name}/test",
-        # The route's body is optional and means "use the stored record"; an
-        # empty object is NOT the same request as no body, so absence is
-        # forwarded as absence.
         json_body=body,
     ))
     return EXIT_OK
@@ -701,21 +429,6 @@ def cmd_pairing_decide(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
-    """`POST /v1/openai/chat/completions` — the cleanup and translation door.
-
-    THE BODY IS THE CLIENT'S, VERBATIM. This proxy forwards what it is given in
-    both directions except `model` (api.py's `_forward_body`), and the fields
-    that matter to Owen's passes — `thinking`, `chat_template_kwargs`,
-    `max_tokens` — are the ENGINE's vocabulary, not this CLI's. Modelling them
-    as flags would put a second owner on every one of them and would be wrong
-    the first time vLLM added a field. So the whole body is `--body`, and
-    `--model` and `--message` exist only as the two-line shorthand for a
-    one-shot question.
-
-    `--stream` is the request's own `stream: true` plus an SSE reader: the
-    server relays the engine's frames untouched, so what is printed is what the
-    engine sent, one `data:` payload per line.
-    """
     if args.body is not None and (args.model is not None or args.message is not None):
         raise ClientRefusal(
             "chat_overspecified: --body is the whole request, so it cannot be "
@@ -749,10 +462,6 @@ def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
         ))
         return EXIT_OK
 
-    # A streamed completion is OpenAI's SSE, not Crucible's: the frames carry no
-    # `event:` and no `id:`, and the stream ends with the literal `[DONE]`. So
-    # it is read here rather than through `follow`, which parses Crucible's
-    # shape and would drop every one of these on the floor.
     headers = {"Accept": "text/event-stream"}
     if extra is not None:
         headers.update(extra)
@@ -775,15 +484,8 @@ def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
 
 
 class _Question(argparse.Action):
-    """`--choice` / `--score` / `--yesno` append to ONE list, in the order typed.
 
-    One list rather than three because the request's `questions` is an ordered
-    object and the reply's `answers` follows it: `--yesno a … --choice b …`
-    should come back a-then-b, and three separate `append` lists would have
-    reordered them by flag.
-    """
-
-    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+    def __call__(self, parser, namespace, values, option_string=None):
         questions = getattr(namespace, self.dest)
         if questions is None:
             questions = []
@@ -792,14 +494,6 @@ class _Question(argparse.Action):
 
 
 def decide_questions(given: list[tuple[str, list[str]]] | None) -> dict[str, Any]:
-    """snap's question grammar (`snap/cli.py`), into the door's `questions`.
-
-    The SHAPE is this CLI's — an option is `opt=description`, levels are one
-    comma-separated word — and it is refused here by name. How many options,
-    how many levels, what a name may contain: those are the server's numbers
-    (PHASE22-DECIDE.md section 2.2) and it refuses them itself, so they are not
-    copied into this file.
-    """
     if not given:
         raise ClientRefusal(
             "decide_needs_a_question: pass at least one --choice, --score or --yesno"
@@ -838,15 +532,6 @@ def decide_questions(given: list[tuple[str, list[str]]] | None) -> dict[str, Any
 
 
 def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
-    """`POST /v1/decide` — a distribution over each question's fixed answers.
-
-    PHASE22-DECIDE.md (2026-09-23): snap's decision model, moved into Crucible
-    as a door beside chat. The grammar is snap's own (`snap decide`), so a
-    person moving from snap types the same thing; what differs is the address.
-    The prompt, the letters and the renormalisation are the SERVER's — this
-    verb sends the state, the questions and their options, and prints the
-    answer the server gives, unchanged.
-    """
     images = []
     for raw in args.image:
         path = Path(raw)
@@ -857,8 +542,6 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
             raise ClientRefusal(f"image_empty: {path} has no bytes")
         images.append(base64.b64encode(data).decode("ascii"))
     if args.state is None:
-        # snap's rule: an image-only decision has the state "". Stated rather
-        # than defaulted — without an image there is nothing to decide about.
         if not images:
             raise ClientRefusal(
                 "decide_needs_state: pass --state <text|@file>, or at least one --image"
@@ -871,8 +554,6 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
         body["images"] = images
     body["questions"] = decide_questions(args.questions)
     if args.missing is not None:
-        # Passed through unchecked: the two words are the server's, and it
-        # refuses any other by name (`400 invalid_request` naming `missing`).
         body["missing"] = args.missing
     extra = None if args.act is None else {"X-Crucible-Act": args.act}
     emit(call(connection, "POST", "/v1/decide", json_body=body, extra_headers=extra))
@@ -880,15 +561,6 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_align(connection: Connection, args: argparse.Namespace) -> int:
-    """`align` — windows of audio with the words spoken in them, placed in time.
-
-    Owen, 2026-09-24: an align verb beside transcription, the model a pick.
-    Every window goes in ONE job, so the aligner loads once for the run and a
-    window that fails is reported alone. Each audio is uploaded and named
-    `<index>.<ext>`, which is how the server pairs it with its text. The
-    windows are the caller's to cut (at most 300 s each): which words belong to
-    which stretch of a long recording is the application's logic.
-    """
     if not args.window:
         raise ClientRefusal("windows_required: give at least one --window INDEX TEXT AUDIO")
     chunks: list[dict[str, Any]] = []
@@ -944,25 +616,7 @@ def cmd_upload(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# ------------------------------------------------------------------------ jobs
-
-
 def cmd_job_submit(connection: Connection, args: argparse.Namespace) -> int:
-    """`POST /v1/jobs` — the one door every job type goes through.
-
-    **THE PARAMS ARE NOT MODELLED HERE.** Each job type owns a pydantic model
-    with `extra="forbid"` (`TtsParams`, `AsrParams`, `RvcParams`, …) and those
-    models are the contract; a set of argparse flags mirroring them would be a
-    second owner of every field, wrong the day a field moves, and would refuse
-    valid requests the server would have taken. So `--params` is JSON and the
-    server is the validator — which also means a new job type needs no change
-    to this file. docs/API-CLI.md carries a worked body per type.
-
-    Inputs go up through `POST /v1/uploads` and are referenced by `blob_id`
-    rather than inlined. `inline_base64` exists on the wire and is not offered:
-    it puts the bytes through the request body and through this process's
-    memory to save one round trip, and every real input here is audio.
-    """
     body: dict[str, Any] = {"type": args.type}
     if args.model is not None:
         body["model"] = args.model
@@ -975,8 +629,6 @@ def cmd_job_submit(connection: Connection, args: argparse.Namespace) -> int:
             )
         body["params"] = params
     if args.resume is not None:
-        # The flag and not a second spelling: it is `params.resume`, and a
-        # --params that already names a different one is a contradiction.
         params = body.setdefault("params", {})
         if params.get("resume") not in (None, args.resume):
             raise ClientRefusal(
@@ -997,9 +649,6 @@ def cmd_job_submit(connection: Connection, args: argparse.Namespace) -> int:
         body["inputs"] = inputs
 
     if args.artifacts_dir is not None and not args.follow:
-        # NOT an implicit --follow. Downloading artifacts means waiting for the
-        # job, and a flag that silently decides whether a command blocks for
-        # twenty minutes is the kind of surprise this repo refuses by name.
         raise ClientRefusal(
             "artifacts_need_follow: --artifacts-dir waits for the job to finish, "
             "so it must be asked for with --follow. Without it this command "
@@ -1048,23 +697,11 @@ def cmd_job_events(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_job_cancel(connection: Connection, args: argparse.Namespace) -> int:
-    """`DELETE /v1/jobs/{id}` — which answers `cancelling`, not `cancelled`.
-
-    The server sets a flag and the runner ends when it sees it, so the answer is
-    the request's outcome and not the job's. Printed as it arrives; watch the
-    stream for the `cancelled` event.
-    """
     emit(call(connection, "DELETE", f"/v1/jobs/{args.job_id}"))
     return EXIT_OK
 
 
 def cmd_job_artifact(connection: Connection, args: argparse.Namespace) -> int:
-    """One artifact's bytes. To a file with `--out`, else to stdout.
-
-    This is the ONE command that does not print JSON, and it cannot: the bytes
-    are a FLAC or a WAV. `--out -` is spelled explicitly so a pipe is something
-    the caller asked for rather than something they got by leaving a flag off.
-    """
     destination = None if args.out == "-" else Path(args.out)
     written = download(
         connection, f"/v1/jobs/{args.job_id}/artifacts/{args.name}", destination
@@ -1080,22 +717,11 @@ def cmd_resumable_get(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_resumable_discard(connection: Connection, args: argparse.Namespace) -> int:
-    """`DELETE /v1/resumable/{id}` — the journal and its finished work, gone."""
     emit(call(connection, "DELETE", f"/v1/resumable/{args.resume_id}"))
     return EXIT_OK
 
 
-# ----------------------------------------------------------------------- tasks
-
-
 def cmd_task_submit(connection: Connection, args: argparse.Namespace) -> int:
-    """`POST /v1/tasks` — work done TO the server, not with its card.
-
-    `TaskCreate`'s validator refuses a field that belongs to another task type,
-    so the fields are passed through exactly as given and absent ones are left
-    absent. Sending `{"kind": null}` with an `install` would be this CLI
-    inventing a request the operator did not make.
-    """
     body: dict[str, Any] = {"type": args.type}
     for flag, field in (
         ("kind", "kind"), ("id", "id"), ("job_type", "job_type"),
@@ -1139,22 +765,6 @@ def cmd_task_cancel(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# ------------------------------------------------------- tts, the serial door
-#
-# PHASE3-TTS.md sections 6 and 7 are two doors and this CLI keeps them two.
-#
-#   BATCHED   `crucible api job submit --type tts --model <voice> --params @…`
-#             One job, N chunks, one `generate_batch`, `<index>.flac` artifacts.
-#             That is the render door and it needs no verb of its own.
-#
-#   SERIAL    `crucible api stream …` — a session, one `say` at a time, audio
-#             arriving on an SSE stream while the row is still generating.
-#
-# The session id survives the process, which is what makes four separate
-# commands a usable shape: a ladder script opens once, says a row, reads until
-# that row is done, decides, says the next.
-
-
 def cmd_stream_open(connection: Connection, args: argparse.Namespace) -> int:
     emit(call(connection, "POST", "/v1/tts/stream", json_body={
         "voice": args.voice, "language": args.language,
@@ -1163,13 +773,6 @@ def cmd_stream_open(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def cmd_stream_say(connection: Connection, args: argparse.Namespace) -> int:
-    """One row. `--take` has no default here, exactly as the wire has none.
-
-    PHASE3-TTS.md section 7: a default take on the wire would be the server
-    choosing, and now that five fine-tunes declare a second rung it would be a
-    render at a take nobody asked for. The same argument makes it `required` in
-    argparse rather than `default=0`.
-    """
     text = args.text
     if args.text_file is not None:
         if text is not None:
@@ -1202,27 +805,11 @@ def cmd_stream_cancel_all(connection: Connection, args: argparse.Namespace) -> i
 
 
 def cmd_stream_close(connection: Connection, args: argparse.Namespace) -> int:
-    """`DELETE`, not `{"op": "close"}`. The two are the same to the server."""
     emit(call(connection, "DELETE", f"/v1/tts/stream/{args.session_id}"))
     return EXIT_OK
 
 
 def cmd_stream_events(connection: Connection, args: argparse.Namespace) -> int:
-    """Follow a session, optionally writing its audio out as WAVs.
-
-    `--until <row>` is what makes a serial ladder scriptable. Without it this
-    follows to `closed`, which for a session a script is still feeding never
-    comes; with it the command returns as soon as that row is `done` or `error`,
-    which is the moment the script has something to judge.
-
-    `--audio-dir` writes `<row>.wav`. The rate is the one on the session's
-    `ready` frame — the engine's own, which the load already checked against the
-    manifest — and never a constant: PHASE3-TTS.md section 6 refuses a row whose
-    rate is not the loaded one rather than resampling it, and a header this
-    client invented would undo that. A session followed with `--audio-dir` but
-    `--since` past the `ready` frame is refused, because there is then no rate
-    to write and guessing one would put a wrong header on real audio.
-    """
     audio_dir = None if args.audio_dir is None else Path(args.audio_dir)
     if audio_dir is not None and args.since:
         raise ClientRefusal(
@@ -1274,16 +861,7 @@ def cmd_stream_events(connection: Connection, args: argparse.Namespace) -> int:
     return exit_code
 
 
-# ---------------------------------------------------------------------- leases
-
-
 def cmd_lease_open(connection: Connection, args: argparse.Namespace) -> int:
-    """`POST /v1/models/{id}/lease` — "I am mid-run on what is resident".
-
-    The path says `models` and the id may name a model, a voice or an aligner:
-    the server reads the kind off `Residency.resident`, so there is no `kind` to
-    send and nothing here to disambiguate.
-    """
     emit(call(connection, "POST", f"/v1/models/{args.subject_id}/lease", json_body={
         "act": args.act, "ttl_seconds": args.ttl,
     }))
@@ -1301,31 +879,14 @@ def cmd_lease_release(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# ------------------------------------------------------------------- pairing
-#
-# FRESH-INSTALL #4 (kylies-pc, 2026-09-26): registering kylies-pc on owens-pc
-# meant running `crucible token --url` inside kylies-pc's guest and copying the
-# line across by hand. The apps never do that — they call `/v1/pairing/start`
-# with the address and, with open pairing (`connect.py`, the default since
-# 1.0.0), hold the token two seconds later (PHASE19 section 3, "Another
-# computer"). The CLI had no such door; `crucible pair <address>` is it, and
-# it is the same two requests the TS SDK's `startPairing`/`pollPairing` make.
-#
-# What it is NOT: discovery. Nothing here finds kylies-pc on its own; the
-# person still says its address once. The SDK README rules out port scanning
-# and multicast, and changing that is Owen's call, not this verb's.
-
-#: Where `crucible pair` keeps the lines it fetched: `<home>/servers/<slug>.pairing`.
 SERVERS_DIR = "servers"
 
 PAIR_TIMEOUT_SECONDS = 10.0
 
-#: The engine's own default port, which a bare address takes (as `crucibleAddress`).
 PAIR_DEFAULT_PORT = 7100
 
 
 def server_slug(name: str) -> str:
-    """A server's name as a filename: `crucible@kylies-pc` -> `crucible-kylies-pc`."""
     slug = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name.strip())
     slug = slug.strip(".-")
     if not slug:
@@ -1338,7 +899,6 @@ def saved_pairing_path(name: str) -> Path:
 
 
 def _pair_origin(address: str) -> str:
-    """`192.168.68.88` -> `http://192.168.68.88:7100`. The SDK's `crucibleAddress` rule."""
     raw = address.strip()
     if not raw or any(ch in raw for ch in " @?#"):
         raise ClientRefusal(
@@ -1408,7 +968,6 @@ def _pair_call(origin: str, path: str, body: dict[str, Any] | None = None,
 
 def pair(address: str, *, client_name: str, sleep: Callable[[float], None] | None = None,
          notify: Callable[[str], None] | None = None) -> tuple[str, str, str]:
-    """(name, url, token) for the Crucible at `address`, by its connect door."""
     import time
 
     sleep = time.sleep if sleep is None else sleep
@@ -1457,7 +1016,6 @@ def pair(address: str, *, client_name: str, sleep: Callable[[float], None] | Non
             token = answer.get("token")
             if answer.get("name") != name or not isinstance(token, str) or not token:
                 raise ClientRefusal(f"pair_not_crucible: {origin} returned an incompatible approval")
-            # The token is proved on an authenticated door before it is kept.
             _pair_call(origin, "/v1/info", token=token)
             return name, origin, token
         if status == "denied":
@@ -1470,12 +1028,6 @@ def pair(address: str, *, client_name: str, sleep: Callable[[float], None] | Non
 
 
 def cmd_pair(args: argparse.Namespace) -> int:
-    """`crucible pair <address>`: fetch the pairing line, keep it, print where.
-
-    The token is never printed (FRESH-INSTALL #33's rule, for another machine's
-    token too): the line goes into a file readable by this user only, and the
-    output says how to use it — `crucible api --server <name> …`.
-    """
     import socket
 
     try:
@@ -1506,8 +1058,6 @@ def cmd_pair(args: argparse.Namespace) -> int:
 
 
 def add_pair_parser(subparsers: Any) -> None:
-    """`crucible pair`. Top level, not under `api`: `api` resolves a connection
-    before any verb runs, and this verb is how a connection comes to exist."""
     parser = subparsers.add_parser(
         "pair",
         help="connect to the Crucible on another computer by its address; no token to copy",
@@ -1521,18 +1071,7 @@ def add_pair_parser(subparsers: Any) -> None:
     parser.set_defaults(func=cmd_pair)
 
 
-# ------------------------------------------------------------------- the verb
-
-
 def command(args: argparse.Namespace) -> int:
-    """`crucible api …`'s one entry point: resolve, run, name what went wrong.
-
-    Three failure kinds and three sentences. A server refusal is printed
-    verbatim by `report_http_error`. A client refusal — a malformed flag, a
-    missing file, a combination this CLI will not make a request out of — is
-    this module's own named code. A transport failure is the address being
-    wrong or the server being down, which is not a refusal at all and says so.
-    """
     try:
         connection = resolve(args)
         return int(args.api_func(connection, args))
@@ -1542,12 +1081,6 @@ def command(args: argparse.Namespace) -> int:
     except urllib.error.HTTPError as exc:
         return report_http_error(exc)
     except BrokenPipeError:
-        # `crucible api job events … | head` is a legitimate thing to type, and
-        # it is not the server going away. CAUGHT BEFORE OSError, which it is a
-        # subclass of: written the other way round (measured 2026-09-16, first
-        # run against the live engine) `crucible api info | head -12` printed
-        # `server_unreachable: the local engine did not answer: [Errno 32]
-        # Broken pipe` about a server that had answered perfectly.
         return EXIT_OK
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
         target = getattr(args, "url", None) or "the local engine"
@@ -1557,7 +1090,6 @@ def command(args: argparse.Namespace) -> int:
 
 
 def _connection_flags(parser: argparse.ArgumentParser) -> None:
-    """The three flags that make these verbs a client. See the module preamble."""
     group = parser.add_argument_group("server")
     group.add_argument(
         "--url",
@@ -1596,7 +1128,6 @@ def _connection_flags(parser: argparse.ArgumentParser) -> None:
 
 
 def add_parser(subparsers: Any) -> None:
-    """`crucible api …`. One namespace, one binary — see the module preamble."""
     parser = subparsers.add_parser(
         "api",
         help="talk to a Crucible server over HTTP: submit jobs, stream tts, read state",
@@ -1616,7 +1147,6 @@ def add_parser(subparsers: Any) -> None:
     def verb(name: str, help_text: str) -> argparse.ArgumentParser:
         return verbs.add_parser(name, help=help_text)
 
-    # ---- the plain reads. `GET`, no arguments, print the document.
     for name, path, help_text in (
         ("ping", "/v1/ping", "is this a Crucible, and which one (needs no token)"),
         ("health", "/v1/health", "the lane, the queue and every job type's readiness"),
@@ -1773,18 +1303,12 @@ def add_parser(subparsers: Any) -> None:
     upload_verb.add_argument("path")
     upload_verb.set_defaults(api_func=cmd_upload)
 
-    # ---- jobs
     job = verb("job", "submit, watch, cancel and read back one unit of work")
     job_verbs = job.add_subparsers(dest="job_command", required=True)
 
     submit = job_verbs.add_parser("submit", help="POST /v1/jobs")
     submit.add_argument(
         "--type", required=True,
-        # NOT `llm` — there is no such job type, and writing one here would send
-        # somebody looking for it. LLM work is the chat proxy; the llm-class job
-        # types are the two that move a model on and off the card. `api info`'s
-        # `job_types` is the list to ASK rather than the one to remember, which
-        # is why this help says so instead of pretending to be complete.
         help="tts, asr, align, align-longform, rvc, denoise, echo, load-model, "
              "unload-model, load-voice, unload-voice, unload-aligner, "
              "unload-denoiser — `crucible api info` says which this server offers",
@@ -1836,8 +1360,6 @@ def add_parser(subparsers: Any) -> None:
     )
     job_artifact.set_defaults(api_func=cmd_job_artifact)
 
-    # ---- resume journals (Owen, 2026-09-27: "maybe we could even have a call
-    # that shows what's available to resume?")
     resumable = verb("resumable", "the resume journals: what can be resumed, and discarding one")
     resumable_verbs = resumable.add_subparsers(dest="resumable_command", required=True)
     resumable_list = resumable_verbs.add_parser(
@@ -1853,7 +1375,6 @@ def add_parser(subparsers: Any) -> None:
     resumable_discard.add_argument("resume_id")
     resumable_discard.set_defaults(api_func=cmd_resumable_discard)
 
-    # ---- tasks
     task = verb("task", "work done TO the server: pulls, installs, engine restarts")
     task_verbs = task.add_subparsers(dest="task_command", required=True)
 
@@ -1884,7 +1405,6 @@ def add_parser(subparsers: Any) -> None:
     task_cancel.add_argument("task_id")
     task_cancel.set_defaults(api_func=cmd_task_cancel)
 
-    # ---- the serial tts door
     stream = verb("stream", "serialized tts: one session, one row at a time")
     stream_verbs = stream.add_subparsers(dest="stream_command", required=True)
 
@@ -1931,7 +1451,6 @@ def add_parser(subparsers: Any) -> None:
     stream_close.add_argument("session_id")
     stream_close.set_defaults(api_func=cmd_stream_close)
 
-    # ---- leases
     lease = verb("lease", "say you are mid-run on what is resident")
     lease_verbs = lease.add_subparsers(dest="lease_command", required=True)
 
