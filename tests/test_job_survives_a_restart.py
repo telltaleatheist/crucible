@@ -209,3 +209,74 @@ def test_publishing_a_chunk_stamps_the_record_and_writes_it_through(tmp_path: Pa
     recovered = again.get(job.id)
     assert recovered.chunks_total == 3
     assert recovered.chunk_at == job.chunk_at
+
+
+def _days_later(days: float) -> Any:
+    from datetime import datetime, timedelta, timezone
+
+    return lambda: datetime.now(timezone.utc) + timedelta(days=days)
+
+
+def test_an_interrupted_job_is_stamped_finished_so_the_reaper_can_age_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.jobs import queue
+
+    _record(tmp_path / "rst111", status=RUNNING)
+    store = _store(tmp_path)
+    store.restore()
+    job = store.get("rst111")
+    assert job.finished == job.interrupted_at
+
+    assert store.reap() == []
+    monkeypatch.setattr(queue, "_now", _days_later(8))
+    reaped = store.reap()
+    assert [record.job_id for record in reaped] == ["rst111"]
+    assert reaped[0].why == "aged"
+    assert not (tmp_path / "rst111").exists()
+
+
+def test_the_interrupted_stamp_is_written_back_so_a_second_restart_keeps_it(
+    tmp_path: Path,
+) -> None:
+    _record(tmp_path / "rst222", status=RUNNING)
+    first = _store(tmp_path)
+    first.restore()
+    stamped = first.get("rst222").finished
+
+    second = _store(tmp_path)
+    second.restore()
+    assert second.get("rst222").status == INTERRUPTED
+    assert second.get("rst222").finished == stamped
+
+
+def test_one_bad_record_does_not_stop_the_reaper_for_the_rest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from crucible.jobs import queue
+
+    _record(tmp_path / "bad333", status=DONE, finished="not a timestamp")
+    _record(tmp_path / "old444", status=DONE, finished="2026-09-20T18:30:00+00:00")
+    store = _store(tmp_path)
+    store.restore()
+    monkeypatch.setattr(queue, "_now", _days_later(30))
+
+    reaped = store.reap()
+    assert [record.job_id for record in reaped] == ["old444"]
+    assert "skipped job bad333" in capsys.readouterr().err
+    assert store.get("bad333").status == DONE
+
+
+def test_a_job_the_lane_failed_out_of_band_comes_back_failed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    job = store.create("tts", "deathstalker", {})
+    job.status = RUNNING
+    store._fail_out_of_band(job, RuntimeError("lane broke"))
+
+    again = _store(tmp_path)
+    again.restore()
+    restored = again.get(job.id)
+    assert restored.status == FAILED
+    assert restored.error["code"] == "queue_failed"

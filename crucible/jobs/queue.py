@@ -331,28 +331,14 @@ class JobStore:
         horizon = float(self._config.retention_days) * 86_400.0
         taken: list[Reaped] = []
         for job in list(self._jobs.values()):
-            if job.status not in TERMINAL_STATES:
-                continue
-            if job.held and self._age_seconds(job, now) <= horizon:
-                continue
-            if job.collected:
-                record = self._reap_one(
-                    job,
-                    "fetched",
-                    now,
-                    f"its {len(job.artifacts)} artifact(s) and their sidecars "
-                    "had all been fetched",
+            try:
+                record = self._reap_if_due(job, now, horizon)
+            except Exception as exc:
+                print(
+                    f"crucible: the reaper skipped job {job.id} ({job.dir}) and "
+                    f"went on with the rest: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
                 )
-            elif self._age_seconds(job, now) > horizon:
-                record = self._reap_one(
-                    job,
-                    "aged",
-                    now,
-                    f"it finished at {job.finished} and this server keeps a "
-                    f"finished job for {self._config.retention_days} day(s) "
-                    "([jobs] retention_days)",
-                )
-            else:
                 continue
             if record is not None:
                 taken.append(record)
@@ -365,6 +351,30 @@ class JobStore:
                 file=sys.stderr,
             )
         return taken
+
+    def _reap_if_due(self, job: Job, now: datetime, horizon: float) -> Reaped | None:
+        if job.status not in TERMINAL_STATES:
+            return None
+        if job.held and self._age_seconds(job, now) <= horizon:
+            return None
+        if job.collected:
+            return self._reap_one(
+                job,
+                "fetched",
+                now,
+                f"its {len(job.artifacts)} artifact(s) and their sidecars "
+                "had all been fetched",
+            )
+        if self._age_seconds(job, now) > horizon:
+            return self._reap_one(
+                job,
+                "aged",
+                now,
+                f"it finished at {job.finished} and this server keeps a "
+                f"finished job for {self._config.retention_days} day(s) "
+                "([jobs] retention_days)",
+            )
+        return None
 
     def _age_seconds(self, job: Job, now: datetime) -> float:
         if job.finished is None:
@@ -523,6 +533,10 @@ class JobStore:
             if job is None:
                 continue
             self._jobs[job.id] = job
+            if (document.get("status"), document.get("finished")) != (
+                job.status, job.finished
+            ):
+                self._persist(job)
             recovered.append(job.id)
             if job.resume_id is not None and job.status == INTERRUPTED:
                 self._journals.ended(job.resume_id, job.id, INTERRUPTED)
@@ -540,9 +554,12 @@ class JobStore:
             return None
         status = str(document.get("status") or QUEUED)
         interrupted_at = document.get("interrupted_at")
+        finished = document.get("finished")
         if status not in TERMINAL_STATES:
             status = INTERRUPTED
-            interrupted_at = interrupted_at or utcnow()
+        if status == INTERRUPTED:
+            interrupted_at = interrupted_at or finished or utcnow()
+            finished = finished or interrupted_at
         job = Job(
             id=str(document["job_id"]),
             type=str(document.get("type") or ""),
@@ -553,7 +570,7 @@ class JobStore:
             status=status,
             progress=float(document.get("progress") or 0.0),
             started=document.get("started"),
-            finished=document.get("finished"),
+            finished=finished,
             error=document.get("error"),
             artifacts=list(document.get("artifacts") or []),
             client=document.get("client"),
@@ -799,6 +816,7 @@ class JobStore:
             self.append_event(job, "failed", {"error": job.error})
         except Exception:
             pass
+        self._persist(job)
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, FAILED)
         self._running_id = None

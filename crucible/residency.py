@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -9,7 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
-from .accelerator import probe_unified_memory
+from .accelerator import (
+    ProcessIdentity,
+    ask_pid_to_stop,
+    forget_leftover,
+    leftovers,
+    note_leftover,
+    probe_unified_memory,
+    process_alive,
+    process_identity,
+)
 from .alignmodels import AlignBackendSpec, AlignManifest
 from .denoisemodels import DenoiseBackendSpec, DenoiseManifest
 from .backend import MLX_DARWIN
@@ -49,7 +61,21 @@ KIND_DENOISE = "denoise"
 
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
 
-CLEARANCE_TIMEOUT_SECONDS = STOP_TIMEOUT_SECONDS + 30.0
+CLEARANCE_MARGIN_SECONDS = 30.0
+
+CLEARANCE_TIMEOUT_SECONDS = STOP_TIMEOUT_SECONDS + CLEARANCE_MARGIN_SECONDS
+
+RESIDENT_RECORD_NAME = "resident.json"
+
+LEFTOVER_POLL_SECONDS = 1.0
+
+
+def resident_record_path(home: Path) -> Path:
+    return Path(home) / "run" / RESIDENT_RECORD_NAME
+
+
+def stop_budget_of(engine: object) -> float:
+    return float(getattr(engine, "stop_budget_seconds", STOP_TIMEOUT_SECONDS))
 
 
 @dataclass(frozen=True)
@@ -210,6 +236,7 @@ class DyingResident:
     session: WorkerSession | None
     pids: frozenset[int]
     since: str
+    log_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -254,6 +281,8 @@ class Residency:
         self._claim_clears = False
         self._cleared: str | None = None
         self._claim_lock = threading.Condition()
+        self._asking_again = threading.Lock()
+        self._record_lock = threading.Lock()
 
 
     @property
@@ -307,9 +336,19 @@ class Residency:
             return self._cleared == subject_id
         return self._claim_clears and resident.id == subject_id
 
+    def clearance_timeout(self) -> float:
+        dying = self._dying
+        engine = self._engine or (None if dying is None else dying.engine)
+        budget = getattr(engine, "stop_budget_seconds", None)
+        if budget is None:
+            return CLEARANCE_TIMEOUT_SECONDS
+        return float(budget) + CLEARANCE_MARGIN_SECONDS
+
     def await_clearance(
-        self, subject_id: str, *, timeout: float = CLEARANCE_TIMEOUT_SECONDS
+        self, subject_id: str, *, timeout: float | None = None
     ) -> bool:
+        if timeout is None:
+            timeout = self.clearance_timeout()
         with self._claim_lock:
             if not self._being_cleared(subject_id):
                 return False
@@ -365,7 +404,7 @@ class Residency:
         *,
         same_intent: Callable[[], bool] | None = None,
     ) -> AsyncIterator[None]:
-        timeout = CLEARANCE_TIMEOUT_SECONDS
+        timeout = self.clearance_timeout()
         deadline = time.monotonic() + timeout
         while True:
             self._claim_lock.acquire()
@@ -422,16 +461,54 @@ class Residency:
         dying = self._dying
         if dying is None:
             return
+        if not self._still_running(dying):
+            self._let_go_of(dying)
+            return
+        second_stop: Exception | None = None
+        if self._asking_again.acquire(blocking=False):
+            try:
+                self._stop_the_dying()
+            except Exception as exc:
+                second_stop = exc
+            finally:
+                self._asking_again.release()
+                self._record_residents()
+        dying = self._dying
+        if dying is None:
+            return
+        running = self._still_running(dying)
+        if not running:
+            self._let_go_of(dying)
+            return
+        pids = " ".join(str(pid) for pid in running)
+        log = "its log" if dying.log_path is None else str(dying.log_path)
+        said = "" if second_stop is None else f" The second stop said: {second_stop}"
         raise JobError(
             "engine_still_stopping",
             f"cannot {what}: {dying.subject_id} (the {KIND_NOUNS[dying.kind]} "
-            f"that was resident) was asked to stop at {dying.since} and has not "
-            f"confirmed it. Its pid(s) {sorted(dying.pids)} still hold the card, "
-            "and Crucible does not SIGKILL a process holding CUDA — that wedges "
-            "WSL2 until Windows reboots. Loading now would put a second engine "
-            "on a card that is already full. Stop that process by hand, then "
-            "restart Crucible",
+            f"that was resident) was asked to stop at {dying.since}, and asked "
+            f"again just now, and pid(s) {pids} are still running on the card. "
+            "Crucible does not SIGKILL a process holding CUDA — that wedges "
+            "WSL2 until Windows reboots — and loading now would put a second "
+            f"engine on a card that is already full. Run `kill {pids}` (never "
+            "-9) and try again once it has exited; Crucible notices the exit "
+            f"by itself, no restart needed. Why it hangs is in {log}.{said}",
         )
+
+    @staticmethod
+    def _still_running(dying: DyingResident) -> list[int]:
+        return sorted(pid for pid in dying.pids if process_alive(pid))
+
+    def _let_go_of(self, dying: DyingResident) -> None:
+        if self._dying is not dying:
+            return
+        self._dying = None
+        print(
+            f"crucible: {dying.subject_id}'s pid(s) {sorted(dying.pids)} have "
+            f"exited since the stop at {dying.since}; the card is free again",
+            file=sys.stderr,
+        )
+        self._record_residents()
 
 
     @property
@@ -606,6 +683,7 @@ class Residency:
             engine_args=tuple(args),
         )
         say(f"{manifest.id} is resident at {engine.base_url}")
+        self._record_residents()
         return self._resident
 
     def load_voice(
@@ -702,6 +780,7 @@ class Residency:
             reference=None if reference is None else reference.to_report(),
         )
         say(f"{manifest.id} is resident")
+        self._record_residents()
         return self._resident
 
     def load_aligner(
@@ -764,6 +843,7 @@ class Residency:
             loaded_at=_now(),
         )
         say(f"{manifest.id} is resident")
+        self._record_residents()
         return self._resident
 
     def load_separator(
@@ -841,6 +921,7 @@ class Residency:
             loaded_at=_now(),
         )
         say(f"{manifest.id} is resident")
+        self._record_residents()
         return self._resident
 
     @staticmethod
@@ -948,10 +1029,14 @@ class Residency:
             pids=(frozenset() if engine is None else engine.pids)
             | (frozenset() if session is None else session.pids),
             since=_now(),
+            log_path=resident.log_path,
         )
         with self._claim_lock:
             self._cleared = subject_id if self._claim_clears else None
-        self._stop_the_dying()
+        try:
+            self._stop_the_dying()
+        finally:
+            self._record_residents()
         return resident
 
     def _stop_the_dying(self) -> None:
@@ -965,6 +1050,170 @@ class Residency:
         self._dying = None
 
     def shutdown(self) -> None:
-        self._stop_the_dying()
+        try:
+            self._stop_the_dying()
+        finally:
+            self._record_residents()
         if self._resident is not None:
             self.unload(self._resident.id)
+
+    @property
+    def record_path(self) -> Path:
+        return resident_record_path(self._config.home)
+
+    def _stop_budget(self) -> float:
+        dying = self._dying
+        engine = self._engine or (None if dying is None else dying.engine)
+        return stop_budget_of(engine)
+
+    def _record_residents(self) -> None:
+        with self._record_lock:
+            self._write_record()
+
+    def _write_record(self) -> None:
+        path = self.record_path
+        identities: dict[int, ProcessIdentity] = {}
+        for pid in sorted(self.owned_pids()):
+            identity = process_identity(pid)
+            if identity is not None:
+                identities[pid] = identity
+        for left in leftovers():
+            identities.setdefault(left.identity.pid, left.identity)
+        try:
+            if not identities:
+                path.unlink(missing_ok=True)
+                return
+            dying = self._dying
+            document = {
+                "crucible_pid": os.getpid(),
+                "recorded_at": _now(),
+                "subject": self.resident_id
+                or (None if dying is None else dying.subject_id),
+                "stop_budget_seconds": self._stop_budget(),
+                "processes": [identity.to_dict() for identity in identities.values()],
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            writing = path.with_name(path.name + ".writing")
+            writing.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+            os.replace(writing, path)
+        except OSError as exc:
+            print(
+                f"crucible: could not record the resident engine's pids in "
+                f"{path}: {type(exc).__name__}: {exc}. If Crucible crashes now, "
+                "the next start cannot ask that engine to stop",
+                file=sys.stderr,
+            )
+
+    def start_reclaiming(self) -> threading.Thread:
+        worker = threading.Thread(
+            target=self.reclaim_leftovers, name="crucible-reclaim", daemon=True
+        )
+        worker.start()
+        return worker
+
+    def reclaim_leftovers(self) -> list[int]:
+        path = self.record_path
+        recorded = self._read_record(path)
+        if recorded is None:
+            return []
+        document, processes = recorded
+        crucible_pid = document.get("crucible_pid")
+        if isinstance(crucible_pid, int) and process_alive(crucible_pid):
+            print(
+                f"crucible: {path} belongs to Crucible pid {crucible_pid}, which "
+                "is still running; its engines are its own and were left alone",
+                file=sys.stderr,
+            )
+            return []
+        asked: list[ProcessIdentity] = []
+        for wanted in processes:
+            found = process_identity(wanted.pid)
+            if found is None or not found.same_process_as(wanted):
+                continue
+            asked_at = _now()
+            if ask_pid_to_stop(found.pid):
+                print(
+                    f"crucible: a previous Crucible left pid {found.pid} "
+                    f"({found.command}) running; asked it to stop (SIGTERM) at "
+                    f"{asked_at}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"crucible: a previous Crucible left pid {found.pid} "
+                    f"({found.command}) running and it could not be signalled; "
+                    f"stop it with `kill {found.pid}` (never -9)",
+                    file=sys.stderr,
+                )
+            note_leftover(found, asked_at)
+            asked.append(found)
+        budget = document.get("stop_budget_seconds")
+        deadline = time.monotonic() + (
+            float(budget) if isinstance(budget, (int, float)) else STOP_TIMEOUT_SECONDS
+        )
+        while any(process_alive(each.pid) for each in asked):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(LEFTOVER_POLL_SECONDS)
+        reclaimed = []
+        for each in asked:
+            if process_alive(each.pid):
+                print(
+                    f"crucible: pid {each.pid} ({each.command}) from a previous "
+                    "Crucible did not exit after SIGTERM and was left running; "
+                    f"stop it with `kill {each.pid}` (never -9). Loads are "
+                    "refused until it is gone",
+                    file=sys.stderr,
+                )
+                continue
+            forget_leftover(each.pid)
+            reclaimed.append(each.pid)
+        if reclaimed:
+            print(
+                f"crucible: reclaimed the card from a previous Crucible's "
+                f"engine(s): pid(s) {reclaimed} exited on SIGTERM",
+                file=sys.stderr,
+            )
+        self._record_residents()
+        return reclaimed
+
+    @staticmethod
+    def _read_record(
+        path: Path,
+    ) -> tuple[dict[str, Any], list[ProcessIdentity]] | None:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            print(
+                f"crucible: could not read {path}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        try:
+            document = json.loads(text)
+            processes = [
+                ProcessIdentity(
+                    pid=int(entry["pid"]),
+                    command=str(entry["command"]),
+                    started=str(entry["started"]),
+                )
+                for entry in document["processes"]
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            quarantine = path.with_name(
+                f"{path.name}.bad-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+            )
+            try:
+                os.replace(path, quarantine)
+            except OSError:
+                quarantine = path
+            print(
+                f"crucible: {path} was not a resident record ({exc}); moved it "
+                f"to {quarantine} and went on. If an engine from a previous "
+                "Crucible is still on the card, the load refusal will name it",
+                file=sys.stderr,
+            )
+            return None
+        return document, processes

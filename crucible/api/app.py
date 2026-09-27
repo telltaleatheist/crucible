@@ -5,7 +5,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
@@ -79,6 +79,19 @@ ROUTE_MODULES = (
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
+def _validation_message(request: Request, problems: list[dict[str, Any]]) -> str:
+    route = f"{request.method} {request.url.path}"
+    if not problems:
+        return f"the request to {route} is not valid"
+    first = problems[0]
+    where = ".".join(first["location"]) or "the request"
+    more = len(problems) - 1
+    also = "" if more == 0 else f" (and {more} more problem(s), listed in details)"
+    return (
+        f"the request to {route} is not valid: {where}: {first['message']}{also}"
+    )
+
+
 def create_app(config: Config, backend: Backend) -> FastAPI:
     residency = Residency(config)
     leases = Leases()
@@ -89,6 +102,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         store: JobStore = app.state.store
         app.state.started_at = time.monotonic()
         store.restore()
+        residency.start_reclaiming()
         store.start()
         app.state.http = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -251,7 +265,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             content={
                 "error": {
                     "code": "invalid_request",
-                    "message": "the request body is not a valid job request",
+                    "message": _validation_message(request, problems),
                     "details": {"problems": problems},
                 }
             },
