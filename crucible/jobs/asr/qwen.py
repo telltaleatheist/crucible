@@ -129,6 +129,11 @@ MAX_OVERLAP_S = 5.0
 #: up to `max_batch`. After `ready` there is no timeout (`workers.py`).
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
 
+#: Pieces per aligner request (`_align_pieces`). 16 pieces of 30 s is eight
+#: minutes of audio: long enough that the per-request overhead is noise, short
+#: enough that a progress event follows every few seconds of aligning.
+ALIGN_BATCH = 16
+
 #: The environment of the ASR worker, per engine. vLLM's is the resident
 #: engine's own (`crucible/engines/vllm.py`, one owner) plus the in-process
 #: engine core (this module's docstring). mlx-audio needs nothing set.
@@ -890,20 +895,45 @@ class QwenAsrRun:
             piece.hit_token_limit = bool(result["hit_token_limit"])
 
     def _align_pieces(self, pieces: list[Piece]) -> None:
-        outcome = self._send(
-            self._align,
-            {
-                "op": "align",
-                "language": QWEN3_LANGUAGES[self._language],
-                "max_audio_s": QWEN3_MAX_AUDIO_S,
-                "ffmpeg": self._ffmpeg,
-                "chunks": [{"audio": p.wav, "text": p.text} for p in pieces],
-            },
-        )
-        try:
-            results = workers.require_positional_results(outcome, len(pieces), "piece")
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
+        """Word times for `pieces`, sent to the aligner ALIGN_BATCH at a time.
+
+        IN BATCHES, WITH A PROGRESS EVENT AFTER EACH (2026-09-27, the Mac, job
+        928bdf54). The Coming of the Third Reich was 3,015 pieces of 30 s, and
+        they went to the aligner as ONE request, which reports nothing until it
+        returns. The job then sent no event for over ten minutes after two hours
+        of transcription, and the client's went-quiet guard cancelled it. Nothing
+        had wedged: the aligner was working through 21 hours of audio in
+        silence. A batch at a time keeps the event stream moving at the
+        aligner's own pace, and lets a cancel land between batches.
+        """
+        results: list[dict[str, Any]] = []
+        aligned_s = 0.0
+        for first in range(0, len(pieces), ALIGN_BATCH):
+            batch = pieces[first:first + ALIGN_BATCH]
+            outcome = self._send(
+                self._align,
+                {
+                    "op": "align",
+                    "language": QWEN3_LANGUAGES[self._language],
+                    "max_audio_s": QWEN3_MAX_AUDIO_S,
+                    "ffmpeg": self._ffmpeg,
+                    "chunks": [{"audio": p.wav, "text": p.text} for p in batch],
+                },
+            )
+            try:
+                results += workers.require_positional_results(outcome, len(batch), "piece")
+            except workers.WorkerError as exc:
+                raise JobError("worker_failed", str(exc)) from None
+            aligned_s += sum(p.end_s - p.start_s for p in batch)
+            done = min(first + ALIGN_BATCH, len(pieces))
+            self._ctx.progress(
+                min(1.0, (self._landed_s() + aligned_s) / self._duration_s),
+                f"word times for {done} of {len(pieces)} piece(s)",
+                stage="aligning",
+                processed_s=self._landed_s() + aligned_s,
+                total_s=self._duration_s,
+                cues=len(self._finished),
+            )
         failures = [
             f"{piece.where()}: {result['error']}"
             for piece, result in zip(pieces, results)
