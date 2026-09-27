@@ -103,7 +103,7 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
     verdict = _decide("tts", "cuda-linux", SIX_GIG, CUDA_RESERVE)
     assert verdict.enabled is False
     assert verdict.selected == ""
-    assert "not quantized" in verdict.reason
+    assert "nothing under 4-bit is ever offered" in verdict.reason
     assert job_type_enabled("tts", decide_all(
         "cuda-linux",
         total_bytes=SIX_GIG,
@@ -171,6 +171,9 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
     assert asr.selected == "qwen3-asr-1.7b"
     assert [c.id for c in asr.candidates] == [
         "qwen3-asr-1.7b",
+        "qwen3-asr-1.7b-mlx",
+        "qwen3-asr-0.6b",
+        "qwen3-asr-0.6b-mlx",
         "whisper-large-v3-turbo",
         "whisper-tiny",
     ]
@@ -311,7 +314,7 @@ def test_one_class_recorded_twice_is_refused(home: Path) -> None:
     path = config_path(home)
     row = (
         "[[capability.classes]]\ncapability = \"tts\"\nenabled = false\n"
-        "selected = \"\"\nreason = \"x\"\nshortfall_bytes = 1\n"
+        "selected = \"\"\nreason = \"x\"\nsummary = \"x\"\nshortfall_bytes = 1\n"
     )
     path.write_text(
         path.read_text(encoding="utf-8")
@@ -346,7 +349,7 @@ def test_the_refusal_names_the_number_and_never_says_flip_the_flag(
     assert isinstance(error, ApiError)
     assert error.status_code == 400
     assert error.code == "job_type_disabled"
-    assert "not quantized" in error.message
+    assert "nothing under 4-bit is ever offered" in error.message
     assert "short by" in error.message
     assert "would not change any of those numbers" in error.message
     assert "= true" not in error.message
@@ -408,7 +411,7 @@ def tiny_card(monkeypatch: pytest.MonkeyPatch) -> None:
     from crucible.backend import Backend, Gpu
 
     monkeypatch.setattr(
-        cli,
+        cli.common,
         "detect_backend",
         lambda: Backend(
             kind="cuda-linux",

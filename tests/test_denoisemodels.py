@@ -16,7 +16,7 @@ from crucible.denoisemodels import (
 )
 from crucible.jobs import denoise as denoise_job
 
-from .conftest import FAKE_BACKEND
+from .conftest import FAKE_BACKEND, write_env_stamp
 
 SHA = "7c1c39191edc34e942ca7f2346ce6b6c0e1208a5f76349ffce6f696bd12910de"
 OTHER_SHA = "5d7d83b2e9d232da60941b717b0abdc345155d45cff3f79715cdb2790ba18c36"
@@ -471,18 +471,7 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "rvc",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("rvc", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_BACKEND.kind))
     pins = jobenv.recipe_pins(recipe)
     refs = jobenv.recipe_direct_references(recipe)

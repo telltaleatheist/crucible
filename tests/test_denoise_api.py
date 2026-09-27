@@ -14,7 +14,7 @@ from crucible.accelerator import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 
-from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
+from .conftest import FAKE_BACKEND, holding_the_card, parse_sse, write_env_stamp
 from crucible.residency import KIND_DENOISE, Residency
 
 MODEL = "denoise-roformer"
@@ -31,18 +31,7 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "rvc",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("rvc", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_BACKEND.kind))
     pins = jobenv.recipe_pins(recipe)
     refs = jobenv.recipe_direct_references(recipe)
@@ -428,18 +417,7 @@ def test_autocast_is_off_on_the_mac(
     directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "rvc",
-                "backend": FAKE_MAC_BACKEND.kind,
-                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("rvc", FAKE_MAC_BACKEND.kind), FAKE_MAC_BACKEND.kind)
     recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_MAC_BACKEND.kind))
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _h, _t: dict(

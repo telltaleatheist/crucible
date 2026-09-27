@@ -414,6 +414,7 @@ class FakeEngine:
         self._prefix_cache = prefix_cache
         self.warming_started = threading.Event()
         self.stopped = False
+        self.exited_with: int | None = None
         self.args: list[str] = []
 
     @property
@@ -429,6 +430,10 @@ class FakeEngine:
     @property
     def pids(self) -> frozenset[int]:
         return frozenset()
+
+    @property
+    def exit_code(self) -> int | None:
+        return self.exited_with
 
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

@@ -16,7 +16,7 @@ from crucible.errors import ApiError
 from crucible.jobs import rvc as rvc_job
 from crucible.rvcmodels import load_rvc_manifest
 
-from .conftest import FAKE_BACKEND, end_process_tree, parse_sse
+from .conftest import FAKE_BACKEND, end_process_tree, parse_sse, write_env_stamp
 
 MODEL = "deathstalker-rvc-v1"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_rvc_worker.py"
@@ -40,18 +40,7 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "rvc",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("rvc", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_BACKEND.kind))
     pins = jobenv.recipe_pins(recipe)
     refs = jobenv.recipe_direct_references(recipe)

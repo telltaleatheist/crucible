@@ -1614,7 +1614,7 @@ def test_there_is_no_platform_gate_left_in_main(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr(cli.orchestrator.sys, "platform", "win32")
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: (_ for _ in ()).throw(
+        cli.common, "detect_backend", lambda: (_ for _ in ()).throw(
             NoViableBackend("no card in this test")
         )
     )

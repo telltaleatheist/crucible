@@ -22,6 +22,8 @@ FORWARD_ROW = (
 PRIVATE = json.dumps([{"InterfaceAlias": "Ethernet 2", "NetworkCategory": "Private"}])
 PUBLIC = json.dumps([{"InterfaceAlias": "Wi-Fi", "NetworkCategory": "Public"}])
 
+ADDRESSES = ("192.168.68.100", "100.64.0.1")
+
 
 def ok(stdout: str = "") -> RunResult:
     return RunResult(code=0, stdout=stdout, stderr="", failure=None)
@@ -37,13 +39,46 @@ class Runner:
     platform = "win32"
 
     def __init__(self, *, forward: bool = False, firewall: bool = False,
-                 profile: str = PRIVATE, applies: bool = True) -> None:
+                 profile: str = PRIVATE, applies: bool = True,
+                 addresses: tuple[str, ...] = ADDRESSES) -> None:
         self.forward = forward
         self.firewall = firewall
         self.profile = profile
         self.applies = applies
+        self.addresses = list(addresses)
         self.calls: list[list[str]] = []
+        self.dialled: list[str] = []
         self.env = dict(WINDOWS_ENV)
+
+    def network(self) -> str:
+        category = json.loads(self.profile)[0]["NetworkCategory"]
+        rule = (
+            [{"enabled": "True", "profile": "Private", "action": "Allow",
+              "direction": "Inbound"}]
+            if self.firewall else []
+        )
+        return json.dumps({
+            "profiles": [
+                {"index": index, "alias": f"Ethernet {index}",
+                 "name": f"Network {index}", "category": category}
+                for index, _ in enumerate(self.addresses, start=1)
+            ],
+            "addresses": [
+                {"address": address, "index": index, "alias": f"Ethernet {index}"}
+                for index, address in enumerate(self.addresses, start=1)
+            ],
+            "firewall": [
+                {"profile": name, "enabled": "True", "inbound": "Block",
+                 "allow_rules": "True", "local_rules": "True"}
+                for name in ("Domain", "Private", "Public")
+            ],
+            "rule": rule,
+            "elevated": False,
+        })
+
+    def get(self, url: str, *, timeout_s: float) -> int | None:
+        self.dialled.append(url)
+        return 200 if self.forward else None
 
     def run(self, argv, *, timeout_s, env=None) -> RunResult:
         self.calls.append(list(argv))
@@ -54,6 +89,8 @@ class Runner:
             return ok(FORWARD_ROW if self.forward else "")
         if "advfirewall firewall show" in joined:
             return ok("Rule Name: Crucible engine (LAN)\n") if self.firewall else absent()
+        if "Get-NetIPAddress" in joined:
+            return ok(self.network())
         if "Get-NetConnectionProfile" in joined:
             return ok(self.profile)
         if "Start-Process" in joined:
@@ -95,11 +132,6 @@ class Engine:
                 host["backend"] = self.backend
             return {"role": "engine", "host": host}
         return {"lan_advertise": self.published.get("lan_advertise", [])}
-
-
-@pytest.fixture(autouse=True)
-def _addresses(monkeypatch):
-    monkeypatch.setattr(lan, "ipv4_addresses", lambda: ["192.168.68.100", "100.64.0.1"])
 
 
 def _decoded(argv: list[str]) -> str:
@@ -154,10 +186,9 @@ def test_a_forward_we_did_not_create_needs_adopt(tmp_path) -> None:
     assert lan.enable(tmp_path, runner, Engine(), adopt=True)["state"] == "configured"
 
 
-def test_a_machine_with_no_address_publishes_nothing(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(lan, "ipv4_addresses", lambda: [])
+def test_a_machine_with_no_address_publishes_nothing(tmp_path) -> None:
     with pytest.raises(lan.LanError, match="lan_no_addresses"):
-        lan.enable(tmp_path, Runner(), Engine())
+        lan.enable(tmp_path, Runner(addresses=()), Engine())
 
 
 def test_a_native_windows_engine_is_refused_and_nothing_is_touched(tmp_path) -> None:
@@ -195,7 +226,9 @@ def test_enable_opens_both_rows_publishes_and_records(tmp_path) -> None:
     result = lan.enable(tmp_path, runner, engine)
 
     assert result["state"] == "configured"
-    assert result["remote_reachability"] == "not_tested", "nothing here dialled in"
+    assert result["remote_reachability"] == "admitted_by_windows"
+    assert result["forward_answers"] is True
+    assert runner.dialled == ["http://192.168.68.100:7100/v1/ping"]
     assert result["urls"] == ["http://192.168.68.100:7100", "http://100.64.0.1:7100"]
 
     assert engine.published == {
@@ -243,8 +276,11 @@ def test_rows_on_a_public_only_network_are_reported_degraded(tmp_path) -> None:
     runner, engine = Runner(profile=PUBLIC), Engine()
     result = lan.enable(tmp_path, runner, engine)
     assert result["state"] == "degraded"
+    assert result["remote_reachability"] == "blocked_by_windows"
     assert "admits nothing here" in result["detail"]
-    assert engine.published["lan_advertise"] != []
+    assert engine.published["lan_advertise"] == [], "nothing unreachable is advertised"
+    assert "crucible lan enable" in result["next"]
+    assert "Private" in result["next"]
 
 
 def test_disable_withdraws_the_projection_before_it_removes_the_rows(tmp_path) -> None:
@@ -281,20 +317,21 @@ def test_disabling_what_was_never_enabled_says_so_and_touches_nothing(tmp_path) 
     assert runner.calls == []
 
 
-def test_status_is_degraded_when_the_address_moved(tmp_path, monkeypatch) -> None:
+def test_status_is_degraded_when_the_address_moved(tmp_path) -> None:
     runner, engine = Runner(), Engine()
     lan.enable(tmp_path, runner, engine)
     assert lan.status(tmp_path, runner, engine)["state"] == "configured"
-    monkeypatch.setattr(lan, "ipv4_addresses", lambda: ["192.168.68.207"])
+    runner.addresses = ["192.168.68.207"]
     report = lan.status(tmp_path, runner, engine)
     assert report["state"] == "degraded"
     assert report["addresses_match"] is False
+    assert "crucible lan reconcile" in report["next"]
 
 
-def test_reconcile_republishes_the_new_address_without_a_prompt(tmp_path, monkeypatch) -> None:
+def test_reconcile_republishes_the_new_address_without_a_prompt(tmp_path) -> None:
     runner, engine = Runner(), Engine()
     lan.enable(tmp_path, runner, engine)
-    monkeypatch.setattr(lan, "ipv4_addresses", lambda: ["192.168.68.207"])
+    runner.addresses = ["192.168.68.207"]
     before = len(runner.elevations)
     result = lan.reconcile(tmp_path, runner, engine=engine)
     assert result["state"] == "configured"

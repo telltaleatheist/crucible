@@ -18,7 +18,13 @@ from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
-from .conftest import FAKE_BACKEND, a_clearance_to_hold, parse_sse, wav_base64
+from .conftest import (
+    FAKE_BACKEND,
+    a_clearance_to_hold,
+    parse_sse,
+    wav_base64,
+    write_env_stamp,
+)
 from .fake_engine import FakeEngine
 
 VOICE = "deathstalker"
@@ -48,17 +54,7 @@ def fake_env(
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"higgs-v3-{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.tts_env("higgs-v3", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _home, _spec: dict(RECIPE_PINS)
     )

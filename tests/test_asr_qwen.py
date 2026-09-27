@@ -23,7 +23,7 @@ from crucible.jobs import align as align_job
 from crucible.jobs import asr as asr_job
 from crucible.jobs.asr import loopguard, qwen
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 
 MODEL = "qwen3-asr-1.7b"
 ALIGNER = "qwen3-aligner"
@@ -243,17 +243,7 @@ def _stamp_llm_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: st
     directory = jobenv.env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": backend_kind,
-                "recipe": f"{backend_kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.llm_env(backend_kind), backend_kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
     monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _spec: dict(pins))
 
@@ -262,18 +252,7 @@ def _stamp_align_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: 
     directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "align",
-                "backend": backend_kind,
-                "recipe": f"{backend_kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("align", backend_kind), backend_kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("align", backend_kind)))
     monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _type: dict(pins))
 

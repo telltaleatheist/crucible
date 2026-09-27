@@ -1,0 +1,40 @@
+# Owen Morgan — exported from this build's owen.toml by `crucible voices export`.
+#
+# The MACHINE facts that file carried are not here: they belong to the
+# box that serves the voice, in its config.toml `[tts.<engine>]` table
+# (PHASE21 section 2.3). The repo and revision are not here either —
+# this file IS the revision, and the local side pins it.
+
+schema = 1
+
+[voice]
+display         = "Owen Morgan"
+kind            = "checkpoint"
+narrator_engine = "higgs-v3"
+language        = "en"
+sample_rate     = 24000
+
+[voice.pace]
+basis              = "inherited"
+pace_chars_per_sec = 16.32
+max_chars_per_sec  = 21.22
+min_chars_per_sec  = 12.55
+inherited_from     = """owen_gp2w_prod, the PREDECESSOR of the shipped weights: 23 clean of 50 renders at 0.8, 2026-09-07; band 600-800 ruled on that predecessor (the records disagree on the method: its ladder's Wilson ranking vs its corpus IQR); cap 800 is Owen's ruling"""
+safe_min_chars     = 600
+safe_max_chars     = 800
+
+[voice.arms.cuda-linux]
+max_chars       = 800
+max_chars_basis = "placeholder"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[voice.arms.mlx-darwin]
+max_chars       = 800
+max_chars_basis = "placeholder"
+sampling        = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+
+[[voice.takes]]
+
+[[voice.takes]]
+temperature = 0.7
+reason = """measured 2026-09-11 over the same 88 chunks: 0.8 gave 4 guard fires / 3 holes / 0 drops, 0.7 gave 8 / 7 / 0. Not a better setting — a DIFFERENT one, which is what a retake of a chunk that failed at 0.8 needs (Owen's ruling 2026-09-14: a retake must not reuse the settings that produced the problem)."""

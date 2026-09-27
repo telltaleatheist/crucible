@@ -48,7 +48,7 @@ def test_init_writes_it_and_force_rewrites_it_with_the_new_token(
     home = tmp_path / "home"
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )
@@ -70,7 +70,7 @@ def test_token_url_prints_the_same_line_the_file_holds(
     home = tmp_path / "home"
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )
@@ -112,7 +112,7 @@ def _synced(home: Path, **overrides) -> str | None:
 def _init(home: Path, monkeypatch: pytest.MonkeyPatch, token: str) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(home))
     monkeypatch.setattr(
-        cli, "detect_backend", lambda: __import__(
+        cli.common, "detect_backend", lambda: __import__(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )

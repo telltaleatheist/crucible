@@ -14,7 +14,7 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible.asrmodels import load_asr_manifest
 from crucible.jobs import asr as asr_job
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse
+from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 
 MODEL = "whisper-tiny"
 BIG_MODEL = "whisper-large-v3-turbo"
@@ -34,18 +34,7 @@ def asr_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "asr",
-                "backend": FAKE_BACKEND.kind,
-                "recipe": f"{FAKE_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("asr", FAKE_BACKEND.kind), FAKE_BACKEND.kind)
     pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("asr", FAKE_BACKEND.kind)))
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _home, _type: dict(pins)
@@ -106,18 +95,7 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "job_type": "asr",
-                "backend": FAKE_MAC_BACKEND.kind,
-                "recipe": f"{FAKE_MAC_BACKEND.kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, jobenv.worker_env("asr", FAKE_MAC_BACKEND.kind), FAKE_MAC_BACKEND.kind)
     pins = jobenv.recipe_pins(
         jobenv.recipe_for(jobenv.worker_env("asr", FAKE_MAC_BACKEND.kind))
     )
