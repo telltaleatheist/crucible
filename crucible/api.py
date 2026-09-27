@@ -80,6 +80,7 @@ from .jobs import (
 from .jobs.base import Job, validate_member_name
 from .manifests import ManifestError, load_manifest
 from .jobs.queue import JobStore
+from .journal import InputDigest, sha256_file
 from .jobs.tts.common import known_voice
 from . import decide as decide_core
 from .decide import DecideRequest, DecideResponse
@@ -2913,8 +2914,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     # ------------------------------------------------------------------ jobs
 
     @private.post("/jobs", status_code=202)
-    async def create_job(request: Request, body: JobCreate) -> dict[str, str]:
+    async def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
         """Admit one job, or refuse with the facts about the one already here.
+
+        **EXPLICIT RESUME ONLY** (Owen, 2026-09-27: *"if the user doesnt send
+        the resume flag then it starts fresh. if they do send a resume flag, it
+        continues from where they left off"*). A job type that keeps a journal
+        (`crucible/journal.py`, docs/RESUMABLE-JOBS.md) answers `resume_id`
+        beside `job_id`: the id to send as `params.resume` if this job does not
+        finish. Without `resume` a job starts a NEW journal and never reads an
+        old one. With it, the journal is checked against this submission (job
+        type, model revision, output-affecting params, every input's sha256,
+        the type's format version) and anything different is refused
+        `resume_mismatch` naming it, before the job exists; an unknown id is
+        `unknown_resume_id` and a collected one `resume_expired`. A type that
+        keeps no journal refuses `resume` as `resume_unsupported`.
 
         **This door refuses when the lane is busy (ARCHITECTURE.md section 3).**
         It used to queue, which made Crucible answer the same question two ways:
@@ -2989,6 +3003,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # the caller actually did.
             _refuse_lease_on_an_upstream(body.model)
         model = resolve_model(plugin, body.model)
+        _refuse_resume_without_a_journal(plugin, body.type, body.params)
 
         def unloads_what_is_being_cleared() -> bool:
             # T6 (2026-09-15): an `unload-...` of the very subject the
@@ -3058,13 +3073,30 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     raise
                 missing_weights = refusal
             else:
+                # Which journal identity this job has, if its type keeps one:
+                # asked after preflight, which has validated the params.
+                identity = _journal_identity(plugin, model, body.params)
+                digests: list[InputDigest] = []
+                resuming: Any = None
+                if identity is not None:
+                    digests = _input_digests(config, store, body.inputs)
+                    resume = body.params.get("resume")
+                    if resume is not None:
+                        # Refused HERE, before the job exists and before any
+                        # upload is moved: `resume_mismatch` names what differs.
+                        resuming = store.journals.verify(resume, identity, digests)
                 job = store.create(
                     body.type, model, body.params,
                     client=_client_agent(request), client_ref=body.client_ref,
                     hold=body.hold,
                 )
+                fresh: Any = None
                 try:
                     _materialise_inputs(config, store, job, body.inputs)
+                    if identity is not None and resuming is None:
+                        # A NEW journal, never an old one reused: forgetting
+                        # the flag destroys nothing.
+                        fresh = store.journals.create(identity, digests, job.id)
                     # `enqueue` asks admission again and is the authority on it;
                     # nothing awaits between here and the check above — the body of
                     # `settled_for` must not — so the two are one atomic stretch on
@@ -3073,13 +3105,21 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                     store.enqueue(job)
                 except ApiError:
                     store.discard(job)
+                    if fresh is not None:
+                        store.journals.forget_new(fresh)
                     raise
+                if fresh is not None:
+                    store.attach_journal(job, fresh.id, resumed=False)
+                elif resuming is not None:
+                    store.journals.adopt(resuming, job.id)
+                    store.attach_journal(job, resuming.id, resumed=True)
         if missing_weights is not None:
             need = installs.pulls_for(body.type, model, missing_weights)
             if need is None:
                 raise missing_weights
             raise installs.start(need)
-        return {"job_id": job.id}
+        # `resume_id` is null for a job type that keeps no journal.
+        return {"job_id": job.id, "resume_id": job.resume_id}
 
     @private.get("/jobs/{job_id}")
     async def get_job(request: Request, job_id: str) -> dict[str, Any]:
@@ -3104,6 +3144,43 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    # ------------------------------------------------------------- resumable
+
+    @private.get("/resumable")
+    async def list_resumable(request: Request) -> dict[str, Any]:
+        """Every journal this server keeps, newest first (Owen, 2026-09-27:
+        *"maybe we could even have a call that shows what's available to
+        resume?"*).
+
+        One row per journal: its `resume_id` (send it as `params.resume`), the
+        job type, the model and revision, the inputs by name and sha256, the
+        output-affecting `params` it was written under, `units_done` of
+        `units_total` and a `progress` sentence, `last_saved`, `expires_at`
+        (`[jobs] retention_days` after the last save), the job that started
+        it (`job_id`), and the job that last wrote it with how that ended
+        (`last_job_id`, `state`: queued, running, done, failed, cancelled or
+        interrupted). Nothing is resumed by reading this: resuming is the
+        app's decision (docs/RESUMABLE-JOBS.md).
+        """
+        store: JobStore = request.app.state.store
+        return {"resumable": store.journals.list()}
+
+    @private.get("/resumable/{resume_id}")
+    async def get_resumable(request: Request, resume_id: str) -> dict[str, Any]:
+        """One journal, as `GET /v1/resumable` lists it."""
+        store: JobStore = request.app.state.store
+        return store.journals.entry(resume_id)
+
+    @private.delete("/resumable/{resume_id}")
+    async def discard_resumable(request: Request, resume_id: str) -> dict[str, Any]:
+        """Discard a journal now. Refused `resume_in_use` while a job writes it.
+
+        The id then answers `resume_expired` rather than `unknown_resume_id`,
+        so a client resuming it later is told what happened.
+        """
+        store: JobStore = request.app.state.store
+        return store.journals.discard(resume_id)
 
     @private.post("/jobs/{job_id}/hold")
     async def hold_job(request: Request, job_id: str) -> dict[str, Any]:
@@ -4828,6 +4905,8 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "chunks_done",
         "chunks_total",
         "chunk_at",
+        "resume_id",
+        "resumed",
     }
 )
 
@@ -4862,6 +4941,11 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         # landed. Both null for a job whose artifacts are not chunks.
         "chunks_total": job.chunks_total,
         "chunk_at": job.chunk_at,
+        # THE JOURNAL THIS JOB WRITES (2026-09-27, `crucible/journal.py`): the
+        # id to send as `resume` if it does not finish, and whether this job
+        # was itself a resume. Null for a job type that keeps no journal.
+        "resume_id": job.resume_id,
+        "resumed": job.resumed,
         # THE TERMINAL FACTS, READABLE AFTER THE STREAM IS GONE (2026-09-20).
         # `done_extra` is what a job adds to its own `done` event — `resident`
         # for a loader, and since the lease moved onto the load, `lease_id`. A
@@ -4874,6 +4958,38 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         # `error` by accident; a collision keeps this function's answer.
         **{k: v for k, v in job.done_extra.items() if k not in _JOB_STATE_KEYS},
     }
+
+
+def _refuse_resume_without_a_journal(
+    plugin: Any, job_type: str, params: dict[str, Any]
+) -> None:
+    """`resume_unsupported`, by name, for a type that keeps no journal.
+
+    Accepted by every type's params IN PRINCIPLE (2026-09-27): the key means
+    the same thing everywhere, so it is refused here, once, for the types that
+    have not been brought onto the journal yet, rather than as an unknown
+    field by each type's own model, which would read as a typo. A type that
+    journals only some of its models (`asr`: Qwen3-ASR yes, whisper not yet)
+    refuses the rest in its own preflight, with the same code.
+    """
+    if "resume" not in params:
+        return
+    if getattr(plugin, "journal_identity", None) is None:
+        raise ApiError(
+            400,
+            "resume_unsupported",
+            f"{job_type} jobs keep no resume journal yet, so there is nothing to "
+            "resume; send the job without resume to run it from the start",
+            {"type": job_type, "resume": params.get("resume")},
+        )
+
+
+def _journal_identity(plugin: Any, model: str | None, params: dict[str, Any]) -> Any:
+    """What this job's journal is the work OF, or None when it keeps none."""
+    identify = getattr(plugin, "journal_identity", None)
+    if identify is None:
+        return None
+    return identify(model, params)
 
 
 def _referenced_artifact(store: JobStore, name: str, ref: ArtifactRef) -> Path:
@@ -4911,6 +5027,55 @@ def _referenced_artifact(store: JobStore, name: str, ref: ArtifactRef) -> Path:
             {"input": name, "job_id": ref.job_id, "artifact": ref.name, "why": "no_such_artifact"},
         )
     return source
+
+
+def _input_digests(
+    config: Config, store: JobStore, inputs: dict[str, JobInput]
+) -> list[InputDigest]:
+    """Each input's name, sha256 and size, for a journaled job (2026-09-27).
+
+    ASKED BEFORE ANYTHING MOVES. A `resume` is checked against these, and a
+    refused resume must not have consumed the client's upload: an upload is
+    moved into the job that names it, and a discarded job takes it with it.
+    An upload's sha256 is the one `POST /v1/uploads` computed and wrote beside
+    it, so a four-hour book is not read twice; inline bytes are hashed in
+    memory; an artifact input is hashed from disk, the one case that reads the
+    file (seconds a GB). Anything unresolvable is left to `_materialise_inputs`
+    to refuse by its own name.
+    """
+    digests: list[InputDigest] = []
+    for name, declared in inputs.items():
+        if declared.blob_id is not None:
+            try:
+                validate_member_name(declared.blob_id)
+            except ValueError:
+                continue
+            source = Path(config.uploads_dir) / declared.blob_id
+            if not source.is_file():
+                continue
+            meta_path = Path(config.uploads_dir) / f"{declared.blob_id}.json"
+            sha, size = None, source.stat().st_size
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if int(meta.get("bytes", -1)) == size:
+                    sha = str(meta["sha256"])
+            except (OSError, ValueError, KeyError, TypeError):
+                sha = None
+            digests.append(
+                InputDigest(name, sha if sha is not None else sha256_file(source), size)
+            )
+        elif declared.inline_base64 is not None:
+            try:
+                payload = base64.b64decode(declared.inline_base64, validate=True)
+            except (binascii.Error, ValueError):
+                continue
+            digests.append(
+                InputDigest(name, hashlib.sha256(payload).hexdigest(), len(payload))
+            )
+        elif declared.artifact is not None:
+            source = _referenced_artifact(store, name, declared.artifact)
+            digests.append(InputDigest(name, sha256_file(source), source.stat().st_size))
+    return digests
 
 
 def _materialise_inputs(

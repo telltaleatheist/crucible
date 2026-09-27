@@ -88,6 +88,13 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "The work. Every job type is created, polled and cancelled through the same routes.",
     ),
     (
+        "/resumable",
+        "Resumable jobs",
+        "The resume journals: every job type that keeps one writes its finished work to "
+        "disk as it lands, and a job sent `params.resume` continues it "
+        "(docs/RESUMABLE-JOBS.md).",
+    ),
+    (
         "/tasks",
         "Tasks",
         "Long host-side work — installs, pulls, env packs — that is not a job because no "

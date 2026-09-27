@@ -52,6 +52,30 @@ What would change this is written down (PHASE25 section 9): residency that can
 hold an ASR engine and its aligner as one resident thing, which is what a
 streaming-transcription door would need anyway.
 
+THE JOURNAL (Owen, 2026-09-27; docs/RESUMABLE-JOBS.md)
+-----------------------------------------------------
+*"we should definitely be writing work to disk, so if something fails, we dont
+lose everything. preferably writing to disk often."* This is the journal's
+first job type and its reference. Every unit below is written to the job's
+journal (`crucible/journal.py`) the moment it exists, keyed by the piece it
+belongs to (`piece_key`: its level and its core's first and last sample):
+
+- `plan.L<level>.<region>` — a split's pieces, as the worker cut them;
+- `text.<piece>` — a piece's decoded text, tokens and token-limit flag, as each
+  result lands off the worker;
+- `words.<piece>` — a piece's aligned items, after each aligner batch;
+- `verdict.<piece>` — what became of it: `landed` (with its owned text),
+  `silent`, or `redecode` (the loop guard's entry, exactly as `redecoded`
+  reports it).
+
+With `resume` the run is the SAME run: the plan is recomputed from the audio
+and must equal the journal's (else `resume_plan_mismatch`, before any piece is
+decoded), every piece with a `text` unit is not decoded again, every piece with
+a `words` unit is not aligned again, and each verdict is recomputed and must
+equal the recorded one (else `resume_mismatch`). Everything after the units is
+a pure function of them, so the resumed `transcript.json` is the uninterrupted
+one, byte for byte.
+
 Why vLLM runs IN the worker process, not as `vllm serve`
 ---------------------------------------------------------
 The resident `llm` engines are `vllm serve` behind a proxy. Here the engine is
@@ -134,6 +158,14 @@ READY_SILENCE_TIMEOUT_SECONDS = 900.0
 #: minutes of audio: long enough that the per-request overhead is noise, short
 #: enough that a progress event follows every few seconds of aligning.
 ALIGN_BATCH = 16
+
+#: WHAT THIS JOB TYPE'S JOURNAL UNITS MEAN (docs/RESUMABLE-JOBS.md). Bumped
+#: whenever a unit written by one build would mean something different to the
+#: next: a unit's keys or values, the piece key, the plan's shape, the loop
+#: guard's or ownership's rules (a verdict records their answer), or anything
+#: the worker does that changes a piece's text for the same audio. A journal
+#: of another version is refused `resume_mismatch` before the job exists.
+JOURNAL_FORMAT_VERSION = 1
 
 #: The environment of the ASR worker, per engine. vLLM's is the resident
 #: engine's own (`crucible/engines/vllm.py`, one owner) plus the in-process
@@ -287,6 +319,21 @@ def plan_aligner(config: Config, asr: AsrBackendSpec, backend_kind: str) -> Alig
     return AlignerPlan(manifest=manifest, spec=spec, python=python, weights_dir=installed.path)
 
 
+def run_dtype_on(config: Config, backend: Any, spec: AsrBackendSpec) -> str:
+    """The dtype the ASR engine is STARTED in on this card, and the one the
+    result records. The manifest's `bfloat16` (Owen's full-precision ruling
+    of 2026-09-24), except under vLLM on a card without bf16, which runs it
+    in float16: Owen, 2026-09-26, *"we can quantize if we need to. no less
+    than 4"* (`engines.vllm.run_dtype`, fresh-install #48). Same two bytes a
+    parameter, so the manifest's memory figures hold. A module function so the
+    journal's identity (`AsrJobType.journal_identity`) and the run read one
+    answer."""
+    stated = spec.require("dtype")
+    if spec.engine != VLLM_ENGINE:
+        return stated
+    return run_dtype(spec, card_for(config.home, backend.gpu))
+
+
 def gpu_memory_utilization(estimate: int, card_bytes: int) -> float:
     """vLLM's startup gate, as the share of the card the estimate is.
 
@@ -352,6 +399,50 @@ class Piece:
             f"{start:.1f}-{end:.1f}s "
             f"({loopguard.clock(start)}-{loopguard.clock(end)})"
         )
+
+
+def _sample(seconds: float) -> int:
+    """A time on the pieces' timeline as the worker's own sample index. The
+    worker reports `sample / 16000`, so this recovers its integer exactly."""
+    return int(round(float(seconds) * speechonly.SAMPLE_RATE))
+
+
+def piece_key(piece: Piece) -> str:
+    """A piece's name in the journal: its level and its core in samples.
+
+    Samples and not seconds, so the key is an integer the worker cut at and
+    never a float's spelling. The level is in it because re-cutting a piece
+    already shorter than the next window gives back one piece with the SAME
+    core as its parent, decoded again; without the level the two would share
+    a key and the child would read its looping parent's text.
+    """
+    return f"L{piece.level}.{_sample(piece.start_s):011d}-{_sample(piece.end_s):011d}"
+
+
+def _roundtrip(value: Any) -> Any:
+    """`value` as it will read back out of the journal, for comparison."""
+    return json.loads(json.dumps(value))
+
+
+def _plan_difference(recorded: dict[str, Any], plan: dict[str, Any]) -> str:
+    """The first way two piece plans differ, as a sentence."""
+    if recorded.get("duration_s") != plan.get("duration_s"):
+        return (
+            f"the audio decoded to {plan.get('duration_s')} s and the journal's "
+            f"to {recorded.get('duration_s')} s"
+        )
+    if recorded.get("kept") != plan.get("kept"):
+        return "speech_only kept different stretches of the audio"
+    before, now = recorded.get("pieces") or [], plan.get("pieces") or []
+    if len(before) != len(now):
+        return f"{len(now)} piece(s) now and {len(before)} in the journal"
+    for index, (old, new) in enumerate(zip(before, now)):
+        if old != new:
+            return (
+                f"piece {index} is {new[0]:.3f}+{new[1]:.3f} s now and "
+                f"{old[0]:.3f}+{old[1]:.3f} s in the journal"
+            )
+    return "the recorded plan differs in a field this build does not name"
 
 
 def own_words(piece: Piece, *, is_last: bool) -> None:
@@ -478,6 +569,8 @@ class QwenAsrRun:
         overlap_s: float,
         width: int | None = None,
         speech: dict[str, Any] | None = None,
+        journal: Any | None = None,
+        resumed: bool = False,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -512,6 +605,16 @@ class QwenAsrRun:
         self._redecoded: list[dict[str, Any]] = []
         self._silent = 0
         self._text_published = False
+        #: THE JOURNAL (2026-09-27, module docstring): None only for a run
+        #: built without one. `resumed` is whether it holds an earlier job's
+        #: work to read back instead of redoing.
+        self._journal = journal
+        self._resumed = resumed and journal is not None
+        #: The journal's counts: pieces in the plan (grown by each re-cut),
+        #: pieces with text, pieces with word times.
+        self._total = 0
+        self._decoded = 0
+        self._aligned = 0
 
     # -------------------------------------------------------------- driving
 
@@ -519,12 +622,18 @@ class QwenAsrRun:
         try:
             self._start_asr()
             pending = self._split(level=0, region=None)
-            if self._word_timestamps:
-                self._start_aligner()
+            self._total = len(pending)
+            # A fresh run loads the aligner up front, so a broken aligner is
+            # found before hours of decoding. A resumed one loads it only when
+            # a piece the journal has no word times for reaches it: a resume
+            # whose aligning was all done never loads it at all.
+            if self._word_timestamps and not self._resumed:
+                self._ensure_aligner()
             while pending:
                 pending = self._round(pending)
         finally:
             self._stop_all()
+            self._save_progress(force=True)
         return self._document()
 
     def _round(self, pending: list[Piece]) -> list[Piece]:
@@ -547,6 +656,7 @@ class QwenAsrRun:
                 # one for the aligner, which has no word to place and says so
                 # by failing the chunk.)
                 self._silent += 1
+                self._verdict(piece, {"outcome": "silent"})
             elif self._word_timestamps:
                 to_align.append(piece)
             else:
@@ -567,6 +677,7 @@ class QwenAsrRun:
                     # Every word it heard was in its overlap, owned by a
                     # neighbour: this piece's own stretch was silence.
                     self._silent += 1
+                    self._verdict(piece, {"outcome": "silent"})
         return again
 
     def _redecode(self, piece: Piece, signal: loopguard.LoopSignal) -> list[Piece]:
@@ -581,26 +692,34 @@ class QwenAsrRun:
                 "was published — a transcript with this stretch missing would "
                 "look exactly like one without it",
             )
-        self._redecoded.append(
-            {
-                "start": piece.start_s,
-                "end": piece.end_s,
-                "window_s": self._ladder[piece.level],
-                "next_window_s": window,
-                "signal": signal.kind,
-                "detail": signal.detail,
-            }
-        )
+        entry = {
+            "start": piece.start_s,
+            "end": piece.end_s,
+            "window_s": self._ladder[piece.level],
+            "next_window_s": window,
+            "signal": signal.kind,
+            "detail": signal.detail,
+        }
+        self._redecoded.append(entry)
+        self._verdict(piece, {"outcome": "redecode", **entry})
         self._ctx.note(
             f"re-decoding {piece.where()} in pieces of at most {window:g} s: "
             f"{signal.detail}"
         )
         # The CORE is re-cut, out of the original source, so the smaller pieces'
         # overlap is the real audio either side and not the looping piece's own.
-        return self._split(level=piece.level + 1, region=(piece.start_s, piece.end_s))
+        children = self._split(
+            level=piece.level + 1, region=(piece.start_s, piece.end_s)
+        )
+        self._total += len(children) - 1
+        return children
 
     def _land(self, piece: Piece) -> None:
         self._finished.append(piece)
+        self._verdict(
+            piece,
+            {"outcome": "landed", "text": piece.text, "words": len(piece.items)},
+        )
         self._ctx.progress(
             min(1.0, self._landed_s() / self._duration_s),
             f"{len(self._finished)} piece(s), {self._landed_s():.0f}s of "
@@ -614,19 +733,125 @@ class QwenAsrRun:
     def _landed_s(self) -> float:
         return sum(piece.duration_s for piece in self._finished)
 
+    # -------------------------------------------------------------- journal
+
+    def _unit(self, kind: str, piece: Piece) -> Any | None:
+        """The journal's `kind` unit for this piece, on a resumed run only.
+
+        A FRESH RUN NEVER READS ITS JOURNAL: it is new, and even if it were
+        not, explicit resume means only a job sent `resume` continues work.
+        """
+        if not self._resumed or self._journal is None:
+            return None
+        return self._journal.get(f"{kind}.{piece_key(piece)}")
+
+    def _put(self, kind: str, piece: Piece, data: dict[str, Any]) -> None:
+        """Write one unit, durably, the moment it exists. A journal that will
+        not take it fails the job by name: work that cannot be kept is work a
+        failure an hour from now would lose, which is what the journal is for."""
+        if self._journal is None:
+            return
+        try:
+            self._journal.put(f"{kind}.{piece_key(piece)}", data)
+        except OSError as exc:
+            raise JobError(
+                "journal_unwritable",
+                f"the piece at {piece.where()}: its {kind} could not be written to "
+                f"journal {self._journal.id}: {type(exc).__name__}: {exc}",
+            ) from None
+
+    def _verdict(self, piece: Piece, verdict: dict[str, Any]) -> None:
+        """Record what became of a piece; on a resume, check it is what was.
+
+        Every verdict is a pure function of the piece's text and word times,
+        which a resume read back from the journal, so a resumed run reaching
+        a different verdict means the rules changed under the journal without
+        `JOURNAL_FORMAT_VERSION` moving. That is refused rather than stitched:
+        half a transcript made under one loop guard and half under another is
+        a transcript nobody can describe.
+        """
+        if self._journal is None:
+            return
+        verdict = _roundtrip(verdict)
+        recorded = self._unit("verdict", piece)
+        if recorded is None:
+            self._put("verdict", piece, verdict)
+        elif recorded != verdict:
+            raise JobError(
+                "resume_mismatch",
+                f"the piece at {piece.where()}: journal {self._journal.id} says it "
+                f"was {recorded.get('outcome')!r} and this run finds it "
+                f"{verdict.get('outcome')!r} from the same text and word times, so "
+                "the loop guard or the ownership rule changed since the journal "
+                "was written. Send the job without resume to start fresh",
+            )
+        self._save_progress()
+
+    def _check_plan(self, key: str, plan: dict[str, Any], where: str) -> None:
+        """A split's pieces, recorded, or on a resume checked against the record.
+
+        THE PLAN IS DETERMINISTIC FROM THE AUDIO AND THE PARAMS: every cut is
+        the centre of the quietest 100 ms before the nominal cut, or with
+        `speech_only` the latest join in that span (`qwen_worker.split_points`),
+        over samples ffmpeg decoded, with no randomness anywhere. A resume
+        recomputes it, and a plan that differs (another ffmpeg decoding the
+        container differently, a changed cutter) means the journal's pieces
+        are not this run's pieces: `resume_plan_mismatch`, before any piece is
+        decoded, rather than text stitched onto the wrong audio.
+        """
+        if self._journal is None:
+            return
+        plan = _roundtrip(plan)
+        recorded = self._journal.get(key) if self._resumed else None
+        if recorded is None:
+            try:
+                self._journal.put(key, plan)
+            except OSError as exc:
+                raise JobError(
+                    "journal_unwritable",
+                    f"the piece plan for {where} could not be written to journal "
+                    f"{self._journal.id}: {type(exc).__name__}: {exc}",
+                ) from None
+            return
+        if recorded == plan:
+            return
+        raise JobError(
+            "resume_plan_mismatch",
+            f"the pieces cut from {where} are not the ones journal "
+            f"{self._journal.id} recorded: {_plan_difference(recorded, plan)}. "
+            "Its text belongs to other pieces of audio and cannot be stitched to "
+            "these; send the job without resume to start fresh",
+        )
+
+    def _save_progress(self, *, force: bool = False) -> None:
+        """The journal's counts, and the sentence `GET /v1/resumable` shows."""
+        if self._journal is None or self._total <= 0:
+            return
+        done = len(self._finished) + self._silent
+        detail = f"{self._decoded:,} decoded"
+        if self._word_timestamps:
+            detail += f", {self._aligned:,} aligned"
+        try:
+            self._journal.progress(
+                done,
+                self._total,
+                f"{done:,} of {self._total:,} pieces done ({detail})",
+                force=force,
+            )
+        except OSError as exc:
+            # The units are the truth and each was written before this; a
+            # count that would not save is said, not raised.
+            print(
+                f"crucible: journal {self._journal.id} progress not saved: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
     # ------------------------------------------------------------- sessions
 
     def _run_dtype(self) -> str:
-        """The dtype the ASR engine is STARTED in on this card, and the one the
-        result records. The manifest's `bfloat16` (Owen's full-precision ruling
-        of 2026-09-24), except under vLLM on a card without bf16, which runs it
-        in float16: Owen, 2026-09-26, *"we can quantize if we need to. no less
-        than 4"* (`engines.vllm.run_dtype`, fresh-install #48). Same two bytes a
-        parameter, so the manifest's memory figures hold."""
-        stated = self._spec.require("dtype")
-        if self._spec.engine != VLLM_ENGINE:
-            return stated
-        return run_dtype(self._spec, card_for(self._config.home, self._backend.gpu))
+        """`run_dtype_on` for this run's card and model."""
+        return run_dtype_on(self._config, self._backend, self._spec)
 
     def _start_asr(self) -> None:
         engine = self._spec.engine
@@ -715,6 +940,11 @@ class QwenAsrRun:
             "token(s)"
         )
 
+    def _ensure_aligner(self) -> None:
+        """The aligner session, started if it is not yet."""
+        if self._align is None:
+            self._start_aligner()
+
     def _start_aligner(self) -> None:
         plan = self._aligner
         if plan is None:  # unreachable: `run` plans it whenever timestamps are on
@@ -756,6 +986,7 @@ class QwenAsrRun:
         session: workers.WorkerSession | None,
         request: dict[str, Any],
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> workers.WorkerOutcome:
         if session is None:  # unreachable: every caller runs after its start
             raise JobError("worker_failed", f"no session for {request['op']!r}")
@@ -765,6 +996,7 @@ class QwenAsrRun:
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_progress=on_progress,
                 cancelled=lambda: self._ctx.cancelled,
+                on_result=on_result,
             )
         except workers.WorkerError as exc:
             raise JobError("worker_failed", str(exc)) from None
@@ -851,6 +1083,31 @@ class QwenAsrRun:
                 f"{self._duration_s:.0f}s of audio{kept} in {count} piece(s) of at "
                 f"most {window:g}s, {self._overlap_s:g}s of overlap each side"
             )
+        # THE PLAN, JOURNALED OR CHECKED (2026-09-27): the cut, not the wav
+        # paths, which are this job's scratch and differ on every run.
+        region_key = (
+            "all" if region is None else f"{_sample(region[0]):011d}-{_sample(region[1]):011d}"
+        )
+        self._check_plan(
+            f"plan.L{level}.{region_key}",
+            {
+                "window_s": window,
+                "overlap_s": self._overlap_s,
+                "duration_s": float(outcome.ready["duration_s"]),
+                "samples": outcome.ready.get("samples"),
+                "kept": outcome.ready.get("kept"),
+                "pieces": [
+                    [
+                        float(result["offset_s"]),
+                        float(result["duration_s"]),
+                        float(result["audio_offset_s"]),
+                        float(result["audio_duration_s"]),
+                    ]
+                    for result in results
+                ],
+            },
+            "the whole input" if region is None else f"the re-cut of {region_key}",
+        )
         max_new = int(self._spec.require("max_new_tokens"))
         return [
             Piece(
@@ -869,34 +1126,89 @@ class QwenAsrRun:
         ]
 
     def _transcribe(self, pieces: list[Piece]) -> None:
+        """Decode `pieces`, journaling each piece's text as its result lands.
+
+        On a resume, a piece whose text is in the journal is not sent: its
+        text, token count and token-limit flag are read back, exactly as the
+        worker gave them, and everything downstream runs on them unchanged.
+        """
+        todo: list[Piece] = []
+        for piece in pieces:
+            unit = self._unit("text", piece)
+            if unit is None:
+                todo.append(piece)
+                continue
+            piece.text = str(unit["text"])
+            piece.tokens = int(unit["tokens"])
+            piece.hit_token_limit = bool(unit["hit_token_limit"])
+            self._decoded += 1
+        if len(todo) < len(pieces):
+            self._ctx.note(
+                f"{len(pieces) - len(todo):,} of {len(pieces):,} piece(s) already "
+                f"decoded in journal {self._journal.id if self._journal else '?'}; "
+                f"decoding {len(todo):,}"
+            )
+        if not todo:
+            return
+
         def on_progress(message: dict[str, Any]) -> None:
             done = int(message["processed"])
-            heard = self._landed_s() + sum(p.duration_s for p in pieces[:done])
+            heard = self._landed_s() + sum(p.duration_s for p in todo[:done])
             self._ctx.progress(
                 min(1.0, heard / self._duration_s),
-                f"transcribed {done} of {len(pieces)} piece(s)",
+                f"transcribed {done} of {len(todo)} piece(s)",
                 stage="transcribing",
                 processed_s=heard,
                 total_s=self._duration_s,
                 cues=len(self._finished),
             )
 
+        landed = [0]
+
+        def on_result(message: dict[str, Any]) -> None:
+            # AS IT LANDS (Owen, 2026-09-27: "preferably writing to disk
+            # often"): the worker sends each batch's results the moment the
+            # batch is decoded, and each is on disk before the next is read. A
+            # result past the count, or one missing a key, is left to the
+            # positional check below to refuse by name.
+            position = landed[0]
+            landed[0] += 1
+            if position >= len(todo):
+                return
+            try:
+                row = {
+                    "text": str(message["text"]),
+                    "tokens": int(message["tokens"]),
+                    "hit_token_limit": bool(message["hit_token_limit"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                return
+            piece = todo[position]
+            piece.text = row["text"]
+            piece.tokens = row["tokens"]
+            piece.hit_token_limit = row["hit_token_limit"]
+            self._put("text", piece, row)
+            self._decoded += 1
+            self._save_progress()
+
         outcome = self._send(
             self._asr,
             {
                 "op": "transcribe",
-                "pieces": [{"wav": p.wav, "max_tokens": p.budget} for p in pieces],
+                "pieces": [{"wav": p.wav, "max_tokens": p.budget} for p in todo],
             },
             on_progress,
+            on_result,
         )
         try:
-            results = workers.require_positional_results(outcome, len(pieces), "piece")
+            results = workers.require_positional_results(outcome, len(todo), "piece")
         except workers.WorkerError as exc:
             raise JobError("worker_failed", str(exc)) from None
-        for piece, result in zip(pieces, results):
+        for piece, result in zip(todo, results):
             piece.text = str(result["text"])
             piece.tokens = int(result["tokens"])
             piece.hit_token_limit = bool(result["hit_token_limit"])
+        self._save_progress()
 
     def _publish_text(self, pieces: list[Piece]) -> None:
         """`transcript.text.json`: what was heard, published BEFORE alignment.
@@ -966,6 +1278,29 @@ class QwenAsrRun:
         silence. A batch at a time keeps the event stream moving at the
         aligner's own pace, and lets a cancel land between batches.
         """
+        # JOURNALED PER BATCH (2026-09-27): each batch's word times are on disk
+        # before the next batch is sent, and on a resume a piece with word
+        # times in the journal is not sent at all. A piece the aligner FAILED
+        # is not journaled, so a resume after `asr_align_failed` re-aligns only
+        # the failures.
+        todo: list[Piece] = []
+        for piece in pieces:
+            unit = self._unit("words", piece)
+            if unit is None:
+                todo.append(piece)
+                continue
+            piece.items = list(unit["items"])
+            self._aligned += 1
+        if len(todo) < len(pieces):
+            self._ctx.note(
+                f"{len(pieces) - len(todo):,} of {len(pieces):,} piece(s) already "
+                f"aligned in journal {self._journal.id if self._journal else '?'}; "
+                f"aligning {len(todo):,}"
+            )
+        if not todo:
+            return
+        self._ensure_aligner()
+        pieces = todo
         results: list[dict[str, Any]] = []
         aligned_s = 0.0
         for first in range(0, len(pieces), ALIGN_BATCH):
@@ -981,9 +1316,15 @@ class QwenAsrRun:
                 },
             )
             try:
-                results += workers.require_positional_results(outcome, len(batch), "piece")
+                landed = workers.require_positional_results(outcome, len(batch), "piece")
             except workers.WorkerError as exc:
                 raise JobError("worker_failed", str(exc)) from None
+            results += landed
+            for piece, result in zip(batch, landed):
+                if "error" not in result:
+                    self._put("words", piece, {"items": list(result["items"])})
+                    self._aligned += 1
+            self._save_progress()
             aligned_s += sum(p.end_s - p.start_s for p in batch)
             done = min(first + ALIGN_BATCH, len(pieces))
             self._ctx.progress(

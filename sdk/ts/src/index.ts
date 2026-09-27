@@ -199,6 +199,8 @@ export type {
   RenderFailure,
   RenderOptions,
   RenderResult,
+  Resumable,
+  ResumableDiscarded,
   ResponseFormat,
   RouteSetting,
   ServerInfo,
