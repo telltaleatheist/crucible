@@ -1,33 +1,3 @@
-"""The `align-longform` job type — four stages, two existing workers, one lane.
-
-The contract and its refusals are in `__init__.py`; the stage drivers are in
-`stages.py`; the two ported algorithms are `coarse.py` and `cues.py`. This file
-is the thing that runs them in order and reports.
-
-WHAT IT CHARGES
----------------
-One slot, its own, for the whole duration — Owen's TTS ruling applied here by the
-same reasoning: *"the entire tts step goes to the other system. That includes
-anything the step needs to do even if it's cpu."* `transcribe` and `coarse-align`
-are the CPU stages and are most of the wall clock, and they run here rather than
-being sliced back to the client.
-
-TWO MODELS, ONE `model` FIELD
------------------------------
-A job carries one model id and this act needs two. `model` is the ALIGNER —
-`qwen3-aligner`, the thing that holds the card and the thing a failure is usually
-about — and the rough pass's model is a PARAM (`rough_model`). That asymmetry is
-deliberate rather than a wire limitation: the aligner decides what this job IS,
-while the whisper size is a speed/quality dial the caller turns per book.
-
-PROGRESS IS PER STAGE AND THE NAMES ARE THE CONTRACT
------------------------------------------------------
-`STAGES` in `__init__.py` are matched verbatim by BookForge's generate-sentences
-row to fill its stacked bars, so they are part of the wire rather than log prose.
-The fractions below are the local aligner's own measured shape: the rough pass
-dominates, the card stage is fast, and coarse-align and write are near-free.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,15 +13,10 @@ from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from . import ALIGNER_MODEL, JOB_TYPE_NAME, STAGES, validate
 from . import coarse, cues, plan, stages
 
-#: Where each stage ends, as a fraction of the whole. The rough pass is ~40
-#: minutes on a 16 h book and the card stage is minutes, so the bar spends most
-#: of its life in `transcribe` — which is the truth, and a bar that raced to 90%
-#: and sat there would be a worse lie than a slow one.
 STAGE_END = {"transcribe": 0.70, "coarse-align": 0.75, "align": 0.95, "write": 1.0}
 
 
 class AlignLongformJobType:
-    """`align-longform`: a whole audiobook in, a VTT and a report out."""
 
     name = JOB_TYPE_NAME
 
@@ -59,10 +24,8 @@ class AlignLongformJobType:
         self._config = config
         self._backend = backend
 
-    # ------------------------------------------------------------- models
 
     def describe_models(self) -> list[ModelDescriptor]:
-        """The ALIGNER only. The rough model is a param, not this job's subject."""
         out: list[ModelDescriptor] = []
         for manifest in load_all_align_manifests().values():
             if manifest.id != ALIGNER_MODEL:
@@ -83,13 +46,6 @@ class AlignLongformJobType:
         return out
 
     def vram_estimate(self, model: str | None) -> int:
-        """The card stage's need.
-
-        The ROUGH pass also uses the card and is not added: the two are never
-        resident together (`stages.py`), so the peak is whichever is larger, and
-        on every shipped pair that is the aligner. Stated rather than summed,
-        because summing would refuse a job that fits.
-        """
         manifests = load_all_align_manifests()
         manifest = manifests.get(model or ALIGNER_MODEL)
         if manifest is None:
@@ -110,16 +66,8 @@ class AlignLongformJobType:
             "fingerprint": f"{manifest.id}@{spec.revision}",
         }
 
-    # ------------------------------------------------------------- health
 
     def check(self, backend: Any) -> JobTypeStatus:
-        """BOTH envs, because this job is nothing without either.
-
-        Reported as one status naming which half is missing, rather than as
-        "ready" on the strength of the aligner alone — a job type that says ready
-        and then fails in its first stage is the shape this server spends its
-        refusals avoiding.
-        """
         missing: list[str] = []
         for job_type in ("asr", "align"):
             status = jobenv.env_status(
@@ -142,7 +90,6 @@ class AlignLongformJobType:
             detail="drives the asr and align workers; one slot for the whole book",
         )
 
-    # ---------------------------------------------------------- preflight
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         try:
@@ -152,9 +99,6 @@ class AlignLongformJobType:
         if model is None:
             raise ApiError(400, "model_required", f"{self.name} needs an aligner")
 
-        # The ROUGH model must be installed too, and refusing here is the point:
-        # discovering it after a 40-minute transcribe would be the same failure
-        # an hour later.
         asr_manifests = load_all_asr_manifests()
         rough = asr_manifests.get(parsed.rough_model)
         if rough is None:
@@ -183,7 +127,6 @@ class AlignLongformJobType:
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
         )
 
-    # --------------------------------------------------------------- run
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = validate(job.params)
@@ -214,7 +157,6 @@ class AlignLongformJobType:
         try:
             duration = stages.probe_duration(ffmpeg, audio)
 
-            # ── 1. transcribe ────────────────────────────────────────────
             ctx.progress(0.0, "transcribing the audiobook", stage=STAGES[0])
             words = stages.transcribe(
                 python=jobenv.env_python(
@@ -235,7 +177,6 @@ class AlignLongformJobType:
             )
             ctx.raise_if_cancelled()
 
-            # ── 2. coarse-align ──────────────────────────────────────────
             ctx.progress(STAGE_END["transcribe"], "placing the book against the transcript",
                          stage=STAGES[1])
             rough_times = coarse.coarse_align(
@@ -244,7 +185,6 @@ class AlignLongformJobType:
             )
             ctx.raise_if_cancelled()
 
-            # ── 3. align ─────────────────────────────────────────────────
             chunk_plan = plan.plan_chunks(
                 rough_times.rough, rough_times.first_index, rough_times.last_index,
                 duration, params.chunk_s,
@@ -289,7 +229,6 @@ class AlignLongformJobType:
                 cancelled=lambda: ctx.cancelled,
             )
 
-            # ── 4. write ─────────────────────────────────────────────────
             ctx.progress(STAGE_END["align"], "writing the transcript", stage=STAGES[3])
             written = _build_cues(params, chunk_plan, aligned)
             if not written:
@@ -299,10 +238,6 @@ class AlignLongformJobType:
                     "is not a transcript.",
                 )
             vtt = cues.write_vtt(written)
-            # WRITTEN AND THEN REGISTERED. `ctx.scratch` is a working directory,
-            # not the artifact store — a file left there is a job that reported
-            # `done` with `artifacts: []`, which is success delivering nothing.
-            # Measured on the first green run, 2026-09-15.
             vtt_path = ctx.scratch / "alignment.vtt"
             vtt_path.write_text(vtt, encoding="utf-8")
             ctx.artifact("alignment.vtt", vtt_path)
@@ -328,19 +263,10 @@ class AlignLongformJobType:
 
 
 def _build_cues(params: Any, chunk_plan: Any, aligned: list[dict[str, Any]]) -> list[cues.Cue]:
-    """Aligner items back onto sentences, BY TOKEN COUNT and by POSITION.
-
-    Crucible's aligner asserts nothing about words — it returns one timestamped
-    item per its OWN tokenisation — so the mapping is the caller's, exactly as it
-    is for the `align` job type. Position is the chunk's whole identity: no index
-    travels either way.
-    """
     out: list[cues.Cue] = []
     for chunk, result in zip(chunk_plan.chunks, aligned):
         items = result.get("items") or []
         if result.get("error") or not items:
-            # A failed window keeps its coarse timing rather than vanishing: the
-            # sentences are still in the book and still in the audio.
             continue
         cursor = 0
         for sentence_index in chunk.sentences:

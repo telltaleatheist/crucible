@@ -1,57 +1,3 @@
-"""Forced-aligner manifests — `align/<id>.toml` (PHASE4-AUDIO.md section 2).
-
-One file per Crucible aligner id, the same shape `models/<id>.toml` and
-`asr/<id>.toml` have: a stable id, weights per backend, and a full commit sha so
-a pull is reproducible.
-
-Why this is a third directory and not a row in `models/`
---------------------------------------------------------
-PHASE4-AUDIO.md section 2 says the aligner "gets a manifest like any other model,
-with `job_type = "align"`". It does not, and cannot: `crucible/manifests.py`
-requires `params_b`, `context_default` and `modalities` on every `[model]` table
-and refuses any engine but `vllm` or `mlx-lm`, because those manifests describe
-things an OpenAI-compatible engine serves. A forced aligner has no context, no
-modalities in that sense and no engine of that kind — it is a checkpoint a worker
-imports — so putting it in `models/` would mean either inventing three numbers
-that mean nothing or loosening a schema that is strict for good reasons.
-
-There is no `job_type` key anywhere in this repo's manifests, either. **The
-directory is the job type**, which is how `asr/` already works, and it is the
-better arrangement: nothing can declare `job_type = "llm"` in `align/` and be
-half-believed by two loaders.
-
-Both backends run the same engine, and that is the point
----------------------------------------------------------
-Qwen3-ForcedAligner is a torch model and torch has an MPS backend, so unlike
-`asr` the Mac needs no second engine, no second worker and no second set of
-weights: `ALIGN_BACKEND_ENGINES` maps both backends to `qwen3-forced-aligner`
-and `align/qwen3-aligner.toml` pins the identical repo and revision on both.
-What changes per backend is the DEVICE the worker is told to load onto, which
-`crucible/jobs/align/__init__.py` owns.
-
-Until 2026-09-14 this module shipped `cuda-linux` alone, and the reason it gave
-was that nobody had measured the aligner on Metal. Half of that is discharged
-and half is not, which is why both halves are written down here rather than one
-of them being quietly dropped: BookForge measured 97x realtime warm on MPS in
-bfloat16 on the M1 Ultra on 2026-09-08 (`electron/components/qwen-align-env.ts`)
-in the very env `envs/align/mlx-darwin.txt` is the freeze of — so the recipe is
-a real one — while the TIMESTAMP comparison `envs/align/mlx-darwin.md` asks for
-has still not been run. `bfloat16` on MPS is a different numerical path from
-`bfloat16` on CUDA, and until one chapter is aligned on both machines and the
-cues compared, nobody can say the two agree. The block ships because the engine,
-the env and the speed are real; the comparison is named as owed in that file and
-in `docs/PHASE15-HOST.md` 7c rather than implied to have happened.
-
-Why this is not `crucible/manifests.py`
----------------------------------------
-It should be, and so should `asrmodels.py`; the three are one loader
-parameterised by (directory, required keys, permitted engines) and they share
-about two hundred identical lines. `asrmodels.py` says the same thing at the same
-length and for the same reason: phase 4 was built beside phases 2 and 3 in one
-tree. The merge is a follow-up, and doing it now would be rewriting two other
-builders' files under them.
-"""
-
 from __future__ import annotations
 
 import os
@@ -66,8 +12,6 @@ from .errors import CrucibleError
 
 ALIGN_DIR_ENV = "CRUCIBLE_ALIGN_DIR"
 
-#: Which engine each backend is allowed to name. ONE engine for both, which is
-#: the whole shape of this job type on the Mac — see the module docstring.
 ALIGN_BACKEND_ENGINES: dict[str, str] = {
     CUDA_LINUX: "qwen3-forced-aligner",
     MLX_DARWIN: "qwen3-forced-aligner",
@@ -83,14 +27,9 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "hf_repo": str,
     "revision": str,
     "memory_bytes_estimate": int,
-    #: `bfloat16` on an accelerator; the manifest says it rather than the code
-    #: guessing it, because it is a property of what the bake-off measured.
     "dtype": str,
 }
 
-#: The dtypes a backend block may name. Not an open string: a manifest that said
-#: `bf16` or `torch.bfloat16` would reach `torch.<name>` as an AttributeError
-#: inside the worker, minutes and one model load later.
 DTYPES = frozenset({"bfloat16", "float16", "float32"})
 
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -99,19 +38,11 @@ _HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 class AlignManifestError(CrucibleError):
-    """An align manifest is missing, unreadable, or does not say what it must."""
+    ...
 
 
 @dataclass(frozen=True)
 class AlignBackendSpec:
-    """One `[backends.<kind>]` block.
-
-    The first four field names are `crucible.manifests.BackendSpec`'s on purpose:
-    `crucible/weights.py` reads `spec.hf_repo`, `spec.revision` and
-    `spec.backend` and nothing else, so aligner weights are pulled and stamped by
-    the one weights module every other model goes through, with no branch in it
-    for this job type.
-    """
 
     backend: str
     engine: str
@@ -122,15 +53,6 @@ class AlignBackendSpec:
 
     @property
     def files(self) -> tuple[str, ...]:
-        """Empty: this backend fetches the WHOLE repo.
-
-        `crucible/weights.py`'s `WeightsSource` asks every spec this, and the
-        empty tuple is a real answer and not a gap — it is what "there is no
-        file to choose, the repository IS the weights" reads as. Only
-        `llama-windows` names files (one GGUF, and a projector beside it for a
-        vision model), because a GGUF repo holds twenty quantizations and
-        pulling all of them is hundreds of gigabytes.
-        """
         return ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,11 +68,6 @@ class AlignBackendSpec:
 
 @dataclass(frozen=True)
 class AlignManifest:
-    #: Which tree under `~/.crucible/` these weights live in — `models`, with the
-    #: llm and asr manifests, so that `crucible models list` shows every set of
-    #: weights this server can be asked to fetch and there is one command to
-    #: learn rather than three. Not a dataclass field: a property of the kind,
-    #: not of the file.
     weights_family = "models"
 
     id: str
@@ -180,11 +97,7 @@ class AlignManifest:
         }
 
 
-# ------------------------------------------------------------------ locating
-
-
 def align_manifests_dir() -> Path:
-    """Where `align/*.toml` live on this host. Refuses by name if absent."""
     override = os.environ.get(ALIGN_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
@@ -200,11 +113,7 @@ def align_manifests_dir() -> Path:
     return path
 
 
-# ------------------------------------------------------------------ checking
-
-
 def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    """Every required key present and correctly typed; no key that is not listed."""
     unknown = sorted(set(table) - set(required))
     if unknown:
         raise AlignManifestError(
@@ -217,7 +126,6 @@ def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -
     for key, kind in required.items():
         value = table[key]
         wrong = not isinstance(value, kind)
-        # bool is a subclass of int; a bool where an int is wanted is still wrong.
         if kind is int and isinstance(value, bool):
             wrong = True
         if wrong:
@@ -330,11 +238,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
     )
 
 
-# ------------------------------------------------------------------- loading
-
-
 def parse_align_manifest(text: str, path: Path, expected_id: str) -> AlignManifest:
-    """Parse and validate one align manifest's text. Raises by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -343,7 +247,6 @@ def parse_align_manifest(text: str, path: Path, expected_id: str) -> AlignManife
 
 
 def load_align_manifest(model_id: str, directory: Path | None = None) -> AlignManifest:
-    """Load `align/<model_id>.toml`. Raises AlignManifestError if it is not there."""
     root = directory if directory is not None else align_manifests_dir()
     path = root / f"{model_id}.toml"
     if not path.is_file():
@@ -361,13 +264,6 @@ def load_align_manifest(model_id: str, directory: Path | None = None) -> AlignMa
 def load_all_align_manifests(
     directory: Path | None = None,
 ) -> dict[str, AlignManifest]:
-    """Every align manifest this build ships, by id, in id order.
-
-    Ordered by `path.stem` and not by path, for the reason
-    `crucible.manifests.load_all_manifests` gives: as whole paths a `-` sorts
-    before a `.`, so the extension decides the order whenever one id is a prefix
-    of another.
-    """
     root = directory if directory is not None else align_manifests_dir()
     manifests: dict[str, AlignManifest] = {}
     for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):

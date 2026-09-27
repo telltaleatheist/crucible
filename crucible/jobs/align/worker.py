@@ -1,84 +1,19 @@
-"""The `align` worker: Qwen3-ForcedAligner, run in its own interpreter and HELD.
-
-PHASE4-AUDIO.md sections 0 and 2. This module is **standalone**. It imports the
-standard library, `numpy`, `soundfile`, `torch` and `qwen_asr`, and nothing from
-`crucible` — the env it runs in has no `crucible` installed and never will, so an
-import from the server package here would be an ImportError at the first real job
-and a green test suite right up until then.
-
-It is the first worker that outlives a job
-------------------------------------------
-`asr` loads, transcribes one file and exits. An aligner that did that would read
-1.7 GB of weights per chunk, and a book is hundreds of chunks — narrator caches
-the model per worker process for exactly this reason
-(`python/narrator/align/aligner.py:519`, "one load per worker process, reused for
-the whole book"). So this reads request after request from stdin until EOF, and
-`crucible.workers.WorkerSession` on the other side is what holds it open.
-
-The wire, in full
------------------
-    stdin   one object per line. Two ops, and the op is required:
-
-            {"op": "load", "model_dir", "device", "dtype"}
-                -> ready {seconds, device, dtype}, done
-
-            {"op": "align", "language", "max_audio_s", "ffmpeg",
-             "chunks": [{"audio": "<path>", "text": "..."}]}
-            `language` is the model's own ENGLISH LANGUAGE NAME ("English",
-            "Cantonese"), not the ISO code the client sent: `model.align` takes
-            the name. The mapping is the server's, checked before the job is
-            queued, so an unsupported language never reaches a loaded model.
-                -> ready {chunks}
-                   result {items: [{text, start, end}]}   one per chunk
-                   result {error: "..."}                  a chunk that failed
-                   done
-
-    fd 1    the five message kinds every phase 4 worker speaks, and no other.
-
-**A chunk carries no index and a result carries no index.** The server knows a
-result's chunk from its POSITION in the stream, because an index a worker reports
-is an index a worker can get wrong — which is not a theory: narrator's aligner
-answers job k by deal position for this reason (`align/env.py:317`), on a book
-where the alternative had already gone wrong.
-
-fd 1 is results and nothing else
---------------------------------
-The first thing this file does, before importing anything that could print, is
-dup fd 1 somewhere safe and point the original at stderr. THIS IS WHOSE LESSON IT
-IS: on Owen's first in-app Higgs book (witches, 401 chunks, 2026-09-05) whisperx's
-logger wrote a `Failed to align segment` warning through a
-`StreamHandler(sys.stdout)`; it landed between two result lines, the parent's
-`json.loads` died with "Extra data", and the whole book failed with no traceback
-because the stdout tail won over stderr. Three chunks aligned fine. A protocol
-channel any library can write to is not a protocol channel
-(`python/narrator/align/worker.py:56`).
-
-What this worker does NOT do
-----------------------------
-It does not map items onto words, it does not check that the model returned the
-text it was given, it derives no scores and it writes no coverage report. All of
-that stays in BookForge (PHASE4-AUDIO.md section 2), which is most of the value
-of the feature and none of the value of a server. What comes back is one
-timestamped item per *the model's own* tokenization — 665 items for a 668-word
-English window, measured 2026-09-08 — and Crucible asserts nothing about words.
-"""
-
 from __future__ import annotations
 
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import workerio  # noqa: E402
+import workerio
 
 sys.path.pop(0)
 workerio.claim_stdout()
 
-import json  # noqa: E402
-import tempfile  # noqa: E402
-import time  # noqa: E402
+import json
+import tempfile
+import time
 
-from workerio import (  # noqa: E402
+from workerio import (
     SAMPLE_RATE,
     cap_memory,
     decode,
@@ -87,26 +22,12 @@ from workerio import (  # noqa: E402
     send,
 )
 
-#: Report at most this often while aligning. A chunk is seconds of work, so this
-#: is about not filling an SSE stream with a line per chunk on a 1,400-chunk book
-#: — the per-chunk news is the `cue` event, which the server emits from the
-#: result.
 PROGRESS_WALL_SECONDS = 1.0
 
-#: The model is loaded once and lives here for the process's life. A dict and not
-#: a bare name so the load op can be idempotent about saying what is loaded.
 _STATE: dict = {"model": None, "model_dir": None, "device": None, "dtype": None}
 
 
 def require(request: dict, key: str, kind: type):
-    """One required key, or a refusal naming it.
-
-    Nothing in either request has a default. A `language` Crucible did not send
-    is not "English" — it is a producer bug, and it says so, for the reason
-    narrator's own worker gives about `REQUIRED_JOB_FIELDS`: a producer that
-    stopped sending `device` would have aligned on CPU while the operator
-    believed otherwise.
-    """
     return workerio.require(
         request,
         key,
@@ -117,16 +38,10 @@ def require(request: dict, key: str, kind: type):
     )
 
 
-# -------------------------------------------------------------------- loading
-
-
 def load(request: dict) -> None:
-    """The `load` op: put the checkpoint on the device and say how long it took."""
     model_dir = require(request, "model_dir", str)
     device = require(request, "device", str)
     dtype_name = require(request, "dtype", str)
-    # REQUIRED, AND NULL OFF CUDA: a producer that stopped sending it would run
-    # uncapped while everyone believed otherwise, `require`'s own reason.
     if "memory_cap_bytes" not in request:
         raise KeyError(
             "the align request has no 'memory_cap_bytes'; it is required, and "
@@ -173,27 +88,11 @@ def load(request: dict) -> None:
     send("done")
 
 
-# ------------------------------------------------------------------- aligning
-
-
 def align_one(model, audio, text: str, language: str, max_audio_s: float) -> list:
-    """One chunk -> the model's own items, or a raise naming why not.
-
-    The model takes a PATH (or a URL), not an array, so the decoded audio is
-    written to a temporary 16 kHz PCM_16 wav for the call and deleted after. That
-    is a documented property of the API as verified in the `qwen-align` env on
-    2026-09-08, not an assumption, and narrator does exactly the same thing
-    (`aligner.py:750`).
-    """
     import soundfile
 
     duration = audio.size / float(SAMPLE_RATE)
     if duration > max_audio_s:
-        # THE REFUSAL, NOT A SPLIT. The model card's own limit is timestamps
-        # "within up to 5 minutes"; cutting a longer chunk into pieces here would
-        # change the alignment and nothing in the output would say it had
-        # happened. Narrator chunks are ~90 s, so anything past this is a
-        # caller's bug and is reported as one.
         raise ValueError(
             f"{duration:.1f}s of audio; Qwen3-ForcedAligner places timestamps "
             f"within {max_audio_s:.0f}s and says nothing about longer input. Cut "
@@ -207,14 +106,11 @@ def align_one(model, audio, text: str, language: str, max_audio_s: float) -> lis
         soundfile.write(wav_path, audio, SAMPLE_RATE, subtype="PCM_16")
         results = model.align(audio=wav_path, text=text, language=language)
     finally:
-        # One temp wav per chunk and a book is hundreds of them; leaving them
-        # behind fills the temp directory with a book's worth of audio.
         try:
             os.unlink(wav_path)
         except OSError:
             pass
 
-    # ONE LIST PER AUDIO, and one audio was passed.
     items = results[0]
     if not items:
         raise ValueError(
@@ -238,7 +134,6 @@ def _torch():
 
 
 def align(request: dict) -> None:
-    """The `align` op: one result per chunk, in the order the chunks arrived."""
     model = _STATE["model"]
     if model is None:
         raise RuntimeError(
@@ -272,11 +167,6 @@ def align(request: dict) -> None:
                 model, audio, require(chunk, "text", str), language, max_audio_s
             )
         except Exception as exc:
-            # One chunk's failure is reported and the run continues, so a single
-            # bad chunk does not cost the rest of the book — and so the server
-            # learns about every failure in one run rather than one per re-run.
-            # NO RETRY AND NO SECOND BACKEND, EVER (Owen's ruling, 2026-09-05):
-            # what comes back is what the model said, or why it said nothing.
             send("result", error=f"{type(exc).__name__}: {exc}")
         else:
             send("result", items=items)
@@ -284,9 +174,6 @@ def align(request: dict) -> None:
         report(position + 1)
 
     send("done")
-
-
-# ----------------------------------------------------------------------- main
 
 
 OPS = {"load": load, "align": align}
@@ -315,14 +202,8 @@ def main() -> int:
             fail(str(exc.args[0]))
             return 1
         except Exception as exc:
-            # A failure of the WHOLE request rather than of one chunk: the model
-            # would not load, or the request was malformed. The session is over
-            # either way, so this exits rather than waiting for another line it
-            # could not honour.
             fail(f"{type(exc).__name__}: {exc}")
             return 1
-    # EOF on stdin: the session was stopped politely. Exit 0 so `stop()` sees a
-    # worker that went when it was asked.
     return 0
 
 
