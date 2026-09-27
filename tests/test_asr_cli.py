@@ -24,12 +24,12 @@ ASR_MODELS = ["whisper-large-v3-turbo", "whisper-tiny"]
 
 @pytest.fixture
 def viable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
 
 
 @pytest.fixture
 def mac(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
 
 
 def test_init_records_the_asr_flag(home: Path, viable: None) -> None:

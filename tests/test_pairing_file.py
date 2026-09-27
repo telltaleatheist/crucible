@@ -209,5 +209,5 @@ def test_the_line_is_the_CONFIG_s_and_never_a_run_s_port_override(
     line = _synced(home)
     assert line is not None
     assert f":{7100}/" in line or ":7100/#" in line
-    source = (Path(cli.__file__)).read_text(encoding="utf-8")
+    source = (Path(cli.serve.__file__)).read_text(encoding="utf-8")
     assert "_sync_pairing_file(config)" in source

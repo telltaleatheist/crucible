@@ -34,12 +34,12 @@ RVC_MODELS = [
 
 @pytest.fixture
 def viable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
 
 
 @pytest.fixture
 def mac(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
 
 
 # --------------------------------------------------------------------- init

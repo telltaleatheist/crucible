@@ -461,7 +461,7 @@ def test_the_fp32_script_and_the_table_name_the_same_strings() -> None:
 
 
 def _mac(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
 
 
 def _mac_llm_env(home: Path, server_text: str) -> Path:
@@ -508,7 +508,7 @@ def test_doctor_reports_a_patched_mac_llm_env_as_sound(
 def test_doctor_says_not_applicable_on_cuda_linux(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["init", "--enable-llm"]) == 0
     capsys.readouterr()
     report = _doctor(capsys)

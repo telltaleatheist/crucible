@@ -45,9 +45,9 @@ async def lifespan(app):
         (root / 'cleaned').write_text('worker exited')
 app = FastAPI(lifespan=lifespan)
 from types import SimpleNamespace
-cli.load_config = lambda: SimpleNamespace(backend_kind='fixture', host='127.0.0.1', port=0, name='fixture')
-cli.detect_backend = lambda: SimpleNamespace(kind='fixture', gpu=SimpleNamespace(name='CPU fixture'))
-cli._sync_pairing_file = lambda config: None
+cli.common.load_config = lambda: SimpleNamespace(backend_kind='fixture', host='127.0.0.1', port=0, name='fixture')
+cli.common.detect_backend = lambda: SimpleNamespace(kind='fixture', gpu=SimpleNamespace(name='CPU fixture'))
+cli.token._sync_pairing_file = lambda config: None
 import crucible.api
 crucible.api.create_app = lambda config, backend: app
 raise SystemExit(cli.cmd_serve(SimpleNamespace(host=None, port=None, log_level='error', controller_stdin=True)))
