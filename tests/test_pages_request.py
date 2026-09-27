@@ -201,7 +201,7 @@ def test_a_backend_with_no_page_block_says_so_and_still_publishes_the_request(
             manifest, backends={"cuda-linux": manifest.backends["cuda-linux"]}
         )
 
-    monkeypatch.setattr("crucible.api.load_manifest", cuda_only)
+    monkeypatch.setattr("crucible.api.routes.info.load_manifest", cuda_only)
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         block = mac.get("/v1/info", headers=auth).json()["pages_engine"]
     assert block["engine"] is None

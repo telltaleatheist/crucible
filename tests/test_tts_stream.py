@@ -1162,7 +1162,7 @@ def test_the_stream_keeps_itself_alive_while_nothing_is_happening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The 15 s keepalive the job streams already send, on the same clock."""
-    monkeypatch.setattr("crucible.api.KEEPALIVE_SECONDS", 0.1)
+    monkeypatch.setattr("crucible.api.sse.KEEPALIVE_SECONDS", 0.1)
     with streaming_server() as base:
         session = opened(base, auth)
         with listen(base, auth, session["session_id"]) as stream:

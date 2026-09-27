@@ -88,7 +88,7 @@ The operator page's own door: it hands out a token and the pairing line.
 
 ### `GET /v1/setup`
 
-Everything an app needs to be pointed at this server, in one read. PHASE13-OPERATOR.md section 3.1. Owen, 2026-09-14: *"crucible has its own ui. and it provides the token or whatever else we need to set it up on foundry or bookforge."* This is "whatever else we need". **It returns the token, and that reveals nothing.** Every `/v1/*` route is behind the bearer token, so the only caller who can read this is one who already has it. What it buys is that nobody types a secret twice: the operator page fetches this and draws a copyable pairing line, and the person pasting that line into BookForge has not seen a token at all. `urls` and `pairing` are the same list read two ways, and both are derived rather than stored — the bind address this process actually holds, made dialable (`crucible/pairing.py`). A wildcard bind becomes one entry per non-loopback IPv4 interface; a concrete bind becomes exactly one. Never a hostname lookup: an interface is a fact about this host, a name is a fact about somebody else's resolver. `job_types` repeats `/v1/info`'s list rather than making the page read twice, and it repeats it from the same producer — `store.registry` — so the two cannot disagree. After an install task's reload (3.4) both answer the new list in the same tick.
+Everything an app needs to be pointed at this server in one read, including its token and pairing lines.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -112,7 +112,7 @@ What the accelerator is and what is free on it right now.
 
 ### `GET /v1/accelerator`
 
-What is on the card right now, and which of it is Crucible's. PHASE4-AUDIO.md section 5. This is the same `nvidia-smi --query-compute-apps` the load guard runs, plus the free/total figures, plus the resident set, plus a flag saying which holders are this server's own processes — and it exists because BookForge arbitrates the GPU three incompatible ways at once (a queue slot, an in-process mutex whose timeout *proceeds without the lock*, and nothing at all for the hosted page reader), on top of a lock file with no producer inside the app. One call here answers the question all three were guessing at. **It never evicts anybody, ever.** It reports, and that is the whole of it. The rule is PHASE2-LLM.md section 4's and it does not soften because more job types now depend on the answer. It is private like every other route here: the bearer token and the version header, in that order. A probe of somebody's hardware is not public information, and `GET /v1/ping` already exists for "is this a Crucible".
+What is on the card right now and which holders are Crucible's own processes. Reports only; it never evicts anything.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -124,7 +124,7 @@ Crucible's own verdict about this host: which classes are enabled, which model e
 
 ### `GET /v1/capability`
 
-What this server can hold, per capability class, and why not. The read a client needs before it decides what to ask for. PHASE 9 made the act-to-model mapping a PER-HOST fact — `crucible install` probes the card and picks the largest candidate that fits, so a 24 GB box serves `translate` with a 4-bit 27B, a bigger one serves it with something else, and a 12 GB box does not serve it at all. A client that was handed a model id by configuration would be carrying a model this server may have refused. WHY A CLASS AND NOT A JOB TYPE. `enable_llm` is one boolean and Owen ruled translation binary per server, so `clean` and `translate` have to be able to disagree. `simplify` and `analysis` became classes of their own too, on the naming ruling (Owen, 2026-09-13: a job is never reported as a different job), and `generate` is the generic chat-shaped act whose working context the CLIENT may state (`?class=generate& context_tokens=&concurrency=`, see `capability.served_rows`). EVERY ROW STATES ITS WORK: `work` is the working context the fit was computed for, with `from: "default" \| "request"`, and a client-sized row adds `context_ceilings` — each candidate's longest servable request here, the smaller of the most its manifest ever starts an engine with on this backend (`max_context`, or `context_default` where none is stated) and what this host's memory affords. A size above the ceiling is `400 context_over_limit`, never clamped. A `load-model` with `params.context` is held to the same ceiling (at one in flight) and refused with the same body; that is how a client reaches a ceiling above the resident model's `max_model_len`. `enabled: false` IS AN ANSWER, not an error. A server that cannot translate says so with the number that decided it, and a client should be able to render "this machine cannot do that" without it looking like a fault. THIS IS A RECORD, NOT AN AUTHORITY. `[jobs] enable_*` remains the single owner of what this server offers; this says what the numbers were when somebody decided. `total_bytes` is the card the decision was made on, so a reader can tell a stale record from a current one — which is how a swapped GPU is noticed without anybody writing down a date. `job_types` IS NOT PART OF THE RECORD, and that is why it is added here rather than in `CapabilityRecord.to_dict()`. PHASE13-OPERATOR.md section 4 draws the operator page's Job types section from this one read, and to draw it the page needs three things the stored record cannot carry: which job type each class feeds (`capability.CLASSES`), which command builds that type's env (`cli.INSTALLER_FOR` — `denoise` shares `rvc`'s), and which narrator engines a `tts` install may name (`voices.NARRATOR_ENGINE_SAMPLING`). All three are THIS BUILD's tables, read live; a record written months ago must not be able to answer them, because they are facts about the code, not about the card. Put in the record they would be a second copy that goes stale the day an engine is added — which is the shape R1 exists to forbid. The page holding its own copy is the same defect one layer out, and is what section 4 means by "never a hard-coded list".
+What this server can hold, per capability class, and why not; `enabled: false` is an answer, not an error. A client-sized class may be sized with `?class=&context_tokens=&concurrency=`.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -132,7 +132,7 @@ What this server can hold, per capability class, and why not. The read a client 
 
 ### `GET /v1/capability/plan`
 
-What an install or a pull will give THIS card, before it happens. Owen, 2026-09-26: *"that can be in a modal or something that pops up when the user tries to install a pakcage from the crucible ui"*. The operator page asks this before its Install and Pull buttons act and shows `confirm` in a confirmation the person accepts or cancels; it renders the words and writes none of them. `?job_type=<type>` for an install, `?subject=<id>` for a pull. Decided LIVE, exactly as `crucible install` will decide it: this card's size and generation (`backend`, `ladder.card_for`), this config's allowance and choices — so the modal and the record install then writes are the same walk. Nothing is written.
+What an install (`?job_type=`) or a pull (`?subject=`) would give this card, decided live and writing nothing.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -144,7 +144,7 @@ The one door apps configure Crucible through. Crucible is set-and-forget; everyt
 
 ### `GET /v1/settings`
 
-Where each class's work runs, and which upstreams are configured. PHASE15-HOST.md section 3.1. Owen, 2026-09-14: *"Settings live in the engine and nowhere else."* An app draws this document and writes through `PUT`; it holds no key, no route and no model list of its own. **A key is never in this answer.** `key_hint` is its last four characters, which is enough to recognise WHICH key is there — the question a person with two accounts asks — and nothing else. There is no route on this server that returns one.
+Where each class's work runs and which upstreams are configured. A key is never returned; `key_hint` shows its last four characters.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -152,7 +152,7 @@ Where each class's work runs, and which upstreams are configured. PHASE15-HOST.m
 
 ### `PUT /v1/settings`
 
-A partial patch, applied whole or not at all, live without a restart. PHASE15-HOST.md section 3.2. The order inside one request is the contract's — upstreams, then routes, then the whole validated — which is what lets an app configure an upstream AND route a class to it in one call, the way section 5.2 tells it to. **A refusal applies nothing.** `settings.resolve` builds the candidate document in memory and raises before `settings.apply` writes a byte, so a request refused for its routes does not leave a key behind on a server whose operator believes it failed. The answer is the whole `GET /v1/settings` document AFTER the write, so a window never has to guess what took.
+Apply a partial settings patch, whole or not at all, live without a restart. Answers the full settings document after the write.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -160,7 +160,7 @@ A partial patch, applied whole or not at all, live without a restart. PHASE15-HO
 
 ### `POST /v1/settings/upstreams/{name}/test`
 
-Ask an upstream what it serves, with a key that may not be saved yet. PHASE15-HOST.md section 3.2. The body is optional and carries `{"key": …}` or `{"url": …}` to test BEFORE saving, which is the order a person actually works in: paste, check it works, then save. With no body the stored record is used. **Unbilled, and never cached.** The answer is somebody else's and changes without telling us; a stale list shown beside a key the operator pasted ten seconds ago is exactly the moment they would believe it. `POST` and not `GET` because it takes a body carrying a secret, and a secret in a query string is a secret in a log.
+List what an upstream serves, using the body's `key` or `url` when given, else the stored record. Never cached.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -184,7 +184,7 @@ Every model this build has a manifest for, and where it stands here.
 
 ### `POST /v1/models/{subject_id}/lease`
 
-Take the one lease this server holds at a time, on ANY resident kind. The order of the checks is their specificity, which is the job door's rule: a bad ttl and an unknown act are true of the request whatever this server is doing, so a client with a typo is told about the typo rather than about somebody else's lease. Residency comes next, because leasing a thing that is not here is a different mistake from being too late for one that is. **The id may name a model, a voice or an aligner** (PHASE7-LANES.md section 5.2, extended 2026-09-14). The route keeps its `/models/` path and its one route family, because the question it asks does not change with the kind: *is this the thing on the card?* The card holds ONE thing, so the kind is read off the residency rather than sent — and the namespaces being separate (a voice may be called `qwen3.5-9b`) cannot produce an ambiguity here, since only one of two colliding ids can be resident at a time and a lease is only ever on the resident one. Without this a book rendered chapter by chapter paid a narrator load per chapter and a book aligned chapter by chapter paid an aligner load per chapter, because the unload ruling clears the card the moment nothing holds it and the lease — the one thing that can hold it — could only name a model.
+Hold whatever is resident (model, voice or aligner) on the card for a run; jobs that would move it are refused `409 leased`. A lease never loads anything.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -207,7 +207,7 @@ The work. Every job type is created, polled and cancelled through the same route
 
 ### `POST /v1/jobs`
 
-Admit one job, or refuse with the facts about the one already here. **EXPLICIT RESUME ONLY** (Owen, 2026-09-27: *"if the user doesnt send the resume flag then it starts fresh. if they do send a resume flag, it continues from where they left off"*). A job type that keeps a journal (`crucible/journal.py`, docs/RESUMABLE-JOBS.md) answers `resume_id` beside `job_id`: the id to send as `params.resume` if this job does not finish. Without `resume` a job starts a NEW journal and never reads an old one. With it, the journal is checked against this submission (job type, model revision, output-affecting params, every input's sha256, the type's format version) and anything different is refused `resume_mismatch` naming it, before the job exists; an unknown id is `unknown_resume_id` and a collected one `resume_expired`. A type that keeps no journal refuses `resume` as `resume_unsupported`. **This door refuses when the lane is busy (ARCHITECTURE.md section 3).** It used to queue, which made Crucible answer the same question two ways: the streaming door has always refused with `409 stream_session_open` naming the holder, while this one accepted and appended. Same server, same card, two policies. Now both refuse and both name who has it. The order of the checks is the order of their cost and their specificity, and it is deliberate. The type and model are resolved first, because `unknown_job_type` is true whether or not anything is running and a client with a typo should be told about the typo rather than about somebody else's render. Admission comes next, before `preflight` — preflight shells out (`ffmpeg -version`), reads manifests and probes the card with `nvidia-smi`, and spending that on a request that cannot be admitted is work done for a 409. It also comes before `store.create`, so a refused submission never makes a directory, and before the inputs are materialised, so it never writes a client's megabytes to disk to delete them again. **A lease is refused ahead of both** (PHASE7-LANES.md section 5.2). A chat completion holds nothing, so a server mid-way through a two-thousand-block translation looks idle between two blocks; a client that says it intends a run takes a lease, and while one is open this door refuses the jobs that would move the leased thing off the card. It does not refuse anything else — a lease is not a reservation, and the lane is still free for work that leaves the card alone, INCLUDING the work the lease was taken for: a `tts` render of the leased voice and an `align` on the leased aligner are admitted, because they run against what is already resident rather than loading it again. **A MISSING ENVIRONMENT OR MODEL IS INSTALLED FOR THE CALLER, and the job is refused while it installs** (Owen, 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*; 2026-09-27: *"Crucible isn't responsible for queuing. The apps that use it are."*). A type this card can run and has not installed, or a declared model or voice (and `rvc`'s base assets) not yet pulled, starts the operator page's install as a task and answers `409 installing`: a sentence saying what is being installed, how big, and to submit again after it, with the task to watch in `details.task_id`. No job is created and nothing waits here; the app's queue retries. A second submit while it runs gets the same answer with the same task, never a second install. A server that never decided its card decides and records it first. A type the card cannot run is refused as before. `[jobs] install_on_submit = false` turns the install off (the refusal then carries `details.install`). `crucible/installonsubmit.py`.
+Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -219,8 +219,8 @@ Admit one job, or refuse with the facts about the one already here. **EXPLICIT R
 | `model` | string or null | no | — |  |
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
-| `client_ref` | string or null | no | — |  |
-| `hold` | boolean | no | `False` |  |
+| `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
+| `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
 *Answers:* `202`, `422`
 
@@ -275,7 +275,7 @@ Job Events
 
 ### `POST /v1/jobs/{job_id}/hold`
 
-Keep this done job's artifacts for a later job (Owen, 2026-09-25). *"keep all working files on the crucible side until the chain is complete. then remove them"*. Held, the job is not reaped for having been fetched: it stays until `DELETE` on this route releases it (and removes it at once), or until the `retention_days` collector takes it (`gc_at`). A later job names its files as `{"artifact": {job_id, name}}` inputs. Survives a restart. Idempotent.
+Keep this job's artifacts for a later job's `{"artifact": {job_id, name}}` inputs until the hold is released or `retention_days` collects it. Idempotent.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -303,7 +303,7 @@ The resume journals: every job type that keeps one writes its finished work to d
 
 ### `GET /v1/resumable`
 
-Every journal this server keeps, newest first (Owen, 2026-09-27: *"maybe we could even have a call that shows what's available to resume?"*). One row per journal: its `resume_id` (send it as `params.resume`), the job type, the model and revision, the inputs by name and sha256, the output-affecting `params` it was written under, `units_done` of `units_total` and a `progress` sentence, `last_saved`, `expires_at` (`[jobs] retention_days` after the last save), the job that started it (`job_id`), and the job that last wrote it with how that ended (`last_job_id`, `state`: queued, running, done, failed, cancelled or interrupted). Nothing is resumed by reading this: resuming is the app's decision (docs/RESUMABLE-JOBS.md).
+Every resume journal this server keeps, newest first, with progress, inputs and expiry. Send a row's `resume_id` as `params.resume` to continue it.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -323,7 +323,7 @@ One journal, as `GET /v1/resumable` lists it.
 
 ### `DELETE /v1/resumable/{resume_id}`
 
-Discard a journal now. Refused `resume_in_use` while a job writes it. The id then answers `resume_expired` rather than `unknown_resume_id`, so a client resuming it later is told what happened.
+Discard a journal now; refused `resume_in_use` while a job writes it.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -347,7 +347,7 @@ The last few tasks, newest first. In memory; a restart forgets them.
 
 ### `POST /v1/tasks`
 
-Admit one operator task, or refuse by name. Every refusal is made here, before the 202, and in the order the job door uses: what is wrong with the REQUEST first (`unknown_subject`, `unknown_job_type`, `narrator_engine_required`, `invalid_module`), then what is already true (`already_installed`, `job_type_installed`), then what this server is doing (`task_busy`, and for anything that reloads the registry, `server_busy`). A client with a misspelled id told "busy" would come back in ten minutes to be told about the typo.
+Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -379,7 +379,7 @@ Get Task
 
 ### `DELETE /v1/tasks/{task_id}`
 
-Cancel. A pull stops at its next chunk and its partial bytes go. `cancelling` and not `cancelled`, exactly as the job door answers: the flag is set here and the runner ends when it sees it, which for a pull is the next progress callback and for an install is the SIGTERM landing. Watch the stream for the `cancelled` event — telling a caller "cancelled" before the download thread has stopped would be the ambiguous answer R3 forbids.
+Cancel a task. Answers `cancelling`; the stream's `cancelled` event says when it has stopped.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -407,7 +407,7 @@ What the server is doing right now, in one read.
 
 ### `GET /v1/activity`
 
-What is on this server and how far along — one read, no job id. PHASE7-LANES.md section 5. Owen, 2026-09-13: *"Crucible will have to have an api endpoint that will report what's on it and its progress so Bookforge can hit that endpoint and fill that gpu slot with that data."* WHY THIS IS A POLL AND NOT THE SSE IT ALREADY HAS. Per-job events are push, fine-grained and exactly right for the step that owns a job. This answers a different question, asked by a bench widget that owns no job and may never own one: *what is this machine doing?* Opening a stream per job per server to render one line of text is the wrong shape. The two do not compete — the step reads the stream, the bench reads this. IT REPORTS AND NOTHING ELSE. It does not admit, reserve, claim or lock. A client that reads "free" and submits is racing every other client, and that race is settled at the door: `POST /v1/jobs` admits one and refuses the other `server_busy`, naming the winner (ARCHITECTURE.md section 3). The loser has lost nothing but a round trip, because it never gave up ownership of its own queue — which is the point of the ruling. A reservation here would be a second place to arbitrate, and a stale one. **So this route is a bench display and a preflight, never admission.** It is the honest answer to "how long until that finishes"; it is not permission to submit, and a client must be able to be refused after reading it. Only `POST /v1/jobs` can say yes. THE PROBE IS OPT-IN, and that is the one design decision in this route. `nvidia-smi` is a subprocess costing tens of milliseconds, and a bench polling three servers every few seconds would spawn one per server per tick forever to render a number nobody is reading. `resident` below already says what is loaded and roughly what it costs, in memory, for free. A caller that genuinely wants the live figure asks for it with `?accelerator_probe=true` and pays for it; `GET /v1/accelerator` remains the full answer.
+What this server is doing and how far along, in one read with no job id. A display and a preflight, never admission; `?accelerator_probe=true` adds a live card probe.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -435,7 +435,7 @@ Everything this build can serve, of every kind, and what is on disk. Removing a 
 
 ### `GET /v1/catalog`
 
-Every subject this backend can hold, installed or not. PHASE13-OPERATOR.md section 3.2. Every field is derived from something this server already owns and no row is authored here — see `crucible/catalog.py`, which is the whole of it.
+Every subject this backend can hold, installed or not.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -443,7 +443,7 @@ Every subject this backend can hold, installed or not. PHASE13-OPERATOR.md secti
 
 ### `DELETE /v1/catalog/{kind}/{subject_id}`
 
-Delete an installed subject's files. PHASE15-HOST.md 3.5a. THE DOOR THE WEIGHTS RULE NEEDS. 3.5: a subject is never stored twice on one machine, so when the guest has its own copy the Windows one goes — and the host must never reach into `crucible/weights.py`'s layout from outside to do it, because a layout with two owners is the shape ARCHITECTURE.md R1 is about. So the server that owns the disk owns the deletion, and this is how it is asked. THE ORDER OF THE REFUSALS IS THE JOB DOOR'S: what is wrong with the REQUEST first (an unknown kind or id is true whatever this server is doing), then what is wrong with this server's STATE. A caller who misspelled a subject id and was told "it is in use" would fix the wrong thing.
+Delete an installed subject's files. Refused while the subject is resident, leased or named by a running task.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -468,7 +468,7 @@ Every voice this build has a manifest for, and where it stands here.
 
 ### `PUT /v1/voices/{voice_id}`
 
-Add or replace a voice this machine owns. Returns its `/v1/voices` row. `revision` MAY BE OMITTED per backend, and that is the whole reason a person can paste a repo id: a manifest needs a full commit sha so a pull is reproducible, and resolving one is the engine's job because the engine is what fetches and what holds the HuggingFace credential. REPLACING A PACKAGED VOICE IS ALLOWED and is not an accident: the overlay is documented to win on a shared id, and deleting the overlay brings the packaged voice back, which is what makes trying an override safe. A door that refused would make the safe thing impossible and the unsafe thing (editing the install) the only way.
+Pin a voice to a repo revision (`{"pin": ...}`) or write a local manifest override (`{"voice": ...}`), and return its `/v1/voices` row. A missing revision is resolved to the repo's head.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -480,7 +480,7 @@ Add or replace a voice this machine owns. Returns its `/v1/voices` row. `revisio
 
 ### `DELETE /v1/voices/{voice_id}`
 
-Delete this machine's own manifest for a voice. The packaged set stands. A voice that only ever existed in the overlay goes entirely; one that was SHADOWING a packaged voice reverts to the packaged manifest, which is the undo for an override that did not work out. This deletes the MANIFEST, never the weights. They are a subject like any other and `DELETE /v1/catalog/voice/{id}` is what removes them — two doors because they are two decisions, and somebody re-describing a voice they have just downloaded 8 GB of should not lose the download.
+Remove this machine's pin or override for a voice; a shipped voice reverts to its packaged manifest. Never deletes weights; an unknown id answers 204.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -492,7 +492,7 @@ Delete this machine's own manifest for a voice. The packaged set stands. A voice
 
 ### `GET /v1/voices/{voice_id}/manifest`
 
-One voice's settings as a whole LOCAL manifest document, for editing. What `PUT /v1/voices/{id}` with a `voice` body takes, whatever the voice's settings came out of: a repo's `crucible-voice.toml` at its pin, this machine's override, a packaged file, or the engine's own row. The operator console edits this and sends it back as an override (Owen, 2026-09-26: a person must be able to configure a voice by hand). `manifest` says which kind of file that was. `not_carried` names what the local schema cannot hold (a repo's `pace_basis`, for one), so an override made from a pinned voice is not silently poorer than it.
+One voice's settings as a whole local manifest document, ready to edit and send back with `PUT`. `not_carried` names what the local schema cannot hold.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -523,7 +523,7 @@ Open the one streaming session this server will hold at a time.
 
 ### `POST /v1/tts/stream/{session_id}`
 
-One op: `say`, `cancel`, `cancel_all` or `close`. **`say` answers with the row's id and not the audio.** A client that wants the audio reads the stream; a client that never opened one is refused by name rather than generating into nothing.
+One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row id; the audio arrives on the stream.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -556,7 +556,7 @@ The same as `{"op": "close"}`, for a client that only has verbs.
 
 ### `GET /v1/tts/stream/{session_id}/events`
 
-The session's SSE stream — everything it has to say, audio included. `Last-Event-ID` is the reattach: a connection that dropped in a tunnel comes back here inside the grace window, is replayed what it missed and follows live from there. It is the one behaviour a WebSocket could not have given for free, which is why this door is not one.
+The session's SSE stream, audio included. Reattach with `Last-Event-ID` within the grace window to replay what was missed.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -590,7 +590,7 @@ A client saying it intends a run, so the card is not taken out from under it mid
 
 ### `DELETE /v1/leases/{lease_id}`
 
-Give the card back before the ttl does it for you. The usual end of a lease, and the one that matters: expiry is the backstop for a client that died, not the way a finished run ends. A run that releases frees the next client immediately instead of after up to an hour of nothing happening.
+Release the lease; if nothing else holds the card, it is cleared before this answers.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -602,7 +602,7 @@ Give the card back before the ttl does it for you. The usual end of a lease, and
 
 ### `POST /v1/leases/{lease_id}/heartbeat`
 
-I am still here. Pushes the deadline out by the lease's own ttl. A 404 here is not an error to log and continue past: it means this client's run is no longer protected, and the card may move under it at any moment. The body says whether the lease was released or expired, which is the difference between "somebody took it from me" and "I stopped talking for too long".
+Push the lease's deadline out by its own ttl. A 404 means the lease was released or expired and the run is no longer protected.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -618,7 +618,7 @@ A chat surface shaped like OpenAI's, for clients that already speak it.
 
 ### `POST /openai/v1/chat/completions`
 
-Proxied to the resident engine, or forwarded to an upstream. PHASE2-LLM.md section 5 is the local half and is unchanged in every respect. PHASE15-HOST.md section 3.4 is the other: a `model` of the form `<upstream>/<id>` goes to that upstream on the operator's account. **The slash is the whole of the test**, and it works because a local model id can never contain one — refused at manifest load, `manifest_model_id_slash`. One character, one owner, no table.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -626,7 +626,7 @@ Proxied to the resident engine, or forwarded to an upstream. PHASE2-LLM.md secti
 
 ### `GET /openai/v1/models`
 
-The resident model in OpenAI's list shape, plus every routed upstream one. `resident_model` rather than `resident`: with a voice on the card there is no model to list, and narrator answers no OpenAI route. **The upstream rows are the ROUTED ones and not a catalog** (PHASE15-HOST.md section 3.4). This route answers *"what may I send as `model`"*, and the answer is the resident thing plus whatever the operator routed to — the upstream's whole catalog is a different question with a different door, `POST /v1/settings/upstreams/{name}/test`, and putting it here would make a client believe this server had agreed to serve any of them.
+The resident model in OpenAI's list shape, plus every upstream model a route names.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -634,7 +634,7 @@ The resident model in OpenAI's list shape, plus every routed upstream one. `resi
 
 ### `POST /v1/openai/chat/completions`
 
-Proxied to the resident engine, or forwarded to an upstream. PHASE2-LLM.md section 5 is the local half and is unchanged in every respect. PHASE15-HOST.md section 3.4 is the other: a `model` of the form `<upstream>/<id>` goes to that upstream on the operator's account. **The slash is the whole of the test**, and it works because a local model id can never contain one — refused at manifest load, `manifest_model_id_slash`. One character, one owner, no table.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -642,7 +642,7 @@ Proxied to the resident engine, or forwarded to an upstream. PHASE2-LLM.md secti
 
 ### `GET /v1/openai/models`
 
-The resident model in OpenAI's list shape, plus every routed upstream one. `resident_model` rather than `resident`: with a voice on the card there is no model to list, and narrator answers no OpenAI route. **The upstream rows are the ROUTED ones and not a catalog** (PHASE15-HOST.md section 3.4). This route answers *"what may I send as `model`"*, and the answer is the resident thing plus whatever the operator routed to — the upstream's whole catalog is a different question with a different door, `POST /v1/settings/upstreams/{name}/test`, and putting it here would make a client believe this server had agreed to serve any of them.
+The resident model in OpenAI's list shape, plus every upstream model a route names.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -654,7 +654,7 @@ Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an 
 
 ### `GET /v1/peer`
 
-`GET /v1/peer` — who manages this engine, and how old this process is. PHASE17 2.4: health flows ONE way. The orchestrator polls this and `/v1/ping`; the engine calls nothing back. An engine that phoned home would need to know its orchestrator's address, keep it fresh across restarts, and behave when it is wrong — three facts to own for a push a 15-second poll already delivers.
+Who manages this engine, and this process's uptime.
 
 *Door:* open
 
@@ -662,7 +662,7 @@ Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an 
 
 ### `POST /v1/peer/claim`
 
-`POST /v1/peer/claim` — an orchestrator says it manages this engine. A STATEMENT OF FACT, not a grant of permission: nothing on this server consults `managed_by` before doing anything, because there is nothing an orchestrator asks an engine to do that an app may not also ask (`crucible/peer.py`'s preamble). What it buys is that `/v1/info` can answer "who manages this".
+An orchestrator states that it manages this engine; `force` takes it from another orchestrator.
 
 *Door:* open
 
@@ -670,7 +670,7 @@ Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an 
 
 ### `DELETE /v1/peer/claim`
 
-`DELETE /v1/peer/claim` — the orchestrator's Quit (PHASE17 2.2). Nothing claimed is NOT a refusal: "there is no claim" is the state the caller asked for. Somebody else's claim is refused, because releasing one by accident is how an engine ends up unmanaged with a tray still watching it.
+The orchestrator releases its claim; releasing when nothing is claimed succeeds.
 
 *Door:* open
 
@@ -680,7 +680,7 @@ Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an 
 
 ### `POST /v1/decide`
 
-One distribution per question, read off the resident model. PHASE22-DECIDE.md is the contract. A decision is the chat door's sibling and walks through the chat door's machinery — the act header, the resident check, `chat_admission`, the `InFlight` record, `_chat_over` — with a different body in and out. What is its own is the reading (`crucible/decide.py`): the frame, the letters, the parser. EVERY REFUSAL A CALLER CAN CAUSE IS MADE BEFORE ANYTHING IS SENT: the act, an upstream id, a model that is not resident, too many images, images on a text model, too many options, an engine that returns no top logprobs or too few of them, a full door. A decision that spent the card and then failed on a question the server could have read first would be a decision the client paid for twice.
+One answer distribution per question, read off the resident model's next-token logprobs. Every refusal a caller can cause is made before anything is sent to the engine.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -702,7 +702,7 @@ Every schema the routes above refer to, for a reader following a nested field.
 
 ### `ArtifactRef`
 
-A previous job's artifact on THIS server, taken as an input. Owen, 2026-09-25: a render's 2,510 chunk FLACs were downloaded, then read back off a share and uploaded again (2.5 minutes, 1.25 GB) to the server that made them, for the align. A reference takes them where they already are. Usually of a HELD job (`POST /v1/jobs/{id}/hold`); an unheld one works while its directory still exists.
+An artifact of a previous job on this server, taken as an input.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -749,7 +749,7 @@ Pick one of named options. Labelled A, B, C… in the order given.
 
 ### `DecideRequest`
 
-`POST /v1/decide` — PHASE22-DECIDE.md section 2.2. One forward pass per question at the RESIDENT model; nothing is decoded and nothing is loaded to answer it.
+`POST /v1/decide`: one forward pass per question at the resident model, nothing decoded or loaded.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -814,12 +814,12 @@ One request to the engine, timed by Crucible.
 | `model` | string or null | no | — |  |
 | `params` | Params | no | — |  |
 | `inputs` | Inputs | no | — |  |
-| `client_ref` | string or null | no | — |  |
-| `hold` | boolean | no | `False` |  |
+| `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
+| `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
 ### `JobInput`
 
-One named input: an uploaded blob, bytes inline in the request, or an artifact of a previous job on this server.
+One named input: an uploaded blob, inline base64 bytes, or a previous job's artifact.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -829,7 +829,7 @@ One named input: an uploaded blob, bytes inline in the request, or an artifact o
 
 ### `LeaseOpen`
 
-`POST /v1/models/{id}/lease` — a client saying it intends a run. Both fields are required and neither has a default, for the streaming door's reason. A default `act` would put a name nobody chose on a bench, which is the thing `X-Crucible-Act` is refused for; a default `ttl_seconds` would be this server picking how long somebody else's run is, which is the one number only the client knows. **There is no `kind`.** The id in the path is the resident thing's, of whatever kind, and the card holds one thing — so the server reads the kind off `Residency.resident` and a client has nothing to disambiguate. A `kind` on the body would be a second owner of `resident.kind`, able to disagree with it (R1), and would let a client be refused for spelling a fact it was never asked to know.
+`POST /v1/models/{id}/lease`: the act the lease is for and how long it lasts; neither has a default.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -886,7 +886,7 @@ Place the state on an ordered scale. `score` is the expected level.
 
 ### `StreamOp`
 
-`POST /v1/tts/stream/{id}` — one op. {"op": "say", "id": "r12", "text": "...", "take": 0} {"op": "cancel", "id": "r12"} {"op": "cancel_all"} {"op": "close"} `take` is **required** on `say` and has no default here. The SDK's `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a client choosing; a default on the wire would be the server choosing, and now that the five fine-tunes declare a second rung that would be a render at a take nobody asked for. A take past the end of the voice's ladder is a SEED LANE at the voice's own sampling (2026-09-19) and is still never clamped — take 4 is never take 2's numbers under take 4's name.
+`POST /v1/tts/stream/{id}`: one op. `say` needs `id`, `text` and `take` (no default); `cancel` needs `id`; `cancel_all` and `close` take nothing.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -897,7 +897,7 @@ Place the state on an ordered scale. `score` is the expected level.
 
 ### `StreamOpen`
 
-`POST /v1/tts/stream` — PHASE3-TTS.md section 7. Nothing has a default, for the render door's reason: a session opened in the wrong language, or on a voice the client did not choose, is a silent substitution and a whole afternoon of listening in the wrong accent.
+`POST /v1/tts/stream`: the voice and language of a streaming session; neither has a default.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -906,7 +906,7 @@ Place the state on an ordered scale. `score` is the expected level.
 
 ### `TaskCreate`
 
-`POST /v1/tasks` — one operator operation. PHASE13-OPERATOR.md 3.3. One model for three request shapes rather than three routes, because there is one lane and one refusal (`task_busy`) governing all of them, and a client that had to pick a path before it could be told "busy" would have to know which of three doors to retry. The validator is `StreamOp`'s in spirit: the `type` word decides which fields are required and which are REFUSED. A `narrator_engine` sent with a `pull`, or an `id` sent with an `install`, is a client that has confused two requests, and accepting it silently would run the wrong one.
+`POST /v1/tasks`: one operator task. `type` decides which fields are required and which are refused.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |

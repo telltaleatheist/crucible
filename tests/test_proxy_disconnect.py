@@ -23,7 +23,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 
-from crucible import api as api_module
+from crucible.api.routes import decide as api_module
 
 from .conftest import FAKE_BACKEND
 from .fake_engine import FakeEngine

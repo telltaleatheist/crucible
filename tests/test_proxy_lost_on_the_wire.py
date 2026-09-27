@@ -29,7 +29,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import api as api_module
+from crucible.api import app as api_module
 from crucible.api import LOST_ON_THE_WIRE, PROXY_KEEPALIVE_EXPIRY, WIRE_ATTEMPTS
 
 from .fake_engine import FakeEngine
