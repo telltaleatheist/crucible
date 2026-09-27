@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import EngineError, SubprocessEngine
+from .base import EngineError, SubprocessEngine, weights_subject_id
 
 SERVE_SCRIPT = Path(__file__).resolve().with_name("mlx_vlm_serve.py")
 
@@ -18,6 +18,9 @@ class MlxVlmEngine(SubprocessEngine):
         "(engines/mlx_vlm_serve.py: batch_generate(compute_logprobs=False)) and "
         "refuses a body carrying logprobs (KNOWN_FIELDS)"
     )
+
+    def subject_id(self, model_dir: Path, served_name: str) -> str:
+        return weights_subject_id(model_dir)
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

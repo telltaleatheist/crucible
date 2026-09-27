@@ -8,60 +8,42 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable
 
 from .. import procgroup
 from ..errors import CrucibleError
 from ..logtail import tail_of_last_run
 
-STOP_TIMEOUT_SECONDS = 180.0
+STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
 READY_POLL_SECONDS = 2.0
-LOG_TAIL_LINES = 40
+LOG_TAIL_LINES = procgroup.LOG_TAIL_LINES
+
+PORT_IN_USE = "port_in_use"
+
+BIND_FAILURE_LINES: tuple[str, ...] = (
+    "address already in use",
+    "bind: address in use",
+)
+
+BIND_SCAN_LINES = 200
 
 
 class EngineError(CrucibleError):
     ...
 
 
-@runtime_checkable
-class Engine(Protocol):
-    name: str
-
-    def start(
-        self,
-        model_dir: Path,
-        served_name: str,
-        port: int,
-        args: list[str],
-    ) -> None:
-        pass
-
-    def ready(
-        self,
-        timeout: float,
-        on_progress: Callable[[str], None] | None = None,
-    ) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass
-
-    @property
-    def base_url(self) -> str:
-        pass
-
-    @property
-    def pids(self) -> frozenset[int]:
-        pass
-
-
-def int_flag(args: "list[str] | tuple[str, ...]", flag: str) -> int | None:
+def str_flag(args: "list[str] | tuple[str, ...]", flag: str) -> str | None:
     found: str | None = None
     for index, arg in enumerate(args):
         if arg == flag and index + 1 < len(args):
             found = args[index + 1]
         elif arg.startswith(flag + "="):
             found = arg.split("=", 1)[1]
+    return found
+
+
+def int_flag(args: "list[str] | tuple[str, ...]", flag: str) -> int | None:
+    found = str_flag(args, flag)
     if found is None:
         return None
     try:
@@ -74,6 +56,22 @@ def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def port_in_use_error(
+    engine_name: str, port: int | None, model_id: str | None, line: str
+) -> "EngineError":
+    return EngineError(
+        f"{PORT_IN_USE}: another server is answering on port {port}: "
+        f"127.0.0.1:{port} was free when Crucible chose it and is taken now, so "
+        f"{model_id} was not started. Crucible never adopts a server it did not "
+        "start, and picks a fresh port on retry: run the load again. "
+        f"{engine_name} said: {line}"
+    )
+
+
+def weights_subject_id(model_dir: Path) -> str:
+    return Path(model_dir).parent.name
 
 
 def logs_dir(home: Path) -> Path:
@@ -97,6 +95,14 @@ class SubprocessEngine:
 
     decide_basis: str | None = None
 
+    sigterm_wait_seconds: float = STOP_TIMEOUT_SECONDS
+
+    env_job_type = "llm"
+
+    pull_command = "crucible models pull"
+
+    binds_a_port = True
+
     def __init__(self, python: Path, log_path: Path) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -114,15 +120,50 @@ class SubprocessEngine:
     def environment(self) -> dict[str, str]:
         return {}
 
+    @property
+    def stop_budget_seconds(self) -> float:
+        return procgroup.stop_budget_seconds(self.sigterm_wait_seconds)
+
+    def missing_executable_hint(self) -> str:
+        return (
+            f"the {self.env_job_type} env is not installed: run "
+            f"`crucible install {self.env_job_type}` and load again"
+        )
+
+    def subject_id(self, model_dir: Path, served_name: str) -> str:
+        return served_name
+
+    def missing_model_hint(self, model_dir: Path, served_name: str) -> str:
+        return (
+            f"the weights are not pulled: run "
+            f"`{self.pull_command} {self.subject_id(model_dir, served_name)}` "
+            "and load again"
+        )
+
+    def bind_failure_in_log(self) -> str | None:
+        for line in self.log_tail(BIND_SCAN_LINES).splitlines():
+            lowered = line.lower()
+            if any(needle in lowered for needle in BIND_FAILURE_LINES):
+                return line.strip()
+        return None
+
+    def refuse_a_taken_port(self) -> None:
+        if not self.binds_a_port:
+            return
+        line = self.bind_failure_in_log()
+        if line is not None:
+            raise port_in_use_error(self.name, self._port, self._served_name, line)
+
     def announced_ready(self) -> str | None:
         served = self._probe_models(f"{self.base_url}/v1/models")
         if served is None:
             return None
         if self._served_name is not None and self._served_name not in served:
             raise EngineError(
-                f"{self.name} is serving {served}, not "
-                f"{self._served_name!r}; Crucible will not proxy a model it "
-                "did not ask for"
+                f"{self.name} on port {self._port} is serving {served}, not "
+                f"{self._served_name!r}: another server is answering on port "
+                f"{self._port}. Crucible will not proxy a model it did not ask "
+                "for, and picks a fresh port on retry: run the load again"
             )
         return f"{self.name} is serving {self._served_name!r}"
 
@@ -179,10 +220,14 @@ class SubprocessEngine:
             )
         if not self._python.is_file():
             raise EngineError(
-                f"no interpreter at {self._python}; the llm env is not installed"
+                f"{self.name} cannot start: {self._python} does not exist; "
+                + self.missing_executable_hint()
             )
         if not model_dir.is_dir():
-            raise EngineError(f"no model directory at {model_dir}")
+            raise EngineError(
+                f"{self.name} cannot start: no model directory at {model_dir}; "
+                + self.missing_model_hint(model_dir, served_name)
+            )
 
         command = self.command(model_dir, served_name, port, args)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +281,7 @@ class SubprocessEngine:
         attempt = 0
         while True:
             code = self._process.poll()
+            self.refuse_a_taken_port()
             if code is not None:
                 raise EngineError(
                     f"{self.name} exited {code} before it was ready. Last "
@@ -285,34 +331,14 @@ class SubprocessEngine:
         process = self._process
         if process is None:
             return
-        if process.poll() is None:
-            try:
-                delivered = procgroup.ask_to_stop(process)
-                if not delivered and procgroup.platform_kind() == procgroup.WIN32:
-                    procgroup.terminate_tree(process, self.name)
-            except procgroup.ProcessGroupError as exc:
-                raise EngineError(
-                    f"could not stop {self.name} (pid {process.pid}): {exc}"
-                ) from exc
-            try:
-                process.wait(timeout=STOP_TIMEOUT_SECONDS)
-            except subprocess.TimeoutExpired:
-                if procgroup.platform_kind() == procgroup.WIN32:
-                    try:
-                        procgroup.terminate_tree(process, self.name)
-                    except procgroup.ProcessGroupError as exc:
-                        self.detach()
-                        self._close_log()
-                        raise EngineError(str(exc)) from exc
-                else:
-                    self.detach()
-                    self._close_log()
-                    raise EngineError(
-                        f"{self.name} (pid {process.pid}) did not exit within "
-                        f"{STOP_TIMEOUT_SECONDS:.0f}s of SIGTERM. Crucible does not "
-                        "SIGKILL a process holding CUDA — that wedges WSL2 until "
-                        f"Windows reboots. Kill it by hand if you must: {self._log_path}"
-                    ) from None
+        try:
+            procgroup.stop_gracefully(
+                process, self.name, self.sigterm_wait_seconds, self._log_path
+            )
+        except procgroup.ProcessGroupError as exc:
+            self.detach()
+            self._close_log()
+            raise EngineError(str(exc)) from exc
         self.detach()
         self._close_log()
         self._process = None

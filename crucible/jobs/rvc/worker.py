@@ -411,13 +411,18 @@ def memory_plan(request: dict) -> tuple[int, float, str]:
     return budget, seconds, basis
 
 
-def _stop(process) -> None:
+def _stop(process, timeout_seconds: float = 180.0) -> None:
     process.terminate()
     try:
-        process.wait(timeout=30)
+        process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        print(
+            f"[rvc] urvc (pid {process.pid}) did not exit within "
+            f"{timeout_seconds:.0f}s of SIGTERM. Crucible does not SIGKILL a "
+            f"process holding CUDA: stop it with `kill {process.pid}` (never -9)",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _run_batch(

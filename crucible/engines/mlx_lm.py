@@ -9,7 +9,7 @@ from typing import Callable
 
 from .. import envpatches
 from ..envpatches import PatchError
-from .base import SubprocessEngine, EngineError, int_flag
+from .base import SubprocessEngine, EngineError, int_flag, weights_subject_id
 
 MODULE = "mlx_lm"
 SUBCOMMAND = "server"
@@ -26,7 +26,6 @@ REQUIRED_FLAGS: tuple[str, ...] = (
 class MlxLmEngine(SubprocessEngine):
     name = "mlx-lm"
 
-    chat_concurrency = None
     chat_concurrency_flag = "--decode-concurrency"
     chat_concurrency_basis = (
         "mlx-lm 0.31.3 batches on its one generation thread: BatchGenerator with "
@@ -72,6 +71,9 @@ class MlxLmEngine(SubprocessEngine):
                         "load again"
                     ) from exc
         super().start(model_dir, served_name, port, args)
+
+    def subject_id(self, model_dir: Path, served_name: str) -> str:
+        return weights_subject_id(model_dir)
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

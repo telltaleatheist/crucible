@@ -479,15 +479,39 @@ def test_a_taken_port_is_port_in_use_and_never_an_invitation_to_adopt(
     said = str(caught.value)
     assert PORT_IN_USE in said
     assert "never adopts" in said
+    assert "run the load again" in said
 
 
 def test_the_stop_clock_is_thirty_seconds_and_the_deviation_is_written_down() -> None:
     assert GRACEFUL_STOP_SECONDS == 30.0
-    source = Path(
-        __import__("crucible.engines.llama_server", fromlist=["x"]).__file__
+    assert LlamaServerEngine.sigterm_wait_seconds == GRACEFUL_STOP_SECONDS
+    doc = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "internals"
+        / "engines-and-capability.md"
     ).read_text(encoding="utf-8")
-    assert "DEVIATION" in source
-    assert "does not run inside WSL2" in source
+    assert "departs from never-SIGKILL" in doc
+
+
+def test_llama_server_stops_through_the_one_shared_stop() -> None:
+    from crucible.engines.base import SubprocessEngine
+
+    assert LlamaServerEngine.stop is SubprocessEngine.stop
+    assert LlamaServerEngine.confirm is SubprocessEngine.confirm
+
+
+def test_a_missing_llama_server_names_the_install_that_pulls_it(
+    tmp_path: Path,
+) -> None:
+    engine = LlamaServerEngine(
+        python=tmp_path / "llama-server.exe", log_path=tmp_path / "log"
+    )
+    with pytest.raises(Exception) as caught:
+        engine.start(tmp_path, "dots-ocr", 51234, [])
+    said = str(caught.value)
+    assert "`crucible install llm`" in said
+    assert "interpreter" not in said
 
 
 def test_stopping_an_engine_that_never_started_does_nothing(tmp_path: Path) -> None:

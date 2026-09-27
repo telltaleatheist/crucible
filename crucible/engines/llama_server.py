@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Callable
 
-from .. import procgroup
-from .base import SubprocessEngine, EngineError
+from .base import (
+    BIND_FAILURE_LINES,
+    PORT_IN_USE,
+    EngineError,
+    SubprocessEngine,
+    port_in_use_error,
+)
 
 ENGINE_NAME = "llama-server"
 
 GRACEFUL_STOP_SECONDS = 30.0
 
-KILL_WAIT_SECONDS = 10.0
-
 PAGES_ENGINE_FAILED = "pages_engine_failed"
-PORT_IN_USE = "port_in_use"
 
 FATAL_SCAN_LINES = 200
 
@@ -54,15 +54,9 @@ FATAL_LINES: tuple[tuple[str, str, str], ...] = (
         PAGES_ENGINE_FAILED,
         "this llama.cpp build does not know this model",
     ),
-    (
-        "address already in use",
-        PORT_IN_USE,
-        "something else on this machine took the port",
-    ),
-    (
-        "bind: address in use",
-        PORT_IN_USE,
-        "something else on this machine took the port",
+    *(
+        (needle, PORT_IN_USE, "something else on this machine took the port")
+        for needle in BIND_FAILURE_LINES
     ),
 )
 
@@ -94,6 +88,14 @@ class LlamaServerEngine(SubprocessEngine):
         "vocabulary"
     )
 
+    sigterm_wait_seconds = GRACEFUL_STOP_SECONDS
+
+    def missing_executable_hint(self) -> str:
+        return (
+            "llama-server is not installed: run `crucible install llm`, which "
+            "pulls the pinned llama.cpp build, and load again"
+        )
+
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> list[str]:
@@ -117,7 +119,9 @@ class LlamaServerEngine(SubprocessEngine):
         if fatal is not None:
             code, reason, line = fatal
             if code == PORT_IN_USE:
-                raise port_in_use_error(self._port, self._served_name, line)
+                raise port_in_use_error(
+                    self.name, self._port, self._served_name, line
+                )
             raise EngineError(
                 f"{code}: {self.name} will not come up: {reason}. It said: {line}"
             )
@@ -130,63 +134,13 @@ class LlamaServerEngine(SubprocessEngine):
                 return (found[0], found[1], line.strip())
         return None
 
-    def stop(self) -> None:
-        process = self._process
-        if process is None:
-            return
-        if process.poll() is None:
-            self._ask_it_to_stop(process)
-            try:
-                process.wait(timeout=GRACEFUL_STOP_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                try:
-                    process.wait(timeout=KILL_WAIT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    self.detach()
-                    self._close_log()
-                    raise EngineError(
-                        f"{self.name} (pid {process.pid}) survived both a "
-                        f"graceful stop and a kill. Its port is still held and "
-                        f"nothing here can take it back: {self._log_path}"
-                    ) from None
-        self.detach()
-        self._close_log()
-        self._process = None
-        self._port = None
-        self._served_name = None
-
-    def _ask_it_to_stop(self, process: "subprocess.Popen[bytes]") -> None:
-        try:
-            procgroup.ask_to_stop(process)
-        except procgroup.ProcessGroupError:
-            pass
-
-    def confirm(
-        self, deadline: float, on_progress: Callable[[str], None] | None
-    ) -> None:
-        return None
-
-
-def port_in_use_error(
-    port: int | None, model_id: str | None, line: str
-) -> EngineError:
-    return EngineError(
-        f"{PORT_IN_USE}: 127.0.0.1:{port} was free when Crucible chose it and "
-        f"is taken now, so {model_id} was not started. Crucible never adopts a "
-        f"server it did not start: retry, and it will choose another port. "
-        f"llama-server said: {line}"
-    )
-
 
 __all__ = [
     "ENGINE_NAME",
     "FATAL_LINES",
     "GRACEFUL_STOP_SECONDS",
-    "KILL_WAIT_SECONDS",
     "LlamaServerEngine",
     "PAGES_ENGINE_FAILED",
     "PORT_IN_USE",
     "fatal_reason",
-    "port_in_use_error",
 ]

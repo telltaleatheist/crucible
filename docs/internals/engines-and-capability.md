@@ -349,6 +349,36 @@ started exactly as `load-model` would).
   group and **never SIGKILL**, because a killed CUDA process wedges WSL2 until
   Windows reboots. On win32 stop sends `CTRL_BREAK_EVENT` and then terminates
   (`procgroup`). Each engine gets its own process group or session.
+- **One stop routine.** `procgroup.stop_gracefully(process, what, timeout,
+  log)` is the only ask/wait/refuse sequence: engines (`SubprocessEngine.stop`),
+  workers (`workers._terminate`, `WorkerSession.stop`) and nothing else. A
+  process still alive after the wait is an error naming its pid, `kill <pid>`
+  (never `-9`) and the log. `STOP_TIMEOUT_SECONDS` (180 s) and
+  `LOG_TAIL_LINES` live in `procgroup`. Scripts that run inside a job env
+  cannot import Crucible and repeat the rule by hand: the ladder's smoke
+  scripts get SIGTERM and 180 s and are then reported by pid; the rvc worker
+  recycles urvc with SIGTERM and 180 s and writes the pid to stderr.
+- **Stop budget.** `SubprocessEngine.sigterm_wait_seconds` is the SIGTERM wait
+  (180 s; llama-server 30 s). `stop_budget_seconds` is the worst case of a
+  whole `stop()`: the SIGTERM wait, plus on win32 two `KILL_WAIT_SECONDS`
+  (taskkill, then the wait after it). narrator overrides it with
+  `QUIT_GRACE_SECONDS` (210) + the reader join (2) + the base budget (180) +
+  2 x (`LAUNCHED_SERVER_GRACE_SECONDS` 180 + one 1 s poll) = 754 s on Linux.
+  Whoever waits on a stop from outside (residency's clearance) must wait
+  longer than `stop_budget_seconds`, or it reports a wedge that is only a slow
+  stop. Inner waits compose: since narrator 72069b5b its quit stops the
+  server it launched, and `QUIT_GRACE_SECONDS` (210) is the time that stop
+  takes, so the SIGTERM after it is a fallback, not the usual path. The rvc
+  worker's 180 s urvc stop happens after `ready`, where the worker exchange
+  has no silence clock, so nothing outside it gives up first.
+- **Next steps in refusals.** A missing executable names the install:
+  `crucible install llm` (vLLM, mlx-lm, mlx-vlm, and llama-server, whose
+  install pulls the pinned llama.cpp build) or `crucible install tts`
+  (narrator). A missing weights directory names `crucible models pull <id>`
+  (narrator: `crucible voices pull <id>`). A port another server answers, or
+  a bind failure in the log (`address already in use`, any engine that binds
+  a port), is `port_in_use`: Crucible picks a fresh port on every start, so
+  the next step is to run the load again.
 - Logs are `~/.crucible/logs/engine-<id>.log`, **appended** and never truncated
   or rotated. A reload used to erase the log of the hang being investigated.
   `log_tail` reads only the current run (up to its header), so a dead run's
@@ -419,8 +449,10 @@ started exactly as `load-model` would).
 - `--alias <id>` makes the served name equal the Crucible id, so the proxy
   forwards `model` verbatim.
 - Nothing is ever adopted. A taken port is `port_in_use`, and the fix is to retry.
-- Stop sends 30 s of graceful `CTRL_BREAK_EVENT` and then terminates. This
-  deliberately departs from never-SIGKILL, which applies only inside WSL2.
+- Stop sends 30 s of graceful `CTRL_BREAK_EVENT`
+  (`sigterm_wait_seconds = GRACEFUL_STOP_SECONDS`) and then terminates the
+  tree through the shared stop. This deliberately departs from never-SIGKILL,
+  which applies only inside WSL2; llama-server never runs there.
 - Fatal log lines (CUDA OOM, missing CUDA runtime DLL, unreadable GGUF) end
   the readiness wait immediately as `pages_engine_failed`.
 - Every block runs `--parallel 1`, so the chat door admits 2

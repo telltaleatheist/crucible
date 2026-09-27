@@ -15,13 +15,13 @@ from .backend import CUDA_LINUX
 from .errors import CrucibleError, JobCancelled
 from .logtail import tail_of_last_run
 
-STOP_TIMEOUT_SECONDS = 180.0
+STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
 
 STOP_ON_EOF_SECONDS = 30.0
 
 POLL_SECONDS = 0.5
 
-LOG_TAIL_LINES = 40
+LOG_TAIL_LINES = procgroup.LOG_TAIL_LINES
 
 READY = "ready"
 PROGRESS = "progress"
@@ -507,35 +507,10 @@ class WorkerSession:
 
 
 def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> None:
-    if process.poll() is not None:
-        return
-    win32 = procgroup.platform_kind() == procgroup.WIN32
     try:
-        delivered = procgroup.ask_to_stop(process)
-        if not delivered:
-            if not win32:
-                return
-            procgroup.terminate_tree(process, script.name)
-            return
+        procgroup.stop_gracefully(process, script.name, STOP_TIMEOUT_SECONDS, log_path)
     except procgroup.ProcessGroupError as exc:
-        raise WorkerError(
-            f"could not stop {script.name} (pid {process.pid}): {exc}"
-        ) from exc
-    try:
-        process.wait(timeout=STOP_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        if win32:
-            try:
-                procgroup.terminate_tree(process, script.name)
-            except procgroup.ProcessGroupError as exc:
-                raise WorkerError(f"{exc}. Its log is {log_path}") from exc
-            return
-        raise WorkerError(
-            f"{script.name} (pid {process.pid}) did not exit within "
-            f"{STOP_TIMEOUT_SECONDS:.0f}s of SIGTERM. Crucible does not SIGKILL a "
-            "process that may be holding CUDA — that wedges WSL2 until Windows "
-            f"reboots. Kill it by hand if you must; its log is {log_path}"
-        ) from None
+        raise WorkerError(str(exc)) from exc
 
 
 def _log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:

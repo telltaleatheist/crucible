@@ -552,23 +552,37 @@ def _preflight(
 
 
 def _run_script(python: Path, script: str) -> tuple[dict[str, Any] | None, str, Watch]:
+    from . import procgroup
+
     process = subprocess.Popen(
         [str(python), "-c", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        **procgroup.own_group(),
     )
     with Watch(lambda: frozenset({process.pid})) as watch:
         try:
             stdout, stderr = process.communicate(timeout=SMOKE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-            return (
-                None,
-                f"did not finish within {SMOKE_TIMEOUT_SECONDS:.0f} s",
-                watch,
+            late = f"did not finish within {SMOKE_TIMEOUT_SECONDS:.0f} s"
+            stop_it = (
+                "Crucible does not SIGKILL a process holding CUDA: stop it with "
+                f"`kill {process.pid}` (never -9), then run `crucible ladder` again"
             )
+            try:
+                procgroup.ask_to_stop(process)
+                process.communicate(timeout=procgroup.STOP_TIMEOUT_SECONDS)
+            except procgroup.ProcessGroupError as exc:
+                return None, f"{late}, and {exc}. {stop_it}", watch
+            except subprocess.TimeoutExpired:
+                return (
+                    None,
+                    f"{late}, and pid {process.pid} did not exit within "
+                    f"{procgroup.STOP_TIMEOUT_SECONDS:.0f} s of SIGTERM. {stop_it}",
+                    watch,
+                )
+            return None, late, watch
     for line in reversed(stdout.splitlines()):
         if line.startswith(RESULT_PREFIX):
             try:

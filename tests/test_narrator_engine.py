@@ -954,7 +954,7 @@ def test_stop_asks_narrator_to_quit_before_it_signals(
 def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
     tmp_path: Path, weights: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(engine_base, "STOP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(BaseEngine, "sigterm_wait_seconds", 1.0)
 
     class DeafEngine(NarratorEngine):
         def command(
@@ -995,6 +995,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         message = str(caught.value)
         assert "did not exit within 1s of SIGTERM" in message
         assert "does not SIGKILL" in message
+        assert f"`kill {pid}`" in message
     finally:
         end_process_tree(pid)
 
@@ -1002,7 +1003,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
 def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
     tmp_path: Path, weights: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(engine_base, "STOP_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(BaseEngine, "sigterm_wait_seconds", 1.0)
 
     class DeafEngine(NarratorEngine):
         def command(
@@ -1065,3 +1066,129 @@ def test_a_started_engine_refuses_to_be_started_twice(
 def test_the_fake_worker_is_the_one_the_readiness_tests_use() -> None:
     assert FAKE_NARRATOR.is_file()
     assert FAKE_NARRATOR.name == "fake_narrator.py"
+
+
+def test_the_stop_budget_is_the_whole_worst_case_of_stop() -> None:
+    from crucible.engines import narrator
+
+    built = NarratorEngine(
+        narrator_engine=A_FUTURE_ENGINE,
+        python=Path(sys.executable),
+        log_path=Path("unused.log"),
+        serving_stack=None,
+        max_num_seqs=None,
+        mem_fraction=None,
+        context_length=None,
+        voices=None,
+        mlx_total_bytes=None,
+    )
+    assert built.stop_budget_seconds == (
+        narrator.QUIT_GRACE_SECONDS
+        + narrator.READER_JOIN_SECONDS
+        + procgroup.stop_budget_seconds(BaseEngine.sigterm_wait_seconds)
+        + 2
+        * (
+            narrator.LAUNCHED_SERVER_GRACE_SECONDS
+            + narrator.LAUNCHED_SERVER_POLL_SECONDS
+        )
+    )
+    assert built.stop_budget_seconds > narrator.QUIT_GRACE_SECONDS
+
+
+def test_a_narrator_env_that_is_missing_names_the_tts_install(tmp_path: Path) -> None:
+    built = NarratorEngine(
+        narrator_engine=A_FUTURE_ENGINE,
+        python=tmp_path / "no-such-python",
+        log_path=tmp_path / "engine.log",
+        serving_stack=None,
+        max_num_seqs=None,
+        mem_fraction=None,
+        context_length=None,
+        voices=None,
+        mlx_total_bytes=None,
+    )
+    with pytest.raises(EngineError) as caught:
+        built.start(tmp_path, "deathstalker", 0, [])
+    assert "`crucible install tts`" in str(caught.value)
+
+
+def test_missing_voice_weights_name_the_voices_pull(tmp_path: Path) -> None:
+    built = NarratorEngine(
+        narrator_engine=A_FUTURE_ENGINE,
+        python=Path(sys.executable),
+        log_path=tmp_path / "engine.log",
+        serving_stack=None,
+        max_num_seqs=None,
+        mem_fraction=None,
+        context_length=None,
+        voices=None,
+        mlx_total_bytes=None,
+    )
+    with pytest.raises(EngineError) as caught:
+        built.start(tmp_path / "absent", "deathstalker", 0, [])
+    assert "`crucible voices pull deathstalker`" in str(caught.value)
+
+
+LINUX_PROC = pytest.mark.skipif(
+    not Path("/proc/self/environ").is_file(),
+    reason="the launched-server reap reads /proc/<pid>/environ (Linux only)",
+)
+
+
+def _launched_server(owner: int, *, deaf: bool) -> "subprocess.Popen[bytes]":
+    import os
+    import subprocess
+
+    from crucible.engines.narrator import OWNER_MARKER_VARIABLE
+
+    script = "import signal, time\n"
+    if deaf:
+        script += "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    script += "print('up', flush=True)\ntime.sleep(60)\n"
+    server = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, OWNER_MARKER_VARIABLE: str(owner)},
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+    assert server.stdout is not None
+    assert server.stdout.readline().strip() == b"up"
+    return server
+
+
+@LINUX_PROC
+def test_a_server_carrying_the_owner_marker_is_found_and_reaped_on_sigterm(
+    engine: FakeNarratorEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.engines import narrator
+
+    monkeypatch.setattr(narrator, "LAUNCHED_SERVER_GRACE_SECONDS", 3.0)
+    monkeypatch.setattr(narrator, "LAUNCHED_SERVER_POLL_SECONDS", 0.1)
+    owner = 999_999_001
+    server = _launched_server(owner, deaf=False)
+    try:
+        assert narrator.processes_launched_by(owner) == frozenset({server.pid})
+        engine._outlive_launched_servers(owner)
+        server.wait(timeout=5)
+        assert narrator.processes_launched_by(owner) == frozenset()
+    finally:
+        end_process_tree(server.pid)
+
+
+@LINUX_PROC
+def test_a_launched_server_deaf_to_sigterm_is_named_and_never_sigkilled(
+    engine: FakeNarratorEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.engines import narrator
+
+    monkeypatch.setattr(narrator, "LAUNCHED_SERVER_GRACE_SECONDS", 1.0)
+    monkeypatch.setattr(narrator, "LAUNCHED_SERVER_POLL_SECONDS", 0.1)
+    owner = 999_999_002
+    server = _launched_server(owner, deaf=True)
+    try:
+        with pytest.raises(EngineError) as caught:
+            engine._outlive_launched_servers(owner)
+        assert f"`kill {server.pid}`" in str(caught.value)
+        assert server.poll() is None
+    finally:
+        end_process_tree(server.pid)
