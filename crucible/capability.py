@@ -121,7 +121,7 @@ from .backend import (
     feature_floor,
     sm_name,
 )
-from .config import CapabilityRecord, CapabilityRow
+from .config import CapabilityRecord, CapabilityRow, desktop_reserve_words
 from .decide import UNSTATED_ENGINE_CONCURRENCY
 from .denoisemodels import load_all_denoise_manifests
 from .engines import vllm as vllm_engine
@@ -2508,6 +2508,8 @@ def install_plan(
     card: "CardFacts | None",
     total_bytes: int,
     pool: str,
+    desktop_allowance_bytes: int | None = None,
+    desktop_basis: str | None = None,
 ) -> dict[str, Any]:
     """What installing `job_type` will give THIS card, for the confirm modal.
 
@@ -2515,6 +2517,12 @@ def install_plan(
     walk `crucible install` records — so the modal and the record are one
     answer. `confirm` is the whole text the UI shows; `classes` is the same
     thing as data for a client that draws its own.
+
+    THE RESERVE IS SAID, WITH ITS BASIS (2026-09-26): "kept 0.6 GiB for this
+    PC's desktop (measured)" (`config.desktop_reserve_words`). Every "this card
+    gives a job N GiB" below is the pool less that reserve, and a person
+    deciding whether to install should see where the rest of the card went.
+    Optional so a caller with no config to hand still gets a plan.
     """
     entries = classes_for_job_type(job_type)
     if not entries:
@@ -2547,6 +2555,18 @@ def install_plan(
         )
     usable = any(row["enabled"] for row in rows)
     card_words = describe_card(card, total_bytes, pool)
+    reserve_words = (
+        None
+        if desktop_allowance_bytes is None or desktop_basis is None
+        else desktop_reserve_words(desktop_allowance_bytes, desktop_basis)
+    )
+    reserve_line = ""
+    if reserve_words is not None:
+        budget = available_bytes(total_bytes, desktop_allowance_bytes or 0)
+        reserve_line = (
+            f"{reserve_words[0].upper()}{reserve_words[1:]}, so a job gets "
+            f"{_gib(budget)}.\n"
+        )
     lines = "\n".join(f"- {row['line']}" for row in rows)
     closing = (
         "Install it?"
@@ -2560,9 +2580,14 @@ def install_plan(
         "job_type": job_type,
         "card": None if card is None else card.to_dict(),
         "card_words": card_words,
+        "desktop_reserve": reserve_words,
+        "desktop_allowance_basis": desktop_basis,
         "usable": usable,
         "classes": rows,
-        "confirm": f"Install {job_type}.\n\nYour card ({card_words}):\n{lines}\n\n{closing}",
+        "confirm": (
+            f"Install {job_type}.\n\nYour card ({card_words}):\n{reserve_line}"
+            f"{lines}\n\n{closing}"
+        ),
     }
 
 

@@ -173,6 +173,15 @@ VRAM held by something that is not us. `CapabilityRecord` stores only
 a desktop swing flips a load. Decide against measured-free, keep the allowance as
 a FLOOR, and record both numbers so a stale decision is visible.
 
+**2026-09-26: the allowance is no longer a guess on an NVIDIA card.** `crucible
+init` measures the desktop and keeps `min(peak + max(peak, 1 GiB), 3 GiB)`, with
+`[accelerator] desktop_allowance_basis` saying `measured`, `declared` or
+`stated`; a config from before reads as stated and is never lowered on its own.
+Owen: *"WE use 3 gb for desktop. kylies pc doesnt use that much ... it only has 1
+monitor connected and its low resolution"*. The rule, its reasons and the
+re-measure verb (`crucible capability --measure-desktop`) are in
+PHASE9-CAPABILITY.md section 1.1, amended.
+
 ## 6. The ceiling, and how Ollama gets it wrong
 
 Owen, 2026-09-16: *"there are some situations in which foundry and bookforge

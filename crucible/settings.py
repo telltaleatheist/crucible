@@ -44,6 +44,7 @@ from . import capability as capability_classes
 from . import upstreams as upstream_module
 from .backend import CardFacts
 from .config import (
+    DESKTOP_BASIS_STATED,
     CapabilityRecord,
     Config,
     LocalModelRecord,
@@ -51,6 +52,7 @@ from .config import (
     load_config,
     write_config,
     _advertised,
+    desktop_reserve_words,
 )
 from .errors import ApiError, ConfigError
 from .jobs.base import utcnow
@@ -218,6 +220,10 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
         "routes": routes,
         "upstreams": upstreams,
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
+        "desktop_allowance_basis": config.desktop_allowance_basis,
+        "desktop_reserve": desktop_reserve_words(
+            config.desktop_allowance_bytes, config.desktop_allowance_basis
+        ),
         "backend_kind": config.backend_kind,
         "tailscale_advertise": list(config.tailscale_advertise),
         "lan_advertise": list(config.lan_advertise),
@@ -243,6 +249,8 @@ class Resolved:
             entry.capability: entry.model for entry in config.local_models
         }
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
+        self.desktop_allowance_basis = config.desktop_allowance_basis
+        self.desktop_allowance_note = config.desktop_allowance_note
         self.tailscale_advertise = config.tailscale_advertise
         self.lan_advertise = config.lan_advertise
         self.removed: set[str] = set()
@@ -405,6 +413,10 @@ def resolve(config: Config, patch: Any) -> Resolved:
             )
         if value != resolved.desktop_allowance_bytes:
             resolved.desktop_allowance_bytes = value
+            # A person typed it: "stated", and from here on nothing replaces
+            # it on its own (config.DESKTOP_BASES, 2026-09-26).
+            resolved.desktop_allowance_basis = DESKTOP_BASIS_STATED
+            resolved.desktop_allowance_note = f"set in Settings on {utcnow()[:10]}"
             resolved.changed.append(f"desktop_allowance_bytes = {value}")
 
     if "local_models" in body:
@@ -696,6 +708,8 @@ def apply(
         # `engine_footprint_unset`.
         tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
+        desktop_allowance_basis=resolved.desktop_allowance_basis,
+        desktop_allowance_note=resolved.desktop_allowance_note,
         capability=recomputed_capability(
             config,
             resolved,

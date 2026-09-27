@@ -1629,12 +1629,16 @@ def _fingerprint(token: str) -> str:
 
 
 def carried_config(config_text: str) -> str:
-    """The THREE things `--config-from` takes, and nothing else (4.3).
+    """What `--config-from` takes, and nothing else (4.3).
 
-    `auth.token`, `[routes]`, `[upstreams]`. The host, the port, the name, the
-    backend and the job flags belong to the machine being initialised, not to
-    the one being left — a guest that inherited `backend = "llama-windows"`
-    would refuse to serve on its own card.
+    `auth.token`, `[routes]`, `[upstreams]` and, since 2026-09-26,
+    `[accelerator]` — the desktop reserve and its basis, because the Windows
+    server and the guest share one card and one desktop, and a reserve
+    somebody stated (or Crucible measured) must survive the move rather than
+    be re-decided in the guest (`cli.carried_from` says why in full). The
+    host, the port, the name, the backend and the job flags belong to the
+    machine being initialised, not to the one being left — a guest that
+    inherited `backend = "llama-windows"` would refuse to serve on its own card.
 
     Extracted textually rather than parsed and re-emitted, because a key is a
     secret and a round trip through a writer is a chance to mangle one. The
@@ -1647,14 +1651,17 @@ def carried_config(config_text: str) -> str:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             section = stripped[1:-1].strip()
-            if section == "auth" or section == "routes" or section.startswith("upstreams"):
+            if (
+                section in ("auth", "routes", "accelerator")
+                or section.startswith("upstreams")
+            ):
                 kept.append(line)
             continue
         if section == "auth":
             if stripped.startswith("token"):
                 kept.append(line)
             continue
-        if section == "routes" or section.startswith("upstreams"):
+        if section in ("routes", "accelerator") or section.startswith("upstreams"):
             kept.append(line)
     text = "\n".join(kept).strip()
     if "token" not in text:
