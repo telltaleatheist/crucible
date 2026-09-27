@@ -160,6 +160,8 @@ def _request(ffmpeg: str, tmp_path: Path, **overrides: object) -> dict:
         "compute_type": "float16",
         "window_s": 1,
         "overlap_s": 0,
+        # Required since 2026-09-27 (speech only); null transcribes everything.
+        "speech": None,
     }
     request.update(overrides)
     return request

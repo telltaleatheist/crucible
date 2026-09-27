@@ -1861,6 +1861,16 @@ export class CrucibleClient {
         ...(given.context !== undefined
           ? { context: readContext(given.context) }
           : {}),
+        // Speech only (2026-09-27), on the same rule: each key sent only when
+        // stated, so a caller that never heard of it sends what it always
+        // did. The bounds are the server's to refuse, by name, with the
+        // sentence saying what to send instead.
+        ...(given.speechOnly !== undefined
+          ? { speech_only: requireBool(given.speechOnly, 'speechOnly') }
+          : {}),
+        ...readSpeechKnob(given.speechThreshold, 'speechThreshold', 'speech_threshold'),
+        ...readSpeechKnob(given.speechPadS, 'speechPadS', 'speech_pad_s'),
+        ...readSpeechKnob(given.speechMinGapS, 'speechMinGapS', 'speech_min_gap_s'),
       },
       // The input's NAME becomes the file's name on the server's disk, and
       // ffmpeg reads the container off the extension — so the caller names the
@@ -4369,6 +4379,16 @@ function requireBool(value: unknown, option: string): boolean {
     throw new CrucibleConfigError(option, `must be a boolean, got ${typeof value}`);
   }
   return value;
+}
+
+/**
+ * One of `asr`'s speech-only knobs: `{}` when left out, the wire key with
+ * `null` (the server's default) or a finite number when stated.
+ */
+function readSpeechKnob(value: unknown, option: string, key: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (value === null) return { [key]: null };
+  return { [key]: requireFinite(value, option) };
 }
 
 function requireFinite(value: unknown, option: string): number {

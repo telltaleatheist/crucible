@@ -549,3 +549,141 @@ patch edits. That patch leaves the sampled token alone (the sampler reads the st
 logprobs; only the RETURNED copy is float32), and mlx-audio discards what is returned
 (`for token, _ in self.stream_generate(...)`), so a transcript is unchanged. The cost
 is one extra float32 log-sum-exp over the vocabulary per generated token.
+
+## 11. Speech only: silence taken out before the model hears it (Owen, 2026-09-27)
+
+**The problem.** Owen, 2026-09-27: *"Sending silences through an asr model produces
+hallucination and nonsense."* Both engines do it, Qwen3-ASR and whisper. **The go:**
+*"Go ahead and write it. We can use the speech detector, that's fine."*
+
+**What a caller sends.** `speech_only: true` in an `asr` job's params, on any model.
+**Off by default, for now.** Owen will measure it against the Deathstalker book, which
+has 133 known dropped sentence openings: if it loses none of them and removes the
+nonsense, the default flips to on. Three optional knobs tune it, each `null` for the
+server's default and each refused without `speech_only: true`:
+
+| param | default | bounds | what it is |
+|---|---|---|---|
+| `speech_threshold` | 0.3 | 0.1 to 0.7 | the detector score at which a 32 ms frame counts as speech; Silero's own is 0.5, and lower keeps more |
+| `speech_pad_s` | 0.3 | 0.1 to 2 | seconds of real audio kept on each side of every stretch of speech |
+| `speech_min_gap_s` | 2 | 1 to 60 | the shortest stretch without speech that is ever taken out; anything shorter stays in, as context |
+
+`speech_only` with `vad_filter: true` is refused: two detectors, and faster-whisper's
+keeps no record of what it dropped. An out-of-range value is a 400 whose sentence
+names the range and the default to send instead. SDK: `speechOnly`,
+`speechThreshold`, `speechPadS`, `speechMinGapS` on `client.asr(...)`, each sent only
+when stated.
+
+**Generous, because dropped openings are the bug the 30 s pieces just fixed**
+(section 3's cut, `qwen.own_words`, `_word_spans`). Every frame at or above the
+threshold is speech, with no minimum speech length, so one 32 ms frame is kept. Every
+run of speech is widened by `speech_pad_s`, and a stretch is taken out only if it is
+still at least `speech_min_gap_s` long after that padding. So no removed region is
+shorter than 2 s, and a narrator's pauses between sentences stay in.
+
+**The detector.** Silero VAD 6.2.1 (MIT, Silero Team). The pinned file is the
+release's own ONNX export `silero_vad_op18_ifless.onnx`, taken from the PyPI wheel
+`silero_vad-6.2.1-py3-none-any.whl` and re-hosted byte for byte on Crucible's `tools`
+release. It is 2,845,718 bytes, sha256
+`7671cd04b004e9076da0d4a7b1a5aec36adf161c39230c1cb94a4fd5db6bbd28`
+(`hosttools.SILERO_VAD`). `crucible install` places it under
+`<home>/tools/silero-vad/` for every job type, beside ffmpeg. A server installed
+before that fetches it on its first `speech_only` job, sha-checked before the file is
+placed.
+
+**The runtime is numpy, on the CPU, inside the ASR worker's own process.** The worker
+has already decoded the audio, and the card is busy. No one runtime is in all five
+envs the ASR workers run in:
+
+| engine | env | has |
+|---|---|---|
+| faster-whisper | asr, cuda-linux | onnxruntime 1.30.0, no torch |
+| mlx-whisper | asr, mlx-darwin | torch 2.14.0, no onnxruntime |
+| vllm | llm, cuda-linux | torch 2.13.0, no onnxruntime |
+| qwen-asr | align, mlx-darwin | torch 2.14.0, no onnxruntime |
+| mlx-audio | llm, mlx-darwin | neither |
+
+Adding a pin to a recipe makes every installed env of it read as not installed
+(`workerenv.env_status` compares every pin). The next asr job would then install the
+env again, including the vLLM env, for a 2.8 MB detector that is off by default.
+numpy is in all five envs.
+
+`crucible/jobs/asr/speechonly.py` is Silero's own framework-free forward pass
+(`silero_vad/tinygrad_model.py` in the wheel), written in numpy. It reads its weights
+out of the pinned ONNX file's protobuf directly, so no env needs `onnx` or
+`onnxruntime`.
+
+**Checked on 2026-09-27, on this PC's CPU, in a scratch venv, on real speech:**
+
+- Weights: the 15 tensors the reader takes out are byte-identical to
+  `onnx.numpy_helper`'s.
+- Scores: against onnxruntime 1.30.0 running the release's default model
+  (`silero_vad.onnx`, the one `load_silero_vad(onnx=True)` loads), the probabilities
+  differ by at most 8.6e-6.
+- Speed: 31 minutes of audio in 3.7 s, which is about 2 minutes for an 18-hour book.
+
+**One trap found doing it.** The `silero_vad_16k.safetensors` in the same wheel holds
+OLDER weights, up to 0.42 apart from the default model on the same audio. That is why
+it is not what is pinned.
+
+**Where it runs, and the timeline.** In the worker, after the decode and before the
+cut, on both whisper workers and on `qwen_worker.py`'s first `split`. The kept regions
+are concatenated in place, and the shortened signal is what is windowed (whisper) or
+cut into pieces (Qwen). The Qwen cutter cuts at a join, where a stretch was taken out,
+whenever one falls in its search span.
+
+Pieces, ownership (`own_words`), the loop guard and every re-cut work on that one
+timeline, unchanged. The worker's `ready` carries the table back: `kept`, as source
+sample spans, and `samples`. The server moves every time back to the source through
+it (`speechonly.Timeline`), sample-exact, and only when it writes the document, the
+way a piece's offset already works:
+
+- A segment's two ends are moved separately. A segment that held a removed stretch
+  spans it in source time, which is true.
+- A word's two ends both land in the kept region that holds its middle, so no word is
+  ever stretched across removed audio.
+- `align-longform` drives `worker.py` itself and always sends `speech: null`. It
+  refuses a transcript that came back cut, because its `index * WINDOW_SECONDS` shift
+  would put every word on the wrong timeline.
+
+**What the transcript reports.** Every `transcript.json` now has three more keys:
+
+- `speech_only`
+- `speech`: the detector, its sha256, the three settings, `speech_s` and `removed_s`.
+  Null when off.
+- `removed`: `[{start, end}]` in source seconds, so a missing line can be looked for
+  in it. Null when off, which is a different statement from `[]`.
+
+`duration_s` is always the source's.
+
+A source in which the detector hears no speech at all fails the job with a sentence
+naming the threshold, rather than publishing an empty transcript.
+
+**How the mapping was checked** (CPU, no model, 2026-09-27). The test book was real
+narration clips with 1.2 to 25 s of silence and room tone put between them. It was
+written as a wav and put through the real `qwen_worker.split` with speech on, at
+10 s pieces.
+
+- The removed stretches were 0 to 3.76, 15.76 to 21.78, 41.39 to 66.42, 84.81 to
+  87.80 and 94.64 to 103.45 s. The 1.2 s pause stayed in.
+- All three joins were used as cuts.
+- Every sample of every piece wav equals the source sample the table maps it to.
+- A loop-guard re-cut of one piece tiled its core, on the same table.
+- A word placed at each clip's opening, in the shortened timeline, came back on its
+  source opening to within 1e-9 s. That held through both Qwen's `_document` and
+  whisper's `_transcript` across three windows.
+
+**The lead-in is measured from the detector's frame, not the true onset.** The
+openings had 0.275 to 0.316 s of audio before them: the detector's first speech frame
+can start up to a frame after the audible onset. That is the number the Deathstalker
+run has to watch.
+
+**Not yet measured**, and all of it is Owen's run:
+
+- Whether any of Deathstalker's 133 openings is lost.
+- Whether the nonsense goes, on Qwen3-ASR and on whisper.
+- The threshold on real room tone, music and breaths.
+- Whether 0.3 s of padding is enough lead-in for Qwen's first word. Section 3 measured
+  1.5 s of lead-in hearing a word that sample zero lost. Here the pad is not the whole
+  lead-in, because a piece cut at a join still gets `overlap_s` of real audio before
+  its core.

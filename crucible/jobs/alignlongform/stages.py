@@ -132,6 +132,12 @@ def transcribe(
         "compute_type": ROUGH_COMPUTE_TYPE,
         "window_s": WINDOW_SECONDS,
         "overlap_s": OVERLAP_SECONDS,
+        # NO SPEECH-ONLY CUT, and it must stay null here (2026-09-27): with it
+        # the worker's windows are cut from a SHORTENED signal and every time
+        # below would need the `kept` table to come back to the book's
+        # timeline, which the `index * WINDOW_SECONDS` shift here does not
+        # apply. The coarse DTW reads wordless stretches for itself.
+        "speech": None,
     }
     try:
         outcome = workers.run_worker(
@@ -148,6 +154,14 @@ def transcribe(
         )
     except workers.WorkerError as exc:
         raise StageFailed("transcribe_failed", str(exc)) from None
+    if outcome.ready.get("kept") is not None:
+        # Unreachable while the request above says `speech: None`; if it ever
+        # is reached, every word time below is on the wrong timeline.
+        raise StageFailed(
+            "transcribe_failed",
+            "the rough transcript came back cut to speech only, and this stage "
+            "reads times on the book's own timeline",
+        )
 
     words: list[tuple[str, float]] = []
     for index, result in enumerate(outcome.results):

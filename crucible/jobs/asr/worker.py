@@ -15,11 +15,13 @@ The wire, in full
             `language` is null for auto-detect, `initial_prompt` null for no
             prompt. Every key is required and an absent one is refused by name
             — there is no default for anything here, because every one of these
-            values changes the transcript.
+            values changes the transcript. (`speech`, since 2026-09-27: null,
+            or `speechonly.settings`'s object.)
 
     fd 1    {"type": "progress", "stage": "decoding"|"transcribing",
              "processed_s", "total_s", "cues"}
-            {"type": "ready", "duration_s", "windows", "device", "compute_type"}
+            {"type": "ready", "duration_s", "windows", "device", "compute_type",
+             "samples", "speech_s", "kept"}
             {"type": "result", "segments": [...], "language", ...}   one per window
             {"type": "result", "error": "..."}                       a failed window
             {"type": "failed", "message"}                            the whole run
@@ -47,6 +49,17 @@ stopped dead mid-book while the windowing loop believed it was finished
 (BookForge, `electron/scripts/transcribe_audiobook.py`). ffmpeg reads those same
 files in full. `-f f32le` is already normalised to [-1, 1], so there is no
 rescale and no second copy.
+
+Speech only (2026-09-27)
+------------------------
+With `speech` set, the decoded audio goes through Silero VAD on the CPU
+(`speechonly.py`, this directory's, imported as a sibling file because this
+env has no `crucible`) and every long stretch without speech is taken out
+before the windows are cut. The windows, and every time in every result, are
+then on the SHORTENED timeline; `ready` carries the table back (`kept`, source
+sample spans; `samples`, the source's length) and the server moves every time
+back to the source. With `speech` null, `speech_s` and `kept` are null and
+nothing else changes.
 
 Why windows at all
 ------------------
@@ -142,6 +155,43 @@ def require_prompt(request: dict) -> "str | None":
     if value.strip() == "":
         raise KeyError("the asr request's 'initial_prompt' is blank; null means none")
     return value
+
+
+def _speechonly():
+    """`speechonly.py` from this file's own directory (no `crucible` here)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import speechonly
+
+    return speechonly
+
+
+def require_speech(request: dict) -> "dict | None":
+    """`speech`: required as a KEY; null means transcribe everything."""
+    return _speechonly().from_request(request)
+
+
+def speech_only(waveform, speech: dict, total: float, audio: str) -> tuple:
+    """The shortened waveform and its `kept` table (2026-09-27)."""
+    last = [0.0]
+
+    def report(seconds: float) -> None:
+        now = time.time()
+        if now - last[0] < DECODE_REPORT_SECONDS:
+            return
+        last[0] = now
+        # "decoding", because it is still before the first window and drives
+        # no fraction; the counts are the detector's position in the audio.
+        send(
+            "progress",
+            stage="decoding",
+            processed_s=round(seconds, 1),
+            total_s=round(total, 1),
+            cues=0,
+        )
+
+    return _speechonly().cut_for_worker(waveform, speech, audio, report)
 
 
 def prompt_too_long(count: int, ceiling: int) -> str:
@@ -321,6 +371,7 @@ def main() -> int:
                 f"{type(language).__name__}"
             )
         initial_prompt = require_prompt(request)
+        speech = require_speech(request)
     except KeyError as exc:
         return fail(str(exc.args[0]))
 
@@ -383,17 +434,28 @@ def main() -> int:
     except Exception as exc:
         return fail(f"could not decode {audio}: {type(exc).__name__}: {exc}")
 
-    total = len(waveform) / float(SAMPLE_RATE)
-    if total <= 0:
+    samples = len(waveform)
+    source_total = samples / float(SAMPLE_RATE)
+    if source_total <= 0:
         return fail(f"{audio} decoded to zero length")
+    kept = None
+    if speech is not None:
+        try:
+            waveform, kept = speech_only(waveform, speech, source_total, audio)
+        except Exception as exc:
+            return fail(f"speech detection failed: {type(exc).__name__}: {exc}")
+    total = len(waveform) / float(SAMPLE_RATE)
 
     windows = int(math.ceil(total / window_s))
     send(
         "ready",
-        duration_s=total,
+        duration_s=source_total,
         windows=windows,
         device=device,
         compute_type=compute_type,
+        samples=samples,
+        speech_s=None if kept is None else total,
+        kept=kept,
     )
 
     emitted = 0

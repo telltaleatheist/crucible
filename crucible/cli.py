@@ -1347,6 +1347,17 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
             f"the env is installed, but Crucible's ffmpeg is not: {exc}. "
             "Installing again retries only the ffmpeg"
         )
+    # The speech detector `asr`'s `speech_only` runs (2026-09-27). Placed for
+    # every type, like ffmpeg, because one file for every host is simpler
+    # than a rule about which types need it. Not a refusal when it fails: it
+    # is off by default, and a `speech_only` job fetches it itself.
+    try:
+        print(hosttools.ensure_silero_vad(config.home))
+    except hosttools.HostToolError as exc:
+        print(
+            f"speech detector: not placed ({exc}); an asr job that asks for "
+            "speech_only will fetch it"
+        )
     return None
 
 

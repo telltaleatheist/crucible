@@ -100,6 +100,17 @@ differs on the wire, all of it refused by name rather than ignored:
 - `vad_filter: true` is refused: neither Qwen engine has a VAD.
 
 docs/PHASE25-QWEN-ASR.md is the contract.
+
+Speech only, both engines (2026-09-27, off by default)
+------------------------------------------------------
+Owen: *"Sending silences through an asr model produces hallucination and
+nonsense."* `speech_only: true` has the worker take every long stretch
+without speech out of the decoded audio (Silero VAD, numpy on the CPU,
+`speechonly.py`) before any model hears it. Every time in `transcript.json`
+is still on the ORIGINAL audio's timeline, and the document says what was
+taken out: `speech_only`, `speech` (the detector, its pin and the three
+settings it ran under) and `removed` (`[{start, end}]`, source seconds), the
+last two null when it was off. `AsrParams` has the rules and the defaults.
 """
 
 from __future__ import annotations
@@ -112,6 +123,7 @@ from typing import Any, Callable
 from pydantic import (
     BaseModel,
     ConfigDict,
+    StrictBool,
     StrictStr,
     ValidationError,
     field_validator,
@@ -136,7 +148,7 @@ from ...errors import ApiError, JobError
 from ...manifests import fingerprint
 from ..align import QWEN3_LANGUAGES
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
-from . import qwen
+from . import qwen, speechonly
 
 __all__ = ["AsrJobType", "AsrParams"]
 
@@ -348,6 +360,35 @@ class AsrParams(BaseModel):
     is 0 to 5 and less than half a piece. Whisper has neither and refuses both
     by name; overlap on a job without word timestamps is refused too, because
     only word times can say which piece a doubled word belongs to.
+
+
+    `speech_only` and its three knobs — both engines, OFF BY DEFAULT (2026-09-27)
+    ------------------------------------------------------------------------------
+    Owen, 2026-09-27: *"Sending silences through an asr model produces
+    hallucination and nonsense"*, in Qwen3-ASR and whisper alike; *"Go ahead
+    and write it. We can use the speech detector, that's fine."* With
+    `speech_only: true` the worker runs Silero VAD on the CPU over the decoded
+    audio (`speechonly.py`), takes out every stretch without speech that is at
+    least `speech_min_gap_s` long, and transcribes what is left. Every time in
+    the transcript is on the ORIGINAL audio's timeline, and the transcript
+    lists what was taken out (`removed`, source seconds) so a missing line can
+    be found.
+
+    Generous on purpose, because dropped sentence openings are the bug the
+    30 s pieces just fixed: `speech_pad_s` (default 0.3, 0.1 to 2) of real
+    audio is kept either side of every stretch of speech;
+    `speech_min_gap_s` (default 2, 1 to 60) is the shortest stretch ever
+    removed, so ordinary pauses stay in as context; `speech_threshold`
+    (default 0.3, 0.1 to 0.7) is the detector score at which a 32 ms frame
+    counts as speech, set below Silero's own 0.5 so doubtful frames are kept.
+    Each is `None` for this server's default; sending one without
+    `speech_only: true` is refused, because it would change nothing.
+
+    **Default OFF, for now (2026-09-27).** Owen will measure it against the
+    Deathstalker book, whose 133 known dropped openings are the test: if it
+    loses none of them and removes the nonsense, the default flips to on.
+    Not with `vad_filter: true` either: that is faster-whisper's own Silero
+    pass with its own rules and no record of what it removed; send one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -359,6 +400,97 @@ class AsrParams(BaseModel):
     context: StrictStr | None = None
     piece_s: float | None = None
     overlap_s: float | None = None
+    speech_only: StrictBool = False
+    speech_threshold: float | None = None
+    speech_pad_s: float | None = None
+    speech_min_gap_s: float | None = None
+
+    @field_validator("speech_threshold")
+    @classmethod
+    def speech_threshold_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (
+            speechonly.MIN_THRESHOLD <= value <= speechonly.MAX_THRESHOLD
+        ):
+            raise ValueError(
+                f"speech_threshold is {value}; it is {speechonly.MIN_THRESHOLD:g} to "
+                f"{speechonly.MAX_THRESHOLD:g}, the detector score at which a frame "
+                "counts as speech (lower keeps more). Send null for this server's "
+                f"default ({speechonly.DEFAULT_THRESHOLD:g})"
+            )
+        return value
+
+    @field_validator("speech_pad_s")
+    @classmethod
+    def speech_pad_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (
+            speechonly.MIN_PAD_S <= value <= speechonly.MAX_PAD_S
+        ):
+            raise ValueError(
+                f"speech_pad_s is {value}; it is {speechonly.MIN_PAD_S:g} to "
+                f"{speechonly.MAX_PAD_S:g} seconds of audio kept either side of "
+                "speech, and less than 0.1 cuts against a sentence's first word. "
+                f"Send null for this server's default ({speechonly.DEFAULT_PAD_S:g})"
+            )
+        return value
+
+    @field_validator("speech_min_gap_s")
+    @classmethod
+    def speech_min_gap_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (
+            speechonly.MIN_MIN_GAP_S <= value <= speechonly.MAX_MIN_GAP_S
+        ):
+            raise ValueError(
+                f"speech_min_gap_s is {value}; it is {speechonly.MIN_MIN_GAP_S:g} to "
+                f"{speechonly.MAX_MIN_GAP_S:g} seconds, the shortest stretch without "
+                "speech that is taken out. Send null for this server's default "
+                f"({speechonly.DEFAULT_MIN_GAP_S:g})"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def speech_knobs_need_speech_only(self) -> "AsrParams":
+        if self.speech_only:
+            if self.vad_filter:
+                raise ValueError(
+                    "speech_only and vad_filter are two speech detectors; send one. "
+                    "speech_only is Crucible's, keeps the original timeline and "
+                    "lists what it removed; vad_filter is faster-whisper's own"
+                )
+            return self
+        stray = [
+            name
+            for name in ("speech_threshold", "speech_pad_s", "speech_min_gap_s")
+            if getattr(self, name) is not None
+        ]
+        if stray:
+            raise ValueError(
+                f"{', '.join(stray)} tune(s) speech_only, and speech_only is false, "
+                "so they would change nothing. Send speech_only: true, or leave "
+                f"{'them' if len(stray) > 1 else 'it'} out"
+            )
+        return self
+
+    def speech_settings(self, weights: Path) -> dict[str, Any] | None:
+        """The worker's `speech` object, or None when `speech_only` is off."""
+        if not self.speech_only:
+            return None
+        return {
+            "weights": str(weights),
+            "sha256": hosttools.SILERO_VAD.sha256,
+            "threshold": (
+                self.speech_threshold
+                if self.speech_threshold is not None
+                else speechonly.DEFAULT_THRESHOLD
+            ),
+            "pad_s": (
+                self.speech_pad_s if self.speech_pad_s is not None else speechonly.DEFAULT_PAD_S
+            ),
+            "min_gap_s": (
+                self.speech_min_gap_s
+                if self.speech_min_gap_s is not None
+                else speechonly.DEFAULT_MIN_GAP_S
+            ),
+        }
 
     @field_validator("piece_s")
     @classmethod
@@ -1029,6 +1161,7 @@ class AsrJobType:
         except ApiError as exc:
             raise JobError(exc.code, exc.message) from None
         ctx.warming(state.detail)
+        speech = params.speech_settings(self._speech_detector(ctx, params))
 
         # Zeros rather than absent fields: every `stage` line carries the same
         # three numbers, so a consumer reads one shape and never has to ask
@@ -1063,10 +1196,11 @@ class AsrJobType:
                 piece_s=params.piece_seconds(),
                 overlap_s=params.overlap_seconds(),
                 width=self._width(manifest, spec, params),
+                speech=speech,
             ).run()
         else:
             document = self._whisper(
-                ctx, job, model, spec, python, weights_dir, ffmpeg, audio, params
+                ctx, job, model, spec, python, weights_dir, ffmpeg, audio, params, speech
             )
 
         path = ctx.scratch / "transcript.json"
@@ -1093,10 +1227,11 @@ class AsrJobType:
         ffmpeg: str,
         audio: Path,
         params: AsrParams,
+        speech: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """The whisper engines' run: one worker, 900-second windows, one exit."""
         outcome = self._transcribe(
-            ctx, job, spec.engine, python, weights_dir, ffmpeg, audio, params
+            ctx, job, spec.engine, python, weights_dir, ffmpeg, audio, params, speech
         )
 
         windows = outcome.ready["windows"]
@@ -1120,7 +1255,32 @@ class AsrJobType:
                 + "; ".join(failures),
             )
 
-        return self._transcript(model, spec, params, outcome, results)
+        return self._transcript(model, spec, params, outcome, results, speech)
+
+    def _speech_detector(self, ctx: JobContext, params: AsrParams) -> Path:
+        """The pinned speech detector's path, fetched if this host has none.
+
+        Only asked when `speech_only` is on. `crucible install` places it
+        (`hosttools.ensure_silero_vad`); a server installed before it existed
+        fetches it here, once — 2.8 MB, sha256-checked before it is placed —
+        rather than telling a caller who asked for speech only to go and run
+        an installer. A fetch that fails fails the job by name.
+        """
+        path = hosttools.silero_vad_path(self._config.home)
+        if not params.speech_only:
+            return path
+        if not hosttools.silero_vad_placed(self._config.home):
+            ctx.warming("fetching the speech detector (silero-vad, 2.8 MB)")
+            try:
+                hosttools.ensure_silero_vad(self._config.home)
+            except hosttools.HostToolError as exc:
+                raise JobError(
+                    "speech_detector_unavailable",
+                    f"speech_only needs the speech detector, and it could not be "
+                    f"fetched: {exc.message}. Send speech_only: false to transcribe "
+                    "everything, or run `crucible install asr` on this server",
+                ) from None
+        return path
 
     @staticmethod
     def _one_input(ctx: JobContext) -> Path:
@@ -1144,6 +1304,7 @@ class AsrJobType:
         ffmpeg: str,
         audio: Path,
         params: AsrParams,
+        speech: dict[str, Any] | None,
     ) -> workers.WorkerOutcome:
         request = {
             "model_dir": str(weights_dir),
@@ -1162,11 +1323,19 @@ class AsrJobType:
             ),
             "window_s": WINDOW_SECONDS,
             "overlap_s": OVERLAP_SECONDS,
+            # null, or `speechonly.settings`'s object: the worker takes the
+            # non-speech out before the windows are cut (2026-09-27).
+            "speech": speech,
         }
 
         def on_ready(message: dict[str, Any]) -> None:
+            kept = (
+                ""
+                if message.get("speech_s") is None
+                else f", {message['speech_s']:.0f}s of it kept as speech"
+            )
             ctx.warming(
-                f"{message['duration_s']:.0f}s of audio decoded, "
+                f"{message['duration_s']:.0f}s of audio decoded{kept}, "
                 f"{message['windows']} window(s) of {WINDOW_SECONDS}s to transcribe "
                 f"on {message['device']} at {message['compute_type']}"
             )
@@ -1228,6 +1397,7 @@ class AsrJobType:
         params: AsrParams,
         outcome: workers.WorkerOutcome,
         results: tuple[dict[str, Any], ...],
+        speech: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Window-relative results into one absolute, deduplicated document.
 
@@ -1235,7 +1405,15 @@ class AsrJobType:
         the worker reports no index, because an index a worker reports is an
         index a worker can get wrong. Window `n` starts at `n * WINDOW_SECONDS`
         by construction, so the shift is arithmetic the server does.
+
+        With `speech_only` the windows were cut from the SHORTENED signal, so
+        that shift lands on its timeline, the dedup runs there, and only then
+        is every time moved back to the source through the worker's `kept`
+        table (`speechonly.Timeline`): segments end by end, each word into the
+        region holding its middle, so no word is stretched across removed
+        audio.
         """
+        timeline = _timeline(outcome.ready, speech)
         segments: list[dict[str, Any]] = []
         for index, result in enumerate(results):
             offset = index * float(WINDOW_SECONDS)
@@ -1267,6 +1445,8 @@ class AsrJobType:
             ):
                 continue
             deduplicated.append(segment)
+        if timeline is not None:
+            deduplicated = [_to_source(segment, timeline) for segment in deduplicated]
 
         # Every window detects the language independently when none was given.
         # The first window's answer is the document's, because that is the one
@@ -1290,5 +1470,34 @@ class AsrJobType:
             "window_s": WINDOW_SECONDS,
             "overlap_s": OVERLAP_SECONDS,
             "windows": outcome.ready["windows"],
+            **speechonly.report(speech, timeline),
             "segments": deduplicated,
         }
+
+
+# ------------------------------------------------------------ speech only
+
+
+def _timeline(
+    ready: dict[str, Any], speech: dict[str, Any] | None
+) -> speechonly.Timeline | None:
+    """The worker's `kept` table as a timeline, or None when speech_only is off."""
+    if speech is None:
+        return None
+    try:
+        return speechonly.Timeline.from_ready(ready)
+    except ValueError as exc:
+        raise JobError("worker_failed", str(exc)) from None
+
+
+def _to_source(segment: dict[str, Any], timeline: speechonly.Timeline) -> dict[str, Any]:
+    """One segment, and its words, from the shortened timeline to the source's."""
+    moved = dict(segment)
+    moved["start"], moved["end"] = timeline.span(segment["start"], segment["end"])
+    if "words" in segment:
+        words = []
+        for word in segment["words"]:
+            start, end = timeline.word(word["start"], word["end"])
+            words.append({**word, "start": start, "end": end})
+        moved["words"] = words
+    return moved

@@ -18,6 +18,17 @@ so the job drives them itself:
    either is re-cut smaller and decoded again, up to the ladder's end, and then
    the job fails as `asr_decode_loop` naming where.
 
+SPEECH ONLY (Owen, 2026-09-27; off by default)
+----------------------------------------------
+*"Sending silences through an asr model produces hallucination and
+nonsense."* With `speech_only`, the worker's first `split` runs Silero VAD on
+the CPU over the decoded source and cuts the SHORTENED signal
+(`speechonly.py`); the cutter prefers the joins where a stretch was taken out.
+Pieces, ownership (`own_words`), the loop guard and every re-cut then work on
+that one timeline, exactly as they do on the source without it; `_document`
+moves every time back to the source through the worker's `kept` table, and
+the transcript lists what was removed.
+
 PER-JOB, NOT RESIDENT, AND WHY (docs/PHASE25 section 3)
 -------------------------------------------------------
 Both sessions belong to this job: started by it, stopped in its `finally`, and
@@ -86,7 +97,7 @@ from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
 from ..align import WORKER_SCRIPT as ALIGN_WORKER_SCRIPT
 from ..align import device_for as align_device_for
 from ..base import Job, JobContext
-from . import loopguard
+from . import loopguard, speechonly
 
 QWEN_WORKER_SCRIPT = Path(__file__).resolve().parent / "qwen_worker.py"
 
@@ -318,15 +329,22 @@ class Piece:
     tokens: int = 0
     hit_token_limit: bool = False
     items: list[dict[str, Any]] = field(default_factory=list)
+    #: With `speech_only`, every second above is on the SHORTENED signal's
+    #: timeline and this maps it back (2026-09-27); None is the source's own.
+    timeline: speechonly.Timeline | None = None
 
     @property
     def end_s(self) -> float:
         return self.start_s + self.duration_s
 
     def where(self) -> str:
+        """Where this piece is, in the SOURCE's seconds: what a reader can find."""
+        start, end = self.start_s, self.end_s
+        if self.timeline is not None:
+            start, end = self.timeline.span(start, end)
         return (
-            f"{self.start_s:.1f}-{self.end_s:.1f}s "
-            f"({loopguard.clock(self.start_s)}-{loopguard.clock(self.end_s)})"
+            f"{start:.1f}-{end:.1f}s "
+            f"({loopguard.clock(start)}-{loopguard.clock(end)})"
         )
 
 
@@ -453,6 +471,7 @@ class QwenAsrRun:
         piece_s: float,
         overlap_s: float,
         width: int | None = None,
+        speech: dict[str, Any] | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -475,6 +494,13 @@ class QwenAsrRun:
         self._ladder = loopguard.window_ladder(piece_s)
         self._asr: workers.WorkerSession | None = None
         self._align: workers.WorkerSession | None = None
+        #: `speech_only` (2026-09-27): the worker's settings object, or None.
+        #: With it every piece lives on the shortened signal's timeline
+        #: (`_duration_s` is ITS length), and `_timeline` maps back to the
+        #: source, whose length is `_source_s`.
+        self._speech = speech
+        self._timeline: speechonly.Timeline | None = None
+        self._source_s = 0.0
         self._duration_s = 0.0
         self._finished: list[Piece] = []
         self._redecoded: list[dict[str, Any]] = []
@@ -786,6 +812,7 @@ class QwenAsrRun:
                 "out_dir": str(out_dir),
                 "region_s": None if region is None else list(region),
                 "overlap_s": self._overlap_s,
+                "speech": self._speech,
             },
             on_progress,
         )
@@ -796,9 +823,24 @@ class QwenAsrRun:
             raise JobError("worker_failed", str(exc)) from None
         if level == 0:
             self._duration_s = float(outcome.ready["duration_s"])
+            self._source_s = self._duration_s
+            kept = ""
+            if self._speech is not None:
+                try:
+                    self._timeline = speechonly.Timeline.from_ready(outcome.ready)
+                except ValueError as exc:
+                    raise JobError("worker_failed", str(exc)) from None
+                self._source_s = self._timeline.total_samples / float(
+                    speechonly.SAMPLE_RATE
+                )
+                kept = (
+                    f" of speech (of {self._source_s:.0f}s; "
+                    f"{len(self._timeline.removed())} stretch(es) without speech "
+                    "taken out)"
+                )
             self._ctx.warming(
-                f"{self._duration_s:.0f}s of audio in {count} piece(s) of at most "
-                f"{window:g}s, {self._overlap_s:g}s of overlap each side"
+                f"{self._duration_s:.0f}s of audio{kept} in {count} piece(s) of at "
+                f"most {window:g}s, {self._overlap_s:g}s of overlap each side"
             )
         max_new = int(self._spec.require("max_new_tokens"))
         return [
@@ -812,6 +854,7 @@ class QwenAsrRun:
                 budget=loopguard.token_budget(
                     float(result["audio_duration_s"]), max_new
                 ),
+                timeline=self._timeline,
             )
             for result in results
         ]
@@ -880,28 +923,58 @@ class QwenAsrRun:
 
     # ------------------------------------------------------------- document
 
+    def _span(self, start: float, end: float) -> tuple[float, float]:
+        """A stretch on the pieces' timeline, in the source's seconds."""
+        if self._timeline is None:
+            return start, end
+        return self._timeline.span(start, end)
+
+    def _word(self, start: float, end: float) -> tuple[float, float]:
+        """A word on the pieces' timeline, in the source's seconds: both ends in
+        the kept region holding its middle, so the aligner can never stretch a
+        word across a removed stretch (`speechonly.Timeline.word`)."""
+        if self._timeline is None:
+            return start, end
+        return self._timeline.word(start, end)
+
     def _document(self) -> dict[str, Any]:
+        """The transcript. Everything was done on the pieces' timeline (the
+        shortened signal's, with `speech_only`); every time is moved to the
+        SOURCE's here, and nowhere earlier, so ownership and the loop guard
+        never saw two timelines."""
         segments = []
         for piece in sorted(self._finished, key=lambda p: p.start_s):
+            start, end = self._span(piece.start_s, piece.end_s)
             row: dict[str, Any] = {
-                "start": piece.start_s,
-                "end": piece.end_s,
+                "start": start,
+                "end": end,
                 "text": piece.text,
             }
             if self._word_timestamps:
-                row["words"] = [
-                    {
-                        "start": piece.audio_start_s + float(item["start"]),
-                        "end": piece.audio_start_s + float(item["end"]),
-                        "word": str(item["text"]),
-                        # whisper's four keys, and the fourth is null on purpose:
-                        # the aligner places words, it does not score them, and
-                        # an invented confidence is worse than none.
-                        "probability": None,
-                    }
-                    for item in piece.items
-                ]
+                words = []
+                for item in piece.items:
+                    word_start, word_end = self._word(
+                        piece.audio_start_s + float(item["start"]),
+                        piece.audio_start_s + float(item["end"]),
+                    )
+                    words.append(
+                        {
+                            "start": word_start,
+                            "end": word_end,
+                            "word": str(item["text"]),
+                            # whisper's four keys, and the fourth is null on
+                            # purpose: the aligner places words, it does not
+                            # score them, and an invented confidence is worse
+                            # than none.
+                            "probability": None,
+                        }
+                    )
+                row["words"] = words
             segments.append(row)
+        redecoded = []
+        for entry in self._redecoded:
+            start, end = self._span(entry["start"], entry["end"])
+            redecoded.append({**entry, "start": start, "end": end})
         aligner = self._aligner
         return {
             "model": self._model,
@@ -928,12 +1001,13 @@ class QwenAsrRun:
             "word_timestamps": self._word_timestamps,
             "initial_prompt": None,
             "context": self._context,
-            "duration_s": self._duration_s,
+            "duration_s": self._source_s,
             "piece_max_s": self._piece_s,
             "overlap_s": self._overlap_s,
             "pieces": len(self._finished) + self._silent,
             "silent_pieces": self._silent,
-            "redecoded": self._redecoded,
+            "redecoded": redecoded,
+            **speechonly.report(self._speech, self._timeline),
             "segments": segments,
         }
 
