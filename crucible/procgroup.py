@@ -14,6 +14,10 @@ WIN32 = "win32"
 
 KILL_WAIT_SECONDS = 10.0
 
+STOP_TIMEOUT_SECONDS = 180.0
+
+LOG_TAIL_LINES = 40
+
 
 class ProcessGroupError(CrucibleError):
     ...
@@ -89,13 +93,84 @@ def terminate_tree(process: "subprocess.Popen[Any]", what: str) -> None:
         ) from None
 
 
+def ask_groups_to_stop(pids: "frozenset[int] | set[int]") -> frozenset[int]:
+    if platform_kind() != "posix":
+        raise ProcessGroupError(
+            f"pids {sorted(pids)} were to be asked to stop by process group, and "
+            "only POSIX has process groups to signal"
+        )
+    failed: set[int] = set()
+    groups: dict[int, set[int]] = {}
+    for pid in pids:
+        try:
+            groups.setdefault(os.getpgid(pid), set()).add(pid)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            failed.add(pid)
+    for group, members in groups.items():
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            failed.update(members)
+    return frozenset(failed)
+
+
+def stop_budget_seconds(sigterm_wait_seconds: float) -> float:
+    if platform_kind() == WIN32:
+        return sigterm_wait_seconds + 2 * KILL_WAIT_SECONDS
+    return sigterm_wait_seconds
+
+
+def stop_gracefully(
+    process: "subprocess.Popen[Any]",
+    what: str,
+    timeout_seconds: float,
+    log_path: "os.PathLike[str] | str",
+) -> None:
+    if process.poll() is not None:
+        return
+    win32 = platform_kind() == WIN32
+    try:
+        if not ask_to_stop(process):
+            if win32:
+                terminate_tree(process, what)
+            return
+        try:
+            process.wait(timeout=timeout_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if win32:
+            terminate_tree(process, what)
+            return
+    except ProcessGroupError as exc:
+        raise ProcessGroupError(
+            f"could not stop {what} (pid {process.pid}): {exc}. Its log is {log_path}"
+        ) from exc
+    raise ProcessGroupError(
+        f"{what} (pid {process.pid}) did not exit within {timeout_seconds:.0f}s "
+        "of SIGTERM. Crucible does not SIGKILL a process holding CUDA: that "
+        "wedges WSL2 until Windows reboots. Stop it with "
+        f"`kill {process.pid}` (never -9), then run the request again. Its log "
+        f"is {log_path}"
+    )
+
+
 __all__ = [
     "KILL_WAIT_SECONDS",
+    "LOG_TAIL_LINES",
+    "STOP_TIMEOUT_SECONDS",
     "POSIX_PLATFORMS",
     "ProcessGroupError",
     "WIN32",
+    "ask_groups_to_stop",
     "ask_to_stop",
     "own_group",
     "platform_kind",
+    "stop_budget_seconds",
+    "stop_gracefully",
     "terminate_tree",
 ]

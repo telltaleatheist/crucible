@@ -640,3 +640,66 @@ def test_check_names_the_missing_base_assets(
     status = job_type.check(FAKE_BACKEND)
     assert status.ready is False
     assert "base assets are not at" in status.detail
+
+
+def _worker_stop() -> Callable[..., None]:
+    import ast
+    import subprocess
+
+    source = (
+        Path(__file__).resolve().parents[1] / "crucible" / "jobs" / "rvc" / "worker.py"
+    ).read_text(encoding="utf-8")
+    found = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "_stop"
+    )
+    namespace: dict[str, Any] = {"subprocess": subprocess, "sys": sys}
+    exec(compile(ast.Module(body=[found], type_ignores=[]), "worker.py", "exec"), namespace)
+    return namespace["_stop"]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the rvc worker runs in a Linux or macOS env; win32 terminate() is a kill",
+)
+def test_the_rvc_worker_recycles_urvc_with_sigterm_and_never_kills_it(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import subprocess
+
+    deaf = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('deaf', flush=True)\n"
+            "time.sleep(60)\n",
+        ],
+        stdout=subprocess.PIPE,
+        **procgroup.own_group(),
+    )
+    try:
+        assert deaf.stdout is not None
+        assert deaf.stdout.readline().strip() == b"deaf"
+        _worker_stop()(deaf, 1.0)
+        assert deaf.poll() is None
+        assert f"`kill {deaf.pid}` (never -9)" in capsys.readouterr().err
+    finally:
+        end_process_tree(deaf.pid)
+
+
+def test_the_rvc_worker_holds_no_kill_call() -> None:
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "crucible" / "jobs" / "rvc" / "worker.py"
+    ).read_text(encoding="utf-8")
+    calls = {
+        node.func.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "kill" not in calls
+    assert callable(_worker_stop())

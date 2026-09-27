@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
-import signal
-import socket
 import subprocess
 import threading
 import time
@@ -12,8 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
+from .. import procgroup
 from ..errors import JobCancelled
-from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine
+from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine, find_free_port
 
 if TYPE_CHECKING:
     from ..narratorvoices import VoicesDocument
@@ -70,26 +68,6 @@ def _wait_until_gone(owner_pid: int, seconds: float) -> frozenset[int]:
         if not left or time.monotonic() >= deadline:
             return left
         time.sleep(LAUNCHED_SERVER_POLL_SECONDS)
-
-
-def _terminate_groups(pids: frozenset[int]) -> None:
-    groups = set()
-    for pid in pids:
-        try:
-            groups.add(os.getpgid(pid))
-        except OSError:
-            continue
-    for group in groups:
-        try:
-            os.killpg(group, signal.SIGTERM)
-        except OSError:
-            continue
-
-
-def free_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 def env_prefix_variable_for(serving_stack: str) -> str:
@@ -177,6 +155,8 @@ QUIT_GRACE_SECONDS = 210.0
 
 POLL_SECONDS = 0.5
 
+READER_JOIN_SECONDS = POLL_SECONDS * 4
+
 CANCEL_GRACE_SECONDS = 120.0
 
 LOAD_SILENCE_TIMEOUT_SECONDS = 900.0
@@ -219,6 +199,12 @@ _ENDED = _Ended()
 
 
 class NarratorEngine(SubprocessEngine):
+    env_job_type = "tts"
+
+    pull_command = "crucible voices pull"
+
+    binds_a_port = False
+
     def __init__(
         self,
         narrator_engine: str,
@@ -355,7 +341,7 @@ class NarratorEngine(SubprocessEngine):
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
             port_variable = STACK_PORT_VARIABLE.get(self._serving_stack)
             if port_variable is not None:
-                environment[port_variable] = str(free_loopback_port())
+                environment[port_variable] = str(find_free_port())
         if self._mem_fraction is not None:
             environment[MEM_FRACTION_VARIABLE] = f"{self._mem_fraction:g}"
         if self._context_length is not None:
@@ -426,7 +412,7 @@ class NarratorEngine(SubprocessEngine):
                 pass
         reader = self._reader
         if reader is not None:
-            reader.join(timeout=POLL_SECONDS * 4)
+            reader.join(timeout=READER_JOIN_SECONDS)
         if (
             process is not None
             and process.stdout is not None
@@ -618,6 +604,15 @@ class NarratorEngine(SubprocessEngine):
             return frozenset()
         return super().pids | processes_launched_by(process.pid)
 
+    @property
+    def stop_budget_seconds(self) -> float:
+        return (
+            QUIT_GRACE_SECONDS
+            + READER_JOIN_SECONDS
+            + super().stop_budget_seconds
+            + 2 * (LAUNCHED_SERVER_GRACE_SECONDS + LAUNCHED_SERVER_POLL_SECONDS)
+        )
+
     def stop(self) -> None:
         process = self._process
         owner = None if process is None else process.pid
@@ -629,15 +624,22 @@ class NarratorEngine(SubprocessEngine):
         left = _wait_until_gone(owner, LAUNCHED_SERVER_GRACE_SECONDS)
         if not left:
             return
-        _terminate_groups(left)
+        unsignalled = procgroup.ask_groups_to_stop(left)
         left = _wait_until_gone(owner, LAUNCHED_SERVER_GRACE_SECONDS)
         if left:
+            pids = " ".join(str(pid) for pid in sorted(left))
+            refused = (
+                f" Crucible could not signal pids {sorted(unsignalled)}."
+                if unsignalled
+                else ""
+            )
             raise EngineError(
                 f"{self.name}: the server narrator launched is still running "
                 f"(pids {sorted(left)}) {2 * LAUNCHED_SERVER_GRACE_SECONDS:.0f}s "
-                "after narrator stopped, and did not exit on SIGTERM. Crucible "
-                "does not SIGKILL a process holding CUDA; stop it by hand before "
-                "the next load."
+                f"after narrator stopped, and did not exit on SIGTERM.{refused} "
+                "Crucible does not SIGKILL a process holding CUDA: stop it with "
+                f"`kill {pids}` (never -9) and load again. Its log is "
+                f"{self.log_path}"
             )
 
     def _quit_narrator(self) -> None:

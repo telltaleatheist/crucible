@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from .base import (
     STOP_TIMEOUT_SECONDS,
-    Engine,
     EngineError,
     SubprocessEngine,
     find_free_port,
@@ -186,7 +185,6 @@ __all__ = [
     "ENGINES",
     "NARRATOR_ENGINES",
     "STOP_TIMEOUT_SECONDS",
-    "Engine",
     "EngineError",
     "EngineWouldNotStop",
     "LlamaServerEngine",

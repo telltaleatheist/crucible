@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..backend import BF16, CUDA_GRAPHS, VLLM_STARTS, CardFacts
-from .base import EngineError, SubprocessEngine, int_flag
+from .base import EngineError, SubprocessEngine, int_flag, str_flag
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
@@ -34,13 +34,8 @@ AUTO_DTYPE = "auto"
 
 
 def dtype_of(engine_args: "tuple[str, ...] | list[str]") -> str:
-    args = list(engine_args)
-    for index, arg in enumerate(args):
-        if arg == "--dtype" and index + 1 < len(args):
-            return args[index + 1]
-        if arg.startswith("--dtype="):
-            return arg.partition("=")[2]
-    return AUTO_DTYPE
+    stated = str_flag(engine_args, "--dtype")
+    return AUTO_DTYPE if stated is None else stated
 
 
 def stated_dtype(spec: object) -> str:

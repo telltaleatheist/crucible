@@ -185,6 +185,8 @@ def test_mlx_vlm_serving_something_else_is_not_a_not_yet(tmp_path: Path) -> None
         with pytest.raises(EngineError) as caught:
             engine.ready(60.0)
         assert "will not proxy a model it did not ask for" in str(caught.value)
+        assert "another server is answering on port" in str(caught.value)
+        assert "run the load again" in str(caught.value)
     finally:
         engine.stop()
 
@@ -220,3 +222,85 @@ def test_the_http_engines_did_not_change(
     assert BaseEngine.readiness_description(engine) == (
         "answer http://127.0.0.1:7654/v1/models"
     )
+
+
+class BindFailingVllm(VllmEngine):
+    def command(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> list[str]:
+        return [
+            sys.executable,
+            "-c",
+            "print('OSError: [Errno 98] error while attempting to bind on "
+            "address (127.0.0.1, 1): address already in use', flush=True)",
+        ]
+
+
+def test_a_vllm_that_could_not_bind_is_port_in_use_with_a_next_step(
+    tmp_path: Path,
+) -> None:
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    engine = BindFailingVllm(
+        python=Path(sys.executable), log_path=tmp_path / "engine.log"
+    )
+    engine.start(weights, "qwen", find_free_port(), ["--max-num-seqs", "1"])
+    try:
+        with pytest.raises(EngineError) as caught:
+            engine.ready(30.0)
+    finally:
+        engine.stop()
+    said = str(caught.value)
+    assert said.startswith("port_in_use:")
+    assert "run the load again" in said
+
+
+def test_a_missing_llm_env_names_the_install_command(tmp_path: Path) -> None:
+    engine = VllmEngine(python=tmp_path / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path, "qwen", 0, ["--max-num-seqs", "1"])
+    assert "`crucible install llm`" in str(caught.value)
+
+
+def test_missing_weights_name_the_pull_for_that_subject(tmp_path: Path) -> None:
+    vllm = VllmEngine(python=Path(sys.executable), log_path=tmp_path / "v.log")
+    with pytest.raises(EngineError) as caught:
+        vllm.start(tmp_path / "absent", "qwen", 0, ["--max-num-seqs", "1"])
+    assert "`crucible models pull qwen`" in str(caught.value)
+
+    unpulled = tmp_path / "models" / "dots-ocr" / "mlx-darwin"
+    vlm = MlxVlmEngine(python=Path(sys.executable), log_path=tmp_path / "m.log")
+    with pytest.raises(EngineError) as caught:
+        vlm.start(unpulled, str(unpulled), 0, ["--width", "1"])
+    assert "`crucible models pull dots-ocr`" in str(caught.value)
+
+
+def test_the_engine_protocol_nobody_implemented_is_gone() -> None:
+    import crucible.engines as engines
+    from crucible.engines import base
+
+    assert not hasattr(engines, "Engine")
+    assert not hasattr(base, "Engine")
+    assert "chat_concurrency" not in vars(MlxLmEngine)
+
+
+def test_str_flag_reads_the_last_spelling_as_argparse_does() -> None:
+    from crucible.engines.base import str_flag
+    from crucible.engines.vllm import AUTO_DTYPE, dtype_of
+
+    assert str_flag(["--dtype", "half", "--dtype=bfloat16"], "--dtype") == "bfloat16"
+    assert str_flag(["--x", "1"], "--dtype") is None
+    assert dtype_of(["--dtype", "float16"]) == "float16"
+    assert dtype_of([]) == AUTO_DTYPE
+
+
+def test_an_engine_stop_budget_is_its_sigterm_wait() -> None:
+    from crucible import procgroup
+    from crucible.engines.llama_server import LlamaServerEngine
+
+    for cls in (VllmEngine, LlamaServerEngine):
+        engine = cls(python=Path(sys.executable), log_path=Path("unused.log"))
+        assert engine.stop_budget_seconds == procgroup.stop_budget_seconds(
+            cls.sigterm_wait_seconds
+        )
+    assert VllmEngine.sigterm_wait_seconds == procgroup.STOP_TIMEOUT_SECONDS
