@@ -320,10 +320,11 @@ def refusal_text(exc: BaseException) -> str:
 said = refusal_text
 
 
-def _tray_verbs_from_desktop(verb: str) -> None:
-    from .desktop import run_tray_verb
-
-    run_tray_verb(verb)
+def _no_tray_verbs(verb: str) -> None:
+    raise LocalError(
+        f"local_tray_unavailable: `crucible local {verb}` needs the tray, which "
+        f"only the `crucible` command line wires in; run `crucible local {verb}`"
+    )
 
 
 def _answer(action: str, tray_verbs: Callable[[str], None]) -> dict | None:
@@ -347,7 +348,7 @@ def _answer(action: str, tray_verbs: Callable[[str], None]) -> dict | None:
     return status() if action == "status" else act(action)
 
 
-def command(args: argparse.Namespace, tray_verbs: Callable[[str], None] = _tray_verbs_from_desktop) -> int:
+def command(args: argparse.Namespace, tray_verbs: Callable[[str], None] = _no_tray_verbs) -> int:
     try:
         answer = _answer(args.local_action, tray_verbs)
     except (OSError, ValueError, RuntimeError, CrucibleError, subprocess.SubprocessError) as exc:

@@ -57,6 +57,12 @@ __all__ = [
 ]
 
 
+def _run_tray_verb(verb: str) -> None:
+    from ..desktop import run_tray_verb
+
+    run_tray_verb(verb)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crucible",
@@ -69,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"crucible {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     from ..local import add_parser as add_local_parser
-    add_local_parser(subparsers)
+    add_local_parser(subparsers, tray_verbs=_run_tray_verb)
 
     init.add_parser(subparsers)
     install.add_parser(subparsers)
