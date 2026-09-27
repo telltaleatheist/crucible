@@ -8,3 +8,7 @@ class HostError(CrucibleError):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+
+
+class LocalError(RuntimeError):
+    pass

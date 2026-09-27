@@ -10,7 +10,6 @@ sys.path.pop(0)
 
 workerio.claim_stdout()
 
-import json
 import math
 import time
 
@@ -113,17 +112,9 @@ def detect_language(model_dir: str, window, dtype) -> tuple[str, float]:
 
 
 def main() -> int:
-    line = sys.stdin.readline()
-    if not line.strip():
-        return fail("the asr worker was given no request on stdin")
-    try:
-        request = json.loads(line)
-    except json.JSONDecodeError as exc:
-        return fail(f"the asr request is not JSON: {exc}")
-    if not isinstance(request, dict):
-        return fail(
-            f"the asr request must be a JSON object, got {type(request).__name__}"
-        )
+    request = workerio.read_request("asr")
+    if request is None:
+        return 1
 
     try:
         model_dir = require(request, "model_dir", str)

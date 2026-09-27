@@ -564,114 +564,135 @@ def install(
     recorded = hosttools.search_path() if path_value is None else path_value
     program = console_script(executable)
     recorded = path_including_program_dir(recorded, program)
-    lines: list[str] = []
-
     if mechanism == SYSTEMD:
-        scope = systemd_scope()
-        who = user if user is not None else getpass.getuser()
-        elevate = writing_door(scope)
-        path, changed = write_definition(
-            unit_path(home, scope),
-            systemd_unit_text(
-                server_name=server_name,
-                program=program,
-                crucible_home=crucible_home,
-                host=host,
-                port=port,
-                path_value=recorded,
-                run_as=(who if scope == SYSTEM_SCOPE else None),
-            ),
-            elevate=elevate,
-            runner=runner,
+        return _install_systemd(
+            home=home, server_name=server_name, program=program, crucible_home=crucible_home,
+            host=host, port=port, runner=runner, recorded=recorded, user=user,
         )
-        lines.append(f"wrote {path}")
-        _require(
-            runner,
-            [*elevate, *systemctl_argv(scope, "daemon-reload")],
-            "systemd would not reload its units",
-        )
-        _require(
-            runner,
-            [*elevate, *systemctl_argv(scope, "enable", "--now", UNIT_NAME)],
-            f"systemd would not enable and start {UNIT_NAME}",
-        )
-        lines.append(f"enabled and started {UNIT_NAME}")
-        if changed:
-            _require(
-                runner,
-                [*elevate, *systemctl_argv(scope, "restart", UNIT_NAME)],
-                f"systemd would not restart {UNIT_NAME} onto its new definition",
-            )
-            lines.append(f"restarted {UNIT_NAME} onto its new definition")
-        lines.append(f"runs: {program} serve")
-        lines.append(f"PATH recorded: {recorded}")
-        if scope == SYSTEM_SCOPE:
-            lines.append(
-                f"scope: system unit, running as {who} — it starts with the "
-                "distro and needs no linger"
-            )
-            return lines
-
-        linger = read_linger(runner, who)
-        if linger is True:
-            lines.append(
-                f"linger: on for {who} — this server survives a logout and starts "
-                "at boot"
-            )
-        elif linger is False:
-            lines.append(
-                f"linger: OFF for {who}. A user service stops when that user's "
-                "last session ends, so this Crucible will die with your shell and "
-                "will not come back at boot. Granting it is yours to do:"
-            )
-            lines.append(f"    sudo loginctl enable-linger {who}")
-        else:
-            lines.append(
-                f"linger: UNKNOWN — loginctl could not be asked about {who}, so "
-                "nothing here knows whether this server survives a logout. On a "
-                f"host that has loginctl: sudo loginctl enable-linger {who}"
-            )
-        return lines
-
     if mechanism == LAUNCHD:
-        log_path = serve_log_path(crucible_home)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        path, _changed = write_definition(
-            plist_path(home),
-            launchd_plist_text(
-                program=program,
-                crucible_home=crucible_home,
-                host=host,
-                port=port,
-                path_value=recorded,
-                log_path=log_path,
-            ),
+        return _install_launchd(
+            home=home, program=program, crucible_home=crucible_home,
+            host=host, port=port, runner=runner, recorded=recorded,
         )
-        lines.append(f"wrote {path}")
-        if _agent_is_loaded(runner):
-            _require(
-                runner,
-                ["launchctl", "bootout", _agent_target()],
-                f"launchd would not unload the {LAUNCHD_LABEL} agent it already has",
-            )
-            lines.append(f"unloaded the previous {LAUNCHD_LABEL}")
-        _require(
-            runner,
-            ["launchctl", "bootstrap", _domain(), str(path)],
-            f"launchd would not load {path}",
-        )
-        _require(
-            runner,
-            ["launchctl", "kickstart", "-k", _agent_target()],
-            f"launchd loaded {LAUNCHD_LABEL} but would not start it",
-        )
-        lines.append(f"loaded and started {LAUNCHD_LABEL} in {_domain()}")
-        lines.append(f"runs: {program} serve")
-        lines.append(f"PATH recorded: {recorded}")
-        lines.append(f"stdout and stderr: {log_path}")
-        return lines
-
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
+
+
+def _install_systemd(
+    *, home: Path, server_name: str, program: str, crucible_home: Path, host: str,
+    port: int, runner: Runner, recorded: str, user: str | None,
+) -> list[str]:
+    scope = systemd_scope()
+    who = user if user is not None else getpass.getuser()
+    elevate = writing_door(scope)
+    path, changed = write_definition(
+        unit_path(home, scope),
+        systemd_unit_text(
+            server_name=server_name,
+            program=program,
+            crucible_home=crucible_home,
+            host=host,
+            port=port,
+            path_value=recorded,
+            run_as=(who if scope == SYSTEM_SCOPE else None),
+        ),
+        elevate=elevate,
+        runner=runner,
+    )
+    lines = [f"wrote {path}"]
+    lines += _enable_systemd_unit(runner, scope, elevate, changed=changed)
+    lines.append(f"runs: {program} serve")
+    lines.append(f"PATH recorded: {recorded}")
+    if scope == SYSTEM_SCOPE:
+        lines.append(
+            f"scope: system unit, running as {who} — it starts with the "
+            "distro and needs no linger"
+        )
+        return lines
+    return lines + _linger_lines(read_linger(runner, who), who)
+
+
+def _enable_systemd_unit(runner: Runner, scope: str, elevate: list[str], *, changed: bool) -> list[str]:
+    _require(
+        runner,
+        [*elevate, *systemctl_argv(scope, "daemon-reload")],
+        "systemd would not reload its units",
+    )
+    _require(
+        runner,
+        [*elevate, *systemctl_argv(scope, "enable", "--now", UNIT_NAME)],
+        f"systemd would not enable and start {UNIT_NAME}",
+    )
+    lines = [f"enabled and started {UNIT_NAME}"]
+    if changed:
+        _require(
+            runner,
+            [*elevate, *systemctl_argv(scope, "restart", UNIT_NAME)],
+            f"systemd would not restart {UNIT_NAME} onto its new definition",
+        )
+        lines.append(f"restarted {UNIT_NAME} onto its new definition")
+    return lines
+
+
+def _linger_lines(linger: bool | None, who: str) -> list[str]:
+    if linger is True:
+        return [
+            f"linger: on for {who} — this server survives a logout and starts "
+            "at boot"
+        ]
+    if linger is False:
+        return [
+            f"linger: OFF for {who}. A user service stops when that user's "
+            "last session ends, so this Crucible will die with your shell and "
+            "will not come back at boot. Granting it is yours to do:",
+            f"    sudo loginctl enable-linger {who}",
+        ]
+    return [
+        f"linger: UNKNOWN — loginctl could not be asked about {who}, so "
+        "nothing here knows whether this server survives a logout. On a "
+        f"host that has loginctl: sudo loginctl enable-linger {who}"
+    ]
+
+
+def _install_launchd(
+    *, home: Path, program: str, crucible_home: Path, host: str, port: int,
+    runner: Runner, recorded: str,
+) -> list[str]:
+    log_path = serve_log_path(crucible_home)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    path, _changed = write_definition(
+        plist_path(home),
+        launchd_plist_text(
+            program=program,
+            crucible_home=crucible_home,
+            host=host,
+            port=port,
+            path_value=recorded,
+            log_path=log_path,
+        ),
+    )
+    lines = [f"wrote {path}"]
+    if _agent_is_loaded(runner):
+        _require(
+            runner,
+            ["launchctl", "bootout", _agent_target()],
+            f"launchd would not unload the {LAUNCHD_LABEL} agent it already has",
+        )
+        lines.append(f"unloaded the previous {LAUNCHD_LABEL}")
+    _require(
+        runner,
+        ["launchctl", "bootstrap", _domain(), str(path)],
+        f"launchd would not load {path}",
+    )
+    _require(
+        runner,
+        ["launchctl", "kickstart", "-k", _agent_target()],
+        f"launchd loaded {LAUNCHD_LABEL} but would not start it",
+    )
+    lines.append(f"loaded and started {LAUNCHD_LABEL} in {_domain()}")
+    lines.append(f"runs: {program} serve")
+    lines.append(f"PATH recorded: {recorded}")
+    lines.append(f"stdout and stderr: {log_path}")
+    return lines
 
 
 def uninstall(mechanism: str, *, home: Path, runner: Runner) -> list[str]:

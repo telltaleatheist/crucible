@@ -21,11 +21,13 @@ class RunResult:
     def ok(self) -> bool:
         return self.failure is None and self.code == 0
 
-    def said(self) -> str:
+    def output_tail(self) -> str:
         for candidate in (self.stderr.strip(), self.stdout.strip(), self.failure):
             if candidate:
                 return candidate if len(candidate) <= 400 else "..." + candidate[-400:]
         return f"exit {self.code}"
+
+    said = output_tail
 
 
 class Runner(Protocol):

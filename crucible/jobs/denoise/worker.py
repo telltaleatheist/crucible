@@ -9,11 +9,10 @@ import workerio
 sys.path.pop(0)
 workerio.claim_stdout()
 
-import json
 import threading
 import time
 
-from workerio import cap_memory, fail, memory_line, send
+from workerio import cap_memory, memory_line, send
 
 _STATE: dict = {"separator": None, "model_instance": None, "model_filename": None}
 
@@ -221,34 +220,7 @@ OPS = {"load": load, "separate": separate}
 
 
 def main() -> int:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            fail(f"the denoise request is not JSON: {exc}")
-            return 1
-        if not isinstance(request, dict):
-            fail(
-                f"the denoise request must be a JSON object, got "
-                f"{type(request).__name__}"
-            )
-            return 1
-        op = request.get("op")
-        handler = OPS.get(op)
-        if handler is None:
-            fail(f"the denoise request's op is {op!r}; this worker takes {sorted(OPS)}")
-            return 1
-        try:
-            handler(request)
-        except KeyError as exc:
-            fail(str(exc.args[0]))
-            return 1
-        except Exception as exc:
-            fail(f"{type(exc).__name__}: {exc}")
-            return 1
-    return 0
+    return workerio.serve("denoise", OPS)
 
 
 if __name__ == "__main__":

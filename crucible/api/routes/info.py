@@ -2,27 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Request
-
-from ... import API_VERSION, VERSION, pairing, weights
+from ... import VERSION, pairing, weights
 from ... import pages as pages_module
 from ... import peer as peer_module
-from ...config import Config
 from ...errors import ApiError
 from ...interfaces import InterfaceError
 from ...jobs import ALL_JOB_TYPES, model_rows, voice_rows
-from ...jobs.queue import JobStore
 from ...manifests import ManifestError, load_manifest
+from ...protocol import API_VERSION
 from ..context import AppContext, Routers
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
-    app, config, backend, residency = ctx.app, ctx.config, ctx.backend, ctx.residency
+    config, backend, residency = ctx.config, ctx.backend, ctx.residency
 
     @private.get("/info")
-    async def info(request: Request) -> dict[str, Any]:
-        store: JobStore = request.app.state.store
+    async def info() -> dict[str, Any]:
+        store = ctx.store
         rows_for: dict[str, list[dict[str, Any]]] = {}
         for name, plugin in sorted(store.registry.items()):
             capability = ALL_JOB_TYPES[name]
@@ -34,13 +31,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
         if config.enable_tts:
             rows_for["tts"] = voice_rows(
                 config, backend, residency,
-                leases=app.state.leases, store=app.state.store,
+                leases=ctx.leases, store=store,
             )
         capabilities = [
             {"job_type": capability, "models": rows}
             for capability, rows in sorted(rows_for.items())
         ]
-        peer_state: peer_module.PeerState = request.app.state.peer
         return {
             "server": {
                 "name": config.name,
@@ -48,7 +44,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "api_version": API_VERSION,
             },
             "role": peer_module.ROLE_ENGINE,
-            "managed_by": peer_state.managed_by(),
+            "managed_by": ctx.peer.managed_by(),
             "host": {
                 "platform": backend.platform,
                 "arch": backend.arch,
@@ -103,8 +99,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         )
 
     @private.get("/health")
-    async def health(request: Request) -> dict[str, Any]:
-        store: JobStore = request.app.state.store
+    async def health() -> dict[str, Any]:
+        store = ctx.store
         if residency.warming is not None:
             status = "warming"
         elif store.running_id is not None:
@@ -122,17 +118,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
         }
 
     @private.get("/setup")
-    async def setup(request: Request) -> dict[str, Any]:
+    async def setup() -> dict[str, Any]:
         """Everything an app needs to be pointed at this server in one read, including
         its token and pairing lines.
         """
-        live: Config = request.app.state.config
-        store: JobStore = request.app.state.store
-        host = request.app.state.bind_host
-        port = request.app.state.bind_port
+        host, port = ctx.bind_host, ctx.bind_port
         try:
             urls = pairing.reachable_urls(
-                host, port, live.advertise + live.tailscale_advertise + live.lan_advertise
+                host, port, config.advertise + config.tailscale_advertise + config.lan_advertise
             )
         except InterfaceError as exc:
             raise ApiError(
@@ -143,13 +136,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 f"{exc}",
             ) from None
         return {
-            "name": live.name,
+            "name": config.name,
             "version": VERSION,
             "backend": backend.kind,
             "bind": f"http://{host}:{port}",
             "urls": urls,
-            "token": live.token,
-            "pairing": pairing.pairing_lines(live.name, urls, live.token),
-            "job_types": sorted(store.registry),
-            "config_path": str(live.path),
+            "token": config.token,
+            "pairing": pairing.pairing_lines(config.name, urls, config.token),
+            "job_types": sorted(ctx.store.registry),
+            "config_path": str(config.path),
         }

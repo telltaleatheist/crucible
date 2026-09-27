@@ -3,29 +3,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .accelerator import AcceleratorState
-from .manifests import BackendSpec, MemoryTerms
+from .enginespec import VLLM_ENGINE, flag_value
+from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError, MemoryTerms
+from .memorybudget import engine_budget_bytes, gib_text
 
-GIB = 1024**3
+MAX_NUM_SEQS_FLAG = "--max-num-seqs"
 
 
 def _gib(value: int) -> str:
-    return f"{value / GIB:.2f} GiB"
+    return gib_text(value, 2)
 
 
-def engine_budget_bytes(
-    total_bytes: int, desktop_allowance_bytes: int, free_bytes: int
-) -> int:
-    return max(0, min(total_bytes - desktop_allowance_bytes, free_bytes))
-
-
-def max_num_seqs(spec: BackendSpec) -> int | None:
-    args = list(spec.engine_args)
-    for index, arg in enumerate(args):
-        if arg == "--max-num-seqs" and index + 1 < len(args):
-            return int(args[index + 1])
-        if arg.startswith("--max-num-seqs="):
-            return int(arg.split("=", 1)[1])
-    return None
+def max_num_seqs(spec: BackendSpec, model_id: str | None = None) -> int | None:
+    stated = flag_value(list(spec.engine_args), MAX_NUM_SEQS_FLAG)
+    if stated is None:
+        return None
+    try:
+        return int(stated)
+    except ValueError:
+        whose = "this model" if model_id is None else model_id
+        raise ManifestError(
+            f"{whose}'s engine_args give {MAX_NUM_SEQS_FLAG} {stated!r}, which is "
+            "not a whole number of requests; set it to one (for example "
+            f"{MAX_NUM_SEQS_FLAG} 16) in {whose}.toml in the model manifests "
+            f"(crucible/models, or ${MODELS_DIR_ENV} where it is set)"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ def plan_vllm_memory(
     desktop_allowance_bytes: int,
     reclaimable_bytes: int,
 ) -> KvPlan | None:
-    if spec.engine != "vllm":
+    if spec.engine != VLLM_ENGINE:
         return None
     terms: MemoryTerms | None = spec.memory
     if terms is None:
@@ -103,7 +105,7 @@ def plan_vllm_memory(
         card.total_bytes, desktop_allowance_bytes, free_after_eviction
     )
     room = max(0, budget - terms.fixed_bytes)
-    concurrency = max_num_seqs(spec)
+    concurrency = max_num_seqs(spec, model_id)
     if concurrency is not None:
         room = min(room, terms.kv_bytes_per_token * context * concurrency)
 

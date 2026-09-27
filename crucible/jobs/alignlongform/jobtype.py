@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from ... import accelerator, hosttools, jobenv, weights
+from ... import hosttools, jobenv, weights
 from ...alignmodels import load_all_align_manifests
 from ...asrmodels import load_all_asr_manifests
 from ...config import Config
 from ...errors import ApiError, JobError
+from ...jobtypes import ALIGN_LONGFORM
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
-from . import ALIGNER_MODEL, JOB_TYPE_NAME, STAGES, validate
-from . import coarse, cues, plan, stages
+from ..binding import JobTypeBinding
+from ..template import card_guard, require_model
+from . import ALIGNER_MODEL, JOB_TYPE_NAME, STAGES, coarse, cues, plan, stages, validate
 
 STAGE_END = {"transcribe": 0.70, "coarse-align": 0.75, "align": 0.95, "write": 1.0}
 
@@ -96,8 +97,7 @@ class AlignLongformJobType:
             parsed = validate(params)
         except ValueError as exc:
             raise ApiError(400, "invalid_params", f"{self.name} params are not valid: {exc}")
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs an aligner")
+        model = require_model(model, self.name, "an aligner")
 
         asr_manifests = load_all_asr_manifests()
         rough = asr_manifests.get(parsed.rough_model)
@@ -119,12 +119,11 @@ class AlignLongformJobType:
         except weights.WeightsError as exc:
             raise ApiError(409, "rough_model_not_installed", str(exc)) from None
 
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
+        card_guard(
+            self._config,
+            model=model,
             need_bytes=self.vram_estimate(model),
             owned_pids=frozenset(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
         )
 
 
@@ -283,3 +282,11 @@ def _build_cues(params: Any, chunk_plan: Any, aligned: list[dict[str, Any]]) -> 
                 kind=sentence.kind,
             ))
     return out
+
+
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        ALIGN_LONGFORM,
+        lambda wiring: AlignLongformJobType(wiring.config, wiring.backend),
+    ),
+)

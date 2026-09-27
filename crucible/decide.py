@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import math
 import string
+import time
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Awaitable, Callable, Literal, Union
 
 from pydantic import (
     BaseModel,
@@ -20,7 +22,6 @@ from pydantic import (
 
 from .enginespec import UNSTATED_ENGINE_CONCURRENCY
 from .errors import ApiError
-
 
 LETTERS: tuple[str, ...] = tuple(string.ascii_uppercase)
 
@@ -682,6 +683,142 @@ def answer(
     )
 
 
+EnginePost = Callable[[dict[str, Any]], Awaitable[Any]]
+
+
+def decide_not_served(
+    resident: Any, reason: str, extra: dict[str, Any] | None
+) -> ApiError:
+    return ApiError(
+        503,
+        "decide_not_served",
+        f"the {resident.engine} engine serving {resident.model_id!r} cannot serve "
+        f"this decision: {reason}. Nothing was sent to it",
+        {"model": resident.model_id, "engine": resident.engine, "reason": reason,
+         **(extra or {})},
+    )
+
+
+def refuse_images_not_served(
+    model_id: str, manifest: Any, backend_kind: str, n_images: int
+) -> None:
+    served = manifest.serves(backend_kind)
+    if "image" in served:
+        return
+    raise ApiError(
+        400,
+        "model_text_only",
+        f"{model_id!r} is served {list(served)} on "
+        f"{backend_kind} (its weights accept "
+        f"{list(manifest.modalities)}) and this decision carries "
+        f"{n_images} image(s). Whether a model answers images HERE is "
+        "its manifest's backend block (`serves`, PHASE22 section 2.9)",
+        {"model": model_id, "backend": backend_kind,
+         "serves": list(served),
+         "modalities": list(manifest.modalities),
+         "images": n_images},
+    )
+
+
+def refuse_unreadable_labels(resident: Any, reading: Any, plans: list[Plan]) -> None:
+    if not reading.served:
+        raise decide_not_served(resident, reading.basis, None)
+    widest = max(plans, key=lambda item: len(item.labels))
+    if reading.max_logprobs is not None and len(widest.labels) > reading.max_logprobs:
+        raise decide_not_served(
+            resident,
+            f"{resident.engine} returns at most {reading.max_logprobs} top "
+            f"logprobs and question {widest.name!r} has {len(widest.labels)} "
+            f"options ({reading.basis})",
+            {"question": widest.name, "options": len(widest.labels),
+             "max_logprobs": reading.max_logprobs},
+        )
+
+
+async def _gathered_in_order(tasks: list[asyncio.Task[Any]]) -> list[Any]:
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if task.cancelled():
+                continue
+            failure = task.exception()
+            if failure is not None:
+                raise failure from None
+        raise
+
+
+def _timing(reading: Reading, wall_ms: float) -> ForwardTiming:
+    return ForwardTiming(
+        wall_ms=round(wall_ms, 1),
+        prompt_tokens=reading.prompt_tokens,
+        cached_tokens=reading.cached_tokens,
+    )
+
+
+async def decide_on_engine(
+    post: EnginePost,
+    resident: Any,
+    body: DecideRequest,
+    plans: list[Plan],
+    *,
+    max_logprobs: int | None,
+    concurrency: int,
+) -> DecideResponse:
+    started = time.perf_counter()
+    state_text = render_state(body.state)
+    images = list(body.images or [])
+    engine = resident.engine
+
+    async def forward(msgs: list[dict[str, Any]], k: int | None) -> tuple[Reading, float]:
+        sent = time.perf_counter()
+        data = await post(request_body(resident.engine_model_name, msgs, k))
+        wall_ms = (time.perf_counter() - sent) * 1000.0
+        return read_reply(data, engine, want_probs=k is not None), wall_ms
+
+    prime: ForwardTiming | None = None
+    if len(plans) > 1:
+        prime = _timing(*await forward(prime_messages(state_text, images), None))
+
+    gate = asyncio.Semaphore(concurrency)
+
+    async def ask(item: Plan) -> tuple[Any, ForwardTiming, int]:
+        k = top_k(len(item.labels), max_logprobs)
+        async with gate:
+            reading, wall_ms = await forward(question_messages(state_text, images, item), k)
+        assert reading.top is not None
+        dist = label_distribution(reading.top, item, engine, missing=body.missing)
+        return answer(item, dist, body.missing), _timing(reading, wall_ms), reading.prompt_tokens
+
+    results = await _gathered_in_order([asyncio.create_task(ask(item)) for item in plans])
+
+    answers = {}
+    per_question = {}
+    tokens = {}
+    for item, (answered, timed, prompt_tokens) in zip(plans, results):
+        answers[item.name] = answered
+        per_question[item.name] = timed
+        tokens[item.name] = prompt_tokens
+    return DecideResponse(
+        model=ModelProvenance(
+            id=resident.model_id,
+            revision=resident.revision,
+            fingerprint=resident.fingerprint,
+        ),
+        engine=engine,
+        answers=answers,
+        timing_ms=DecideTiming(
+            total=round((time.perf_counter() - started) * 1000.0, 1),
+            per_question=per_question,
+            prime=prime,
+        ),
+        tokens=DecideTokens(per_question=tokens, images=len(images)),
+    )
+
+
 __all__ = [
     "Answer",
     "ChoiceAnswer",
@@ -691,6 +828,7 @@ __all__ = [
     "DecideTiming",
     "DecideTokens",
     "Distribution",
+    "EnginePost",
     "ForwardTiming",
     "IMAGES_NOTE",
     "LABEL_MARGIN",
@@ -713,6 +851,8 @@ __all__ = [
     "answer",
     "assign_labels",
     "check_image_count",
+    "decide_not_served",
+    "decide_on_engine",
     "image_format",
     "image_part",
     "label_distribution",
@@ -723,6 +863,8 @@ __all__ = [
     "question_block",
     "question_messages",
     "read_reply",
+    "refuse_images_not_served",
+    "refuse_unreadable_labels",
     "render_state",
     "request_body",
     "system_content",

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from .clock import now
 from .errors import JobError
 from .jobs.base import DONE
+from .jobtypes import JOB_TYPE_SPECS
 
 if TYPE_CHECKING:
     from .inflight import InFlight
@@ -18,7 +19,9 @@ if TYPE_CHECKING:
 
 SETTLEMENT_HOLDER = "the settlement clearing the card"
 
-LEAVES_IT_RESIDENT: frozenset[str] = frozenset({"load-model", "load-voice"})
+LEAVES_IT_RESIDENT: frozenset[str] = frozenset(
+    spec.name for spec in JOB_TYPE_SPECS if spec.leaves_it_resident
+)
 
 
 @dataclass(frozen=True)

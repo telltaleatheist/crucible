@@ -6,9 +6,9 @@ from typing import Callable, Mapping
 
 from .. import wsl
 from ..platform.powershell import query_argv, runas_argv
-from ..platform.runner import RunResult, Runner
-from .errors import HostError
+from ..platform.runner import Runner, RunResult
 from ..platform.wsl_table import WSL_STATE_CODES, WSL_STATES, WslStateDef
+from .errors import HostError
 
 NO_HYPERVISOR = re.compile(
     r"HCS_E_HYPERV_NOT_INSTALLED|0x80370102|hypervisor|virtual machine platform",
@@ -88,6 +88,46 @@ def read_wsl_answer(result: RunResult) -> WslAnswer:
         return WslAnswer("component_required", "0x8007019e")
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     return WslAnswer("unreadable", first=first[:160])
+
+
+LXSS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
+
+
+def registered_wsl_distros() -> list[str] | None:
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, LXSS_KEY)
+    except FileNotFoundError:
+        return []
+    with key:
+        return _distribution_names(winreg, key)
+
+
+def _distribution_names(winreg, key) -> list[str]:
+    names: list[str] = []
+    index = 0
+    while True:
+        try:
+            sub = winreg.EnumKey(key, index)
+        except OSError:
+            return names
+        index += 1
+        try:
+            with winreg.OpenKey(key, sub) as distro:
+                names.append(str(winreg.QueryValueEx(distro, "DistributionName")[0]))
+        except OSError:
+            continue
+
+
+def read_wsl_distros(result: object) -> list[str] | None:
+    if getattr(result, "ok"):
+        return wsl.parse_distro_list(getattr(result, "stdout"))
+    if registered_wsl_distros() == []:
+        return []
+    return None
 
 
 def wsl_answer_line(result: RunResult) -> str:
@@ -215,10 +255,6 @@ class Evidence:
     release: str = ""
 
 
-def _said(result: RunResult) -> str:
-    return result.said()
-
-
 def _free_bytes(result: RunResult) -> int | None:
     first = result.stdout.strip().split()
     if not first or not first[0].isdigit():
@@ -274,7 +310,7 @@ class WslState:
 def render(text: str, result: RunResult, seen: Evidence) -> str:
     free = _free_bytes(result)
     replacements: Mapping[str, str] = {
-        "{said}": _said(result),
+        "{said}": result.output_tail(),
         "{app_distro}": seen.app_distro or "",
         "{release}": seen.release,
         "{required}": gib(seen.required_bytes),
@@ -297,24 +333,97 @@ def install_index_urls(release: str) -> list[str]:
     interpreter = pin_for("cuda-linux", SERVER_PYTHON).url
     if interpreter not in urls:
         urls.append(interpreter)
-    wheel = _WHEEL_URL_TEMPLATE.replace("{release}", release)
+    wheel = GUEST_WHEEL_URL_TEMPLATE.replace("{release}", release)
     if wheel not in urls:
         urls.append(wheel)
     return urls
 
 
-def _wheel_url_template() -> str:
+NETWORK_ROW = "guest_no_network"
+
+
+def state_row(code: str) -> WslStateDef:
     for state in WSL_STATES:
-        if state.code == "guest_no_network":
-            return state.action_url
+        if state.code == code:
+            return state
     raise HostError(
         "wsl_state_unknown",
-        "the generated table has no `guest_no_network` row, so nothing here "
+        f"the generated table has no `{code}` row, so nothing here "
         "knows which wheel a first install fetches.",
     )
 
 
-_WHEEL_URL_TEMPLATE = _wheel_url_template()
+GUEST_WHEEL_URL_TEMPLATE = state_row(NETWORK_ROW).action_url
+
+_WHEEL_URL_TEMPLATE = GUEST_WHEEL_URL_TEMPLATE
+
+
+class _Probes:
+    def __init__(
+        self, runner: Runner, seen: Evidence, *, indexes: str, timeout_s: float
+    ) -> None:
+        self._runner = runner
+        self._seen = seen
+        self._indexes = indexes
+        self._timeout_s = timeout_s
+
+    def substitute(self, word: str) -> str:
+        return (
+            word.replace("{app_distro}", self._seen.app_distro or "")
+            .replace("{release}", self._seen.release)
+            .replace("{indexes}", self._indexes)
+        )
+
+    def ask(self, state: WslStateDef) -> RunResult:
+        cached = self._seen.results.get(state.probe)
+        if cached is not None:
+            return cached
+        argv = [self.substitute(word) for word in state.probe_argv]
+        result = self._runner.run(argv, timeout_s=self._timeout_s)
+        self._seen.results[state.probe] = result
+        if state.probe == "wsl-list":
+            self._seen.distros = read_wsl_distros(result) or []
+        return result
+
+    def matched(self, state: WslStateDef, result: RunResult) -> WslState:
+        return WslState(
+            code=state.code,
+            sentence=render(state.sentence, result, self._seen),
+            action_kind=state.action_kind,
+            action_argv=tuple(self.substitute(word) for word in state.action_argv),
+            action_text=render(state.action_text, result, self._seen),
+            action_url=render(state.action_url, result, self._seen),
+            automatic=state.automatic,
+            evidence=result.output_tail(),
+        )
+
+
+def _row_applies(
+    state: WslStateDef, *, check_network: bool, required_bytes: int, app_distro: str | None
+) -> bool:
+    if state.optional:
+        wanted = (state.code == NETWORK_ROW and check_network) or (
+            state.code == "guest_no_disk" and required_bytes > 0
+        )
+        if not wanted:
+            return False
+    return not (
+        state.code == "foreign_distro_not_systemd"
+        and (app_distro is None or app_distro == "crucible")
+    )
+
+
+def _predicate(state: WslStateDef) -> Predicate:
+    means = MEANS.get(state.code)
+    if means is None:
+        raise HostError(
+            "wsl_state_unknown",
+            f"the generated table has a row {state.code!r} and this build has no "
+            "predicate for it. Regenerate with `npm run gen:install` in "
+            "sdk/bootstrap and add the predicate to crucible/host/wslstate.py; "
+            "a row that can never match is a machine state nobody answers.",
+        )
+    return means
 
 
 def detect(
@@ -333,62 +442,17 @@ def detect(
         app_distro=app_distro,
         release=release,
     )
-
     indexes = " ".join(install_index_urls(release)) if check_network else ""
-
-    def substitute(word: str) -> str:
-        return (
-            word.replace("{app_distro}", app_distro or "")
-            .replace("{release}", release)
-            .replace("{indexes}", indexes)
-        )
-
-    def ask(state: WslStateDef) -> RunResult:
-        cached = seen.results.get(state.probe)
-        if cached is not None:
-            return cached
-        argv = [substitute(word) for word in state.probe_argv]
-        result = runner.run(argv, timeout_s=timeout_s)
-        seen.results[state.probe] = result
-        if state.probe == "wsl-list":
-            from .presence import read_wsl_distros
-
-            seen.distros = read_wsl_distros(result) or []
-        return result
-
+    probes = _Probes(runner, seen, indexes=indexes, timeout_s=timeout_s)
     for state in WSL_STATES:
-        if state.optional:
-            wanted = (state.code == "guest_no_network" and check_network) or (
-                state.code == "guest_no_disk" and required_bytes > 0
-            )
-            if not wanted:
-                continue
-        if state.code == "foreign_distro_not_systemd" and (
-            app_distro is None or app_distro == "crucible"
+        if not _row_applies(
+            state, check_network=check_network, required_bytes=required_bytes, app_distro=app_distro
         ):
             continue
-        means = MEANS.get(state.code)
-        if means is None:
-            raise HostError(
-                "wsl_state_unknown",
-                f"the generated table has a row {state.code!r} and this build has no "
-                "predicate for it. Regenerate with `npm run gen:install` in "
-                "sdk/bootstrap and add the predicate to crucible/host/wslstate.py; "
-                "a row that can never match is a machine state nobody answers.",
-            )
-        result = ask(state)
-        if not means(result, seen):
-            continue
-        return WslState(
-            code=state.code,
-            sentence=render(state.sentence, result, seen),
-            action_kind=state.action_kind,
-            action_argv=tuple(substitute(word) for word in state.action_argv),
-            action_text=render(state.action_text, result, seen),
-            action_url=render(state.action_url, result, seen),
-            automatic=state.automatic,
-            evidence=_said(result),
-        )
+        means = _predicate(state)
+        result = probes.ask(state)
+        if means(result, seen):
+            return probes.matched(state, result)
     raise HostError(
         "wsl_state_unknown",
         f"no row of {list(WSL_STATE_CODES)} matched, and the table must be total",

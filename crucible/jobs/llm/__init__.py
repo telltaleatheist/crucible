@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
-from ... import accelerator, jobenv, llamacpp, vram, weights
+from ... import accelerator, jobenv, llamacpp, ollamastore, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...capability import (
     MIN_LOAD_CONTEXT,
@@ -12,14 +13,12 @@ from ...capability import (
     available_bytes,
     check_load_context,
 )
-from ... import ollamastore
 from ...cardfacts import card_for
 from ...config import Config
 from ...engines import EngineError
 from ...engines import vllm as vllm_engine
 from ...errors import ApiError, JobError
-from ...inflight import require_act_name
-from ...leases import require_ttl
+from ...jobtypes import LOAD_MODEL, UNLOAD_MODEL
 from ...manifests import (
     ManifestError,
     ModelManifest,
@@ -30,17 +29,30 @@ from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_LLM,
     Residency,
-    describe_resident,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
+from ..leaseonload import LeaseOnLoad, open_lease_for_load
+from ..template import (
+    ManifestCatalog,
+    as_job_error,
+    card_guard,
+    parse_params,
+    require_model,
+    run_model,
+)
+from ..unload import UnloadJobType, UnloadParams
 
 __all__ = [
+    "JOB_TYPES",
+    "LeaseOnLoad",
     "LlmEngineStatus",
     "LoadModelJobType",
     "LoadParams",
     "Residency",
     "UnloadModelJobType",
+    "UnloadParams",
     "llm_engine_status",
     "model_rows",
 ]
@@ -83,13 +95,6 @@ def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
     )
 
 
-class LeaseOnLoad(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    act: str
-    ttl_seconds: int
-
-
 class LoadParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -98,74 +103,24 @@ class LoadParams(BaseModel):
     context: int | None = Field(default=None, ge=MIN_LOAD_CONTEXT, strict=True)
 
 
-class UnloadParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-def _manifests() -> dict[str, ModelManifest]:
-    try:
-        return load_all_manifests()
-    except ManifestError as exc:
-        raise ApiError(
-            500,
-            "manifests_unreadable",
-            f"this server cannot read its model manifests: {exc}",
-        ) from None
-
-
-def _params(model: type[BaseModel], params: dict[str, Any], job_type: str) -> Any:
-    try:
-        return model.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            f"{job_type} params are not valid: "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
-
-
-def _known(model_id: str) -> ModelManifest:
-    manifests = _manifests()
-    manifest = manifests.get(model_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_model",
-            f"no manifest for model {model_id!r}; this build ships "
-            f"{sorted(manifests)}",
-        )
-    return manifest
+MANIFESTS: ManifestCatalog[ModelManifest] = ManifestCatalog(
+    lambda: load_all_manifests(),
+    ManifestError,
+    unreadable_code="manifests_unreadable",
+    what="model manifests",
+    unknown="manifest for model",
+)
 
 
 def _descriptors(
     config: Config, backend_kind: str, residency: Residency
 ) -> list[ModelDescriptor]:
-    rows: list[ModelDescriptor] = []
-    for manifest in _manifests().values():
-        if manifest.supports(backend_kind):
-            spec = manifest.spec(backend_kind)
-            revision = spec.revision
-            source = spec.hf_repo
-            estimate = spec.memory_bytes_estimate
-            installed = weights.installed(config, manifest, spec) is not None
-        else:
-            revision, source, estimate, installed = "", "", 0, False
-        rows.append(
-            ModelDescriptor(
-                id=manifest.id,
-                revision=revision,
-                source=source,
-                installed=installed,
-                resident=residency.is_resident(KIND_LLM, manifest.id),
-                vram_bytes=estimate,
-            )
-        )
-    return rows
+    return MANIFESTS.descriptors(
+        backend_kind,
+        installed=lambda manifest, spec: weights.installed(config, manifest, spec)
+        is not None,
+        resident=lambda model_id: residency.is_resident(KIND_LLM, model_id),
+    )
 
 
 def _in_the_ollama_store(manifest: Any, backend_kind: str) -> dict[str, Any] | None:
@@ -197,7 +152,7 @@ def model_rows(
     env = llm_engine_status(config, backend)
     resident = residency.resident_model
     rows: list[dict[str, Any]] = []
-    for manifest in _manifests().values():
+    for manifest in MANIFESTS.all().values():
         supported = manifest.supports(backend_kind)
         estimate: int | None = None
         revision: str | None = None
@@ -300,25 +255,11 @@ def model_rows(
     return rows
 
 
-def _model_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
-    if model is None:
-        return None
-    manifest = _known(model)
-    spec = manifest.backends.get(backend_kind)
-    if spec is None:
-        return {"id": model, "revision": None, "fingerprint": None}
-    return {
-        "id": model,
-        "revision": spec.revision,
-        "fingerprint": fingerprint(model, spec.revision),
-    }
-
-
 def _require_loadable(
     config: Config, backend: Any, model_id: str
 ) -> tuple[ModelManifest, Any, Any]:
     backend_kind = backend.kind
-    manifest = _known(model_id)
+    manifest = MANIFESTS.known(model_id)
     spec = worker_type.require_block(manifest, model_id, backend_kind, "model")
     worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)
     accelerator.refuse_if_card_lacks(
@@ -381,8 +322,19 @@ def _load_context(
     return params.context
 
 
+@dataclass(frozen=True)
+class LoadNeeds:
+    manifest: ModelManifest
+    spec: Any
+    python: Any
+    installed: Any
+    context: int
+    state: Any
+    plan: Any
+
+
 class LoadModelJobType:
-    name = "load-model"
+    name = LOAD_MODEL.name
 
     def __init__(
         self,
@@ -407,15 +359,11 @@ class LoadModelJobType:
         return self._residency.reclaimable_bytes()
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
-        if not manifest.supports(self._config.backend_kind):
-            return 0
-        return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+        model = run_model(model, self.name)
+        return MANIFESTS.memory_estimate(model, self._config.backend_kind)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        return _model_provenance(self._config.backend_kind, model)
+        return MANIFESTS.provenance(self._config.backend_kind, model)
 
     def check(self, backend: Any) -> JobTypeStatus:
         env = llm_engine_status(self._config, backend)
@@ -433,19 +381,16 @@ class LoadModelJobType:
             )
         return JobTypeStatus(ready=True, detail=f"{env.detail}; loadable: {ready}")
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        loading = _params(LoadParams, params, self.name)
-        self._residency.refuse_if_claimed(f"loading {model!r}")
-        manifest, spec, _ = _require_loadable(self._config, self._backend, model)
-        context = _load_context(self._config, self._backend, manifest, loading)
-        state = accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
+    def requirements(self, model: str, params: LoadParams) -> LoadNeeds:
+        manifest, spec, (python, installed) = _require_loadable(
+            self._config, self._backend, model
+        )
+        context = _load_context(self._config, self._backend, manifest, params)
+        state = card_guard(
+            self._config,
+            model=model,
             need_bytes=spec.memory_bytes_estimate,
             owned_pids=self._residency.owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._reclaimable(),
         )
         plan = vram.plan_vllm_memory(
@@ -458,12 +403,17 @@ class LoadModelJobType:
         )
         if plan is not None and not plan.fits:
             raise ApiError(409, "insufficient_kv_cache", plan.sentence())
+        return LoadNeeds(manifest, spec, python, installed, context, state, plan)
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        model = require_model(model, self.name)
+        loading = parse_params(LoadParams, params, self.name)
+        self._residency.refuse_if_claimed(f"loading {model!r}")
+        self.requirements(model, loading)
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = LoadParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
+        model = run_model(job.model, self.name)
         self._residency.begin_warming(model)
         try:
             self._load(ctx, model, params, job.client)
@@ -477,58 +427,26 @@ class LoadModelJobType:
         params: LoadParams,
         client: str | None,
     ) -> None:
-        try:
-            manifest, spec, (python, installed) = _require_loadable(
-                self._config, self._backend, model
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
-        try:
-            context = _load_context(self._config, self._backend, manifest, params)
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
-
         ctx.warming(f"checking the accelerator for {model}")
-        try:
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
-                owned_pids=self._residency.owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-                reclaimable_bytes=self._reclaimable(),
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
-        ctx.warming(state.detail)
-
-        plan = vram.plan_vllm_memory(
-            model_id=model,
-            spec=spec,
-            context=context,
-            card=state,
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=self._reclaimable(),
-        )
-        if plan is not None:
-            if not plan.fits:
-                raise JobError("insufficient_kv_cache", plan.sentence())
-            ctx.warming(plan.detail())
+        needs = as_job_error(self.requirements, model, params)
+        ctx.warming(needs.state.detail)
+        if needs.plan is not None:
+            ctx.warming(needs.plan.detail())
 
         ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
             resident = self._residency.load(
-                manifest,
-                spec,
-                installed.path,
-                python,
-                plan=plan,
-                context=context,
+                needs.manifest,
+                needs.spec,
+                needs.installed.path,
+                needs.python,
+                plan=needs.plan,
+                context=needs.context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
                 card_args=vllm_engine.card_args(
-                    spec, card_for(self._config.home, self._backend.gpu)
+                    needs.spec, card_for(self._config.home, self._backend.gpu)
                 ),
             )
         except EngineError as exc:
@@ -537,7 +455,7 @@ class LoadModelJobType:
         extra: dict[str, Any] = {"resident": resident.model_id}
         extra["lease_id"] = None
         if params.lease is not None:
-            extra["lease_id"] = _open_lease_for_load(
+            extra["lease_id"] = open_lease_for_load(
                 self._leases,
                 kind=resident.kind,
                 subject=resident.model_id,
@@ -548,108 +466,30 @@ class LoadModelJobType:
         ctx.done_extra(**extra)
 
 
-def _open_lease_for_load(
-    leases: Any | None,
-    *,
-    kind: str,
-    subject: str,
-    request: LeaseOnLoad,
-    client: str | None,
-) -> str:
-    if leases is None:
-        raise JobError(
-            "leases_unavailable",
-            "this build has no lease register, so `params.lease` cannot be "
-            "honoured. It is refused rather than ignored: a client told nothing "
-            "would believe it holds the card",
-        )
-    try:
-        act = require_act_name(request.act.strip(), "a load's `params.lease.act`")
-        ttl = require_ttl(request.ttl_seconds)
-    except ApiError as exc:
-        raise JobError(exc.code, exc.message) from None
-    try:
-        lease = leases.open(
-            kind=kind, subject=subject, act=act, client=client, ttl_seconds=ttl
-        )
-    except ApiError as exc:
-        raise JobError(exc.code, exc.message) from None
-    return lease.id
+_open_lease_for_load = open_lease_for_load
 
 
-class UnloadModelJobType:
-    name = "unload-model"
-
-    def __init__(
-        self, config: Config, backend: Any, residency: Residency
-    ) -> None:
-        self._config = config
-        self._backend = backend
-        self._residency = residency
-
-    @property
-    def residency(self) -> Residency:
-        return self._residency
-
-    def describe_models(self) -> list[ModelDescriptor]:
-        return _descriptors(self._config, self._config.backend_kind, self._residency)
-
-    def vram_estimate(self, model: str | None) -> int:
-        return 0
-
-    def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        return _model_provenance(self._config.backend_kind, model)
-
-    def check(self, backend: Any) -> JobTypeStatus:
-        resident = self._residency.resident_id
-        return JobTypeStatus(
-            ready=True,
-            detail=(
-                f"resident: {resident}" if resident else "nothing is resident"
-            ),
+class UnloadModelJobType(UnloadJobType):
+    def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
+        super().__init__(
+            UNLOAD_MODEL,
+            residency,
+            describe=lambda: _descriptors(config, config.backend_kind, residency),
+            provenance=lambda model: MANIFESTS.provenance(config.backend_kind, model),
         )
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        _params(UnloadParams, params, self.name)
-        if self._residency.being_cleared(model):
-            return
-        self._residency.refuse_if_claimed(f"unloading {model!r}")
-        if not self._residency.is_resident(KIND_LLM, model):
-            raise ApiError(
-                409,
-                "model_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_LLM, "no model is"),
-                {"requested": model, "resident": self._residency.resident_id},
-            )
 
-    def run(self, job: Job, ctx: JobContext) -> None:
-        UnloadParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        ctx.progress(0.0, f"unloading {model}")
-        if self._residency.await_clearance(model):
-            ctx.progress(1.0, f"{model} is unloaded — the card was cleared of it")
-            ctx.done_extra(resident=self._residency.resident_id)
-            return
-        if not self._residency.is_resident(KIND_LLM, model):
-            raise JobError(
-                "model_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_LLM, "no model is"),
-            )
-        try:
-            self._residency.unload(model)
-        except KeyError:
-            raise JobError(
-                "model_not_resident",
-                f"{model!r} is not resident on this server; "
-                + describe_resident(self._residency, KIND_LLM, "no model is"),
-            ) from None
-        except EngineError as exc:
-            raise JobError("engine_failed", str(exc)) from None
-        ctx.progress(1.0, f"{model} is unloaded")
-        ctx.done_extra(resident=self._residency.resident_id)
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        LOAD_MODEL,
+        lambda wiring: LoadModelJobType(
+            wiring.config, wiring.backend, wiring.residency, wiring.leases
+        ),
+    ),
+    JobTypeBinding(
+        UNLOAD_MODEL,
+        lambda wiring: UnloadModelJobType(
+            wiring.config, wiring.backend, wiring.residency
+        ),
+    ),
+)

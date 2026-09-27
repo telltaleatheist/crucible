@@ -9,7 +9,6 @@ import workerio
 sys.path.pop(0)
 workerio.claim_stdout()
 
-import json
 import math
 import re
 import shutil
@@ -515,15 +514,9 @@ def _describe_unreadable(name: str, exc: Exception) -> str:
 
 
 def main() -> int:
-    line = sys.stdin.readline()
-    if not line.strip():
-        return fail("the rvc worker was given no request on stdin")
-    try:
-        request = json.loads(line)
-    except json.JSONDecodeError as exc:
-        return fail(f"the rvc request is not JSON: {exc}")
-    if not isinstance(request, dict):
-        return fail(f"the rvc request must be a JSON object, got {type(request).__name__}")
+    request = workerio.read_request("rvc")
+    if request is None:
+        return 1
 
     try:
         models_dir = require(request, "models_dir", str)

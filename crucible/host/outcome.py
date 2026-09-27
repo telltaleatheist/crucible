@@ -158,7 +158,7 @@ def read_or_quarantine(home: Path, log: Callable[[str], None]) -> Outcome | None
 
         aside = quarantine(path(home))
         log(
-            f"outcome: {exc.message} It was moved to {aside} and the orchestrator "
+            f"outcome: {exc.message} It was moved to {aside} and the controller "
             "decides again from nothing, as if no move had been recorded."
         )
         return None

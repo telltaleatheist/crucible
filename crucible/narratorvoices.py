@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
-from .engines.base import EngineError
+from .errors import EngineError
 from .narratorengines import DOCUMENT_READERS
 from .voicereference import ClipEntry, VoiceReference, place
 from .voices import VoiceBackendSpec, VoiceManifest
@@ -113,6 +113,35 @@ def voice_entry(
     weights_dir: Path,
     clip: ClipEntry | None = None,
 ) -> dict[str, Any]:
+    kind = _entry_kind(manifest, spec, weights_dir, clip)
+    entry: dict[str, Any] = {"kind": kind}
+    if kind in ("checkpoint", "clips"):
+        entry["checkpointDir"] = str(weights_dir)
+    if clip is not None:
+        entry["clips"] = [clip.to_dict()]
+    if spec.max_chars is not None:
+        entry["maxChars"] = spec.max_chars
+    pace = manifest.pace
+    if pace.target_chars is not None:
+        entry["targetChars"] = pace.target_chars
+    if pace.safe_min_chars is not None:
+        entry["safeMinChars"] = pace.safe_min_chars
+    if pace.safe_max_chars is not None:
+        entry["safeMaxChars"] = pace.safe_max_chars
+    entry["sampling"] = _sampling_entry(manifest, spec)
+    if pace.pace_chars_per_sec is not None:
+        entry["paceCharsPerSec"] = pace.pace_chars_per_sec
+        entry["maxCharsPerSec"] = pace.max_chars_per_sec
+        entry["minCharsPerSec"] = pace.min_chars_per_sec
+    return entry
+
+
+def _entry_kind(
+    manifest: VoiceManifest,
+    spec: VoiceBackendSpec,
+    weights_dir: Path,
+    clip: ClipEntry | None,
+) -> str:
     if manifest.narrator_engine not in DOCUMENT_READERS:
         raise NarratorVoicesError(
             f"{manifest.id} names narrator_engine {manifest.narrator_engine!r}, "
@@ -158,27 +187,7 @@ def voice_entry(
             "fingerprint. RULING OWED on narrator's side; until then a token "
             f"voice loads on {MLX_DARWIN} only"
         )
-
-    entry: dict[str, Any] = {"kind": kind}
-    if kind in ("checkpoint", "clips"):
-        entry["checkpointDir"] = str(weights_dir)
-    if clip is not None:
-        entry["clips"] = [clip.to_dict()]
-    if spec.max_chars is not None:
-        entry["maxChars"] = spec.max_chars
-    pace = manifest.pace
-    if pace.target_chars is not None:
-        entry["targetChars"] = pace.target_chars
-    if pace.safe_min_chars is not None:
-        entry["safeMinChars"] = pace.safe_min_chars
-    if pace.safe_max_chars is not None:
-        entry["safeMaxChars"] = pace.safe_max_chars
-    entry["sampling"] = _sampling_entry(manifest, spec)
-    if pace.pace_chars_per_sec is not None:
-        entry["paceCharsPerSec"] = pace.pace_chars_per_sec
-        entry["maxCharsPerSec"] = pace.max_chars_per_sec
-        entry["minCharsPerSec"] = pace.min_chars_per_sec
-    return entry
+    return kind
 
 
 def write_document(

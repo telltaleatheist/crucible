@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..capability import BY_NAME as CAPABILITY_CLASSES
 from ..capability import CLASSES, classes_for_job_type
 from ..errors import ApiError
 from ..jobenv import INSTALLER_FOR
+from ..jobtypes import BY_NAME as SPECS
+from ..jobtypes import FAMILIES, JOB_TYPE_SPECS
 from ..residency import Residency
+from .align import AlignJobType, UnloadAlignerJobType
+from .alignlongform.jobtype import AlignLongformJobType
+from .asr import AsrJobType
 from .base import (
     OPTIONAL_JOB_TYPE_MEMBERS,
     Job,
@@ -16,12 +22,11 @@ from .base import (
     ModelDescriptor,
     validate_member_name,
 )
-from .align import AlignJobType, UnloadAlignerJobType
-from .alignlongform.jobtype import AlignLongformJobType
-from .asr import AsrJobType
+from .binding import Wiring
 from .denoise import DenoiseJobType, UnloadDenoiserJobType
 from .echo import EchoJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
+from .registry_table import REGISTRY_TABLE
 from .rvc import RvcJobType
 from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
 
@@ -30,21 +35,7 @@ if TYPE_CHECKING:
     from ..config import Config
     from ..leases import Leases
 
-ALL_JOB_TYPES: dict[str, str] = {
-    AlignJobType.name: "align",
-    UnloadAlignerJobType.name: "align",
-    AlignLongformJobType.name: "align",
-    AsrJobType.name: "asr",
-    DenoiseJobType.name: "denoise",
-    UnloadDenoiserJobType.name: "denoise",
-    EchoJobType.name: "echo",
-    LoadModelJobType.name: "llm",
-    UnloadModelJobType.name: "llm",
-    LoadVoiceJobType.name: "tts",
-    TtsJobType.name: "tts",
-    UnloadVoiceJobType.name: "tts",
-    RvcJobType.name: "rvc",
-}
+ALL_JOB_TYPES: dict[str, str] = {spec.name: spec.family.name for spec in JOB_TYPE_SPECS}
 
 
 def build_registry(
@@ -53,36 +44,17 @@ def build_registry(
     residency: Residency | None = None,
     leases: "Leases | None" = None,
 ) -> dict[str, JobType]:
-    registry: dict[str, JobType] = {}
-    holder = residency if residency is not None else Residency(config)
-    if config.enable_echo:
-        registry[EchoJobType.name] = EchoJobType()
-    if config.enable_llm:
-        registry[LoadModelJobType.name] = LoadModelJobType(
-            config, backend, holder, leases
-        )
-        registry[UnloadModelJobType.name] = UnloadModelJobType(config, backend, holder)
-    if config.enable_tts:
-        registry[LoadVoiceJobType.name] = LoadVoiceJobType(
-            config, backend, holder, leases
-        )
-        registry[UnloadVoiceJobType.name] = UnloadVoiceJobType(config, backend, holder)
-        registry[TtsJobType.name] = TtsJobType(config, backend, holder)
-    if config.enable_asr:
-        registry[AsrJobType.name] = AsrJobType(config, backend, holder.owned_pids)
-    if config.enable_align:
-        registry[AlignJobType.name] = AlignJobType(config, backend, holder)
-        registry[UnloadAlignerJobType.name] = UnloadAlignerJobType(
-            config, backend, holder
-        )
-        registry[AlignLongformJobType.name] = AlignLongformJobType(config, backend)
-    if config.enable_rvc:
-        registry[RvcJobType.name] = RvcJobType(config, backend, holder.owned_pids)
-    if config.enable_denoise:
-        registry[DenoiseJobType.name] = DenoiseJobType(config, backend, holder)
-        registry[UnloadDenoiserJobType.name] = UnloadDenoiserJobType(
-            config, backend, holder
-        )
+    wiring = Wiring(
+        config=config,
+        backend=backend,
+        residency=residency if residency is not None else Residency(config),
+        leases=leases,
+    )
+    registry: dict[str, JobType] = {
+        binding.spec.name: binding.build(wiring)
+        for binding in REGISTRY_TABLE
+        if getattr(config, binding.spec.family.flag)
+    }
     _assert_every_type_implements_the_protocol(registry)
     return registry
 
@@ -110,6 +82,18 @@ def _assert_every_type_implements_the_protocol(registry: dict[str, JobType]) -> 
                 "the protocol is called by the queue or the API; a type that is "
                 "missing one fails somewhere far from here."
             )
+        if plugin.name != job_type:
+            raise TypeError(
+                f"{type(plugin).__name__} calls itself {plugin.name!r} and was "
+                f"built for {job_type!r} from crucible/jobs/registry_table.py"
+            )
+        journals = callable(getattr(plugin, "journal_identity", None))
+        if journals != SPECS[job_type].journal_identity:
+            raise TypeError(
+                f"{job_type!r}'s spec in crucible/jobtypes.py says journal_identity="
+                f"{SPECS[job_type].journal_identity} and {type(plugin).__name__} "
+                f"{'has' if journals else 'has no'} journal_identity"
+            )
 
 
 _UNCOVERED = sorted(set(ALL_JOB_TYPES.values()) - {entry.job_type for entry in CLASSES})
@@ -118,6 +102,18 @@ if _UNCOVERED:
         f"job type(s) {_UNCOVERED} have no capability class in "
         "crucible/capability.py, so nothing decides whether this host can run "
         "them and `job_type_disabled` would have no number to name"
+    )
+
+_MISFILED = sorted(
+    (family.name, name)
+    for family in FAMILIES
+    for name in family.capability_classes
+    if name not in CAPABILITY_CLASSES or CAPABILITY_CLASSES[name].job_type != family.name
+)
+if _MISFILED:
+    raise TypeError(
+        f"(family, class) pairs {_MISFILED} in crucible/jobtypes.py name a class "
+        "that crucible/capability.py's CLASSES does not file under that family"
     )
 
 
@@ -255,7 +251,9 @@ def resolve_model(plugin: JobType, model: str | None) -> str | None:
 
 __all__ = [
     "ALL_JOB_TYPES",
+    "CAPABILITIES",
     "AlignJobType",
+    "AlignLongformJobType",
     "AsrJobType",
     "DenoiseJobType",
     "EchoJobType",

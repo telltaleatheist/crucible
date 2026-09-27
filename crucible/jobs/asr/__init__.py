@@ -10,7 +10,6 @@ from pydantic import (
     ConfigDict,
     StrictBool,
     StrictStr,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -27,17 +26,33 @@ from ...asrmodels import (
 from ...cardfacts import card_for
 from ...config import Config
 from ...errors import ApiError, JobError
-from ...manifests import fingerprint
-from ..align import QWEN3_LANGUAGES
+from ...jobtypes import ASR_JOB
 from ...journal import Identity
+from ...manifests import fingerprint
 from .. import worker_type
+from ..align import QWEN3_LANGUAGES
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
+from ..template import (
+    ManifestCatalog,
+    as_job_error,
+    card_guard,
+    parse_params,
+    require_model,
+    run_model,
+)
 from . import qwen, speechonly
 from .document import progress_decoding, transcript_document, worker_failed
 
-__all__ = ["AsrJobType", "AsrParams"]
+__all__ = ["JOB_TYPES", "AsrJobType", "AsrParams"]
 
-JOB_TYPE = "asr"
+JOB_TYPE = ASR_JOB.name
+
+FFMPEG_WHY = (
+    "decodes every input through it — faster-whisper's own PyAV decoder "
+    "silently truncates some m4b files, which ends a transcript hours early "
+    "with no error."
+)
 
 WINDOW_SECONDS = 900
 OVERLAP_SECONDS = 15
@@ -294,45 +309,14 @@ class AsrParams(BaseModel):
         return None if self.language == AUTO_LANGUAGE else self.language
 
 
-def _manifests() -> dict[str, AsrManifest]:
-    try:
-        return load_all_asr_manifests()
-    except AsrManifestError as exc:
-        raise ApiError(
-            500,
-            "asr_manifests_unreadable",
-            f"this server cannot read its ASR model manifests: {exc}",
-        ) from None
-
-
-def _known(model_id: str) -> AsrManifest:
-    manifests = _manifests()
-    manifest = manifests.get(model_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_model",
-            f"no ASR manifest for model {model_id!r}; this build ships "
-            f"{sorted(manifests)}",
-            {"model": model_id, "offered": sorted(manifests)},
-        )
-    return manifest
-
-
-def _params(params: dict[str, Any]) -> AsrParams:
-    try:
-        return AsrParams.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            "asr params are not valid: "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
+MANIFESTS: ManifestCatalog[AsrManifest] = ManifestCatalog(
+    lambda: load_all_asr_manifests(),
+    AsrManifestError,
+    unreadable_code="asr_manifests_unreadable",
+    what="ASR model manifests",
+    unknown="ASR manifest for model",
+    offer_in_details=True,
+)
 
 
 def _most_a_job_needs(spec: Any, backend_kind: str) -> int:
@@ -373,15 +357,6 @@ def _python_for(config: Config, engine: str, backend_kind: str, model_id: str) -
         ) from None
 
 
-def _require_ffmpeg() -> str:
-    return hosttools.require_ffmpeg(
-        "asr",
-        "decodes every input through it — faster-whisper's own PyAV decoder "
-        "silently truncates some m4b files, which ends a transcript hours early "
-        "with no error.",
-    )
-
-
 class AsrJobType:
 
     name = JOB_TYPE
@@ -399,36 +374,18 @@ class AsrJobType:
 
     def describe_models(self) -> list[ModelDescriptor]:
         backend_kind = self._config.backend_kind
-        rows: list[ModelDescriptor] = []
-        for manifest in _manifests().values():
-            if manifest.supports(backend_kind):
-                spec = manifest.spec(backend_kind)
-                revision, source, estimate = (
-                    spec.revision,
-                    spec.hf_repo,
-                    _most_a_job_needs(spec, backend_kind),
-                )
-                installed = (
-                    weights.installed(self._config, manifest, spec) is not None
-                )
-            else:
-                revision, source, estimate, installed = "", "", 0, False
-            rows.append(
-                ModelDescriptor(
-                    id=manifest.id,
-                    revision=revision,
-                    source=source,
-                    installed=installed,
-                    resident=False,
-                    vram_bytes=estimate,
-                )
+        return MANIFESTS.descriptors(
+            backend_kind,
+            installed=lambda manifest, spec: weights.installed(
+                self._config, manifest, spec
             )
-        return rows
+            is not None,
+            resident=lambda model_id: False,
+            estimate=lambda spec: _most_a_job_needs(spec, backend_kind),
+        )
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
+        manifest = MANIFESTS.known(run_model(model, self.name))
         spec = manifest.backends.get(self._config.backend_kind)
         if spec is None:
             return {
@@ -447,9 +404,7 @@ class AsrJobType:
         }
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
+        manifest = MANIFESTS.known(run_model(model, self.name))
         if not manifest.supports(self._config.backend_kind):
             return 0
         return _most_a_job_needs(
@@ -464,7 +419,7 @@ class AsrJobType:
                 "through it",
             )
         try:
-            manifests = _manifests()
+            manifests = MANIFESTS.all()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
         envs: dict[str, tuple[bool, str]] = {}
@@ -494,7 +449,7 @@ class AsrJobType:
 
 
     def _spec_for(self, model_id: str) -> tuple[AsrManifest, Any]:
-        manifest = _known(model_id)
+        manifest = MANIFESTS.known(model_id)
         return manifest, worker_type.require_block(
             manifest, model_id, self._backend.kind, "ASR model"
         )
@@ -630,25 +585,30 @@ class AsrJobType:
                 {"engine": engine, "language": params.language},
             )
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        checked = _params(params)
-        self._refuse_what_this_engine_has_not_got(model, checked)
-        _require_ffmpeg()
-        manifest, spec, _, _, _ = self._require_runnable(model, checked)
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
-            need_bytes=self._need_bytes(manifest, spec, checked),
-            owned_pids=self._owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+    def requirements(
+        self, model_id: str, params: AsrParams
+    ) -> tuple[str, AsrManifest, Any, Path, Path, "qwen.AlignerPlan | None", Any]:
+        self._refuse_what_this_engine_has_not_got(model_id, params)
+        ffmpeg = hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
+        manifest, spec, python, weights_dir, aligner = self._require_runnable(
+            model_id, params
         )
+        state = card_guard(
+            self._config,
+            model=model_id,
+            need_bytes=self._need_bytes(manifest, spec, params),
+            owned_pids=self._owned_pids(),
+        )
+        return ffmpeg, manifest, spec, python, weights_dir, aligner, state
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        model = require_model(model, self.name)
+        self.requirements(model, parse_params(AsrParams, params, self.name))
 
     def journal_identity(self, model: str | None, params: dict[str, Any]) -> Identity | None:
         if model is None:
             return None
-        checked = _params(params)
+        checked = parse_params(AsrParams, params, self.name)
         _, spec = self._spec_for(model)
         if spec.engine not in QWEN_ASR_ENGINES:
             return None
@@ -683,26 +643,11 @@ class AsrJobType:
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = AsrParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
+        model = run_model(job.model, self.name)
         audio = self._one_input(ctx)
-
-        try:
-            self._refuse_what_this_engine_has_not_got(model, params)
-            ffmpeg = _require_ffmpeg()
-            manifest, spec, python, weights_dir, aligner = self._require_runnable(
-                model, params
-            )
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=self._need_bytes(manifest, spec, params),
-                owned_pids=self._owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        ffmpeg, manifest, spec, python, weights_dir, aligner, state = as_job_error(
+            self.requirements, model, params
+        )
         ctx.warming(state.detail)
         speech = params.speech_settings(self._speech_detector(ctx, params))
 
@@ -950,3 +895,13 @@ class AsrJobType:
             timeline=timeline,
             segments=deduplicated,
         )
+
+
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        ASR_JOB,
+        lambda wiring: AsrJobType(
+            wiring.config, wiring.backend, wiring.residency.owned_pids
+        ),
+    ),
+)

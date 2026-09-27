@@ -5,7 +5,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
@@ -31,10 +31,10 @@ from ..residency import Residency
 from ..settle import Settlement
 from ..tasks import ReloadRefused, TaskStore
 from ..ttsstream import StreamManager
-from .context import AppContext, Routers
+from .context import AppContext, Routers, Services
 from .deps import (
     BeforeEveryRequest,
-    _error_response,
+    error_response,
     require_api_version,
     require_auth,
     require_peer_api_version,
@@ -79,6 +79,12 @@ ROUTE_MODULES = (
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
+HTTP_ERROR_CODES = {404: "not_found", 405: "method_not_allowed"}
+
+
+def _say(line: str) -> None:
+    print(f"crucible: {line}", file=sys.stderr)
+
 
 def _validation_message(request: Request, problems: list[dict[str, Any]]) -> str:
     route = f"{request.method} {request.url.path}"
@@ -93,11 +99,156 @@ def _validation_message(request: Request, problems: list[dict[str, Any]]) -> str
     )
 
 
-def create_app(config: Config, backend: Backend) -> FastAPI:
-    residency = Residency(config)
-    leases = Leases()
-    registry = build_registry(config, backend, residency, leases)
+def _validation_refusal(request: Request, exc: RequestValidationError) -> ApiError:
+    problems = [
+        {
+            "location": [str(part) for part in problem["loc"]],
+            "type": problem["type"],
+            "message": problem["msg"],
+        }
+        for problem in exc.errors()
+    ]
+    return ApiError(
+        400,
+        "invalid_request",
+        _validation_message(request, problems),
+        {"problems": problems},
+    )
 
+
+def _http_refusal(exc: StarletteHTTPException) -> ApiError:
+    code = HTTP_ERROR_CODES.get(exc.status_code, "http_error")
+    return ApiError(exc.status_code, code, str(exc.detail))
+
+
+class RegistryKeeper:
+    def __init__(
+        self, config: Config, backend: Backend, residency: Residency, leases: Leases
+    ) -> None:
+        self._config = config
+        self._backend = backend
+        self._residency = residency
+        self._leases = leases
+        self.registry = self._built(config)
+
+    def _built(self, config: Config) -> dict[str, Any]:
+        return build_registry(config, self._backend, self._residency, self._leases)
+
+    def take_up_enabled_types(self, live: Config) -> None:
+        try:
+            wanted = self._built(live)
+        except Exception as exc:
+            _say(
+                "config.toml turned a job type on, but its plugin could not be "
+                f"built: {type(exc).__name__}: {exc}"
+            )
+            return
+        added = sorted(name for name in wanted if name not in self.registry)
+        for name in added:
+            self.registry[name] = wanted[name]
+        if added:
+            _say(f"took up newly enabled job type(s) {added}")
+
+    def reload(self, holder: Callable[[], Any]) -> list[str]:
+        held = holder()
+        if held is not None:
+            raise ReloadRefused(held)
+        self._config.adopt(load_config(self._config.home))
+        rebuilt = self._built(self._config)
+        self.registry.clear()
+        self.registry.update(rebuilt)
+        return sorted(self.registry)
+
+    def take_up_installed(self) -> list[str]:
+        self._config.adopt(load_config(self._config.home))
+        self.take_up_enabled_types(self._config)
+        return sorted(self.registry)
+
+
+class ConfigFollower:
+    def __init__(self, config: Config, keeper: RegistryKeeper) -> None:
+        self._config = config
+        self._keeper = keeper
+        self._failed: str | None = None
+
+    def __call__(self) -> None:
+        try:
+            if self._config.follow_file():
+                _say("config.toml moved on disk; the server adopted it")
+                self._keeper.take_up_enabled_types(self._config)
+        except ConfigError as exc:
+            if self._failed != str(exc):
+                self._failed = str(exc)
+                _say(
+                    "config.toml could not be re-read; serving the last good "
+                    f"document: {exc}"
+                )
+
+
+def _decider(config: Config, backend: Backend) -> Callable[[str], ApiError]:
+    def decide_here(job_type: str) -> ApiError:
+        try:
+            write_capability(config, backend, decide_for(config, backend), {})
+            config.adopt(load_config(config.home))
+            _say("no capability record; decided this card and recorded it")
+        except Exception as exc:
+            _say(f"could not decide this card: {type(exc).__name__}: {exc}")
+        return disabled_error(job_type, config)
+
+    return decide_here
+
+
+def _services(
+    config: Config,
+    backend: Backend,
+    residency: Residency,
+    leases: Leases,
+    keeper: RegistryKeeper,
+) -> Services:
+    store = JobStore(config, backend, keeper.registry)
+    streams = StreamManager(residency)
+    inflight = InFlight()
+    settlement = Settlement(
+        residency=residency, store=store, leases=leases, inflight=inflight
+    )
+    store.attach_settlement(settlement)
+    streams.when_closed(settlement.settle_quietly)
+    task_store = TaskStore(
+        config,
+        backend,
+        reload=lambda: keeper.reload(settlement.holder),
+        holder=settlement.holder,
+        take_up=keeper.take_up_installed,
+    )
+    return Services(
+        leases=leases,
+        store=store,
+        streams=streams,
+        inflight=inflight,
+        ollama_contexts=upstreams.OllamaContexts(),
+        settings_history=settings_module.History(),
+        removals=catalog.Removals(),
+        peer=peer_module.PeerState(),
+        pairing_requests=PairingRequests(open_pairing=config.open_pairing),
+        settlement=settlement,
+        tasks=task_store,
+        installs=InstallOnSubmit(config, backend, task_store),
+    )
+
+
+def _proxy_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            connect=PROXY_CONNECT_TIMEOUT,
+            read=PROXY_READ_TIMEOUT,
+            write=60.0,
+            pool=10.0,
+        ),
+        limits=httpx.Limits(keepalive_expiry=PROXY_KEEPALIVE_EXPIRY),
+    )
+
+
+def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store: JobStore = app.state.store
@@ -105,15 +256,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         store.restore()
         residency.start_reclaiming()
         store.start()
-        app.state.http = httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=PROXY_CONNECT_TIMEOUT,
-                read=PROXY_READ_TIMEOUT,
-                write=60.0,
-                pool=10.0,
-            ),
-            limits=httpx.Limits(keepalive_expiry=PROXY_KEEPALIVE_EXPIRY),
-        )
+        app.state.http = _proxy_client()
         try:
             yield
         finally:
@@ -123,182 +266,47 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             await asyncio.to_thread(app.state.streams.shutdown)
             await asyncio.to_thread(residency.shutdown)
 
-    app = FastAPI(
-        title="Crucible",
-        version=VERSION,
-        lifespan=lifespan,
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
-    )
-    app.state.config = config
-    app.state.backend = backend
-    app.state.residency = residency
+    return lifespan
 
-    def take_up_enabled_types(live: Config) -> None:
-        try:
-            wanted = build_registry(live, backend, residency, leases)
-        except Exception as exc:
-            print(
-                f"crucible: config.toml turned a job type on, but its plugin could "
-                f"not be built: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            return
-        added = sorted(name for name in wanted if name not in registry)
-        for name in added:
-            registry[name] = wanted[name]
-        if added:
-            print(f"crucible: took up newly enabled job type(s) {added}", file=sys.stderr)
 
-    def follow_the_config_file() -> None:
-        live: Config = app.state.config
-        try:
-            if live.follow_file():
-                print("crucible: config.toml moved on disk; the server adopted it", file=sys.stderr)
-                take_up_enabled_types(live)
-        except ConfigError as exc:
-            failed = getattr(app.state, "config_follow_failed", None)
-            if failed != str(exc):
-                app.state.config_follow_failed = str(exc)
-                print(
-                    f"crucible: config.toml could not be re-read; serving the last "
-                    f"good document: {exc}",
-                    file=sys.stderr,
-                )
-
-    app.add_middleware(BeforeEveryRequest, step=follow_the_config_file)
-    app.state.bind_host = config.host
-    app.state.bind_port = config.port
-    app.state.store = JobStore(config, backend, registry)
-    app.state.streams = StreamManager(residency)
-    app.state.inflight = InFlight()
-    app.state.ollama_contexts = upstreams.OllamaContexts()
-    app.state.settings_history = settings_module.History()
-    app.state.removals = catalog.Removals()
-    app.state.peer = peer_module.PeerState()
-    app.state.pairing_requests = PairingRequests(open_pairing=config.open_pairing)
-    app.state.leases = leases
-    app.state.settlement = Settlement(
-        residency=residency,
-        store=app.state.store,
-        leases=app.state.leases,
-        inflight=app.state.inflight,
-    )
-    app.state.store.attach_settlement(app.state.settlement)
-    app.state.streams.when_closed(app.state.settlement.settle_quietly)
-
-    def reload_registry() -> list[str]:
-        held = app.state.settlement.holder()
-        if held is not None:
-            raise ReloadRefused(held)
-        config.adopt(load_config(config.home))
-        rebuilt = build_registry(config, backend, residency, leases)
-        registry.clear()
-        registry.update(rebuilt)
-        return sorted(registry)
-
-    def take_up_installed() -> list[str]:
-        config.adopt(load_config(config.home))
-        take_up_enabled_types(config)
-        return sorted(registry)
-
-    app.state.tasks = TaskStore(
-        config,
-        backend,
-        reload=reload_registry,
-        holder=app.state.settlement.holder,
-        take_up=take_up_installed,
-    )
-
-    def decide_here(job_type: str) -> ApiError:
-        try:
-            write_capability(config, backend, decide_for(config, backend), {})
-            config.adopt(load_config(config.home))
-            print(
-                "crucible: no capability record; decided this card and recorded it",
-                file=sys.stderr,
-            )
-        except Exception as exc:
-            print(
-                f"crucible: could not decide this card: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-        return disabled_error(job_type, config)
-
-    app.state.installs = InstallOnSubmit(config, backend, app.state.tasks)
-
-    Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
-    Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
-
+def _answer_refusals(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return _error_response(exc)
+        return error_response(exc)
 
     @app.exception_handler(StarletteHTTPException)
-    async def _http_error(
-        request: Request, exc: StarletteHTTPException
-    ) -> JSONResponse:
-        code = {404: "not_found", 405: "method_not_allowed"}.get(
-            exc.status_code, "http_error"
-        )
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": {"code": code, "message": str(exc.detail)}},
-        )
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        return error_response(_http_refusal(exc))
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        problems = [
-            {
-                "location": [str(part) for part in problem["loc"]],
-                "type": problem["type"],
-                "message": problem["msg"],
-            }
-            for problem in exc.errors()
-        ]
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "code": "invalid_request",
-                    "message": _validation_message(request, problems),
-                    "details": {"problems": problems},
-                }
-            },
-        )
+        return error_response(_validation_refusal(request, exc))
 
-    public = APIRouter(prefix="/v1")
-    private = APIRouter(
-        prefix="/v1", dependencies=[Depends(require_auth), Depends(require_api_version)]
-    )
-    openai_router = APIRouter(
-        prefix="/openai/v1",
-        dependencies=[Depends(require_auth), Depends(require_api_version)],
-    )
-    peer_router = APIRouter(
-        prefix="/v1/peer",
-        dependencies=[Depends(require_peer_auth), Depends(require_peer_api_version)],
+
+def _routers() -> Routers:
+    behind_the_token = [Depends(require_auth), Depends(require_api_version)]
+    return Routers(
+        public=APIRouter(prefix="/v1"),
+        private=APIRouter(prefix="/v1", dependencies=behind_the_token),
+        openai=APIRouter(prefix="/openai/v1", dependencies=behind_the_token),
+        peer=APIRouter(
+            prefix="/v1/peer",
+            dependencies=[Depends(require_peer_auth), Depends(require_peer_api_version)],
+        ),
     )
 
-    routers = Routers(public=public, private=private, openai=openai_router, peer=peer_router)
-    ctx = AppContext(
-        app=app,
-        config=config,
-        backend=backend,
-        residency=residency,
-        decide_here=decide_here,
-    )
+
+def _mount_routes(app: FastAPI, ctx: AppContext) -> None:
+    routers = _routers()
     for module in ROUTE_MODULES:
         module.register(routers, ctx)
+    for router in (routers.public, routers.private, routers.openai, routers.peer):
+        app.include_router(router)
 
-    app.include_router(public)
-    app.include_router(private)
-    app.include_router(openai_router)
-    app.include_router(peer_router)
 
+def _mount_operator_page(app: FastAPI) -> None:
     @app.get("/", include_in_schema=False)
     async def operator_page() -> Response:
         index = UI_DIR / "index.html"
@@ -314,4 +322,39 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+
+def create_app(config: Config, backend: Backend) -> FastAPI:
+    residency = Residency(config)
+    leases = Leases()
+    keeper = RegistryKeeper(config, backend, residency, leases)
+    app = FastAPI(
+        title="Crucible",
+        version=VERSION,
+        lifespan=_lifespan(residency),
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+    app.state.config = config
+    app.state.backend = backend
+    app.state.residency = residency
+    app.state.bind_host = config.host
+    app.state.bind_port = config.port
+    app.add_middleware(BeforeEveryRequest, step=ConfigFollower(config, keeper))
+    _services(config, backend, residency, leases, keeper).publish(app)
+    Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
+    _answer_refusals(app)
+    _mount_routes(
+        app,
+        AppContext(
+            app=app,
+            config=config,
+            backend=backend,
+            residency=residency,
+            decide_here=_decider(config, backend),
+        ),
+    )
+    _mount_operator_page(app)
     return app

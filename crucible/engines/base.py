@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import procgroup
-from ..errors import CrucibleError
+from ..errors import EngineError
 from ..logtail import tail_of_last_run
 
 STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
@@ -26,10 +26,6 @@ BIND_FAILURE_LINES: tuple[str, ...] = (
 )
 
 BIND_SCAN_LINES = 200
-
-
-class EngineError(CrucibleError):
-    ...
 
 
 def str_flag(args: "list[str] | tuple[str, ...]", flag: str) -> str | None:

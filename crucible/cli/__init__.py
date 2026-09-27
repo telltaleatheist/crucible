@@ -5,12 +5,14 @@ import argparse
 from .. import VERSION
 from ..config import CRUCIBLE_HOME_ENV
 from . import (
+    api_cmd,
     capability,
     common,
     doctor,
     init,
     install,
     orchestrator,
+    pair,
     serve,
     service_cmd,
     token,
@@ -55,6 +57,12 @@ __all__ = [
 ]
 
 
+def _run_tray_verb(verb: str) -> None:
+    from ..desktop import run_tray_verb
+
+    run_tray_verb(verb)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crucible",
@@ -67,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"crucible {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     from ..local import add_parser as add_local_parser
-    add_local_parser(subparsers)
+    add_local_parser(subparsers, tray_verbs=_run_tray_verb)
 
     init.add_parser(subparsers)
     install.add_parser(subparsers)
@@ -87,9 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     from ..lan import add_parser as add_lan_parser
     add_lan_parser(subparsers)
 
-    from ..apiclient import add_pair_parser, add_parser as add_api_parser
-    add_api_parser(subparsers)
-    add_pair_parser(subparsers)
+    api_cmd.add_parser(subparsers)
+    pair.add_pair_parser(subparsers)
     return parser
 
 

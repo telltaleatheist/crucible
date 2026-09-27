@@ -50,3 +50,7 @@ class JobError(CrucibleError):
 
 class JobCancelled(CrucibleError):
     ...
+
+
+class EngineError(CrucibleError):
+    ...

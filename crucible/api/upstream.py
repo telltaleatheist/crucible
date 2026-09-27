@@ -5,36 +5,35 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
 from fastapi import Request, Response
-from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from .. import upstreams
+from ..admission import refuse_lease_on_an_upstream
+from ..admission import refuse_lease_on_an_upstream as _refuse_lease_on_an_upstream
 from ..config import Config
 from ..errors import ApiError
 from ..inflight import Entry, InFlight, read_act
 from ..sampling import SAMPLING_HEADER
+from .context import AppContext
+from .deps import error_response
 from .proxy import (
     PROXY_CONNECT_TIMEOUT,
-    _RelayResponse,
-    _attempts,
-    _post_unless_the_caller_leaves,
-    _sent_across_the_wire,
-    _set_model_in_frame,
+    RelayResponse,
+    attempts_note,
+    post_unless_the_caller_leaves,
+    sent_across_the_wire,
+    set_model_in_frame,
 )
 
-
-def _refuse_lease_on_an_upstream(subject_id: str) -> None:
-    if upstreams.split_model(subject_id) is None:
-        return
-    raise ApiError(
-        409,
-        "lease_not_needed",
-        "an upstream model is never resident; send the chat",
-        {"model": subject_id},
-    )
+__all__ = [
+    "_refuse_lease_on_an_upstream",
+    "forward_to_upstream",
+    "refuse_lease_on_an_upstream",
+    "routed_upstream_rows",
+]
 
 
-def _routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
+def routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
     routed_for: dict[str, list[str]] = {}
     for entry in config.routes:
         routed_for.setdefault(entry.model, []).append(entry.capability)
@@ -59,7 +58,7 @@ def _upstream_unreachable(name: str, url: str, exc: Exception) -> ApiError:
     return ApiError(
         502,
         "upstream_unreachable",
-        f"{name} did not answer at {url}{_attempts(exc)}: {type(exc).__name__}: "
+        f"{name} did not answer at {url}{attempts_note(exc)}: {type(exc).__name__}: "
         f"{exc}",
         {"upstream": name},
     )
@@ -70,10 +69,8 @@ def _rate_limited(name: str, response: httpx.Response, body: bytes) -> Response:
     retry_after = response.headers.get("retry-after")
     if retry_after is not None:
         headers["Retry-After"] = retry_after
-    return JSONResponse(
-        status_code=429,
-        headers=headers,
-        content=ApiError(
+    return error_response(
+        ApiError(
             429,
             "upstream_rate_limited",
             f"{name} rate-limited this request: "
@@ -84,7 +81,8 @@ def _rate_limited(name: str, response: httpx.Response, body: bytes) -> Response:
                 "retry_after": retry_after,
                 "upstream_status": response.status_code,
             },
-        ).body(),
+        ),
+        headers,
     )
 
 
@@ -109,16 +107,16 @@ def _set_model_in_response(raw: bytes, model_id: str) -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
-async def _forward_to_upstream(
+async def forward_to_upstream(
+    ctx: AppContext,
     request: Request,
     requested: str,
     body: dict[str, Any],
     *,
     client_agent: str | None,
 ) -> Response:
-    live: Config = request.app.state.config
     name, model_id = upstreams.require_upstream_model(requested)
-    record = live.upstream(name)
+    record = ctx.config.upstream(name)
     if record is None:
         raise ApiError(
             409,
@@ -132,10 +130,10 @@ async def _forward_to_upstream(
         )
 
     act = read_act(request.headers)
-    client: httpx.AsyncClient = request.app.state.http
+    client = ctx.http
     if name == "ollama":
         forwarded = await upstreams.forward_ollama(
-            client, record, model_id, body, request.app.state.ollama_contexts
+            client, record, model_id, body, ctx.ollama_contexts
         )
     else:
         forwarded = upstreams.forward_body(name, model_id, body)
@@ -149,7 +147,7 @@ async def _forward_to_upstream(
     }
     url = upstreams.chat_url(record)
     headers = upstreams.chat_headers(record)
-    inflight: InFlight = request.app.state.inflight
+    inflight = ctx.inflight
     entry = inflight.open(act=act, model=requested, client=client_agent)
     try:
         if body.get("stream") is True:
@@ -164,8 +162,8 @@ async def _forward_to_upstream(
                 when_relayed=_close_inflight(inflight, entry),
             )
         try:
-            upstream = await _sent_across_the_wire(
-                lambda: _post_unless_the_caller_leaves(
+            upstream = await sent_across_the_wire(
+                lambda: post_unless_the_caller_leaves(
                     client, url, forwarded.body, request, headers
                 ),
                 where=f"{name} at {url}",
@@ -173,14 +171,13 @@ async def _forward_to_upstream(
         except httpx.HTTPError as exc:
             raise _upstream_unreachable(name, url, exc) from None
         if upstream is None:
-            return JSONResponse(
-                status_code=499,
-                content=ApiError(
+            return error_response(
+                ApiError(
                     499,
                     "client_disconnected",
                     f"the caller closed the connection before {name} answered; "
                     "the upstream request was cancelled with it",
-                ).body(),
+                )
             )
         payload = upstream.content
         if upstream.status_code == 429:
@@ -247,7 +244,7 @@ async def _stream_from_upstream(
         ),
     )
     try:
-        upstream = await _sent_across_the_wire(
+        upstream = await sent_across_the_wire(
             lambda: client.send(upstream_request, stream=True),
             where=f"{name} at {url}",
         )
@@ -291,11 +288,11 @@ async def _stream_from_upstream(
                 buffer += chunk
                 while b"\n\n" in buffer:
                     frame, buffer = buffer.split(b"\n\n", 1)
-                    yield _set_model_in_frame(frame, requested) + b"\n\n"
+                    yield set_model_in_frame(frame, requested) + b"\n\n"
             if buffer:
-                yield _set_model_in_frame(buffer, requested)
+                yield set_model_in_frame(buffer, requested)
 
-    return _RelayResponse(
+    return RelayResponse(
         relay(),
         upstream=upstream,
         when_relayed=when_relayed,
