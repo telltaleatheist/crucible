@@ -78,12 +78,18 @@ export const STAMP_NAME = '.crucible';
  * `$dest` is the interpreter itself and `$dest/bin/crucible` is what the wheel
  * install then puts inside it.
  */
-export function activateRuntimeSh(dest: string, partial: string): string {
+export function activateRuntimeSh(dest: string, partial: string, stop?: string): string {
+  // `stop` is how the running server is quiesced before its tree moves aside.
+  // The generated install.sh passes `crucible_quiesce || return 1`, which stops
+  // it with the NEW release's code (fresh-install #39, 2026-09-26); the
+  // default is the installed binary's own shutdown, as it always was.
+  const quiesce = stop
+    ?? 'if [ -x "$_crucible_dest/bin/crucible" ]; then "$_crucible_dest/bin/crucible" local shutdown || return 1; fi';
   return `activate_crucible_runtime() {\n`
     + `  _crucible_dest=${dest}; _crucible_partial=${partial}; _crucible_previous="$_crucible_dest.previous"\n`
     + `  if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi\n`
     + `  if [ -e "$_crucible_dest" ]; then\n`
-    + `    if [ -x "$_crucible_dest/bin/crucible" ]; then "$_crucible_dest/bin/crucible" local shutdown || return 1; fi\n`
+    + `    ${quiesce}\n`
     + `    mv "$_crucible_dest" "$_crucible_previous" || return 1\n`
     + `  fi\n`
     + `  if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/python3" --version; then\n`
@@ -439,13 +445,22 @@ export async function installRuntime(
   // The server is shut down before its own `site-packages` is rewritten under
   // it. `local shutdown` is a no-op on a machine where nothing is running, and
   // `service-install` later in the sequence is what starts it again.
+  //
+  // AND WHEN THE INSTALLED BINARY COULD NOT STOP IT, THE NEW ONE IS ASKED
+  // (fresh-install #39, 2026-09-26). This was `|| true` and nothing after it:
+  // 1.0.48's shutdown could not reach root in a guest whose interop was broken,
+  // pip wrote the new release under the still-running old server, and
+  // `local start` then refused it as `engine_version_stale`. The release just
+  // installed knows its own ways to stop the service, so it gets a second go
+  // before anything is started, and a failure there fails this step by name.
   const desktop = runner.platform === 'darwin'
     ? ` && ${shellQuote(paths.python)} -m pip install ${DESKTOP_PACKAGES.map(shellQuote).join(' ')}`
     : '';
   await run(
     'install-wheel',
-    `if [ -x ${shellQuote(paths.crucible)} ]; then ${shellQuote(paths.crucible)} local shutdown || true; fi`
+    `crucible_stopped=1; if [ -x ${shellQuote(paths.crucible)} ]; then ${shellQuote(paths.crucible)} local shutdown || crucible_stopped=0; fi`
       + ` && ${shellQuote(paths.python)} -m pip install --upgrade --no-input ${shellQuote(paths.wheel)}`
+      + ` && { [ "$crucible_stopped" = 1 ] || ${shellQuote(paths.crucible)} local shutdown >&2; }`
       + desktop
       + ` && rm -f ${shellQuote(paths.wheel)}`
       + ` && printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' ${shellQuote(pin.sha256)} `

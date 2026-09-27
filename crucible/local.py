@@ -119,14 +119,15 @@ def connection(home: Path) -> tuple[str, str, str]:
 
 
 def request(url: str, *, token: str | None = None, method: str = "GET",
-            timeout: float = 3) -> dict:
+            timeout: float = 3, headers: dict[str, str] | None = None) -> dict:
     """One local HTTP call. `timeout` is THREE seconds because most of these
     are liveness probes, and a tray that blocks is a tray with no menu.
 
     Callers that ask a heavier question pass their own -- see `INFO_TIMEOUT`.
     """
-    headers = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
-    req = urllib.request.Request(url, headers=headers, method=method,
+    sent = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
+    sent.update(headers or {})
+    req = urllib.request.Request(url, headers=sent, method=method,
                                  data=b"{}" if method == "POST" else None)
     # Local service access must not depend on the invoking shell's proxy env.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -236,6 +237,101 @@ def controller_ping() -> dict:
     return observed
 
 
+#: Sent with an upgrade's `POST /quit` (fresh-install #35): hand the distro
+#: hold over rather than letting it go. `crucible/host/door.py` reads it.
+HANDOVER_HEADER = "X-Crucible-Handover"
+
+#: The controller's door on Windows (PHASE17 3.2).
+CONTROLLER_URL = "http://127.0.0.1:7101"
+
+#: What a person is told when neither token this PC can find opens the door.
+TOKEN_MISMATCH = (
+    "engine_token_mismatch: Crucible's controller on this PC would not accept "
+    "the engine token this PC holds, nor the one its Linux engine holds, so "
+    "nothing was stopped or changed. Quit Crucible from its icon in the "
+    "notification area, then run the install again; Crucible puts the "
+    "engine's token right by itself when it next starts"
+)
+
+
+def _guest_tokens(home: Path) -> list[str]:
+    """The token the Linux engine on this PC holds, read from the guest itself.
+
+    Fresh-install #32 (2026-09-26, kylies-pc). After the engine moved from
+    /root to /home/crucible with a NEW token, the Windows copy of the pairing
+    line still held the old one, the controller's door wanted the guest's, and
+    every upgrade failed with 401 before it could stop anything: a machine no
+    later release could reach. The guest is the owner of its token (PHASE15
+    3.6), so when the Windows copy is refused, the guest is asked. Crucible's
+    own distro first, then a distro the orchestrator was given by consent.
+    Read through `guest_pairing_argv`, as the user the engine runs as.
+    """
+    from .host.app import consented_distro
+    from .host.errors import HostError
+    from .host.presence import guest_pairing_argv
+    from .host.wsl_states import CRUCIBLE_DISTRO
+
+    distros = [CRUCIBLE_DISTRO]
+    try:
+        named = consented_distro(home)
+    except HostError:
+        named = None
+    if named and named not in distros:
+        distros.append(named)
+    tokens: list[str] = []
+    for distro in distros:
+        try:
+            done = subprocess.run(
+                guest_pairing_argv(distro), capture_output=True, timeout=60,
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode != 0:
+            continue
+        try:
+            tokens.append(parse_pairing_line(done.stdout.decode("utf-8", "replace").strip()).token)
+        except ValueError:
+            continue
+    return tokens
+
+
+def door_call(path: str, home: Path, token: str, *, method: str = "GET",
+              timeout: float = 3) -> tuple[dict, str]:
+    """One call to the controller's door, and the token that opened it.
+
+    A 401 is not the end of it (fresh-install #32, 2026-09-26): the pairing
+    file is read again, in case a tray that just started has rewritten it, and
+    then the guest is asked for its own token. The token that worked is
+    returned so the calls after it use the same one. When none does, the
+    refusal is `TOKEN_MISMATCH`, in words, and not `HTTP Error 401`.
+    """
+    try:
+        return request(CONTROLLER_URL + path, token=token, method=method, timeout=timeout), token
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401 or sys.platform != "win32":
+            raise
+    tried = {token}
+    candidates: list[str] = []
+    try:
+        candidates.append(connection(home)[2])
+    except LocalError:
+        pass
+    candidates.extend(_guest_tokens(home))
+    for candidate in candidates:
+        if candidate in tried:
+            continue
+        tried.add(candidate)
+        try:
+            return (request(CONTROLLER_URL + path, token=candidate, method=method,
+                            timeout=timeout), candidate)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 401:
+                raise
+    raise LocalError(TOKEN_MISMATCH)
+
+
 def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
     home = home if home is not None else crucible_home()
     if sys.platform == "win32" and action == "start" and not (home / "pairing").exists():
@@ -257,7 +353,6 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
         return {"schema_version": 1, "state": "opened", "name": name, "url": url,
                 "detail": "Opened Crucible's console"}
     if sys.platform == "win32":
-        endpoint = "http://127.0.0.1:7101"
         try:
             ping = controller_ping()
         except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -275,7 +370,7 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                     time.sleep(0.25)
         if ping.get("crucible") is not True or ping.get("role") != "orchestrator":
             raise LocalError("wrong_controller: another service occupies Crucible's control port")
-        request(endpoint + "/local/" + action, token=token, method="POST", timeout=timeout)
+        door_call("/local/" + action, home, token, method="POST", timeout=timeout)
     else:
         from . import service
         config = load_config(home)
@@ -363,6 +458,18 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                     observed["sharing"] = {"state": "degraded", "detail": str(exc),
                                            "remote_reachability": "not_tested"}
             return observed
+        # ON WINDOWS, `unauthorized` IS WAITED OUT, not refused on sight
+        # (fresh-install #32, 2026-09-26). `status` re-reads the pairing file
+        # every pass, and the tray that just started rewrites that file from
+        # the guest's own line, and repairs a guest whose token was replaced,
+        # within seconds of coming up. Refusing on the first 401 reported
+        # "unauthorized" to a person at exactly the moment the product was
+        # putting it right; at the deadline it is still a refusal, in words.
+        if observed["state"] == "unauthorized" and sys.platform == "win32":
+            if time.monotonic() >= deadline:
+                raise LocalError(TOKEN_MISMATCH)
+            time.sleep(0.25)
+            continue
         if observed["state"] in ("wrong_service", "unauthorized", "broken"):
             raise LocalError(f"{observed['state']}: {observed['detail']}")
         if time.monotonic() >= deadline:
@@ -442,7 +549,7 @@ def shutdown() -> None:
         if ping.get("crucible") is not True or ping.get("role") != "orchestrator":
             raise LocalError("wrong_controller: port 7101 is occupied by another service")
         _, _, token = connection(home)
-        info = request("http://127.0.0.1:7101/v1/info", token=token)
+        info, token = door_call("/v1/info", home, token)
         server = info.get("server")
         if not isinstance(server, dict) or info.get("role") != "orchestrator" or server.get("api_version") != 1:
             raise LocalError("controller_upgrade_unsupported: authenticated controller identity is incompatible")
@@ -475,10 +582,23 @@ def shutdown() -> None:
         # 0.6.0 has authenticated /info and /quit, but no /local/stop. Its
         # documented quit stops its native child and releases its guest hold.
         # A guest unit uses a different runtime and survives the Windows swap.
-        if supported:
+        #
+        # SO A GUEST ENGINE IS NOT STOPPED HERE ANY MORE (fresh-install #35,
+        # 2026-09-26). `act("stop")` ran for every owner, and for a `wsl-unit`
+        # that is `systemctl stop` on an engine whose files this upgrade does
+        # not touch: the guest is carried separately, by the new tray, with its
+        # own shutdown. On kylies-pc the 1.0.48 upgrade left nothing on :7100
+        # for about 50 s. Only a `child` engine, whose runtime IS being
+        # replaced, is stopped; the guest keeps serving through the swap.
+        if supported and owner not in ("wsl-unit", "found"):
             act("stop")
         try:
-            request("http://127.0.0.1:7101/quit", token=token, method="POST")
+            # THE HANDOVER HEADER (#35): the old tray leaves a bounded hold on
+            # the distro behind it, so WSL does not idle the guest away in the
+            # seconds before the new tray takes its own. An orchestrator older
+            # than this ignores the header and quits as it always did.
+            request("http://127.0.0.1:7101/quit", token=token, method="POST",
+                    headers={HANDOVER_HEADER: "1"})
         except urllib.error.HTTPError as exc:
             if exc.code != 404:
                 raise
@@ -515,6 +635,21 @@ def shutdown() -> None:
                 raise LocalError("controller_shutdown_failed: controller did not exit")
             time.sleep(0.1)
     else:
+        # NOTHING INSTALLED IS NOTHING TO STOP, and that is a success
+        # (fresh-install #39, 2026-09-26). install.sh used to run this with
+        # `|| true`, so a re-run after an install that died before
+        # `service-install` shrugged off "no config" and "no unit". It now
+        # treats a failed stop as a server still running (the #39 trap), so
+        # this answers the real question: was there a service to stop?
+        from . import service
+        try:
+            config = load_config(home)
+        except ConfigError:
+            return
+        observed = service.status(service.mechanism_for(config.backend_kind),
+                                  service.user_home(), runner=service.subprocess_runner)
+        if not observed.installed:
+            return
         act("stop")
 
 

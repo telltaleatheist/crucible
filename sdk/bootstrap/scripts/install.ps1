@@ -226,8 +226,8 @@ if ($have -eq $PySha -and (Test-Path $PythonExe)) {
   if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }
   if (Test-Path -LiteralPath $HostDir) {
     if (Test-Path -LiteralPath $Cmd) {
-      & $Cmd local shutdown
-      if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }
+      $said = @(Native { & $Cmd local shutdown })
+      if ($LASTEXITCODE -ne 0) { $said | Show; Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }
     }
     Move-Item -LiteralPath $HostDir -Destination $Previous -ErrorAction Stop
   }
@@ -266,7 +266,25 @@ if ($gotWheel -ne $want) {
   Remove-Item $WheelPath -Force
   Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"
 }
-if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }
+if (Test-Path -LiteralPath $Cmd) {
+  $Stage = Join-Path $DownloadDir "stage"
+  if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
+  $stopped = $false
+  $null = @(Native { & $PythonExe -m pip install --quiet --no-deps --no-input --target $Stage $WheelPath })
+  if ($LASTEXITCODE -eq 0) {
+    $keptPath = $env:PYTHONPATH
+    $env:PYTHONPATH = $Stage
+    $said = @(Native { & $PythonExe -m crucible.cli local shutdown })
+    $stopped = ($LASTEXITCODE -eq 0)
+    $env:PYTHONPATH = $keptPath
+  }
+  if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
+  if (-not $stopped) {
+    $said = @(Native { & $Cmd local shutdown })
+    $stopped = ($LASTEXITCODE -eq 0)
+  }
+  if (-not $stopped) { Say "host: the running Crucible did not stop cleanly; installing over it:"; $said | Show }
+}
 Say "host: installing Crucible into $HostDir (about a minute)"
 Native { & $PythonExe -m pip install --quiet --disable-pip-version-check --no-warn-script-location --upgrade --no-input $WheelPath } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }

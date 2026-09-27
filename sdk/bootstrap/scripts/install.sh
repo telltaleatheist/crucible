@@ -220,16 +220,20 @@ if [ "$BACKEND" = cuda-linux ]; then
   card="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
   say "prerequisites: $card, driver $driver, compute capability $cap"
 fi
-case " $JOB_TYPES " in
-  *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)
-    command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and there is no ffmpeg on PATH. Install it first; crucible would otherwise install cleanly and refuse its first job" ;;
-  *)
-    if command -v ffmpeg >/dev/null 2>&1; then
-      say "prerequisites: ffmpeg present"
-    else
-      say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; tts, asr, align, rvc and denoise will refuse until it is there"
-    fi ;;
-esac
+if [ "$BACKEND" = cuda-linux ]; then
+  say "prerequisites: ffmpeg is Crucible's own; the first job type that decodes audio places it in $CRUCIBLE_HOME/tools/bin"
+else
+  case " $JOB_TYPES " in
+    *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)
+      command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and this Mac has no ffmpeg on PATH. Install Homebrew's first (brew install ffmpeg); crucible would otherwise install cleanly and refuse its first job" ;;
+    *)
+      if command -v ffmpeg >/dev/null 2>&1; then
+        say "prerequisites: ffmpeg present"
+      else
+        say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; on this Mac tts, asr, align, rvc and denoise will refuse until Homebrew's is installed (brew install ffmpeg)"
+      fi ;;
+  esac
+fi
 if [ -n "$MIN_FREE_GIB" ]; then
   have_gib=$(( free_kib / 1048576 ))
   [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"
@@ -246,6 +250,7 @@ say "server"
 dest="$CRUCIBLE_HOME/server"
 partial="$dest.partial"
 downloads="$CRUCIBLE_HOME/downloads"
+wheel=""
 case "$BACKEND" in
   cuda-linux) py_asset='cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz'; py_sha='faa0758583a63f14c5eee516af82738403b59c13edda6fc0a21d953febd89eed'; py_version='3.11.16'; py_url='https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-install_only.tar.gz' ;;
   mlx-darwin) py_asset='cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz'; py_sha='50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9'; py_version='3.11.16'; py_url='https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16+20260901-aarch64-apple-darwin-install_only.tar.gz' ;;
@@ -257,6 +262,38 @@ crucible_older() {
 }
 if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then
   [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release release and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"
+fi
+quiesced=0
+crucible_quiesce() {
+  if [ ! -x "$dest/bin/crucible" ]; then quiesced=1; return 0; fi
+  if [ -n "$wheel" ] && [ -f "$downloads/$wheel" ]; then
+    stage="$downloads/stage"
+    rm -rf "$stage"
+    if "$dest/bin/python3" -m pip install --quiet --no-deps --no-input --target "$stage" "$downloads/$wheel" >/dev/null 2>&1 \
+      && PYTHONPATH="$stage" "$dest/bin/python3" -m crucible.cli local shutdown; then
+      rm -rf "$stage"; quiesced=1; say "server: the running server was stopped by $RELEASE's own code"; return 0
+    fi
+    rm -rf "$stage"
+    say "server: $RELEASE's code could not stop the running server; asking the installed release to stop it"
+  fi
+  "$dest/bin/crucible" local shutdown || return 1
+  quiesced=1
+}
+crucible_quiesce_after() {
+  if [ "$quiesced" = 1 ]; then return 0; fi
+  say "server: stopping the old server with the release just installed"
+  "$dest/bin/crucible" local shutdown || die "upgrade_stop_failed: the Crucible server that was already running could not be stopped, by the old release or by $RELEASE, so the new one cannot take its place yet. $RELEASE is installed and takes over when the old server next stops: when this machine restarts, or on Windows when Crucible next starts"
+  quiesced=1
+}
+if [ -z "$FROM_SOURCE" ]; then
+  wheel="crucible-$RELEASE-py3-none-any.whl"
+  say "server: $wheel"
+  mkdir -p "$downloads"; rm -f "$downloads/$wheel"
+  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$wheel" "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel"
+  want_sha="$(curl -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256" | awk '{print $1}')" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256"
+  case "$want_sha" in *[!0-9a-f]*|"") die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256 is not a sha256" ;; esac
+  got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"
+  if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi
 fi
 if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then
   say "server: python $py_version is already at $dest"
@@ -283,7 +320,7 @@ else
   _crucible_dest="$dest"; _crucible_partial="$partial/python"; _crucible_previous="$_crucible_dest.previous"
   if [ -e "$_crucible_previous" ]; then echo "upgrade_recovery_required: $_crucible_previous was preserved from an interrupted upgrade" >&2; return 1; fi
   if [ -e "$_crucible_dest" ]; then
-    if [ -x "$_crucible_dest/bin/crucible" ]; then "$_crucible_dest/bin/crucible" local shutdown || return 1; fi
+    crucible_quiesce || return 1
     mv "$_crucible_dest" "$_crucible_previous" || return 1
   fi
   if mv "$_crucible_partial" "$_crucible_dest" && "$_crucible_dest/bin/python3" --version; then
@@ -304,28 +341,22 @@ if [ -n "$FROM_SOURCE" ]; then
   rm -rf "$src"
   git clone --filter=blob:none "https://github.com/telltaleatheist/crucible" "$src" || die "from_source_clone_failed: https://github.com/telltaleatheist/crucible"
   git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"
-  if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi
+  crucible_quiesce || say "server: the running server did not stop; installing the checkout and stopping it with that"
   "$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"
   if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install pystray pillow || die "from_source_install_failed: desktop packages could not be installed"; fi
   printf 'python_sha256=%s\npython_version=%s\nrelease=%s\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/.crucible"
   CRUCIBLE="$dest/bin/crucible"
+  crucible_quiesce_after
   say "server: installed $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"
 else
-  wheel="crucible-$RELEASE-py3-none-any.whl"
-  say "server: $wheel"
-  mkdir -p "$downloads"; rm -f "$downloads/$wheel"
-  curl -fL --retry 3 --retry-delay 2 --create-dirs -o "$downloads/$wheel" "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/$wheel"
-  want_sha="$(curl -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256" | awk '{print $1}')" || die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256"
-  case "$want_sha" in *[!0-9a-f]*|"") die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$RELEASE/crucible-$RELEASE-py3-none-any.whl.sha256 is not a sha256" ;; esac
-  got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"
-  if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi
-  if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi
+  crucible_quiesce || say "server: the running server did not stop; installing $RELEASE and stopping it with that"
   "$dest/bin/python3" -m pip install --upgrade --no-input "$downloads/$wheel" || die "runtime_install_failed: pip would not install $wheel"
   if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install pystray pillow || die "runtime_install_failed: the desktop packages would not install"; fi
   rm -f "$downloads/$wheel"
   printf 'python_sha256=%s\npython_version=%s\nrelease=%s\n' "$py_sha" "$py_version" "$RELEASE" > "$dest/.crucible"
   CRUCIBLE="$dest/bin/crucible"
   "$CRUCIBLE" --version >/dev/null || die "runtime_install_failed: $CRUCIBLE would not run"
+  crucible_quiesce_after
 fi
 
 # --- init ----------------------------------------------------------------

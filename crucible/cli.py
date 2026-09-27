@@ -151,6 +151,13 @@ def _orchestrator_try_again() -> int:
     return EXIT_REFUSED
 
 
+def cmd_guest(args: argparse.Namespace) -> int:
+    """`crucible guest <words…>`: `crucible/host/guestcli.py` (fresh-install #29)."""
+    from .host import guestcli
+
+    return guestcli.run(args.guest_words)
+
+
 def cmd_orchestrator(args: argparse.Namespace) -> int:
     """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
 
@@ -412,12 +419,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         token=token,
     )
     print(f"pairing:  {paired} ({_pairing_permission(paired)})")
-    _print_pairing(
-        args.name if args.name is not None else default_server_name(),
-        args.host,
-        args.port,
-        token,
-    )
+    print(PAIRING_NOT_PRINTED)
     return EXIT_OK
 
 
@@ -594,7 +596,7 @@ def cmd_service_install(args: argparse.Namespace) -> int:
         config.home, name=config.name, port=config.port, token=config.token
     )
     print(f"pairing:  {paired} ({_pairing_permission(paired)})")
-    _print_pairing(config.name, config.host, config.port, config.token)
+    print(PAIRING_NOT_PRINTED)
     from .local import publish_installation
     publish_installation(config.home)
     return EXIT_OK
@@ -3114,10 +3116,9 @@ def _pairing_lines(
     """The lines, or the sentence saying why there are none.
 
     PHASE13-OPERATOR.md section 3.1. A refusal is returned rather than raised
-    because the two callers want different things done with it: `token --url`
-    has nothing else to print and exits 1, while `init` and `service install`
-    have already succeeded and merely have one fewer thing to tell the
-    operator.
+    because `token --url` has nothing else to print and exits 1. (`init` and
+    `service install` called this too until #33; they no longer print the
+    line at all — see `PAIRING_NOT_PRINTED`.)
 
     **The loopback line comes first, always** (PHASE15-HOST.md section 3.6).
     It is what `<CRUCIBLE_HOME>/pairing` holds, and *"`crucible token --url`
@@ -3147,22 +3148,18 @@ def _pairing_lines(
     return lines
 
 
-def _print_pairing(
-    name: str, host: str, port: int, token: str, advertise: tuple[str, ...] = ()
-) -> None:
-    """The one block `init`, `service install` and `token --url` all print.
-
-    Owen, 2026-09-14: nobody types a token twice. The line carries the name,
-    the address and the secret, so the person setting up BookForge pastes one
-    string into one field instead of reading three values off a terminal.
-    """
-    result = _pairing_lines(name, host, port, token, advertise)
-    if isinstance(result, str):
-        print(f"pairing: {result}", file=sys.stderr)
-        return
-    print("pairing: paste one of these into an app's Crucible server door —")
-    for line in result:
-        print(f"  {line}")
+#: What `init` and `service install` say about the pairing line, INSTEAD of
+#: printing it (fresh-install #33, 2026-09-26). They used to print the whole
+#: `crucible://` line, token included, and both run inside every install, so
+#: anything that logged an install captured the secret; the Windows move
+#: already had to redact its own stream. The line is still one string an app
+#: pastes (Owen, 2026-09-14: nobody types a token twice), and it is still in
+#: the pairing file an app on this machine reads by itself. Printing it is
+#: now the job of the one verb whose name says it prints a secret.
+PAIRING_NOT_PRINTED = (
+    "pairing:  the line an app pastes is in that file and is not printed here; "
+    "`crucible token --url` prints it"
+)
 
 
 def cmd_token(args: argparse.Namespace) -> int:
@@ -3571,6 +3568,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     host_parser.set_defaults(func=cmd_orchestrator)
     host_parser.add_argument("--headless", action="store_true", help="Run the controller independently of the tray")
+
+    # FRESH-INSTALL #29 (2026-09-26): the Linux engine's own CLI, from Windows,
+    # as the user the engine runs as. Nobody spells a guest path.
+    guest_parser = subparsers.add_parser(
+        "guest",
+        help="win32 only: run a crucible command inside this PC's Linux engine",
+        description=(
+            "Forward the rest of the line to the `crucible` inside the WSL "
+            "distro this PC's orchestrator manages, as the user its engine runs "
+            "as: `crucible guest install rvc`, `crucible guest doctor`."
+        ),
+    )
+    guest_parser.add_argument("guest_words", nargs=argparse.REMAINDER,
+                              help="the command to run inside the Linux engine")
+    guest_parser.set_defaults(func=cmd_guest)
 
     serve = subparsers.add_parser("serve", help="run the API in the foreground")
     serve.add_argument("--host", default=None, help="bind host (default from config)")

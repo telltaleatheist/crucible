@@ -111,7 +111,7 @@ class OrchestratorPort(Protocol):
     def local_stop(self) -> dict[str, object]:
         """Stop the managed engine and preserve that intent across login."""
 
-    def quit(self) -> None:
+    def quit(self, *, handover: bool = False) -> None:
         """PHASE17 4.4's stop — THE SAME ONE the tray menu's Quit runs.
 
         Release the claim (2.2), let the held distro go (PHASE15 7b.4c), take
@@ -353,9 +353,16 @@ class OrchestratorDoor:
     def check_restartable(self) -> None:
         self._orchestrator.check_restartable()
 
-    def quit(self) -> None:
-        """PHASE17 4.4 — the menu's Quit, reached by the transport instead."""
-        self._orchestrator.quit()
+    def quit(self, *, handover: bool = False) -> None:
+        """PHASE17 4.4 — the menu's Quit, reached by the transport instead.
+
+        `handover` only when asked for (an upgrade's quit, #35),
+        so an orchestrator whose `quit` takes no argument is called as before.
+        """
+        if handover:
+            self._orchestrator.quit(handover=True)
+        else:
+            self._orchestrator.quit()
 
     def info(self) -> dict[str, Any]:
         return self._orchestrator.info()
@@ -559,7 +566,11 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 self._restart()
                 return
             if path == QUIT_PATH:
-                self._quit()
+                # An upgrade's quit says so (fresh-install #35); `local.py`
+                # owns the header's name.
+                from ..local import HANDOVER_HEADER
+
+                self._quit(handover=self.headers.get(HANDOVER_HEADER) == "1")
                 return
             if path != INSTALL_PATH:
                 self._refuse(404, "not_found", self._what_this_door_is())
@@ -687,7 +698,7 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 return
             self._stream(door.restart)
 
-        def _quit(self) -> None:
+        def _quit(self, *, handover: bool = False) -> None:
             """`POST /quit` — PHASE17 4.4. The only non-interactive stop.
 
             **IT ANSWERS BEFORE IT STOPS, AND THE ANSWER IS THE LAST EVENT.**
@@ -711,7 +722,10 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
             """
             if not self._authorised():
                 return
-            door._log.write(f"door: POST {QUIT_PATH} — running the menu's Quit")
+            door._log.write(
+                f"door: POST {QUIT_PATH} — running the menu's Quit"
+                + (" for an upgrade, handing the distro hold over" if handover else "")
+            )
             self._answer({"quit": True, "name": door.name})
             try:
                 self.wfile.flush()
@@ -721,7 +735,7 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 # stayed up because nobody was listening to its goodbye would
                 # be the no-op 4.4 was written about.
                 door._log.write(f"door: the quit answer did not land ({exc}); stopping anyway")
-            door.quit()
+            door.quit(handover=handover)
 
         def _stream(self, sequence: Callable[[Callable[[Event], None]], None]) -> None:
             """The ndjson. Flushed per line: a progress bar that arrives at the

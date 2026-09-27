@@ -176,10 +176,9 @@ export function hostFactsSh(): string {
  * reads off the network that is not bytes is `<wheel>.sha256`, one line.
  */
 export function serverSh(): string {
-  return interpreterSh() + wheelSh();
+  return serverPreludeSh() + wheelFetchSh() + interpreterSh() + wheelInstallSh();
 }
 
-/** The interpreter half: fetch, verify, unpack, swap. Once, ever. */
 /**
  * The prefix `crucible/interpreter.py` puts in front of a progress line, and
  * the three fields `parse_progress_line` accepts. WRITTEN HERE AND PARSED
@@ -223,7 +222,12 @@ export function progressFetchSh(destination: string, url: string): string {
     + `  wait "$fetch_pid" || die "runtime_download_failed: $py_url"\n`;
 }
 
-export function interpreterSh(): string {
+/**
+ * What both halves stand on: the paths, the pin for this backend, the
+ * never-older gate, and `crucible_quiesce`. Emitted once, before the wheel is
+ * fetched, so the gate still refuses before anything downloads.
+ */
+export function serverPreludeSh(): string {
   // The pin, per backend, as a `case` — the generated script is run on a
   // machine whose backend is `$BACKEND` and cannot be known here. Only the two
   // POSIX backends: the Windows interpreter is `install.ps1`'s, from the same
@@ -235,6 +239,7 @@ export function interpreterSh(): string {
   return `dest="$CRUCIBLE_HOME/${SERVER_SUBDIR}"\n`
     + `partial="$dest${PARTIAL_SUFFIX}"\n`
     + `downloads="$CRUCIBLE_HOME/${DOWNLOADS_SUBDIR}"\n`
+    + `wheel=""\n`
     + `case "$BACKEND" in\n`
     + cases
     + `  *) die "unsupported_platform: no interpreter is pinned for $BACKEND" ;;\n`
@@ -251,7 +256,60 @@ export function interpreterSh(): string {
     + `if [ -n "$stamp_release" ] && crucible_older "$RELEASE" "$stamp_release"; then\n`
     + `  [ "$ROLLBACK_TO" = "$RELEASE" ] || die "install_would_downgrade: $dest is the $stamp_release release and this would install $RELEASE over it. Nothing was downloaded. An operator who means to go back names the version: --rollback-to $RELEASE"\n`
     + `fi\n`
-    + `if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
+    + quiesceSh();
+}
+
+/**
+ * `crucible_quiesce`: stop the running server before its tree is replaced,
+ * WITH THE NEW RELEASE'S CODE (2026-09-26, kylies-pc, fresh-install #39).
+ *
+ * The old line was `"$dest/bin/crucible" local shutdown || true`: the
+ * INSTALLED binary, whose ways of reaching root are whatever the old release
+ * knew. 1.0.48's only root door was `wsl.exe -u root`, interop was broken in
+ * that guest, so it could not stop the unit; `|| true` swallowed that, pip
+ * wrote 1.0.49 under the running 1.0.48, and `local start` then rightly
+ * refused the stale engine (`engine_version_stale`). A fix to how Crucible
+ * stops itself could never help the upgrade that ships it.
+ *
+ * So the verified wheel is unpacked beside the tree (`pip install --target`,
+ * no dependencies: they are the installed tree's) and ITS `local shutdown`
+ * runs, on the installed interpreter. That works for the interpreter half
+ * too, which runs this before it moves the old tree aside. When the new code
+ * cannot be staged (no wheel yet: `--from-source`; or a release whose CLI
+ * needs a package the old tree lacks) the installed binary is asked, as
+ * before. And when both fail, `quiesced` stays 0 and the wheel half asks
+ * AGAIN with the freshly installed binary before anything is started
+ * (`crucible_quiesce_after`), so the switch is never left to a stale
+ * process and a refusal names what happened in plain words.
+ */
+export function quiesceSh(): string {
+  return `quiesced=0\n`
+    + `crucible_quiesce() {\n`
+    + `  if [ ! -x "$dest/bin/crucible" ]; then quiesced=1; return 0; fi\n`
+    + `  if [ -n "$wheel" ] && [ -f "$downloads/$wheel" ]; then\n`
+    + `    stage="$downloads/stage"\n`
+    + `    rm -rf "$stage"\n`
+    + `    if "$dest/bin/python3" -m pip install --quiet --no-deps --no-input --target "$stage" "$downloads/$wheel" >/dev/null 2>&1 \\\n`
+    + `      && PYTHONPATH="$stage" "$dest/bin/python3" -m crucible.cli local shutdown; then\n`
+    + `      rm -rf "$stage"; quiesced=1; say "server: the running server was stopped by $RELEASE's own code"; return 0\n`
+    + `    fi\n`
+    + `    rm -rf "$stage"\n`
+    + `    say "server: $RELEASE's code could not stop the running server; asking the installed release to stop it"\n`
+    + `  fi\n`
+    + `  "$dest/bin/crucible" local shutdown || return 1\n`
+    + `  quiesced=1\n`
+    + `}\n`
+    + `crucible_quiesce_after() {\n`
+    + `  if [ "$quiesced" = 1 ]; then return 0; fi\n`
+    + `  say "server: stopping the old server with the release just installed"\n`
+    + `  "$dest/bin/crucible" local shutdown || die "upgrade_stop_failed: the Crucible server that was already running could not be stopped, by the old release or by $RELEASE, so the new one cannot take its place yet. $RELEASE is installed and takes over when the old server next stops: when this machine restarts, or on Windows when Crucible next starts"\n`
+    + `  quiesced=1\n`
+    + `}\n`;
+}
+
+/** The interpreter half: fetch, verify, unpack, swap. Only when the pin moved. */
+export function interpreterSh(): string {
+  return `if [ "$stamp_python_sha" = "$py_sha" ] && [ -x "$dest/bin/python3" ]; then\n`
     + `  say "server: python $py_version is already at $dest"\n`
     + `else\n`
     + `  say "server: python $py_version from python-build-standalone"\n`
@@ -265,20 +323,18 @@ export function interpreterSh(): string {
     // directory IS the interpreter, so the swap moves `python/` rather than the
     // archive's root.
     + `  [ -x "$partial/python/bin/python3" ] || die "runtime_unpack_failed: $py_asset unpacked without a python/bin/python3"\n`
-    + `  ${activateRuntimeSh('"$dest"', '"$partial/python"')} || die "runtime_unpack_failed: the previous runtime was preserved"\n`
+    + `  ${activateRuntimeSh('"$dest"', '"$partial/python"', 'crucible_quiesce || return 1')} || die "runtime_unpack_failed: the previous runtime was preserved"\n`
     + `  rm -rf "$partial" "$downloads/$py_asset"\n`
     + `fi\n`;
 }
 
 /**
- * The wheel half: fetch, verify against the release's own `<wheel>.sha256`, pip
- * it into the interpreter, stamp what is now there.
- *
- * THE SERVER IS SHUT DOWN FIRST, because this rewrites its own `site-packages`
- * under it. `local shutdown` is a no-op on a machine where nothing is running,
- * and `service-install` later in the sequence starts it again.
+ * The wheel half, first part: fetch it and verify it against the release's own
+ * `<wheel>.sha256`. BEFORE the interpreter half since #39 (2026-09-26), so a
+ * verified copy of the new code is on disk for `crucible_quiesce` to stop the
+ * old server with, whichever half gets to it first.
  */
-export function wheelSh(): string {
+export function wheelFetchSh(): string {
   const base = `https://github.com/${RELEASE_REPO}/releases/download/v$RELEASE`;
   return `wheel="${wheelAssetName('$RELEASE')}"\n`
     + `say "server: $wheel"\n`
@@ -287,10 +343,22 @@ export function wheelSh(): string {
     + `want_sha="$(curl -fsSL --retry 3 "${base}/${wheelShaAssetName('$RELEASE')}" | awk '{print $1}')" || die "runtime_download_failed: ${base}/${wheelShaAssetName('$RELEASE')}"\n`
     + `case "$want_sha" in *[!0-9a-f]*|"") die "runtime_download_failed: ${base}/${wheelShaAssetName('$RELEASE')} is not a sha256" ;; esac\n`
     + `got_sha="$($SHA_TOOL "$downloads/$wheel" | awk '{print $1}')"\n`
-    + `if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi\n`
-    // The server is shut down before its own site-packages is rewritten under
-    // it. A no-op where nothing is running; `service-install` starts it again.
-    + `if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi\n`
+    + `if [ "$got_sha" != "$want_sha" ]; then rm -f "$downloads/$wheel"; die "runtime_sha_mismatch: $wheel hashes $got_sha, the release says $want_sha. The download was deleted"; fi\n`;
+}
+
+/**
+ * The wheel half, second part: pip it into the interpreter, stamp what is now
+ * there.
+ *
+ * THE SERVER IS SHUT DOWN FIRST, because this rewrites its own `site-packages`
+ * under it, and by the NEW code (`crucible_quiesce`, #39). A no-op on a
+ * machine where nothing is running; `service-install` later in the sequence
+ * starts it again. When neither release's code could stop it, it is asked
+ * once more by the binary just installed, and refused by name if that fails
+ * too, rather than `|| true` leaving a stale server for `local start` to find.
+ */
+export function wheelInstallSh(): string {
+  return `crucible_quiesce || say "server: the running server did not stop; installing $RELEASE and stopping it with that"\n`
     + `"$dest/bin/python3" -m pip install --upgrade --no-input "$downloads/$wheel" || die "runtime_install_failed: pip would not install $wheel"\n`
     // The tray's two packages, on the platform that has a desktop. Declared in
     // `interpreter.ts` rather than in `pyproject.toml`, so a headless Linux
@@ -299,7 +367,8 @@ export function wheelSh(): string {
     + `rm -f "$downloads/$wheel"\n`
     + `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$RELEASE" > "$dest/${STAMP_NAME}"\n`
     + `CRUCIBLE="$dest/bin/crucible"\n`
-    + `"$CRUCIBLE" --version >/dev/null || die "runtime_install_failed: $CRUCIBLE would not run"\n`;
+    + `"$CRUCIBLE" --version >/dev/null || die "runtime_install_failed: $CRUCIBLE would not run"\n`
+    + `crucible_quiesce_after\n`;
 }
 
 /**

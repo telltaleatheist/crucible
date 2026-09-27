@@ -34,7 +34,7 @@ import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from '../src/interpr
 import { HOST_BACKEND, RELEASE_REPO, wheelAssetName, wheelShaAssetName } from '../src/release.js';
 import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/runtime.js';
 import type { RunResult } from '../src/runner.js';
-import { installJobTypesSh, installSteps, interpreterSh, uninstallSh, wheelSh, type StepPlan } from '../src/steps.js';
+import { installJobTypesSh, installSteps, interpreterSh, serverPreludeSh, uninstallSh, wheelFetchSh, wheelInstallSh, type StepPlan } from '../src/steps.js';
 import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
@@ -224,7 +224,9 @@ function argumentsSh(): string {
  * `ffmpeg` is the one check that is CONDITIONAL, and deliberately: a bare llm
  * droplet does not need it, and refusing one that asked for nothing else
  * would be an installer inventing a requirement. It is required when a job
- * type that decodes audio was asked for, and REPORTED otherwise.
+ * type that decodes audio was asked for, and REPORTED otherwise. ON THE MAC
+ * ONLY since 2026-09-26: on Linux `crucible install` places Crucible's own
+ * pinned build (fresh-install #25), so there is nothing to require.
  *
  * Disk is the other conditional. Since PHASE20 the server itself is a ~30 MB
  * interpreter and a 1 MB wheel, which is not worth a guard; WEIGHTS and job
@@ -244,16 +246,25 @@ function prerequisitesSh(): string {
     '  card="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"',
     '  say "prerequisites: $card, driver $driver, compute capability $cap"',
     'fi',
-    'case " $JOB_TYPES " in',
-    '  *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)',
-    '    command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and there is no ffmpeg on PATH. Install it first; crucible would otherwise install cleanly and refuse its first job" ;;',
-    '  *)',
-    '    if command -v ffmpeg >/dev/null 2>&1; then',
-    '      say "prerequisites: ffmpeg present"',
-    '    else',
-    '      say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; tts, asr, align, rvc and denoise will refuse until it is there"',
-    '    fi ;;',
-    'esac',
+    // ON LINUX, FFMPEG IS CRUCIBLE'S OWN (fresh-install #25, 2026-09-26):
+    // `crucible install <type>` places the pinned build in
+    // `$CRUCIBLE_HOME/tools/bin` for every type that decodes audio, so this
+    // neither refuses nor sends anybody to apt. The Mac has no pinned build
+    // yet and still runs Homebrew's, so there the check stands.
+    'if [ "$BACKEND" = cuda-linux ]; then',
+    '  say "prerequisites: ffmpeg is Crucible\'s own; the first job type that decodes audio places it in $CRUCIBLE_HOME/tools/bin"',
+    'else',
+    '  case " $JOB_TYPES " in',
+    '    *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)',
+    '      command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and this Mac has no ffmpeg on PATH. Install Homebrew\'s first (brew install ffmpeg); crucible would otherwise install cleanly and refuse its first job" ;;',
+    '    *)',
+    '      if command -v ffmpeg >/dev/null 2>&1; then',
+    '        say "prerequisites: ffmpeg present"',
+    '      else',
+    '        say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; on this Mac tts, asr, align, rvc and denoise will refuse until Homebrew\'s is installed (brew install ffmpeg)"',
+    '      fi ;;',
+    '  esac',
+    'fi',
     'if [ -n "$MIN_FREE_GIB" ]; then',
     '  have_gib=$(( free_kib / 1048576 ))',
     '  [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"',
@@ -294,7 +305,7 @@ function fromSourceSh(): string {
     'rm -rf "$src"',
     `git clone --filter=blob:none "https://github.com/${RELEASE_REPO}" "$src" || die "from_source_clone_failed: https://github.com/${RELEASE_REPO}"`,
     'git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"',
-    'if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi',
+    'crucible_quiesce || say "server: the running server did not stop; installing the checkout and stopping it with that"',
     '"$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"',
     `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "from_source_install_failed: desktop packages could not be installed"; fi`,
     // The stamp records the COMMIT as the release, because that is what is
@@ -302,6 +313,7 @@ function fromSourceSh(): string {
     // says so rather than comparing a sha with a version number.
     `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
     'CRUCIBLE="$dest/bin/crucible"',
+    'crucible_quiesce_after',
     'say "server: installed $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"',
   ].join('\n');
 }
@@ -421,11 +433,21 @@ export function generateInstallSh(): string {
       // replaces the second half only, so the first is emitted once, outside
       // the `if` — which is also the one place this file would otherwise have
       // two copies of a pin. Neither branch is the other's fallback.
+      //
+      // THE WHEEL IS FETCHED BEFORE THE INTERPRETER HALF (fresh-install #39,
+      // 2026-09-26), so whichever half replaces the running server's tree
+      // first can stop that server with the NEW release's code
+      // (`crucible_quiesce`). `--from-source` has no wheel to stage, and
+      // falls back to the installed binary and then the new one.
+      lines.push(serverPreludeSh().trimEnd());
+      lines.push('if [ -z "$FROM_SOURCE" ]; then');
+      lines.push(indent(wheelFetchSh().trimEnd()));
+      lines.push('fi');
       lines.push(interpreterSh().trimEnd());
       lines.push('if [ -n "$FROM_SOURCE" ]; then');
       lines.push(indent(fromSourceSh()));
       lines.push('else');
-      lines.push(indent(wheelSh().trimEnd()));
+      lines.push(indent(wheelInstallSh().trimEnd()));
       lines.push('fi');
     } else {
       lines.push(step.sh.trimEnd());
@@ -734,9 +756,12 @@ export function generateInstallPs1(): string {
     '  if ($LASTEXITCODE -ne 0) { Die "runtime_unpack_failed: python.exe in $staged would not run" }',
     '  if (Test-Path -LiteralPath $Previous) { Die "upgrade_recovery_required: $Previous exists from an interrupted upgrade; restore or inspect it before retrying" }',
     '  if (Test-Path -LiteralPath $HostDir) {',
+    // Through `Native` (#34), so a refusal arrives as its own words rather
+    // than as RemoteException lines, and shown only when it IS a refusal:
+    // the success answer is `{"closed": true}`, which says nothing to a person.
     '    if (Test-Path -LiteralPath $Cmd) {',
-    '      & $Cmd local shutdown',
-    '      if ($LASTEXITCODE -ne 0) { Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }',
+    '      $said = @(Native { & $Cmd local shutdown })',
+    '      if ($LASTEXITCODE -ne 0) { $said | Show; Die "upgrade_stop_failed: the old runtime was kept because Crucible did not stop cleanly" }',
     '    }',
     '    Move-Item -LiteralPath $HostDir -Destination $Previous -ErrorAction Stop',
     '  }',
@@ -775,7 +800,35 @@ export function generateInstallPs1(): string {
     '  Remove-Item $WheelPath -Force',
     '  Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"',
     '}',
-    'if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }',
+    // THE NEW RELEASE'S CODE STOPS THE OLD ONE (fresh-install #39, 2026-09-26),
+    // as `crucible_quiesce` does in install.sh. `& $Cmd local shutdown` ran
+    // the INSTALLED release's shutdown, so a fix to how Crucible stops itself
+    // (the guest-token retry for #32, the hold handover for #35) could never
+    // help the upgrade that shipped it. The verified wheel is unpacked beside
+    // the host (`pip install --target`, no dependencies: they are the
+    // installed host's) and its `local shutdown` runs on the installed
+    // interpreter. The installed binary is the fallback. Not fatal, as before
+    // (a tray that is not running is not a failure), but a refusal is shown in
+    // its own words through `Native` (#34), and `{"closed": true}` is not.
+    'if (Test-Path -LiteralPath $Cmd) {',
+    '  $Stage = Join-Path $DownloadDir "stage"',
+    '  if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }',
+    '  $stopped = $false',
+    '  $null = @(Native { & $PythonExe -m pip install --quiet --no-deps --no-input --target $Stage $WheelPath })',
+    '  if ($LASTEXITCODE -eq 0) {',
+    '    $keptPath = $env:PYTHONPATH',
+    '    $env:PYTHONPATH = $Stage',
+    '    $said = @(Native { & $PythonExe -m crucible.cli local shutdown })',
+    '    $stopped = ($LASTEXITCODE -eq 0)',
+    '    $env:PYTHONPATH = $keptPath',
+    '  }',
+    '  if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }',
+    '  if (-not $stopped) {',
+    '    $said = @(Native { & $Cmd local shutdown })',
+    '    $stopped = ($LASTEXITCODE -eq 0)',
+    '  }',
+    '  if (-not $stopped) { Say "host: the running Crucible did not stop cleanly; installing over it:"; $said | Show }',
+    '}',
     // #12: `--no-warn-script-location`, because pip's eleven "is not on PATH"
     // warnings about host\Scripts were the loudest thing an install printed,
     // and none of them is true of how Crucible is started. `--quiet` keeps
