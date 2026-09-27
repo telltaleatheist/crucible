@@ -603,9 +603,20 @@ class PresenceWatcher:
         one mistake here that cannot be undone by pressing the button again.
         """
         result = self._runner.run(wsl_list_argv(), timeout_s=WSL_LIST_TIMEOUT_SECONDS)
+        # ONE LINE, KEYED ON THE CODE (FRESH-INSTALL #10/#17, kylies-pc
+        # 2026-09-26). This logged `result.said()`, which before WSL was live
+        # was wsl.exe's whole usage screen, then its multi-line
+        # WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED text, then "has no installed
+        # distributions". What the reply MEANS goes in the log; the reader
+        # that decides "no distros" is the installer's (`read_wsl_distros`).
+        from .wslstate import wsl_answer_line
+
+        names = read_wsl_distros(result)
+        if names is None:
+            return Distro.UNKNOWN, f"wsl -l -v: {wsl_answer_line(result)}"
         if not result.ok:
-            return Distro.UNKNOWN, f"wsl -l -v: {result.said()}"
-        names = parse_wsl_list(result.stdout)
+            # A fact from the registry WSL itself reads: nothing registered.
+            return Distro.ABSENT, f"wsl -l -v: {wsl_answer_line(result)}; no distributions"
         if self._distro in names:
             return Distro.PRESENT, f'wsl -l -v lists "{self._distro}"'
         listed = ", ".join(names) if names else "nothing"

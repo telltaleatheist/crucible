@@ -88,6 +88,12 @@ HOST_ERROR_CODES: dict[str, str] = {
         "the one after the first. Nothing here can repair that and asking again "
         "would be a loop, so it is terminal for the tray (PHASE19 2.4)."
     ),
+    # PLACEHOLDER (A1, 2026-09-26, FRESH-INSTALL #19): A2 owns the wording.
+    "wsl_reboot_still_owed": (
+        "Windows restarted and has still not finished turning WSL on; it needs "
+        "another Update and restart. Within the restart budget this is "
+        "reboot-pending, and the tray goes on after the restart."
+    ),
     "wsl_outcome_invalid": (
         "`wsl-outcome.json` is present and is not the document PHASE19 2.2 "
         "describes. It is what the tray decides from, so it is refused rather "

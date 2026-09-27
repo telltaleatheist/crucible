@@ -35,7 +35,7 @@ from .. import API_VERSION, VERSION
 from .. import peer as peer_module
 from ..pairing import parse_pairing_line
 from . import door as door_module
-from . import installer, menu, outcome, startup
+from . import installer, menu, outcome, startup, wslstate
 from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
 from .door import OrchestratorDoor, serve
 from .errors import HostError
@@ -746,10 +746,15 @@ class Host:
                                                    orchestrator did not start is
                                                    watched and never acted on.
             `[orchestrator] wsl = "never"`      -> `declined`, recorded once.
+            outcome is a transient `cannot`     -> re-checked by what is live
+                                                   (FRESH-INSTALL #16/#18); live
+                                                   now is the move, resumed.
             outcome is `cannot`                 -> `cannot`, nothing. A person
                                                    changes the BIOS, the VPN or
                                                    the distro and presses Try
-                                                   again (2.5).
+                                                   again (2.5): the tray menu or
+                                                   `crucible orchestrator
+                                                   --try-again`.
             outcome is `failed`, attempts >= 2  -> `failed`, nothing.
             outcome is `reboot-pending`         -> the move, resumed (2.4).
             otherwise                           -> probe the table; a row the
@@ -791,6 +796,30 @@ class Host:
                 f'([{CONSENT_TABLE}] {WSL_KEY} = "{WSL_NEVER}"); it stays native'
             )
             return outcome.DECLINED
+        if (
+            previous is not None
+            and previous.state == outcome.CANNOT
+            and previous.code in outcome.TRANSIENT_CANNOT_CODES
+        ):
+            # FRESH-INSTALL #16/#18 (kylies-pc, 2026-09-26). The machine was
+            # fixed by one more restart, and the tray came back, logged "no
+            # installed distributions" and did NOTHING, because the file still
+            # said `cannot`. A `cannot` whose cause goes away by itself (a
+            # restart servicing still owed) is re-checked here, at every start,
+            # by what is live; nothing is enabled and no prompt is raised by
+            # the check. Live now is the move, resumed.
+            try:
+                live = wslstate.probe_live(self._c.runner)
+            except Exception as exc:  # noqa: BLE001 - never raise out of the thread
+                self._c.log.write(f"engine: the WSL re-check crashed: {type(exc).__name__}: {exc}")
+                return outcome.CANNOT
+            self._c.log.write(
+                f"engine: {previous.code} was recorded {previous.at}; checked again "
+                f"at this start: {live.line()}"
+            )
+            if live.live:
+                return self._move("resumed: WSL is live now")
+            return outcome.CANNOT
         if previous is not None and previous.state == outcome.CANNOT:
             self._c.log.write(
                 f"engine: this machine cannot run the Linux engine "
@@ -856,7 +885,9 @@ class Host:
             return outcome.FAILED
         finally:
             door.release()
-        self._refresh()
+            # Every ending changes what the menu offers (Try again, the
+            # restart line), not only success.
+            self._refresh()
         return outcome.DONE
 
     def stopped_windows_catalog(self) -> CatalogPort:
@@ -1195,11 +1226,29 @@ class Host:
     # ------------------------------------------------------------------ menu
 
     def model(self) -> menu.MenuModel:
+        try:
+            recorded = outcome.read(self._c.home)
+        except HostError:
+            recorded = None
         return menu.menu_model(
             self._c.presence.distro,
             self._c.presence.engine,
             self._c.presence.owner,
+            None if recorded is None else recorded.state,
         )
+
+    def try_again(self) -> None:
+        """PHASE19 2.5's Try again, from the tray (FRESH-INSTALL #16, 2026-09-26).
+
+        The same move and the same claim as `POST /install`: `_move` runs it
+        under the door's claim, so a press while a move is already running is
+        the one in flight rather than a second walk. On a thread, because the
+        menu handler is the icon's own loop.
+        """
+        threading.Thread(
+            target=self._move, args=("tried again from the tray menu",),
+            name="crucible-try-again", daemon=True,
+        ).start()
 
     def on_click(self, item_id: str) -> None:
         self._c.log.write(f"menu: {item_id}")
@@ -1210,6 +1259,8 @@ class Host:
             # on the page, the page posts the task, the server relays to this
             # host's door. One door, one sequence, one place a person watches.
             open_console(self._c.home, self._c.log)
+        elif item_id == menu.TRY_AGAIN:
+            self.try_again()
         elif item_id == menu.RESTART_ENGINE:
             if self._refuse_acting_on_a_found_engine("restart"):
                 return
@@ -1547,7 +1598,13 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
     Windows config has no Windows engine, so there is no catalog to move from
     and `migrate-weights` says exactly that.
     """
-    def install_sequence(emit: Callable[[installer.Event], None], *, resuming: bool) -> None:
+    def install_sequence(
+        emit: Callable[[installer.Event], None],
+        *,
+        restarts: int,
+        rebooted: bool,
+        walks: list[installer.EngineInstall],
+    ) -> None:
         if context.presence.owner is Owner.WSL_UNIT:
             # Port 7100 now belongs to the destination. It must never be read
             # as the Windows source on a retry after an interrupted cleanup.
@@ -1574,19 +1631,23 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
                 ENGINE_PORT,
                 where=f'the "{CRUCIBLE_DISTRO}" engine',
             )
-        installer.EngineInstall(
+        walk = installer.EngineInstall(
             context.runner,
             emit,
             release=context.release,
             home=context.home,
             install_sh_url=INSTALL_SH_URL.format(release=context.release),
-            resuming=resuming,
+            restarts=restarts,
+            rebooted=rebooted,
+            log=context.log.write,
             windows_catalog=windows,
             guest_catalog=guest,
             stop_windows_server=host.stop_windows_for_move,
             switch_pairing=host.finish_wsl_move,
             windows_after_switch=host.stopped_windows_catalog,
-        ).run()
+        )
+        walks.append(walk)
+        walk.run()
 
     def run_sequence(emit: Callable[[installer.Event], None]) -> None:
         """The move, and the ONE place its ending is recorded (PHASE19 2.2).
@@ -1608,7 +1669,6 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
         with host._operation:
             host.check_restartable()
             previous = outcome.read(context.home)
-            resuming = previous is not None and previous.state == outcome.REBOOT_PENDING
             # 2.2: a `failed` is retried ONCE. The count is of consecutive
             # failures, so anything else resets it — a machine that failed,
             # was fixed and then failed again gets its retry back.
@@ -1617,36 +1677,88 @@ def _sequence(context: HostContext, host: Host) -> Callable[[Callable[[installer
                 if previous is not None and previous.state == outcome.FAILED
                 else 1
             )
-            try:
-                install_sequence(emit, resuming=resuming)
-            except HostError as exc:
-                outcome.write(
+            # THE RESTART BUDGET (FRESH-INSTALL #19, 2026-09-26). Only a
+            # `reboot-pending` carries its count on; a `cannot` that is being
+            # tried again (a person's Try again, or the tray's re-probe of a
+            # transient one) starts a fresh budget, because somebody or
+            # something has changed the machine since.
+            restarts = 0
+            rebooted = True
+            if previous is not None and previous.state == outcome.REBOOT_PENDING:
+                restarts = max(previous.restarts, 1)
+                rebooted = _booted_since(previous)
+            walks: list[installer.EngineInstall] = []
+            recorded = False
+
+            def record(state: str, code: str | None, sentence: str | None) -> None:
+                nonlocal recorded
+                if recorded:
+                    return
+                recorded = True
+                written = outcome.write(
                     context.home,
-                    state=outcome.classify(exc.code),
-                    code=exc.code,
-                    sentence=exc.message,
+                    state=state,
+                    code=code,
+                    sentence=sentence,
                     release=context.release,
                     attempts=attempt,
+                    restarts=walks[-1].restarts if walks else restarts,
                 )
+                context.log.write(
+                    f"outcome: {outcome.path(context.home)} says {written.state}"
+                    + (f" ({written.code})" if written.code else "")
+                    + f", written {written.at}"
+                )
+
+            def emit_recorded(event: installer.Event) -> None:
+                # THE RECORD BEFORE THE REPORT (FRESH-INSTALL #9, 2026-09-26).
+                # The terminal `failed` event used to go out first and the file
+                # was written only when the exception unwound, so whoever read
+                # the stream (the console, an app) could look for
+                # `wsl-outcome.json` before it existed. The file is the one
+                # owner of the ending, so it is written before anybody is told.
+                if event.event == "failed":
+                    code = event.data.get("code")
+                    message = event.data.get("message")
+                    code = code if isinstance(code, str) else "task_failed"
+                    record(
+                        outcome.classify(code),
+                        code,
+                        message if isinstance(message, str) else None,
+                    )
+                elif event.event == "done":
+                    record(outcome.DONE, None, None)
+                emit(event)
+
+            try:
+                install_sequence(
+                    emit_recorded, restarts=restarts, rebooted=rebooted, walks=walks
+                )
+            except HostError as exc:
+                record(outcome.classify(exc.code), exc.code, exc.message)
                 raise
             except Exception as exc:  # noqa: BLE001 - an ending is always recorded
-                outcome.write(
-                    context.home,
-                    state=outcome.FAILED,
-                    code="task_failed",
-                    sentence=f"{type(exc).__name__}: {exc}",
-                    release=context.release,
-                    attempts=attempt,
-                )
+                record(outcome.FAILED, "task_failed", f"{type(exc).__name__}: {exc}")
                 raise
-            outcome.write(
-                context.home,
-                state=outcome.DONE,
-                release=context.release,
-                attempts=attempt,
-            )
+            record(outcome.DONE, None, None)
 
     return run_sequence
+
+
+def _booted_since(previous: outcome.Outcome) -> bool:
+    """Has Windows booted since this outcome was written? (FRESH-INSTALL #19)
+
+    A restart that did not happen spends nothing from the restart budget: a
+    tray restarted by an upgrade (kylies-pc went through three releases in one
+    evening) or a Fast Startup "shut down" would otherwise count as restarts
+    that failed to commit WSL. Unknown on either side is taken as "yes", which
+    is how the move behaved before the boot time was read at all.
+    """
+    boot = wslstate.booted_at()
+    at = previous.at_epoch()
+    if boot is None or at is None:
+        return True
+    return boot > at
 
 
 def _guest_line(context: HostContext) -> str | None:

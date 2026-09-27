@@ -38,6 +38,287 @@ NO_HYPERVISOR = re.compile(
 PROBE_TIMEOUT_SECONDS = 60.0
 
 
+# ------------------------------------------------ what wsl.exe's answer MEANS
+#
+# FRESH-INSTALL #10, #15, #17 (kylies-pc, 2026-09-26). Three readings of
+# wsl.exe went wrong on one machine in one hour:
+#
+#   * before WSL was live, `wsl -l -v` printed wsl.exe's whole usage screen, and
+#     the tray logged all of it as the "presence";
+#   * after the features were enabled but before a restart had committed them,
+#     wsl.exe answered `WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED`, the table read
+#     that as `wsl_missing`, and the resume ran `wsl --install` under UAC AGAIN,
+#     which re-pended the very servicing transaction the restart was for;
+#   * `Win32_OptionalFeature InstallState = 1` said "enabled" the whole time,
+#     while CBS had the package at "Install Pending" and there was no lxss.sys.
+#
+# So "is WSL live" is keyed on what wsl.exe ANSWERS, by its machine-readable
+# code, and "is a restart still owed" on what servicing says (CBS
+# RebootPending, PendingFileRenameOperations). InstallState is read too, but
+# only as a fact for the log (#11) and as a gate on the noisy pending signals:
+# never on its own.
+
+#: The machine-readable part of a wsl.exe refusal: `Error code:
+#: Wsl/Service/WSL_E_DISTRO_NOT_FOUND` (measured on owens-pc, 2026-09-26), or
+#: an HCS code. Codes are not localised; the sentences around them are.
+WSL_ERROR_CODE = re.compile(r"\b((?:WSL|HCS)_E_[A-Z0-9_]+)\b")
+
+#: The answers that mean "WSL is not live yet, and enabling it is what's owed".
+COMPONENT_REQUIRED_CODES: frozenset[str] = frozenset(
+    {"WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED", "WSL_E_OPTIONAL_COMPONENT_NOT_ENABLED"}
+)
+
+#: The answers that mean WSL IS live and simply has nothing registered.
+NO_DISTRO_CODES: frozenset[str] = frozenset(
+    {"WSL_E_DEFAULT_DISTRO_NOT_FOUND", "WSL_E_DISTRO_NOT_FOUND"}
+)
+
+#: Option names from wsl.exe's usage screen. They are not localised, and the
+#: inbox stub on a machine without the feature prints the usage screen instead
+#: of an answer. Three of them in one reply is the usage screen and not a
+#: sentence that happens to name an option.
+_USAGE_OPTIONS = ("--install", "--list", "--exec", "--distribution", "--shutdown", "--help")
+
+#: The two features `wsl --install --no-distribution` enables.
+WSL_FEATURES: tuple[str, ...] = ("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")
+
+#: `Win32_OptionalFeature.InstallState`: 1 enabled, 2 disabled, 3 absent.
+FEATURE_STATES = {1: "on", 2: "off", 3: "absent", 4: "unknown"}
+
+FEATURE_QUERY_TIMEOUT_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class WslAnswer:
+    """What ONE wsl.exe reply means, as a word, and the code it carried.
+
+    `kind` is one of:
+      live                the command worked
+      no_distros          WSL is live and has nothing registered
+      component_required  the features are not live (off, or awaiting a restart)
+      stub                the inbox wsl.exe answered with its usage screen
+      no_hypervisor       Windows cannot start a virtual machine
+      error               another WSL_E_/HCS_E_ code
+      unreadable          no code, no usage screen: nothing to key on
+    """
+
+    kind: str
+    code: str = ""
+    #: The first line of the reply, kept ONLY when there is no code to name
+    #: (`unreadable`): one line of evidence, never the whole screen.
+    first: str = ""
+
+    @property
+    def live(self) -> bool:
+        return self.kind in ("live", "no_distros")
+
+    def line(self) -> str:
+        """One line for host.log. Never wsl.exe's own prose (#10, #17)."""
+        words = {
+            "live": "WSL is live",
+            "no_distros": "WSL is live with no distributions",
+            "component_required": "WSL is not live yet: its Windows features are off or waiting for a restart",
+            "stub": "WSL is not installed yet (wsl.exe answered with its usage text)",
+            "no_hypervisor": "Windows cannot start a virtual machine",
+            "error": "wsl.exe refused",
+            "unreadable": "wsl.exe gave no answer this build can read",
+        }[self.kind]
+        if self.code == "WSL_E_DISTRO_NOT_FOUND":
+            words = "WSL is live and that distribution is not registered"
+        if self.code:
+            return f"{words} ({self.code})"
+        return f"{words}: {self.first}" if self.first else words
+
+
+def read_wsl_answer(result: RunResult) -> WslAnswer:
+    """Classify a wsl.exe reply by its code, never by its localised sentence."""
+    if result.ok:
+        return WslAnswer("live")
+    text = f"{result.stdout}\n{result.stderr}\n{result.failure or ''}".replace("\x00", "")
+    found = WSL_ERROR_CODE.search(text)
+    code = found.group(1) if found else ""
+    if code in COMPONENT_REQUIRED_CODES:
+        return WslAnswer("component_required", code)
+    if code in NO_DISTRO_CODES:
+        return WslAnswer("no_distros", code)
+    if (
+        code == "HCS_E_HYPERV_NOT_INSTALLED"
+        or "0x80370102" in text.lower()
+        or (not code and NO_HYPERVISOR.search(text))
+    ):
+        return WslAnswer("no_hypervisor", code or "HCS_E_HYPERV_NOT_INSTALLED")
+    if code:
+        return WslAnswer("error", code)
+    if sum(1 for option in _USAGE_OPTIONS if option in text) >= 3:
+        return WslAnswer("stub")
+    # The pre-store inbox wsl.exe with the feature off says so by HRESULT.
+    if "0x8007019e" in text.lower():
+        return WslAnswer("component_required", "0x8007019e")
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return WslAnswer("unreadable", first=first[:160])
+
+
+def wsl_answer_line(result: RunResult) -> str:
+    """`read_wsl_answer(result).line()`, for callers that only log."""
+    return read_wsl_answer(result).line()
+
+
+def feature_query_argv() -> list[str]:
+    """InstallState of both WSL features, one `Name=State` per line. No admin.
+
+    `Get-CimInstance Win32_OptionalFeature` answers a standard user (measured on
+    owens-pc, 2026-09-26, 1.1 s); `Get-WindowsOptionalFeature` needs elevation.
+    """
+    names = " or ".join(f"Name='{name}'" for name in WSL_FEATURES)
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        f'Get-CimInstance Win32_OptionalFeature -Filter "{names}" | '
+        "ForEach-Object { $_.Name + '=' + $_.InstallState }",
+    ]
+
+
+def parse_features(text: str) -> dict[str, int | None]:
+    """`{feature: InstallState}`, None for a feature the query did not name."""
+    states: dict[str, int | None] = {name: None for name in WSL_FEATURES}
+    for raw in text.splitlines():
+        name, _, value = raw.strip().partition("=")
+        if name in states and value.strip().isdigit():
+            states[name] = int(value.strip())
+    return states
+
+
+#: Where servicing says a restart is still owed. Read, never written.
+CBS_REBOOT_PENDING_KEY = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+)
+WU_REBOOT_REQUIRED_KEY = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+)
+SESSION_MANAGER_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager"
+
+
+def servicing_signals() -> tuple[str, ...] | None:
+    """Which restart-owed signals Windows is raising, or None off Windows.
+
+    `cbs` (Component Based Servicing has a RebootPending key) is the one that
+    speaks for the WSL features: DISM sets it when an enable needs a restart to
+    commit. `pending-renames` (PendingFileRenameOperations) and `windows-update`
+    (RebootRequired) are generic, and on a live machine one of them is often
+    set for somebody else's reasons (owens-pc had 70 characters of renames with
+    WSL perfectly live, 2026-09-26), so `LiveWsl.restart_owed` counts them only
+    while the features say they are on and wsl.exe says they are not live.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+    signals: list[str] = []
+    for name, key in (("cbs", CBS_REBOOT_PENDING_KEY), ("windows-update", WU_REBOOT_REQUIRED_KEY)):
+        try:
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key))
+            signals.append(name)
+        except OSError:
+            pass
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SESSION_MANAGER_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, "PendingFileRenameOperations")
+            if value:
+                signals.append("pending-renames")
+    except OSError:
+        pass
+    return tuple(signals)
+
+
+def booted_at() -> float | None:
+    """When this machine last booted, as a Unix time, or None off Windows.
+
+    `GetTickCount64` runs through sleep and through a Fast Startup "shut down",
+    which is the point: a Fast Startup boot never commits servicing (#14), so it
+    must not count as the restart Crucible asked for either.
+    """
+    try:
+        import ctypes
+
+        tick = ctypes.windll.kernel32.GetTickCount64  # type: ignore[attr-defined]
+    except (ImportError, AttributeError, OSError):
+        return None
+    import time
+
+    tick.restype = ctypes.c_ulonglong
+    return time.time() - tick() / 1000.0
+
+
+@dataclass(frozen=True)
+class LiveWsl:
+    """Is WSL live, and if not, is a restart what it is waiting for (#15)."""
+
+    answer: WslAnswer
+    #: `{feature: InstallState}`; None where the query could not say.
+    features: dict[str, int | None]
+    #: `servicing_signals()`, or None when there is no registry to ask.
+    signals: tuple[str, ...] | None
+
+    @property
+    def live(self) -> bool:
+        return self.answer.live
+
+    @property
+    def features_on(self) -> bool:
+        return all(self.features.get(name) == 1 for name in WSL_FEATURES)
+
+    @property
+    def restart_owed(self) -> bool:
+        """Enabled, not live, and servicing says it is waiting on a restart.
+
+        CBS RebootPending on its own is enough once wsl.exe says the component
+        is required: that is exactly the enable-then-restart gap. The generic
+        signals count only when both features also report on, so a stray
+        rename queued by some other program never stands in for "enable WSL".
+        """
+        if self.live or self.answer.kind not in ("component_required", "stub", "unreadable"):
+            return False
+        signals = self.signals or ()
+        if "cbs" in signals:
+            return True
+        return self.features_on and bool(signals)
+
+    def features_line(self) -> str:
+        return ", ".join(
+            f"{name} {FEATURE_STATES.get(state, 'unreadable') if state is not None else 'unreadable'}"
+            for name, state in self.features.items()
+        )
+
+    def line(self) -> str:
+        """One line for host.log and the event stream."""
+        signals = "unreadable" if self.signals is None else (", ".join(self.signals) or "none")
+        owed = "; a restart is still owed" if self.restart_owed else ""
+        return (
+            f"{self.answer.line()}; features: {self.features_line()}; "
+            f"restart signals: {signals}{owed}"
+        )
+
+
+def probe_live(
+    runner: Runner,
+    *,
+    status: RunResult | None = None,
+    signals: Callable[[], tuple[str, ...] | None] = servicing_signals,
+) -> LiveWsl:
+    """`wsl --status` by its code, the features, and servicing's signals.
+
+    `status` is the `wsl --status` reply when the caller already has one (the
+    walk does), so the probe is not asked twice.
+    """
+    if status is None:
+        status = runner.run(["wsl.exe", "--status"], timeout_s=PROBE_TIMEOUT_SECONDS)
+    queried = runner.run(feature_query_argv(), timeout_s=FEATURE_QUERY_TIMEOUT_SECONDS)
+    features = parse_features(queried.stdout) if queried.ok else {name: None for name in WSL_FEATURES}
+    return LiveWsl(answer=read_wsl_answer(status), features=features, signals=signals())
+
+
 @dataclass
 class Evidence:
     """Everything the probes have answered so far, for rows that need two facts."""
@@ -80,12 +361,15 @@ def _systemd_on(result: RunResult) -> bool:
 Predicate = Callable[[RunResult, Evidence], bool]
 
 MEANS: dict[str, Predicate] = {
-    "virtualization_disabled": lambda result, _: (
-        not result.ok
-        and NO_HYPERVISOR.search(f"{result.stdout}{result.stderr}{result.failure or ''}")
-        is not None
-    ),
-    "wsl_missing": lambda result, _: not result.ok,
+    # By the CODE first (#15): a component-required answer whose prose happens
+    # to mention the virtual machine platform is a feature to enable, not a
+    # firmware setting, and only the code tells them apart. The expression is
+    # still the reading for a reply that carries no code at all.
+    "virtualization_disabled": lambda result, _: read_wsl_answer(result).kind == "no_hypervisor",
+    # By what wsl.exe ANSWERS (#15): a live WSL with no default distribution
+    # can fail `--status` with WSL_E_DEFAULT_DISTRO_NOT_FOUND, and reading
+    # that as "missing" would put a live machine through `wsl --install`.
+    "wsl_missing": lambda result, _: not read_wsl_answer(result).live,
     "wsl1_only": lambda result, _: re.search(
         r"Default Version:\s*1\b", result.stdout, re.IGNORECASE
     )

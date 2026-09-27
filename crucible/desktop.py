@@ -107,6 +107,31 @@ def remove_desktop() -> None:
         (Path.home() / "Library" / "LaunchAgents" / (LABEL + ".plist")).unlink(missing_ok=True)
 
 
+def _move_items(home: Path, retrying: bool, try_again: object) -> list:
+    """The Linux-engine move's items, from `wsl-outcome.json` (FRESH-INSTALL #16).
+
+    `host.menu.outcome_items` decides WHICH (Try again on `cannot`/`failed`, a
+    restart line on `reboot-pending`) so this icon and the host's own model
+    cannot disagree; this only turns them into pystray items. Windows only:
+    the move exists nowhere else.
+    """
+    if sys.platform != "win32":
+        return []
+    import pystray
+    from .host import menu as host_menu, outcome
+    from .host.errors import HostError
+
+    try:
+        recorded = outcome.read(home)
+    except HostError:
+        recorded = None
+    items = []
+    for entry in host_menu.outcome_items(None if recorded is None else recorded.state, busy=retrying):
+        handler = (lambda *_: try_again()) if entry.item_id == host_menu.TRY_AGAIN else None  # type: ignore[operator]
+        items.append(pystray.MenuItem(entry.label, handler, enabled=entry.enabled))
+    return items
+
+
 def tray() -> None:
     from .processlock import ProcessLock
     home = crucible_home()
@@ -146,6 +171,7 @@ def _run_tray(home: Path) -> None:
         if observed.get("role") != "orchestrator":
             raise local.LocalError("wrong_controller: port 7101 is occupied")
     stopped = threading.Event()
+    retrying = threading.Event()
     busy = threading.Lock()
     state = {"state": "starting", "detail": "Starting Crucible"}
     notice = {"message": "", "adopt": False}
@@ -164,6 +190,7 @@ def _run_tray(home: Path) -> None:
                          "Enable Tailscale sharing")
         icon.menu = pystray.Menu(
             pystray.MenuItem(notice["message"] or state["detail"], None, enabled=False),
+            *_move_items(home, retrying.is_set(), try_again),
             pystray.MenuItem("Open Crucible", lambda *_: action("open-console")),
             pystray.MenuItem("Connect an app…", lambda *_: action("connect")),
             pystray.MenuItem("Start Crucible", lambda *_: action("start"), enabled=state["state"] != "running"),
@@ -204,6 +231,37 @@ def _run_tray(home: Path) -> None:
                 busy.release()
                 refresh()
         threading.Thread(target=run, daemon=True).start()
+
+    def try_again() -> None:
+        """FRESH-INSTALL #16: the Linux-engine move once more, from the menu.
+
+        Its own thread and not `busy`: a move can run for many minutes, and the
+        status line should keep updating meanwhile. Each plain line the move
+        reports becomes the menu's header line.
+        """
+        if retrying.is_set():
+            return
+        retrying.set()
+
+        def run() -> None:
+            from .host.errors import HostError
+            from .host.retry import try_again as run_try_again
+
+            def say(line: str) -> None:
+                notice["message"] = line
+                refresh()
+
+            try:
+                ended = run_try_again(home, say)
+                if ended is not None and ended.sentence:
+                    notice["message"] = ended.sentence
+            except (HostError, OSError) as exc:
+                notice["message"] = str(exc)
+            finally:
+                retrying.clear()
+                refresh()
+
+        threading.Thread(target=run, name="crucible-try-again", daemon=True).start()
 
     def close() -> None:
         stopped.set()

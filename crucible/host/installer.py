@@ -168,6 +168,45 @@ REBOOT_AGAIN_SENTENCE = (
     "is a machine somebody has to look at."
 )
 
+#: PLACEHOLDER (A1, 2026-09-26): the words are A2's (the host message table and
+#: the installer's console lines). `wsl_reboot_still_owed`: a restart Crucible
+#: asked for happened, and Windows still has not finished turning WSL on.
+REBOOT_STILL_OWED_SENTENCE = (
+    "Windows restarted but has not finished turning on WSL yet. Use Update and "
+    "restart once more; Crucible goes on by itself after it."
+)
+
+#: FRESH-INSTALL #19 (kylies-pc, 2026-09-26): how many restarts the move asks
+#: for, each judged by the live probe (`wslstate.probe_live`), before it records
+#: `cannot`. The first restart after an enable can be deferred by servicing
+#: when a Windows update was staged minutes earlier ("Deferring startup
+#: processing ... Reboot mark set" in CBS.log), and the second committed both.
+#: One restart is not evidence that restarting will not help; three is the
+#: plan's ceiling ("allow 2-3 restarts").
+RESTART_BUDGET = 3
+
+
+def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
+    """Per feature: already on, turned on now, or still off (FRESH-INSTALL #11).
+
+    kylies-pc's log could not say whether the enable found the features on
+    (they had been enabled on 2026-09-07) or turned them on itself. This line is
+    that answer, from InstallState before and after the elevated command.
+    """
+    words: list[str] = []
+    for name in wslstate.WSL_FEATURES:
+        was, now = before.features.get(name), after.features.get(name)
+        if was == 1:
+            said = "was already on"
+        elif now == 1:
+            said = "turned on now"
+        elif now is None:
+            said = "state unreadable"
+        else:
+            said = f"still {wslstate.FEATURE_STATES.get(now, 'unknown')}"
+        words.append(f"{name} {said}")
+    return "; ".join(words) + f"; then: {after.answer.line()}"
+
 
 #: How long the move waits for the restarted guest to answer. A first boot of
 #: Canonical's image with cloud-init still on took about 40 s on kylies-pc, so
@@ -273,6 +312,9 @@ class EngineInstall:
         distro: str = CRUCIBLE_DISTRO,
         elevate: bool = True,
         resuming: bool = False,
+        restarts: int = 0,
+        rebooted: bool = True,
+        log: Callable[[str], None] | None = None,
         share_lan: bool | None = None,
         windows_catalog: CatalogPort | None = None,
         guest_catalog: CatalogPort | None = None,
@@ -304,12 +346,25 @@ class EngineInstall:
         #: PHASE19 2.4: is this run the one AFTER the reboot Windows demanded?
         #:
         #: Resume is "run the sequence from the top", because every step is
-        #: already idempotent — so the only thing this changes is what a SECOND
-        #: reboot demand means. The first is a machine doing what Windows asked;
-        #: the second, on a machine that has already restarted, is a state
-        #: nothing here can repair, and asking for a third restart would be a
-        #: loop with a person in it.
+        #: already idempotent — so the only thing this changes is what a later
+        #: reboot demand means. It used to make the SECOND demand terminal;
+        #: FRESH-INSTALL #19 (2026-09-26) replaced that with the restart budget
+        #: below, and `resuming` now only means "at least one restart was
+        #: already asked for" to a caller that does not pass `restarts`.
         self._resuming = resuming
+        #: THE RESTART BUDGET (FRESH-INSTALL #19, 2026-09-26). `restarts` is how
+        #: many restarts this move has already asked for in a row, read off the
+        #: outcome file; a resume from a file written before the count existed
+        #: is one. `rebooted` is whether Windows has actually booted since the
+        #: last ask (`app._sequence` compares the boot time with the outcome's
+        #: `at`): a tray restarted by an upgrade, or a Fast Startup "shut down",
+        #: is not the restart that was asked for and spends nothing.
+        #: `self.restarts` is what the caller records if this run stops for
+        #: another restart.
+        self.restarts = max(restarts, 1 if resuming else 0)
+        self._rebooted = rebooted
+        #: host.log, for the few lines that must outlive the event ring (#11).
+        self._log = log
         #: Whether this install should open the LAN door (`crucible lan`).
         #:
         #: THREE STATES, and `None` is the useful one. `True`/`False` is an
@@ -416,6 +471,50 @@ class EngineInstall:
     def _fail(self, code: str, message: str) -> HostError:
         self._emit(Event("failed", {"code": code, "message": message}))
         return HostError(code, message)
+
+    def _said(self, text: str) -> None:
+        """A line for the stream AND for host.log (FRESH-INSTALL #11).
+
+        `_line` reaches only the event ring, and the tray's own move has no
+        reader on it: "did enabling WSL raise a prompt" was unanswerable from
+        the one file a person could send. The WSL-state lines are few and they
+        are the ones that matter after the fact, so they go to both.
+        """
+        self._line(text)
+        if self._log is not None:
+            self._log(text)
+
+    def _restart_owed(self) -> HostError:
+        """Stop for a restart, within the budget (FRESH-INSTALL #19, 2026-09-26).
+
+        `self.restarts` counts the restarts this move has asked for. A restart
+        is spent only when Windows really booted since the last ask
+        (`self._rebooted`); otherwise the same ask stands. Past
+        `RESTART_BUDGET` restarts the move is `cannot` (`wsl_reboot_again`),
+        which the tray still re-probes at every start (`outcome.
+        TRANSIENT_CANNOT_CODES`), so a later restart that commits WSL resumes
+        the move with nobody pressing anything.
+        """
+        if self.restarts == 0:
+            self.restarts = 1
+            code, sentence = "wsl_reboot_required", REBOOT_SENTENCE
+            note = "the first restart this move asks for"
+        elif not self._rebooted:
+            code, sentence = (
+                ("wsl_reboot_required", REBOOT_SENTENCE)
+                if self.restarts == 1
+                else ("wsl_reboot_still_owed", REBOOT_STILL_OWED_SENTENCE)
+            )
+            note = "Windows has not booted since it was asked, so the same ask stands"
+        elif self.restarts >= RESTART_BUDGET:
+            code, sentence = "wsl_reboot_again", REBOOT_AGAIN_SENTENCE
+            note = "the budget is spent; the tray re-checks at every start"
+        else:
+            self.restarts += 1
+            code, sentence = "wsl_reboot_still_owed", REBOOT_STILL_OWED_SENTENCE
+            note = "Windows restarted and servicing still owes one"
+        self._said(f"wsl: {code}: restart {self.restarts} of {RESTART_BUDGET} ({note})")
+        return self._fail(code, sentence)
 
     def _guest_facts(self) -> tuple[str, str, str]:
         """The guest's home, its console script, and its server's name.
@@ -583,6 +682,28 @@ class EngineInstall:
                 # distro. The sentence is the table's and the host adds none.
                 raise self._fail(state.code, state.sentence + " " + state.action_text)
             if state.action_kind == "run-elevated":
+                # WHAT IS LIVE, BEFORE ANY UAC (FRESH-INSTALL #15, 2026-09-26).
+                # On kylies-pc the features were enabled and waiting for a
+                # restart to commit; the resume read that as "missing", ran
+                # `wsl --install` under UAC again, and the DISM call re-pended
+                # the very transaction the restart was for. A restart that is
+                # still owed is asked for, and nothing is enabled twice.
+                if state.code in repaired:
+                    raise self._fail(
+                        state.code,
+                        f"{state.sentence} WSL was enabled once in this run and "
+                        "the machine still answers the same way, so this is not "
+                        "something Crucible can repair here.",
+                    )
+                before = wslstate.probe_live(self._runner)
+                self._said(f"wsl: {before.line()}")
+                if before.restart_owed:
+                    self._said(
+                        f"wsl: features {before.features_line()}: already on and "
+                        "waiting for a restart, so nothing was enabled and no "
+                        "administrator prompt was raised"
+                    )
+                    raise self._restart_owed()
                 if not self._elevate:
                     raise self._fail(
                         state.code,
@@ -595,26 +716,43 @@ class EngineInstall:
                     wslstate.elevated_argv(state), timeout_s=IMPORT_TIMEOUT_SECONDS
                 )
                 if not result.ok:
+                    self._said(
+                        "wsl: an administrator prompt was raised to enable WSL "
+                        f"and was refused, or the command failed; features "
+                        f"{before.features_line()}"
+                    )
                     raise self._fail(
                         state.code,
                         f"{state.sentence} The permission prompt was refused or the "
                         f"command failed: {result.said()}",
                     )
-                # Enabling WSL always needs a restart, and there is no probe
-                # that says so — `wsl --status` answers the same before and
-                # after. The task ends here, the tray's Startup item brings the
+                # Enabling WSL almost always needs a restart, and the live probe
+                # is what says whether it did (#15). The task ends here, the
+                # tray's Startup item brings the
                 # tray back, and PHASE19 2.3 is what brings the INSTALL back:
                 # the tray reads `reboot-pending` out of `wsl-outcome.json` at
                 # its next start and resumes. That used to be the app's job and
                 # the sentence used to ask for a press; 2.3 ruled it the tray's,
                 # because the tray is the process that is already there.
                 #
-                # A SECOND DEMAND IS NOT A SECOND RESTART (2.4). This run is
-                # already the one after the reboot, and Windows asking again is
-                # a machine a person has to look at rather than a loop.
-                if self._resuming:
-                    raise self._fail("wsl_reboot_again", REBOOT_AGAIN_SENTENCE)
-                raise self._fail("wsl_reboot_required", REBOOT_SENTENCE)
+                # #11: what the enable did, per feature, in host.log: already
+                # on, turned on now, or still off after the administrator
+                # prompt. Whether a prompt was raised is this branch itself:
+                # `Start-Process -Verb RunAs` is the prompt.
+                after = wslstate.probe_live(self._runner)
+                self._said(
+                    "wsl: an administrator prompt was raised to enable WSL and "
+                    "accepted; " + _feature_report(before, after)
+                )
+                if after.live:
+                    # The enable took without a restart (a store WSL on a
+                    # machine whose features were already committed). Walk on,
+                    # once: `repaired` stops a second enable in the same run.
+                    repaired.add(state.code)
+                    continue
+                # 2.4, AMENDED by #19: a second demand is not the end. The
+                # budget decides, and each restart is judged by what is live.
+                raise self._restart_owed()
             if state.code in never_repair:
                 raise self._fail(
                     state.code,
