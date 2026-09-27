@@ -64,9 +64,9 @@ that imported `apiclient` while `crucible.cli` was still loading gets the same a
 ### Constraints on the layout
 
 - **`-m crucible.cli` is baked into installed machines**: `launcher.py`'s shims,
-  `local.py`, `desktop.py`, `host/app.py`, `host/runner.py` (which compares argv against
+  `platform/installation.py`, `desktop.py`, `host/app.py`, `platform/runner.py` (which compares argv against
   `["-m", "crucible.cli", "serve", "--controller-stdin"]`), `uninstall.py`, the
-  bootstrapper's install scripts, and `host/startup.py`, whose Startup item runs
+  bootstrapper's install scripts, and `platform/startup.py`, whose Startup item runs
   `runpy.run_module('crucible.cli', run_name='__main__')`. So `crucible/cli/__main__.py`
   must exist and the package must keep that name. `pyproject.toml`'s console script is
   `crucible.cli:main`, and `python -m crucible` imports `main` from here too.

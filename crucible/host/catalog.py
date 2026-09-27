@@ -193,21 +193,20 @@ class StoppedWindowsCatalog:
     def remove(self, subject: Subject) -> None:
         from ..errors import CrucibleError
         from ..weights import WeightsShared
-        from .installer import cleanup_subjects, record_cleanup
-        for row in self._subjects():
-            if (row.kind, row.id) == subject.key:
-                try:
-                    saved = cleanup_subjects(self._config.home)
-                    if subject.key not in saved:
-                        record_cleanup(self._config.home, saved | {subject.key})
-                    row.remove()
-                    self._pending.discard(subject.key)
-                except WeightsShared as exc:
-                    raise CatalogRefusal(exc.code, str(exc)) from exc
-                except (OSError, CrucibleError) as exc:
-                    raise CatalogRefusal("subject_remove_failed", str(exc)) from exc
-                return
-        raise CatalogRefusal("subject_unknown", f"The native catalog no longer declares {subject}")
+        from .cleanup_record import cleanup_subjects, record_cleanup
+        row = next((row for row in self._subjects() if (row.kind, row.id) == subject.key), None)
+        if row is None:
+            raise CatalogRefusal("subject_unknown", f"The native catalog no longer declares {subject}")
+        try:
+            saved = cleanup_subjects(self._config.home)
+            if subject.key not in saved:
+                record_cleanup(self._config.home, saved | {subject.key})
+            row.remove()
+            self._pending.discard(subject.key)
+        except WeightsShared as exc:
+            raise CatalogRefusal(exc.code, str(exc)) from exc
+        except (OSError, CrucibleError) as exc:
+            raise CatalogRefusal("subject_remove_failed", str(exc)) from exc
 
 
 class GuestCatalog:
@@ -252,7 +251,7 @@ class GuestCatalog:
         if not result.ok:
             raise HostError(
                 "catalog_unreachable",
-                f"{self._where} did not answer {method} {path}: {result.said()}. "
+                f"{self._where} did not answer {method} {path}: {result.output_tail()}. "
                 "Nothing is removed from a machine whose catalog cannot be read.",
             )
         text, mark, status_text = result.stdout.rpartition(self.STATUS_MARK)

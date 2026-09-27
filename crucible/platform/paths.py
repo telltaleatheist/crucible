@@ -4,8 +4,8 @@ from pathlib import PureWindowsPath
 from typing import Mapping
 
 from ..protocol import DEFAULT_PORT, DOOR_PORT, LOOPBACK
-from ..wsl import RELEASE_REPOSITORY
 from .errors import HostError
+from .wsl_table import RELEASE_REPOSITORY
 
 APPDATA_DIRNAME = "Crucible"
 

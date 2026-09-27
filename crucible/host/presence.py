@@ -7,12 +7,15 @@ from urllib.parse import urlsplit
 
 from .. import wsl
 from ..platform.paths import ENGINE_HOST, ENGINE_PORT, engine_url
-from ..platform.runner import Child, RunResult, Runner
+from ..platform.runner import Child, Runner, RunResult
 from ..service import UNIT_NAME
 from ..wsl import CRUCIBLE_DISTRO, guest_argv
 from ..wsl import parse_distro_list as parse_wsl_list
 from .log import HostLog
 from .state import Distro, Engine, Owner
+from .wslstate import LXSS_KEY as LXSS_KEY
+from .wslstate import read_wsl_distros, wsl_answer_line
+from .wslstate import registered_wsl_distros as registered_wsl_distros
 
 BOOT_WAIT_SECONDS = 30
 WATCH_SECONDS = 15
@@ -95,43 +98,6 @@ class UnitProbe:
     detail: str
 
 
-LXSS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
-
-
-def registered_wsl_distros() -> list[str] | None:
-    try:
-        import winreg
-    except ImportError:
-        return None
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, LXSS_KEY)
-    except FileNotFoundError:
-        return []
-    names: list[str] = []
-    with key:
-        index = 0
-        while True:
-            try:
-                sub = winreg.EnumKey(key, index)
-            except OSError:
-                break
-            index += 1
-            try:
-                with winreg.OpenKey(key, sub) as distro:
-                    names.append(str(winreg.QueryValueEx(distro, "DistributionName")[0]))
-            except OSError:
-                continue
-    return names
-
-
-def read_wsl_distros(result: object) -> list[str] | None:
-    if getattr(result, "ok"):
-        return parse_wsl_list(getattr(result, "stdout"))
-    if registered_wsl_distros() == []:
-        return []
-    return None
-
-
 @dataclass(frozen=True)
 class FoundEngine:
     distro: str
@@ -180,7 +146,6 @@ class PresenceWatcher:
 
     def probe_distro(self) -> tuple[Distro, str]:
         result = self._runner.run(wsl_list_argv(), timeout_s=WSL_LIST_TIMEOUT_SECONDS)
-        from .wslstate import wsl_answer_line
 
         names = read_wsl_distros(result)
         if names is None:
@@ -211,14 +176,14 @@ class PresenceWatcher:
             wsl_running_argv(), timeout_s=WSL_LIST_TIMEOUT_SECONDS
         )
         if not listed.ok:
-            self._log.write(f"find-engine: wsl -l -v --running: {listed.said()}")
+            self._log.write(f"find-engine: wsl -l -v --running: {listed.output_tail()}")
             return None
         for name in parse_wsl_list(listed.stdout):
             line = self.read_guest_pairing(name)
             if line is not None:
                 self._log.write(
                     f'find-engine: the engine on {engine_url()} is the "{name}" '
-                    "distro's, and this host did not start it"
+                    "distro's, and this controller did not start it"
                 )
                 return FoundEngine(distro=name, line=line)
         return None
@@ -231,7 +196,7 @@ class PresenceWatcher:
         state = _printed_state(result)
         if state in UNIT_STATES:
             return UnitProbe(True, state, f"{UNIT_NAME} is {state}")
-        return UnitProbe(False, state, f'no system {UNIT_NAME} in "{self._distro}" ({result.said()})')
+        return UnitProbe(False, state, f'no system {UNIT_NAME} in "{self._distro}" ({result.output_tail()})')
 
     def running_owner(self, distro: Distro, detail: str) -> Presence:
         if not self.consented:
@@ -272,7 +237,7 @@ class PresenceWatcher:
             distro,
             Engine.RUNNING,
             f'the engine on {engine_url()} is the "{self.found.distro}" distro\'s '
-            "and this host did not start it",
+            "and this controller did not start it",
             Owner.FOUND,
         )
 
@@ -286,8 +251,8 @@ class PresenceWatcher:
             wsl_boot_argv(self._distro), timeout_s=WSL_BOOT_TIMEOUT_SECONDS
         )
         if not started.ok:
-            self._log.write(f"boot: wsl --exec true failed: {started.said()}")
-        if self._wait_for_ping(self._boot_wait_s):
+            self._log.write(f"boot: wsl --exec true failed: {started.output_tail()}")
+        if self.wait_for_ping(self._boot_wait_s):
             self._recovery_spent = False
             return self.running_owner(distro, "the engine answered /v1/ping")
         self._log.write(
@@ -304,7 +269,7 @@ class PresenceWatcher:
             Owner.NONE,
         )
 
-    def _wait_for_ping(self, seconds: float) -> bool:
+    def wait_for_ping(self, seconds: float) -> bool:
         deadline = self._monotonic() + seconds
         while True:
             if self.ping():
@@ -313,6 +278,7 @@ class PresenceWatcher:
                 return False
             self._sleep(1.0)
 
+    _wait_for_ping = wait_for_ping
 
     def recover(self) -> bool:
         probe = self.probe_unit()
@@ -325,9 +291,9 @@ class PresenceWatcher:
         )
         self._log.write(
             f"recovery {RECIPE_SYSTEM_UNIT_START}: "
-            f"{'ok' if result.ok else result.said()}"
+            f"{'ok' if result.ok else result.output_tail()}"
         )
-        return self._wait_for_ping(10.0)
+        return self.wait_for_ping(10.0)
 
     def restart_wsl_unit(self) -> bool:
         probe = self.probe_unit()
@@ -340,9 +306,9 @@ class PresenceWatcher:
         )
         self._log.write(
             f"restart {RECIPE_SYSTEM_UNIT_RESTART}: "
-            f"{'ok' if result.ok else result.said()}"
+            f"{'ok' if result.ok else result.output_tail()}"
         )
-        if self._wait_for_ping(self._boot_wait_s):
+        if self.wait_for_ping(self._boot_wait_s):
             self._recovery_spent = False
             return True
         self._log.write(
@@ -371,7 +337,7 @@ class PresenceWatcher:
             return Presence(
                 distro,
                 Engine.STOPPED,
-                "the engine this host found is no longer answering; it was not "
+                "the engine this controller found is no longer answering; it was not "
                 "started here, so there is nothing here to restart",
                 Owner.FOUND,
             )
