@@ -142,6 +142,7 @@ import {
   type VoiceInfo,
   type VoicePace,
   type VoiceServing,
+  type WaitingFor,
   type WrittenArtifact,
 } from './types.js';
 import { SDK_VERSION } from './version.js';
@@ -171,6 +172,8 @@ const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
   'queued',
   'warming',
+  // Install-on-submit (2026-09-26): what a queued job waits for, as it moves.
+  'waiting',
   'progress',
   // PHASE3-TTS.md section 6's addition, and the reason `api_version` did not
   // move for it: a client that does not know the kind still sees every
@@ -942,6 +945,9 @@ export class CrucibleClient {
       status: oneOf(str(body, 'status', 'job'), JOB_STATES, 'job.status'),
       progress: optNum(body, 'progress', 'job'),
       position: optNum(body, 'position', 'job'),
+      // Informational: null on every job not waiting for its install, and on
+      // a server before install-on-submit (2026-09-26).
+      waitingFor: readWaitingFor(optObject(body, 'waiting_for', 'job'), 'job.waiting_for'),
       // Absent or null is "no error stated"; a present one is read strictly,
       // because its code is what a caller decides a retry on.
       error: readFailureOrNull(optObject(body, 'error', 'job'), 'job.error'),
@@ -3077,7 +3083,16 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
 
   switch (known) {
     case 'queued':
-      return { id, event: 'queued', data: { position: optNum(data, 'position', where) } };
+      return {
+        id,
+        event: 'queued',
+        data: {
+          position: optNum(data, 'position', where),
+          waitingFor: readWaitingFor(optObject(data, 'waiting_for', where), `${where}.waiting_for`),
+        },
+      };
+    case 'waiting':
+      return { id, event: 'waiting', data: readWaitingFor(data, where) as WaitingFor };
     case 'warming':
       return { id, event: 'warming', data: { message: optStr(data, 'message', where) } };
     case 'progress':
@@ -3097,6 +3112,34 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
         data: { status: oneOf(str(data, 'status', where), ['cancelled'], `${where}.status`) },
       };
   }
+}
+
+/**
+ * `waiting_for` (2026-09-26, install-on-submit), every field informational:
+ * a caller shows `message` and waits for the job's own terminal event. Null
+ * in, null out.
+ */
+function readWaitingFor(data: Json | null, where: string): WaitingFor | null {
+  if (data === null) return null;
+  const step = optObject(data, 'step', where);
+  return {
+    reason: optStr(data, 'reason', where) ?? 'install',
+    taskId: optStr(data, 'task_id', where),
+    message: optStr(data, 'message', where) ?? '',
+    plan: optStr(data, 'plan', where),
+    steps: optStrArray(data, 'steps', where) ?? [],
+    step:
+      step === null
+        ? null
+        : {
+            name: optStr(step, 'name', `${where}.step`),
+            index: optNum(step, 'index', `${where}.step`),
+            total: optNum(step, 'total', `${where}.step`),
+          },
+    progress: optNum(data, 'progress', where),
+    line: optStr(data, 'line', where),
+    since: optStr(data, 'since', where),
+  };
 }
 
 /**

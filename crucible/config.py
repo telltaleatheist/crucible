@@ -57,6 +57,18 @@ DEFAULT_OPEN_PAIRING = True
 #: had ever deleted one.
 DEFAULT_RETENTION_DAYS = 7
 
+#: `[jobs] install_on_submit` — whether a job for a type this card can run but
+#: has not installed is ACCEPTED and waits for the server to install it, rather
+#: than refused.
+#:
+#: TRUE by ruling (Owen, 2026-09-26): *"yes, we need to install a missing
+#: environment when a job is submitted"*, under his standing rule that Crucible
+#: is idiot proof and a caller need not know an environment exists
+#: (`crucible/installonsubmit.py`). An operator who wants every install to be
+#: his own act sets it false, and the refusal carries the install request
+#: instead. Absent means true, on `DEFAULT_RETENTION_DAYS`'s terms.
+DEFAULT_INSTALL_ON_SUBMIT = True
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -405,6 +417,9 @@ class Config:
     #: reads it. Defaulted for `_capability_flag`'s reason: every config in
     #: existence was written before this key, and absent means the ruled seven.
     retention_days: int = DEFAULT_RETENTION_DAYS
+    #: `[jobs] install_on_submit` — see `DEFAULT_INSTALL_ON_SUBMIT`. Read by
+    #: `POST /v1/jobs` on every request, so turning it off needs no restart.
+    install_on_submit: bool = DEFAULT_INSTALL_ON_SUBMIT
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
@@ -641,6 +656,39 @@ def _retention_days(table: dict[str, Any]) -> int:
             "artifacts before the client that asked for them could fetch them"
         )
     return value
+
+
+def _install_on_submit(table: dict[str, Any]) -> bool:
+    """`[jobs] install_on_submit`, true when absent (2026-09-26, Owen's ruling).
+
+    Absent is the ruled default rather than a fallback: every config in
+    existence was written before the key. A quoted string is refused, for
+    `_open_pairing`'s reason: `"false"` would read as true.
+    """
+    section = table.get("jobs")
+    if section is None:
+        raise ConfigError("config is missing the [jobs] section")
+    if "install_on_submit" not in section:
+        return DEFAULT_INSTALL_ON_SUBMIT
+    return _require(table, "jobs", "install_on_submit", bool)
+
+
+def _kept_install_on_submit(home: Path) -> bool:
+    """What the config.toml already on disk says, for a rewrite that did not say.
+
+    `write_config` is called by rewriters that rebuild the whole document from
+    their own arguments (`crucible install`'s capability step, the settings
+    door). One that predates this key would put an operator's `false` back to
+    true on the next install, which is the one moment it matters. So a caller
+    that passes nothing keeps the file's value; an unreadable or absent file
+    gets the ruled default.
+    """
+    try:
+        with open(config_path(home), "rb") as handle:
+            value = tomllib.load(handle).get("jobs", {}).get("install_on_submit")
+    except (OSError, tomllib.TOMLDecodeError):
+        return DEFAULT_INSTALL_ON_SUBMIT
+    return value if isinstance(value, bool) else DEFAULT_INSTALL_ON_SUBMIT
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
@@ -1428,6 +1476,7 @@ def load_config(home: Path | None = None) -> Config:
         enable_align=_capability_flag(table, "enable_align"),
         enable_rvc=_capability_flag(table, "enable_rvc"),
         enable_denoise=_capability_flag(table, "enable_denoise"),
+        install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         flags_absent=tuple(
             flag for flag in CAPABILITY_FLAGS if flag not in table.get("jobs", {})
@@ -1471,6 +1520,10 @@ def write_config(
     #: rewrite silently puts an operator's retention window back to seven.
     #: `cli._write_capability` and `settings.apply` both do.
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    #: None keeps what the file on disk says (`_kept_install_on_submit`),
+    #: so a rewriter written before the key cannot turn an operator's
+    #: `false` back on.
+    install_on_submit: bool | None = None,
     capability: CapabilityRecord | None = None,
     #: `[routes]` and `[upstreams.*]`. Defaulted to empty for the same reason
     #: `enable_denoise` is defaulted: a caller written before this phase states
@@ -1534,6 +1587,14 @@ def write_config(
             "enable_align": enable_align,
             "enable_rvc": enable_rvc,
             "enable_denoise": enable_denoise,
+            # Written always, for `retention_days`'s reason below: the
+            # operator who wants installs to be his own act must find the
+            # switch in the file.
+            "install_on_submit": (
+                _kept_install_on_submit(home)
+                if install_on_submit is None
+                else install_on_submit
+            ),
             # Written always, unlike `routes` and `local_models` below: this is
             # not "there is one of these", it is a number every server has, and
             # an operator changing how long his renders survive should find the

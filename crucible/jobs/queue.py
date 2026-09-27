@@ -194,6 +194,15 @@ class JobStore:
         #: why the bytes are not there rather than that they never were.
         self._consumed_blobs: dict[str, str] = {}
         self._pending: deque[str] = deque()
+        #: Jobs ADMITTED AND WAITING FOR THEIR INSTALL, by id, to what they are
+        #: waiting for (2026-09-26, Owen's ruling: *"yes, we need to install a
+        #: missing environment when a job is submitted"*). Not on the lane:
+        #: a job waiting minutes for pip holds no card, so the lane stays free
+        #: for work that can run now, and the settlement does not count it.
+        #: `crucible/installonsubmit.py` parks and releases them; a release
+        #: puts the job on the lane behind whatever is there, because it was
+        #: admitted with a 202 and a 202 is a promise (`enqueue_admitted`).
+        self._parked: dict[str, dict[str, Any]] = {}
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._running_id: str | None = None
@@ -339,6 +348,10 @@ class JobStore:
         """
         if job.status == RUNNING:
             return 0
+        if job.id in self._parked:
+            # Not in line yet: it is waiting for its install, and `waiting_for`
+            # on the job's state says for what (2026-09-26).
+            return None
         if job.status == QUEUED:
             return self._pending.index(job.id) + 1
         return None
@@ -456,6 +469,59 @@ class JobStore:
             self._pending.append(job.id)
         self.append_event(job, "queued", {"position": self.position(job)})
         self._wake.set()
+
+    # ---------------------------------------------------- waiting for an install
+    #
+    # 2026-09-26, Owen's ruling: a job for a type this card can run and has not
+    # installed is accepted and waits for the install. These are the store's
+    # half; `crucible/installonsubmit.py` decides when.
+
+    def park(self, job: Job, waiting_for: dict[str, Any]) -> None:
+        """Admit a job that waits for its install before it goes on the lane."""
+        self._parked[job.id] = waiting_for
+        job.message = waiting_for.get("message")
+        self.append_event(
+            job, "queued", {"position": None, "waiting_for": waiting_for}
+        )
+
+    def waiting_for(self, job: Job) -> dict[str, Any] | None:
+        """What this job is waiting for, or None when it is not waiting."""
+        return self._parked.get(job.id)
+
+    def parked(self) -> list[Job]:
+        """Every job waiting for an install, oldest first."""
+        return [self._jobs[job_id] for job_id in self._parked if job_id in self._jobs]
+
+    def update_waiting(self, job: Job, waiting_for: dict[str, Any]) -> None:
+        """Say how the install it waits for is going: the record and a `waiting` event."""
+        if job.id not in self._parked:
+            return
+        self._parked[job.id] = waiting_for
+        job.message = waiting_for.get("message")
+        self.append_event(job, "waiting", waiting_for)
+
+    def enqueue_admitted(self, job: Job) -> None:
+        """Put a job whose install has landed on the lane, BEHIND whatever is there.
+
+        No `refuse_if_busy`: this job was admitted when it was submitted, and
+        the 202 it was answered with is a promise the lane keeps. It is the one
+        way `_pending` holds more than one job, and it holds them in the order
+        their installs finished.
+        """
+        with self._lane_lock:
+            self._parked.pop(job.id, None)
+            self._pending.append(job.id)
+        self.append_event(job, "queued", {"position": self.position(job)})
+        self._wake.set()
+
+    def fail_unadmitted(self, job: Job, error: dict[str, str]) -> None:
+        """End a job that waited for an install and cannot run.
+
+        Its install failed, or what it installed still refuses it. It was never
+        on the lane, so it never ran.
+        """
+        self._parked.pop(job.id, None)
+        self._finish(job, FAILED, error)
 
     def discard(self, job: Job) -> None:
         """Forget a job that was never admitted, and delete its scratch.
@@ -1061,6 +1127,11 @@ class JobStore:
                 f"job {job.id} is already {job.status}",
             )
         job.cancel_requested = True
+        if self._parked.pop(job.id, None) is not None:
+            # Waiting for its install. The install goes on: it is this card's
+            # env either way, and another job may be waiting on it too.
+            self._finish(job, CANCELLED)
+            return CANCELLED
         if job.status == QUEUED:
             with self._lane_lock:
                 self._pending.remove(job.id)
