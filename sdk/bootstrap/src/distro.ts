@@ -424,6 +424,13 @@ export function finishImportScript(): string {
     // on a server that hadn't started yet. The marker file is cloud-init's own
     // off switch.
     'mkdir -p /etc/cloud && touch /etc/cloud/cloud-init.disabled',
+    // WINDOWS INTEROP SURVIVES SYSTEMD (2026-09-26, kylies-pc). With
+    // `[boot] systemd=true`, systemd-binfmt resets binfmt_misc at boot and
+    // drops WSL's own `WSLInterop` registration, so every `.exe` run from the
+    // guest fails with "Exec format error". It broke the carry to 1.0.48, whose
+    // root door was `wsl.exe -u root`. This entry is re-registered on every
+    // systemd-binfmt run: the standard fix for this known WSL and systemd issue.
+    "mkdir -p /usr/lib/binfmt.d && printf ':WSLInterop:M::MZ::/init:PF\\n' > /usr/lib/binfmt.d/WSLInterop.conf",
     `cat > /etc/wsl.conf <<'EOF'\n${WSL_CONF_TEXT}EOF`,
   ].join('\n');
 }

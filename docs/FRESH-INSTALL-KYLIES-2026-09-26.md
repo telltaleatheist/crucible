@@ -380,3 +380,24 @@ for 30 s before its recovery recipe started the unit. An upgrade should hand the
   otherwise, as on a foreign distro without it. Root no longer depends on Windows interop.
 - **Still owed:** why interop is unregistered after some boots and not others, since other paths
   still use it.
+
+## The 1.0.49 carry, and the guest reaching 1.0.49
+
+### 38. Stock noble-wsl with systemd loses WSLInterop on boot
+- **What:** `/proc/sys/fs/binfmt_misc` held only `register` and `status`; systemd-binfmt drops WSL's
+  registration, so any `.exe` from the guest (wsl.exe, cmd.exe, nvidia-smi.exe, explorer.exe) fails
+  with "Exec format error". It happens on the image every fresh user gets.
+- **Fixed (next release), for new imports:** the finish script writes
+  `/usr/lib/binfmt.d/WSLInterop.conf` (`:WSLInterop:M::MZ::/init:PF`), which re-registers on every
+  systemd-binfmt run. Nothing Crucible does in the guest needs interop since 1.0.49 (#37), but other
+  tools do.
+
+### 39. An upgrade runs the OLD binary's `local shutdown` before installing the new one
+- **What:** the 1.0.49 carry failed at local-start: install.sh ran `local shutdown` with the
+  installed 1.0.48 binary (its only root door was wsl.exe; interop broken), which couldn't stop the
+  service. `local start` then found 1.0.48 still running and rightly refused it
+  (`engine_version_stale`). A one-time trap when crossing from 1.0.48 or older with interop broken.
+- **Resolved on kylies-pc:** `crucible service stop && crucible local start` as crucible, using
+  1.0.49's own sudo door. The engine is 1.0.49 and the token is unchanged.
+- **Should be:** the shutdown before an upgrade uses the NEW code's door (install the wheel to a
+  staging path first, or stop the unit with the new binary).

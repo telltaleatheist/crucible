@@ -44,7 +44,7 @@ WSL_CONF_TEXT = "# crucible-rootfs\n[boot]\nsystemd=true\n[user]\ndefault=crucib
 #: What an imported Canonical image needs before anything can be installed
 #: into it: the crucible user, passwordless sudo, and the wsl.conf above.
 #: One root script, and its owner is distro.ts -- see `finishImportScript`.
-FINISH_IMPORT_SCRIPT = "id -u crucible >/dev/null 2>&1 || useradd --create-home --shell /bin/bash crucible\npasswd --delete crucible >/dev/null\nprintf 'crucible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/crucible\nchmod 0440 /etc/sudoers.d/crucible\nmkdir -p /etc/cloud && touch /etc/cloud/cloud-init.disabled\ncat > /etc/wsl.conf <<'EOF'\n# crucible-rootfs\n[boot]\nsystemd=true\n[user]\ndefault=crucible\nEOF"
+FINISH_IMPORT_SCRIPT = "id -u crucible >/dev/null 2>&1 || useradd --create-home --shell /bin/bash crucible\npasswd --delete crucible >/dev/null\nprintf 'crucible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/crucible\nchmod 0440 /etc/sudoers.d/crucible\nmkdir -p /etc/cloud && touch /etc/cloud/cloud-init.disabled\nmkdir -p /usr/lib/binfmt.d && printf ':WSLInterop:M::MZ::/init:PF\\n' > /usr/lib/binfmt.d/WSLInterop.conf\ncat > /etc/wsl.conf <<'EOF'\n# crucible-rootfs\n[boot]\nsystemd=true\n[user]\ndefault=crucible\nEOF"
 
 
 @dataclass(frozen=True)
