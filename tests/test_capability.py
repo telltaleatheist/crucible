@@ -580,7 +580,7 @@ def test_the_refusal_refuses_a_name_that_is_neither() -> None:
 
 @pytest.fixture
 def viable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
 
 
 @pytest.fixture
@@ -654,7 +654,7 @@ def test_install_writes_the_flag_and_the_reason_even_when_it_disables(
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     config = load_config(home)
-    assert cli._capability_step(config, cli.detect_backend(), "tts") == 1
+    assert cli._capability_step(config, cli.common.detect_backend(), "tts") == 1
     out = capsys.readouterr()
     assert "DISABLED" in out.err
     after = load_config(home)
@@ -668,7 +668,7 @@ def test_install_turns_the_flag_on_when_the_card_holds_it(
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     config = load_config(home)
-    assert cli._capability_step(config, cli.detect_backend(), "tts") == 0
+    assert cli._capability_step(config, cli.common.detect_backend(), "tts") == 0
     after = load_config(home)
     assert after.enable_tts is True
     assert after.capability.row("tts").selected != ""
@@ -711,7 +711,7 @@ def test_doctor_notices_the_card_was_swapped(
     capsys.readouterr()
     # `viable` ran first and `tiny_card` second, so the record above was decided
     # on the 6 GiB card; put the 3090 Ti back and the record is stale.
-    import crucible.cli as cli_module
+    import crucible.cli.common as cli_module
 
     cli_module.detect_backend = lambda: FAKE_BACKEND  # type: ignore[assignment]
     assert cli.main(["doctor", "--json"]) == 1

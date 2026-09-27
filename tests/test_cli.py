@@ -21,7 +21,7 @@ from .conftest import FAKE_BACKEND
 
 @pytest.fixture
 def viable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
 
 
 def test_init_writes_a_0600_config_with_a_token(
@@ -66,7 +66,7 @@ def test_init_refuses_without_a_backend(
     def refuse() -> None:
         raise NoViableBackend("no nvidia-smi on this Linux host")
 
-    monkeypatch.setattr(cli, "detect_backend", refuse)
+    monkeypatch.setattr(cli.common, "detect_backend", refuse)
     assert cli.main(["init"]) == 1
     assert not config_path(home).exists()
     assert "no nvidia-smi" in capsys.readouterr().err
@@ -76,7 +76,7 @@ def test_doctor_json_is_healthy_after_init(
     home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr("crucible.cli.detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr("crucible.cli.common.detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["init", "--enable-echo"]) == 0
     capsys.readouterr()
 
@@ -122,7 +122,7 @@ def test_doctor_is_unhealthy_when_the_backend_changed(
         gpu=Gpu(vendor="apple", name="Apple M2 Ultra", vram_bytes=1),
         detail="test double",
     )
-    monkeypatch.setattr(cli, "detect_backend", lambda: elsewhere)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: elsewhere)
     assert cli.main(["doctor", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
     assert any("backend_changed" in problem for problem in report["problems"])
@@ -271,7 +271,7 @@ def test_the_two_tts_engines_share_one_env_on_the_mac(
     """On mlx-darwin they genuinely do, so the two rows name the same directory."""
     from .conftest import FAKE_MAC_BACKEND
 
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor", "--json"]) == 1
@@ -413,7 +413,7 @@ def test_doctor_runs_with_every_job_type_enabled(
     no env is installed in a test home, so every row should be naming what is
     missing and the command that fixes it.
     """
-    monkeypatch.setattr("crucible.cli.detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr("crucible.cli.common.detect_backend", lambda: FAKE_BACKEND)
     # EVERY type, which is what this test is named after and what it has to keep
     # being: two more (`align`, `rvc`) landed after it was written, and a test
     # that says "every" while naming four is a test that stops covering the
@@ -538,7 +538,7 @@ def test_a_failing_import_is_refused_by_name_with_the_last_lines(
         stdout = ""
         stderr = "Traceback\nImportError: libcudart.so.12: cannot open shared object file"
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _Completed())
+    monkeypatch.setattr(cli.install.subprocess, "run", lambda *a, **k: _Completed())
     refusal = cli._smoke_import(tmp_path / "python", "llm", "cuda-linux")
     assert refusal is not None
     assert refusal.startswith("env_smoke_failed:")

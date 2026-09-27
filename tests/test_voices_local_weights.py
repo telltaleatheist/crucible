@@ -304,7 +304,7 @@ def test_the_pull_command_reaches_the_named_refusal(
     home: Path, screening: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
     assert cli.main(["voices", "pull", "screening"]) == 1
@@ -318,7 +318,7 @@ def test_the_list_command_does_not_offer_a_pull_that_would_refuse(
     # The merge deleted the moment its renders landed, which is the EXPECTED
     # end of a screening voice's life rather than a broken install.
     shutil.rmtree(screening)
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["init", "--enable-tts"]) == 0
     capsys.readouterr()
     assert cli.main(["voices", "list", "--json"]) == 0

@@ -329,7 +329,7 @@ def test_the_cli_verb_pulls_the_shipped_set(
     """`crucible rvc pull-base`, driven the way an operator drives it."""
     from crucible import cli
 
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assets = rvcbase.load_rvc_base()
     payloads = {entry.source: b"" for entry in assets.files}
     serve(monkeypatch, payloads)

@@ -753,8 +753,8 @@ def test_the_cli_refuses_the_base_by_name(
     config = _config(home, CUDA_LINUX)
     alias = load_manifest(ALIAS)
     weights.pull(config, alias, alias.spec(CUDA_LINUX))
-    monkeypatch.setattr(cli, "load_config", lambda: config)
-    monkeypatch.setattr(cli, "detect_backend", lambda: _backend(CUDA_LINUX))
+    monkeypatch.setattr(cli.common, "load_config", lambda: config)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: _backend(CUDA_LINUX))
 
     class Args:
         kind = "model"
