@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli, envpatches, jobenv, narratorpatches
+from crucible import cli, envpatches, jobenv
 from crucible.engines import EngineError, decide_reading
 from crucible.engines.mlx_lm import MlxLmEngine, REQUIRED_FLAGS
 
@@ -148,8 +148,8 @@ def test_the_applier_raises_the_cap_to_40_and_keeps_a_snapshot(tmp_path: Path) -
     assert text.replace(script["NEW"], script["OLD"]) == pristine()
     # `.orig` is the live file as it was, kept for reference.
     assert Path(str(server_of(env)) + ".orig").read_text(encoding="utf-8") == pristine()
-    [row] = narratorpatches.check(env, MAC_PINS, patches=(PATCH,))
-    assert row["status"] == narratorpatches.APPLIED
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(PATCH,))
+    assert row["status"] == envpatches.APPLIED
 
 
 def test_the_applier_is_idempotent(tmp_path: Path) -> None:
@@ -171,8 +171,8 @@ def test_a_moved_anchor_is_refused_by_name_and_touches_nothing(tmp_path: Path) -
     assert "ANCHOR_NOT_FOUND" in done.stderr
     assert server_of(env).read_text(encoding="utf-8") == moved
     assert not Path(str(server_of(env)) + ".orig").exists()
-    [row] = narratorpatches.check(env, MAC_PINS, patches=(PATCH,))
-    assert row["status"] == narratorpatches.MISSING
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(PATCH,))
+    assert row["status"] == envpatches.MISSING
 
 
 def test_no_server_py_is_refused_by_name(tmp_path: Path) -> None:
@@ -194,11 +194,9 @@ def test_the_script_and_the_table_name_the_same_strings() -> None:
 # ----------------------------------------------------------------- registry
 
 
-def test_the_tts_table_is_the_one_it_always_was() -> None:
-    found = envpatches.patches_for("tts")
-    assert found is not None
-    assert found.patches is narratorpatches.NARRATOR_PATCHES
-    assert found.scripts_dir == narratorpatches.SCRIPTS_DIR
+def test_only_the_llm_env_carries_patches() -> None:
+    assert envpatches.patched_job_types() == ("llm",)
+    assert envpatches.patches_for("tts") is None
     assert envpatches.patches_for("asr") is None
     assert envpatches.check("asr", Path("nowhere"), {}) == []
 
@@ -211,11 +209,11 @@ def test_the_patch_is_selected_by_the_recipe_not_by_a_backend_name(tmp_path: Pat
     assert FP32.distribution in MAC_PINS and FP32.distribution not in CUDA_PINS
     for pins in (CUDA_PINS, {}):
         rows = envpatches.check("llm", env, pins)
-        assert [row["status"] for row in rows] == [narratorpatches.NOT_APPLICABLE] * 2
+        assert [row["status"] for row in rows] == [envpatches.NOT_APPLICABLE] * 2
         # And apply runs nothing there: the files are still stock.
         assert [
             row["status"] for row in envpatches.apply("llm", env, Path(sys.executable), pins)
-        ] == [narratorpatches.NOT_APPLICABLE] * 2
+        ] == [envpatches.NOT_APPLICABLE] * 2
         assert server_of(env).read_text(encoding="utf-8") == pristine()
         assert generate_of(env).read_text(encoding="utf-8") == pristine_generate()
 
@@ -225,7 +223,7 @@ def test_apply_through_the_registry_patches_and_proves_it(tmp_path: Path) -> Non
     said: list[str] = []
     rows = envpatches.apply("llm", env, Path(sys.executable), MAC_PINS, on_line=said.append)
     assert [row["id"] for row in rows] == ["mlx-lm-top-logprobs-40", "mlx-lm-fp32-logprobs"]
-    assert [row["status"] for row in rows] == [narratorpatches.APPLIED] * 2
+    assert [row["status"] for row in rows] == [envpatches.APPLIED] * 2
     assert sum(line.startswith("PATCHED") for line in said) == 2
 
 
@@ -273,7 +271,7 @@ def test_an_llm_patch_that_will_not_go_in_leaves_no_new_stamp(
     before = stamp.read_bytes()
 
     def refuse(*a, **k):
-        raise narratorpatches.PatchError("mlx-lm-top-logprobs-40: ANCHOR_NOT_FOUND")
+        raise envpatches.PatchError("mlx-lm-top-logprobs-40: ANCHOR_NOT_FOUND")
 
     monkeypatch.setattr(envpatches, "apply", refuse)
     with pytest.raises(jobenv.EnvError) as caught:
@@ -393,8 +391,8 @@ def test_the_fp32_applier_patches_every_returned_site_and_keeps_a_snapshot(
     assert Path(str(generate_of(env)) + ".orig").read_text(encoding="utf-8") == (
         pristine_generate()
     )
-    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
-    assert row["status"] == narratorpatches.APPLIED
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == envpatches.APPLIED
     # And it is still Python.
     compile(text, "generate.py", "exec")
 
@@ -432,8 +430,8 @@ def test_the_fp32_applier_writes_nothing_when_one_site_moved(tmp_path: Path) -> 
     assert "ANCHOR_NOT_FOUND" in done.stderr
     assert generate_of(env).read_text(encoding="utf-8") == moved
     assert not Path(str(generate_of(env)) + ".orig").exists()
-    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
-    assert row["status"] == narratorpatches.MISSING
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == envpatches.MISSING
 
 
 def test_a_surviving_stock_site_reads_stale_not_applied(tmp_path: Path) -> None:
@@ -444,8 +442,8 @@ def test_a_surviving_stock_site_reads_stale_not_applied(tmp_path: Path) -> None:
     text = generate_of(env).read_text(encoding="utf-8")
     text += "\nlogprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)\n"
     generate_of(env).write_text(text, encoding="utf-8")
-    [row] = narratorpatches.check(env, MAC_PINS, patches=(FP32,))
-    assert row["status"] == narratorpatches.STALE
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(FP32,))
+    assert row["status"] == envpatches.STALE
 
 
 def test_the_fp32_script_and_the_table_name_the_same_strings() -> None:
@@ -543,9 +541,9 @@ def test_env_patch_llm_applies_and_exits_zero(
     python.write_text("", encoding="utf-8")
     # The env's own interpreter is an empty file here; the applier is run by
     # THIS interpreter instead, which is the only substitution.
-    real = narratorpatches._run_script
+    real = envpatches._run_script
     monkeypatch.setattr(
-        narratorpatches, "_run_script", lambda argv: real([sys.executable, *argv[1:]])
+        envpatches, "_run_script", lambda argv: real([sys.executable, *argv[1:]])
     )
     capsys.readouterr()
     assert cli.main(["env", "patch", "llm"]) == 0
@@ -565,9 +563,9 @@ def test_env_patch_llm_refuses_by_name_when_the_anchor_moved(
     python = jobenv.env_python(home, jobenv.llm_env("mlx-darwin"))
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
-    real = narratorpatches._run_script
+    real = envpatches._run_script
     monkeypatch.setattr(
-        narratorpatches, "_run_script", lambda argv: real([sys.executable, *argv[1:]])
+        envpatches, "_run_script", lambda argv: real([sys.executable, *argv[1:]])
     )
     capsys.readouterr()
     assert cli.main(["env", "patch", "llm"]) == 1

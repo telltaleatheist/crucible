@@ -7,9 +7,7 @@ facts:
               its `## Measured limits` section. One writer, in the repo with the
               loader, so "what the loader reads" and "what the card says" cannot
               be two things. Until 2026-09-19 the card was written by a regex in
-              a campaign script generated fresh per deploy, and thirdreich's
-              card carried `higgs_target_chars` ten days after that field was
-              retired because nothing ever read the card back.
+              a campaign script generated fresh per deploy.
 
     `export`  a packaged `voices/<id>.toml` -> a `crucible-voice.toml`, plus the
               MACHINE rows it drops, printed. The bridge from today's files, and
@@ -51,18 +49,6 @@ FM_OWNED: tuple[str, ...] = (
     "higgs_max_chars_served_basis",
     "higgs_max_chars_mlx_basis",
 )
-
-#: KEYS THAT ARE RETIRED, and why, refused BY NAME when a card still carries
-#: one. Not dropped quietly: a retired key in a card is a number an audit script
-#: may still be reading, and the person who has to know is the one deploying.
-RETIRED_FM_KEYS: dict[str, str] = {
-    "higgs_target_chars": (
-        "retired 2026-09-09 when Owen's 800-character ruling replaced the "
-        "single packing target for fine-tunes; thirdreich's card still carried "
-        "it ten days later. A voice packs to a measured safe band or to a "
-        "target, never to both, and the manifest says which"
-    ),
-}
 
 #: Which arm each cap key states. The two are not always equal — thirdreich
 #: carried 1623 served against 900 on mlx — which is why the card has two keys
@@ -109,15 +95,6 @@ def render_frontmatter(repo: RepoManifest, existing: str) -> str:
     pace, and a card carrying `higgs_pace_chars_per_sec:` with nothing after it
     is a field an audit script reads as zero.
     """
-    for line in existing.split("\n"):
-        name = line.split(":", 1)[0].strip()
-        if name in RETIRED_FM_KEYS:
-            raise CardError(
-                f"this card carries {name}, which is retired: "
-                f"{RETIRED_FM_KEYS[name]}. Remove the line and run this again — "
-                "it is not dropped silently, because something may still be "
-                "reading it"
-            )
     keep = [
         line
         for line in existing.split("\n")
@@ -554,7 +531,6 @@ __all__ = [
     "CardError",
     "FM_OWNED",
     "REPO_MANIFEST_NAME",
-    "RETIRED_FM_KEYS",
     "export_manifest",
     "read_frontmatter",
     "render_card",

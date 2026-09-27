@@ -723,18 +723,6 @@ def test_a_fake_repo_carries_the_catalog_numbers_through(
     assert len(served.takes) == 2
 
 
-def test_a_packaged_manifest_still_beats_a_pin_for_the_same_id(host: Path) -> None:
-    """SECTION 8.1, AS A TEST. Adding the pins regresses nothing; deleting the
-    packaged files at 8.3 is the step that hands the id over."""
-    a_pin(host, voice_id="mistborn")
-    a_cached_manifest(
-        host, GOOD.replace('display         = "Mistborn"', 'display = "From the pin"')
-    )
-    served = load_all_voices()["mistborn"]
-    assert served.display != "From the pin"
-    assert served.manifest_source == "packaged"
-
-
 def test_the_engine_rows_report_themselves_as_the_engines(host: Path) -> None:
     """Section 2.6: `higgs-default` and `zeroshot` are not voices anybody
     trains, and "Crucible ships no voices" is exactly true of voices."""
@@ -998,7 +986,7 @@ def test_a_packaged_manifest_converted_and_merged_is_the_same_voice(
     assert any("config.toml [tts.higgs-v3]" in line for line in dropped)
 
     # And the three that differ, deliberately.
-    assert packaged.manifest_source == "packaged"
+    assert packaged.manifest_source == "override"
     assert merged.manifest_source == "repo"
     assert packaged.pace_basis is None and merged.pace_basis == "measured"
     for arm in merged.backends:

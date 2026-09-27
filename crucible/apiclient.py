@@ -477,7 +477,7 @@ def report_http_error(exc: urllib.error.HTTPError) -> int:
 
     Unchanged is the whole point. `crucible/errors.py` gives every refusal a
     `code`, and several carry a `details.field` naming exactly what was wrong;
-    a client that turned `chunk_too_long` into "that sentence is too long"
+    a client that turned `server_busy` into "try again later"
     would have deleted the one string a person can search this repo for.
     """
     raw = exc.read()

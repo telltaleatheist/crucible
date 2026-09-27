@@ -1385,13 +1385,10 @@ def require_sayable(
     PAST the end of the voice's declared ladder, both of which mean "the loaded
     voice's own sampling" and are what sending no key means.
 
-    **`unknown_take` was raised here and is retired** (2026-09-19,
-    PHASE18-UNCERTIFIED.md section 5). A take past the ladder is a seed lane at
-    the voice's own numbers rather than an error, so there is nothing left for
-    this function to refuse: `take` is `Field(ge=0)` on `StreamOp`, which is
-    the one owner of "a take is not negative", and `VoiceManifest.take` answers
-    everything at or above 0. It is still never CLAMPED — the numbers are take
-    0's, not the last rung's, so no client can ask for take 4 and be handed
-    take 2's draw under take 4's name.
+    A take past the ladder is a seed lane at the voice's own numbers rather
+    than an error: `take` is `Field(ge=0)` on `StreamOp`, which is the one
+    owner of "a take is not negative". It is never CLAMPED — the numbers are
+    take 0's, not the last rung's, so no client can ask for take 4 and be
+    handed take 2's draw under take 4's name.
     """
     return take_sampling(manifest, take)

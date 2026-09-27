@@ -396,42 +396,6 @@ def test_the_tts_recipes_pin_the_stack_each_arm_measured(
     assert mac["mlx-lm"] == "0.31.3"
 
 
-def test_doctor_reports_the_two_site_packages_patches_as_NOT_APPLICABLE(
-    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """pip cannot express an edit to somebody else's installed package — and
-    since 2026-09-15 there is no such package in the `tts` env to edit.
-
-    Both patches are fixes to the vLLM stack: the negative-token-id rejection in
-    `vllm` and the sentinel filter in `vllm_omni`. Owen ruled that Higgs does
-    not render on vllm-omni at all, so `higgs-v3-cuda-linux.txt` installs
-    sglang-omni and neither distribution is present. SGLang-Omni has its own
-    stage processor and needs no patch, which `sgl_served`'s header and
-    BookForge's own installer both state in as many words.
-
-    SO THE ROWS STAY AND THE PROBLEMS GO. They are still reported, by name, so
-    a reader can see that the question was asked and answered — but a doctor
-    that called this env unpatched would be calling a sound env broken, which
-    is exactly what it did to the Mac until 2026-09-13. `NOT_APPLICABLE` is in
-    `SOUND_STATUSES` for that reason.
-    """
-    assert cli.main(["init", "--enable-tts"]) == 0
-    capsys.readouterr()
-    # Still 1: the `tts` env is not installed in this home. That is the env
-    # row's problem, not the patches'.
-    assert cli.main(["doctor", "--json"]) == 1
-    report = json.loads(capsys.readouterr().out)
-    rows = {entry["id"]: entry for entry in report["narrator_patches"]}
-    assert sorted(rows) == ["higgs-sentinel-filter", "vllm-negative-token-id"]
-    for entry in rows.values():
-        assert entry["applied"] is False
-        assert entry["status"] == "not_applicable"
-    assert not any("HTTP 400" in problem for problem in report["problems"])
-    assert not any(
-        "240 ms of audible garbage" in problem for problem in report["problems"]
-    )
-
-
 def test_doctor_runs_with_every_job_type_enabled(
     home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

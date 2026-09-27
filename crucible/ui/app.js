@@ -1818,7 +1818,6 @@
   var VOICE_SOURCE = {
     repo: ['from its repo', 'ok'],
     override: ['set on this machine', 'warn'],
-    packaged: ['built into this release', 'floor'],
     engine: ["the engine's own", 'floor']
   };
 

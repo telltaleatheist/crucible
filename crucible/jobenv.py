@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from . import envpatches, interpreter, narratorpatches
+from . import envpatches, interpreter
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
@@ -1097,28 +1097,13 @@ def install_env(
             on_line,
         )
 
-        # THE TWO SITE-PACKAGES PATCHES pip CANNOT EXPRESS, RE-APPLIED HERE.
-        #
-        # pip has just written vllm-omni's own `higgs_audio_v3.py` over the edit
-        # narrator's sentinel proof reads, which is what made every Higgs load on
-        # owens-pc fail from 07:46 on 2026-09-15 after a `--force` at 07:34 — the
-        # proof found a 0-byte report because the code that writes records was
-        # gone. Before this call the recipe said the patches "must be re-applied"
-        # and named nobody to do it; `crucible doctor` then reported them
-        # `missing` from a command nobody runs after an install.
+        # SITE-PACKAGES PATCHES pip CANNOT EXPRESS, RE-APPLIED HERE, from each
+        # env type's own table (`crucible/envpatches.py`), selected again by
+        # the recipe's own pins.
         #
         # ONLY WHERE pip TOUCHED SITE-PACKAGES. The `PLAN_REFERENCES` arm above
-        # installs narrator alone with `--no-deps`, so the stack these patch is
-        # exactly as it was and re-applying them would be work for nothing.
-        #
-        # EACH ENV TYPE ITS OWN TABLE (`crucible/envpatches.py`). The tts
-        # patches edit the vLLM stack, and the `llm` env pins `vllm` too —
-        # patching an LLM server's input processor to admit token -100 is not a
-        # thing anyone asked for — so they stay tts's. The `llm` table holds
-        # mlx-lm's `top_logprobs` 11 -> 40 (PHASE22-DECIDE.md section 2.6).
-        # Each table then selects again by the recipe's own pins, so
-        # `mlx-darwin`'s tts env (no vllm, no vllm-omni) runs neither tts patch
-        # and `cuda-linux`'s llm env (no mlx-lm) does not run the llm one.
+        # installs narrator alone with `--no-deps`, so the stack is exactly as
+        # it was and re-applying would be work for nothing.
         #
         # BEFORE THE STAMP, and it raises: an env that is stamped installed is
         # an env whose patches are in, or there is no stamp.
@@ -1126,7 +1111,7 @@ def install_env(
             envpatches.apply(
                 spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line
             )
-        except narratorpatches.PatchError as exc:
+        except envpatches.PatchError as exc:
             # Re-raised as this module's error so the CLI refuses by name
             # rather than showing a traceback. No stamp has been written, so
             # the env this leaves behind is one nothing downstream trusts.
@@ -1141,19 +1126,15 @@ def install_env(
         # exports it.
         #
         # THE FAILURE IS LATE AND LOOKS LIKE HEALTH, which is why this is here
-        # and not in a setup note. Nothing fails at install: pip is happy, the
-        # env stamps installed, and this stack has no site-packages patches for
-        # `doctor` to report on. It goes wrong at the first render on a card.
-        # Both links were created BY HAND on owens-pc on 2026-09-15, and the
-        # recipe has claimed ever since that this module "creates and checks
-        # them" — a sentence that was true of nothing until now.
+        # and not in a setup note. Nothing fails at install: pip is happy and
+        # the env stamps installed. It goes wrong at the first render on a card.
         #
         # `cuda-linux` ONLY: `mlx-darwin`'s tts env has no CUDA in it, and
         # asking it for an nvidia directory would call a working Mac env broken.
         if spec.job_type == "tts" and backend_kind == "cuda-linux":
             try:
-                narratorpatches.ensure_cuda_toolkit_links(directory, on_line=on_line)
-            except narratorpatches.PatchError as exc:
+                envpatches.ensure_cuda_toolkit_links(directory, on_line=on_line)
+            except envpatches.PatchError as exc:
                 raise EnvError(str(exc)) from exc
 
     if python_version is None:
