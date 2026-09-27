@@ -127,3 +127,31 @@ Files: `crucible/capability.py`, `accelerator.py` / `backend.py` for the probe, 
 - **#1 ("latest" isn't the build you need).** A process fix: promote each release once it's installed and smoke-passed somewhere, so `releases/latest` never lags what's deployed. No code, unless the merge shows the promote script needs a change.
 - **Merging, conflicts, one release, and the kylies-pc / Mac deploys.** Only when their jobs are done, coordinated with training-pc-1.
 - **Updating the snag log** with each package's report.
+
+## Status, 2026-09-27 (everything merged to main, nothing released)
+
+| Package | Merge | Snags |
+|---|---|---|
+| C LAN, pairing | b7e1360 | #44, #46, #47, #4 (`crucible pair`); #3 tray item left to Owen |
+| A1 WSL state machine | 656e217 | #9, #10/#17, #11, #15, #16/#18, #19; #8 not built (sign-in stated in every message) |
+| A2 installer words | bdfc57e, then bd9ac08 cherry-picked | #6, #7, #12, #14, #26, #28, #34; `Die` under `irm \| iex` (04ec29f) |
+| D envs, ffmpeg | 1f30b0b | #25/#43 (`tools` release, ffmpeg n8.1.3), #31, #40, #41, #42, #13a |
+| G card facts, ladder | 7217ae0, 98913ae | #48; quantize to 4-bit floor; install modal; `crucible ladder` |
+| B upgrades, guest | 728db69 | #23, #27, #29 (`crucible guest`), #32, #33, #35, #39 |
+| E rvc | bd9c18f, 08934f3 | #5, #45; recycle by memory; partial results kept; 48 kHz floor; input channels |
+| desktop reserve | 53dc173 | measured at init, capped at 3 GiB; existing configs untouched |
+| install on submit | 8a5d8de | #2 |
+| virtualization re-check | c6375f6 | BIOS fix resumes by itself |
+
+Owed before a release:
+- `tests/test_lan.py` (C) and `test_tts_api.py` (a 16 GiB card now fits Higgs).
+- An autouse patch of `ladder.measure_desktop_reserve` for tests that run `init` on a GPU box.
+
+Owed on hardware:
+- rvc seams on real speech, and urvc's memory growth on CUDA.
+- The ladder's GPU rungs.
+- Higgs quantized, and on Turing.
+- The asr narrow widths.
+- `capability --measure-desktop` on kylies-pc.
+
+#1 stays a process fix: promote each release once it's installed and smoke-passed somewhere.
