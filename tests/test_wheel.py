@@ -163,7 +163,7 @@ def test_every_recipe_an_install_can_be_asked_for_travels(
     build and no checkout: the recipe is what pip is handed, so one missing
     from the wheel is a job type that cannot be installed at all.
     """
-    from crucible import jobenv, workerenv
+    from crucible import jobenv
     from crucible.voices import NARRATOR_ENGINE_SAMPLING
 
     wanted: set[str] = set()
@@ -171,10 +171,10 @@ def test_every_recipe_an_install_can_be_asked_for_travels(
         wanted.add(jobenv.recipe_for(jobenv.llm_env(backend_kind)))
         for engine in NARRATOR_ENGINE_SAMPLING:
             wanted.add(jobenv.recipe_for(jobenv.tts_env(engine, backend_kind)))
-        for job_type in workerenv.WORKER_JOB_TYPES:
+        for job_type in jobenv.WORKER_JOB_TYPES:
             try:
-                wanted.add(workerenv.recipe_for(job_type, backend_kind))
-            except workerenv.WorkerEnvError:
+                wanted.add(jobenv.recipe_for(jobenv.worker_env(job_type, backend_kind)))
+            except jobenv.EnvError:
                 # No recipe for that backend is a FACT rather than a gap —
                 # `envs/asr/mlx-darwin.md` is prose saying CTranslate2 has no
                 # Metal backend — and a missing file cannot be in the wheel.

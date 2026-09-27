@@ -493,7 +493,7 @@ def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
     in one — /home/telltale/anaconda3/envs/crucible/pyvenv.cfg is not there`.
     Two mistakes, one line (`Path(python).resolve().parent.parent`, a7ab9af):
 
-    1. **`.resolve()` walked out of the env.** `workerenv.install_worker_env`
+    1. **`.resolve()` walked out of the env.** `jobenv.install_env`
        builds the env with `sys.executable -m venv`, and a venv's `bin/python`
        is a SYMLINK to the interpreter it was built from — here the conda env
        the server itself runs in. Resolving it therefore lands on the BASE

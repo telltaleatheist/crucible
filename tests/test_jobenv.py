@@ -921,3 +921,177 @@ def test_the_install_refuses_before_it_makes_a_venv_or_dials_a_mirror(
     assert "env_disk" in str(caught.value)
     assert ran == [], "nothing was run"
     assert not env_dir(home, spec).exists(), "and nothing was made"
+
+
+
+# ------------------------------------------------------------- worker envs
+#
+# `rvc`'s recipe cannot be `name==version` all the way down: `generate
+# convert-dir` is in Owen's fork and not on PyPI, and both call themselves
+# `ultimate-rvc 0.5.11` — so the version is not an identity and the commit is.
+
+FORK_SHA = "05cc3f1ba921f070e16eaf3e1f188073c31c0101"
+
+
+def _worker_recipe(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "cuda-linux.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_rvc_recipe_pins_a_commit_not_a_branch() -> None:
+    path = recipe_for(jobenv.worker_env("rvc", "cuda-linux"))
+    refs = jobenv.recipe_direct_references(path)
+    assert refs["ultimate-rvc"] == FORK_SHA
+    assert "ultimate-rvc" not in recipe_pins(path)
+
+
+def test_both_rvc_recipes_pin_the_same_commit() -> None:
+    """An RVC checkpoint is not quantised per backend and neither is the engine."""
+    linux = jobenv.recipe_direct_references(
+        recipe_for(jobenv.worker_env("rvc", "cuda-linux"))
+    )
+    mac = jobenv.recipe_direct_references(
+        recipe_for(jobenv.worker_env("rvc", "mlx-darwin"))
+    )
+    assert linux == mac
+
+
+def test_the_align_recipe_is_all_version_pins() -> None:
+    path = recipe_for(jobenv.worker_env("align", "cuda-linux"))
+    assert jobenv.recipe_direct_references(path) == {}
+    pins = recipe_pins(path)
+    assert pins["qwen-asr"] == "0.0.6"
+    assert pins["torch"] == "2.14.0"
+
+
+def test_every_worker_recipe_that_ships_has_a_headline_package() -> None:
+    for job_type in jobenv.WORKER_JOB_TYPES:
+        for path in recipes_dir(job_type).glob("*.txt"):
+            assert (job_type, path.stem) in jobenv.WORKER_HEADLINE_PACKAGE, path
+
+
+def test_every_worker_headline_package_is_in_its_own_recipe() -> None:
+    for job_type in jobenv.WORKER_JOB_TYPES:
+        for path in recipes_dir(job_type).glob("*.txt"):
+            headline = jobenv.worker_env(job_type, path.stem).headline
+            named = set(recipe_pins(path)) | set(
+                jobenv.recipe_direct_references(path)
+            )
+            assert headline in named, f"{path.name} does not install {headline}"
+
+
+def test_a_worker_pair_nobody_decided_is_refused_by_name() -> None:
+    with pytest.raises(EnvError) as caught:
+        jobenv.worker_env("asr", "llama-windows")
+    assert "no 'asr' env on 'llama-windows'" in str(caught.value)
+
+
+def test_a_branch_is_not_a_pin(tmp_path: Path) -> None:
+    path = _worker_recipe(
+        tmp_path, "ultimate-rvc @ git+https://github.com/x/y@bookforge\n"
+    )
+    with pytest.raises(EnvError) as caught:
+        jobenv.recipe_direct_references(path)
+    assert "a branch name is not a pin" in str(caught.value)
+
+
+def test_index_urls_and_comments_are_not_requirements(tmp_path: Path) -> None:
+    path = _worker_recipe(
+        tmp_path,
+        "# a comment\n--extra-index-url https://example/whl\n\ntorch==2.7.0+cu128\n",
+    )
+    assert recipe_pins(path) == {"torch": "2.7.0+cu128"}
+    assert jobenv.recipe_direct_references(path) == {}
+
+
+def _stamped_worker(home: Path, job_type: str, backend: str = "cuda-linux") -> Path:
+    spec = jobenv.worker_env(job_type, backend)
+    recipe = recipe_for(spec)
+    directory = env_dir(home, spec)
+    (directory / "bin").mkdir(parents=True)
+    (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (directory / "crucible-env.json").write_text(
+        json.dumps(
+            {
+                "backend": backend,
+                "recipe": recipe.name,
+                "environment_sha256": jobenv.environment_sha256(recipe),
+                "direct_references": jobenv.recipe_direct_references(recipe),
+                "recipe_text": jobenv.recipe_text(recipe),
+                "python_version": "3.11.16",
+                "seconds": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_a_matching_worker_env_names_the_commit_and_not_the_version(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.5.11 is what pip reports for the fork AND for PyPI's release."""
+    _stamped_worker(home, "rvc")
+    spec = jobenv.worker_env("rvc", "cuda-linux")
+    path = recipe_for(spec)
+    monkeypatch.setattr(
+        jobenv,
+        "installed_packages",
+        lambda _h, _s: {**recipe_pins(path), "ultimate-rvc": "0.5.11"},
+    )
+    monkeypatch.setattr(
+        jobenv,
+        "installed_direct_references",
+        lambda _h, _s: dict(jobenv.recipe_direct_references(path)),
+    )
+    status = env_status(home, spec, "cuda-linux")
+    assert status.installed is True
+    assert "ultimate-rvc @ 05cc3f1ba921" in status.detail
+    assert "0.5.11" not in status.detail
+
+
+def test_the_wrong_commit_is_not_ready_and_says_which(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PyPI release installed instead of the fork: same version, no `convert-dir`."""
+    _stamped_worker(home, "rvc")
+    spec = jobenv.worker_env("rvc", "cuda-linux")
+    path = recipe_for(spec)
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _h, _s: dict(recipe_pins(path)))
+    monkeypatch.setattr(jobenv, "installed_direct_references", lambda _h, _s: {})
+    status = env_status(home, spec, "cuda-linux")
+    assert status.installed is False
+    assert "ultimate-rvc was installed from no recorded commit" in status.detail
+    assert FORK_SHA in status.detail
+
+
+def test_a_headline_that_is_not_installed_is_a_build_bug_said_out_loud(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stamped_worker(home, "align")
+    spec = jobenv.worker_env("align", "cuda-linux")
+    pins = recipe_pins(recipe_for(spec))
+    del pins["qwen-asr"]
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _h, _s: dict(pins))
+    monkeypatch.setattr(jobenv, "recipe_pins", lambda _p: dict(pins))
+    with pytest.raises(EnvError) as caught:
+        env_status(home, spec, "cuda-linux")
+    assert "the package the align env exists for" in str(caught.value)
+
+
+def test_a_worker_env_is_refused_the_same_way_when_the_disk_is_short(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        jobenv, "_run", lambda command, failure, on_line: ran.append(list(command))
+    )
+    monkeypatch.setattr(jobenv.shutil, "disk_usage", lambda _p: _Usage(1_000_000))
+    spec = jobenv.worker_env("align", "cuda-linux")
+    with pytest.raises(EnvError) as caught:
+        jobenv.install_env(home, spec, "cuda-linux")
+    assert "env_disk" in str(caught.value)
+    assert "'align'" in str(caught.value)
+    assert ran == [], "nothing was run"
+    assert not env_dir(home, spec).exists()

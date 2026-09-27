@@ -310,7 +310,7 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
 def a_venv_on_a_conda_env(tmp_path: Path) -> Path:
     """THE LIVE WSL LAYOUT, which is what broke on 2026-09-14.
 
-    `workerenv.install_worker_env` builds the tts env with `sys.executable -m
+    `jobenv.install_env` builds the tts env with `sys.executable -m
     venv`, and on that box the server's own interpreter is a CONDA env — so
     `~/.crucible/envs/tts-higgs-v3/bin/python` is a symlink into
     `~/anaconda3/envs/crucible/bin`, and the conda env at the other end has no

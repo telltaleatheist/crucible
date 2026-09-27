@@ -10,7 +10,7 @@ import pytest
 
 from urllib.parse import quote
 
-from crucible import cli, jobenv, pairing, workerenv
+from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 from crucible.interfaces import InterfaceError
@@ -487,56 +487,6 @@ def test_doctor_runs_with_every_job_type_enabled(
         assert problem, "a problem with no text is a problem nobody can act on"
 
 
-def test_a_config_written_before_a_job_type_existed_still_loads(
-    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """An upgrade must not invalidate a config, and must say what it assumed.
-
-    Found on Owen's Mac, 2026-09-13: its server had been running since before
-    `asr`, `tts`, `align` and `rvc` were built, and after the upgrade `crucible
-    token --show` could not read its own config to print its own token. The only
-    repair on offer was `crucible init --force`, which mints a NEW token and
-    breaks every client that had the old one — so requiring the flags meant
-    every added job type broke every deployed server.
-
-    Absent reads as off, which cannot switch anything on by accident, and
-    `doctor` names the flags so "off because I chose that" and "off because this
-    file predates it" are told apart rather than guessed at.
-    """
-    monkeypatch.setattr("crucible.cli.detect_backend", lambda: FAKE_BACKEND)
-    assert cli.main(["init", "--enable-echo", "--enable-llm"]) == 0
-    capsys.readouterr()
-
-    # Rewrite the config as a phase-2 one: no asr, tts, align or rvc key at all.
-    path = home / "config.toml"
-    kept = [
-        line
-        for line in path.read_text(encoding="utf-8").splitlines(True)
-        if not any(
-            line.startswith(f"{flag} =")
-            for flag in ("enable_asr", "enable_tts", "enable_align", "enable_rvc")
-        )
-    ]
-    path.write_text("".join(kept), encoding="utf-8")
-
-    config = load_config(home)
-    assert config.enable_echo is True
-    assert config.enable_llm is True
-    assert config.enable_asr is False
-    assert config.enable_rvc is False
-    assert set(config.flags_absent) == {
-        "enable_asr", "enable_tts", "enable_align", "enable_rvc",
-    }
-    assert config.token, "the token survived, which is the whole point"
-
-    assert cli.main(["doctor", "--json"]) in (0, 1)
-    report = json.loads(capsys.readouterr().out)
-    assert set(report["config"]["flags_absent"]) == {
-        "enable_asr", "enable_tts", "enable_align", "enable_rvc",
-    }
-
-
 def test_init_takes_a_token_the_caller_minted(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -582,10 +532,10 @@ def test_every_installable_name_has_a_smoke_import() -> None:
     """
     for backend_kind in ("cuda-linux", "mlx-darwin"):
         for job_type in cli.INSTALLABLE_JOB_TYPES:
-            if job_type in workerenv.WORKER_JOB_TYPES:
+            if job_type in jobenv.WORKER_JOB_TYPES:
                 try:
-                    workerenv.recipe_for(job_type, backend_kind)
-                except workerenv.WorkerEnvError:
+                    jobenv.recipe_for(jobenv.worker_env(job_type, backend_kind))
+                except jobenv.EnvError:
                     continue
                 keys = [job_type]
             elif job_type == "llm":

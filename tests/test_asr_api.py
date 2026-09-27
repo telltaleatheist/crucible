@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, workerenv
+from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp
 from crucible.asrmodels import load_asr_manifest
 from crucible.jobs import asr as asr_job
@@ -57,7 +57,7 @@ def asr_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     A symlink and not a stub script: the worker is spawned with it for real, so
     it has to be able to run a Python file.
     """
-    directory = workerenv.worker_env_dir(home, "asr")
+    directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -72,9 +72,9 @@ def asr_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = workerenv.recipe_pins(workerenv.recipe_for("asr", FAKE_BACKEND.kind))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("asr", FAKE_BACKEND.kind)))
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     return directory
 
@@ -143,7 +143,7 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     exists and BEFORE the client starts, which is not an ordering a fixture can
     express without a second `home`.
     """
-    directory = workerenv.worker_env_dir(home, "asr")
+    directory = home / "envs" / "asr"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -158,11 +158,11 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = workerenv.recipe_pins(
-        workerenv.recipe_for("asr", FAKE_MAC_BACKEND.kind)
+    pins = jobenv.recipe_pins(
+        jobenv.recipe_for(jobenv.worker_env("asr", FAKE_MAC_BACKEND.kind))
     )
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     return directory
 

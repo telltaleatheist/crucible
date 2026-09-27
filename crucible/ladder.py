@@ -818,7 +818,7 @@ def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
 
     Empty off `cuda-linux`: the GPU rungs measure the Linux engines' envs, and
     no other backend has an llm env of that kind to ask for."""
-    from . import jobenv, workerenv
+    from . import jobenv
 
     found: dict[str, Path] = {}
     if backend_kind != CUDA_LINUX:
@@ -826,8 +826,8 @@ def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
     llm = jobenv.env_python(home, jobenv.llm_env(backend_kind))
     if llm.is_file():
         found["llm"] = llm
-    for job_type in workerenv.WORKER_JOB_TYPES:
-        python = workerenv.worker_env_python(home, job_type)
+    for job_type in jobenv.WORKER_JOB_TYPES:
+        python = jobenv.env_python(home, jobenv.worker_env(job_type, backend_kind))
         if python.is_file():
             found[job_type] = python
     return found

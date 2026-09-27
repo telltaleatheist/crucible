@@ -398,7 +398,11 @@ def _write(home: Path, **overrides: Any) -> None:
         "enable_tts": False,
         "enable_align": False,
         "enable_rvc": False,
+        "enable_denoise": False,
         "desktop_allowance_bytes": CUDA_RESERVE,
+        "retention_days": 7,
+        "desktop_allowance_basis": "stated",
+        "desktop_allowance_note": "",
     }
     base.update(overrides)
     write_config(home, **base)
@@ -435,7 +439,6 @@ def test_a_config_with_no_capability_table_reads_as_NOT_DECIDED(home: Path) -> N
     _write(home)
     config = load_config(home)
     assert config.capability is None
-    assert config.flags_absent == (), "the phase-2 compat path is untouched"
 
 
 def test_a_capability_table_with_an_unknown_key_is_refused(home: Path) -> None:

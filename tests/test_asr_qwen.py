@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, workerenv
+from crucible import accelerator, jobenv
 from crucible.accelerator import GIB
 from crucible.alignmodels import load_align_manifest
 from crucible.asrmodels import (
@@ -288,7 +288,7 @@ def _stamp_llm_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: st
 
 
 def _stamp_align_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: str) -> None:
-    directory = workerenv.worker_env_dir(home, "align")
+    directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -303,8 +303,8 @@ def _stamp_align_env(home: Path, monkeypatch: pytest.MonkeyPatch, backend_kind: 
         ),
         encoding="utf-8",
     )
-    pins = workerenv.recipe_pins(workerenv.recipe_for("align", backend_kind))
-    monkeypatch.setattr(workerenv, "installed_packages", lambda _home, _type: dict(pins))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("align", backend_kind)))
+    monkeypatch.setattr(jobenv, "installed_packages", lambda _home, _type: dict(pins))
 
 
 def _stamp_weights(home: Path, model_id: str, spec: Any, backend_kind: str) -> None:

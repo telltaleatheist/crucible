@@ -58,7 +58,6 @@ from . import (
     service,
     uninstall,
     weights,
-    workerenv,
 )
 from .alignmodels import (
     AlignManifest,
@@ -82,6 +81,7 @@ from .config import (
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_RETENTION_DAYS,
     DESKTOP_BASES,
     DESKTOP_BASIS_DECLARED,
     DESKTOP_BASIS_MEASURED,
@@ -297,29 +297,29 @@ def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
     return token, carried
 
 
-def carried_reserve(path: Path) -> tuple[int, str, str] | None:
-    """`--config-from`'s desktop reserve: (bytes, basis, note), or None.
-
-    None when the carried file states no reserve — an older host's extract,
-    which carried three tables only — and `crucible init` then decides the
-    reserve as a fresh init would. A reserve with no basis carries as "stated",
-    `config._desktop_basis`'s reading of the same absence.
-    """
+def carried_reserve(path: Path) -> tuple[int, str, str]:
+    """`--config-from`'s desktop reserve: (bytes, basis, note)."""
     import tomllib
 
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None  # `carried_from` has already refused this file by name
+    except OSError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} could not be read: {exc}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} is not TOML: {exc}")
     section = document.get("accelerator")
-    if not isinstance(section, dict):
-        return None
-    value = section.get("desktop_allowance_bytes")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return None
-    basis = section.get("desktop_allowance_basis", DESKTOP_BASIS_STATED)
-    if basis not in DESKTOP_BASES:
-        basis = DESKTOP_BASIS_STATED
+    value = section.get("desktop_allowance_bytes") if isinstance(section, dict) else None
+    basis = section.get("desktop_allowance_basis") if isinstance(section, dict) else None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or basis not in DESKTOP_BASES
+    ):
+        raise ConfigError(
+            f"config_from_no_reserve: {path} has no [accelerator] "
+            "desktop_allowance_bytes and desktop_allowance_basis to carry"
+        )
     note = section.get("desktop_allowance_note", "")
     return value, basis, note if isinstance(note, str) else ""
 
@@ -329,8 +329,8 @@ def _existing_stated_reserve(path: Path) -> tuple[int, str] | None:
 
     Owen, 2026-09-26: an existing reserve is never changed automatically. A
     re-init mints a new token; it is not a request to lower owens-pc's 3 GiB
-    because nothing was streaming that minute. So a stated reserve (and a
-    config from before the basis existed reads as stated) survives the re-init;
+    because nothing was streaming that minute. So a stated reserve survives the
+    re-init;
     `crucible capability --measure-desktop` is the deliberate way to replace it.
     """
     if not path.exists():
@@ -371,10 +371,8 @@ def _decide_reserve(
             "stated",
         )
     if args.config_from is not None:
-        carried = carried_reserve(Path(args.config_from))
-        if carried is not None:
-            value, basis, note = carried
-            return value, basis, note, f"{basis}, carried from {args.config_from}"
+        value, basis, note = carried_reserve(Path(args.config_from))
+        return value, basis, note, f"{basis}, carried from {args.config_from}"
     if args.force:
         kept = _existing_stated_reserve(config_path(home))
         if kept is not None:
@@ -439,12 +437,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     # on an NVIDIA card since 2026-09-26, what its desktop actually holds
     # (`_decide_reserve` gives the order). BEFORE the config is written, so a
     # measurement never sees a half-written home.
-    (
-        desktop_allowance_bytes,
-        desktop_basis,
-        desktop_note,
-        desktop_source,
-    ) = _decide_reserve(args, backend, home)
+    try:
+        (
+            desktop_allowance_bytes,
+            desktop_basis,
+            desktop_note,
+            desktop_source,
+        ) = _decide_reserve(args, backend, home)
+    except ConfigError as exc:
+        return _fail(str(exc))
 
     # The token is minted HERE unless the caller brought one. `--token` exists
     # for `@crucible/bootstrap` (PHASE12-BOOTSTRAP.md): the app that installs a
@@ -484,6 +485,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_rvc=args.enable_rvc,
         enable_denoise=args.enable_denoise,
         desktop_allowance_bytes=desktop_allowance_bytes,
+        retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
         desktop_allowance_note=desktop_note,
         # THIS BOX'S SERVING FOOTPRINT PER NARRATOR ENGINE (PHASE21 section
@@ -1140,17 +1142,14 @@ def cmd_capability(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ install
 
 
-#: Every job type `crucible install` can build an env for. Two shapes of env
-#: sit behind it — `jobenv` for the types whose work is an engine SERVER
-#: (llm, tts) and `workerenv` for the types whose work is a library in its
-#: own venv (asr, and align and rvc after it). The two modules are one
-#: module's worth of code twice over and merging them is a named follow-up;
-#: this tuple is the one place the difference does not leak.
-INSTALLABLE_JOB_TYPES = ("llm", "tts", *workerenv.WORKER_JOB_TYPES)
+#: Every job type `crucible install` can build an env for: the engine SERVERS
+#: (llm, tts) and the types whose work is a library in its own venv
+#: (`jobenv.WORKER_JOB_TYPES`).
+INSTALLABLE_JOB_TYPES = ("llm", "tts", *jobenv.WORKER_JOB_TYPES)
 
 #: Which `crucible install <type>` builds the env a job type needs. Almost
 #: always itself; `denoise` is the exception, because it shares the `rvc` env
-#: (`workerenv.JOB_TYPES_SERVED_BY_ENV` is the owner of that fact). `crucible
+#: (`jobenv.JOB_TYPES_SERVED_BY_ENV` is the owner of that fact). `crucible
 #: doctor` reads this so the command it suggests is one that exists.
 #:
 #: `SMOKE_IMPORT` below is its partner and they are now in ONE file. The table
@@ -1163,7 +1162,7 @@ INSTALLER_FOR: dict[str, str] = {
     **{name: name for name in INSTALLABLE_JOB_TYPES},
     **{
         job_type: env
-        for env, served in workerenv.JOB_TYPES_SERVED_BY_ENV.items()
+        for env, served in jobenv.JOB_TYPES_SERVED_BY_ENV.items()
         for job_type in served
     },
     # `pages` is a CAPABILITY CLASS and not a job type — PHASE3-VLM.md section
@@ -1268,16 +1267,6 @@ def cmd_install(args: argparse.Namespace) -> int:
     # the developer's path became everybody's and the flag it hid behind went
     # with them. What the recipe path does to an env that is already there is
     # `jobenv.plan_install`'s answer, not this function's.
-    #
-    # Which installer a type uses is a fact about the SHAPE of its work, not
-    # about its name: `llm` and `tts` run an engine server and get a `jobenv`;
-    # `asr`, and `align` and `rvc` after it, run a library in its own venv and
-    # get a `workerenv` (PHASE4-AUDIO.md section 0). `workerenv.WORKER_JOB_TYPES`
-    # is the list of the second kind, so asking it is the question, rather than
-    # testing for one name and assuming everything else is the other.
-    if args.job_type in workerenv.WORKER_JOB_TYPES:
-        return _install_worker_env(config, backend, args)
-
     try:
         spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
         recipe = jobenv.recipe_for(spec)
@@ -1307,13 +1296,24 @@ def cmd_install(args: argparse.Namespace) -> int:
         return _fail(refusal)
     print(f"installed in {elapsed:.0f}s: {status.detail}")
     for name in sorted(status.packages):
-        if name in (spec.headline, "torch", "numpy", "transformers", "mlx"):
+        if name in (
+            spec.headline, "torch", "numpy", "transformers", "mlx",
+            "ctranslate2", "onnxruntime",
+        ):
             print(f"  {name}=={status.packages[name]}")
     refusal = _ensure_tools(config, args)
     if refusal is not None:
         return _fail(refusal)
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
-    return _capability_step(config, backend, args.job_type)
+    # One env can serve more than one job type — `rvc`'s also carries
+    # audio-separator, which is `denoise` — and the flag for each of them is
+    # decided here, because this is the door that has just built the thing they
+    # share.
+    return _capability_step(
+        config,
+        backend,
+        *jobenv.JOB_TYPES_SERVED_BY_ENV.get(args.job_type, (args.job_type,)),
+    )
 
 
 def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
@@ -1400,67 +1400,6 @@ def _install_llama_windows(
     )
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(config, backend, args.job_type)
-
-
-def _install_worker_env(
-    config: Config, backend: Backend, args: argparse.Namespace
-) -> int:
-    """`crucible install <type>` for a type whose work runs in its own venv.
-
-    PHASE4-AUDIO.md section 0: the phase 4 types are libraries rather than
-    servers, so each gets an env of its own and a worker script run with that
-    env's python. The `llm` branch above does the same job through `jobenv`; the
-    two modules are one module's worth of code twice over, and merging them is a
-    follow-up (crucible/workerenv.py says so at the top).
-    """
-    try:
-        recipe = workerenv.recipe_for(args.job_type, backend.kind)
-    except workerenv.WorkerEnvError as exc:
-        return _fail(str(exc))
-    print(f"backend: {backend.kind}")
-    print(f"recipe:  {recipe}")
-    print(f"target:  {workerenv.worker_env_dir(config.home, args.job_type)}")
-    started = time.monotonic()
-    try:
-        status = workerenv.install_worker_env(
-            config.home,
-            args.job_type,
-            backend.kind,
-            force=args.force,
-            on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
-        )
-    except workerenv.WorkerEnvError as exc:
-        return _fail(str(exc))
-    elapsed = time.monotonic() - started
-    if not status.installed:
-        return _fail(f"the env did not come out installed: {status.detail}")
-    refusal = _smoke_import(
-        workerenv.worker_env_python(config.home, args.job_type),
-        args.job_type,
-        backend.kind,
-    )
-    if refusal is not None:
-        return _fail(refusal)
-    print(f"installed in {elapsed:.0f}s: {status.detail}")
-    headline = workerenv.headline_package(args.job_type, backend.kind)
-    for name in sorted(status.packages):
-        # The headline plus the packages whose version is the thing most
-        # likely to be quietly wrong. `mlx` is here for the same reason
-        # `ctranslate2` is: it is the engine under the headline, and an
-        # mlx that resolved differently is a different numerical path.
-        if name in (headline, "ctranslate2", "mlx", "numpy", "onnxruntime"):
-            print(f"  {name}=={status.packages[name]}")
-    refusal = _ensure_tools(config, args)
-    if refusal is not None:
-        return _fail(refusal)
-    # One env can serve more than one job type — `rvc`'s also carries
-    # audio-separator, which is `denoise` — and the flag for each of them is
-    # decided here, because this is the door that has just built the thing they
-    # share.
-    _measure_step(config, backend, gpu=not args.no_gpu_measure)
-    return _capability_step(
-        config, backend, *workerenv.JOB_TYPES_SERVED_BY_ENV[args.job_type]
-    )
 
 
 def _measure_step(config: Config, backend: Backend, *, gpu: bool) -> None:
@@ -1610,6 +1549,8 @@ def _env_spec(
     narrator engine — so the flag is required for it and refused for `llm`,
     rather than quietly ignored on the type that has only one env.
     """
+    if job_type in jobenv.WORKER_JOB_TYPES:
+        return jobenv.worker_env(job_type, backend_kind)
     if job_type == "llm":
         if narrator_engine is not None:
             raise jobenv.EnvError(
@@ -2591,14 +2532,14 @@ def _plan_or_refusal(call: Any) -> "jobenv.EnvPlan | str":
     """
     try:
         return call()
-    except (jobenv.EnvError, workerenv.WorkerEnvError) as exc:
+    except jobenv.EnvError as exc:
         return str(exc)
 
 
 def _provenance(
     report: dict[str, Any],
     label: str,
-    status: "jobenv.EnvStatus | workerenv.EnvStatus",
+    status: jobenv.EnvStatus,
     recipe: Path,
     plan: "jobenv.EnvPlan | str",
 ) -> dict[str, Any]:
@@ -2640,7 +2581,7 @@ def _provenance(
 def _provenance_line(entry: dict[str, Any]) -> str:
     """The one-line form `crucible doctor` prints after an env's detail."""
     if entry["environment_sha256"] is None:
-        recipe = f"{entry['recipe']} halves not recorded (installed before 0.7.0)"
+        recipe = f"{entry['recipe']} not stamped"
     elif entry["environment_sha256"] != entry["environment_sha256_now"]:
         recipe = (
             f"{entry['recipe']} {entry['environment_sha256'][:12]} != "
@@ -2842,11 +2783,6 @@ def _doctor_report() -> dict[str, Any]:
                 config.desktop_allowance_bytes, config.desktop_allowance_basis
             ),
             "backend_kind": config.backend_kind,
-            # Which capability flags this config did not carry. A config written
-            # before a job type existed reads that type as off, which is the only
-            # answer that does not invalidate every server on an upgrade — and
-            # this is how it says so out loud instead of looking like a choice.
-            "flags_absent": list(config.flags_absent),
         }
         # NOT ON WIN32. A Windows file has no POSIX mode: `os.chmod` there
         # sets one read-only bit and `stat` reports 0o666 whatever the ACL
@@ -2891,31 +2827,21 @@ def _doctor_report() -> dict[str, Any]:
                     jobenv.llm_env(backend.kind),
                     backend.kind,
                 )
-        for job_type in workerenv.WORKER_JOB_TYPES:
+        for job_type in jobenv.WORKER_JOB_TYPES:
             if not getattr(config, f"enable_{job_type}"):
                 continue
             try:
-                worker_env = workerenv.env_status(config.home, job_type, backend.kind)
-                entry = worker_env.to_dict()
-                entry["provenance"] = _provenance(
-                    report,
-                    f"{job_type}_env",
-                    worker_env,
-                    workerenv.recipe_for(job_type, backend.kind),
-                    _plan_or_refusal(
-                        lambda: workerenv.plan_install(
-                            config.home, job_type, backend.kind
-                        )
-                    ),
-                )
-                report["worker_envs"].append(entry)
-                if not worker_env.installed:
-                    report["problems"].append(f"{job_type}_env: {worker_env.detail}")
-            except workerenv.WorkerEnvError as exc:
+                spec = jobenv.worker_env(job_type, backend.kind)
+            except jobenv.EnvError as exc:
                 report["worker_envs"].append(
                     {"job_type": job_type, "installed": False, "detail": str(exc)}
                 )
                 report["problems"].append(f"{job_type}_env: {exc}")
+                continue
+            entry = _env_report(
+                report, f"{job_type}_env", config.home, spec, backend.kind
+            )
+            report["worker_envs"].append({"job_type": job_type, **entry})
         if config.enable_tts:
             # One row per narrator engine, because on cuda-linux each is its
             # own venv and a voice load picks by its manifest's
@@ -3116,13 +3042,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"reserve: {config['desktop_reserve']}")
             if config["desktop_allowance_note"]:
                 print(f"         {config['desktop_allowance_note']}")
-            if config["flags_absent"]:
-                absent = ", ".join(config["flags_absent"])
-                print(
-                    f"note:    this config predates {absent}; those job types are "
-                    "off. Add the keys to [jobs] to turn them on — do NOT run "
-                    "`crucible init --force`, which mints a new token"
-                )
         env = report["llm_env"]
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"

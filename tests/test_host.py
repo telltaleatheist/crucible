@@ -2094,6 +2094,10 @@ def test_write_config_copies_a_carried_table_verbatim(tmp_path: Path) -> None:
         enable_align=False,
         enable_rvc=False,
         desktop_allowance_bytes=1,
+        enable_denoise=False,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
         carried_tables={
             "routes": {"translate": "anthropic/claude-sonnet-5"},
             "upstreams": {"anthropic": {"key": "sk-ant-x", "a_field_from_the_future": 1}},
@@ -2125,6 +2129,10 @@ def test_a_carried_table_may_not_shadow_one_this_writer_owns(tmp_path: Path) -> 
             enable_align=False,
             enable_rvc=False,
             desktop_allowance_bytes=1,
+            enable_denoise=False,
+            retention_days=7,
+            desktop_allowance_basis="stated",
+            desktop_allowance_note="",
             carried_tables={"auth": {"token": "somebody-elses"}},
         )
     assert "two writers" in str(caught.value)

@@ -34,7 +34,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ... import accelerator, weights, workerenv
+from ... import accelerator, jobenv, weights
 from ...alignmodels import load_all_align_manifests
 from ...asrmodels import load_all_asr_manifests
 from ...config import Config
@@ -122,8 +122,10 @@ class AlignLongformJobType:
         """
         missing: list[str] = []
         for job_type in ("asr", "align"):
-            status = workerenv.env_status(
-                self._config.home, job_type, self._config.backend_kind
+            status = jobenv.env_status(
+                self._config.home,
+                jobenv.worker_env(job_type, self._config.backend_kind),
+                self._config.backend_kind,
             )
             if not status.installed:
                 missing.append(f"{job_type} ({status.detail})")
@@ -209,8 +211,10 @@ class AlignLongformJobType:
             # ── 1. transcribe ────────────────────────────────────────────
             ctx.progress(0.0, "transcribing the audiobook", stage=STAGES[0])
             words = stages.transcribe(
-                home=self._config.home,
-                python=workerenv.worker_env_python(self._config.home, "asr"),
+                python=jobenv.env_python(
+                    self._config.home,
+                    jobenv.worker_env("asr", self._config.backend_kind),
+                ),
                 weights_dir=rough_weights,
                 ffmpeg=ffmpeg,
                 audio=audio,
@@ -264,8 +268,10 @@ class AlignLongformJobType:
             ctx.raise_if_cancelled()
 
             aligned = stages.align_chunks(
-                home=self._config.home,
-                python=workerenv.worker_env_python(self._config.home, "align"),
+                python=jobenv.env_python(
+                    self._config.home,
+                    jobenv.worker_env("align", self._config.backend_kind),
+                ),
                 weights_dir=aligner_weights,
                 ffmpeg=ffmpeg,
                 language_name=params.language_name,

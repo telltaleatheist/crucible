@@ -64,6 +64,7 @@ def _config(home: Path) -> Config:
         enable_rvc=False,
         enable_denoise=False,
         desktop_allowance_bytes=3 * GIB,
+        desktop_allowance_basis="stated",
         capability=None,
     )
 

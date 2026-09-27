@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli, workerenv
+from crucible import cli, jobenv
 from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -107,7 +107,7 @@ def test_align_is_installable_and_rvc_is_installable(viable: None) -> None:
     """Both are worker envs, which is a fact about the SHAPE of their work."""
     assert "align" in cli.INSTALLABLE_JOB_TYPES
     assert "rvc" in cli.INSTALLABLE_JOB_TYPES
-    assert set(workerenv.WORKER_JOB_TYPES) == {"align", "asr", "rvc"}
+    assert set(jobenv.WORKER_JOB_TYPES) == {"align", "asr", "rvc"}
 
 
 def test_every_worker_type_has_a_mac_recipe_now(mac: None) -> None:
@@ -118,14 +118,14 @@ def test_every_worker_type_has_a_mac_recipe_now(mac: None) -> None:
     `qwen-align`, and `asr`'s is the scratch env the seven mlx-whisper
     manifests were measured in.
     """
-    for job_type in workerenv.WORKER_JOB_TYPES:
-        recipe = workerenv.recipe_for(job_type, FAKE_MAC_BACKEND.kind)
+    for job_type in jobenv.WORKER_JOB_TYPES:
+        recipe = jobenv.recipe_for(jobenv.worker_env(job_type, FAKE_MAC_BACKEND.kind))
         assert recipe.is_file(), job_type
-        assert workerenv.recipe_pins(recipe), job_type
+        assert jobenv.recipe_pins(recipe), job_type
     # And a backend with no recipe at all still refuses by name, which is what
     # the Mac used to be the example of.
-    with pytest.raises(workerenv.WorkerEnvError) as caught:
-        workerenv.recipe_for("align", "llama-windows")
+    with pytest.raises(jobenv.EnvError) as caught:
+        jobenv.recipe_for(jobenv.worker_env("align", "llama-windows"))
     assert "no align env recipe for backend 'llama-windows'" in str(caught.value)
 
 

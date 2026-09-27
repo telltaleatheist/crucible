@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, workerenv, workers
+from crucible import accelerator, jobenv, workers
 from crucible.accelerator import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
@@ -47,7 +47,7 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     `rvc`, not `denoise`: this type has no env of its own, which is the thing
     this fixture's name exists to keep saying.
     """
-    directory = workerenv.worker_env_dir(home, "rvc")
+    directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -62,14 +62,14 @@ def rvc_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    recipe = workerenv.recipe_for("rvc", FAKE_BACKEND.kind)
-    pins = workerenv.recipe_pins(recipe)
-    refs = workerenv.recipe_direct_refs(recipe)
+    recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_BACKEND.kind))
+    pins = jobenv.recipe_pins(recipe)
+    refs = jobenv.recipe_direct_references(recipe)
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     monkeypatch.setattr(
-        workerenv, "installed_direct_refs", lambda _home, _type: dict(refs)
+        jobenv, "installed_direct_references", lambda _home, _type: dict(refs)
     )
     return directory
 
@@ -507,7 +507,7 @@ def test_autocast_is_off_on_the_mac(
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
-    directory = workerenv.worker_env_dir(home, "rvc")
+    directory = home / "envs" / "rvc"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -522,15 +522,15 @@ def test_autocast_is_off_on_the_mac(
         ),
         encoding="utf-8",
     )
-    recipe = workerenv.recipe_for("rvc", FAKE_MAC_BACKEND.kind)
+    recipe = jobenv.recipe_for(jobenv.worker_env("rvc", FAKE_MAC_BACKEND.kind))
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _h, _t: dict(
-            workerenv.recipe_pins(recipe)
+        jobenv, "installed_packages", lambda _h, _t: dict(
+            jobenv.recipe_pins(recipe)
         )
     )
     monkeypatch.setattr(
-        workerenv, "installed_direct_refs", lambda _h, _t: dict(
-            workerenv.recipe_direct_refs(recipe)
+        jobenv, "installed_direct_references", lambda _h, _t: dict(
+            jobenv.recipe_direct_references(recipe)
         )
     )
     manifest = load_denoise_manifest(MODEL)
@@ -745,6 +745,9 @@ def test_check_reports_what_is_missing_in_order(
         enable_rvc=False,
         enable_denoise=True,
         desktop_allowance_bytes=3 * GIB,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     config = load_config(home)
     plugin = denoise_job.DenoiseJobType(config, FAKE_BACKEND, frozenset)

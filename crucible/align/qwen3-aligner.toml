@@ -34,7 +34,7 @@ dtype = "bfloat16"
 
 # MEASURED on the 3090 Ti, 2026-09-26, and it REPLACES a computed 3,446,157,280
 # that was 1.4 GiB short. Measured because 1.0.41 caps a plain-torch worker at
-# this number (`workerenv.torch_memory_cap`), and the computed figure turned a
+# this number (`workers.torch_memory_cap`), and the computed figure turned a
 # legitimate 300 s window into an OOM at "3.21 GiB allowed". The window was 300 s
 # of The Coming of the Third Reich with 742 words, the longest this job accepts
 # (QWEN3_MAX_AUDIO_S), aligned by the worker directly, uncapped, with

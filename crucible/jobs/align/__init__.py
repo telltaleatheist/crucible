@@ -76,7 +76,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ... import accelerator, hosttools, weights, workerenv, workers
+from ... import accelerator, hosttools, jobenv, weights, workers
 from ...alignmodels import (
     AlignBackendSpec,
     AlignManifest,
@@ -379,8 +379,10 @@ class AlignJobType:
 
     def check(self, backend: Any) -> JobTypeStatus:
         try:
-            env = workerenv.env_status(self._config.home, JOB_TYPE, backend.kind)
-        except workerenv.WorkerEnvError as exc:
+            env = jobenv.env_status(
+                self._config.home, jobenv.worker_env(JOB_TYPE, backend.kind), backend.kind
+            )
+        except jobenv.EnvError as exc:
             return JobTypeStatus(ready=False, detail=str(exc))
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
@@ -444,15 +446,17 @@ class AlignJobType:
             host_name=self._backend.gpu.name,
         )
         try:
-            python = workerenv.require_env(self._config.home, JOB_TYPE, backend_kind)
-        except workerenv.WorkerEnvError as exc:
+            python = jobenv.require_env(
+                self._config.home, jobenv.worker_env(JOB_TYPE, backend_kind), backend_kind
+            )
+        except jobenv.EnvError as exc:
             raise ApiError(
                 409,
                 "env_missing",
                 f"cannot run {model_id!r}: {exc}",
                 {
                     "model": model_id,
-                    "env": str(workerenv.worker_env_dir(self._config.home, JOB_TYPE)),
+                    "env": str(self._config.home / "envs" / JOB_TYPE),
                 },
             ) from None
         try:

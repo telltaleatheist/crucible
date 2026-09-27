@@ -33,7 +33,7 @@ way, and borrowing the resident holder would evict whatever a client had loaded.
 
 THE ENVIRONMENT IS NOT OPTIONAL
 -------------------------------
-Both workers get `workerenv.worker_environment(...)`. The `asr` env needs it to
+Both workers get `workers.worker_environment(...)`. The `asr` env needs it to
 run at all — pip's CUDA libraries are in per-package directories the loader does
 not search, and ctranslate2 resolves cuBLAS at the first matrix multiply, so
 without it the model loads and the first window dies (measured on owens-pc,
@@ -47,7 +47,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from ... import workerenv, workers
+from ... import workers
 
 #: The `asr` worker's window, IMPORTED from that job type rather than copied.
 #:
@@ -99,7 +99,6 @@ def probe_duration(ffmpeg: str, audio: Path) -> float:
 
 def transcribe(
     *,
-    home: Path,
     python: Path,
     weights_dir: Path,
     ffmpeg: str,
@@ -148,9 +147,7 @@ def transcribe(
             ready_silence_timeout=900.0,
             on_progress=on_progress,
             cancelled=cancelled,
-            environment=workerenv.worker_environment(
-                workerenv.worker_env_dir(home, "asr")
-            ),
+            environment=workers.worker_environment(python.parent.parent),
         )
     except workers.WorkerError as exc:
         raise StageFailed("transcribe_failed", str(exc)) from None
@@ -215,7 +212,6 @@ def slice_chunk(ffmpeg: str, audio: Path, start: float, end: float, out: Path) -
 
 def align_chunks(
     *,
-    home: Path,
     python: Path,
     weights_dir: Path,
     ffmpeg: str,
@@ -240,8 +236,8 @@ def align_chunks(
         script=Path(__file__).resolve().parents[1] / "align" / "worker.py",
         log_path=log_path,
         environment={
-            **workerenv.worker_environment(workerenv.worker_env_dir(home, "align")),
-            **workerenv.torch_allocator_environment(backend_kind),
+            **workers.worker_environment(python.parent.parent),
+            **workers.torch_allocator_environment(backend_kind),
         },
     )
     try:
@@ -256,7 +252,7 @@ def align_chunks(
         session.start(
             {"op": "load", "model_dir": str(weights_dir),
              "device": "cuda", "dtype": "bfloat16",
-             "memory_cap_bytes": workerenv.torch_memory_cap(
+             "memory_cap_bytes": workers.torch_memory_cap(
                  backend_kind, memory_bytes_estimate
              )},
             ready_silence_timeout=900.0,

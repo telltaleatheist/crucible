@@ -24,8 +24,8 @@ today — `tts-higgs-v3`. The engine stays in the NAME rather than collapsing to
 needs a second directory and not a rebuild of the first.
 
 So an env is named by an `EnvSpec`, and each job type states its own naming rule
-in its own constructor below — `llm_env()` and `tts_env()` — where the two can be
-read against each other.
+in its own constructor below — `llm_env()`, `tts_env()` and `worker_env()` — where
+they can be read against each other.
 
 This file was `crucible/llmenv.py` until the `tts` job type needed the same
 machinery. Nothing about the `llm` env's layout, stamp or refusals changed in the
@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import envpatches, interpreter, narratorpatches
+from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
@@ -169,6 +170,40 @@ RECIPE_PYTHON: dict[str, str] = {
     "higgs-v3-cuda-linux": "3.12",
 }
 
+#: The job types whose work is a LIBRARY run in its own venv rather than an
+#: engine server (PHASE4-AUDIO.md section 0): faster-whisper, ultimate-rvc and
+#: the Qwen3 aligner are imported, not connected to, and each one's torch pin is
+#: incompatible with the others. Their worker scripts run as `<that venv's
+#: python> <worker.py>`. `denoise` is absent: it has no env of its own.
+WORKER_JOB_TYPES: tuple[str, ...] = ("align", "asr", "rvc")
+
+#: What `crucible doctor` and `crucible install <type>` report the version of
+#: for a worker env: the one library the env exists for. PER (JOB TYPE,
+#: BACKEND), because `asr` installs faster-whisper on `cuda-linux` and
+#: mlx-whisper on `mlx-darwin`. Written out rather than defaulted, so the next
+#: type to gain a second engine is a refusal here rather than a doctor line
+#: naming a package the env does not contain.
+WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
+    ("align", CUDA_LINUX): "qwen-asr",
+    ("align", MLX_DARWIN): "qwen-asr",
+    ("asr", CUDA_LINUX): "faster-whisper",
+    ("asr", MLX_DARWIN): "mlx-whisper",
+    ("rvc", CUDA_LINUX): "ultimate-rvc",
+    ("rvc", MLX_DARWIN): "ultimate-rvc",
+}
+
+#: Which job types one worker env serves. Almost always itself; `rvc` is the
+#: exception and `denoise` is why: audio-separator is torch, the rvc env
+#: already holds the exact torch it wants, and a second venv would be a second
+#: 3 GB torch on disk to drive the same card. `crucible install rvc` decides
+#: the capability flag for both types and `crucible doctor` names the install
+#: command that turns a type on, so the fact has one owner (ARCHITECTURE.md R1).
+JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
+    "align": ("align",),
+    "asr": ("asr",),
+    "rvc": ("rvc", "denoise"),
+}
+
 
 class EnvError(CrucibleError):
     """A job type's env is missing, or could not be built. Carries the reason."""
@@ -267,6 +302,26 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
     )
 
 
+def worker_env(job_type: str, backend_kind: str) -> EnvSpec:
+    """The venv a worker job type's library runs in: `envs/<job_type>/`.
+
+    One per job type, whichever backend, built from `envs/<job_type>/
+    <backend>.txt`. Refuses a (type, backend) pair nobody has decided.
+    """
+    headline = WORKER_HEADLINE_PACKAGE.get((job_type, backend_kind))
+    if headline is None:
+        raise EnvError(
+            f"no {job_type!r} env on {backend_kind!r}; this build has worker "
+            f"envs for {sorted(WORKER_HEADLINE_PACKAGE)}"
+        )
+    return EnvSpec(
+        job_type=job_type,
+        key=job_type,
+        recipe_name=backend_kind,
+        headline=headline,
+    )
+
+
 @dataclass(frozen=True)
 class EnvStatus:
     """What `crucible doctor` prints for one env."""
@@ -277,8 +332,7 @@ class EnvStatus:
     python_version: str | None
     packages: dict[str, str]
     #: THE ENVIRONMENT HALF of the recipe this env was installed from: every
-    #: line but its direct references, hashed. None for an env stamped before
-    #: the two halves were told apart.
+    #: line but its direct references, hashed. None when there is no stamp.
     #:
     #: TWO HALVES BECAUSE THEY MOVE FOR DIFFERENT REASONS AND COST DIFFERENT
     #: AMOUNTS (PHASE20 section 4). A narrator edit moves one git sha in one
@@ -286,11 +340,11 @@ class EnvStatus:
     #: hash over the whole file cannot say which happened.
     environment_sha256: str | None = None
     #: The commit each `name @ url` line was installed from, as stamped. None
-    #: for an env stamped before the halves were recorded — which is not the
-    #: same as `{}`, an env whose recipe has no direct references.
+    #: when there is no stamp — which is not the same as `{}`, an env whose
+    #: recipe has no direct references.
     direct_references: dict[str, str] | None = None
-    #: The recipe's TEXT as installed, line-ending-normalised. None for an env
-    #: stamped before this was recorded.
+    #: The recipe's TEXT as installed, line-ending-normalised. None when there
+    #: is no stamp.
     #:
     #: A hash says THAT a recipe moved and can never say WHAT moved, and the
     #: difference decides whether `pip install -r` into the existing venv is
@@ -333,11 +387,7 @@ def env_python(home: Path, spec: EnvSpec) -> Path:
 
 
 def stamp_path(home: Path, spec: EnvSpec) -> Path:
-    """Written only after pip returned 0 in this venv, and at no other moment.
-
-    Public because `plan_env` — the rule `workerenv` shares — is handed the
-    path rather than deriving it, so neither module can guess a second one.
-    """
+    """Written only after pip returned 0 in this venv, and at no other moment."""
     return env_dir(home, spec) / ENV_STAMP_NAME
 
 
@@ -592,8 +642,8 @@ def refuse_without_room(*, job_type: str, recipe: Path, directory: Path) -> None
     resolutions and was never measured. Requiring a whole archive's worth of
     free space before reinstalling one narrator line would be a floor invented
     here, and it would refuse on a machine where the env is already sitting in
-    most of that space. `install_env` and `install_worker_env` therefore call
-    this on `PLAN_BUILD` and on nothing else.
+    most of that space. `install_env` therefore calls this on `PLAN_BUILD` and
+    on nothing else.
     """
     required = recipe_archive_bytes(recipe)
     filesystem = _filesystem_of(directory)
@@ -711,17 +761,21 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             python_version=None,
             packages={},
         )
-    record = json.loads(stamp.read_text(encoding="utf-8"))
-    # `.get` and not `[]` for these three alone: a stamp written before PHASE20
-    # hashed the recipe whole and recorded no references at all. Absent means
-    # "installed before the two halves were told apart", which is exactly what
-    # `plan_install` answers — not a default standing in for a fact.
-    environment_sha256 = record.get("environment_sha256")
-    direct_references = record.get("direct_references")
-    # Absent for every env stamped before the text was recorded, and that
-    # absence is load-bearing rather than tidy-uppable: it is exactly the case
-    # `plan_install` cannot prove anything about and refuses by name.
-    recipe_text = record.get("recipe_text")
+    record = _read_stamp(stamp)
+    if record is None:
+        return EnvStatus(
+            installed=False,
+            path=directory,
+            detail=(
+                f"{stamp} was written by an older Crucible and does not say what "
+                f"this env was built from — run `{install}`"
+            ),
+            python_version=None,
+            packages={},
+        )
+    environment_sha256 = record["environment_sha256"]
+    direct_references = record["direct_references"]
+    recipe_text = record["recipe_text"]
     if record["backend"] != backend_kind:
         return EnvStatus(
             installed=False,
@@ -750,10 +804,11 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
     # does not move when the sha does, so a version check here would call an env
     # built from last month's commit a match.
     built_from = installed_direct_references(home, spec)
+    pinned_references = recipe_direct_references(recipe)
     wrong += sorted(
         f"{name} was installed from "
         f"{built_from.get(name, 'no recorded commit')}, recipe pins {commit}"
-        for name, commit in recipe_direct_references(recipe).items()
+        for name, commit in pinned_references.items()
         if built_from.get(name) != commit
     )
     if wrong:
@@ -767,12 +822,26 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             direct_references=direct_references,
             recipe_text=recipe_text,
         )
+    if spec.headline in pinned_references:
+        # A git install. `pip list` reports the version the project DECLARES,
+        # which for `ultimate-rvc` is 0.5.11 for both Owen's fork and the PyPI
+        # release, so the doctor line names the commit the recipe pins.
+        headline = f"{spec.headline} @ {pinned_references[spec.headline][:12]}"
+    elif spec.headline in present:
+        headline = f"{spec.headline} {present[spec.headline]}"
+    else:
+        raise EnvError(
+            f"{directory} matches {recipe.name}, but {spec.headline!r} — the "
+            f"package the {spec.key} env exists for — is not installed in it. "
+            "Either the recipe no longer installs it or the headline names the "
+            "wrong thing; both are bugs in this build, not in the env."
+        )
     return EnvStatus(
         installed=True,
         path=directory,
         detail=(
-            f"{spec.headline} {present[spec.headline]}, python "
-            f"{record['python_version']}, {len(present)} packages"
+            f"{headline}, python {record['python_version']}, "
+            f"{len(present)} packages"
         ),
         python_version=record["python_version"],
         packages=present,
@@ -864,17 +933,12 @@ def plan_env(
     force: bool,
     install_command: str,
 ) -> EnvPlan:
-    """THE decision, for `jobenv` and `workerenv` alike (PHASE20 section 4).
+    """THE decision (PHASE20 section 4).
 
     An env is touched only when its recipe moved, and then by pip INTO the
     venv that is there — pip skips what is already satisfied, so the cost is
     the difference rather than the environment. The delete-and-rebuild that
     used to be the answer to every drift is now `--force` and nothing else.
-
-    Shared by the two env modules rather than written twice: they are already
-    one module's worth of code twice over (see `workerenv`'s header), and a
-    second copy of this rule is a second answer to "does this env need
-    anything", which is precisely the shape ARCHITECTURE.md R1 is about.
     """
     if force:
         return EnvPlan(
@@ -891,7 +955,13 @@ def plan_env(
             f"{directory} exists but {stamp.name} does not: the last "
             f"`{install_command}` did not finish",
         )
-    record = json.loads(stamp.read_text(encoding="utf-8"))
+    record = _read_stamp(stamp)
+    if record is None:
+        return EnvPlan(
+            PLAN_BUILD,
+            f"{stamp} was written by an older Crucible and does not say what "
+            f"{directory} was built from",
+        )
     if record["backend"] != backend_kind:
         raise EnvError(
             f"{directory} was installed for backend {record['backend']!r} and "
@@ -900,25 +970,8 @@ def plan_env(
             f"drift that is genuinely a rebuild: `{install_command} --force`"
         )
 
-    before = record.get("recipe_text")
-    if before is None:
-        # An env stamped before the text was recorded. The bytes behind that
-        # stamp are GONE, so nothing here can tell a moved comment from a moved
-        # `--index-url` — and `pip install -r` does NOT act on the second, since
-        # the pin it resolves is already satisfied by the wheel the old index
-        # served. Stamping this recipe over that env would claim bytes nobody
-        # installed, so it refuses rather than guessing.
-        raise EnvError(
-            f"{directory} was stamped before the recipe's text was recorded, so "
-            f"there is no telling what moved in {recipe.name} since. Without "
-            "those bytes an `--index-url` change — which silently swaps the "
-            "wheel a pin resolves to and which pip will not act on, because the "
-            "pin is already satisfied — reads exactly like a comment. "
-            f"`{install_command} --force` rebuilds it, and is the only answer "
-            "that is certainly true."
-        )
     after = recipe_text(recipe)
-    problems = unverifiable_recipe_changes(before, after, recipe.name)
+    problems = unverifiable_recipe_changes(record["recipe_text"], after, recipe.name)
     if problems:
         raise EnvError(
             f"{directory} cannot be brought to {recipe.name} by pip: "
@@ -931,19 +984,8 @@ def plan_env(
 
     here_environment = environment_sha256(recipe)
     here_references = recipe_direct_references(recipe)
-    stamped_environment = record.get("environment_sha256")
-    stamped_references = record.get("direct_references")
-    if stamped_environment is None or stamped_references is None:
-        # Stamped before the two halves were told apart. The remedy is the
-        # ordinary one — `pip install -r`, which is seconds when nothing moved
-        # — rather than a re-stamp on its own: a stamp is written after pip
-        # returned 0 in this venv and at no other moment.
-        return EnvPlan(
-            PLAN_RECIPE,
-            f"{directory} was stamped before {recipe.name}'s two halves were "
-            "recorded apart; pip is run over the recipe so the new stamp "
-            "describes bytes that are certainly there",
-        )
+    stamped_environment = record["environment_sha256"]
+    stamped_references = record["direct_references"]
     if stamped_environment != here_environment:
         return EnvPlan(
             PLAN_RECIPE,
@@ -982,6 +1024,24 @@ def plan_env(
             PLAN_RECIPE, f"{directory} does not hold what {recipe.name} pins"
         )
     return EnvPlan(PLAN_NOTHING, f"{directory} is what {recipe.name} says")
+
+
+#: Every key `_write_stamp` writes that a reader relies on.
+_STAMP_KEYS = (
+    "backend",
+    "environment_sha256",
+    "direct_references",
+    "recipe_text",
+    "python_version",
+)
+
+
+def _read_stamp(stamp: Path) -> dict[str, Any] | None:
+    """The stamp's record, or None for one that lacks a key `_write_stamp` writes."""
+    record = json.loads(stamp.read_text(encoding="utf-8"))
+    if not all(key in record for key in _STAMP_KEYS):
+        return None
+    return record
 
 
 def _reference_name(line: str) -> str | None:
@@ -1187,10 +1247,9 @@ _LF = b"\n"
 def recipe_sha256(path: Path) -> str:
     """The recipe's SHA-256 over LINE-ENDING-NORMALISED bytes.
 
-    THE ONE NORMALISATION. `environment_sha256` above, `recipe_text` below and
-    `workerenv`'s env stamp all come through here, because a fact with two
-    owners is a fact that will eventually disagree with itself, and this one
-    already did.
+    THE ONE NORMALISATION. `environment_sha256` above and `recipe_text` below
+    both come through here, because a fact with two owners is a fact that will
+    eventually disagree with itself, and this one already did.
 
     MEASURED 2026-09-15, which is why the normalisation is here at all: the
     same commit of `pyproject.toml` hashed to `1ab85cc3…` from the main

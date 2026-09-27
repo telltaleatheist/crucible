@@ -130,7 +130,7 @@ from pydantic import (
     model_validator,
 )
 
-from ... import accelerator, hosttools, jobenv, ladder, weights, workerenv, workers
+from ... import accelerator, hosttools, jobenv, ladder, weights, workers
 from ...asrmodels import (
     QWEN_ASR_ENGINES,
     QWEN_CONTEXT_MAX_TOKENS,
@@ -653,16 +653,20 @@ def _most_a_job_needs(spec: Any, backend_kind: str) -> int:
     return spec.memory_bytes_estimate
 
 
+def _env_spec(env: str, backend_kind: str) -> jobenv.EnvSpec:
+    """The spec of one of the envs an asr engine runs in."""
+    if env == "llm":
+        return jobenv.llm_env(backend_kind)
+    return jobenv.worker_env(env, backend_kind)
+
+
 def _env_ready(config: Config, env: str, backend_kind: str) -> tuple[bool, str]:
     """Is one env installed here, and what does its status say."""
     try:
-        if env == "llm":
-            status = jobenv.env_status(
-                config.home, jobenv.llm_env(backend_kind), backend_kind
-            )
-        else:
-            status = workerenv.env_status(config.home, env, backend_kind)
-    except (workerenv.WorkerEnvError, jobenv.EnvError) as exc:
+        status = jobenv.env_status(
+            config.home, _env_spec(env, backend_kind), backend_kind
+        )
+    except jobenv.EnvError as exc:
         return False, str(exc)
     return status.installed, status.detail
 
@@ -671,16 +675,10 @@ def _python_for(config: Config, engine: str, backend_kind: str, model_id: str) -
     """The interpreter an engine's worker runs in, or `env_missing` by name."""
     env = _for_engine(ENV_FOR_ENGINE, engine, "env")
     try:
-        if env == "llm":
-            spec = jobenv.llm_env(backend_kind)
-            return jobenv.require_env(config.home, spec, backend_kind)
-        return workerenv.require_env(config.home, env, backend_kind)
-    except (workerenv.WorkerEnvError, jobenv.EnvError) as exc:
-        directory = (
-            jobenv.env_dir(config.home, jobenv.llm_env(backend_kind))
-            if env == "llm"
-            else workerenv.worker_env_dir(config.home, env)
-        )
+        spec = _env_spec(env, backend_kind)
+        return jobenv.require_env(config.home, spec, backend_kind)
+    except jobenv.EnvError as exc:
+        directory = config.home / "envs" / env
         raise ApiError(
             409,
             "env_missing",
@@ -1405,10 +1403,8 @@ class AsrJobType:
                 # constructs fine and the first window fails with
                 # "Library libcublas.so.12 is not found or cannot be loaded"
                 # — measured on owens-pc against a doctor reporting ready.
-                # See `workerenv.worker_environment`.
-                environment=workerenv.worker_environment(
-                    workerenv.worker_env_dir(self._config.home, JOB_TYPE)
-                ),
+                # See `workers.worker_environment`.
+                environment=workers.worker_environment(python.parent.parent),
                 log_path=self._config.logs_dir / f"asr-{job.id}.log",
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_ready=on_ready,

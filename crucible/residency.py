@@ -67,7 +67,7 @@ from .voicereference import VoiceReference
 from .voices import VoiceBackendSpec, VoiceManifest
 from .vram import KvPlan
 from .workers import WorkerError, WorkerSession
-from .workerenv import torch_allocator_environment, torch_memory_cap
+from .workers import torch_allocator_environment, torch_memory_cap
 
 #: The kinds of thing that can hold the card, and what `/v1/health` reports as
 #: `resident_kind` so a client can tell which door to knock on.
@@ -1421,7 +1421,7 @@ class Residency:
 
         log_path = engine_log_path(self._config.home, manifest.id)
         # A plain-torch worker held across windows of different lengths: the
-        # allocator setting and its admitted share (`workerenv`'s note says why).
+        # allocator setting and its admitted share (`workers`'s note says why).
         session = WorkerSession(
             python=python,
             script=script,
@@ -1528,7 +1528,7 @@ class Residency:
             script=script,
             log_path=log_path,
             # Plus the torch allocator setting on CUDA: a separator held across
-            # inputs of different lengths is `workerenv`'s case exactly.
+            # inputs of different lengths is `workers`'s case exactly.
             environment={**environment, **torch_allocator_environment(spec.backend)},
         )
 
