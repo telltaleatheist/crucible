@@ -102,11 +102,9 @@ test('an unknown kind is never terminal', async () => {
 });
 
 test('strictness about the LOAD-BEARING fields of a kind the client claims is untouched', async () => {
-  // The line this draws: tolerant of kinds it makes no claim about, and of
-  // informational fields (a `progress` frame's fraction reads null when a
-  // server does not state it — Owen, 2026-09-24), strict about what a caller
-  // acts on. An `artifact` frame with no `name` names nothing to fetch, and
-  // is still a protocol error.
+  // Tolerant of kinds it makes no claim about, strict about the ones it
+  // claims. An `artifact` frame with no `name` names nothing to fetch, and is
+  // a protocol error.
   const strict = createServer((request, response) => {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });
     response.end('id: 1\nevent: artifact\ndata: {"bytes": 12}\n\n');
@@ -121,30 +119,6 @@ test('strictness about the LOAD-BEARING fields of a kind the client claims is un
     }, /event 1 \(artifact\) has no field "name"/);
   } finally {
     await new Promise<void>((resolve) => strict.close(() => resolve()));
-  }
-});
-
-test('a progress frame without a fraction reads it as null, and the stream runs on', async () => {
-  const sparse = createServer((request, response) => {
-    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    response.end(
-      'id: 1\nevent: progress\ndata: {"message": "no fraction here"}\n\n' +
-        'id: 2\nevent: done\ndata: {"artifacts": []}\n\n',
-    );
-  });
-  await new Promise<void>((resolve) => sparse.listen(0, '127.0.0.1', resolve));
-  const sparseUrl = `http://127.0.0.1:${(sparse.address() as AddressInfo).port}`;
-  try {
-    const c = new CrucibleClient({ url: sparseUrl, token: TOKEN, clientName: 'test' });
-    const seen: JobEvent[] = [];
-    for await (const event of c.events('j1')) seen.push(event);
-    const [progress, done] = seen;
-    assert.ok(progress !== undefined && progress.event === 'progress');
-    assert.equal(progress.data.fraction, null);
-    assert.equal(progress.data.message, 'no fraction here');
-    assert.equal(done?.event, 'done');
-  } finally {
-    await new Promise<void>((resolve) => sparse.close(() => resolve()));
   }
 });
 

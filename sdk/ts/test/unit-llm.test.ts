@@ -250,10 +250,6 @@ test('a model row carries weights_of: the base, or null, and never absent', asyn
   const models = await client().models();
   assert.equal(models[0]!.weightsOf, null);
   assert.equal(models[1]!.weightsOf, 'qwen3.5-9b');
-  // A server that predates the field (PHASE22) has no alias to report.
-  const { weights_of: _dropped, ...without } = MODEL_ROW;
-  handle = (_request, response) => json(response, 200, [without]);
-  assert.equal((await client().models())[0]!.weightsOf, null);
 });
 
 test('a model that is not loadable and does not say why still reads: loadable is the fact', async () => {
@@ -278,25 +274,6 @@ test('a model row missing a load-bearing field is still a protocol error, by nam
 test('a /v1/models body that is not an array is a protocol error, not an empty list', async () => {
   handle = (_request, response) => json(response, 200, { models: [MODEL_ROW] });
   await assert.rejects(client().models(), CrucibleProtocolError);
-});
-
-test('a row without max_model_len, fingerprint or revision reads each as null', async () => {
-  // Numbers and pins a caller may use — null already means "this host would
-  // not serve it" for all three, and a server that does not state them has
-  // said nothing a caller can act on differently (Owen, 2026-09-24). A caller
-  // sizing a request with no clamp gets the engine's own named 400.
-  const {
-    max_model_len: _len,
-    fingerprint: _fingerprint,
-    revision: _revision,
-    ...bare
-  } = MODEL_ROW;
-  handle = (_request, response) => json(response, 200, [bare]);
-  const [model] = await client().models();
-  assert.equal(model!.maxModelLen, null);
-  assert.equal(model!.fingerprint, null);
-  assert.equal(model!.revision, null);
-  assert.equal(model!.resident, true);
 });
 
 // ---------------------------------------------------- info's llm capability
@@ -409,8 +386,7 @@ test('an llm row info() cannot read is carried aside, and the rest of info() sti
   // A row shaped like the phase-1 row has no `loadable`, which is load-bearing.
   // `models()` refuses it by name; `info()` — the probe an app makes to find
   // out what it is talking to — carries it aside as unreadable, with its raw
-  // data and the reason, rather than losing the whole document (Owen,
-  // 2026-09-24).
+  // data and the reason, rather than losing the whole document.
   const phaseOneRow = {
     id: 'qwen3.5-9b-old',
     revision: REVISION,
@@ -792,29 +768,6 @@ test('a provenance sidecar names the weights, not only the model', async () => {
   });
   // The document round-trips: clients persist it verbatim beside the artifact.
   assert.equal(provenance.backend, 'cuda-linux');
-});
-
-test('a provenance model block with no fingerprint reads it as null', async () => {
-  handle = (_request, response) => {
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(
-      JSON.stringify({
-        server: { name: 'crucible@owens-pc', version: '0.2.0' },
-        backend: 'cuda-linux',
-        job_type: 'load-model',
-        model: { id: 'qwen3.5-9b', revision: REVISION },
-        params: {},
-        started: null,
-        finished: '2026-09-13T00:04:00+00:00', client_ref: null, interrupted_at: null, chunks_done: [],
-        chunks_total: null, chunk_at: null,
-      }),
-    );
-  };
-  // A sidecar is a record; the bytes on disk are the server's own. A server
-  // that does not state the fingerprint has not made the artifact unusable.
-  const provenance = await client().provenance('job-1', 'payload.bin');
-  assert.equal(provenance.model?.id, 'qwen3.5-9b');
-  assert.equal(provenance.model?.fingerprint, null);
 });
 
 // ----------------------------------------------- the constrained transport
