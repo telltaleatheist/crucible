@@ -72,6 +72,7 @@ keep when the thing that must exit cleanly is the thing that was asked to.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from dataclasses import dataclass, field
@@ -510,6 +511,7 @@ class QwenAsrRun:
         self._finished: list[Piece] = []
         self._redecoded: list[dict[str, Any]] = []
         self._silent = 0
+        self._text_published = False
 
     # -------------------------------------------------------------- driving
 
@@ -550,6 +552,8 @@ class QwenAsrRun:
             else:
                 self._land(piece)
         if to_align:
+            if not self._text_published:
+                self._publish_text(to_align)
             self._align_pieces(to_align)
             for piece in to_align:
                 signal = loopguard.alignment_signal(piece.items)
@@ -893,6 +897,62 @@ class QwenAsrRun:
             piece.text = str(result["text"])
             piece.tokens = int(result["tokens"])
             piece.hit_token_limit = bool(result["hit_token_limit"])
+
+    def _publish_text(self, pieces: list[Piece]) -> None:
+        """`transcript.text.json`: what was heard, published BEFORE alignment.
+
+        Owen, 2026-09-27 (relayed by training-pc-1): an aligner failure must
+        cost only the alignment. Job 928bdf54 had two hours of transcription
+        and nothing to show for it, because the transcript existed only once
+        the aligner returned. So the first round's text is an artifact the
+        moment it is decoded, and it stays with the job whatever happens next.
+
+        It is PIECES, not segments, and says so. Each row is one piece's text
+        with both of its spans in source seconds: `start`/`end`, the stretch it
+        owns, and `audio_start`/`audio_end`, the audio the model heard, overlap
+        included. Its text covers the second one: the overlap's words have not
+        been given to their owner yet, because ownership is decided from word
+        times. A client re-aligning after a failure sends each row's audio span
+        and text to `align` as it is. The finished transcript is still
+        `transcript.json`; this file does not replace it.
+        """
+        rows = []
+        for piece in sorted(pieces, key=lambda p: p.start_s):
+            start, end = self._span(piece.start_s, piece.end_s)
+            audio_start, audio_end = self._span(
+                piece.audio_start_s, piece.audio_start_s + piece.audio_duration_s
+            )
+            rows.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "audio_start": audio_start,
+                    "audio_end": audio_end,
+                    "text": piece.text,
+                }
+            )
+        document = {
+            "model": self._model,
+            "revision": self._spec.revision,
+            "language": self._language,
+            "duration_s": self._source_s,
+            "piece_max_s": self._piece_s,
+            "overlap_s": self._overlap_s,
+            "word_times": False,
+            "note": (
+                "each piece's text as decoded, before alignment and before the "
+                "overlap's words were given to their owner; rows overlap by up to "
+                "overlap_s. The finished transcript is transcript.json"
+            ),
+            "pieces": rows,
+        }
+        path = self._ctx.scratch / "transcript.text.json"
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        self._ctx.artifact("transcript.text.json", path)
+        self._text_published = True
+        self._ctx.note(
+            f"published transcript.text.json ({len(rows)} piece(s)) before aligning"
+        )
 
     def _align_pieces(self, pieces: list[Piece]) -> None:
         """Word times for `pieces`, sent to the aligner ALIGN_BATCH at a time.
