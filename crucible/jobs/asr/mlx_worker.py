@@ -1,88 +1,23 @@
-"""The `asr` worker on `mlx-darwin`: mlx-whisper, run in its own interpreter.
-
-The SECOND worker behind one job type, beside `worker.py`'s faster-whisper. It
-is a second worker and not a branch inside the first because the two run in
-different envs on different machines and share no import: `worker.py` imports
-`faster_whisper` (CTranslate2) and this one imports `mlx_whisper` (MLX), and
-neither library exists in the other's env.
-
-**The wire is byte-for-byte `worker.py`'s.** Same request object on stdin, same
-newline-delimited JSON out, same `ready` / `progress` / `result` / `failed` /
-`done` message types, same window-relative timestamps with no index. That is the
-point: `crucible/jobs/asr/__init__.py` assembles `transcript.json` from these
-messages with no branch in it for the engine, so BookForge's align and transcript
-readers see one artifact shape whichever machine ran the job. Anything this
-engine cannot do is a REFUSAL, never a quietly different field. That includes
-`speech` (2026-09-27): the same `speechonly.py`, numpy on the CPU, the same
-`samples` / `speech_s` / `kept` in `ready` (see `worker.py`).
-
-This module is **standalone**, for `worker.py`'s reason: the env it runs in has
-no `crucible` installed and never will.
-
-The three places mlx-whisper is not faster-whisper
----------------------------------------------------
-1. **There is no VAD.** faster-whisper ships Silero; mlx-whisper has nothing of
-   the kind — `no_speech_threshold` skips a 30-second segment the model itself
-   thinks is silent, which is a different mechanism on different evidence. So a
-   request with `vad_filter: true` is REFUSED here by name. Transcribing without
-   the filter the caller asked for would be a different transcript with nothing
-   in the output to say so, which is the same argument PHASE4-AUDIO.md section 3
-   makes against the CPU fallback.
-
-2. **`transcribe()` does not report a language probability.** faster-whisper's
-   `info.language_probability` has no counterpart in the returned dict. It is
-   not invented and it is not dropped: this worker runs whisper's OWN language
-   detection first — `model.detect_language()` on the window's first 30 seconds,
-   exactly what `mlx_whisper.transcribe` does internally when no language is
-   given — takes the best code and ITS probability, and then passes that code to
-   `transcribe()` so the detection is not run twice. Measured on the M1 Ultra,
-   2026-09-14: `{"detected": "en", "probability": 0.9946824908256531}`, which is
-   the same shape and the same meaning as faster-whisper's field. When the
-   caller NAMED a language there is nothing to detect, and the probability is
-   1.0 because the caller asserted it.
-
-3. **The segments carry more than faster-whisper's.** mlx-whisper's rows have
-   `seek`, `id`, `tokens`, `temperature`, `avg_logprob`, `compression_ratio` and
-   `no_speech_prob` beside the three fields Crucible publishes. `serialise()`
-   forwards the same three (plus `words`) and nothing else, for `worker.py`'s
-   stated reason: a field Crucible publishes is a field Crucible has to keep
-   publishing.
-
-Why the window loop is still here
-----------------------------------
-mlx-whisper does its own 30-second sliding window internally, so it would not
-OOM on a long array the way `faster_whisper.transcribe` does. The 900-second
-windows stay anyway, because the ARTIFACT is windowed: `transcript.json` records
-`window_s`, `overlap_s` and `windows`, the server shifts each window's
-timestamps by its position, and a file produced on the Mac must be the same
-document as one produced on the PC. One engine windowing and the other not would
-be a difference a reader could see.
-"""
-
 from __future__ import annotations
 
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import workerio  # noqa: E402
+import workerio
 
 sys.path.pop(0)
 
-# mlx-whisper prints a tqdm bar and its language-detection notice; both would
-# land in the middle of a JSON line otherwise.
 workerio.claim_stdout()
 
-import json  # noqa: E402
-import math  # noqa: E402
-import time  # noqa: E402
+import json
+import math
+import time
 
-from workerio import SAMPLE_RATE, decode, fail, probe_duration, send  # noqa: E402
+from workerio import SAMPLE_RATE, decode, fail, probe_duration, send
 
 speechonly = workerio.load_sibling("speechonly", __file__)
 
-#: The window mlx-whisper's own decoder slides, in mel frames and in seconds.
-#: Used only for the language-detection slice below.
 DETECT_SECONDS = 30
 
 PROGRESS_FRACTION_STEP = 0.002
@@ -90,7 +25,6 @@ PROGRESS_WALL_SECONDS = 1.5
 
 
 def require(request: dict, key: str, kind: type) -> object:
-    """One required key, or a refusal naming it. Nothing here has a default."""
     return workerio.require(
         request,
         key,
@@ -101,17 +35,7 @@ def require(request: dict, key: str, kind: type) -> object:
     )
 
 
-# -------------------------------------------------------------- transcription
-
-
 def serialise(segment: dict, want_words: bool) -> dict:
-    """One mlx-whisper segment, window-relative, as plain JSON.
-
-    Exactly the three fields `worker.py.serialise` publishes, plus `words` in
-    the same four-key shape (`word`, `start`, `end`, `probability`) — which is
-    mlx-whisper's own shape, verified on the M1 Ultra on 2026-09-14:
-    `{"word": " the", "start": 0.0, "end": 0.26, "probability": 0.0922...}`.
-    """
     row: dict = {
         "start": float(segment["start"]),
         "end": float(segment["end"]),
@@ -119,9 +43,6 @@ def serialise(segment: dict, want_words: bool) -> dict:
     }
     if not want_words:
         return row
-    # A segment mlx-whisper found no words in has no `words` key at all; an
-    # empty list says the same thing without making the client check two shapes,
-    # which is `worker.py`'s rule for the `None` its engine returns.
     row["words"] = [
         {
             "start": float(word["start"]),
@@ -135,12 +56,6 @@ def serialise(segment: dict, want_words: bool) -> dict:
 
 
 def require_prompt(request: dict) -> "str | None":
-    """`initial_prompt`: required as a KEY, null means no prompt.
-
-    `worker.py`'s rule, verbatim in behaviour. mlx-whisper's `transcribe` calls
-    `initial_prompt.strip()`, so anything but a string or null would be an
-    AttributeError in the first window rather than a refusal before the first.
-    """
     if "initial_prompt" not in request:
         raise KeyError(
             "the asr request has no 'initial_prompt'; null means no prompt, and "
@@ -160,21 +75,9 @@ def require_prompt(request: dict) -> "str | None":
 
 
 def check_prompt_length(model_dir: str, dtype, prompt: str) -> "str | None":
-    """A refusal if the prompt is longer than whisper keeps, else None.
-
-    mlx-whisper's own arithmetic: `transcribe` builds its tokenizer with
-    `get_tokenizer(model.is_multilingual, num_languages=model.num_languages,
-    ...)` and encodes `" " + initial_prompt.strip()`; `DecodingTask`'s
-    `_get_initial_tokens` then keeps `prompt_tokens[-(n_ctx // 2 - 1):]` with
-    `n_ctx = model.dims.n_text_ctx`. A longer prompt loses its BEGINNING with no
-    error. The language and task only choose special tokens, which `encode`
-    never emits, so they are left at the library's own defaults here.
-    """
     from mlx_whisper.tokenizer import get_tokenizer
     from mlx_whisper.transcribe import ModelHolder
 
-    # The same cached holder `transcribe()` loads through, so this is the one
-    # load of the run and not a second one.
     model = ModelHolder.get_model(model_dir, dtype)
     tokenizer = get_tokenizer(
         model.is_multilingual, num_languages=model.num_languages
@@ -192,14 +95,6 @@ def check_prompt_length(model_dir: str, dtype, prompt: str) -> "str | None":
 
 
 def detect_language(model_dir: str, window, dtype) -> tuple[str, float]:
-    """whisper's own language detection on the first 30 s, and its probability.
-
-    This is what `mlx_whisper.transcribe` does internally when `language` is
-    None, lifted out so the PROBABILITY can be reported — the engine's own
-    function keeps the code and throws the number away. Running it here and then
-    passing the code into `transcribe()` means the detection happens once, not
-    twice.
-    """
     import mlx.core as mx
     from mlx_whisper.audio import N_FRAMES, log_mel_spectrogram, pad_or_trim
     from mlx_whisper.transcribe import ModelHolder
@@ -212,10 +107,6 @@ def detect_language(model_dir: str, window, dtype) -> tuple[str, float]:
         axis=-2,
     ).astype(dtype)
     _, probabilities = model.detect_language(mel)
-    # `detect_language` is typed `List[dict]` and returns a bare dict for a
-    # single mel (measured 2026-09-14). Both shapes are accepted rather than
-    # one of them being assumed, because the assumption is one release from
-    # being a KeyError in the middle of a book.
     table = probabilities[0] if isinstance(probabilities, list) else probabilities
     best = max(table, key=table.get)
     return str(best), float(table[best])
@@ -261,11 +152,6 @@ def main() -> int:
         return fail(str(exc.args[0]))
 
     if vad_filter:
-        # The server refuses this before the job is queued
-        # (`crucible/jobs/asr/__init__.py`), so reaching it here is a bug in
-        # Crucible rather than a caller's mistake — and it is still a refusal,
-        # because the one thing this worker must never do is produce a
-        # transcript under rules the caller did not ask for.
         return fail(
             "this request asks for vad_filter and mlx-whisper has no VAD at all "
             "(faster-whisper's is Silero; mlx-whisper's no_speech_threshold is a "
@@ -283,10 +169,6 @@ def main() -> int:
             "The asr env is installed with `crucible install asr`."
         )
 
-    # mlx-whisper's own default, stated rather than inherited: `transcribe`
-    # reads `fp16` out of its decode options and picks `mx.float16` unless told
-    # otherwise. The server sends `float16` on this backend for that reason, and
-    # anything else is a refusal rather than a silent substitution.
     dtypes = {"float16": mx.float16, "float32": mx.float32}
     dtype = dtypes.get(compute_type)
     if dtype is None:
@@ -295,8 +177,6 @@ def main() -> int:
             f"{sorted(dtypes)}"
         )
     if device != "metal":
-        # MLX has one device and it is the Apple GPU. A request naming anything
-        # else has come from a server that thinks this is a different engine.
         return fail(
             f"device {device!r} is not mlx-whisper's; MLX runs on Metal and "
             "nothing else, and the server sends 'metal' on this backend"
@@ -323,9 +203,6 @@ def main() -> int:
         return fail(f"{audio} decoded to zero length")
     kept = None
     if speech is not None:
-        # `worker.py`'s speech only, the same file and the same numpy on the
-        # CPU: this is not mlx-whisper's VAD (it has none), it is Crucible's,
-        # run before whisper hears anything.
         try:
             waveform, kept = speechonly.cut_for_worker(
                 waveform,
@@ -374,9 +251,6 @@ def main() -> int:
     for index in range(windows):
         start = index * float(window_s)
         boundary = min(start + window_s, total)
-        # The window is extended `overlap_s` PAST its own boundary so a sentence
-        # straddling the cut is still spoken in full inside it — `worker.py`'s
-        # rule, and the server drops the duplicate cues either way.
         first = int(start * SAMPLE_RATE)
         last = int(min(boundary + overlap_s, total) * SAMPLE_RATE)
         window = waveform[first:last]
@@ -384,9 +258,6 @@ def main() -> int:
             if language is None:
                 code, probability = detect_language(model_dir, window, dtype)
             else:
-                # Nothing was detected, so nothing is reported as detected: the
-                # caller asserted the language and 1.0 is that assertion, not a
-                # measurement the model made.
                 code, probability = language, 1.0
             result = mlx_whisper.transcribe(
                 window,
@@ -394,8 +265,6 @@ def main() -> int:
                 language=code,
                 word_timestamps=word_timestamps,
                 fp16=dtype is mx.float16,
-                # Every window, for `worker.py`'s reason: each window is its own
-                # `transcribe()` call and each call starts its history empty.
                 initial_prompt=initial_prompt,
                 verbose=None,
             )
@@ -405,9 +274,6 @@ def main() -> int:
                 emitted += 1
                 transcribe_progress(min(total, start + float(segment["end"])))
         except Exception as exc:
-            # One window's failure is reported and the run continues, so a
-            # single bad stretch does not cost the other seventeen hours.
-            # What the server does with a hole is the server's ruling.
             send("result", error=f"{type(exc).__name__}: {exc}")
             continue
         send(
