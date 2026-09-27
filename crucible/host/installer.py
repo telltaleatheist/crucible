@@ -10,15 +10,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
-from . import landoor, wslstate
-from .presence import guest_argv
+from .. import wsl
+from ..atomicjson import write_json
+from ..errors import CrucibleError
+from ..platform import landoor
+from ..platform.paths import ENGINE_PORT, engine_url
+from ..platform.runner import RunResult, Runner
+from ..wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE, guest_argv
+from . import outcome, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
-from ..errors import CrucibleError
-from .paths import ENGINE_PORT, engine_url
-from .runner import RunResult, Runner
 from .quarantine import quarantine
-from .wsl_states import CRUCIBLE_DISTRO, WSL_CONF_MARKER
+from .wsl_states import WSL_CONF_MARKER
 
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
@@ -64,11 +67,7 @@ def quarantine_bad_cleanup_record(home: Path, log: Callable[[str], None]) -> Pat
 
 
 def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
-    home.mkdir(parents=True, exist_ok=True)
-    record = home / CLEANUP_RECORD
-    staged = record.with_suffix(".tmp")
-    staged.write_text(json.dumps({"schema_version": 1, "subjects": [list(row) for row in sorted(subjects)]}) + "\n", encoding="utf-8")
-    staged.replace(record)
+    write_json(home / CLEANUP_RECORD, {"schema_version": 1, "subjects": [list(row) for row in sorted(subjects)]})
 
 STEPS: tuple[str, ...] = (
     "wsl-state",
@@ -346,28 +345,28 @@ class EngineInstall:
     def _restart_owed(self) -> HostError:
         if self.restarts == 0:
             self.restarts = 1
-            code, sentence = "wsl_reboot_required", REBOOT_SENTENCE
+            code, sentence = outcome.REBOOT_REQUIRED_CODE, REBOOT_SENTENCE
             note = "the first restart this move asks for"
         elif not self._rebooted:
             code, sentence = (
-                ("wsl_reboot_required", REBOOT_SENTENCE)
+                (outcome.REBOOT_REQUIRED_CODE, REBOOT_SENTENCE)
                 if self.restarts == 1
-                else ("wsl_reboot_still_owed", REBOOT_STILL_OWED_SENTENCE)
+                else (outcome.REBOOT_STILL_OWED_CODE, REBOOT_STILL_OWED_SENTENCE)
             )
             note = "Windows has not booted since it was asked, so the same ask stands"
         elif self.restarts >= RESTART_BUDGET:
-            code, sentence = "wsl_reboot_again", REBOOT_AGAIN_SENTENCE
+            code, sentence = outcome.REBOOT_BUDGET_SPENT_CODE, REBOOT_AGAIN_SENTENCE
             note = "the budget is spent; the tray re-checks at every start"
         else:
             self.restarts += 1
-            code, sentence = "wsl_reboot_still_owed", REBOOT_STILL_OWED_SENTENCE
+            code, sentence = outcome.REBOOT_STILL_OWED_CODE, REBOOT_STILL_OWED_SENTENCE
             note = "Windows restarted and servicing still owes one"
         self._said(f"wsl: {code}: restart {self.restarts} of {RESTART_BUDGET} ({note})")
         return self._fail(code, sentence)
 
     def _guest_facts(self) -> tuple[str, str, str]:
         home = self._runner.run(
-            guest_argv(self._distro, ["bash", "-lc", 'printf %s "${CRUCIBLE_HOME:-$HOME/.crucible}"']),
+            wsl.guest_home_argv(self._distro),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not home.ok or home.stdout.strip() == "":
@@ -538,7 +537,7 @@ class EngineInstall:
 
     def _import_distro(self) -> None:
         self._step("import-distro")
-        listed = self._runner.run(["wsl.exe", "-l", "-v"], timeout_s=QUICK_TIMEOUT_SECONDS)
+        listed = self._runner.run(wsl.list_argv(), timeout_s=QUICK_TIMEOUT_SECONDS)
         from .presence import read_wsl_distros
 
         distros = read_wsl_distros(listed)
@@ -606,12 +605,12 @@ class EngineInstall:
             )
         except OSError:
             pass
-        imported = self._runner.run(["wsl.exe", "--import", self._distro, str(destination), str(archive), "--version", "2"], timeout_s=IMPORT_TIMEOUT_SECONDS)
+        imported = self._runner.run(wsl.import_argv(self._distro, str(destination), str(archive)), timeout_s=IMPORT_TIMEOUT_SECONDS)
         if not imported.ok:
             raise self._fail("distro_import_failed", imported.said())
         self._line("Preparing the Linux system for Crucible (its user and settings)")
         finished = self._runner.run(
-            ["wsl.exe", "-d", self._distro, "-u", "root", "--exec", "bash", "-c", FINISH_IMPORT_SCRIPT],
+            wsl.root_argv(self._distro, ["bash", "-c", FINISH_IMPORT_SCRIPT]),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not finished.ok:
@@ -654,10 +653,7 @@ class EngineInstall:
 
     def guest_release(self) -> str | None:
         read = self._runner.run(
-            guest_argv(
-                self._distro,
-                ["bash", "-lc", 'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/installation.json"'],
-            ),
+            wsl.guest_file_argv(self._distro, "installation.json"),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not read.ok or read.stdout.strip() == "":
@@ -743,7 +739,7 @@ class EngineInstall:
             [
                 "bash",
                 "-lc",
-                f'"$HOME/.crucible/server/bin/crucible" init --force --config-from {remote}; '
+                f'"{GUEST_CRUCIBLE}" init --force --config-from {remote}; '
                 f"code=$?; rm -f {remote}; exit $code",
             ],
             QUICK_TIMEOUT_SECONDS,
@@ -758,9 +754,9 @@ class EngineInstall:
         restarted = self._stream_guest([
             "bash", "-c", 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
             'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
-            '"$HOME/.crucible/server/bin/crucible" capability --write && '
-            '"$HOME/.crucible/server/bin/crucible" service stop && '
-            '"$HOME/.crucible/server/bin/crucible" service start',
+            f'"{GUEST_CRUCIBLE}" capability --write && '
+            f'"{GUEST_CRUCIBLE}" service stop && '
+            f'"{GUEST_CRUCIBLE}" service start',
         ], QUICK_TIMEOUT_SECONDS)
         if not restarted.ok:
             raise self._fail("guest_restart_failed", restarted.said())
@@ -946,7 +942,7 @@ class EngineInstall:
                 "enabled explicitly; installation changes no port forwards or firewall rules.",
             )
             return
-        from ..sharing import Engine
+        from ..sharing import PairedEngine
 
         door = landoor.detect(self._runner, ENGINE_PORT)
         missing = [
@@ -969,7 +965,7 @@ class EngineInstall:
             self._line(landoor.ELEVATION_SENTENCE)
         try:
             result = lan_door.enable(
-                self._home, self._runner, Engine(self._home, "lan"),
+                self._home, self._runner, PairedEngine(self._home, "lan"),
                 port=ENGINE_PORT, adopt=True, say=self._line,
             )
         except CrucibleError as exc:
@@ -1018,20 +1014,6 @@ class EngineInstall:
                 stream,
             ),
         )
-
-
-def elevated(argv: Sequence[str]) -> list[str]:
-    program, *rest = argv
-    quoted = ",".join("'" + word.replace("'", "''") + "'" for word in rest)
-    arguments = "" if quoted == "" else f" -ArgumentList {quoted}"
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        f"Start-Process -Verb RunAs -Wait -FilePath '{program}'{arguments}",
-    ]
 
 
 def carried_config(config_text: str) -> str:

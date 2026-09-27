@@ -12,7 +12,7 @@ from ..peer import ROLE_ORCHESTRATOR
 from .errors import HostError
 from .installer import ENGINE_TARGET_WSL, Event
 from .log import HostLog
-from .paths import DOOR_HOST, DOOR_PORT
+from ..platform.paths import DOOR_HOST, DOOR_PORT
 
 INSTALL_PATH = "/install"
 INSTALL_EVENTS_PATH = "/install/events"
@@ -372,7 +372,7 @@ def make_handler(door: OrchestratorDoor) -> type[BaseHTTPRequestHandler]:
                 self._restart()
                 return
             if path == QUIT_PATH:
-                from ..local import HANDOVER_HEADER
+                from ..protocol import HANDOVER_HEADER
 
                 self._quit(handover=self.headers.get(HANDOVER_HEADER) == "1")
                 return

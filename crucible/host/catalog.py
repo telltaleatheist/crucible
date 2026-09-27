@@ -6,9 +6,10 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..platform.runner import Runner
+from ..protocol import API_HEADER, API_VERSION, LOOPBACK, api_headers
+from ..wsl import default_user_argv
 from .errors import HostError
-from .runner import Runner
-from .. import API_VERSION
 
 CATALOG_TIMEOUT_SECONDS = 60.0
 
@@ -121,7 +122,7 @@ class HttpCatalog:
         self, method: str, path: str, body: dict[str, Any] | None, timeout_s: float
     ) -> bytes:
         data = None if body is None else json.dumps(body).encode("utf-8")
-        headers = {"Authorization": f"Bearer {self._token}", "X-Crucible-Api": str(API_VERSION)}
+        headers = api_headers(self._token)
         if data is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
@@ -226,11 +227,7 @@ class GuestCatalog:
         return self._where
 
     def curl_argv(self, method: str, path: str, body: str | None) -> list[str]:
-        argv = [
-            "wsl.exe",
-            "-d",
-            self._distro,
-            "--exec",
+        words = [
             "curl",
             "-sS",
             "-X",
@@ -238,14 +235,14 @@ class GuestCatalog:
             "-H",
             f"Authorization: Bearer {self._token}",
             "-H",
-            f"X-Crucible-Api: {API_VERSION}",
+            f"{API_HEADER}: {API_VERSION}",
             "-w",
             f"{self.STATUS_MARK}%{{http_code}}",
         ]
         if body is not None:
-            argv += ["-H", "Content-Type: application/json", "-d", body]
-        argv.append(f"http://127.0.0.1:{self._port}{path}")
-        return argv
+            words += ["-H", "Content-Type: application/json", "-d", body]
+        words.append(f"http://{LOOPBACK}:{self._port}{path}")
+        return default_user_argv(self._distro, words)
 
     def _request(
         self, method: str, path: str, body: dict[str, Any] | None, timeout_s: float

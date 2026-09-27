@@ -13,6 +13,7 @@ from xml.sax.saxutils import escape as xml_escape
 from . import hosttools
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
+from .wsl import root_argv
 
 SERVICE_MECHANISM: dict[str, str] = {
     CUDA_LINUX: "systemd",
@@ -98,7 +99,7 @@ def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
             "`wsl.exe -u root` door cannot be named. Install from a WSL shell, "
             "or run this as root"
         )
-    return ["wsl.exe", "-d", distro, "-u", "root", "--exec"]
+    return root_argv(distro)
 
 
 def installed_scope(home: Path) -> str | None:
