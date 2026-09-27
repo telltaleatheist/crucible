@@ -131,8 +131,6 @@ test('the server offers the llm capability and lists the model', async () => {
   assert.ok(isLlmCapability(llm), 'the llm capability carries /v1/models rows');
 
   const model = await row();
-  // Informational fields are nullable on the wire (any Crucible that answers
-  // works, Owen 2026-09-24); THIS server is current and must state them all.
   assert.ok(model.family !== null && model.family.length > 0, 'the manifest must name a family');
   assert.ok(model.paramsB !== null && model.paramsB > 0, 'the manifest must give a parameter count');
   assert.ok(model.memoryBytesEstimate !== null && model.memoryBytesEstimate > 0,

@@ -65,7 +65,7 @@ import {
   CrucibleUnreachable,
 } from './errors.js';
 import { readSseFrames } from './sse.js';
-import { asObject, bool, nullableNum, num, optBool, optNum, optStr, str, type Json } from './shape.js';
+import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
 
 /** Everything `stream(...)` needs. Neither field has a default. */
 export interface StreamOptions {
@@ -92,11 +92,10 @@ export interface StreamAudio {
   /** Mono PCM16 at the session's `sampleRate`, ready to play or to write. */
   readonly pcm: Int16Array;
   /**
-   * Seconds of audio in `pcm`, as the server measured it in the same bytes —
-   * or null where a server did not state it. `pcm.length / sampleRate` says
-   * the same thing.
+   * Seconds of audio in `pcm`, as the server measured it in the same bytes.
+   * `pcm.length / sampleRate` says the same thing.
    */
-  readonly seconds: number | null;
+  readonly seconds: number;
 }
 
 /** A row finishing, whether it spoke its whole text or was stopped. */
@@ -104,13 +103,10 @@ export interface StreamRowDone {
   readonly kind: 'done';
   readonly id: string;
   readonly done: true;
-  /** Seconds of audio actually delivered for this row, or null where not stated. */
-  readonly seconds: number | null;
-  /**
-   * The characters the server sent to the engine — its own count, not a
-   * reply's — or null where not stated.
-   */
-  readonly chars: number | null;
+  /** Seconds of audio actually delivered for this row. */
+  readonly seconds: number;
+  /** The characters the server sent to the engine — its own count, not a reply's. */
+  readonly chars: number;
   /** `chars / seconds`, or null for a row that delivered no audio at all. */
   readonly charsPerSec: number | null;
   /**
@@ -167,8 +163,8 @@ export interface StreamRestart {
   readonly restart: true;
   /** Discard every chunk of this row below this seq. */
   readonly fromSeq: number;
-  /** Why, in the server's words, or null where not stated. */
-  readonly reason: string | null;
+  /** Why, in the server's words. */
+  readonly reason: string;
 }
 
 /** One row failing on its own. Its neighbours are unaffected. */
@@ -210,14 +206,11 @@ export type CancelOutcome = 'dropped' | 'aborting_batch' | 'already_finished';
 export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   readonly sessionId: string;
   readonly voice: string;
-  /**
-   * `<voice>@<revision>` — the merge that is speaking, not just its name — or
-   * null where the server did not state it.
-   */
-  readonly fingerprint: string | null;
+  /** `<voice>@<revision>` — the merge that is speaking, not just its name. */
+  readonly fingerprint: string;
   readonly sampleRate: number;
-  /** The backend speaking, or null where the server did not state it. */
-  readonly backend: string | null;
+  /** The backend speaking. */
+  readonly backend: string;
 
   /**
    * Speak one row. Returns its id, **not its audio**: the audio comes out of
@@ -316,9 +309,9 @@ export async function openTtsStream(
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
-    fingerprint: optStr(body, 'fingerprint', 'stream'),
+    fingerprint: str(body, 'fingerprint', 'stream'),
     sampleRate: num(body, 'sample_rate', 'stream'),
-    backend: optStr(body, 'backend', 'stream'),
+    backend: str(body, 'backend', 'stream'),
   });
   try {
     await session.attach();
@@ -343,17 +336,17 @@ type Pumped = StreamEvent | { readonly kind: 'ready' };
 interface Identity {
   sessionId: string;
   voice: string;
-  fingerprint: string | null;
+  fingerprint: string;
   sampleRate: number;
-  backend: string | null;
+  backend: string;
 }
 
 class Session implements TtsStreamSession {
   readonly sessionId: string;
   readonly voice: string;
-  readonly fingerprint: string | null;
+  readonly fingerprint: string;
   readonly sampleRate: number;
-  readonly backend: string | null;
+  readonly backend: string;
 
   readonly #transport: StreamTransport;
   /**
@@ -548,7 +541,7 @@ class Session implements TtsStreamSession {
           const event = frame.event ?? 'message';
           if (event === 'closed') {
             this.#closed = true;
-            this.#closedReason = optStr(asObject(parse(frame.data, event), event), 'reason', event);
+            this.#closedReason = str(asObject(parse(frame.data, event), event), 'reason', event);
             return;
           }
           yield this.#read(event, frame.data);
@@ -613,13 +606,11 @@ class Session implements TtsStreamSession {
       // one fact with two copies is compared, never trusted twice
       // (ARCHITECTURE.md R1). A `ready` naming another voice, merge, rate or
       // backend would mean this stream is not the session that was opened.
-      // The fingerprint and the backend are compared as stated: a server that
-      // states neither, on either copy, has two copies that agree.
       const said = {
         voice: str(body, 'voice', 'ready'),
-        fingerprint: optStr(body, 'fingerprint', 'ready'),
+        fingerprint: str(body, 'fingerprint', 'ready'),
         sampleRate: num(body, 'sample_rate', 'ready'),
-        backend: optStr(body, 'backend', 'ready'),
+        backend: str(body, 'backend', 'ready'),
       };
       const opened = {
         voice: this.voice,
@@ -644,7 +635,7 @@ class Session implements TtsStreamSession {
         id: str(body, 'id', 'audio'),
         seq: num(body, 'seq', 'audio'),
         pcm: pcm16(decodeBase64(str(body, 'pcm_base64', 'audio'))),
-        seconds: optNum(body, 'seconds', 'audio'),
+        seconds: num(body, 'seconds', 'audio'),
       };
     }
     if (event === 'done') {
@@ -653,17 +644,15 @@ class Session implements TtsStreamSession {
         id: str(body, 'id', 'done'),
         done: true,
         // Measurements of the row, for a record or a display.
-        seconds: optNum(body, 'seconds', 'done'),
-        chars: optNum(body, 'chars', 'done'),
-        charsPerSec: optNum(body, 'chars_per_sec', 'done'),
-        capped: optBool(body, 'capped', 'done'),
+        seconds: num(body, 'seconds', 'done'),
+        chars: num(body, 'chars', 'done'),
+        charsPerSec: nullableNum(body, 'chars_per_sec', 'done'),
+        capped: nullableBool(body, 'capped', 'done'),
         // Strict: whether the row finished or was stopped is what a player
         // decides to keep its audio on.
         cancelled: bool(body, 'cancelled', 'done'),
-        // STRICT, and a `done` without it is a protocol error: the caller
-        // inserts this silence itself, and its `null` already MEANS "the row
-        // was cancelled, keep no gap" — so an absent key read as null would
-        // have a player run a finished row's sentences together.
+        // The caller inserts this silence itself, and its `null` MEANS "the
+        // row was cancelled, keep no gap".
         gapSec: nullableNum(body, 'gap_sec', 'done'),
       };
     }
@@ -673,7 +662,7 @@ class Session implements TtsStreamSession {
         id: str(body, 'id', 'restart'),
         restart: true,
         fromSeq: num(body, 'from_seq', 'restart'),
-        reason: optStr(body, 'reason', 'restart'),
+        reason: str(body, 'reason', 'restart'),
       };
     }
     if (event === 'error') {

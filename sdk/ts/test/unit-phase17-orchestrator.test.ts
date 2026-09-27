@@ -1,6 +1,6 @@
 /**
  * PHASE17-ORCHESTRATOR.md, from the client's side: the three fields `info()`
- * gained, the vintage rule that lets them be additive, and `engineOf`.
+ * gained, and `engineOf`.
  *
  * The whole of what an app has to learn this phase is one function. Everything
  * else — the claim, the release, the restart — happens between two Crucible
@@ -61,20 +61,6 @@ function oldDocument(): Record<string, unknown> {
   };
 }
 
-// --------------------------------------------------------------- the vintage
-
-test('a pre-Phase-17 server reads as an engine that nobody manages', async () => {
-  // PHASE17 3.3 and PHASE15 3.3: a document with NO `role` states its answer
-  // by its vintage. It is not a default this client fills, and it is exactly
-  // the case that matters, because every server alive today is one.
-  reply = oldDocument();
-  const info = await client().info();
-  assert.equal(info.role, 'engine');
-  assert.equal(info.managedBy, null);
-  assert.equal(info.engine, null);
-  assert.equal(engineOf(info), null, 'talk to the address you already have');
-});
-
 // ---------------------------------------------------------------- an engine
 
 test('an unclaimed engine says so, and null is a complete answer', async () => {
@@ -98,17 +84,6 @@ test('a claimed engine names who manages it, and not their version', async () =>
   });
   // Still the engine: an app talks HERE, claimed or not. A claim is a
   // statement of fact between two Crucible processes, never a gate.
-  assert.equal(engineOf(info), null);
-});
-
-test('an engine that states its role and omits managed_by reads as unmanaged', async () => {
-  // Who claimed an engine is informational — an engine talks to its callers
-  // the same either way — so a server that does not say reads as null (Owen,
-  // 2026-09-24). An ORCHESTRATOR's `engine` is different; see below.
-  reply = { ...oldDocument(), role: 'engine' };
-  const info = await client().info();
-  assert.equal(info.role, 'engine');
-  assert.equal(info.managedBy, null);
   assert.equal(engineOf(info), null);
 });
 

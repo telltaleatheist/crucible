@@ -242,8 +242,7 @@ identify weights — the same id serves a different repo on each backend, and a 
 be re-pinned — so an id in a record cannot say afterwards what actually produced the
 output. The server assembles the string so every client files the same weights under the
 same name. `fingerprint`, `revision`, `memoryBytesEstimate` and `maxModelLen` are all
-`null` together on a model this host's backend cannot serve — and each is also `null` from
-a server that does not state it (see [Any Crucible that answers](#any-crucible-that-answers)).
+`null` together on a model this host's backend cannot serve.
 
 `modalities` is the exception to that: it is **never null, on any host**. It says what a
 client may put in a chat request's content parts (`text`, `image`) — what the model is
@@ -543,10 +542,8 @@ that read that as `false` would report every runaway as a long sentence, which i
 the distinction this event exists to carry. Compare against `true` and `false` explicitly;
 never write `if (chunk.capped)`.
 
-A `chunk` frame that *omits* `capped` — or `guard`, or a measurement — reads it as `null`:
-a server that does not state the field and narrator not saying are the same news to a
-caller, and neither is ever `false`. A frame that sends one with the wrong type is still a
-`CrucibleProtocolError`.
+A `chunk` frame that omits `capped`, `guard` or a measurement, or sends one with the wrong
+type, is a `CrucibleProtocolError`.
 
 No `chunk` event and no artifact is produced for a row that rendered nothing. **A failed
 chunk is reported and the run continues** — one bad sentence never sinks the other 1,399 —
@@ -831,45 +828,23 @@ await crucible.releaseArtifacts(renderJobId);         // removes the render job'
 - A referenced file is hard-linked into the new job, so releasing the held job never takes a
   running job's inputs with it.
 
-## Any Crucible that answers
+## Reading the wire
 
-Owen, 2026-09-24: *"lets modify bookforge and foundry so they dont require any particular
-crucible server. if it can make the call to the crucible server then it should work."* It
-replaced the lockstep rule, under which this client demanded every field it knew and refused
-a server one release behind it by name. So every field this client reads is one of two kinds:
+Every field this client reads is read as the current server sends it. A key the server always
+sends is required: a missing one is a `CrucibleProtocolError` naming the field, and so is a
+field of the wrong type. Where the server may honestly send `null`, the type says `T | null`,
+and `null` is never `0` and never `false`. The few keys the server sends only in some cases
+(a job's `leaseId`, a model row's `reason`) read as `null` when absent.
 
-- **Load-bearing** — what a call cannot be done right without: an id, a job's `status`, the
-  `artifacts` to fetch, a chunk's `index`, the audio and its `seq`, a chat's `content` and
-  `finishReason`, a decision's answer, a voice's `sampleRate` and `pace`, a capability row's
-  `enabled` and `selected`, an error's `code`. A missing one is a `CrucibleProtocolError`
-  naming the field.
-- **Informational** — what informs a display, or a number you may use: estimates, notes,
-  counts, timestamps, pins, measurements, a refusal's holder. Absent reads as **`null`**, and
-  every type that carries one says `T | null`. `null` is never `0` and never `false`.
+An unknown event kind — on a job's stream or a TTS session's — arrives as an `unknown` event
+rather than ending the stream, because a newer server may add one. And `info()` never fails
+over one voice or model row it cannot read: that row goes to the capability's
+`unreadableRows`, with its raw data and the reason, and the rest of the document is returned.
+(`models()` and `voices()` are the direct reads and refuse such a row by name.)
 
-An informational field that is **present with the wrong type** is still a
-`CrucibleProtocolError`: API v1 adds fields and never retypes them, so a wrong type is a
-broken server, not an old one. An unknown event kind — on a job's stream or a TTS session's —
-arrives as an `unknown` event rather than ending the stream. And `info()` never fails over one
-voice or model row it cannot read: that row goes to the capability's `unreadableRows`, with its
-raw data and the reason, and the rest of the document is returned. (`models()` and `voices()`
-are the direct reads and still refuse such a row by name.)
-
-### Informational to the read, load-bearing to YOUR path
-
-A field can be informational for the call that reads it and still be something one of *your*
-code paths cannot proceed without. The read stays tolerant, so every other caller keeps working
-against an older server. **The path that needs the field refuses by name when it is `null`.** It
-never substitutes a default. The ones clients have actually hit (Briefcase and bookforge-pc-1,
-2026-09-24):
-
-| Field | Who needs it | What `null` means, and what to do |
-|---|---|---|
-| `info().host.backend`, capability `backendKind` | a client choosing a per-backend module or model (a model one backend alone declares, such as the Mac-only 8-bit 27B) | The server did not say which backend it is. Refuse the choice by name; don't guess. |
-| `job().chunksDone` | a resume | Unknown, **not** "none done". Treating it as `[]` re-renders chunks already on disk. Refuse the resume by name, or start over knowingly. |
-| decide `answers[q].logprobs` | a client summing evidence | Derivable. The server computes `logprobs[l] = ln(probabilities[l])` (`crucible/decide.py`), and `probabilities` is load-bearing and never null. A label whose probability is exactly 0 has a `null` logprob (`-Infinity` is not JSON). |
-| chat `usage` / `usage.promptTokens` | a client counting tokens | The engine behind the door did not report usage; some upstreams don't. It isn't 0. Count it yourself or refuse the count. |
-| `activity().chat.inFlight` | a client deciding whether the card is free (for example, before an unload) | The server did not count. It isn't 0. **Treat it as busy.** |
+A chat body is relayed from the engine behind the door, so its `id`, `model` and `usage` are
+`null` where that engine did not report them. `usage` isn't 0: count it yourself or refuse the
+count.
 
 On a model row, `installed`, `backendSupported` and `family` describe the model. **`loadable`
 and `resident` are the facts to act on**: whether a `load-model` would be accepted, and whether

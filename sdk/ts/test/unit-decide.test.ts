@@ -4,14 +4,9 @@
  *
  * The request half is pinned to the contract's worked example byte for byte in
  * meaning: what goes on the wire is the ORDER (state, questions, options) and
- * nothing the SDK made up. The reply half is Owen's ruling of 2026-09-24 —
- * *"if it can make the call to the crucible server then it should work"* —
- * which replaced the lockstep one: the ANSWER is load-bearing and demanded (an
- * answer per question, of the type asked, its choice/level/score/p, its
- * probabilities and label_mass), everything that describes it (timings, token
- * counts, the model's pins, the engine, confidence, log-probabilities) reads as
- * null when a server does not state it, and a reply that answers a different
- * question than the one asked is still a protocol error rather than a result.
+ * nothing the SDK made up. The reply is read as the server sends it, and a
+ * reply that answers a different question than the one asked is a protocol
+ * error rather than a result.
  *
  * Run: `npm run test:unit` (exits non-zero on any failure).
  */
@@ -244,67 +239,7 @@ for (const [path, name, strip] of LOAD_BEARING) {
   });
 }
 
-/**
- * Every informational field, removed one at a time, reads as null and the
- * decision still arrives — each is a number or a string a caller may use,
- * never one the answer depends on.
- */
-const INFORMATIONAL: Array<[string, (body: Record<string, any>) => void, (r: any) => unknown]> = [
-  ['timing_ms.per_question.team.cached_tokens', (b) => delete b.timing_ms.per_question.team.cached_tokens, (r) => r.timingMs.perQuestion.team.cachedTokens],
-  ['timing_ms.prime', (b) => delete b.timing_ms.prime, (r) => r.timingMs.prime],
-  ['timing_ms', (b) => delete b.timing_ms, (r) => r.timingMs],
-  ['engine', (b) => delete b.engine, (r) => r.engine],
-  ['model.fingerprint', (b) => delete b.model.fingerprint, (r) => r.model.fingerprint],
-  ['model', (b) => delete b.model, (r) => r.model],
-  ['tokens.images', (b) => delete b.tokens.images, (r) => r.tokens.images],
-  ['tokens', (b) => delete b.tokens, (r) => r.tokens],
-  ['answers.anger.confidence', (b) => delete b.answers.anger.confidence, (r) => r.answers.anger.confidence],
-  ['answers.team.logprobs', (b) => delete b.answers.team.logprobs, (r) => r.answers.team.logprobs],
-  ['answers.anger.logprobs', (b) => delete b.answers.anger.logprobs, (r) => r.answers.anger.logprobs],
-  ['answers.urgent.logprob', (b) => delete b.answers.urgent.logprob, (r) => r.answers.urgent.logprob],
-];
-
-for (const [name, strip, read] of INFORMATIONAL) {
-  test(`a reply without ${name} still decides, and reads it as null`, async () => {
-    const body = reply();
-    strip(body);
-    handle = (_request, response) => json(response, 200, body);
-    const result = await client().decide(EXAMPLE);
-    assert.equal(read(result), null);
-    const team = result.answers['team'];
-    assert.ok(team !== undefined && team.type === 'choice');
-    assert.equal(team.choice, 'billing');
-  });
-}
-
-test('a 1.0.23-shaped reply — no logprobs anywhere — reads cleanly with nulls', async () => {
-  const body = reply();
-  delete body.answers.team.logprobs;
-  delete body.answers.anger.logprobs;
-  delete body.answers.urgent.logprob;
-  handle = (_request, response) => json(response, 200, body);
-  const result = await client().decide(EXAMPLE);
-  const { team, anger, urgent } = result.answers;
-  assert.ok(team?.type === 'choice' && anger?.type === 'score' && urgent?.type === 'yesno');
-  assert.equal(team.logprobs, null);
-  assert.deepEqual(team.probabilities, { billing: 0.91, technical: 0.09 });
-  assert.equal(anger.logprobs, null);
-  assert.equal(anger.level, 'Calm');
-  assert.equal(urgent.logprob, null);
-  assert.equal(urgent.p, 0.83);
-});
-
-test('a null revision reads as null: the pins describe the decision, they are not it', async () => {
-  const body = reply();
-  body.model.revision = null;
-  handle = (_request, response) => json(response, 200, body);
-  const result = await client().decide(EXAMPLE);
-  assert.equal(result.model?.revision, null);
-  assert.equal(result.model?.id, 'qwen3.5-9b');
-});
-
 test('an informational block keyed by questions nobody asked is still a protocol error', async () => {
-  // Present and wrong is a broken server, not an old one.
   const body = reply();
   body.timing_ms.per_question.nobody = { wall_ms: 1, prompt_tokens: 1, cached_tokens: null };
   handle = (_request, response) => json(response, 200, body);

@@ -143,12 +143,6 @@ test('the key hint arrives with its ellipsis and is rendered verbatim', async ()
   assert.equal(settings.upstreams.anthropic?.url, undefined);
 });
 
-test('a document missing a descriptive field reads it as null, never undefined', async () => {
-  const { backend_kind: _dropped, ...without } = DOCUMENT;
-  answer(200, without);
-  assert.equal((await client().settings()).backendKind, null);
-});
-
 test('a document missing its routes is a protocol error: where work runs is never filled in', async () => {
   const { routes: _dropped, ...without } = DOCUMENT;
   answer(200, without);
@@ -458,23 +452,16 @@ test('local model choices and nullable automatic preferences cross the settings 
   assert.deepEqual(JSON.parse(lastBody),{local_models:{translate:null}});
 });
 
-test('a document missing either local-model field reads it as null; a malformed one fails by name', async () => {
-  // AN OMISSION READS AS AN OLDER ENGINE AGAIN. It was a protocol error from
-  // 2026-09-16 (nothing released, nothing legacy) until Owen's ruling of
-  // 2026-09-24: "if it can make the call to the crucible server then it should
-  // work". A page that cannot draw a model picker for an older engine can
-  // still draw its routes and keys. `null` is "this engine does not answer the
-  // question", which is not an empty object.
+test('a document missing either local-model field, or with a malformed one, fails by name', async () => {
   const { local_models: _m, ...noModels } = DOCUMENT;
   answer(200, noModels);
-  assert.equal((await client().settings()).localModels, null);
+  await assert.rejects(client().settings(), /settings has no field "local_models"/);
   const { local_model_choices: _c, ...noChoices } = DOCUMENT;
   answer(200, noChoices);
-  assert.equal((await client().settings()).localModelChoices, null);
+  await assert.rejects(client().settings(), /settings has no field "local_model_choices"/);
 
-  // Present and wrong is a broken server, not an old one.
   answer(200,{...DOCUMENT,local_models:{translate:123}});
   await assert.rejects(client().settings(),CrucibleProtocolError);
   answer(200,{...DOCUMENT,local_model_choices:{translate:[{id:'model',memory_bytes_estimate:1,fits:true,installed:'yes'}]}});
-  await assert.rejects(client().settings(),/installed is present but is not a boolean/);
+  await assert.rejects(client().settings(),/installed is not a boolean/);
 });

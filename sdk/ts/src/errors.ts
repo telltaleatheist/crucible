@@ -164,29 +164,24 @@ export const SERVER_BUSY = 'server_busy';
  * the caller's, every time.
  */
 export class CrucibleBusy extends CrucibleRefused {
-  // EVERY FIELD BELOW IS INFORMATIONAL and `null` where the server did not
-  // state it (any Crucible that answers works, Owen 2026-09-24). The refusal
-  // is the CODE; these say who is in the way, for a person. A body missing one
-  // is still this type, never a protocol error in its place.
-
   /** The busy job's `client` — its recorded User-Agent. Null = it did not say. */
   readonly holder: string | null;
-  readonly jobId: string | null;
+  readonly jobId: string;
   /** The busy job's type: `tts`, `llm`, `rvc`, ... */
-  readonly jobType: string | null;
+  readonly jobType: string;
   /** The model it holds, or null for a job type that names none. */
   readonly model: string | null;
   /** `running` or `queued`. Names which clock {@link since} is on. */
-  readonly jobStatus: string | null;
+  readonly jobStatus: string;
   /**
    * When it started (`running`) or was admitted (`queued`), as the server said
    * it. {@link jobStatus} is what makes this unambiguous: without it a caller
    * cannot tell a job that has been rendering for an hour from one admitted
    * 2 ms ago.
    */
-  readonly since: string | null;
+  readonly since: string;
   /** 0..1. */
-  readonly progress: number | null;
+  readonly progress: number;
   /** The holder's latest progress line. Null until the job has said anything. */
   readonly jobMessage: string | null;
 
@@ -197,12 +192,12 @@ export class CrucibleBusy extends CrucibleRefused {
     details: unknown,
     fields: {
       holder: string | null;
-      jobId: string | null;
-      jobType: string | null;
+      jobId: string;
+      jobType: string;
       model: string | null;
-      jobStatus: string | null;
-      since: string | null;
-      progress: number | null;
+      jobStatus: string;
+      since: string;
+      progress: number;
       jobMessage: string | null;
     },
   ) {
@@ -222,12 +217,9 @@ export class CrucibleBusy extends CrucibleRefused {
    * human. Here rather than in each client for the same reason the fields are.
    */
   get busyLine(): string {
-    // Each part the server did not state is left out, never guessed.
     const who = this.holder === null ? 'an unnamed client' : this.holder;
-    const what = [this.jobType, this.model].filter((part) => part !== null).join(' ');
-    const parts = [who];
-    if (what !== '') parts.push(what);
-    if (this.progress !== null) parts.push(`${Math.round(this.progress * 100)}% done`);
+    const what = this.model === null ? this.jobType : `${this.jobType} ${this.model}`;
+    const parts = [who, what, `${Math.round(this.progress * 100)}% done`];
     const line = `busy: ${parts.join(', ')}`;
     return this.jobMessage === null ? line : `${line} — ${this.jobMessage}`;
   }
@@ -262,19 +254,15 @@ export class CrucibleCardHeld extends CrucibleRefused {
    * tells this type from {@link CrucibleBusy}.
    */
   readonly fact: string;
-  /**
-   * Who, in the server's own words — or null where the server did not state
-   * it. A fact that holds has a holder; a server that does not name it has
-   * still refused by code, which is the load-bearing part.
-   */
-  readonly who: string | null;
+  /** Who, in the server's own words. */
+  readonly who: string;
 
   constructor(
     status: number,
     code: string,
     serverMessage: string,
     details: unknown,
-    fields: { fact: string; who: string | null },
+    fields: { fact: string; who: string },
   ) {
     super(status, code, serverMessage, details);
     this.fact = fields.fact;
@@ -283,7 +271,7 @@ export class CrucibleCardHeld extends CrucibleRefused {
 
   /** "held by a lease: 'foundry/owens-pc' for 'translate'" — one line, for a row. */
   get heldLine(): string {
-    return this.who === null ? `held by ${this.fact}` : `held by ${this.fact}: ${this.who}`;
+    return `held by ${this.fact}: ${this.who}`;
   }
 }
 
@@ -330,9 +318,7 @@ export const LEASED = 'leased';
  * nobody chose (ARCHITECTURE.md R5).
  */
 export class CrucibleLeased extends CrucibleRefused {
-  // Every field below is INFORMATIONAL, and null where the server did not
-  // state it — CrucibleBusy's rule. The refusal is the code.
-  readonly leaseId: string | null;
+  readonly leaseId: string;
   /**
    * Which resident kind is held: `llm`, `tts` or `align`.
    *
@@ -341,7 +327,7 @@ export class CrucibleLeased extends CrucibleRefused {
    * — `leased` on a `load-voice` means something different when a 27B is held
    * than when narrator is.
    */
-  readonly kind: string | null;
+  readonly kind: string;
   /**
    * Who holds it — the lease's recorded `client`. Null = it did not say, and
    * never a guess, for the reason {@link CrucibleBusy.holder} is null.
@@ -352,11 +338,11 @@ export class CrucibleLeased extends CrucibleRefused {
    */
   readonly holder: string | null;
   /** What the run IS: a capability class name. */
-  readonly act: string | null;
+  readonly act: string;
   /** When the lease was taken. */
-  readonly since: string | null;
+  readonly since: string;
   /** When it stops being open unless its holder heartbeats it. */
-  readonly expiresAt: string | null;
+  readonly expiresAt: string;
 
   constructor(
     status: number,
@@ -364,12 +350,12 @@ export class CrucibleLeased extends CrucibleRefused {
     serverMessage: string,
     details: unknown,
     fields: {
-      leaseId: string | null;
-      kind: string | null;
+      leaseId: string;
+      kind: string;
       holder: string | null;
-      act: string | null;
-      since: string | null;
-      expiresAt: string | null;
+      act: string;
+      since: string;
+      expiresAt: string;
     },
   ) {
     super(status, code, serverMessage, details);
@@ -387,12 +373,8 @@ export class CrucibleLeased extends CrucibleRefused {
    * reason {@link CrucibleBusy.busyLine} is.
    */
   get leasedLine(): string {
-    // Each part the server did not state is left out, never guessed.
     const who = this.holder === null ? 'an unnamed client' : this.holder;
-    const parts = [who];
-    if (this.act !== null) parts.push(this.act);
-    const line = `leased: ${parts.join(', ')}`;
-    return this.expiresAt === null ? line : `${line}, until ${this.expiresAt}`;
+    return `leased: ${who}, ${this.act}, until ${this.expiresAt}`;
   }
 }
 
@@ -622,12 +604,8 @@ export class CrucibleCapabilityUndecided extends CrucibleServerError {}
  * id, a job's status, a done's artifacts, a chat's content), or a field present
  * with the wrong type.
  *
- * What it is NOT, since Owen's ruling of 2026-09-24 (*"if it can make the call
- * to the crucible server then it should work"*): a missing informational
- * field — that reads as `null` — or an event kind this build has not heard of —
- * that arrives as {@link UnknownEvent}. Both are how an older or newer server
- * looks within API v1, and version skew is not a reason to refuse a call that
- * worked. See `shape.ts` for the line between the two kinds of field.
+ * What it is NOT: an event kind this build has not heard of, which arrives as
+ * {@link UnknownEvent} because a newer server may add one within API v1.
  */
 export class CrucibleProtocolError extends CrucibleError {
   readonly detail: string;
@@ -639,31 +617,15 @@ export class CrucibleProtocolError extends CrucibleError {
 }
 
 // ------------------------------------------- the capability document's route
-//
-// PHASE15-HOST.md section 3.3's last bullet, which is a READING RULE and not a
-// default: a capability document in which NO row carries `route` comes from a
-// server that predates phase 15, and every class on such a server IS local —
-// that is a fact the document states by its own vintage, not a value this
-// client fills in. A document in which SOME rows carry it and one does not is
-// a defect, and so is a `route` this vocabulary does not have.
 
-/** A document where some rows say `route` and one does not. Names the row. */
+/** A capability row with no `route`. Names the row. */
 export const CAPABILITY_ROUTE_MISSING = 'capability_route_missing';
 /** A `route` that is neither `local` nor `upstream`. */
 export const CAPABILITY_ROUTE_UNKNOWN = 'capability_route_unknown';
 
 // ------------------------------------ the voice document's needs_reference
-//
-// The SAME reading rule (PHASE15-HOST.md 3.3), applied to the field
-// PHASE3-TTS.md section 2 added: a document in which NO voice row carries
-// `needs_reference` comes from a server that predates the field, and a voice
-// on such a server IS a checkpoint whose voice is in its weights — so every
-// row reads `needsReference: false`, because that is the document's vintage
-// speaking and not a default this client fills in per row. The rule holds for
-// both documents voice rows arrive in: `/v1/voices` and the `tts` capability
-// of `/v1/info`.
 
-/** A document where some voice rows say `needs_reference` and one does not. Names the row. */
+/** A voice row with no `needs_reference`. Names the row. */
 export const VOICES_NEEDS_REFERENCE_MISSING = 'voices_needs_reference_missing';
 /** A `needs_reference` that is not a boolean. */
 export const VOICES_NEEDS_REFERENCE_UNKNOWN = 'voices_needs_reference_unknown';

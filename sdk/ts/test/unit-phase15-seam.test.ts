@@ -110,16 +110,9 @@ after(async () => {
 const GIB = 1024 ** 3;
 
 /**
- * Eleven classes with NO `route` on any of them — the shape a server
- * initialised before phase 15 sent.
- *
- * Read as "every class is local" — a fact the document states by its vintage,
- * since a server that predates upstream routing had nowhere else to send work.
- * That reading was withdrawn on 2026-09-16 (no older server would ever be
- * pointed at) and RESTORED on 2026-09-24 by Owen's ruling that any Crucible
- * that answers works. Half a document is still refused: a server that routes
- * and does not say where one class runs is a defect, and a route is the one
- * fact that decides whether a run costs GPU-minutes or money.
+ * Eleven classes with NO `route` on any of them. A route is the one fact that
+ * decides whether a run costs GPU-minutes or money, so a row without one is
+ * refused.
  */
 function preRouteRecord(): Record<string, unknown> {
   const classes = [
@@ -155,15 +148,6 @@ function preRouteRecord(): Record<string, unknown> {
 
 // ------------------------------- 1. the capability document's route, by 3.3
 
-test('a document where NO row says route reads every class as local', async () => {
-  answers(200, preRouteRecord());
-  const record = await client().capability();
-  assert.equal(record.classes.length, 11);
-  for (const row of record.classes) {
-    assert.equal(row.route, 'local', `${row.capability} predates routing, so it is local`);
-  }
-});
-
 /** The same eleven classes, each stating where it runs. What a server sends. */
 function routedRecord(): Record<string, unknown> {
   const document = preRouteRecord();
@@ -171,9 +155,7 @@ function routedRecord(): Record<string, unknown> {
   return document;
 }
 
-test('reading a pre-phase-15 document is a STATEMENT, not a filled-in default', async () => {
-  // The difference shows in the other direction: the same document with ONE
-  // row routed is not "ten defaults and one fact", it is a defect.
+test('a row with no route is capability_route_missing', async () => {
   const document = preRouteRecord();
   const classes = document['classes'] as Record<string, unknown>[];
   classes[3]!['route'] = 'upstream';
@@ -599,16 +581,7 @@ test('a task type this build does not have names the four that exist', async () 
 
 // ---------- 8. the voice document's needs_reference — the SAME rule, by 3.3
 
-/**
- * The defect Foundry found against a live server on 2026-09-14: a Crucible
- * built one commit before 743dc1a answers voice rows with no `needs_reference`
- * on them, and this client threw
- * `info.capabilities[6].models[0] has no field "needs_reference"` at its very
- * first read — and the same from `voices()`. Section 3.3's reading rule is the
- * fix, applied exactly as it is to `route`: the vintage is asked ONCE of the
- * whole document, and a document nobody's row states it in is a PRE-FIELD
- * server's, where every voice is a checkpoint.
- */
+/** A voice row with no `needs_reference` on it, which is refused by name. */
 const PRE_FIELD_VOICE = {
   id: 'deathstalker',
   display: 'Deathstalker',
@@ -672,29 +645,7 @@ function preFieldInfo(rows: Record<string, unknown>[]): Record<string, unknown> 
   };
 }
 
-test('a voices() document where NO row says needs_reference reads every voice as false', async () => {
-  answers(200, preFieldVoices());
-  const voices = await client().voices();
-  assert.equal(voices.length, 3);
-  for (const voice of voices) {
-    assert.equal(voice.needsReference, false, `${voice.id} should read as false`);
-  }
-});
-
-test("info()'s tts rows read the same way — the seam Foundry hit first", async () => {
-  answers(200, preFieldInfo(preFieldVoices()));
-  const info = await client().info();
-  const tts = info.capabilities.find(isTtsCapability);
-  assert.ok(tts, 'the tts capability should be read as voice rows');
-  assert.equal(tts.models.length, 3);
-  for (const voice of tts.models) {
-    assert.equal(voice.needsReference, false, `${voice.id} should read as false`);
-  }
-});
-
-test('reading a pre-field document is a STATEMENT, not a filled-in default', async () => {
-  // Same proof as the route rule's: the same document with ONE row stating the
-  // field is not "two defaults and one fact", it is a defect.
+test('a voice row with no needs_reference is voices_needs_reference_missing', async () => {
   const rows = preFieldVoices();
   rows[2]!['needs_reference'] = true;
   answers(200, rows);
@@ -708,12 +659,10 @@ test('reading a pre-field document is a STATEMENT, not a filled-in default', asy
   });
 });
 
-test('a half-stated info document carries the rows it cannot read aside, by the same name', async () => {
-  // `voices()` refuses the document (above). `info()` is the probe an app
-  // makes to find out what it is talking to, so the rows that cannot say
-  // whether a load needs a clip are carried aside as unreadable — with the
-  // same named reason — and the rest of the document still reads (Owen,
-  // 2026-09-24).
+test('info() carries a voice row with no needs_reference aside, by the same name', async () => {
+  // `voices()` refuses the document (above). `info()` carries the rows that
+  // cannot say whether a load needs a clip aside as unreadable, with the same
+  // named reason, and the rest of the document still reads.
   const rows = preFieldVoices();
   rows[0]!['needs_reference'] = false;
   answers(200, preFieldInfo(rows));

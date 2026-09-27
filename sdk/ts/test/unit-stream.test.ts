@@ -470,8 +470,7 @@ test('an error naming a row is yielded; one naming none ends the session', async
 
 test('an event kind this client does not know is carried as unknown, and the session runs on', async () => {
   // `events()`' rule for a job's stream (`UnknownEvent`), applied to a
-  // session's: a newer server's frame is news, not a fault, and it used to end
-  // the listener's whole session (Owen, 2026-09-24).
+  // session's: a newer server's frame is news, not a fault.
   reset();
   serving((response) => {
     frame(response, 1, 'ready', READY);
