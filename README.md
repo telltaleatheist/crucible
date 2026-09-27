@@ -868,8 +868,16 @@ Three things worth knowing before you send params:
 - **Every input must produce an output.** A missing one fails the job and publishes nothing:
   a book with one sentence in the wrong voice looks exactly like a book without one.
 
-Batching — 96 files per recycled process — is the server's and never crosses the wire. It is
-a **memory** bound, not a throughput choice: proven necessary on a 64 GB Mac.
+- **Any length in, the same length out.** A 12-hour master can go in whole: the job cuts it
+  at quiet points (`piece_s`, `overlap_s`, `crossfade_s` — optional, defaults 60 / 0.5 / 0.02)
+  and stitches the conversion back to the input's exact frame count, sample rate and format,
+  in one channel. Input names need no extension; the format is read from the bytes.
+
+Batching — a recycled urvc process per 96 pieces, or sooner when the audio it has converted or
+the memory it holds reaches a budget taken from the host's RAM — is the server's and never
+crosses the wire. It is a **memory** bound, not a throughput choice: each ten-minute file grows
+the process ~1.5 GB for good (measured on the Mac and kylies-pc). Each input is published the
+moment it finishes, so a cancelled or failed job keeps the inputs it had already converted.
 
 One thing it needs before the first conversion: urvc's shared base assets — the contentvec
 embedder and the rmvpe/fcpe predictors, the engine's rather than any model's.

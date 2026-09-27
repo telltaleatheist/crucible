@@ -145,6 +145,17 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
+@pytest.fixture(autouse=True)
+def ffmpeg_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rvc refuses `ffmpeg_missing` up front (2026-09-26); these tests are about
+    everything else, so the probe answers for the machine running the suite."""
+    monkeypatch.setattr(
+        rvc_job,
+        "ffmpeg_paths",
+        lambda: {"ffmpeg": "/usr/bin/ffmpeg", "ffprobe": "/usr/bin/ffprobe"},
+    )
+
+
 @pytest.fixture
 def fake_worker(monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(rvc_job, "WORKER_SCRIPT", FAKE_WORKER)
@@ -381,19 +392,21 @@ def test_a_model_with_no_index_refuses_a_non_zero_index_rate(
     assert "Send index_rate 0" in response.json()["error"]["message"]
 
 
-def test_a_job_with_two_formats_is_refused(
+def test_mixed_formats_and_a_name_without_an_extension_are_converted(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    """urvc takes one input glob and one output extension, and artifacts keep names."""
+    """#45 (2026-09-26): the worker reads each input's format from its bytes, so
+    neither the NAME's extension nor one format per job is the server's to refuse."""
     events = run_job(
         ready,
         auth,
-        inputs={**INPUTS, "44.wav": {"inline_base64": base64.b64encode(b"w").decode()}},
+        inputs={
+            **INPUTS,
+            "44.wav": {"inline_base64": base64.b64encode(b"w").decode()},
+            "c000": {"inline_base64": base64.b64encode(b"c").decode()},
+        },
     )
-    assert terminal(events)["event"] == "failed"
-    error = terminal(events)["data"]["error"]
-    assert error["code"] == "invalid_inputs"
-    assert "one format at a time" in error["message"]
+    assert terminal(events)["event"] == "done"
 
 
 def test_a_job_with_no_inputs_is_refused(
@@ -424,10 +437,11 @@ def test_a_run_converts_every_input_and_keeps_its_name(
         assert response.content.endswith(b"[converted by the fake rvc worker]\n")
 
 
-def test_a_missing_output_fails_the_job_and_publishes_nothing(
+def test_a_missing_output_fails_the_job_and_keeps_the_rest(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A book with one sentence in the wrong voice looks exactly like one without."""
+    """The job fails, so it never ends like a whole conversion; what did convert
+    is kept (2026-09-26: a cancel at 26 of 35 used to lose all 26)."""
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_SKIP", "42.flac")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
@@ -435,7 +449,10 @@ def test_a_missing_output_fails_the_job_and_publishes_nothing(
     assert error["code"] == "rvc_output_missing"
     assert "42.flac" in error["message"]
     job_id = events[-1]["job_id"]
-    assert ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["artifacts"] == []
+    assert ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["artifacts"] == [
+        "41.flac",
+        "43.flac",
+    ]
 
 
 def test_the_server_and_not_the_client_chooses_how_it_runs(
@@ -444,7 +461,7 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The batch size, the staged models root and the extension never cross the wire."""
+    """The batch sizes and the staged models root never cross the wire."""
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_TRANSCRIPT", str(transcript))
     run_job(ready, auth)
@@ -453,7 +470,10 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
 
     assert sent["batch_size"] == 96
     assert sent["model_name"] == "deathstalker_rvc_v1"
-    assert sent["extension"] == "flac"
+    assert sent["memory_fraction"] == 0.5
+    assert sent["max_batch_audio_s"] == 1800.0
+    # Absent piece params are the server's defaults, sent resolved (#5).
+    assert (sent["piece_s"], sent["overlap_s"], sent["crossfade_s"]) == (60.0, 0.5, 0.02)
     assert sent["inputs"] == SENTENCES
     # The four numbers the client DID choose reach the engine unadjusted — in
     # particular protect_rate, which is not flipped on the way through.
