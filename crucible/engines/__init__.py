@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 from ..narratorengines import NARRATOR_ENGINES, VoicesDocumentView
 from .base import (
@@ -26,6 +27,15 @@ ENGINES: dict[str, type[SubprocessEngine]] = {
 }
 
 
+def engine_class(engine_name: str) -> type[SubprocessEngine]:
+    cls = ENGINES.get(engine_name)
+    if cls is None:
+        raise EngineError(
+            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
+        )
+    return cls
+
+
 def engine_log_path(home: Path, model_id: str) -> Path:
     return logs_dir(home) / f"engine-{model_id}.log"
 
@@ -36,11 +46,7 @@ ChatAdmission = tuple[int | None, str | None]
 def chat_admission(
     engine_name: str, engine_args: "list[str] | tuple[str, ...]"
 ) -> ChatAdmission:
-    cls = ENGINES.get(engine_name)
-    if cls is None:
-        raise EngineError(
-            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
-        )
+    cls = engine_class(engine_name)
     concurrency = cls.chat_concurrency
     basis = cls.chat_concurrency_basis
     flag = cls.chat_concurrency_flag
@@ -93,11 +99,7 @@ class DecideReading:
 
 
 def decide_reading(engine_name: str) -> DecideReading:
-    cls = ENGINES.get(engine_name)
-    if cls is None:
-        raise EngineError(
-            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
-        )
+    cls = engine_class(engine_name)
     basis = cls.decide_basis
     if basis is None:
         raise EngineError(
@@ -120,11 +122,7 @@ def decide_reading(engine_name: str) -> DecideReading:
 
 
 def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
-    cls = ENGINES.get(engine_name)
-    if cls is None:
-        raise EngineError(
-            f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
-        )
+    cls = engine_class(engine_name)
     return cls(python=python, log_path=log_path)
 
 
@@ -159,16 +157,50 @@ def build_voice_engine(
 
 
 def engine_model_name(engine_name: str, model_dir: Path, model_id: str) -> str:
-    if engine_name == VllmEngine.name:
-        return model_id
-    if engine_name == MlxLmEngine.name:
-        return str(Path(model_dir).resolve())
-    if engine_name == LlamaServerEngine.name:
-        return model_id
-    if engine_name == MlxVlmEngine.name:
-        return str(model_dir)
-    raise EngineError(
-        f"unknown engine {engine_name!r}; this build has {sorted(ENGINES)}"
+    return engine_class(engine_name).served_name(model_dir, model_id)
+
+
+def start_engine(
+    engine: SubprocessEngine,
+    weights_dir: Path,
+    served: str,
+    port: int,
+    args: list[str],
+    say: Callable[[str], None],
+    timeout: float,
+    confirm: Callable[[], Any] | None = None,
+) -> None:
+    try:
+        engine.start(weights_dir, served, port, args)
+        engine.ready(timeout, on_progress=say)
+        if confirm is not None:
+            confirm()
+    except BaseException as start_failure:
+        try:
+            engine.stop()
+        except EngineError as stop_failure:
+            raise EngineError(
+                f"{start_failure}\n...and stopping it also failed: {stop_failure}"
+            ) from start_failure
+        raise
+
+
+def engine_load_args(
+    manifest: Any,
+    spec: Any,
+    weights_dir: Path,
+    plan: Any,
+    *,
+    context: int,
+    card_args: tuple[str, ...] = (),
+) -> list[str]:
+    return engine_class(spec.engine).load_args(
+        spec,
+        weights_dir,
+        context,
+        plan,
+        card_flags=card_args,
+        source=manifest.path.name,
     )
 
 
@@ -190,8 +222,11 @@ __all__ = [
     "VllmEngine",
     "build_engine",
     "build_voice_engine",
+    "engine_class",
+    "engine_load_args",
     "engine_log_path",
     "engine_model_name",
     "find_free_port",
+    "start_engine",
     "logs_dir",
 ]

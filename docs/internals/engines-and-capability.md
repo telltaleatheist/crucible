@@ -372,18 +372,38 @@ started exactly as `load-model` would).
   same lock (`claim_to_clear`), so no door can record a hold the settlement
   missed. An unload of the subject being cleared counts as the same intent and
   reports `done`. A clearance that outlives the budget is raised as a wedge.
-- `_start` tears down a half-started engine on **any** `BaseException`. An
-  orphan there sits in no slot, so the guard would call it foreign.
+- `Residency` is lifecycle only: claims, evict, warming, dying, reclaim, the
+  resident record and `unload`. It knows no engine and no job. A load is
+  `Residency.occupy(kind, subject_id, start, say=...)`: occupy refuses (a
+  claim on another thread, a stop still running), evicts, marks warming,
+  calls `start()` and publishes the `Occupant` it returns (the `Resident`
+  record plus the engine or worker session whose pids and `stop()` it owns).
+  The body of each load lives with its job package: `jobs.llm.occupy_model`,
+  `jobs.tts.common.occupy_voice`, `jobs.align.occupy_aligner`,
+  `jobs.denoise.occupy_separator`. An occupant whose kind or id is not the one
+  asked for is stopped and refused.
+- `engines.start_engine` (still `Residency._start`) tears down a half-started
+  engine on **any** `BaseException`. An orphan there sits in no slot, so the
+  guard would call it foreign.
 - A voice load is not finished at `ready`. narrator's `load`/`loaded` exchange
   is part of it, and the sample rate on `loaded` must match the manifest.
   Crucible refuses a mismatch and never resamples.
-- `load` requires `context` and `plan` (no defaults): an unsized pool on a
-  shared card is the 2026-09-17 failure. Reloading the same id is a full restart.
-- `_engine_args` order: the manifest's args, then `card_args`, then the KV
-  plan's flags. argparse uses the last spelling, so later flags override.
-  `--max-model-len` goes to vLLM only (mlx-lm has no such flag, and its
-  `max_model_len` is admission). Crucible composes `-m`, `--mmproj` and `-c`
-  for `llama-server`, because only the server knows where the weights are.
+- `occupy_model` requires `context` and `plan` (no defaults): an unsized pool
+  on a shared card is the 2026-09-17 failure. Reloading the same id is a full
+  restart.
+- Engine-specific argv and served names are class methods on the engine,
+  reached through the `engines.ENGINES` table, never by comparing names:
+  `load_args(spec, weights_dir, context, plan, card_flags=, source=)` and
+  `served_name(weights_dir, model_id)`. The defaults are the manifest's args
+  plus the plan's flags, and the model id. `engines.engine_load_args` and
+  `engine_model_name` look the class up by `spec.engine`.
+- Argv order: the manifest's args, then `card_args`, then the KV plan's flags.
+  argparse uses the last spelling, so later flags override. `VllmEngine`
+  adds `--max-model-len` and the decide flags (mlx-lm has no such flag, and
+  its `max_model_len` is admission). `LlamaServerEngine` composes `-m`,
+  `--mmproj` and `-c`, because only the server knows where the weights are.
+  `MlxLmEngine` serves under the resolved weights path, `MlxVlmEngine` under
+  the path as given.
 
 ## Engines
 

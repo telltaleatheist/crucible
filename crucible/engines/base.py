@@ -70,6 +70,10 @@ def weights_subject_id(model_dir: Path) -> str:
     return Path(model_dir).parent.name
 
 
+def plan_flags(plan: Any) -> list[str]:
+    return [] if plan is None else list(plan.flags())
+
+
 def logs_dir(home: Path) -> Path:
     directory = home / "logs"
     directory.mkdir(parents=True, exist_ok=True)
@@ -107,6 +111,22 @@ class SubprocessEngine:
         self._port: int | None = None
         self._served_name: str | None = None
 
+    @classmethod
+    def load_args(
+        cls,
+        spec: Any,
+        weights_dir: Path,
+        context: int,
+        plan: Any,
+        *,
+        card_flags: tuple[str, ...] = (),
+        source: str = "",
+    ) -> list[str]:
+        return [*spec.engine_args, *plan_flags(plan)]
+
+    @classmethod
+    def served_name(cls, weights_dir: Path, model_id: str) -> str:
+        return model_id
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

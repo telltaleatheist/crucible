@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator
-from types import SimpleNamespace
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,7 +15,7 @@ from crucible import residency as residency_module
 from crucible.config import load_config, write_config
 from crucible.engines import EngineError
 from crucible.errors import ApiError, JobError
-from crucible.residency import Residency, ResidentVoice
+from crucible.residency import KIND_TTS, Residency, ResidentVoice
 
 from .conftest import FAKE_BACKEND
 from .test_tts_api import VOICE
@@ -157,14 +156,11 @@ def test_a_load_behind_a_process_that_will_not_stop_is_refused_by_name(
         holder.unload(VOICE)
     assert engine.stops == 1
 
-    manifest = SimpleNamespace(id=VOICE)
+    def start() -> residency_module.Occupant:
+        raise AssertionError("a refused load must not start anything")
+
     with pytest.raises(JobError) as refusal:
-        holder.load_voice(
-            manifest,
-            None,
-            Path("/nonexistent/weights"),
-            Path("/nonexistent/python"),
-        )
+        holder.occupy(KIND_TTS, VOICE, start, say=lambda _message: None)
     assert refusal.value.code == "engine_still_stopping"
     assert VOICE in refusal.value.message
     assert f"`kill {STUBBORN_PID}` (never -9)" in refusal.value.message

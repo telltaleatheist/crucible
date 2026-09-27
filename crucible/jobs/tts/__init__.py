@@ -20,6 +20,7 @@ from ..unload import UnloadJobType, UnloadParams
 from .common import (
     describe_voices,
     known_voice,
+    occupy_voice,
     require_loadable,
     require_reference,
     voice_load_plan,
@@ -163,7 +164,8 @@ class LoadVoiceJobType:
         ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
-            resident = self._residency.load_voice(
+            resident = occupy_voice(
+                self._residency,
                 needs.manifest,
                 needs.spec,
                 needs.installed.path,

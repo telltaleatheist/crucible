@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ... import accelerator, jobenv, llamacpp, ollamastore, vram, weights
+from ... import residency as residency_module
 from ...backend import LLAMA_WINDOWS
 from ...capability import (
     MIN_LOAD_CONTEXT,
@@ -14,12 +16,14 @@ from ...capability import (
     check_load_context,
 )
 from ...cardfacts import card_for
+from ...clock import utcnow
 from ...config import Config
-from ...engines import EngineError
+from ...engines import EngineError, engine_load_args, find_free_port, start_engine
 from ...engines import vllm as vllm_engine
 from ...errors import ApiError, JobError
 from ...jobtypes import LOAD_MODEL, UNLOAD_MODEL
 from ...manifests import (
+    BackendSpec,
     ManifestError,
     ModelManifest,
     fingerprint,
@@ -28,7 +32,10 @@ from ...manifests import (
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_LLM,
+    Occupant,
     Residency,
+    ResidentModel,
+    say_to,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
@@ -55,6 +62,7 @@ __all__ = [
     "UnloadParams",
     "llm_engine_status",
     "model_rows",
+    "occupy_model",
 ]
 
 
@@ -436,7 +444,8 @@ class LoadModelJobType:
         ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
-            resident = self._residency.load(
+            resident = occupy_model(
+                self._residency,
                 needs.manifest,
                 needs.spec,
                 needs.installed.path,
@@ -467,6 +476,56 @@ class LoadModelJobType:
 
 
 _open_lease_for_load = open_lease_for_load
+
+
+def occupy_model(
+    residency: Residency,
+    manifest: ModelManifest,
+    spec: BackendSpec,
+    weights_dir: Path,
+    python: Path,
+    *,
+    plan: "vram.KvPlan | None",
+    context: int,
+    timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    on_progress: Callable[[str], None] | None = None,
+    card_args: tuple[str, ...] = (),
+) -> ResidentModel:
+    say = say_to(on_progress)
+
+    def start() -> Occupant:
+        log_path = residency.log_path_for(manifest.id)
+        engine = residency_module.build_engine(spec.engine, python, log_path)
+        served = residency_module.engine_model_name(
+            spec.engine, weights_dir, manifest.id
+        )
+        port = find_free_port()
+        say(
+            f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
+            f"(context {context}); log {log_path}"
+        )
+        args = engine_load_args(
+            manifest, spec, weights_dir, plan, context=context, card_args=card_args
+        )
+        start_engine(engine, weights_dir, served, port, args, say, timeout)
+        resident = ResidentModel(
+            model_id=manifest.id,
+            backend=spec.backend,
+            engine=spec.engine,
+            engine_model_name=served,
+            base_url=engine.base_url,
+            port=port,
+            revision=spec.revision,
+            max_model_len=context,
+            defaults=manifest.defaults,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=utcnow(),
+            engine_args=tuple(args),
+        )
+        return Occupant(resident, engine=engine, base_url=engine.base_url)
+
+    return cast(ResidentModel, residency.occupy(KIND_LLM, manifest.id, start, say=say))
 
 
 class UnloadModelJobType(UnloadJobType):

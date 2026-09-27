@@ -72,6 +72,10 @@ class MlxLmEngine(SubprocessEngine):
                     ) from exc
         super().start(model_dir, served_name, port, args)
 
+    @classmethod
+    def served_name(cls, weights_dir: Path, model_id: str) -> str:
+        return str(Path(weights_dir).resolve())
+
     def subject_id(self, model_dir: Path, served_name: str) -> str:
         return weights_subject_id(model_dir)
 

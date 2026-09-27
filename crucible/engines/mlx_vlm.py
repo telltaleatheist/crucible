@@ -19,6 +19,10 @@ class MlxVlmEngine(SubprocessEngine):
         "refuses a body carrying logprobs (KNOWN_FIELDS)"
     )
 
+    @classmethod
+    def served_name(cls, weights_dir: Path, model_id: str) -> str:
+        return str(weights_dir)
+
     def subject_id(self, model_dir: Path, served_name: str) -> str:
         return weights_subject_id(model_dir)
 
