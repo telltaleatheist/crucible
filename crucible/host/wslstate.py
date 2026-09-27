@@ -8,7 +8,7 @@ from .. import wsl
 from ..platform.powershell import query_argv, runas_argv
 from ..platform.runner import RunResult, Runner
 from .errors import HostError
-from .wsl_states import WSL_STATE_CODES, WSL_STATES, WslStateDef
+from ..platform.wsl_table import WSL_STATE_CODES, WSL_STATES, WslStateDef
 
 NO_HYPERVISOR = re.compile(
     r"HCS_E_HYPERV_NOT_INSTALLED|0x80370102|hypervisor|virtual machine platform",

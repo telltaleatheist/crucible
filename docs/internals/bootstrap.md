@@ -141,14 +141,14 @@ the code does not say by itself.
 ## Generated outputs
 
 - `npm run gen:install` writes `scripts/install.sh`, `scripts/install.ps1` and
-  `crucible/host/wsl_states.py`; `--check` (asserted by
+  `crucible/platform/wsl_table.py`; `--check` (asserted by
   `test/unit-gen-install.test.ts`) fails on drift.
 - `install.ps1` must be ASCII. Windows PowerShell 5.1 reads a BOM-less `.ps1` in
   the ANSI code page, and the generator writes BOM-less UTF-8 (a BOM breaks
   `irm | iex`). An em dash inside a string made `[Parser]::ParseFile` fail
   (measured 2026-09-15). `asciiOnly` transliterates via `ASCII_FOR` and refuses
   any other non-ASCII character rather than letting it degrade.
-- `wsl_states.py` carries the WSL state table as data for the Windows host. The
+- `platform/wsl_table.py` carries the WSL state table as data for the Windows host. The
   `means` predicates are code and live in `crucible/host/wslstate.py`, one per
   code; a pytest asserts the two sets are equal. Sentences are functions, so the
   generator calls them with sentinel evidence and swaps sentinels for
@@ -254,7 +254,7 @@ the code does not say by itself.
   vouches for it. The image is downloaded on the Windows side (`curl.exe`,
   verified with `certutil -hashfile`), because `wsl --import` reads a Windows path.
 - `finishImportScript` does what the image lacks, as one idempotent root script
-  that is also emitted into `wsl_states.py` for the host's importer: the
+  that is also emitted into `platform/wsl_table.py` for the host's importer: the
   `crucible` user, passwordless sudo, `/etc/cloud/cloud-init.disabled` (Canonical's
   image ran cloud-init at every boot, which held systemd and `crucible.service`
   for ~39 s looking for a datasource), a `WSLInterop` binfmt entry (with

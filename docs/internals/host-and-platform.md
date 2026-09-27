@@ -138,7 +138,7 @@ is not the orchestrator, lives beside it so `lan.py`, `sharing.py`, `local.py` a
   `EngineDecision`; `menu.py` and `presence.py` import them from there.
 
 `desktop.py` is the composition root and may import `host`. The generated WSL table stays at
-`host/wsl_states.py` because `sdk/bootstrap/scripts/gen-install-scripts.ts` writes it there;
+`platform/wsl_table.py` because `sdk/bootstrap/scripts/gen-install-scripts.ts` writes it there;
 `wsl.py` is the one neutral module that reads it. `crucible.host.{paths,runner,landoor,
 portholder,startup}` are the platform modules under their old names for one release: each old
 module replaces itself in `sys.modules`, so a patch through either name reaches the same

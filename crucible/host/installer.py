@@ -21,7 +21,7 @@ from . import outcome, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
 from .quarantine import quarantine
-from .wsl_states import WSL_CONF_MARKER
+from ..platform.wsl_table import WSL_CONF_MARKER
 
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
@@ -561,7 +561,7 @@ class EngineInstall:
             self._line(f'"{self._distro}" is already imported')
             self._finish("import-distro", f'"{self._distro}" was already there')
             return
-        from .wsl_states import (
+        from ..platform.wsl_table import (
             FINISH_IMPORT_SCRIPT,
             UBUNTU_WSL_ROOTFS,
             UBUNTU_WSL_ROOTFS_URL,

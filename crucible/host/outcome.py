@@ -9,7 +9,7 @@ from typing import Callable
 from ..atomicjson import write_json
 from .errors import HostError
 from .state import MoveState
-from .wsl_states import WSL_OUTCOME_NAME, WSL_STATES
+from ..platform.wsl_table import WSL_OUTCOME_NAME, WSL_STATES
 
 OUTCOME_NAME = WSL_OUTCOME_NAME
 

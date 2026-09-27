@@ -14,9 +14,9 @@ from crucible.platform import powershell, runner
 
 ROOT = Path(__file__).resolve().parents[1]
 
-GENERATED_TABLE = ROOT / "crucible" / "host" / "wsl_states.py"
+GENERATED_TABLE = ROOT / "crucible" / "platform" / "wsl_table.py"
 
-HOST_MODULES_THE_NEUTRAL_ONES_MAY_LOAD = {"crucible.host", "crucible.host.errors", "crucible.host.wsl_states"}
+HOST_MODULES_THE_NEUTRAL_ONES_MAY_LOAD = {"crucible.host", "crucible.host.errors", "crucible.host.wsl_states", "crucible.platform.wsl_table"}
 
 
 def _crucible_sources(*skip: Path) -> list[Path]:

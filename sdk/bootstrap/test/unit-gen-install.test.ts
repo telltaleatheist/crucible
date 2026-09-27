@@ -450,7 +450,7 @@ test('neither installer names an asset of ours that PHASE20 deleted', () => {
 test('the WSL image comes from Canonical, and its digest from Canonical\'s own sums file', () => {
   // PHASE20 section 2. The host imports it (install.ps1 does not), so what this
   // asserts is the generated PYTHON table — the one owner crossing the seam.
-  const py = GENERATED.find((file) => file.path.endsWith('wsl_states.py'));
+  const py = GENERATED.find((file) => file.path.endsWith('wsl_table.py'));
   assert.ok(py !== undefined, 'the generator still writes the Python table');
   assert.ok(py.text.includes(UBUNTU_WSL_ROOTFS));
   assert.ok(py.text.includes('cloud-images.ubuntu.com/wsl/releases/24.04/current'));
