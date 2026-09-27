@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import capability as capability_classes
@@ -27,6 +28,10 @@ PULLABLE_REFUSALS = frozenset(
         "denoise_model_missing",
     }
 )
+
+ENV_REFUSALS = frozenset({"env_missing"})
+
+INSTALLABLE_REFUSALS = PULLABLE_REFUSALS | ENV_REFUSALS
 
 CATALOG_IS_COMPLETE = frozenset({"rvc", "denoise", "asr", "align"})
 
@@ -97,11 +102,41 @@ class InstallOnSubmit:
             or not self.installable(job_type)
         ):
             raise refusal
-        capability = ALL_JOB_TYPES[job_type]
         installer = str(install["job_type"])
         engine = self._narrator_engine(installer, model)
         if installer == "tts" and engine is None:
             raise refusal
+        return self._need(job_type, model, installer, engine, refusal, model_required=True)
+
+    def env_for(self, job_type: str, model: str | None, refusal: ApiError) -> Need:
+        if refusal.code not in ENV_REFUSALS or not self.installable(job_type):
+            raise refusal
+        details = refusal.details or {}
+        installer = _installer_of(job_type, details.get("env"))
+        engine = None
+        if installer == "tts":
+            named = details.get("narrator_engine")
+            engine = named if isinstance(named, str) else self._narrator_engine(installer, model)
+            if engine is None:
+                raise refusal
+        return self._need(job_type, model, installer, engine, refusal, model_required=False)
+
+    def need_for(self, job_type: str, model: str | None, refusal: ApiError) -> Need | None:
+        if refusal.code in ENV_REFUSALS:
+            return self.env_for(job_type, model, refusal)
+        return self.pulls_for(job_type, model, refusal)
+
+    def _need(
+        self,
+        job_type: str,
+        model: str | None,
+        installer: str,
+        engine: str | None,
+        refusal: ApiError,
+        *,
+        model_required: bool,
+    ) -> Need:
+        capability = ALL_JOB_TYPES[job_type]
         if env_installed(self._config, self._backend, installer, engine):
             running = self._tasks.running
             earlier = None if running is None else self._task_needs.get(running.id)
@@ -141,7 +176,12 @@ class InstallOnSubmit:
         words = [f"Your card ({plan['card_words']}):"]
         words += [f"- {row['line']}" for row in plan["classes"]]
         subjects = catalog.subjects(self._config, self._backend)
-        if model is None and job_type == capability and capability in CATALOG_IS_COMPLETE:
+        if (
+            model_required
+            and model is None
+            and job_type == capability
+            and capability in CATALOG_IS_COMPLETE
+        ):
             offered = _offered(subjects, capability)
             if offered:
                 raise ApiError(
@@ -484,6 +524,17 @@ def _pull_of(subject: catalog.Subject) -> Pull:
     return Pull(subject.kind, subject.id, words, subject.expected_bytes)
 
 
+def _installer_of(job_type: str, env: Any) -> str:
+    from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
+
+    name = Path(str(env)).name if isinstance(env, str) and env else ""
+    if name in INSTALLABLE_JOB_TYPES:
+        return name
+    if name.startswith("tts-"):
+        return "tts"
+    return INSTALLER_FOR[ALL_JOB_TYPES[job_type]]
+
+
 def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | None:
     try:
         if installer in jobenv.WORKER_JOB_TYPES:
@@ -533,6 +584,8 @@ def _current_step(task: Task) -> dict[str, Any] | None:
 
 __all__ = [
     "BASE_SUBJECTS",
+    "ENV_REFUSALS",
+    "INSTALLABLE_REFUSALS",
     "INSTALLING",
     "InstallOnSubmit",
     "Need",

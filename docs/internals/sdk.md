@@ -147,9 +147,15 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   conclusion must never be drawn from them: `accelerator_unreadable` is not an
   idle card, `capability_undecided` is not "nothing fits", and `server_busy` /
   `leased` carry bodies a bench needs (holder, job, progress, `busyLine`).
-- `server_busy` has two shapes, discriminated on `details.fact`: the job door's
-  (the holder is always a job) and the operator door's (`CrucibleCardHeld`: a
-  job, a lease, the streaming claim or a chat).
+- `server_busy` has two shapes, discriminated on `details.door`: `job` (the job
+  door's, `CrucibleBusy`; the holder is always a job) and `operator` (the
+  operator door's, `CrucibleCardHeld`: a job, a lease, the streaming claim or a
+  chat). A body with no `door` (a server before 1.0.52) is read by whether it
+  carries `fact`.
+- `events` and `taskEvents` are one private generator, `#follow`, given the
+  path, the frame reader and the terminal set; the Node builtins both
+  `writeArtifactsTo` and `readPairingFile` need are loaded once by
+  `node-builtins.ts`.
 - `holder`/`client` is `null` when the busy job or lease came without a name; show
   "an unnamed client", never a guess.
 - `testUpstream` decides its three result refusals (`upstream_unreachable`,

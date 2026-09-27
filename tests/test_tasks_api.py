@@ -542,6 +542,7 @@ def test_an_install_is_refused_while_any_of_the_four_facts_holds_the_card(
         assert response.status_code == 409
         body = response.json()["error"]
         assert body["code"] == "server_busy"
+        assert body["details"]["door"] == "operator"
         assert body["details"]["fact"] == "a chat"
         assert body["details"]["in_flight"] == 1
 
@@ -560,6 +561,7 @@ def test_a_lease_refusal_carries_the_lease_s_own_fields(
         response = post(client, auth, {"type": "install", "job_type": "llm"})
     assert response.status_code == 409
     details = response.json()["error"]["details"]
+    assert details["door"] == "operator"
     assert details["fact"] == "a lease"
     assert details["client"] == "foundry/owens-pc"
     assert details["act"] == "translate"

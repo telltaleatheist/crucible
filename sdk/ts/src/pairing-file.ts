@@ -1,4 +1,5 @@
 import { CrucibleError, CruciblePairingFileError } from './errors.js';
+import { loadNodeBuiltins, requireFunctions } from './node-builtins.js';
 import { parsePairing, type Pairing } from './pairing.js';
 
 /** The environment variable a server's home is overridden with. */
@@ -16,48 +17,24 @@ interface NodeApis {
   homedir(): string;
 }
 
-let apis: Promise<NodeApis> | null = null;
-
-function loadNodeApis(): Promise<NodeApis> {
-  if (apis === null) {
-    apis = (async () => {
-      const scheme = 'node:';
-      let fs: Record<string, unknown>;
-      let path: Record<string, unknown>;
-      let os: Record<string, unknown>;
-      try {
-        fs = (await import(/* webpackIgnore: true */ `${scheme}fs/promises`)) as never;
-        path = (await import(/* webpackIgnore: true */ `${scheme}path`)) as never;
-        os = (await import(/* webpackIgnore: true */ `${scheme}os`)) as never;
-      } catch (cause) {
-        throw new CrucibleError(
-          'readPairingFile needs node:fs/promises, node:path and node:os, and ' +
-            'this runtime has none of them. The pairing file is a file on the ' +
-            'machine a server runs on; in a browser there is no such machine, ' +
-            'and a pasted pairing line (parsePairing) is the door instead.',
-          { cause },
-        );
-      }
-      for (const [name, found] of [
-        ['readFile', fs['readFile']],
-        ['join', path['join']],
-        ['homedir', os['homedir']],
-      ] as const) {
-        if (typeof found !== 'function') {
-          throw new CrucibleError(
-            `this runtime's node builtins have no ${name}(); readPairingFile ` +
-              'cannot read a file without it',
-          );
-        }
-      }
-      return {
-        readFile: fs['readFile'] as NodeApis['readFile'],
-        join: path['join'] as NodeApis['join'],
-        homedir: os['homedir'] as NodeApis['homedir'],
-      };
-    })();
-  }
-  return apis;
+async function loadNodeApis(): Promise<NodeApis> {
+  const node = await loadNodeBuiltins(
+    'readPairingFile needs node:fs/promises, node:path and node:os, and ' +
+      'this runtime has none of them. The pairing file is a file on the ' +
+      'machine a server runs on; in a browser there is no such machine, ' +
+      'and a pasted pairing line (parsePairing) is the door instead.',
+  );
+  const missing = (name: string): string =>
+    `this runtime's node builtins have no ${name}(); readPairingFile ` +
+    'cannot read a file without it';
+  requireFunctions(node.fs, ['readFile'], missing);
+  requireFunctions(node.path, ['join'], missing);
+  requireFunctions(node.os, ['homedir'], missing);
+  return {
+    readFile: node.fs['readFile'] as NodeApis['readFile'],
+    join: node.path['join'] as NodeApis['join'],
+    homedir: node.os['homedir'] as NodeApis['homedir'],
+  };
 }
 
 /**

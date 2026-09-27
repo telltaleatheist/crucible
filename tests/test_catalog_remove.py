@@ -7,7 +7,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import weights
+from crucible import CLIENT_NAME_HEADER, weights
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND
@@ -189,6 +189,26 @@ def test_the_removal_is_recorded_in_activity_with_the_act(
     assert rows[0]["act"] == "clean"
     assert "the-host/1" in rows[0]["client"]
     assert rows[0]["bytes_freed"] == 19_306_310_880
+
+
+def test_the_removal_records_the_client_s_stated_name_over_its_user_agent(
+    client: TestClient,
+    auth: dict[str, str],
+    home: Path,
+    fake_weights: Callable[[str], Path],
+) -> None:
+    fake_weights("qwen3.5-9b")
+    response = client.delete(
+        "/v1/catalog/model/qwen3.5-9b",
+        headers={
+            **auth,
+            "User-Agent": "python-httpx/0.27",
+            CLIENT_NAME_HEADER: "foundry/owens-pc",
+        },
+    )
+    assert response.status_code == 204
+    rows = client.get("/v1/activity", headers=auth).json()["catalog"]["removals"]
+    assert rows[0]["client"] == "foundry/owens-pc"
 
 
 def test_the_record_is_newest_first_and_never_holds_a_path(

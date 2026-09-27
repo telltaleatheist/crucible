@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, workers
+from crucible import accelerator, jobenv, tasks, workers
 from crucible.accelerator import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
@@ -211,16 +211,21 @@ def test_denoise_takes_no_params(
     assert "aggressiveness" in response.json()["error"]["message"]
 
 
-def test_a_missing_env_names_the_rvc_install(
-    make_client: Callable[..., TestClient], auth: dict[str, str], idle_card: None
+def test_a_missing_env_installs_rvc_on_submit(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_denoise=True) as client:
         response = submit(client, auth)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "env_missing"
-    message = response.json()["error"]["message"]
-    assert "crucible install rvc" in message
-    assert "shares the rvc env" in message
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the rvc environment" in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "rvc"}]
 
 
 def test_a_missing_checkpoint_names_the_files_and_where_they_are(

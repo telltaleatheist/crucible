@@ -391,6 +391,10 @@ model, decide the card automatically if it was never decided, and do not hold th
   this job again after it. Task … is doing it: GET /v1/tasks/…"*. `details` carries the task id,
   steps, the current step, byte progress and pace, the last line, and `plan` (the install
   modal's sentences from `GET /v1/capability/plan`).
+- A type that is ON whose env has gone or drifted (`preflight` refuses `env_missing`, after an
+  upgrade changed a recipe) starts the same install. The installer is the env the refusal names
+  (`details.env`, plus `details.narrator_engine` for tts), so a denoise job installs rvc and word
+  timestamps install align. Nothing about `env_missing` is left to a hand step.
 - The job is **refused, not held**. Holding it would make the lane a queue of two, with Crucible
   owning the order. The client retries the way it retries `server_busy`.
 - One install per env: there is one task lane. A submit during a related install is pointed at
@@ -401,8 +405,9 @@ model, decide the card automatically if it was never decided, and do not hold th
   off, and an undeclared model for a type whose catalog is complete
   (`CATALOG_IS_COMPLETE`: rvc, denoise, asr, align). llm and tts are not in that list, because
   their models may be upstream routes or local directories.
-- Pulls are considered only when `preflight` refused with one of the `PULLABLE_REFUSALS`, so a
-  job whose weights are present costs nothing extra.
+- Installs and pulls are considered only when `preflight` refused with one of the
+  `INSTALLABLE_REFUSALS` (`env_missing` and the `PULLABLE_REFUSALS`), so a job whose env and
+  weights are present costs nothing extra.
 - `[jobs] install_on_submit = false` restores the plain refusal.
 
 ## 9. Per-type notes: llm and echo

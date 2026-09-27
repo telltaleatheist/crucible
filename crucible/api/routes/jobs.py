@@ -10,7 +10,7 @@ from fastapi import Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ...errors import ApiError
-from ...installonsubmit import PULLABLE_REFUSALS, InstallOnSubmit
+from ...installonsubmit import INSTALLABLE_REFUSALS, InstallOnSubmit
 from ...jobs import resolve, resolve_model
 from ...jobs.base import Job, validate_member_name
 from ...jobs.queue import JobStore
@@ -47,6 +47,8 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "finished",
         "client_ref",
         "interrupted_at",
+        "held_by",
+        "held_since",
         "chunks_done",
         "chunks_total",
         "chunk_at",
@@ -150,15 +152,15 @@ def register(routers: Routers, ctx: AppContext) -> None:
         ):
             leases.refuse_if_leased(body.type, model)
             store.refuse_if_busy()
-            missing_weights: ApiError | None = None
+            not_installed: ApiError | None = None
             try:
                 plugin.preflight(model, body.params)
             except ApiError as refusal:
                 if not (
-                    config.install_on_submit and refusal.code in PULLABLE_REFUSALS
+                    config.install_on_submit and refusal.code in INSTALLABLE_REFUSALS
                 ):
                     raise
-                missing_weights = refusal
+                not_installed = refusal
             else:
                 identity = _journal_identity(plugin, model, body.params)
                 digests: list[InputDigest] = []
@@ -189,10 +191,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 elif resuming is not None:
                     store.journals.adopt(resuming, job.id)
                     store.attach_journal(job, resuming.id, resumed=True)
-        if missing_weights is not None:
-            need = installs.pulls_for(body.type, model, missing_weights)
+        if not_installed is not None:
+            need = installs.need_for(body.type, model, not_installed)
             if need is None:
-                raise missing_weights
+                raise not_installed
             raise installs.start(need)
         return {"job_id": job.id, "resume_id": job.resume_id}
 

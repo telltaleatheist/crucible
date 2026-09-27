@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, hosttools, jobenv
+from crucible import accelerator, hosttools, jobenv, tasks
 from crucible.accelerator import GIB
 from crucible.alignmodels import load_align_manifest
 from crucible.asrmodels import (
@@ -424,17 +424,21 @@ def test_the_guard_asks_for_the_asr_engine_and_the_aligner_together(
     assert accepted.status_code == 202, accepted.json()
 
 
-def test_word_timestamps_without_the_align_env_is_refused_naming_it(
+def test_word_timestamps_without_the_align_env_install_the_aligner_on_submit(
     make_client: Callable[..., TestClient], home: Path, monkeypatch: pytest.MonkeyPatch,
     auth: dict[str, str], sent: dict[str, Path],
 ) -> None:
     _stage(home, monkeypatch, FAKE_BACKEND.kind, align_env=False)
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_asr=True) as client:
         response = submit(client, auth)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "env_missing"
-    assert "qwen3-aligner" in response.json()["error"]["message"]
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the align environment" in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "align"}]
 
 
 def test_a_clean_run_is_word_timestamped_in_absolute_time(

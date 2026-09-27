@@ -10,8 +10,9 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, procgroup, rvcbase, jobenv
+from crucible import accelerator, procgroup, rvcbase, jobenv, tasks
 from crucible.accelerator import GIB, ComputeApp
+from crucible.errors import ApiError
 from crucible.jobs import rvc as rvc_job
 from crucible.rvcmodels import load_rvc_manifest
 
@@ -262,14 +263,51 @@ def test_batch_size_is_not_a_wire_parameter(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-def test_a_missing_env_is_named(
-    make_client: Callable[..., TestClient], auth: dict[str, str], idle_card: None
+def test_a_missing_env_is_installed_on_submit(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_rvc=True) as client:
         response = submit(client, auth)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "env_missing"
-    assert "crucible install rvc" in response.json()["error"]["message"]
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the rvc environment" in error["message"]
+        assert error["details"]["steps"][0] == "install rvc"
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "rvc"}]
+
+
+def test_the_env_an_env_missing_refusal_names_chooses_the_installer(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
+    with make_client(enable_rvc=True) as client:
+        plugin = client.app.state.store.registry["rvc"]
+
+        def refuse(model: str | None, params: dict[str, Any]) -> None:
+            raise ApiError(
+                409,
+                "env_missing",
+                f"cannot run {model!r}: the align env has gone",
+                {"model": model, "env": str(home / "envs" / "align")},
+            )
+
+        monkeypatch.setattr(plugin, "preflight", refuse)
+        response = submit(client, auth)
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert error["details"]["steps"][0] == "install align"
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "align"}]
 
 
 def test_missing_weights_are_named_with_the_pull_command(

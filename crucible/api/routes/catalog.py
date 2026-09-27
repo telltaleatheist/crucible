@@ -11,6 +11,7 @@ from ...errors import ApiError, CrucibleError
 from ...inflight import read_act
 from ...jobs import disabled_error, model_rows
 from ...residency import KIND_NOUNS
+from ..caller import client_agent
 from ..context import AppContext, Routers
 
 
@@ -120,7 +121,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             subject_id=subject_id,
             bytes_freed=found.bytes,
             act=read_act(request.headers),
-            client=request.headers.get("user-agent"),
+            client=client_agent(request),
         )
         print(
             f"crucible: removed {kind} {subject_id} ({found.bytes / 1e9:.2f} GB) "

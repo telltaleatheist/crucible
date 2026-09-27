@@ -69,6 +69,7 @@ class Reaped:
 
 def busy_details(job: Job) -> dict[str, Any]:
     return {
+        "door": "job",
         "holder": job.client,
         "job_id": job.id,
         "type": job.type,

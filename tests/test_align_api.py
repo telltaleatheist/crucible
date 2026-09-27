@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, hosttools, procgroup, jobenv, workers
+from crucible import accelerator, hosttools, procgroup, jobenv, tasks, workers
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
@@ -295,17 +295,22 @@ def test_an_empty_chunk_text_is_refused(
     assert "nothing here to place" in response.json()["error"]["message"]
 
 
-def test_a_missing_env_is_named(
+def test_a_missing_env_is_installed_on_submit(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     ffmpeg: str,
     idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_align=True) as client:
         response = submit(client, auth)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "env_missing"
-    assert "crucible install align" in response.json()["error"]["message"]
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the align environment" in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "align"}]
 
 
 def test_missing_weights_are_named_with_the_pull_command(

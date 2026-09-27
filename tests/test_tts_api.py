@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, residency as residency_module, weights
+from crucible import accelerator, jobenv, residency as residency_module, tasks, weights
 from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
@@ -304,19 +305,25 @@ def test_a_voice_with_no_block_for_this_backend_is_refused(
         assert error["details"]["declared"] == ["cuda-linux"]
 
 
-def test_a_missing_env_is_refused_by_name(
+def test_a_missing_env_is_installed_on_submit_for_the_voice_s_engine(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     tts_recipes: Path,
     idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_tts=True) as client:
         response = submit(client, auth, type="load-voice", model=VOICE)
         assert response.status_code == 409
         error = response.json()["error"]
-        assert error["code"] == "env_missing"
-        assert error["details"]["narrator_engine"] == "higgs-v3"
-        assert "tts-higgs-v3" in error["details"]["env"]
+        assert error["code"] == "installing"
+        assert "installing the tts environment for higgs-v3" in error["message"]
+        assert error["details"]["steps"][0] == "install tts (higgs-v3)"
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [
+            {"type": "tts", "narrator_engine": "higgs-v3"}
+        ]
 
 
 def test_unpulled_weights_are_refused_by_name(
