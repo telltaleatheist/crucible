@@ -29,11 +29,17 @@ Three details that are not obvious, all measured, each enforced at one line
   "absent" is a meaningful wire value rather than a refusal, and the reason is
   that urvc's defaults are the measured ones: filling them in here would put
   Crucible's guess in a client's output with nothing to say it had happened.
-- **Batching is a memory bound, not a throughput choice.** A recycled worker
-  process per 96 pieces or `BATCH_AUDIO_SECONDS` of audio, proven necessary on a
-  64 GB Mac (2026-07-17). It is engine knowledge: the server does it, the client
-  never sees it, and the model reload it costs is the server's problem to
-  reduce later. See `worker.py`.
+- **Batching is a memory bound, not a throughput choice.** A recycled urvc
+  process per 96 pieces, or sooner when the audio it has converted or the
+  memory it holds reaches a budget taken from this host's RAM — proven
+  necessary on a 64 GB Mac (2026-07-17), and again on the Mac and kylies-pc
+  (2026-09-26, see `LEAK_BYTES_PER_AUDIO_SECOND`). It is engine knowledge: the
+  server does it, the client never sees it, and the model reload it costs is
+  the server's problem to reduce later. See `worker.py`.
+- **A finished input is published the moment it finishes** (2026-09-26), so a
+  cancel or a failure keeps every input already converted as an artifact. The
+  job still ends `cancelled` or `failed`: its artifacts are what was saved,
+  never a whole answer, and only `done` says every input converted.
 
 Any length in, the same length out (fresh-install #5 and #45, 2026-09-26)
 -------------------------------------------------------------------------
@@ -109,14 +115,31 @@ JOB_TYPE = "rvc"
 #: the host.
 BATCH_SIZE = 96
 
-#: Seconds of audio per recycled urvc process, the bound a long input needs
-#: (fresh-install #5, 2026-09-26). 96 is the right count for sentences and the
-#: wrong one for pieces of a master: 96 ten-minute pieces is sixteen hours of
-#: audio through one process that leaks ~1.5 GB per ten minutes. Twenty minutes
-#: is ~3 GB at the Mac's measured rate, against a model reload of about ten
-#: seconds per batch — 2% of the batch's conversion at 2.4x real time.
-#: UNMEASURED on a CUDA host: the leak rate there is owed a measurement.
-BATCH_AUDIO_SECONDS = 1200.0
+#: What a urvc process grows by, per second of audio converted, and never gives
+#: back. MEASURED, 2026-09-26: training-pc-1's book jobs ran one urvc process
+#: per book (the old 96-FILE recycle), and on kylies-pc and the Mac each
+#: ten-minute file grew it about 1.5 GB — BookForge's 2026-07-17 figure again.
+#: The Mac's Activity Monitor read ~88 GB for python at file 26 of 35, 3.4 GB a
+#: file once Metal buffers and the baseline are counted, and THAT is the rate
+#: planned with: the seconds bound is the only one that holds on macOS, where
+#: `ps` cannot see Metal memory (`worker.py`, `process_memory`).
+LEAK_BYTES_PER_AUDIO_SECOND = 3.4e9 / 600.0
+
+#: The share of this host's memory, as available when the job starts, one urvc
+#: process may hold before it is recycled. Half: the rest is the desktop, the
+#: server, the driver and the worker itself. A WSL VM with WSL's default half
+#: of a 16 GB PC and ~6.5 GB available gets ~3.2 GB and ~9.5 minutes of audio
+#: per process; a 64 GB Mac is capped by `MAX_BATCH_AUDIO_SECONDS`.
+MEMORY_FRACTION = 0.5
+
+#: The most audio one process converts, whatever the budget says: past half an
+#: hour, a recycle's model reload (about 10 s, estimated from the first real
+#: job's 24.6 s cold run of 60 s; not measured on its own) is under 1% of the
+#: conversion.
+MAX_BATCH_AUDIO_SECONDS = 1800.0
+
+#: The budget on a host that will not say how much memory it has.
+FALLBACK_MEMORY_BUDGET_BYTES = 3 * 1024**3
 
 #: Pieces (#5, 2026-09-26). Owen's asr ruling carries over: "make it so the
 #: caller can determine how big the chunks are and whether they overlap. and by
@@ -710,7 +733,10 @@ class RvcJobType:
             "protect_rate": params.protect_rate,
             "n_semitones": params.n_semitones,
             "batch_size": BATCH_SIZE,
-            "batch_audio_s": BATCH_AUDIO_SECONDS,
+            "memory_fraction": MEMORY_FRACTION,
+            "leak_bytes_per_audio_s": LEAK_BYTES_PER_AUDIO_SECOND,
+            "max_batch_audio_s": MAX_BATCH_AUDIO_SECONDS,
+            "fallback_budget_bytes": FALLBACK_MEMORY_BUDGET_BYTES,
             "piece_s": params.piece_seconds(),
             "overlap_s": params.overlap_seconds(),
             "crossfade_s": params.crossfade_seconds(),
@@ -735,11 +761,36 @@ class RvcJobType:
             # one file and 720 pieces, and "0 of 1 file(s)" for six hours is no
             # progress report at all.
             pieces[0] = int(message.get("pieces", message["files"]))
+            budget = message.get("memory_budget_bytes")
+            bound = (
+                ""
+                if budget is None
+                else f", each urvc process recycled by {budget / 1e9:.1f} GB "
+                f"({message.get('memory_basis')}) or "
+                f"{float(message.get('batch_audio_s', 0)) / 60:.0f} min of audio"
+            )
             ctx.warming(
                 f"{message['files']} file(s), cut into {pieces[0]} piece(s), "
-                f"through {manifest.model_name} in {message['batches']} batch(es) "
-                "— the batch is a memory bound, not a throughput choice"
+                f"through {manifest.model_name} in at least {message['batches']} "
+                f"batch(es) of {message['batch_size']} piece(s) at most{bound} — "
+                "the batch is a memory bound, not a throughput choice"
             )
+
+        published: list[str] = []
+
+        def on_result(message: dict[str, Any]) -> None:
+            # AS EACH INPUT FINISHES (2026-09-26): a cancel at 26 of 35 lost all
+            # 26 when publishing waited for the end. The Nth result is the Nth
+            # input, so the name is known by position; an input that failed is
+            # not published, and the check after the run names it.
+            name = names[len(published)] if len(published) < len(names) else None
+            published.append("" if name is None else name)
+            if name is None or "error" in message:
+                return
+            ctx.artifact(name, output_dir / name)
+            # The artifact is a copy; the scratch one is dead weight on a
+            # multi-gigabyte master.
+            (output_dir / name).unlink(missing_ok=True)
 
         def on_progress(message: dict[str, Any]) -> None:
             processed = int(message["processed"])
@@ -771,6 +822,7 @@ class RvcJobType:
                 ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
                 on_ready=on_ready,
                 on_progress=on_progress,
+                on_result=on_result,
                 cancelled=lambda: ctx.cancelled,
                 environment=dict(ENGINE_ENVIRONMENT),
             )
@@ -779,8 +831,10 @@ class RvcJobType:
             raise JobError("worker_failed", str(exc)) from None
 
         # EVERY INPUT MUST PRODUCE AN OUTPUT. A run that converted 1,399 of 1,400
-        # sentences and published them looks exactly like one that converted all
-        # 1,400, and the book it assembles has one sentence in the wrong voice.
+        # sentences must not END like one that converted all 1,400, or the book
+        # it assembles has one sentence in the wrong voice. The 1,399 are kept
+        # (published as they finished); the job FAILS, so nothing reads them as
+        # the whole answer.
         missing = [
             f"{name}: {result['error']}"
             for name, result in zip(names, results)
@@ -789,15 +843,14 @@ class RvcJobType:
         if missing:
             raise JobError(
                 "rvc_output_missing",
-                f"{len(missing)} of {total} input(s) produced no output, so nothing "
-                "is published: a partial conversion assembled into a book is a book "
-                "with sentences in two voices and nothing to say which. "
+                f"{len(missing)} of {total} input(s) produced no output, so this job "
+                "is not a conversion of its inputs: the others are kept as "
+                "artifacts, and a book assembled from them would have sentences in "
+                "two voices. "
                 + "; ".join(missing[:20])
                 + (f" (and {len(missing) - 20} more)" if len(missing) > 20 else ""),
             )
 
-        for name in names:
-            ctx.artifact(name, output_dir / name)
         ctx.progress(
             1.0,
             f"{total} file(s) converted through {manifest.model_name}",

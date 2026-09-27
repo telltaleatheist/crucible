@@ -296,6 +296,7 @@ def run_worker(
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
     environment: dict[str, str] | None = None,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> WorkerOutcome:
     """Run one worker to completion and return what it said.
 
@@ -342,6 +343,9 @@ def run_worker(
             on_progress=on_progress,
             cancelled=cancelled,
             keep_open=False,
+            # Each result AS IT LANDS, for a job that publishes per result
+            # (rvc, 2026-09-26: a cancel must keep what already finished).
+            on_result=on_result,
         )
     finally:
         log_handle.close()

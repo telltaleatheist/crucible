@@ -437,10 +437,11 @@ def test_a_run_converts_every_input_and_keeps_its_name(
         assert response.content.endswith(b"[converted by the fake rvc worker]\n")
 
 
-def test_a_missing_output_fails_the_job_and_publishes_nothing(
+def test_a_missing_output_fails_the_job_and_keeps_the_rest(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A book with one sentence in the wrong voice looks exactly like one without."""
+    """The job fails, so it never ends like a whole conversion; what did convert
+    is kept (2026-09-26: a cancel at 26 of 35 used to lose all 26)."""
     monkeypatch.setenv("CRUCIBLE_FAKE_RVC_SKIP", "42.flac")
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
@@ -448,7 +449,10 @@ def test_a_missing_output_fails_the_job_and_publishes_nothing(
     assert error["code"] == "rvc_output_missing"
     assert "42.flac" in error["message"]
     job_id = events[-1]["job_id"]
-    assert ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["artifacts"] == []
+    assert ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["artifacts"] == [
+        "41.flac",
+        "43.flac",
+    ]
 
 
 def test_the_server_and_not_the_client_chooses_how_it_runs(
@@ -466,7 +470,8 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
 
     assert sent["batch_size"] == 96
     assert sent["model_name"] == "deathstalker_rvc_v1"
-    assert sent["batch_audio_s"] == 1200.0
+    assert sent["memory_fraction"] == 0.5
+    assert sent["max_batch_audio_s"] == 1800.0
     # Absent piece params are the server's defaults, sent resolved (#5).
     assert (sent["piece_s"], sent["overlap_s"], sent["crossfade_s"]) == (60.0, 0.5, 0.02)
     assert sent["inputs"] == SENTENCES
