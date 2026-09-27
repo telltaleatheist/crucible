@@ -141,6 +141,14 @@ Timeline, local time:
   the person to pick "Update and restart" when offered and never Shut down. On a fresh home PC,
   pending Windows updates are the normal case, not the exception.
 
+- **Owen's ruling, 2026-09-26:** *"we should also make it clear that the user has to reboot and
+  update, not just reboot. a lot of people avoid hitting update because its a pain in the ass, but
+  the update logic is the route through which wsl installs and is necessary."* So every message
+  that asks for a restart says **"Update and restart"** by name, and says why: the WSL feature is
+  installed by Windows' servicing step, and a restart that skips or defers pending updates doesn't
+  install it. That covers the installer's console line, the tray, `wsl_reboot_required` and
+  `wsl_reboot_again`. If Crucible triggers the restart itself, it must be one that runs servicing.
+
 ### 15. The probe trusts `Win32_OptionalFeature InstallState = 1`, which is not "live"
 - **What:** both features reported InstallState=1 (enabled) while CBS had
   Microsoft-Windows-Lxss-Package at "current: Install Pending", with no lxss.sys, LxssManager.dll or
