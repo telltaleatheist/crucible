@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import socket
 import subprocess
 import threading
 import time
@@ -32,6 +33,15 @@ STACK_ENV_PREFIX_VARIABLE: dict[str, str] = {
 STACK_LAUNCH_BINARY: dict[str, str] = {
     "sglang-omni": "sgl-omni",
 }
+STACK_PORT_VARIABLE: dict[str, str] = {
+    "sglang-omni": "HIGGS_SGL_PORT",
+}
+
+
+def free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def env_prefix_variable_for(serving_stack: str) -> str:
@@ -295,6 +305,9 @@ class NarratorEngine(SubprocessEngine):
                 self._env_prefix
             )
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
+            port_variable = STACK_PORT_VARIABLE.get(self._serving_stack)
+            if port_variable is not None:
+                environment[port_variable] = str(free_loopback_port())
         if self._mem_fraction is not None:
             environment[MEM_FRACTION_VARIABLE] = f"{self._mem_fraction:g}"
         if self._context_length is not None:
