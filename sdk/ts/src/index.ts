@@ -230,6 +230,7 @@ export type {
   VoicePace,
   VoiceServing,
   VoiceReference,
+  WaitingFor,
   WarmingData,
   WrittenArtifact,
 } from './types.js';

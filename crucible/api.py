@@ -85,6 +85,7 @@ from . import decide as decide_core
 from .decide import DecideRequest, DecideResponse
 from .engines import chat_admission, decide_reading
 from .inflight import Entry, InFlight, read_act, require_act_name
+from .installonsubmit import InstallOnSubmit, live_decisions
 from .leases import CARD_EFFECTS, Leases, require_ttl
 from .residency import KIND_NOUNS, Residency
 from .settle import Settlement
@@ -638,6 +639,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             # download thread and a pip subprocess, and both want telling
             # before the process goes. A task's cancel is cooperative and
             # returns in milliseconds (`crucible/tasks.py`).
+            # The install-on-submit driver first: it follows a task and would
+            # otherwise watch it be cancelled and fail its waiting jobs for it.
+            await app.state.installs.stop()
             await app.state.tasks.stop()
             await store.stop()
             await app.state.http.aclose()
@@ -835,11 +839,52 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         registry.update(rebuilt)
         return sorted(registry)
 
+    def take_up_installed() -> list[str]:
+        """The additive reload an install-on-submit ends with. **Event loop only.**
+
+        2026-09-26, Owen's ruling (`crucible/installonsubmit.py`). Not
+        `reload_registry`: that swap refuses while anything holds the card,
+        and this install started while a job may be running. It re-reads the
+        file and ADDS the plugins it now enables, replacing none, which is
+        `take_up_enabled_types` (#42) and exactly what this server already
+        does when `crucible install` runs beside it.
+        """
+        config.adopt(load_config(config.home))
+        take_up_enabled_types(config)
+        return sorted(registry)
+
     app.state.tasks = TaskStore(
         config,
         backend,
         reload=reload_registry,
         holder=app.state.settlement.holder,
+        take_up=take_up_installed,
+    )
+
+    async def admit_installed(job: Job) -> None:
+        """Admit a job whose install has landed, as `POST /v1/jobs` would have.
+
+        The same refusals in the same order, now that there is a plugin to ask:
+        the model, the lease, the clearance, `preflight`. Then onto the lane
+        BEHIND whatever is there (`JobStore.enqueue_admitted`): this job was
+        answered 202 when it was submitted, so it is not refused `server_busy`.
+        A refusal here fails the job, or, for somebody else holding the card
+        for now, keeps it waiting (`installonsubmit.TRANSIENT_REFUSALS`).
+        """
+        plugin = registry.get(job.type)
+        if plugin is None:
+            take_up_enabled_types(config)
+            plugin = registry.get(job.type)
+        if plugin is None:
+            raise disabled_error(job.type, config)
+        model = resolve_model(plugin, job.model)
+        async with residency.settled_for(f"a {job.type} job"):
+            app.state.leases.refuse_if_leased(job.type, model)
+            plugin.preflight(model, job.params)
+            app.state.store.enqueue_admitted(job)
+
+    app.state.installs = InstallOnSubmit(
+        config, backend, app.state.store, app.state.tasks, admit=admit_installed
     )
 
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
@@ -973,16 +1018,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 "invalid_request",
                 "name exactly one of ?job_type= (an install) or ?subject= (a pull)",
             )
-        card = ladder.card_for(live.home, backend.gpu)
-        decisions = capability_classes.decide_all(
-            backend.kind,
-            total_bytes=backend.gpu.vram_bytes,
-            desktop_allowance_bytes=live.desktop_allowance_bytes,
-            gpu_vendor=backend.gpu.vendor,
-            chosen={entry.capability: entry.model for entry in live.local_models},
-            card=card,
-        )
-        pool = capability_classes.pool_name(backend.kind, backend.gpu.vendor)
+        # One walk, shared with install-on-submit, whose job status carries the
+        # same sentences for a caller that has no modal (2026-09-26).
+        decisions, card, pool = live_decisions(live, backend)
         if job_type is not None:
             return capability_classes.install_plan(
                 job_type,
@@ -1939,6 +1977,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             "position": store.position(job),
             "progress": job.progress,
             "message": job.message,
+            # Null unless it waits for its install (2026-09-26).
+            "waiting_for": store.waiting_for(job),
             "created": job.created,
             "started": job.started,
             "client": job.client,
@@ -2208,7 +2248,11 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 },
             },
             "running": [] if running is None else [_activity_row(store, running)],
-            "queued": [_activity_row(store, job) for job in queued],
+            # Then every job waiting for its install, which is queued too and
+            # not yet on the lane (2026-09-26, `crucible/installonsubmit.py`).
+            "queued": [
+                _activity_row(store, job) for job in [*queued, *store.parked()]
+            ],
         }
 
         if accelerator_probe:
@@ -2904,10 +2948,42 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         work the lease was taken for: a `tts` render of the leased voice and an
         `align` on the leased aligner are admitted, because they run against
         what is already resident rather than loading it again.
+
+        **A TYPE THIS CARD CAN RUN AND HAS NOT INSTALLED IS INSTALLED, not
+        refused** (Owen, 2026-09-26: *"yes, we need to install a missing
+        environment when a job is submitted"*). When the refusal would be
+        `job_type_disabled` with `reason: not_installed`, the job is accepted
+        with a 202 and waits, `queued` with `position: null` and a
+        `waiting_for` that says in words what it waits for, while the server
+        runs the operator page's install as a task, with the base weights the
+        type needs and the model the job names. It then runs; if the install
+        fails, it fails with the install's own reason. A type the card cannot
+        run is still refused at once. `[jobs] install_on_submit = false` turns
+        this off. `crucible/installonsubmit.py` has the whole of it.
         """
         store: JobStore = request.app.state.store
         leases: Leases = request.app.state.leases
-        plugin = resolve(store.registry, body.type, config)
+        try:
+            plugin = resolve(store.registry, body.type, config)
+        except ApiError as refusal:
+            if refusal.code != "job_type_disabled" or not config.install_on_submit:
+                raise
+            installs: InstallOnSubmit = request.app.state.installs
+            # Raises `refusal` itself for every case an install cannot fix,
+            # and a sharper refusal for a card that cannot run it after all.
+            need = installs.plan(body.type, body.model, refusal)
+            job = store.create(
+                body.type, body.model, body.params,
+                client=_client_agent(request), client_ref=body.client_ref,
+                hold=body.hold,
+            )
+            try:
+                _materialise_inputs(config, store, job, body.inputs)
+            except ApiError:
+                store.discard(job)
+                raise
+            installs.park(job, need)
+            return {"job_id": job.id}
         if body.model is not None:
             # An upstream model is never resident and never on the lane, so
             # `load-model` naming one is the same mistake a lease on one is,
@@ -2990,6 +3066,18 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     @private.get("/jobs/{job_id}")
     async def get_job(request: Request, job_id: str) -> dict[str, Any]:
+        """One job's state: `status`, `progress`, `position`, `error`, `artifacts`.
+
+        `waiting_for` (2026-09-26, install-on-submit) is null unless the job is
+        `queued` waiting for its install, when it says what for: `message` in
+        words ("installing the rvc environment (about 3.3 GB), then pulling its
+        base assets (about 900 MB); your job starts after it"), `plan` (the
+        install modal's sentences for this card, since an API caller has no
+        modal), `task_id`, `steps`, the task's current `step`, `progress` (0..1
+        while a step reports bytes) and its last output `line`. `reason` is
+        `install`, or `card` once installed while somebody else holds the
+        card. The job's own stream carries the same object as `waiting` events.
+        """
         store: JobStore = request.app.state.store
         job = store.get(job_id)
         return _job_state(store, job)
@@ -4725,6 +4813,7 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "status",
         "progress",
         "position",
+        "waiting_for",
         "error",
         "artifacts",
         "created",
@@ -4747,6 +4836,11 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "position": store.position(job),
+        # WHAT A `queued` JOB WAITS FOR, when it is its install (2026-09-26,
+        # `crucible/installonsubmit.py`): `message` in words, `plan` the install
+        # modal's sentences for this card, and the task's `step` and `progress`.
+        # Null for every job that is not waiting for one.
+        "waiting_for": store.waiting_for(job),
         "error": job.error,
         "artifacts": list(job.artifacts),
         "created": job.created,

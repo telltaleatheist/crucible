@@ -253,6 +253,16 @@ class Task:
     #: predates the field" are not one reading.
     unmet: list[dict[str, str]] = field(default_factory=list)
     cancel_requested: bool = False
+    #: Started by `POST /v1/jobs` for a job waiting on it, not by a person
+    #: (2026-09-26, Owen's ruling; `crucible/installonsubmit.py`). Such a task
+    #: may start while a job holds the card, and ends by TAKING UP what it
+    #: installed rather than swapping the registry (`TaskStore.submit`).
+    on_submit: bool = False
+    #: The install's own one-line reason for failing, as `crucible install`
+    #: printed it (`jobenv.failure_message`'s first line, #31), or None. What
+    #: a job waiting on this task fails with: a person reads one sentence
+    #: about pip, not "exited 1, see the stream".
+    reason: str | None = None
     #: The install subprocess, while one is running. A cancel SIGTERMs it.
     process: subprocess.Popen[str] | None = None
 
@@ -739,6 +749,7 @@ class TaskStore:
         *,
         reload: Callable[[], list[str]],
         holder: Callable[[], Held | None],
+        take_up: Callable[[], list[str]] | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -749,6 +760,11 @@ class TaskStore:
         #: The four facts, read through the one thing that owns them
         #: (`crucible/settle.py`). Injected for `reload`'s reason.
         self._holder = holder
+        #: The ADDITIVE reload an install-on-submit ends with: re-read the
+        #: config and add the plugins it now enables, replacing none
+        #: (`crucible/api.py`, `take_up_enabled_types`, #42). Safe while a job
+        #: runs, which the full swap is not. None falls back to the swap.
+        self._take_up = take_up
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
         self._running_id: str | None = None
@@ -841,13 +857,20 @@ class TaskStore:
 
     # ---------------------------------------------------------------- submit
 
-    def submit(self, request: dict[str, Any]) -> Task:
+    def submit(self, request: dict[str, Any], *, on_submit: bool = False) -> Task:
         """Validate, admit, and start. **Event loop only.**
 
         Returns the admitted task; the work runs in a background task on this
         loop. Nothing awaits between the admission check and the start, so the
         two are one atomic stretch — `JobStore.enqueue`'s property, for
         `JobStore.enqueue`'s reason.
+
+        `on_submit` is the job door's install (2026-09-26, Owen's ruling,
+        `crucible/installonsubmit.py`). It is not gated on the four facts,
+        because it does not end in the swap they guard: it ends by taking up
+        what it installed, adding plugins and replacing none, which is what a
+        running server already does when `crucible install` is run beside it
+        (#42). One task at a time still holds.
         """
         task_type = request["type"]
         if task_type == "pull":
@@ -873,7 +896,7 @@ class TaskStore:
             )
 
         self.refuse_if_busy()
-        if _touches_the_registry(task_type, request):
+        if _touches_the_registry(task_type, request) and not on_submit:
             self.refuse_if_the_card_is_held()
 
         now = utcnow()
@@ -886,6 +909,7 @@ class TaskStore:
             # so a `created` that preceded `started` would be a duration that is
             # always zero pretending to mean something.
             started=now,
+            on_submit=on_submit,
         )
         self._tasks[task.id] = task
         self._order.append(task.id)
@@ -1332,7 +1356,8 @@ class TaskStore:
             raise ApiError(
                 500,
                 "install_failed",
-                f"`{' '.join(argv)}` exited {code}. Its output is on this task's "
+                _reason_first(task)
+                + f"`{' '.join(argv)}` exited {code}. Its output is on this task's "
                 "event stream, line by line, and in the server's log; the env "
                 "that was built is left on disk (R6) so a re-run does not start "
                 "again from nothing",
@@ -1371,6 +1396,14 @@ class TaskStore:
                 # second at best and, on a quiet stretch, never fires.
                 if task.cancel_requested and process.poll() is None:
                     process.terminate()
+                # THE ONE LINE, KEPT (2026-09-26). `crucible install` refuses
+                # through `_fail`, whose first line is `crucible: ` and the
+                # reason (`jobenv.failure_message`'s head); the command and
+                # pip's tail follow unprefixed. The last such line is the
+                # refusal, and it is what a job waiting on this install fails
+                # with.
+                if stripped.startswith("crucible: "):
+                    task.reason = stripped[len("crucible: "):].strip() or None
                 # AN INSTALL THAT DOWNLOADS AN INTERPRETER REPORTS ITS BYTES.
                 # `crucible install` prints a sentinel line carrying the three
                 # fields the PULL task already emits
@@ -1404,7 +1437,11 @@ class TaskStore:
         re-read inside `self._reload`, so nothing can be admitted between the
         two.
         """
-        job_types = self._reload()
+        job_types = (
+            self._take_up()
+            if task.on_submit and self._take_up is not None
+            else self._reload()
+        )
         self.append_event(
             task,
             "step",
@@ -1615,11 +1652,17 @@ class TaskStore:
             raise ApiError(
                 500,
                 "install_failed",
-                f"step {index} of {total} ({entry.name}) exited {code}. The "
+                _reason_first(task)
+                + f"step {index} of {total} ({entry.name}) exited {code}. The "
                 "module stops here and every step before it STAYS — the envs "
                 "and weights are on disk (R6). Re-posting the module skips what "
                 "is already installed and resumes at this step",
             )
+
+
+def _reason_first(task: Task) -> str:
+    """The install's own reason, as the head of its failure, or nothing."""
+    return "" if task.reason is None else f"{task.reason}. "
 
 
 def _touches_the_registry(task_type: str, request: dict[str, Any]) -> bool:
