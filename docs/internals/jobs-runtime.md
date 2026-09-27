@@ -96,8 +96,8 @@ which imports `residency` and every job package. A table there could be read by 
   run-time guard happens later than the preflight check (the tts render, align and denoise,
   which load inside a claim or a session) keep the guard in one `_guard` method both sides call.
 - `ResidentWorker` is the `_session`/`_forget` pair align and denoise shared: reuse the resident
-  session when its process is alive, forget a dead one, guard, load, and say "a bug in
-  residency.py" if a load published no session.
+  session when its process is alive, forget a dead one, guard, load, and name the job module
+  as the bug if its occupant carried no session.
 - `leaseonload.LeaseOnLoad` and `open_lease_for_load` are the `params.lease` of `load-model`
   and `load-voice` (were `jobs.llm.LeaseOnLoad` / `_open_lease_for_load`, still re-exported).
 - `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
@@ -427,6 +427,12 @@ intention, and the fix is a lease on the client side, never an exception here.
 
 ### A stop that did not finish, and engines a crash left behind (`crucible/residency.py`)
 
+- Each job package loads through `Residency.occupy`, which owns the shared preamble (refuse,
+  evict, warming) and publishes what the package's `start()` returns. `residency.py` imports no
+  job package and no engine module, so `residency -> jobs -> residency` is not a cycle.
+  `Residency.load_voice` is `jobs.tts.common.occupy_voice`, set by that module for
+  `jobs/tts/render.py` until render calls `occupy_voice` itself.
+
 - `unload` records the stopping engine as `DyingResident` before it asks it to stop. If the stop
   raises (SIGTERM deadline passed), the record stays and every load or claim goes through
   `refuse_if_stopping`. That check first asks the process table whether any of the dying pids
@@ -568,7 +574,7 @@ through `crucible.tasks` at call time rather than binding their own copies.
 
 - **llm** (`load-model`, `unload-model`). Chat never touches the lane (it is proxied). The lane
   serialises the lifecycle only.
-  - `_reclaimable` counts the resident model itself: `Residency.load` always evicts, so reloading
+  - `_reclaimable` counts the resident model itself: `Residency.occupy` always evicts, so reloading
     the resident model is a full restart and its memory is free for the guard. Types that REUSE
     what they name (tts, align, denoise) exclude it instead.
   - The guard runs at submit and again in the lane, because the card moves. The KV-pool check

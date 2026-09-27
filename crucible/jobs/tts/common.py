@@ -1,11 +1,24 @@
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable, cast
 
 from ... import accelerator, jobenv, ttsplan, weights
+from ... import residency as residency_module
+from ...backend import MLX_DARWIN
+from ...clock import utcnow
 from ...config import Config
+from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
 from ...errors import ApiError
-from ...residency import KIND_TTS, Residency
+from ...narratorvoices import DOCUMENT_READERS, write_document
+from ...residency import (
+    DEFAULT_READY_TIMEOUT_SECONDS,
+    KIND_TTS,
+    Occupant,
+    Residency,
+    ResidentVoice,
+    say_to,
+)
 from ...voicereference import ReferenceError, VoiceReference, parse_reference
 from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest, load_all_voices
 from ..base import ModelDescriptor
@@ -15,6 +28,7 @@ __all__ = [
     "describe_voices",
     "known_voice",
     "load_voices",
+    "occupy_voice",
     "require_loadable",
     "require_reference",
     "validated_params",
@@ -326,3 +340,139 @@ def voice_load_plan(
         total_bytes=backend.gpu.vram_bytes,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
     )
+
+
+def _serving_width(manifest: VoiceManifest, serving_width: int | None) -> int | None:
+    if manifest.serving is None:
+        return None
+    if serving_width is None:
+        return manifest.serving.max_num_seqs
+    return min(serving_width, manifest.serving.max_num_seqs)
+
+
+def _build_narrator(
+    home: Path,
+    manifest: VoiceManifest,
+    spec: VoiceBackendSpec,
+    weights_dir: Path,
+    python: Path,
+    log_path: Path,
+    reference: VoiceReference | None,
+    serving_width: int | None,
+) -> NarratorEngine:
+    voices = (
+        write_document(home, manifest, spec, weights_dir, reference)
+        if manifest.narrator_engine in DOCUMENT_READERS
+        else None
+    )
+    serving = manifest.serving
+    return residency_module.build_voice_engine(
+        manifest.narrator_engine,
+        python,
+        log_path,
+        serving_stack=jobenv.tts_env(manifest.narrator_engine, spec.backend).serving_stack,
+        max_num_seqs=_serving_width(manifest, serving_width),
+        mem_fraction=None if serving is None else serving.mem_fraction,
+        context_length=None if serving is None else serving.context_length,
+        voices=voices,
+        mlx_total_bytes=(
+            accelerator.probe_unified_memory()[1]
+            if spec.backend == MLX_DARWIN
+            else None
+        ),
+    )
+
+
+def confirm_voice_loaded(
+    engine: NarratorEngine,
+    manifest: VoiceManifest,
+    weights_dir: Path,
+    say: Callable[[str], None],
+) -> dict[str, Any]:
+    say(f"loading {manifest.id} into narrator from {weights_dir}")
+    loaded = engine.load(
+        voice=manifest.id, weights_dir=weights_dir, warm=True, on_progress=say
+    )
+    reported = loaded.get("sampleRate")
+    if not isinstance(reported, int) or isinstance(reported, bool):
+        raise EngineError(
+            f"{engine.name} loaded {manifest.id} and reported sampleRate "
+            f"{reported!r}, which is not a sample rate. Every duration and "
+            "every byte count downstream is derived from it"
+        )
+    if reported != manifest.sample_rate:
+        raise EngineError(
+            f"{engine.name} renders {manifest.id} at {reported} Hz, but "
+            f"{manifest.path.name} declares {manifest.sample_rate}. Crucible "
+            "refuses rather than resampling: a FLAC written at the manifest's "
+            "rate from bytes generated at the engine's is a chunk of the "
+            "wrong length, and nothing in the file would say so. Fix the "
+            "manifest, or find out why the engine changed"
+        )
+    say(
+        f"narrator loaded {manifest.id}: engine {loaded.get('engine')!r}, "
+        f"backend {loaded.get('backend')!r}, {reported} Hz"
+    )
+    return loaded
+
+
+def occupy_voice(
+    residency: Residency,
+    manifest: VoiceManifest,
+    spec: VoiceBackendSpec,
+    weights_dir: Path,
+    python: Path,
+    *,
+    reference: VoiceReference | None = None,
+    timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    on_progress: Callable[[str], None] | None = None,
+    serving_width: int | None = None,
+) -> ResidentVoice:
+    say = say_to(on_progress)
+
+    def start() -> Occupant:
+        log_path = residency.log_path_for(manifest.id)
+        engine = _build_narrator(
+            residency.home,
+            manifest,
+            spec,
+            weights_dir,
+            python,
+            log_path,
+            reference,
+            serving_width,
+        )
+        port = find_free_port()
+        say(
+            f"starting narrator ({manifest.narrator_engine}) for {manifest.id} "
+            f"on {spec.backend}; log {log_path}"
+        )
+        start_engine(
+            engine,
+            weights_dir,
+            manifest.id,
+            port,
+            [],
+            say,
+            timeout,
+            confirm=lambda: confirm_voice_loaded(engine, manifest, weights_dir, say),
+        )
+        resident = ResidentVoice(
+            voice_id=manifest.id,
+            backend=spec.backend,
+            narrator_engine=manifest.narrator_engine,
+            revision=spec.weights_identity,
+            fingerprint=manifest.fingerprint(spec.backend),
+            sample_rate=manifest.sample_rate,
+            max_chars=spec.max_chars,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=utcnow(),
+            reference=None if reference is None else reference.to_report(),
+        )
+        return Occupant(resident, engine=engine)
+
+    return cast(ResidentVoice, residency.occupy(KIND_TTS, manifest.id, start, say=say))
+
+
+Residency.load_voice = occupy_voice

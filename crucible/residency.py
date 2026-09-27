@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, AsyncIterator, Callable, ClassVar, Iterator
 
 from .accelerator import (
     ProcessIdentity,
@@ -18,13 +18,9 @@ from .accelerator import (
     forget_leftover,
     leftovers,
     note_leftover,
-    probe_unified_memory,
     process_alive,
     process_identity,
 )
-from .alignmodels import AlignBackendSpec, AlignManifest
-from .denoisemodels import DenoiseBackendSpec, DenoiseManifest
-from .backend import MLX_DARWIN
 from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
 from .clock import utcnow as _now
 from .config import Config
@@ -35,26 +31,40 @@ from .engines import (
     SubprocessEngine,
     build_engine,
     build_voice_engine,
+    engine_load_args,
     engine_log_path,
     engine_model_name,
-    find_free_port,
+    start_engine,
 )
-from .engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
 from .errors import ApiError, JobError
-from .jobenv import tts_env
-from .manifests import (
-    NO_DEFAULTS,
-    BackendSpec,
-    ModelDefaults,
-    ModelManifest,
-    fingerprint,
-)
-from .narratorvoices import DOCUMENT_READERS, write_document
-from .voicereference import VoiceReference
-from .voices import VoiceBackendSpec, VoiceManifest
-from .vram import KvPlan
-from .workers import WorkerError, WorkerSession
-from .workers import torch_allocator_environment, torch_memory_cap
+from .manifests import NO_DEFAULTS, ModelDefaults, fingerprint
+from .workers import WorkerSession
+
+__all__ = [
+    "CLEARANCE_MARGIN_SECONDS",
+    "CLEARANCE_TIMEOUT_SECONDS",
+    "DEFAULT_READY_TIMEOUT_SECONDS",
+    "KIND_ALIGN",
+    "KIND_DENOISE",
+    "KIND_LLM",
+    "KIND_NOUNS",
+    "KIND_TTS",
+    "DyingResident",
+    "Occupant",
+    "Residency",
+    "Resident",
+    "ResidentAligner",
+    "ResidentModel",
+    "ResidentSeparator",
+    "ResidentVoice",
+    "build_engine",
+    "build_voice_engine",
+    "describe_resident",
+    "engine_model_name",
+    "resident_record_path",
+    "say_to",
+    "stop_budget_of",
+]
 
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
 
@@ -242,6 +252,37 @@ class DyingResident:
             "since": self.since,
             "pids": sorted(self.pids),
         }
+
+
+@dataclass(frozen=True)
+class Occupant:
+    resident: Resident
+    engine: SubprocessEngine | None = None
+    session: WorkerSession | None = None
+    base_url: str | None = None
+
+    @property
+    def pids(self) -> frozenset[int]:
+        pids: frozenset[int] = frozenset()
+        if self.engine is not None:
+            pids |= self.engine.pids
+        if self.session is not None:
+            pids |= self.session.pids
+        return pids
+
+    def stop(self) -> None:
+        if self.engine is not None:
+            self.engine.stop()
+        if self.session is not None:
+            self.session.stop()
+
+
+def say_to(on_progress: Callable[[str], None] | None) -> Callable[[str], None]:
+    def say(message: str) -> None:
+        if on_progress is not None:
+            on_progress(message)
+
+    return say
 
 
 def describe_resident(residency: "Residency", kind: str, absent: str) -> str:
@@ -603,416 +644,66 @@ class Residency:
         )
         self.unload(previous.id)
 
-    def load(
+    @property
+    def home(self) -> Path:
+        return self._config.home
+
+    def log_path_for(self, subject_id: str) -> Path:
+        return engine_log_path(self._config.home, subject_id)
+
+    def occupy(
         self,
-        manifest: ModelManifest,
-        spec: BackendSpec,
-        weights_dir: Path,
-        python: Path,
+        kind: str,
+        subject_id: str,
+        start: Callable[[], Occupant],
         *,
-        plan: "KvPlan | None",
-        context: int,
-        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
-        on_progress: Callable[[str], None] | None = None,
-        card_args: tuple[str, ...] = (),
-    ) -> ResidentModel:
-        self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self.refuse_if_stopping(f"load {manifest.id}")
-
-        def say(message: str) -> None:
-            if on_progress is not None:
-                on_progress(message)
-
-        self._evict(say, manifest.id)
-
-        log_path = engine_log_path(self._config.home, manifest.id)
-        engine = build_engine(spec.engine, python, log_path)
-        served = engine_model_name(spec.engine, weights_dir, manifest.id)
-        port = find_free_port()
-
-        self.begin_warming(manifest.id)
-        say(
-            f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
-            f"(context {context}); log {log_path}"
-        )
-        args = self._engine_args(
-            manifest, spec, weights_dir, plan, context=context, card_args=card_args
-        )
-        try:
-            self._start(
-                engine,
-                weights_dir,
-                served,
-                port,
-                args,
-                say,
-                timeout,
-            )
-        finally:
-            self.end_warming()
-
-        self._engine = engine
-        self._resident = ResidentModel(
-            model_id=manifest.id,
-            backend=spec.backend,
-            engine=spec.engine,
-            engine_model_name=served,
-            base_url=engine.base_url,
-            port=port,
-            revision=spec.revision,
-            max_model_len=context,
-            defaults=manifest.defaults,
-            memory_bytes_estimate=spec.memory_bytes_estimate,
-            log_path=log_path,
-            loaded_at=_now(),
-            engine_args=tuple(args),
-        )
-        say(f"{manifest.id} is resident at {engine.base_url}")
-        self._record_residents()
-        return self._resident
-
-    def load_voice(
-        self,
-        manifest: VoiceManifest,
-        spec: VoiceBackendSpec,
-        weights_dir: Path,
-        python: Path,
-        *,
-        reference: VoiceReference | None = None,
-        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
-        on_progress: Callable[[str], None] | None = None,
-        serving_width: int | None = None,
-    ) -> ResidentVoice:
-        self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self.refuse_if_stopping(f"load {manifest.id}")
-
-        def say(message: str) -> None:
-            if on_progress is not None:
-                on_progress(message)
-
-        self._evict(say, manifest.id)
-
-        log_path = engine_log_path(self._config.home, manifest.id)
-        env_spec = tts_env(manifest.narrator_engine, spec.backend)
-        voices = (
-            write_document(
-                self._config.home, manifest, spec, weights_dir, reference
-            )
-            if manifest.narrator_engine in DOCUMENT_READERS
-            else None
-        )
-        engine = build_voice_engine(
-            manifest.narrator_engine,
-            python,
-            log_path,
-            serving_stack=env_spec.serving_stack,
-            max_num_seqs=(
-                None if manifest.serving is None
-                else (
-                    manifest.serving.max_num_seqs
-                    if serving_width is None
-                    else min(serving_width, manifest.serving.max_num_seqs)
-                )
-            ),
-            mem_fraction=(
-                None if manifest.serving is None
-                else manifest.serving.mem_fraction
-            ),
-            context_length=(
-                None if manifest.serving is None
-                else manifest.serving.context_length
-            ),
-            voices=voices,
-            mlx_total_bytes=(
-                probe_unified_memory()[1] if spec.backend == MLX_DARWIN else None
-            ),
-        )
-        port = find_free_port()
-
-        self.begin_warming(manifest.id)
-        say(
-            f"starting narrator ({manifest.narrator_engine}) for {manifest.id} "
-            f"on {spec.backend}; log {log_path}"
-        )
-        try:
-            self._start(
-                engine,
-                weights_dir,
-                manifest.id,
-                port,
-                [],
-                say,
-                timeout,
-                confirm=lambda: self._load_the_voice(
-                    engine, manifest, weights_dir, say
-                ),
-            )
-        finally:
-            self.end_warming()
-
-        self._engine = engine
-        self._resident = ResidentVoice(
-            voice_id=manifest.id,
-            backend=spec.backend,
-            narrator_engine=manifest.narrator_engine,
-            revision=spec.weights_identity,
-            fingerprint=manifest.fingerprint(spec.backend),
-            sample_rate=manifest.sample_rate,
-            max_chars=spec.max_chars,
-            memory_bytes_estimate=spec.memory_bytes_estimate,
-            log_path=log_path,
-            loaded_at=_now(),
-            reference=None if reference is None else reference.to_report(),
-        )
-        say(f"{manifest.id} is resident")
-        self._record_residents()
-        return self._resident
-
-    def load_aligner(
-        self,
-        manifest: AlignManifest,
-        spec: AlignBackendSpec,
-        weights_dir: Path,
-        python: Path,
-        *,
-        max_audio_s: float,
-        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
-        on_progress: Callable[[str], None] | None = None,
-    ) -> ResidentAligner:
-        from .jobs.align import device_for, start_aligner_session
-
-        self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self.refuse_if_stopping(f"load {manifest.id}")
-
-        def say(message: str) -> None:
-            if on_progress is not None:
-                on_progress(message)
-
-        self._evict(say, manifest.id)
-
-        log_path = engine_log_path(self._config.home, manifest.id)
-        device = device_for(spec.backend)
-        dtype = spec.dtype
-        self.begin_warming(manifest.id)
-        say(
-            f"loading {manifest.id} ({spec.engine}) on {device} at {dtype}; "
-            f"log {log_path}"
-        )
-        try:
-            session = start_aligner_session(
-                python,
-                weights_dir,
-                spec,
-                log_path,
-                ready_silence_timeout=timeout,
-                on_ready=lambda message: say(
-                    f"{manifest.id} loaded in {message['seconds']:.1f}s on "
-                    f"{message['device']} at {message['dtype']}"
-                ),
-                on_progress=lambda message: say(str(message["message"])),
-            )
-        finally:
-            self.end_warming()
-
-        self._session = session
-        self._resident = ResidentAligner(
-            aligner_id=manifest.id,
-            backend=spec.backend,
-            revision=spec.revision,
-            fingerprint=fingerprint(manifest.id, spec.revision),
-            device=device,
-            dtype=dtype,
-            max_audio_s=max_audio_s,
-            memory_bytes_estimate=spec.memory_bytes_estimate,
-            log_path=log_path,
-            loaded_at=_now(),
-        )
-        say(f"{manifest.id} is resident")
-        self._record_residents()
-        return self._resident
-
-    def load_separator(
-        self,
-        manifest: DenoiseManifest,
-        spec: DenoiseBackendSpec,
-        model_file_dir: Path,
-        python: Path,
-        script: Path,
-        *,
-        use_autocast: bool,
-        environment: dict[str, str],
-        timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
-        on_progress: Callable[[str], None] | None = None,
-    ) -> ResidentSeparator:
-        self._refuse_mutation_if_claimed(f"load {manifest.id}")
-        self.refuse_if_stopping(f"load {manifest.id}")
-
-        def say(message: str) -> None:
-            if on_progress is not None:
-                on_progress(message)
-
-        self._evict(say, manifest.id)
-
-        log_path = engine_log_path(self._config.home, manifest.id)
-        session = WorkerSession(
-            python=python,
-            script=script,
-            log_path=log_path,
-            environment={**environment, **torch_allocator_environment(spec.backend)},
-        )
-
-        self.begin_warming(manifest.id)
-        say(
-            f"loading {manifest.id} ({manifest.model_filename}) with "
-            f"use_autocast={use_autocast}; log {log_path}"
-        )
-        try:
-            outcome = session.start(
-                {
-                    "op": "load",
-                    "model_file_dir": str(model_file_dir),
-                    "model_filename": manifest.model_filename,
-                    "use_autocast": use_autocast,
-                    "memory_cap_bytes": torch_memory_cap(
-                        spec.backend, spec.memory_bytes_estimate
-                    ),
-                },
-                ready_silence_timeout=timeout,
-                on_ready=lambda message: say(
-                    f"{manifest.id} loaded in {message['seconds']:.1f}s"
-                ),
-                on_progress=lambda message: say(str(message["message"])),
-            )
-        finally:
-            self.end_warming()
-        if outcome.results:
-            session.stop()
-            raise WorkerError(
-                f"{script.name} answered a load request with "
-                f"{len(outcome.results)} result(s); a load produces none"
-            )
-
-        self._session = session
-        self._resident = ResidentSeparator(
-            separator_id=manifest.id,
-            backend=spec.backend,
-            model_filename=manifest.model_filename,
-            revision=spec.revision,
-            fingerprint=fingerprint(manifest.id, spec.revision),
-            sample_rate=manifest.sample_rate,
-            use_autocast=use_autocast,
-            memory_bytes_estimate=spec.memory_bytes_estimate,
-            log_path=log_path,
-            loaded_at=_now(),
-        )
-        say(f"{manifest.id} is resident")
-        self._record_residents()
-        return self._resident
-
-    @staticmethod
-    def _load_the_voice(
-        engine: NarratorEngine,
-        manifest: VoiceManifest,
-        weights_dir: Path,
         say: Callable[[str], None],
-    ) -> dict[str, Any]:
-        say(f"loading {manifest.id} into narrator from {weights_dir}")
-        loaded = engine.load(
-            voice=manifest.id, weights_dir=weights_dir, warm=True, on_progress=say
-        )
-        reported = loaded.get("sampleRate")
-        if not isinstance(reported, int) or isinstance(reported, bool):
-            raise EngineError(
-                f"{engine.name} loaded {manifest.id} and reported sampleRate "
-                f"{reported!r}, which is not a sample rate. Every duration and "
-                "every byte count downstream is derived from it"
-            )
-        if reported != manifest.sample_rate:
-            raise EngineError(
-                f"{engine.name} renders {manifest.id} at {reported} Hz, but "
-                f"{manifest.path.name} declares {manifest.sample_rate}. Crucible "
-                "refuses rather than resampling: a FLAC written at the manifest's "
-                "rate from bytes generated at the engine's is a chunk of the "
-                "wrong length, and nothing in the file would say so. Fix the "
-                "manifest, or find out why the engine changed"
-            )
-        say(
-            f"narrator loaded {manifest.id}: engine {loaded.get('engine')!r}, "
-            f"backend {loaded.get('backend')!r}, {reported} Hz"
-        )
-        return loaded
-
-    @staticmethod
-    def _start(
-        engine: SubprocessEngine,
-        weights_dir: Path,
-        served: str,
-        port: int,
-        args: list[str],
-        say: Callable[[str], None],
-        timeout: float,
-        confirm: Callable[[], Any] | None = None,
-    ) -> None:
+    ) -> Resident:
+        self._refuse_mutation_if_claimed(f"load {subject_id}")
+        self.refuse_if_stopping(f"load {subject_id}")
+        self._evict(say, subject_id)
+        self.begin_warming(subject_id)
         try:
-            engine.start(weights_dir, served, port, args)
-            engine.ready(timeout, on_progress=say)
-            if confirm is not None:
-                confirm()
-        except BaseException as start_failure:
-            try:
-                engine.stop()
-            except EngineError as stop_failure:
-                raise EngineError(
-                    f"{start_failure}\n...and stopping it also failed: {stop_failure}"
-                ) from start_failure
-            raise
+            occupant = start()
+        finally:
+            self.end_warming()
+        resident = occupant.resident
+        if resident.kind != kind or resident.id != subject_id:
+            occupant.stop()
+            raise EngineError(
+                f"loading the {kind} {subject_id!r} started the {resident.kind} "
+                f"{resident.id!r} instead; it was stopped. That is a bug in the "
+                f"job package that built it: report it with {resident.log_path}"
+            )
+        self._engine = occupant.engine
+        self._session = occupant.session
+        self._resident = resident
+        at = "" if occupant.base_url is None else f" at {occupant.base_url}"
+        say(f"{subject_id} is resident{at}")
+        self._record_residents()
+        return resident
 
-    @staticmethod
-    def _engine_args(
-        manifest: ModelManifest,
-        spec: BackendSpec,
-        weights_dir: Path,
-        plan: "KvPlan | None",
-        *,
-        context: int,
-        card_args: tuple[str, ...] = (),
-    ) -> list[str]:
-        args = list(spec.engine_args)
-        if spec.engine == "vllm":
-            args += ["--max-model-len", str(context)]
-            args += list(VLLM_DECIDE_ARGS)
-            args += list(card_args)
-        if spec.engine == "llama-server":
-            if spec.file is None:
-                raise EngineError(
-                    f"{manifest.path.name}'s {spec.backend} block names no "
-                    "`file`, and llama-server serves one GGUF. A block for "
-                    "this backend without a file is a block for nothing"
-                )
-            args = ["-m", str(weights_dir / spec.file)] + args
-            if spec.mmproj is not None:
-                args += ["--mmproj", str(weights_dir / spec.mmproj)]
-            args += ["-c", str(context)]
-        if plan is not None:
-            args += plan.flags()
-        return args
+    _start = staticmethod(start_engine)
+
+    _engine_args = staticmethod(engine_load_args)
+
+    load_voice: ClassVar[Callable[..., ResidentVoice]]
 
     def unload(self, subject_id: str) -> Resident:
         self._refuse_mutation_if_claimed(f"unload {subject_id}")
         resident = self._resident
         if resident is None or resident.id != subject_id:
             raise KeyError(subject_id)
-        engine, session = self._engine, self._session
+        leaving = Occupant(resident, self._engine, self._session)
         self._resident = None
         self._engine = None
         self._session = None
         self._dying = DyingResident(
             subject_id=resident.id,
             kind=resident.kind,
-            engine=engine,
-            session=session,
-            pids=(frozenset() if engine is None else engine.pids)
-            | (frozenset() if session is None else session.pids),
+            engine=leaving.engine,
+            session=leaving.session,
+            pids=leaving.pids,
             since=_now(),
             log_path=resident.log_path,
         )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -14,13 +14,18 @@ from ...alignmodels import (
     load_all_align_manifests,
 )
 from ...backend import CUDA_LINUX, MLX_DARWIN
+from ...clock import utcnow
 from ...config import Config
 from ...errors import ApiError, JobCancelled, JobError
 from ...jobtypes import ALIGN_JOB, UNLOAD_ALIGNER
+from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_ALIGN,
+    Occupant,
     Residency,
+    ResidentAligner,
+    say_to,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
@@ -35,7 +40,13 @@ from ..template import (
 )
 from ..unload import UnloadJobType, UnloadParams
 
-__all__ = ["JOB_TYPES", "AlignJobType", "AlignParams", "UnloadAlignerJobType"]
+__all__ = [
+    "JOB_TYPES",
+    "AlignJobType",
+    "AlignParams",
+    "UnloadAlignerJobType",
+    "occupy_aligner",
+]
 
 JOB_TYPE = ALIGN_JOB.name
 
@@ -125,6 +136,57 @@ def start_aligner_session(
             f"{len(outcome.results)} result(s); a load produces none"
         )
     return session
+
+
+def occupy_aligner(
+    residency: Residency,
+    manifest: AlignManifest,
+    spec: AlignBackendSpec,
+    weights_dir: Path,
+    python: Path,
+    *,
+    max_audio_s: float,
+    timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    on_progress: Callable[[str], None] | None = None,
+) -> ResidentAligner:
+    say = say_to(on_progress)
+
+    def start() -> Occupant:
+        log_path = residency.log_path_for(manifest.id)
+        device = device_for(spec.backend)
+        say(
+            f"loading {manifest.id} ({spec.engine}) on {device} at {spec.dtype}; "
+            f"log {log_path}"
+        )
+        session = start_aligner_session(
+            python,
+            weights_dir,
+            spec,
+            log_path,
+            ready_silence_timeout=timeout,
+            on_ready=lambda message: say(
+                f"{manifest.id} loaded in {message['seconds']:.1f}s on "
+                f"{message['device']} at {message['dtype']}"
+            ),
+            on_progress=lambda message: say(str(message["message"])),
+        )
+        resident = ResidentAligner(
+            aligner_id=manifest.id,
+            backend=spec.backend,
+            revision=spec.revision,
+            fingerprint=fingerprint(manifest.id, spec.revision),
+            device=device,
+            dtype=spec.dtype,
+            max_audio_s=max_audio_s,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=utcnow(),
+        )
+        return Occupant(resident, session=session)
+
+    return cast(
+        ResidentAligner, residency.occupy(KIND_ALIGN, manifest.id, start, say=say)
+    )
 
 
 class AlignChunk(BaseModel):
@@ -294,7 +356,8 @@ class AlignJobType(ResidentWorker):
             ctx,
             model,
             spec.memory_bytes_estimate,
-            lambda: self._residency.load_aligner(
+            lambda: occupy_aligner(
+                self._residency,
                 manifest,
                 spec,
                 weights_dir,

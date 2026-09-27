@@ -214,7 +214,7 @@ class ResidentWorker:
             raise JobError(
                 "worker_failed",
                 f"{model} loaded but no session was published; this is a bug in "
-                "crucible/residency.py",
+                f"{type(self).__module__}, whose occupant carried no session",
             )
         return loaded
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict
 
 from ... import workers
 from ...backend import CUDA_LINUX
+from ...clock import utcnow
 from ...config import Config
 from ...denoisemodels import (
     PULL_COMMAND,
@@ -21,10 +22,14 @@ from ...denoisemodels import installed as model_installed
 from ...denoisemodels import missing as missing_model_files
 from ...errors import ApiError, JobError
 from ...jobtypes import DENOISE_JOB, RVC_ENV, UNLOAD_DENOISER
+from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_DENOISE,
+    Occupant,
     Residency,
+    ResidentSeparator,
+    say_to,
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
@@ -46,6 +51,7 @@ __all__ = [
     "UnloadDenoiserJobType",
     "denoise_models_dir",
     "denoise_models_dir_for",
+    "occupy_separator",
 ]
 
 JOB_TYPE = DENOISE_JOB.name
@@ -78,6 +84,78 @@ def denoise_models_dir_for(home: Path) -> Path:
 
 def denoise_models_dir(config: Config) -> Path:
     return denoise_models_dir_for(config.home)
+
+
+def occupy_separator(
+    residency: Residency,
+    manifest: DenoiseManifest,
+    spec: DenoiseBackendSpec,
+    model_file_dir: Path,
+    python: Path,
+    script: Path,
+    *,
+    use_autocast: bool,
+    environment: dict[str, str],
+    timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    on_progress: Callable[[str], None] | None = None,
+) -> ResidentSeparator:
+    say = say_to(on_progress)
+
+    def start() -> Occupant:
+        log_path = residency.log_path_for(manifest.id)
+        session = workers.WorkerSession(
+            python=python,
+            script=script,
+            log_path=log_path,
+            environment={
+                **environment,
+                **workers.torch_allocator_environment(spec.backend),
+            },
+        )
+        say(
+            f"loading {manifest.id} ({manifest.model_filename}) with "
+            f"use_autocast={use_autocast}; log {log_path}"
+        )
+        outcome = session.start(
+            {
+                "op": "load",
+                "model_file_dir": str(model_file_dir),
+                "model_filename": manifest.model_filename,
+                "use_autocast": use_autocast,
+                "memory_cap_bytes": workers.torch_memory_cap(
+                    spec.backend, spec.memory_bytes_estimate
+                ),
+            },
+            ready_silence_timeout=timeout,
+            on_ready=lambda message: say(
+                f"{manifest.id} loaded in {message['seconds']:.1f}s"
+            ),
+            on_progress=lambda message: say(str(message["message"])),
+        )
+        if outcome.results:
+            session.stop()
+            raise workers.WorkerError(
+                f"{script.name} answered a load request with "
+                f"{len(outcome.results)} result(s); a load produces none"
+            )
+        resident = ResidentSeparator(
+            separator_id=manifest.id,
+            backend=spec.backend,
+            model_filename=manifest.model_filename,
+            revision=spec.revision,
+            fingerprint=fingerprint(manifest.id, spec.revision),
+            sample_rate=manifest.sample_rate,
+            use_autocast=use_autocast,
+            memory_bytes_estimate=spec.memory_bytes_estimate,
+            log_path=log_path,
+            loaded_at=utcnow(),
+        )
+        return Occupant(resident, session=session)
+
+    return cast(
+        ResidentSeparator,
+        residency.occupy(KIND_DENOISE, manifest.id, start, say=say),
+    )
 
 
 class DenoiseParams(BaseModel):
@@ -313,7 +391,8 @@ class DenoiseJobType(ResidentWorker):
         python: Path,
     ) -> None:
         began = time.perf_counter()
-        self._residency.load_separator(
+        occupy_separator(
+            self._residency,
             manifest,
             spec,
             model_file_dir,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from .base import (
     BIND_FAILURE_LINES,
     PORT_IN_USE,
     EngineError,
     SubprocessEngine,
+    plan_flags,
     port_in_use_error,
 )
 
@@ -95,6 +97,34 @@ class LlamaServerEngine(SubprocessEngine):
             "llama-server is not installed: run `crucible install llm`, which "
             "pulls the pinned llama.cpp build, and load again"
         )
+
+    @classmethod
+    def load_args(
+        cls,
+        spec: Any,
+        weights_dir: Path,
+        context: int,
+        plan: Any,
+        *,
+        card_flags: tuple[str, ...] = (),
+        source: str = "",
+    ) -> list[str]:
+        if spec.file is None:
+            raise EngineError(
+                f"{source}'s {spec.backend} block names no "
+                "`file`, and llama-server serves one GGUF. A block for "
+                "this backend without a file is a block for nothing"
+            )
+        mmproj = [] if spec.mmproj is None else ["--mmproj", str(weights_dir / spec.mmproj)]
+        return [
+            "-m",
+            str(weights_dir / spec.file),
+            *spec.engine_args,
+            *mmproj,
+            "-c",
+            str(context),
+            *plan_flags(plan),
+        ]
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

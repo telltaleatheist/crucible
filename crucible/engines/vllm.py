@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from ..enginespec import (
     AUTO_DTYPE,
@@ -13,7 +14,7 @@ from ..enginespec import (
     stated_dtype,
 )
 from ..enginespec import VLLM_ENGINE as ENGINE_NAME
-from .base import EngineError, SubprocessEngine, int_flag
+from .base import EngineError, SubprocessEngine, int_flag, plan_flags
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
@@ -58,6 +59,26 @@ class VllmEngine(SubprocessEngine):
         "cuda-linux block states it, and the "
         "number of CUDA graphs captured follows it) and queues the rest"
     )
+
+    @classmethod
+    def load_args(
+        cls,
+        spec: Any,
+        weights_dir: Path,
+        context: int,
+        plan: Any,
+        *,
+        card_flags: tuple[str, ...] = (),
+        source: str = "",
+    ) -> list[str]:
+        return [
+            *spec.engine_args,
+            "--max-model-len",
+            str(context),
+            *DECIDE_ARGS,
+            *card_flags,
+            *plan_flags(plan),
+        ]
 
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
