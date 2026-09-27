@@ -178,6 +178,14 @@ class Job:
     held_by: str | None = None
     #: When the hold was taken (ISO-8601 UTC), None when not held.
     held_since: str | None = None
+    #: THE JOURNAL THIS JOB WRITES (Owen, 2026-09-27; `crucible/journal.py`),
+    #: or None for a job type that keeps none. A fresh job gets a new one at
+    #: submit; a job sent `resume` writes the one it named. Persisted, so a
+    #: restart can say which journal an interrupted job was writing.
+    resume_id: str | None = None
+    #: True when this job was submitted with `resume` and continues a journal
+    #: an earlier job wrote; False for a job that started it.
+    resumed: bool = False
 
     @property
     def held(self) -> bool:
@@ -283,6 +291,25 @@ class JobContext:
         if not directory.is_dir():
             return {}
         return {p.name: p for p in sorted(directory.iterdir()) if p.is_file()}
+
+    @property
+    def journal(self) -> Any | None:
+        """This job's resume journal (`crucible/journal.py`), or None.
+
+        Owen, 2026-09-27: *"we should definitely be writing work to disk, so if
+        something fails, we dont lose everything. preferably writing to disk
+        often."* A journaled job type `put`s each finished unit the moment it
+        lands and, when `resumed` is true, `get`s what an earlier job finished
+        instead of doing it again. docs/RESUMABLE-JOBS.md is the contract.
+        """
+        if self._job.resume_id is None:
+            return None
+        return self._store.journals.open(self._job.resume_id)
+
+    @property
+    def resumed(self) -> bool:
+        """Was this job sent `resume`, so that its journal holds earlier work?"""
+        return self._job.resumed
 
     @property
     def cancelled(self) -> bool:

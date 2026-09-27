@@ -841,6 +841,56 @@ export interface JobStatus {
    * did. Two reads a minute apart are a pace, with no engine log to tail.
    */
   readonly chunkAt: string | null;
+  /**
+   * The resume journal this job writes (Owen, 2026-09-27; the server's
+   * docs/RESUMABLE-JOBS.md): send it as `params.resume` (for `asr`,
+   * {@link AsrOptions.resume}) to continue this work if the job does not
+   * finish. `null` for a job type that keeps no journal, and on a server
+   * before the journal existed.
+   */
+  readonly resumeId: string | null;
+  /** True when this job was itself a resume of an earlier job's journal. */
+  readonly resumed: boolean;
+}
+
+/**
+ * One journal, as `GET /v1/resumable` lists it (Owen, 2026-09-27: *"maybe we
+ * could even have a call that shows what's available to resume?"*). Reading
+ * it resumes nothing: whether and when to resume is the app's decision.
+ */
+export interface Resumable {
+  /** Send this as `params.resume` to continue the work. */
+  readonly resumeId: string;
+  readonly jobType: string;
+  /** The model and the exact revision the journal was written with. */
+  readonly model: { readonly id: string | null; readonly revision: string | null };
+  /** The job type's unit format; a resume under another is refused. */
+  readonly formatVersion: number | null;
+  /** Each input by name, sha256 and size: a resume must send the same bytes. */
+  readonly inputs: readonly { readonly name: string; readonly sha256: string; readonly bytes: number }[];
+  /** The output-affecting params it was written under, resolved. */
+  readonly params: Readonly<Record<string, unknown>> | null;
+  readonly unitsDone: number;
+  readonly unitsTotal: number | null;
+  /** A sentence a person reads: "2,400 of 3,015 pieces done (...)". */
+  readonly progress: string | null;
+  readonly created: string | null;
+  readonly lastSaved: string | null;
+  /** When the server's `retention_days` collector takes it (ISO-8601). */
+  readonly expiresAt: string | null;
+  /** The job that started the journal. */
+  readonly jobId: string | null;
+  /** The job that last wrote it, and how that ended. */
+  readonly lastJobId: string | null;
+  readonly state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | string;
+}
+
+/** `DELETE /v1/resumable/{id}`'s receipt. */
+export interface ResumableDiscarded {
+  readonly resumeId: string;
+  readonly discarded: boolean;
+  readonly unitsDone: number;
+  readonly unitsTotal: number | null;
 }
 
 /** `DELETE /v1/jobs/{id}`. A running job ends `cancelled` at its next checkpoint. */
@@ -2500,6 +2550,18 @@ export interface AsrOptions {
    * out (or `null`), 2. Sent as `speech_min_gap_s`.
    */
   readonly speechMinGapS?: number | null;
+  /**
+   * Continue a journal instead of starting fresh (Owen, 2026-09-27: *"if the
+   * user doesnt send the resume flag then it starts fresh. if they do send a
+   * resume flag, it continues from where they left off"*). The
+   * {@link JobStatus.resumeId} of the job that did not finish, or a
+   * {@link Resumable.resumeId}. The server refuses it by name when the audio,
+   * the model's revision or an output-affecting param differs
+   * (`resume_mismatch`), when it does not know the id (`unknown_resume_id`) or
+   * has collected it (`resume_expired`), and on a whisper model
+   * (`resume_unsupported`). Qwen3-ASR only, for now. Sent only when stated.
+   */
+  readonly resume?: string | null;
 }
 
 // ---------------------------------------------------------------------------

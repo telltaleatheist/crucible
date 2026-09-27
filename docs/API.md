@@ -207,7 +207,7 @@ The work. Every job type is created, polled and cancelled through the same route
 
 ### `POST /v1/jobs`
 
-Admit one job, or refuse with the facts about the one already here. **This door refuses when the lane is busy (ARCHITECTURE.md section 3).** It used to queue, which made Crucible answer the same question two ways: the streaming door has always refused with `409 stream_session_open` naming the holder, while this one accepted and appended. Same server, same card, two policies. Now both refuse and both name who has it. The order of the checks is the order of their cost and their specificity, and it is deliberate. The type and model are resolved first, because `unknown_job_type` is true whether or not anything is running and a client with a typo should be told about the typo rather than about somebody else's render. Admission comes next, before `preflight` — preflight shells out (`ffmpeg -version`), reads manifests and probes the card with `nvidia-smi`, and spending that on a request that cannot be admitted is work done for a 409. It also comes before `store.create`, so a refused submission never makes a directory, and before the inputs are materialised, so it never writes a client's megabytes to disk to delete them again. **A lease is refused ahead of both** (PHASE7-LANES.md section 5.2). A chat completion holds nothing, so a server mid-way through a two-thousand-block translation looks idle between two blocks; a client that says it intends a run takes a lease, and while one is open this door refuses the jobs that would move the leased thing off the card. It does not refuse anything else — a lease is not a reservation, and the lane is still free for work that leaves the card alone, INCLUDING the work the lease was taken for: a `tts` render of the leased voice and an `align` on the leased aligner are admitted, because they run against what is already resident rather than loading it again. **A MISSING ENVIRONMENT OR MODEL IS INSTALLED FOR THE CALLER, and the job is refused while it installs** (Owen, 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*; 2026-09-27: *"Crucible isn't responsible for queuing. The apps that use it are."*). A type this card can run and has not installed, or a declared model or voice (and `rvc`'s base assets) not yet pulled, starts the operator page's install as a task and answers `409 installing`: a sentence saying what is being installed, how big, and to submit again after it, with the task to watch in `details.task_id`. No job is created and nothing waits here; the app's queue retries. A second submit while it runs gets the same answer with the same task, never a second install. A server that never decided its card decides and records it first. A type the card cannot run is refused as before. `[jobs] install_on_submit = false` turns the install off (the refusal then carries `details.install`). `crucible/installonsubmit.py`.
+Admit one job, or refuse with the facts about the one already here. **EXPLICIT RESUME ONLY** (Owen, 2026-09-27: *"if the user doesnt send the resume flag then it starts fresh. if they do send a resume flag, it continues from where they left off"*). A job type that keeps a journal (`crucible/journal.py`, docs/RESUMABLE-JOBS.md) answers `resume_id` beside `job_id`: the id to send as `params.resume` if this job does not finish. Without `resume` a job starts a NEW journal and never reads an old one. With it, the journal is checked against this submission (job type, model revision, output-affecting params, every input's sha256, the type's format version) and anything different is refused `resume_mismatch` naming it, before the job exists; an unknown id is `unknown_resume_id` and a collected one `resume_expired`. A type that keeps no journal refuses `resume` as `resume_unsupported`. **This door refuses when the lane is busy (ARCHITECTURE.md section 3).** It used to queue, which made Crucible answer the same question two ways: the streaming door has always refused with `409 stream_session_open` naming the holder, while this one accepted and appended. Same server, same card, two policies. Now both refuse and both name who has it. The order of the checks is the order of their cost and their specificity, and it is deliberate. The type and model are resolved first, because `unknown_job_type` is true whether or not anything is running and a client with a typo should be told about the typo rather than about somebody else's render. Admission comes next, before `preflight` — preflight shells out (`ffmpeg -version`), reads manifests and probes the card with `nvidia-smi`, and spending that on a request that cannot be admitted is work done for a 409. It also comes before `store.create`, so a refused submission never makes a directory, and before the inputs are materialised, so it never writes a client's megabytes to disk to delete them again. **A lease is refused ahead of both** (PHASE7-LANES.md section 5.2). A chat completion holds nothing, so a server mid-way through a two-thousand-block translation looks idle between two blocks; a client that says it intends a run takes a lease, and while one is open this door refuses the jobs that would move the leased thing off the card. It does not refuse anything else — a lease is not a reservation, and the lane is still free for work that leaves the card alone, INCLUDING the work the lease was taken for: a `tts` render of the leased voice and an `align` on the leased aligner are admitted, because they run against what is already resident rather than loading it again. **A MISSING ENVIRONMENT OR MODEL IS INSTALLED FOR THE CALLER, and the job is refused while it installs** (Owen, 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*; 2026-09-27: *"Crucible isn't responsible for queuing. The apps that use it are."*). A type this card can run and has not installed, or a declared model or voice (and `rvc`'s base assets) not yet pulled, starts the operator page's install as a task and answers `409 installing`: a sentence saying what is being installed, how big, and to submit again after it, with the task to watch in `details.task_id`. No job is created and nothing waits here; the app's queue retries. A second submit while it runs gets the same answer with the same task, never a second install. A server that never decided its card decides and records it first. A type the card cannot run is refused as before. `[jobs] install_on_submit = false` turns the install off (the refusal then carries `details.install`). `crucible/installonsubmit.py`.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -296,6 +296,42 @@ The chain is complete: release the hold and remove the job now.
 | `job_id` | path | yes | string |  |
 
 *Answers:* `204`, `422`
+
+## Resumable jobs
+
+The resume journals: every job type that keeps one writes its finished work to disk as it lands, and a job sent `params.resume` continues it (docs/RESUMABLE-JOBS.md).
+
+### `GET /v1/resumable`
+
+Every journal this server keeps, newest first (Owen, 2026-09-27: *"maybe we could even have a call that shows what's available to resume?"*). One row per journal: its `resume_id` (send it as `params.resume`), the job type, the model and revision, the inputs by name and sha256, the output-affecting `params` it was written under, `units_done` of `units_total` and a `progress` sentence, `last_saved`, `expires_at` (`[jobs] retention_days` after the last save), the job that started it (`job_id`), and the job that last wrote it with how that ended (`last_job_id`, `state`: queued, running, done, failed, cancelled or interrupted). Nothing is resumed by reading this: resuming is the app's decision (docs/RESUMABLE-JOBS.md).
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
+### `GET /v1/resumable/{resume_id}`
+
+One journal, as `GET /v1/resumable` lists it.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `resume_id` | path | yes | string |  |
+
+*Answers:* `200`, `422`
+
+### `DELETE /v1/resumable/{resume_id}`
+
+Discard a journal now. Refused `resume_in_use` while a job writes it. The id then answers `resume_expired` rather than `unknown_resume_id`, so a client resuming it later is told what happened.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `resume_id` | path | yes | string |  |
+
+*Answers:* `200`, `422`
 
 ## Tasks
 

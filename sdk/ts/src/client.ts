@@ -118,6 +118,8 @@ import {
   type RenderFailure,
   type RenderOptions,
   type RenderResult,
+  type Resumable,
+  type ResumableDiscarded,
   type RouteSetting,
   type CrucibleRole,
   type ServerInfo,
@@ -970,6 +972,53 @@ export class CrucibleClient {
       // 2026-09-24).
       chunksTotal: optNum(body, 'chunks_total', 'job'),
       chunkAt: optStr(body, 'chunk_at', 'job'),
+      // The journal this job writes (2026-09-27). Null on a job type that
+      // keeps none and on a server before 1.0.51.
+      resumeId: optStr(body, 'resume_id', 'job'),
+      resumed: optBool(body, 'resumed', 'job') ?? false,
+    };
+  }
+
+  // -------------------------------------------------------------- resumable
+
+  /**
+   * `GET /v1/resumable` — every resume journal the server keeps, newest first
+   * (Owen, 2026-09-27). Resuming is a separate, explicit submit with
+   * `params.resume`; nothing here resumes anything.
+   */
+  async resumable(): Promise<Resumable[]> {
+    const body = await this.#json('/v1/resumable', { method: 'GET' }, 'resumable');
+    const rows = asArray(field(body, 'resumable', 'resumable'), 'resumable');
+    return rows.map((row, index) => readResumable(asObject(row, `resumable[${index}]`)));
+  }
+
+  /** `GET /v1/resumable/{id}` — one journal. */
+  async resumableEntry(resumeId: string): Promise<Resumable> {
+    const id = requireText(resumeId, 'resumeId');
+    const body = await this.#json(
+      `/v1/resumable/${encodeURIComponent(id)}`,
+      { method: 'GET' },
+      'resumable',
+    );
+    return readResumable(body);
+  }
+
+  /**
+   * `DELETE /v1/resumable/{id}` — discard a journal and its finished work.
+   * Refused `resume_in_use` (409) while a job is writing it.
+   */
+  async discardResumable(resumeId: string): Promise<ResumableDiscarded> {
+    const id = requireText(resumeId, 'resumeId');
+    const body = await this.#json(
+      `/v1/resumable/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+      'resumable',
+    );
+    return {
+      resumeId: str(body, 'resume_id', 'resumable'),
+      discarded: bool(body, 'discarded', 'resumable'),
+      unitsDone: optNum(body, 'units_done', 'resumable') ?? 0,
+      unitsTotal: optNum(body, 'units_total', 'resumable'),
     };
   }
 
@@ -1871,6 +1920,11 @@ export class CrucibleClient {
         ...readSpeechKnob(given.speechThreshold, 'speechThreshold', 'speech_threshold'),
         ...readSpeechKnob(given.speechPadS, 'speechPadS', 'speech_pad_s'),
         ...readSpeechKnob(given.speechMinGapS, 'speechMinGapS', 'speech_min_gap_s'),
+        // Explicit resume only (2026-09-27): sent only when stated, so a
+        // caller that never heard of it starts fresh as it always did.
+        ...(given.resume !== undefined && given.resume !== null
+          ? { resume: requireText(given.resume, 'resume') }
+          : {}),
       },
       // The input's NAME becomes the file's name on the server's disk, and
       // ffmpeg reads the container off the extension — so the caller names the
@@ -2413,6 +2467,40 @@ export class CrucibleClient {
  * named refusal for a person, so an orchestrator that omits the key is refused
  * by name rather than read as managing nothing.
  */
+/** One journal row of `GET /v1/resumable` (2026-09-27). */
+function readResumable(body: Json): Resumable {
+  const where = 'resumable';
+  const model = optObject(body, 'model', where);
+  const inputs = optArray(body, 'inputs', where) ?? [];
+  return {
+    resumeId: str(body, 'resume_id', where),
+    jobType: str(body, 'job_type', where),
+    model: {
+      id: model === null ? null : optStr(model, 'id', `${where}.model`),
+      revision: model === null ? null : optStr(model, 'revision', `${where}.model`),
+    },
+    formatVersion: optNum(body, 'format_version', where),
+    inputs: inputs.map((raw, index) => {
+      const input = asObject(raw, `${where}.inputs[${index}]`);
+      return {
+        name: str(input, 'name', `${where}.inputs[${index}]`),
+        sha256: str(input, 'sha256', `${where}.inputs[${index}]`),
+        bytes: num(input, 'bytes', `${where}.inputs[${index}]`),
+      };
+    }),
+    params: optObject(body, 'params', where),
+    unitsDone: optNum(body, 'units_done', where) ?? 0,
+    unitsTotal: optNum(body, 'units_total', where),
+    progress: optStr(body, 'progress', where),
+    created: optStr(body, 'created', where),
+    lastSaved: optStr(body, 'last_saved', where),
+    expiresAt: optStr(body, 'expires_at', where),
+    jobId: optStr(body, 'job_id', where),
+    lastJobId: optStr(body, 'last_job_id', where),
+    state: str(body, 'state', where),
+  };
+}
+
 function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'> {
   if (!('role' in body)) {
     return { role: 'engine', managedBy: null, engine: null };

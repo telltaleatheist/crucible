@@ -117,7 +117,7 @@ crucible api pairing-decide --id … --code … --allow|--deny
 ```
 crucible api job submit --type <t> [--model <m>] [--params <json|@file>]
                         [--input NAME=PATH]... [--input-blob NAME=BLOB]...
-                        [--follow] [--artifacts-dir DIR]
+                        [--resume RESUME_ID] [--follow] [--artifacts-dir DIR]
 crucible api job get <job-id>
 crucible api job events <job-id> [--since <event-id>]
 crucible api job cancel <job-id>
@@ -139,6 +139,20 @@ is audio.
 `--artifacts-dir` **requires `--follow`** and is refused without it
 (`artifacts_need_follow`). Downloading artifacts means waiting, and a flag that
 silently decides whether a command blocks for twenty minutes is a surprise.
+
+### Resumable jobs — the journals (2026-09-27)
+
+```
+crucible api resumable list                    → {"resumable": [...]}, newest first
+crucible api resumable get <resume-id>
+crucible api resumable discard <resume-id>     refused resume_in_use while a job writes it
+```
+
+A job type that keeps a journal (`asr` on Qwen3-ASR, for now) answers
+`resume_id` beside `job_id`. If the job fails, is cancelled or the server stops
+under it, submit the SAME job again with `--resume <resume-id>` (it is
+`params.resume`): the finished pieces are read back instead of redone. Without
+`--resume` a job always starts fresh. docs/RESUMABLE-JOBS.md is the contract.
 
 ### Tasks — work done *to* the server
 

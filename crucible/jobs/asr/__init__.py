@@ -147,6 +147,7 @@ from ...errors import ApiError, JobError
 # is two names for one set of weights, which is the thing it exists to stop.
 from ...manifests import fingerprint
 from ..align import QWEN3_LANGUAGES
+from ...journal import Identity
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from . import qwen, speechonly
 
@@ -404,6 +405,13 @@ class AsrParams(BaseModel):
     speech_threshold: float | None = None
     speech_pad_s: float | None = None
     speech_min_gap_s: float | None = None
+    #: THE RESUME FLAG (Owen, 2026-09-27: *"if the user doesnt send the resume
+    #: flag then it starts fresh. if they do send a resume flag, it continues
+    #: from where they left off"*). The `resume_id` a Qwen3-ASR job answered
+    #: with, or one `GET /v1/resumable` lists; None starts fresh with a new
+    #: journal. Whisper keeps no journal yet and refuses it as
+    #: `resume_unsupported`. docs/RESUMABLE-JOBS.md.
+    resume: StrictStr | None = None
 
     @field_validator("speech_threshold")
     @classmethod
@@ -1048,6 +1056,18 @@ class AsrJobType:
         """
         _, spec = self._spec_for(model_id)
         engine = spec.engine
+        if params.resume is not None and engine not in QWEN_ASR_ENGINES:
+            # 2026-09-27: the Qwen3-ASR path is the journal's first job type;
+            # whisper's is not on it yet, and a resume it ignored would re-run
+            # the whole book while the caller believed it was continuing.
+            raise ApiError(
+                400,
+                "resume_unsupported",
+                f"{model_id!r} is whisper ({engine!r}), which keeps no resume "
+                "journal yet, so there is nothing to resume; send the job without "
+                "resume to transcribe from the start",
+                {"type": JOB_TYPE, "engine": engine, "resume": params.resume},
+            )
         if engine in ENGINES_WITHOUT_VAD and params.vad_filter:
             raise ApiError(
                 400,
@@ -1134,6 +1154,56 @@ class AsrJobType:
             # engine holds is not memory this job can have.
         )
 
+    def journal_identity(self, model: str | None, params: dict[str, Any]) -> Identity | None:
+        """What a Qwen3-ASR job's journal is the work OF; None for whisper.
+
+        docs/RESUMABLE-JOBS.md. Asked by `POST /v1/jobs` after `preflight`, so
+        the params are valid and the model runs here. The params recorded are
+        the ones that change what a piece's text or word times ARE, each
+        RESOLVED to the value the run uses, so a caller that sent `piece_s:
+        null` and one that sent `piece_s: 30` are the same work: the engine
+        and the dtype it runs at on this card, the language, the context, word
+        timestamps, the piece length and overlap, and speech_only with its
+        three settings and the detector's pin; and the aligner's id and
+        revision beside the model's own. NOT recorded: `resume` itself, and
+        the width the engine starts at (`serving_width`), which is how many
+        pieces go at once and not what any piece says.
+        """
+        if model is None:
+            return None
+        checked = _params(params)
+        _, spec = self._spec_for(model)
+        if spec.engine not in QWEN_ASR_ENGINES:
+            return None
+        backend_kind = self._backend.kind
+        aligner: dict[str, Any] | None = None
+        if checked.word_timestamps:
+            aligner_manifest, aligner_spec = qwen.aligner_spec(spec, backend_kind)
+            aligner = {"id": aligner_manifest.id, "revision": aligner_spec.revision}
+        speech = checked.speech_settings(Path("silero_vad"))
+        if speech is not None:
+            # The detector by its pin, never by where this host keeps it.
+            speech = {key: value for key, value in speech.items() if key != "weights"}
+        return Identity(
+            job_type=JOB_TYPE,
+            model=model,
+            revision=spec.revision,
+            format_version=qwen.JOURNAL_FORMAT_VERSION,
+            params={
+                "engine": spec.engine,
+                "dtype": qwen.run_dtype_on(self._config, self._backend, spec),
+                "language": checked.language,
+                "context": checked.context,
+                "word_timestamps": checked.word_timestamps,
+                "vad_filter": checked.vad_filter,
+                "piece_s": checked.piece_seconds(),
+                "overlap_s": checked.overlap_seconds(),
+                "speech_only": checked.speech_only,
+                "speech": speech,
+                "aligner": aligner,
+            },
+        )
+
     # ------------------------------------------------------------------ run
 
     def run(self, job: Job, ctx: JobContext) -> None:
@@ -1197,6 +1267,11 @@ class AsrJobType:
                 overlap_s=params.overlap_seconds(),
                 width=self._width(manifest, spec, params),
                 speech=speech,
+                # Every piece's text and word times are written here as they
+                # land; with `resume`, what an earlier job finished is read
+                # back instead of redone (docs/RESUMABLE-JOBS.md).
+                journal=ctx.journal,
+                resumed=ctx.resumed,
             ).run()
         else:
             document = self._whisper(

@@ -44,6 +44,7 @@ from typing import Any
 
 from .. import VERSION
 from ..errors import ApiError, JobCancelled, JobError
+from ..journal import Journals
 from .base import (
     CANCELLED,
     DONE,
@@ -217,6 +218,20 @@ class JobStore:
         #: None is a store with no server around it: `crucible doctor` and the
         #: admission unit tests build one, and neither has a card to clear.
         self._settlement: Any | None = None
+        #: THE RESUME JOURNALS (Owen, 2026-09-27: *"we should definitely be
+        #: writing work to disk, so if something fails, we dont lose
+        #: everything"*; `crucible/journal.py`). Under the home, not under
+        #: `jobs/`, because `reap` deletes a job's directory and a journal must
+        #: outlive every job that writes it. Owned here so the one collector
+        #: (`reap`) takes both, and so the lane records how each writer ended.
+        #: A store built with no home around it (`crucible doctor`, a bare
+        #: unit-test config) keeps no journals rather than guessing a place.
+        home = getattr(config, "home", None)
+        self._journals = Journals(
+            None if home is None else Path(home) / "journals",
+            lambda: float(self._config.retention_days),
+            self._live_state,
+        )
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -256,6 +271,22 @@ class JobStore:
     @property
     def registry(self) -> dict[str, JobType]:
         return self._registry
+
+    @property
+    def journals(self) -> Journals:
+        return self._journals
+
+    def _live_state(self, job_id: str) -> str | None:
+        """`queued` or `running` for a job this lane holds, else None.
+
+        What a journal's listing asks about its writer: a writer recorded
+        `running` whose job this process is not running was running under a
+        server that stopped, and is `interrupted` (`Journals.writer_state`).
+        """
+        job = self._jobs.get(job_id)
+        if job is None or job.status not in (QUEUED, RUNNING):
+            return None
+        return job.status
 
     @property
     def queue_depth(self) -> int:
@@ -660,6 +691,16 @@ class JobStore:
             if record is not None:
                 taken.append(record)
         taken.extend(self._reap_orphan_directories(now, horizon))
+        # THE JOURNALS, ON THE SAME TICK AND BY THE SAME WINDOW (2026-09-27,
+        # `crucible/journal.py`): one collector, not two. Not in `taken`, which
+        # is job tombstones; a journal leaves its own under `journals/_gone/`.
+        try:
+            self._journals.reap(now)
+        except Exception as exc:
+            print(
+                f"crucible: the journal reaper failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
         return taken
 
     def _age_seconds(self, job: Job, now: datetime) -> float:
@@ -790,6 +831,12 @@ class JobStore:
         for waiter in self._subscribers.get(job.id, []):
             waiter.set()
 
+    def attach_journal(self, job: Job, resume_id: str, *, resumed: bool) -> None:
+        """Name the journal this admitted job writes, on the record and on disk."""
+        job.resume_id = resume_id
+        job.resumed = resumed
+        self._persist(job)
+
     def record_chunks_total(self, job: Job, total: int) -> None:
         """`JobContext.expect_chunks`: the denominator, on the record and on disk."""
         job.chunks_total = int(total)
@@ -854,6 +901,11 @@ class JobStore:
         job carrying the chunks whose artifacts are missing. There is no resume
         endpoint to build and no half-run state machine to get wrong.
 
+        STILL TRUE WITH THE JOURNAL (2026-09-27, `crucible/journal.py`): a job
+        type that keeps one has its finished units on disk, and continuing them
+        is again a NEW job, sent by the client with `params.resume`. A restart
+        only records, on the journal, that its writer was interrupted.
+
         `events` are NOT restored either. They are a live stream's backlog, and
         a client reconnecting to a job that ended before this process existed
         wants the record, not a replay of a run it already missed.
@@ -885,6 +937,9 @@ class JobStore:
                 continue
             self._jobs[job.id] = job
             recovered.append(job.id)
+            if job.resume_id is not None and job.status == INTERRUPTED:
+                # Its journal still says `running`; say how it really ended.
+                self._journals.ended(job.resume_id, job.id, INTERRUPTED)
         if recovered:
             print(
                 f"crucible: recovered {len(recovered)} job(s) from disk; "
@@ -934,6 +989,8 @@ class JobStore:
             # between steps, and a deploy must not take a chain's files.
             held_by=document.get("held_by"),
             held_since=document.get("held_since"),
+            resume_id=document.get("resume_id"),
+            resumed=bool(document.get("resumed")),
         )
         return job
 
@@ -1012,6 +1069,8 @@ class JobStore:
             "done_extra": job.done_extra,
             "held_by": job.held_by,
             "held_since": job.held_since,
+            "resume_id": job.resume_id,
+            "resumed": job.resumed,
         }
 
     def provenance(
@@ -1161,6 +1220,8 @@ class JobStore:
         # `_running_id` is already this job's: the lane set it in the same step
         # that took the job off `_pending` (`_run_lane`, `_lane_lock`).
         self.append_event(job, "progress", {"fraction": 0.0, "message": "started"})
+        if job.resume_id is not None:
+            self._journal_started(job)
         loop = asyncio.get_running_loop()
         ctx = JobContext(self, job, loop)
         status = DONE
@@ -1193,6 +1254,47 @@ class JobStore:
         finally:
             self._finish(job, status, error)
             self._running_id = None
+
+    def _journal_started(self, job: Job) -> None:
+        """Mark this job as its journal's writer, and say what it resumes.
+
+        THE EVENT SAYS WHAT WAS RESUMED (2026-09-27): a resumed job's stream
+        carries `resumed: 2,400 of 3,015 pieces done ...`, read off the
+        journal's own manifest, before the job type skips anything. A fresh
+        job says nothing here. A journal that will not open is said, not
+        raised: the job type opens it again and fails by name if it must.
+        """
+        assert job.resume_id is not None
+        try:
+            journal = self._journals.open(job.resume_id)
+            before = journal.manifest
+            journal.set_writer(job.id, RUNNING, resumed=job.resumed)
+        except Exception as exc:
+            self.append_event(
+                job,
+                "note",
+                {"message": f"could not open journal {job.resume_id}: "
+                            f"{type(exc).__name__}: {exc}"},
+            )
+            return
+        if not job.resumed:
+            return
+        done = before.get("units_done") or 0
+        total = before.get("units_total")
+        sentence = before.get("progress") or f"{done:,} unit(s) done"
+        previous = [row.get("job_id") for row in before.get("jobs") or []]
+        self.append_event(
+            job,
+            "note",
+            {
+                "message": f"resumed: {sentence}, from journal {job.resume_id} "
+                f"(last saved {before.get('last_saved')})",
+                "resume_id": job.resume_id,
+                "resumed_from": previous[-2] if len(previous) >= 2 else None,
+                "units_done": done,
+                "units_total": total,
+            },
+        )
 
     async def _settle(self, job: Job, outcome: str) -> None:
         """Clear the card if this job was the last thing holding it.
@@ -1274,6 +1376,8 @@ class JobStore:
             # Nothing further can be told to the client, whose stream will end
             # when it disconnects. The lane lives, which is the point.
             pass
+        if job.resume_id is not None:
+            self._journals.ended(job.resume_id, job.id, FAILED)
         self._running_id = None
 
     def _finish(self, job: Job, status: str, error: dict[str, str] | None = None) -> None:
@@ -1281,6 +1385,10 @@ class JobStore:
         job.finished = utcnow()
         job.error = error
         self._persist(job)
+        if job.resume_id is not None:
+            # The journal outlives this job whatever the outcome, and records
+            # which job last wrote it and how that ended (`GET /v1/resumable`).
+            self._journals.ended(job.resume_id, job.id, status)
         if status == DONE:
             job.progress = 1.0
             self._restamp_provenance(job)

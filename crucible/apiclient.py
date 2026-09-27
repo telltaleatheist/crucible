@@ -974,6 +974,16 @@ def cmd_job_submit(connection: Connection, args: argparse.Namespace) -> int:
                 f"{type(params).__name__}"
             )
         body["params"] = params
+    if args.resume is not None:
+        # The flag and not a second spelling: it is `params.resume`, and a
+        # --params that already names a different one is a contradiction.
+        params = body.setdefault("params", {})
+        if params.get("resume") not in (None, args.resume):
+            raise ClientRefusal(
+                f"resume_given_twice: --resume {args.resume} and --params "
+                f"resume {params['resume']!r} name two journals; send one"
+            )
+        params["resume"] = args.resume
 
     inputs: dict[str, dict[str, str]] = {}
     for raw in args.input:
@@ -1061,6 +1071,17 @@ def cmd_job_artifact(connection: Connection, args: argparse.Namespace) -> int:
     )
     if destination is not None:
         emit({"name": args.name, "path": str(destination), "bytes": written})
+    return EXIT_OK
+
+
+def cmd_resumable_get(connection: Connection, args: argparse.Namespace) -> int:
+    emit(call(connection, "GET", f"/v1/resumable/{args.resume_id}"))
+    return EXIT_OK
+
+
+def cmd_resumable_discard(connection: Connection, args: argparse.Namespace) -> int:
+    """`DELETE /v1/resumable/{id}` — the journal and its finished work, gone."""
+    emit(call(connection, "DELETE", f"/v1/resumable/{args.resume_id}"))
     return EXIT_OK
 
 
@@ -1778,6 +1799,11 @@ def add_parser(subparsers: Any) -> None:
         "--input-blob", action="append", default=[], metavar="NAME=BLOB_ID",
         help="give the job an already-uploaded blob as input NAME; repeatable",
     )
+    submit.add_argument(
+        "--resume", default=None, metavar="RESUME_ID",
+        help="continue the journal a job answered with (params.resume); without "
+             "it the job starts fresh. `crucible api resumable list` shows them",
+    )
     submit.add_argument("--follow", action="store_true", help="watch the event stream until the job ends")
     submit.add_argument(
         "--artifacts-dir", default=None,
@@ -1809,6 +1835,23 @@ def add_parser(subparsers: Any) -> None:
         help="where to write it; `-` (the default) means stdout",
     )
     job_artifact.set_defaults(api_func=cmd_job_artifact)
+
+    # ---- resume journals (Owen, 2026-09-27: "maybe we could even have a call
+    # that shows what's available to resume?")
+    resumable = verb("resumable", "the resume journals: what can be resumed, and discarding one")
+    resumable_verbs = resumable.add_subparsers(dest="resumable_command", required=True)
+    resumable_list = resumable_verbs.add_parser(
+        "list", help="GET /v1/resumable — every journal, newest first"
+    )
+    resumable_list.set_defaults(api_func=cmd_get("/v1/resumable"))
+    resumable_get = resumable_verbs.add_parser("get", help="GET /v1/resumable/{id}")
+    resumable_get.add_argument("resume_id")
+    resumable_get.set_defaults(api_func=cmd_resumable_get)
+    resumable_discard = resumable_verbs.add_parser(
+        "discard", help="DELETE /v1/resumable/{id} — refused while a job writes it"
+    )
+    resumable_discard.add_argument("resume_id")
+    resumable_discard.set_defaults(api_func=cmd_resumable_discard)
 
     # ---- tasks
     task = verb("task", "work done TO the server: pulls, installs, engine restarts")

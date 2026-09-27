@@ -687,3 +687,15 @@ run has to watch.
   1.5 s of lead-in hearing a word that sample zero lost. Here the pad is not the whole
   lead-in, because a piece cut at a join still gets `overlap_s` of real audio before
   its core.
+
+## 12. Resumable: every piece on disk as it lands (Owen, 2026-09-27)
+
+*"we should definitely be writing work to disk, so if something fails, we dont
+lose everything."* A Qwen3-ASR job is the journal's first job type and its
+reference: every piece's plan, decoded text, word times and verdict (landed,
+silent, re-decoded) is written to `<CRUCIBLE_HOME>/journals/<resume_id>/` the
+moment it exists, and a job sent `params.resume` continues from it, checked
+against the same audio, model revision and params, with a transcript that
+comes out byte-identical. The submit answers `resume_id`; `GET /v1/resumable`
+lists what can be resumed. Whisper refuses `resume` as `resume_unsupported` for
+now. docs/RESUMABLE-JOBS.md is the contract.
