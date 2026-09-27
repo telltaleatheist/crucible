@@ -60,7 +60,7 @@ from typing import Any, Callable
 
 from . import denoisemodels, lineup, llamacpp, rvcbase, weights
 from .alignmodels import load_all_align_manifests
-from .asrmodels import load_all_asr_manifests, retired_asr_id_note
+from .asrmodels import load_all_asr_manifests
 from .backend import Backend
 from .config import Config
 from .errors import ApiError, CrucibleError
@@ -570,10 +570,7 @@ def stranded_weights(config: Config) -> list[dict[str, Any]]:
     and the operator decides (`weights.stranded` says why nothing deletes).
     What lands here is a model this build removed or no longer declares for a
     backend — since 2026-09-24 most visibly the whisper sizes Owen's asr lineup
-    ruling retired — and any renamed id whose bytes `jobs/asr`'s
-    `adopt_renamed_asr_weights` could not prove were the new id's. `note` is
-    the retirement sentence where this build has one (`retired_asr_id_note`),
-    and null for anything else.
+    ruling retired.
     """
     # AN ALIAS OWNS NO FOLDER OF ITS OWN (2026-09-24). Its weights are its
     # base's folder (`weights._store_id`), so a folder under an ALIAS's id is a
@@ -584,19 +581,17 @@ def stranded_weights(config: Config) -> list[dict[str, Any]]:
         for manifest in (*load_all_manifests().values(), *load_all_asr_manifests().values())
         if getattr(manifest, "weights_of", None) is not None
     }
-    rows: list[dict[str, Any]] = []
-    for entry in weights.stranded(
-        config,
-        ModelManifest.weights_family,
-        tuple(BACKEND_ENGINES),
-        lambda subject_id: (
-            () if subject_id in aliases else backends_declaring("model", subject_id)
-        ),
-    ):
-        row = entry.to_dict()
-        row["note"] = retired_asr_id_note(entry.subject_id)
-        rows.append(row)
-    return rows
+    return [
+        entry.to_dict()
+        for entry in weights.stranded(
+            config,
+            ModelManifest.weights_family,
+            tuple(BACKEND_ENGINES),
+            lambda subject_id: (
+                () if subject_id in aliases else backends_declaring("model", subject_id)
+            ),
+        )
+    ]
 
 
 def find(

@@ -101,9 +101,7 @@ def test_every_model_is_one_id_on_both_backends_with_each_backends_engine() -> N
 
 
 def test_the_merged_whispers_kept_every_pin_they_had() -> None:
-    """The four old manifests' pins, verbatim: a rename moves no bytes, which is
-    also what lets `adopt_renamed_asr_weights` move a pulled copy rather than
-    download it again."""
+    """The four old manifests' pins, verbatim: a rename moves no bytes."""
     expected = {
         ("whisper-large-v3-turbo", "cuda-linux"): (
             "dropbox-dash/faster-whisper-large-v3-turbo",

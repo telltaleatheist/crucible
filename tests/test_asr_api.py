@@ -400,7 +400,7 @@ def test_somebody_else_on_the_card_refuses_by_name(
         ("mlx-whisper-tiny", "whisper-tiny"),
     ],
 )
-def test_a_renamed_whisper_id_is_unknown_and_names_its_replacement(
+def test_a_renamed_whisper_id_is_unknown(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -409,9 +409,7 @@ def test_a_renamed_whisper_id_is_unknown_and_names_its_replacement(
     new_id: str,
 ) -> None:
     """Owen, 2026-09-24: the old backend-prefixed ids are GONE, not aliases.
-    Refused `unknown_model` on BOTH machines — never quietly run as the new id —
-    and the sentence names the id that replaced it, so a client fixes its call
-    in one edit."""
+    Refused `unknown_model` on BOTH machines — never quietly run as the new id."""
     monkeypatch.setattr(
         accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB)
     )
@@ -421,8 +419,6 @@ def test_a_renamed_whisper_id_is_unknown_and_names_its_replacement(
     error = response.json()["error"]
     assert error["code"] == "unknown_model"
     assert error["details"] == {"model": old_id, "offered": ALL_MODELS}
-    assert f"renamed {new_id!r} on 2026-09-24" in error["message"]
-    assert "not an alias" in error["message"]
 
 
 @pytest.mark.parametrize(
@@ -440,16 +436,14 @@ def test_a_renamed_whisper_id_is_unknown_and_names_its_replacement(
         "mlx-whisper-distil-large-v3",
     ],
 )
-def test_a_retired_whisper_size_is_unknown_and_says_it_was_retired(
+def test_a_retired_whisper_size_is_unknown(
     asr_client: TestClient, auth: dict[str, str], old_id: str
 ) -> None:
-    """The five sizes Owen removed, on both engines: no replacement is named,
-    because none was chosen for them; the three that exist are."""
+    """The five sizes Owen removed, on both engines."""
     response = submit(asr_client, auth, model=old_id)
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "unknown_model"
-    assert f"{old_id!r} was retired on 2026-09-24" in error["message"]
     assert error["details"]["offered"] == ALL_MODELS
 
 

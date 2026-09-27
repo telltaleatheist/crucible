@@ -595,15 +595,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # connect quietly stopped working.
         print(f"crucible: pairing file NOT written: {exc}", file=sys.stderr)
 
-    # WEIGHTS PULLED UNDER A RENAMED ASR ID MOVE TO THE NEW ONE, before the
-    # first request can ask whether they are installed (Owen's asr lineup
-    # ruling, 2026-09-24; `jobs/asr.adopt_renamed_asr_weights`). Every line is
-    # printed, moved or left, so the log says what happened to the bytes.
-    from .jobs.asr import adopt_renamed_asr_weights
-
-    for line in adopt_renamed_asr_weights(config):
-        print(f"crucible: asr weights: {line}", file=sys.stderr)
-
     from .api import create_app  # imported here so `init`/`token` stay light
 
     app = create_app(config, backend)
@@ -3218,7 +3209,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 mark = "NOT READY"
             print(f"job {entry['name']}: {mark} — {entry['detail']}")
         for entry in report["stranded_weights"] or ():
-            why = entry["note"] or (
+            why = (
                 f"no manifest in this build declares {entry['id']!r} on "
                 f"{entry['backend']}"
             )

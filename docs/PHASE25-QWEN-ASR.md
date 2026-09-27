@@ -487,33 +487,16 @@ No asr backend is Windows, so there was no `llama-windows` block to keep.
 
 **The old ids are gone, not aliases.** A request naming any of the fourteen removed
 ids is `400 unknown_model` with `details: {model, offered}`, `offered` being the
-three. For the four renamed ids the sentence names the replacement (*"'mlx-whisper-tiny'
-was renamed 'whisper-tiny' on 2026-09-24, one id on every backend; the old id is not an
-alias"*); for the ten retired ones it says they were retired and names the three
-(`RENAMED_ASR_IDS`, `RETIRED_ASR_IDS`, reaching `jobs.resolve_model` through the job
-type's `retired_model_note`).
+ids this build ships.
 
 **Weights already on disk.** The store is `~/.crucible/models/<id>/<backend>/`, so a
-rename strands a pull. Two halves:
+removed id strands a pull.
 
-- **Renamed ids are MOVED, once, at server start.** `crucible serve` calls
-  `jobs/asr.adopt_renamed_asr_weights` before the app is built; the store half is
-  `weights.adopt_renamed`. A directory is moved only when its stamp names exactly the
-  repo and revision the new id's block pins for that backend — which the four renames
-  do, since no pin changed — so a Mac that had pulled `mlx-whisper-large-v3-turbo`
-  reads `whisper-large-v3-turbo` as installed with no 1.6 GB download. It is a rename
-  on one filesystem, not a copy; the stamp's `id` is rewritten and `renamed_from`
-  added. Every directory it finds is reported on the server's stderr, moved or left
-  and why (another pin, no stamp, the new id already pulled, a move that failed). A
-  failed move is weather: reported, tried again at the next start, and never a
-  refusal to serve.
 - **Everything nothing owns is REPORTED, never deleted** (`catalog.stranded_weights`
   over `weights.stranded`): every `models/<id>/<backend>` directory this build declares
-  no manifest block for, with its size, its path and the retirement sentence where
-  there is one. `crucible doctor` prints each as a note naming the directory to delete,
+  no manifest block for, with its size and its path. `crucible doctor` prints each as a note naming the directory to delete,
   and `doctor --json` carries them as `stranded_weights`; they do not make a server
-  unhealthy. That covers the five retired sizes on both engines, a renamed id the move
-  had to leave, and orphans older than this ruling (the 8-bit 27B's cuda-linux folder,
+  unhealthy. That covers the five retired sizes and the renamed ids on both engines, and orphans older than this ruling (the 8-bit 27B's cuda-linux folder,
   2026-09-23).
 
 A config's `[local_models] asr = "<old id>"`, if any app ever wrote one, is not

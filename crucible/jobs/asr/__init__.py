@@ -137,9 +137,7 @@ from ...asrmodels import (
     QWEN_PIECE_MAX_SECONDS,
     AsrManifest,
     AsrManifestError,
-    RENAMED_ASR_IDS,
     load_all_asr_manifests,
-    retired_asr_id_note,
 )
 from ...config import Config
 from ...errors import ApiError, JobError
@@ -601,36 +599,6 @@ class AsrParams(BaseModel):
 # ------------------------------------------------------------------ helpers
 
 
-def adopt_renamed_asr_weights(config: Config) -> list[str]:
-    """Move weights pulled under a RENAMED asr id into the new id's folder.
-
-    Run once per server start, before anything is served (`crucible serve`).
-    Owen's lineup ruling of 2026-09-24 renamed four ids (`RENAMED_ASR_IDS`) and
-    the store is laid out by id, so without this a Mac that had pulled
-    `mlx-whisper-large-v3-turbo` would read `whisper-large-v3-turbo` as not
-    installed and download the same 1.6 GB again beside the old copy. The
-    store moves a directory only when its stamp names the new block's exact
-    pin (`weights.adopt_renamed`), so this never puts different bytes under an
-    id. Idempotent: once moved there is nothing under the old id to find.
-
-    A rename whose target this build does not ship is a defect in THIS build,
-    not weather, and is refused by name.
-    """
-    manifests = load_all_asr_manifests()
-    lines: list[str] = []
-    for old_id, new_id in sorted(RENAMED_ASR_IDS.items()):
-        manifest = manifests.get(new_id)
-        if manifest is None:
-            raise AsrManifestError(
-                f"RENAMED_ASR_IDS maps {old_id!r} to {new_id!r}, and this build "
-                f"ships no such asr manifest (it ships {sorted(manifests)})"
-            )
-        lines.extend(
-            weights.adopt_renamed(config, old_id, manifest, manifest.backends)
-        )
-    return lines
-
-
 def _manifests() -> dict[str, AsrManifest]:
     try:
         return load_all_asr_manifests()
@@ -646,15 +614,11 @@ def _known(model_id: str) -> AsrManifest:
     manifests = _manifests()
     manifest = manifests.get(model_id)
     if manifest is None:
-        # A removed id is refused like any other unknown id — it is NOT an
-        # alias (Owen, 2026-09-24) — and the sentence says what replaced it,
-        # so a client reading the refusal can fix its call in one edit.
-        note = retired_asr_id_note(model_id)
         raise ApiError(
             400,
             "unknown_model",
             f"no ASR manifest for model {model_id!r}; this build ships "
-            f"{sorted(manifests)}" + ("" if note is None else f". {note}"),
+            f"{sorted(manifests)}",
             {"model": model_id, "offered": sorted(manifests)},
         )
     return manifest
@@ -819,15 +783,6 @@ class AsrJobType:
                 )
             )
         return rows
-
-    def retired_model_note(self, model: str) -> str | None:
-        """What replaced an asr id this build removed, for `unknown_model`.
-
-        Read by `jobs.resolve_model` when a request names an id this type does
-        not serve. Never resolves anything: the old ids are not aliases (Owen,
-        2026-09-24), and a request naming one is refused either way.
-        """
-        return retired_asr_id_note(model)
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         """The `model` block of a transcript's provenance sidecar.
