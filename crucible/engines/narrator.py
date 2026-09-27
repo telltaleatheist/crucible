@@ -93,10 +93,9 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #:                       chose. STATED FROM THE ENV SPEC (`jobenv.tts_env`),
 #:                       because the stack is a property of what the recipe
 #:                       installed, not of the voice.
-#:   HIGGS_ENV           the prefix the SERVER runs out of. narrator's packaged
-#:                       `serve_higgs_v3.sh` builds CUDA_HOME, PATH,
-#:                       LD_LIBRARY_PATH and `$HIGGS_ENV/bin/vllm-omni` from it
-#:                       and refuses (exit 5) when it is unset. For Crucible it
+#:   HIGGS_SGL_ENV       the prefix the SERVER runs out of. narrator's packaged
+#:                       `serve_higgs_sgl.sh` builds CUDA_HOME, PATH and
+#:                       LD_LIBRARY_PATH from it. For Crucible it
 #:                       is THE TTS ENV ITSELF — `higgs_env_prefix()` below,
 #:                       which derives it from the interpreter Crucible was
 #:                       handed and confirms it by reading what is on disk
@@ -110,43 +109,13 @@ ENGINE_VARIABLE = "NARRATOR_ENGINE"
 #: below, at `MLX_TIERS`, not here: the three above are the served arm's
 #: and this one is `mlx-darwin`'s, where narrator starts no server and batches
 #: in process. It is not stated from the voice manifest — `max_num_seqs` is a
-#: vLLM stage-0 admission width measured on a 24 GB card and means nothing to a
+#: served admission width measured on a 24 GB card and means nothing to a
 #: Metal backend — but from a table of widths measured on THIS arm.
 #:
 #: NARRATOR_HIGGS3_SERVE_SCRIPT is deliberately NOT here. narrator ships its own
 #: launcher as package data as of BookForge 0eeb0267 and runs it when no
 #: override is named; an operator's path into somebody's checkout is exactly
 #: what that commit removed the need for.
-#:
-#: THE LAUNCHER'S OTHER SIX KNOBS ARE UNSET HERE, AND THAT IS INERT RATHER THAN
-#: LOST — but it is inert only because two files agree, and an agreement nothing
-#: compares is the shape `docs/ARCHITECTURE.md` was written about. So the
-#: comparison is written down. BookForge states each of these from its catalog
-#: (`electron/data/higgs-models.json`'s shared `serving` block, through
-#: `higgsSpawnEnv`); Crucible states none of them and takes the default in
-#: narrator's own `engine/higgs/launch/serve_higgs_v3.sh`. The two columns are
-#: the same numbers, and they are the same numbers ON PURPOSE: that script's
-#: defaults were set to the measured catalog values on 2026-09-13 precisely so
-#: a caller who has only read the file is correct.
-#:
-#:     variable                  launcher default         catalog value
-#:     HIGGS_HOST                127.0.0.1                127.0.0.1
-#:     HIGGS_PORT                8095                     8095
-#:     HIGGS_GPU_MEM_UTIL        0.35                     0.35
-#:     HIGGS_CODEC_GPU_MEM_UTIL  0.10                     0.1
-#:     HIGGS_MAX_MODEL_LEN       8192                     8192
-#:     HIGGS_DEPLOY_CONFIG       the packaged             higgs_default_
-#:                               higgs_default_           frames7500.yaml
-#:                               frames7500.yaml          (the same bytes)
-#:
-#: THE LAST ROW IS THE ONE THAT WOULD HAVE HURT. Unset meant "vllm-omni's own
-#: auto-discovered profile" until 2026-09-13, and that profile caps stage 0 at
-#: 2048 frames = 81.92 s — every long chunk cut mid-sentence, with the request
-#: reporting success. It is now `${VAR-<sibling>}` (the `-` form, not `:-`), so
-#: silence means the certified frames-7500 profile and the auto one stays
-#: reachable as the empty string. A reader who finds this table stale should
-#: fix the table, not add six variables: the launcher is the owner, and a
-#: second statement of a number is how the two come to disagree.
 #:
 #: NARRATOR_HIGGS_VOICES (and, on the MLX arm, NARRATOR_HIGGS3_MLX_MODEL) is
 #: the fourth thing a `higgs-v3` worker needs, ON BOTH ARMS, and it is not a
@@ -173,49 +142,31 @@ MEM_FRACTION_VARIABLE = "HIGGS_SGL_MEM_FRACTION"
 #: reader under. Stated here so the two sides cannot pick different spellings.
 CONTEXT_LENGTH_VARIABLE = "HIGGS_CONTEXT_LENGTH"
 
-#: THE ENV PREFIX VARIABLE IS THE STACK'S, NOT ONE NAME FOR BOTH — and each
-#: launcher reads ONLY its own.
+#: THE ENV PREFIX VARIABLE IS THE STACK'S. `serve_higgs_sgl.sh` builds
+#: CUDA_HOME, PATH and LD_LIBRARY_PATH out of `HIGGS_SGL_ENV` — and DEFAULTS IT
+#: to `$HOME/anaconda3/envs/sglomni` rather than refusing, because the script is
+#: also run by hand on the machine it was transcribed from. Leaving it unset
+#: sends the launcher looking for `sgl-omni` inside a conda env that does not
+#: exist on a Crucible host — `exit 5`, several minutes after a load began,
+#: naming a directory nobody configured.
 #:
-#: `serve_higgs_v3.sh` builds CUDA_HOME, PATH, LD_LIBRARY_PATH and
-#: `$HIGGS_ENV/bin/vllm-omni` out of `HIGGS_ENV` and exits 5 when it is unset.
-#: `serve_higgs_sgl.sh` does the identical job out of `HIGGS_SGL_ENV` — and
-#: DEFAULTS IT to `$HOME/anaconda3/envs/sglomni` rather than refusing, because
-#: the script is also run by hand on the machine it was transcribed from.
-#:
-#: THAT DEFAULT IS WHY THIS IS A TABLE AND NOT A CONSTANT. Sending the SGLang
-#: launcher `HIGGS_ENV` would set a variable it never reads, leave
-#: `HIGGS_SGL_ENV` unset, and send it looking for `sgl-omni` inside a conda env
-#: that does not exist on a Crucible host — `exit 5`, several minutes after a
-#: load began, naming a directory nobody configured. BookForge's `higgsSpawnEnv`
-#: branches on exactly this and emits `HIGGS_SGL_ENV` + `NARRATOR_HIGGS_SGL_
-#: SERVE_SCRIPT` on one arm and `HIGGS_ENV` + `NARRATOR_HIGGS3_SERVE_SCRIPT` on
-#: the other, with the comment that nothing from the vllm-omni half comes along.
-#:
-#: The BINARY is per stack for the same reason: it is the most direct evidence
-#: on disk that a directory is the tree the stack was installed into, and the
-#: two stacks install different ones.
+#: The BINARY is the most direct evidence on disk that a directory is the tree
+#: the stack was installed into.
 STACK_ENV_PREFIX_VARIABLE: dict[str, str] = {
-    "vllm-omni": "HIGGS_ENV",
     "sglang-omni": "HIGGS_SGL_ENV",
 }
 STACK_LAUNCH_BINARY: dict[str, str] = {
-    "vllm-omni": "vllm-omni",
     "sglang-omni": "sgl-omni",
 }
 
-#: The vllm-omni arm's name, kept as a module constant because `crucible doctor`
-#: and the tests refer to it and because it is what `higgs_env_prefix`'s refusal
-#: says when no stack is in hand.
-ENV_PREFIX_VARIABLE = STACK_ENV_PREFIX_VARIABLE["vllm-omni"]
-
 
 def env_prefix_variable_for(serving_stack: str) -> str:
-    """`HIGGS_ENV` or `HIGGS_SGL_ENV`, or a refusal naming the stack.
+    """`HIGGS_SGL_ENV`, or a refusal naming the stack.
 
     No default. A stack this build does not know is a launcher whose variables
-    nobody here has read, and guessing one of the two would configure the wrong
-    server — or, on the SGLang arm, no server at all while its own hardcoded
-    conda default takes over.
+    nobody here has read, and guessing would configure the wrong server — or,
+    on the SGLang arm, no server at all while its own hardcoded conda default
+    takes over.
     """
     variable = STACK_ENV_PREFIX_VARIABLE.get(serving_stack)
     if variable is None:
@@ -474,18 +425,9 @@ CANCEL_GRACE_SECONDS = 120.0
 #: itself, which is minutes of weight reading before the `loaded` line.
 LOAD_SILENCE_TIMEOUT_SECONDS = 900.0
 
-#: The binary `serve_higgs_v3.sh` execs, relative to `$HIGGS_ENV`. The launcher
-#: also builds `$HIGGS_ENV/lib/python3.11/site-packages/nvidia/cu13` as
-#: CUDA_HOME and puts `$HIGGS_ENV/bin` on PATH — so the prefix is the tree the
-#: STACK is installed into, and this path is the most direct evidence on disk
-#: that a directory is that tree.
-#: The vllm-omni arm's, kept for callers with no stack in hand. The per-stack
-#: answer is `STACK_LAUNCH_BINARY`, which is what `higgs_env_prefix` reads.
-LAUNCH_BINARY = ("bin", STACK_LAUNCH_BINARY["vllm-omni"])
-
 
 def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
-    """`$HIGGS_ENV` / `$HIGGS_SGL_ENV` for a tts env, READ off the env.
+    """`$HIGGS_SGL_ENV` for a tts env, READ off the env.
 
     THE DEFECT THIS EXISTS FOR (live WSL server, 2026-09-14): every `tts` job
     failed at engine start with `HIGGS_ENV is the prefix its server runs out
@@ -497,8 +439,8 @@ def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
        builds the env with `sys.executable -m venv`, and a venv's `bin/python`
        is a SYMLINK to the interpreter it was built from — here the conda env
        the server itself runs in. Resolving it therefore lands on the BASE
-       interpreter's prefix, which is not the env Crucible installed vllm-omni
-       into. The prefix is where the env IS, so the symlink is not followed.
+       interpreter's prefix, which is not the env Crucible installed the
+       stack into. The prefix is where the env IS, so the symlink is not followed.
     2. **`pyvenv.cfg` was made the definition of a prefix.** A conda env has
        none (it has `conda-meta/`), and a downloaded python-build-standalone
        tree (`crucible/interpreter.py`) has neither — so the check refused
@@ -507,19 +449,15 @@ def higgs_env_prefix(python: Path, serving_stack: str) -> Path:
 
     What is read, in the order the evidence answers the launcher's question:
 
-    * `bin/<the stack's server>` — the file the script execs, `vllm-omni` or
-      `sgl-omni`. Definitive on all three layouts, and the only one that says
-      the STACK is here and not merely a python. It is the stack's OWN binary
-      since 2026-09-15: looking for vllm-omni inside an SGLang env would find
-      nothing and fall through to the weaker checks below, so the one piece of
-      evidence that actually distinguishes a stack tree from a bare venv would
-      never fire on the stack Owen renders on.
+    * `bin/<the stack's server>` — the file the script execs, `sgl-omni`.
+      Definitive on all three layouts, and the only one that says the STACK is
+      here and not merely a python.
     * `pyvenv.cfg` — a venv. Its own prefix, never its parent's.
     * `conda-meta/` — a conda env, which is its own prefix.
 
     Anything else is refused BY NAME here rather than at the end of a launch,
-    where it reads as `$HIGGS_ENV/bin/vllm-omni: No such file` — or, on the
-    SGLang arm, as a launcher quietly taking its own hardcoded conda default.
+    where it reads as a launcher quietly taking its own hardcoded conda
+    default.
     """
     variable = env_prefix_variable_for(serving_stack)
     binary = STACK_LAUNCH_BINARY[serving_stack]
@@ -730,7 +668,7 @@ class NarratorEngine(SubprocessEngine):
             )
         else:
             # Every other arm reads no `NARRATOR_HIGGS3_MLX_*` variable: the
-            # served arm renders through vllm-omni, and an engine that is not
+            # served arm renders through SGLang-Omni, and an engine that is not
             # `higgs-v3` owes its own set here (see `environment`) rather than
             # inheriting Higgs's vocabulary.
             if mlx_total_bytes is not None:
@@ -805,8 +743,8 @@ class NarratorEngine(SubprocessEngine):
         `mlx-darwin` narrator builds `HiggsV3MlxEngine` from
         `HiggsV3MlxConfig`, neither of which reads `HIGGS_STACK` or
         `HIGGS_MAX_NUM_SEQS` (the MLX `detect_backend()` returns 'mlx' off an
-        import), and there is no launch script for `HIGGS_ENV` to mean anything
-        to. Setting them there would be three levers read by nothing.
+        import), and there is no launch script for `HIGGS_SGL_ENV` to mean
+        anything to. Setting them there would be three levers read by nothing.
 
         THAT ARM HAS A WIDTH OF ITS OWN, and until 2026-09-15 this method left
         it unset. `NARRATOR_HIGGS3_MLX_BATCH` is what `HiggsV3MlxEngine` reads
@@ -846,16 +784,15 @@ class NarratorEngine(SubprocessEngine):
             assert self._serving_stack is not None
             assert self._max_num_seqs is not None
             environment[STACK_VARIABLE] = self._serving_stack
-            # THE STACK'S OWN NAME FOR ITS PREFIX. `HIGGS_ENV` on vllm-omni,
-            # `HIGGS_SGL_ENV` on SGLang-Omni — see `STACK_ENV_PREFIX_VARIABLE`
-            # for why sending the wrong one is worse than sending none.
+            # THE STACK'S OWN NAME FOR ITS PREFIX — see
+            # `STACK_ENV_PREFIX_VARIABLE`.
             environment[env_prefix_variable_for(self._serving_stack)] = str(
                 self._env_prefix
             )
             environment[MAX_NUM_SEQS_VARIABLE] = str(self._max_num_seqs)
         # THE TWO LEVERS THE MANIFEST MAY STATE, ON EITHER ARM (2026-09-19).
         # Outside the `_env_prefix` block above deliberately: `HIGGS_STACK`,
-        # `HIGGS_ENV` and `HIGGS_MAX_NUM_SEQS` are the SERVED arm's vocabulary
+        # `HIGGS_SGL_ENV` and `HIGGS_MAX_NUM_SEQS` are the SERVED arm's vocabulary
         # and mean nothing in process, but Owen ruled the same day that darwin
         # is to be configured the same way — "context limits and such" — so
         # these two are stated wherever the manifest states them and narrator
@@ -1041,15 +978,13 @@ class NarratorEngine(SubprocessEngine):
         such channel: its `_resolve_row` reads `item['voice']` and nothing else,
         so a rung is DROPPED IN SILENCE and take N renders at take 0.
 
-        ONE KEY FOR THE TWO FACTS, and the key was `itemSampling` for exactly
-        one day. A rung is (sampling deltas, SEED OFFSET): narrator seeded
+        ONE KEY FOR THE TWO FACTS. A rung is (sampling deltas, SEED OFFSET): narrator seeded
         chunk i at `config.seed + i` whatever the take until 2026-09-15, so a
         rung that declared no sampling override — which `[[voice.takes]]`
         permits — rendered take 0 byte for byte, and two take-0 re-rolls always
         did. Both halves land in one narrator module, are refused under this one
         code, and a build has both or neither; two capability keys would be two
-        owners of one answer (docs/ARCHITECTURE.md). Nothing had shipped under
-        the old name — the tts recipes pin a narrator older than either half.
+        owners of one answer (docs/ARCHITECTURE.md).
 
         Measured 2026-09-15, which is why this exists. Two `tts` render jobs on
         voice `owen` — one 150-char sentence, take 0 and take 1, whose rung is

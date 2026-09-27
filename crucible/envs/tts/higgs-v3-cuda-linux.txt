@@ -12,41 +12,6 @@
 # (`python -m narrator.serve`, with NARRATOR_ENGINE=higgs-v3).
 #
 # ---------------------------------------------------------------------------
-# THIS RECIPE SERVED vllm-omni UNTIL 2026-09-15. IT DOES NOT ANY MORE.
-# ---------------------------------------------------------------------------
-#
-# Owen, 2026-09-15: "we dont use vllm-omni. we use sglang. vllm-omni doesnt work
-# for higgs."
-#
-# That is a ruling about CORRECTNESS, not a preference between two working
-# stacks, and the measurement behind it is the training side's of 2026-09-05 -
-# the same 50 packed chunks of *Working Towards the Fuhrer*, the same merged
-# checkpoint (ckpt-1080), the same sampling, one seed, scored by whisper
-# coverage / skipped words / insertion rate / early stop plus 3 s ECAPA windows
-# for mid-chunk voice switches (orpheus-finetune/HIGGS_FIELD_NOTES.md 4n):
-#
-#     engine, in flight        early stops  damaged/50  switches  chars/min
-#     vllm-omni 0.28.0, 1           0            5          0        1,064
-#     vllm-omni 0.28.0, 16          4           13          6       10,752
-#     SGLang-Omni 0.1.4, 16         0            5          0       26,666
-#
-# vllm-omni's damage is its BATCHED TALKER and not the model or the text: the
-# same build at width 1 is clean, and the corruption lands on the NEWEST batch
-# row (the request that prefills while others decode, which vLLM's condense
-# moves when an earlier row retires). The truncations Owen heard, the gibberish
-# and the sustained voice switches are all that one defect. BookForge's own
-# catalog flipped to `stack: "sglang-omni"` on 2026-09-06 on these numbers;
-# Crucible rendered on the other stack for nine days because this file installed
-# it, which is the divergence the 2026-09-15 narrator-seam audit found.
-#
-# THE vllm-omni RECIPE IS REPLACED RATHER THAN KEPT BESIDE THIS ONE. A second
-# recipe that serves Higgs on vllm-omni is a supported way to render a damaged
-# book, and Crucible does not keep one. Nothing is lost: BookForge's catalog
-# keeps the vllm-omni knobs beside its sglang block so a flip is one word,
-# narrator keeps both backends and both launchers, and this file's own history
-# holds the resolved vllm-omni set.
-#
-# ---------------------------------------------------------------------------
 # WHY THERE IS AN ENV PER NARRATOR ENGINE HERE AND NOT PER BACKEND
 # ---------------------------------------------------------------------------
 # `llm` has one env per host. `tts` on cuda-linux is named per narrator engine,
@@ -61,12 +26,9 @@
 # THIS ENV IS PYTHON 3.12, AND THAT IS NOT A DETAIL
 # ---------------------------------------------------------------------------
 # sglang-omni 0.1.4 pulls torch 2.13.0+cu130 and flashinfer against a 3.12
-# interpreter. The vllm-omni env was 3.11, and `jobenv.install_env` built every
-# env with `sys.executable -m venv` - the SERVER'S interpreter, which on
-# owens-pc is python 3.11.16. So this recipe cannot be built by the machinery
-# that built the last one, and `EnvSpec.python_version` is what carries the
-# requirement: an install that cannot find a 3.12 REFUSES BY NAME rather than
-# building a 3.11 env that pip then fails to fill.
+# interpreter, and `EnvSpec.python_version` is what carries the requirement: an
+# install that cannot find a 3.12 REFUSES BY NAME rather than building an env
+# from the server's own interpreter that pip then fails to fill.
 #
 # BookForge builds the same stack as a SEPARATE CONDA ENV (`sglomni`) for the
 # same reason, and its installer's first line is "Never touches higgs3".
@@ -79,35 +41,20 @@
 #     toolkit: `lib64 -> lib` and `libcudart.so -> libcudart.so.13` inside
 #     <env>/lib/python3.12/site-packages/nvidia/cu13, which is also what
 #     CUDA_HOME must point at. `serve_higgs_sgl.sh` points at them;
-#     `crucible/narratorpatches.py` creates and checks them
-#     (`ensure_cuda_toolkit_links` / `check_cuda_toolkit_links`), the same
-#     after-pip-and-before-the-stamp discipline the vllm-omni patches had.
-#
-#     TRUE SINCE 2026-09-15 AND NOT BEFORE. Both links were made BY HAND on
-#     owens-pc to get the first SGLang env up, and this paragraph described the
-#     machinery that would do it for a day before any existed. `crucible doctor`
-#     now prints a row per link on cuda-linux, which matters more here than the
-#     patch rows do: this stack has no site-packages patches at all, so without
-#     them that whole section is empty on the one host where the one thing that
-#     can be silently missing lives.
+#     `crucible/envpatches.py` creates and checks them
+#     (`ensure_cuda_toolkit_links` / `check_cuda_toolkit_links`) after pip
+#     and before the stamp, and `crucible doctor` prints a row per link.
 #  2. `flashinfer-jit-cache` is published on flashinfer's OWN per-CUDA index and
 #     is on no PyPI, hence the `--extra-index-url` below. Without it the server
 #     still starts and compiles its kernels at every cold start instead.
-#
-# THERE ARE NO SITE-PACKAGES PATCHES ON THIS STACK. The two the vllm-omni env
-# needed (the negative-token-id fix and the sentinel filter) are edits to
-# vllm/vllm_omni. SGLang-Omni has its own stage processor and needs neither,
-# which is a real difference between the stacks rather than an omission - and it
-# is why `crucible doctor` reports no patch rows here.
 #
 # ---------------------------------------------------------------------------
 # A RESOLVED SET, READ FROM THE ENV THAT ACTUALLY WORKS
 # ---------------------------------------------------------------------------
 # What follows is `pip list --format=freeze` from the `sglomni` conda env on
-# owens-pc (WSL2, Ubuntu, python 3.12.14) on 2026-09-15 - the env every night-3
-# measurement above was taken against - with `pip`, `setuptools` and `wheel`
-# dropped (the venv brings its own and `install_env` upgrades them) and
-# narrator's direct reference added. Owen's instruction was "look at the old
+# owens-pc (WSL2, Ubuntu, python 3.12.14) on 2026-09-15, with `pip`,
+# `setuptools` and `wheel` dropped (the venv brings its own and `install_env`
+# upgrades them) and narrator's direct reference added. Owen's instruction was "look at the old
 # bookforge config. mirror it. it should be exact", and this is that env's own
 # answer rather than a guess at what SGLang needs.
 #

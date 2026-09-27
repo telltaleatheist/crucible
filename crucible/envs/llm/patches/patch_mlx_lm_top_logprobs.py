@@ -16,15 +16,14 @@ vocabulary), and both the batched and the single-stream generation paths pass
 `args.top_logprobs` through untouched. Nothing downstream assumes 11.
 
 USAGE: `<env python> patch_mlx_lm_top_logprobs.py <env prefix>` (or set
-`CRUCIBLE_LLM_ENV`). The shape is `envs/tts/patches/patch_vllm.py`'s, on
-purpose, so `crucible/narratorpatches.py` runs and checks both the same way:
+`CRUCIBLE_LLM_ENV`). `crucible/envpatches.py` runs and checks it:
 
 - IDEMPOTENT. Already patched is asked of the LIVE file by the same marker
   `crucible doctor` greps for, and prints `ALREADY_PATCHED`.
 - PATCHED FROM THE LIVE FILE, never from `.orig`. `.orig` is a snapshot of
   whatever was live just before this patch, kept for reference and never read
-  back — patch_vllm.py's docstring records what reading it back once did
-  (an upgrade's new source overwritten with the previous version's).
+  back (reading it back would overwrite an upgrade's new source with the
+  previous version's).
 - REFUSES BY NAME. No file: `NOT_FOUND`. Two distinct site-packages trees:
   `AMBIGUOUS`. The anchor line not there: `ANCHOR_NOT_FOUND`, exit 2 — a newer
   mlx-lm that moved or reworded the validator must be re-patched deliberately,
@@ -61,8 +60,8 @@ def target_path() -> str:
     """`server.py` inside the env this was pointed at, deduped by real path.
 
     Globbed over `lib/python*/site-packages` because the env is built from
-    whatever interpreter the server runs under. Deduped by REAL path for
-    patch_vllm.py's reason (a `python3.1 -> python3.11` symlink matches twice);
+    whatever interpreter the server runs under. Deduped by REAL path because
+    a `python3.1 -> python3.11` symlink matches twice;
     two DISTINCT trees are refused, because picking one is a coin flip nobody
     could see land.
     """

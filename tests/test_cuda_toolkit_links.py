@@ -11,7 +11,7 @@ for `doctor` to report on, so the whole narrator-patches section is empty on the
 one host where the one silently-missing thing lives. The failure arrives at the
 first render on a card. Both were created BY HAND on owens-pc on 2026-09-15, and
 `envs/tts/higgs-v3-cuda-linux.txt` claimed from that day that
-`crucible/narratorpatches.py` "creates and checks them" while nothing did.
+`crucible/envpatches.py` "creates and checks them" while nothing did.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from crucible import narratorpatches
-from crucible.narratorpatches import (
+from crucible import envpatches
+from crucible.envpatches import (
     APPLIED,
     CUDA_TOOLKIT_LINKS,
     CUDA_TOOLKIT_REL,
@@ -69,12 +69,12 @@ def toolkit(tmp_path: Path) -> Path:
 
 
 def rows(env: Path) -> dict[str, dict]:
-    return {row["id"]: row for row in narratorpatches.check_cuda_toolkit_links(env)}
+    return {row["id"]: row for row in envpatches.check_cuda_toolkit_links(env)}
 
 
 def test_install_creates_both_and_they_are_relative(tmp_path: Path) -> None:
     env = toolkit(tmp_path)
-    narratorpatches.ensure_cuda_toolkit_links(env)
+    envpatches.ensure_cuda_toolkit_links(env)
     site = env / "lib" / "python3.12" / "site-packages" / CUDA_TOOLKIT_REL
     for link_rel, target in CUDA_TOOLKIT_LINKS:
         link = site / link_rel
@@ -90,9 +90,9 @@ def test_running_it_twice_is_a_no_op(tmp_path: Path) -> None:
     # `install --force` re-runs the whole build; the second pass must not be an
     # error, and must not replace a link with an identical one either.
     env = toolkit(tmp_path)
-    narratorpatches.ensure_cuda_toolkit_links(env)
+    envpatches.ensure_cuda_toolkit_links(env)
     said: list[str] = []
-    narratorpatches.ensure_cuda_toolkit_links(env, on_line=said.append)
+    envpatches.ensure_cuda_toolkit_links(env, on_line=said.append)
     assert all("already there" in line for line in said), said
     assert [row["status"] for row in rows(env).values()] == [APPLIED, APPLIED]
 
@@ -102,7 +102,7 @@ def test_a_link_pointing_somewhere_else_is_refused_not_replaced(tmp_path: Path) 
     site = env / "lib" / "python3.12" / "site-packages" / CUDA_TOOLKIT_REL
     (site / "lib64").symlink_to("somewhere-else")
     with pytest.raises(PatchError) as caught:
-        narratorpatches.ensure_cuda_toolkit_links(env)
+        envpatches.ensure_cuda_toolkit_links(env)
     # Named, and it says what it found — silently overwriting would destroy the
     # evidence of whatever put it there.
     assert "somewhere-else" in str(caught.value)
@@ -115,7 +115,7 @@ def test_a_real_directory_where_a_link_belongs_is_refused(tmp_path: Path) -> Non
     site = env / "lib" / "python3.12" / "site-packages" / CUDA_TOOLKIT_REL
     (site / "lib64").mkdir()
     with pytest.raises(PatchError) as caught:
-        narratorpatches.ensure_cuda_toolkit_links(env)
+        envpatches.ensure_cuda_toolkit_links(env)
     assert "not a symlink" in str(caught.value)
 
 
@@ -126,7 +126,7 @@ def test_an_env_without_the_cuda_wheel_is_refused_by_name(tmp_path: Path) -> Non
     env = tmp_path / "env"
     (env / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
     with pytest.raises(PatchError) as caught:
-        narratorpatches.ensure_cuda_toolkit_links(env)
+        envpatches.ensure_cuda_toolkit_links(env)
     assert "nvidia-cuda-runtime-cu13" in str(caught.value)
     assert [row["status"] for row in rows(env).values()] == [NO_FILE, NO_FILE]
 
@@ -134,7 +134,7 @@ def test_an_env_without_the_cuda_wheel_is_refused_by_name(tmp_path: Path) -> Non
 def test_no_venv_at_all_is_its_own_answer(tmp_path: Path) -> None:
     env = tmp_path / "nothing-here"
     with pytest.raises(PatchError):
-        narratorpatches.ensure_cuda_toolkit_links(env)
+        envpatches.ensure_cuda_toolkit_links(env)
     assert [row["status"] for row in rows(env).values()] == [NO_ENV, NO_ENV]
 
 

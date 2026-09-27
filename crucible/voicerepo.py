@@ -264,8 +264,7 @@ def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
 def load_pins() -> dict[str, Pin]:
     """Every pin this host offers, by id — packaged first, the machine's winning.
 
-    The same precedence `voice_dirs()` has and for the same reason: the packaged
-    list is what this BUILD ships, the home list is what this MACHINE decided,
+    The packaged list is what this BUILD ships, the home list is what this MACHINE decided,
     and a deploy repins one machine at a time (section 8.4). Deleting a home row
     puts the packaged pin back, which is what makes trying a new checkpoint safe.
     """

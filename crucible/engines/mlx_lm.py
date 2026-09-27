@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import envpatches
-from ..narratorpatches import PatchError
+from ..envpatches import PatchError
 from .base import SubprocessEngine, EngineError, int_flag
 
 #: `python -m mlx_lm.server` still runs in 0.31.3 but prints a deprecation

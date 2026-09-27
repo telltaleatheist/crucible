@@ -52,7 +52,6 @@ from . import (
     jobenv,
     ladder,
     llamacpp,
-    narratorpatches,
     pairing,
     rvcbase,
     service,
@@ -1277,7 +1276,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     # with them. What the recipe path does to an env that is already there is
     # `jobenv.plan_install`'s answer, not this function's.
     try:
-        spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+        spec = _env_spec(args.job_type, None, backend.kind)
         recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         return _fail(str(exc))
@@ -2690,7 +2689,7 @@ def _doctor_report() -> dict[str, Any]:
         "llm_env": None,
         "worker_envs": [],
         "tts_envs": {},
-        "narrator_patches": [],
+        "cuda_toolkit_links": [],
         "llm_patches": [],
         "capability": None,
         # THE TWO PATHS, because the Mac audit of 2026-09-14 found the same
@@ -2866,24 +2865,9 @@ def _doctor_report() -> dict[str, Any]:
                 )
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING)
             }
-            # The two site-packages edits pip cannot express (PHASE3-TTS.md
-            # section 4). They are reported SEPARATELY from the env row and not
-            # folded into it, because an env whose pins all match is otherwise
-            # reported ready — and a reader has no way to tell that from an env
-            # that will render every chunk with 240 ms of garbage on the end.
-            patched_spec = jobenv.tts_env(
-                narratorpatches.PATCHED_ENGINE, backend.kind
-            )
-            report["narrator_patches"] = narratorpatches.check(
-                jobenv.env_dir(config.home, patched_spec),
-                jobenv.recipe_pins(jobenv.recipe_for(patched_spec)),
-            )
-            # AND THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
-            # ASK ABOUT. Reported in the same rows for the same reason, and
-            # needed MORE here than the patches are: the SGLang stack has no
-            # site-packages patches at all, so without these this section would
-            # be empty on the very host whose env holds the one thing that can
-            # be silently missing.
+            # THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
+            # ASK ABOUT. Reported SEPARATELY from the env row, because an env
+            # whose pins all match is otherwise reported ready.
             #
             # GATED ON THE ENV EXISTING, and that gate is the point rather than
             # an optimisation. With no `tts` env installed the links cannot be
@@ -2891,26 +2875,23 @@ def _doctor_report() -> dict[str, Any]:
             # and "lib/libcudart.so is missing" — for one cause the env row
             # already states in full ("no venv at ... run `crucible install
             # tts`"). Three sentences about one fact is how a reader ends up
-            # chasing the wrong one. The patches avoid this a different way
-            # (`not_applicable`, when the recipe does not install what they
-            # edit); this recipe DOES pin nvidia-cuda-runtime-cu13, so the
-            # honest answer is not "not applicable" but "not yet asked".
-            patched_env = jobenv.env_dir(config.home, patched_spec)
-            if (
-                backend.kind == "cuda-linux"
-                and narratorpatches.site_packages(patched_env) is not None
-            ):
-                report["narrator_patches"].extend(
-                    narratorpatches.check_cuda_toolkit_links(patched_env)
-                )
-            for entry in report["narrator_patches"]:
-                # `applied` is not the test. Both patches edit the vLLM stack,
-                # which `mlx-darwin`'s recipe does not install, and a Mac that
-                # has nothing to patch is sound rather than broken.
-                if entry["status"] not in narratorpatches.SOUND_STATUSES:
+            # chasing the wrong one.
+            if backend.kind == "cuda-linux":
+                for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+                    engine_env = jobenv.env_dir(
+                        config.home, jobenv.tts_env(engine, backend.kind)
+                    )
+                    if envpatches.site_packages(engine_env) is None:
+                        continue
+                    for entry in envpatches.check_cuda_toolkit_links(engine_env):
+                        report["cuda_toolkit_links"].append(
+                            {"engine": engine, **entry}
+                        )
+            for entry in report["cuda_toolkit_links"]:
+                if entry["status"] not in envpatches.SOUND_STATUSES:
                     report["problems"].append(
-                        f"narrator_patch[{entry['id']}]: {entry['status']} — "
-                        f"{entry['detail']}. {entry['why']}"
+                        f"cuda_toolkit_link[{entry['engine']}:{entry['id']}]: "
+                        f"{entry['status']} — {entry['detail']}. {entry['why']}"
                     )
         if config.enable_llm:
             # THE `llm` ENV's PATCHES (`crucible/envpatches.py`): mlx-lm's
@@ -2929,8 +2910,8 @@ def _doctor_report() -> dict[str, Any]:
                 # `no_env` is the llm env row's fact, stated there in full with
                 # the command that fixes it; a second problem for the same
                 # cause is how a reader ends up chasing the wrong sentence.
-                if entry["status"] not in narratorpatches.SOUND_STATUSES and (
-                    entry["status"] != narratorpatches.NO_ENV
+                if entry["status"] not in envpatches.SOUND_STATUSES and (
+                    entry["status"] != envpatches.NO_ENV
                 ):
                     report["problems"].append(
                         f"llm_patch[{entry['id']}]: {entry['status']} — "
@@ -3073,14 +3054,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"tts env ({engine}): {mark} — {entry['detail']}")
             if "provenance" in entry:
                 print(f"         {_provenance_line(entry['provenance'])}")
-        for entry in report["narrator_patches"]:
-            if entry["status"] == narratorpatches.NOT_APPLICABLE:
-                mark = "n/a"
-            else:
-                mark = "applied" if entry["applied"] else entry["status"].upper()
-            print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
+        for entry in report["cuda_toolkit_links"]:
+            mark = "applied" if entry["applied"] else entry["status"].upper()
+            print(
+                f"cuda toolkit link ({entry['engine']}, {entry['id']}): {mark} — "
+                f"{entry['detail']}"
+            )
         for entry in report["llm_patches"]:
-            if entry["status"] == narratorpatches.NOT_APPLICABLE:
+            if entry["status"] == envpatches.NOT_APPLICABLE:
                 mark = "n/a"
             else:
                 mark = "applied" if entry["applied"] else entry["status"].upper()
@@ -3192,7 +3173,7 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
         rows = envpatches.check("llm", config.home / "envs" / "none", {})
     else:
         try:
-            spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+            spec = _env_spec(args.job_type, None, backend.kind)
             recipe = jobenv.recipe_for(spec)
             pins = jobenv.recipe_pins(recipe)
         except jobenv.EnvError as exc:
@@ -3209,11 +3190,11 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
             rows = envpatches.apply(
                 args.job_type, directory, python, pins, on_line=print
             )
-        except narratorpatches.PatchError as exc:
+        except envpatches.PatchError as exc:
             return _fail(f"env_patch_failed: {exc}")
     for row in rows:
         print(f"{args.job_type} patch ({row['id']}): {row['status']} — {row['detail']}")
-    unsound = [r for r in rows if r["status"] not in narratorpatches.SOUND_STATUSES]
+    unsound = [r for r in rows if r["status"] not in envpatches.SOUND_STATUSES]
     if unsound:
         return _fail(
             "env_patch_failed: "
@@ -3998,12 +3979,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     env_patch.add_argument("job_type", choices=sorted(envpatches.patched_job_types()))
-    env_patch.add_argument(
-        "--narrator-engine",
-        default=None,
-        choices=sorted(NARRATOR_ENGINE_SAMPLING),
-        help="which tts env; required for 'tts', refused for 'llm'",
-    )
     env_patch.set_defaults(func=cmd_env_patch)
 
     token = subparsers.add_parser(

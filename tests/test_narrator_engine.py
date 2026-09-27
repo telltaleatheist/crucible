@@ -31,7 +31,6 @@ from crucible.engines.base import SubprocessEngine as BaseEngine
 from crucible.engines.mlx_lm import MlxLmEngine
 from crucible.engines.narrator import (
     ENGINE_VARIABLE,
-    ENV_PREFIX_VARIABLE,
     STACK_ENV_PREFIX_VARIABLE,
     env_prefix_variable_for,
     MAX_NUM_SEQS_VARIABLE,
@@ -220,8 +219,6 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
     assert environment[STACK_VARIABLE] == "sglang-omni"
     assert environment[env_prefix_variable_for("sglang-omni")] == str(
         python.parent.parent)
-    # AND NOT the other stack's name, which that launcher never reads.
-    assert ENV_PREFIX_VARIABLE not in environment
     assert environment[MAX_NUM_SEQS_VARIABLE] == "16"
     # The fourth thing, on both arms: where narrator resolves the voice.
     assert environment[DOCUMENT_VARIABLE] == str(document.path)

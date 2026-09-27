@@ -71,8 +71,7 @@ band for a voice that states none, centred at 15.0 against a real book pace
 nearer 17.2, and re-rolls healthy chunks to MAX_DEPTH. Hence the band being
 the caller's to state and `retake_without_band` rather than a lookup.
 
-**This door does not refuse a chunk by length.** `chunk_too_long` was retired
-on 2026-09-19 — see `_require_renderable`.
+**This door does not refuse a chunk by length.** See `_require_renderable`.
 
 **One artifact per requested index, always** (PHASE6 section 5). The ladder may
 decide a chunk is unsalvageable whole and render it as two halves, but
@@ -577,19 +576,12 @@ def _require_renderable(
     three things it always returned, so the rule that validates it has one
     reader and `_render` does not re-derive it.
 
-    **This door no longer asks whether the text fits.** `chunk_too_long` was
-    the third check here until 2026-09-19 and it is retired, not relaxed.
-    Owen: *"I don't think it's crucible's place to refuse chunks outside the
-    band… especially if we add a different tts engine."* Chunking and packing
-    are the client's (PHASE3-TTS.md section 1) — that has never changed — and
-    the cap a voice carries is advertised on `/v1/voices` so the client can
-    pack to it. What changed is who acts on it: an oversize chunk now surfaces
-    as whatever the engine does with it, reported honestly on the `chunk` row,
-    rather than as a server refusing a render it was never asked to judge. The
-    two facts that made the refusal untenable arrived together: a screening
-    checkpoint has no measured cap to be refused against, and a second TTS
-    engine would have its own frame arithmetic that this number describes
-    nothing about.
+    **This door does not ask whether the text fits.** Owen: *"I don't think
+    it's crucible's place to refuse chunks outside the band… especially if we
+    add a different tts engine."* Chunking and packing are the client's
+    (PHASE3-TTS.md section 1), and the cap a voice carries is advertised on
+    `/v1/voices` so the client can pack to it. An oversize chunk surfaces as
+    whatever the engine does with it, reported honestly on the `chunk` row.
 
     `resident` is whether this voice is the one already on the card. It bears
     on exactly one refusal — see below.
@@ -648,14 +640,12 @@ def _require_renderable(
     # pins narrator by commit and a pin is allowed to be older than the channel.
     # On 2026-09-15 it was, and two takes of one sentence came back byte-
     # identical. The check needs the engine, so it is not in this function.
-    # AND A TAKE PAST THE END OF THE LADDER IS NO LONGER REFUSED (2026-09-19).
-    # `unknown_take` lived here and is retired with the rule it enforced: a
-    # take at or past the last declared rung is a SEED LANE at the voice's own
-    # sampling, which `VoiceManifest.take` now answers with directly. It is
-    # still not a clamp — the numbers are take 0's, never take 2's under take
-    # 4's name — and `take` still rides on every item, so the draw moves.
-    # Screening names takes 0..N on a voice that declares no ladder at all, and
-    # that is the case the refusal made inexpressible.
+    # A TAKE PAST THE END OF THE LADDER IS NOT REFUSED: a take at or past the
+    # last declared rung is a SEED LANE at the voice's own sampling, which
+    # `VoiceManifest.take` answers with directly. It is not a clamp — the
+    # numbers are take 0's, never take 2's under take 4's name — and `take`
+    # rides on every item, so the draw moves. Screening names takes 0..N on a
+    # voice that declares no ladder at all.
 
     return (
         manifest, spec, interpreter,
