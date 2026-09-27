@@ -12,7 +12,7 @@ import json
 import time
 import wave
 
-from workerio import SAMPLE_RATE, decode, fail, send
+from workerio import SAMPLE_RATE, decode, send
 
 
 MIN_PIECE_SECONDS = 0.5
@@ -463,30 +463,7 @@ OPS = {"load": load, "split": split, "transcribe": transcribe}
 
 def main() -> int:
     workerio.claim_stdout()
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            fail(f"the qwen asr request is not JSON: {exc}")
-            return 1
-        if not isinstance(request, dict):
-            fail(f"the qwen asr request must be an object, got {type(request).__name__}")
-            return 1
-        handler = OPS.get(request.get("op"))
-        if handler is None:
-            fail(f"the qwen asr request's op is {request.get('op')!r}; this worker takes {sorted(OPS)}")
-            return 1
-        try:
-            handler(request)
-        except KeyError as exc:
-            fail(str(exc.args[0]))
-            return 1
-        except Exception as exc:
-            fail(f"{type(exc).__name__}: {exc}")
-            return 1
-    return 0
+    return workerio.serve("qwen asr", OPS)
 
 
 if __name__ == "__main__":

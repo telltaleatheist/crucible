@@ -9,7 +9,6 @@ import workerio
 sys.path.pop(0)
 workerio.claim_stdout()
 
-import json
 import tempfile
 import time
 
@@ -17,7 +16,6 @@ from workerio import (
     SAMPLE_RATE,
     cap_memory,
     decode,
-    fail,
     memory_line,
     send,
 )
@@ -180,31 +178,7 @@ OPS = {"load": load, "align": align}
 
 
 def main() -> int:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            fail(f"the align request is not JSON: {exc}")
-            return 1
-        if not isinstance(request, dict):
-            fail(f"the align request must be a JSON object, got {type(request).__name__}")
-            return 1
-        op = request.get("op")
-        handler = OPS.get(op)
-        if handler is None:
-            fail(f"the align request's op is {op!r}; this worker takes {sorted(OPS)}")
-            return 1
-        try:
-            handler(request)
-        except KeyError as exc:
-            fail(str(exc.args[0]))
-            return 1
-        except Exception as exc:
-            fail(f"{type(exc).__name__}: {exc}")
-            return 1
-    return 0
+    return workerio.serve("align", OPS)
 
 
 if __name__ == "__main__":

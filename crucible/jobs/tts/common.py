@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
-
 from ... import accelerator, jobenv, ttsplan, weights
 from ...config import Config
 from ...errors import ApiError
@@ -11,6 +9,7 @@ from ...residency import KIND_TTS, Residency
 from ...voicereference import ReferenceError, VoiceReference, parse_reference
 from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest, load_all_voices
 from ..base import ModelDescriptor
+from ..template import ManifestCatalog, parse_params
 
 __all__ = [
     "describe_voices",
@@ -62,46 +61,24 @@ def require_reference(
         ) from None
 
 
+VOICES: ManifestCatalog[VoiceManifest] = ManifestCatalog(
+    lambda: load_all_voices(),
+    VoiceError,
+    unreadable_code="voices_unreadable",
+    what="voice manifests",
+    unknown="manifest for voice",
+    unknown_code="unknown_voice",
+)
+
+validated_params = parse_params
+
+
 def load_voices() -> dict[str, VoiceManifest]:
-    try:
-        return load_all_voices()
-    except VoiceError as exc:
-        raise ApiError(
-            500,
-            "voices_unreadable",
-            f"this server cannot read its voice manifests: {exc}",
-        ) from None
-
-
-def validated_params(
-    model: type[BaseModel], params: dict[str, Any], job_type: str
-) -> Any:
-    try:
-        return model.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            f"{job_type} params are not valid: "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
+    return VOICES.all()
 
 
 def known_voice(voice_id: str) -> VoiceManifest:
-    manifests = load_voices()
-    manifest = manifests.get(voice_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_voice",
-            f"no manifest for voice {voice_id!r}; this build ships "
-            f"{sorted(manifests)}",
-        )
-    return manifest
+    return VOICES.known(voice_id)
 
 
 def describe_voices(config: Config, residency: Residency) -> list[ModelDescriptor]:

@@ -7,15 +7,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
 
-from ... import accelerator, hosttools, rvcbase, weights, workers
+from ... import hosttools, rvcbase, weights, workers
 from ...config import Config
 from ...errors import ApiError, JobError
-from ...manifests import fingerprint
+from ...jobtypes import RVC_JOB
 from ...rvcmodels import (
     RvcBackendSpec,
     RvcManifest,
@@ -24,10 +23,19 @@ from ...rvcmodels import (
 )
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..binding import JobTypeBinding
+from ..template import (
+    ManifestCatalog,
+    as_job_error,
+    card_guard,
+    parse_params,
+    require_model,
+    run_model,
+)
 
-__all__ = ["RvcJobType", "RvcParams", "rvc_base_dir"]
+__all__ = ["JOB_TYPES", "RvcJobType", "RvcParams", "rvc_base_dir"]
 
-JOB_TYPE = "rvc"
+JOB_TYPE = RVC_JOB.name
 
 BATCH_SIZE = 96
 
@@ -182,43 +190,13 @@ class RvcParams(BaseModel):
         return min(DEFAULT_CROSSFADE_S, 2 * self.overlap_seconds())
 
 
-def _manifests() -> dict[str, RvcManifest]:
-    try:
-        return load_all_rvc_manifests()
-    except RvcManifestError as exc:
-        raise ApiError(
-            500,
-            "rvc_manifests_unreadable",
-            f"this server cannot read its RVC manifests: {exc}",
-        ) from None
-
-
-def _known(model_id: str) -> RvcManifest:
-    manifests = _manifests()
-    manifest = manifests.get(model_id)
-    if manifest is None:
-        raise ApiError(
-            400,
-            "unknown_model",
-            f"no RVC manifest for {model_id!r}; this build ships {sorted(manifests)}",
-        )
-    return manifest
-
-
-def _params(params: dict[str, Any]) -> RvcParams:
-    try:
-        return RvcParams.model_validate(params)
-    except ValidationError as exc:
-        raise ApiError(
-            400,
-            "invalid_params",
-            "rvc params are not valid: "
-            + "; ".join(
-                f"{'.'.join(str(p) for p in problem['loc']) or '<root>'}: "
-                f"{problem['msg']}"
-                for problem in exc.errors()
-            ),
-        ) from None
+MANIFESTS: ManifestCatalog[RvcManifest] = ManifestCatalog(
+    lambda: load_all_rvc_manifests(),
+    RvcManifestError,
+    unreadable_code="rvc_manifests_unreadable",
+    what="RVC manifests",
+    unknown="RVC manifest for",
+)
 
 
 def _require_base_assets(config: Config) -> Path:
@@ -247,20 +225,6 @@ def _require_base_assets(config: Config) -> Path:
     return root
 
 
-def _rvc_provenance(backend_kind: str, model: str | None) -> dict[str, Any] | None:
-    if model is None:
-        return None
-    manifest = _known(model)
-    spec = manifest.backends.get(backend_kind)
-    if spec is None:
-        return {"id": model, "revision": None, "fingerprint": None}
-    return {
-        "id": model,
-        "revision": spec.revision,
-        "fingerprint": fingerprint(model, spec.revision),
-    }
-
-
 class RvcJobType:
     name = JOB_TYPE
 
@@ -276,45 +240,23 @@ class RvcJobType:
 
 
     def describe_models(self) -> list[ModelDescriptor]:
-        backend_kind = self._config.backend_kind
-        rows: list[ModelDescriptor] = []
-        for manifest in _manifests().values():
-            if manifest.supports(backend_kind):
-                spec = manifest.spec(backend_kind)
-                revision, source, estimate = (
-                    spec.revision,
-                    f"{spec.hf_repo}:{spec.archive}",
-                    spec.memory_bytes_estimate,
-                )
-                installed = (
-                    weights.installed(self._config, manifest, spec) is not None
-                )
-            else:
-                revision, source, estimate, installed = "", "", 0, False
-            rows.append(
-                ModelDescriptor(
-                    id=manifest.id,
-                    revision=revision,
-                    source=source,
-                    installed=installed,
-                    resident=False,
-                    vram_bytes=estimate,
-                )
+        return MANIFESTS.descriptors(
+            self._config.backend_kind,
+            installed=lambda manifest, spec: weights.installed(
+                self._config, manifest, spec
             )
-        return rows
+            is not None,
+            resident=lambda model_id: False,
+            source=lambda spec: f"{spec.hf_repo}:{spec.archive}",
+        )
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        return _rvc_provenance(self._config.backend_kind, model)
+        return MANIFESTS.provenance(self._config.backend_kind, run_model(model, self.name))
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-        manifest = _known(model)
-        if not manifest.supports(self._config.backend_kind):
-            return 0
-        return manifest.spec(self._config.backend_kind).memory_bytes_estimate
+        return MANIFESTS.memory_estimate(
+            run_model(model, self.name), self._config.backend_kind
+        )
 
     def check(self, backend: Any) -> JobTypeStatus:
         env = worker_type.env_or_status(self._config, JOB_TYPE, backend.kind)
@@ -344,7 +286,7 @@ class RvcJobType:
                 ),
             )
         try:
-            manifests = _manifests()
+            manifests = MANIFESTS.all()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
         installed = worker_type.installed_ids(
@@ -362,11 +304,11 @@ class RvcJobType:
         return JobTypeStatus(ready=True, detail=f"{env.detail}; installed: {installed}")
 
 
-    def _require_runnable(
-        self, model_id: str
-    ) -> tuple[RvcManifest, RvcBackendSpec, Path, Path]:
+    def requirements(self, model_id: str, params: RvcParams) -> tuple[
+        RvcManifest, RvcBackendSpec, Path, Path, dict[str, str], Path, Any
+    ]:
         backend_kind = self._backend.kind
-        manifest = _known(model_id)
+        manifest = MANIFESTS.known(model_id)
         spec = worker_type.require_block(manifest, model_id, backend_kind, "RVC model")
         worker_type.refuse_if_larger_than_host(
             self._backend, model_id, spec.memory_bytes_estimate
@@ -374,25 +316,21 @@ class RvcJobType:
         python = worker_type.require_worker_python(
             self._config, JOB_TYPE, backend_kind, model_id
         )
-        return manifest, spec, python, worker_type.require_weights(
-            self._config, manifest, spec, model_id
-        )
-
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a model")
-        validated = _params(params)
-        manifest, spec, _, _ = self._require_runnable(model)
-        _require_ffmpeg()
-        self._require_index(manifest, validated)
-        _require_base_assets(self._config)
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
+        weights_dir = worker_type.require_weights(self._config, manifest, spec, model_id)
+        tools = _require_ffmpeg()
+        self._require_index(manifest, params)
+        base = _require_base_assets(self._config)
+        state = card_guard(
+            self._config,
+            model=model_id,
             need_bytes=spec.memory_bytes_estimate,
             owned_pids=self._owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
         )
+        return manifest, spec, python, weights_dir, tools, base, state
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        model = require_model(model, self.name)
+        self.requirements(model, parse_params(RvcParams, params, self.name))
 
     @staticmethod
     def _require_index(manifest: RvcManifest, params: RvcParams) -> None:
@@ -411,24 +349,10 @@ class RvcJobType:
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = RvcParams.model_validate(job.params)
-        model = job.model
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a model")
-
-        try:
-            manifest, spec, python, weights_dir = self._require_runnable(model)
-            tools = _require_ffmpeg()
-            self._require_index(manifest, params)
-            base = _require_base_assets(self._config)
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
-                owned_pids=self._owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        model = run_model(job.model, self.name)
+        manifest, spec, python, weights_dir, tools, base, state = as_job_error(
+            self.requirements, model, params
+        )
         ctx.warming(state.detail)
 
         names = self._inputs(ctx)
@@ -600,3 +524,13 @@ class RvcJobType:
             )
         (voices / manifest.model_name).symlink_to(model_dir, target_is_directory=True)
         return root.parent
+
+
+JOB_TYPES: tuple[JobTypeBinding, ...] = (
+    JobTypeBinding(
+        RVC_JOB,
+        lambda wiring: RvcJobType(
+            wiring.config, wiring.backend, wiring.residency.owned_pids
+        ),
+    ),
+)

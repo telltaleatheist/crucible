@@ -8,27 +8,28 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ... import accelerator, hosttools, jobenv
+from ... import hosttools, jobenv
 from ...config import Config
 from ...engines import EngineError, EngineWouldNotStop, NarratorEngine
 from ...errors import ApiError, JobCancelled, JobError
+from ...jobtypes import TTS_JOB
 from ...narratorvoices import take_sampling
 from ...residency import KIND_TTS, Residency, describe_resident
 from ...voices import VoiceManifest
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
+from ..template import as_job_error, card_guard, parse_params, require_model, run_model
 from .common import (
-    voice_load_plan,
     describe_voices,
     known_voice,
     require_loadable,
-    validated_params,
+    voice_load_plan,
     voice_provenance,
     voice_rows,
 )
 
 __all__ = ["TtsChunk", "TtsJobType", "TtsParams"]
 
-JOB_TYPE = "tts"
+JOB_TYPE = TTS_JOB.name
 
 RENDER_SILENCE_TIMEOUT_SECONDS = 600.0
 
@@ -88,15 +89,13 @@ class TtsParams(BaseModel):
         return self
 
 
-def _require_ffmpeg() -> str:
-    return hosttools.require_ffmpeg(
-        "tts",
-        "encodes every chunk through it: narrator returns base64 PCM16 and the "
-        "artifact BookForge's assembly expects is a mono FLAC. The alternative is "
-        "linking libsndfile into the server's own interpreter, which is a "
-        "compiled audio dependency in a process that deliberately imports no "
-        "engine at all.",
-    )
+FFMPEG_WHY = (
+    "encodes every chunk through it: narrator returns base64 PCM16 and the "
+    "artifact BookForge's assembly expects is a mono FLAC. The alternative is "
+    "linking libsndfile into the server's own interpreter, which is a "
+    "compiled audio dependency in a process that deliberately imports no "
+    "engine at all."
+)
 
 
 _BAND_ON_THE_WIRE: dict[str, str] = {
@@ -374,9 +373,7 @@ class TtsJobType:
         return voice_provenance(self._config.backend_kind, model)
 
     def vram_estimate(self, model: str | None) -> int:
-        if model is None:
-            raise JobError("model_required", f"{self.name} needs a voice")
-        manifest = known_voice(model)
+        manifest = known_voice(run_model(model, self.name, "a voice"))
         if not manifest.supports(self._config.backend_kind):
             return 0
         return manifest.spec(self._config.backend_kind).memory_bytes_estimate
@@ -410,44 +407,44 @@ class TtsJobType:
         return JobTypeStatus(ready=True, detail=f"renderable: {ready}")
 
 
-    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        if model is None:
-            raise ApiError(400, "model_required", f"{self.name} needs a voice")
-        checked = validated_params(TtsParams, params, self.name)
-        self._residency.refuse_if_claimed("a tts render")
-        _require_ffmpeg()
-        resident = self._residency.is_resident(KIND_TTS, model)
-        manifest, spec, _, _, _ = _require_renderable(
-            self._config, self._backend, model, checked, resident
-        )
-        if resident:
-            return
-        accelerator.guard(
-            self._config.backend_kind,
-            model_id=model,
-            need_bytes=voice_load_plan(
-                self._config, self._backend, manifest, spec
-            ).need_bytes,
-            owned_pids=self._residency.owned_pids(),
-            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
+    def requirements(
+        self, voice_id: str, params: TtsParams, resident: bool
+    ) -> tuple[str, VoiceManifest, Any, Any, dict[str, float] | None, int | None]:
+        ffmpeg = hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
+        return (
+            ffmpeg,
+            *_require_renderable(self._config, self._backend, voice_id, params, resident),
         )
 
+    def _guard(self, manifest: VoiceManifest, spec: Any) -> tuple[Any, Any]:
+        plan = voice_load_plan(self._config, self._backend, manifest, spec)
+        state = card_guard(
+            self._config,
+            model=manifest.id,
+            need_bytes=plan.need_bytes,
+            owned_pids=self._residency.owned_pids(),
+            reclaimable_bytes=self._residency.reclaimable_bytes(excluding=manifest.id),
+        )
+        return plan, state
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        model = require_model(model, self.name, "a voice")
+        checked = parse_params(TtsParams, params, self.name)
+        self._residency.refuse_if_claimed("a tts render")
+        resident = self._residency.is_resident(KIND_TTS, model)
+        _, manifest, spec, _, _, _ = self.requirements(model, checked, resident)
+        if not resident:
+            self._guard(manifest, spec)
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = TtsParams.model_validate(job.params)
-        voice_id = job.model
-        if voice_id is None:
-            raise JobError("model_required", f"{self.name} needs a voice")
-
-        try:
-            ffmpeg = _require_ffmpeg()
-            manifest, spec, (python, installed), band, width = _require_renderable(
-                self._config, self._backend, voice_id, params,
-                self._residency.is_resident(KIND_TTS, voice_id),
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        voice_id = run_model(job.model, self.name, "a voice")
+        ffmpeg, manifest, spec, (python, installed), band, width = as_job_error(
+            self.requirements,
+            voice_id,
+            params,
+            self._residency.is_resident(KIND_TTS, voice_id),
+        )
 
         with self._residency.claimed(f"tts job {job.id}", may_mutate=True):
             engine = self._make_resident(ctx, manifest, spec, installed.path, python)
@@ -491,20 +488,7 @@ class TtsJobType:
             return engine
 
         ctx.warming(f"checking the accelerator for {manifest.id}")
-        try:
-            plan = voice_load_plan(self._config, self._backend, manifest, spec)
-            state = accelerator.guard(
-                self._config.backend_kind,
-                model_id=manifest.id,
-                need_bytes=plan.need_bytes,
-                owned_pids=self._residency.owned_pids(),
-                desktop_allowance_bytes=self._config.desktop_allowance_bytes,
-                reclaimable_bytes=self._residency.reclaimable_bytes(
-                    excluding=manifest.id
-                ),
-            )
-        except ApiError as exc:
-            raise JobError(exc.code, exc.message) from None
+        plan, state = as_job_error(self._guard, manifest, spec)
         ctx.warming(state.detail)
 
         try:

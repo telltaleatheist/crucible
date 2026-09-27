@@ -15,6 +15,7 @@ from typing import Any, Iterator
 from . import envpatches, interpreter
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
+from .jobtypes import ENVS, FAMILIES, LLM_ENV
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
 
@@ -35,7 +36,7 @@ RECIPE_PYTHON: dict[str, str] = {
     "higgs-v3-cuda-linux": "3.12",
 }
 
-WORKER_JOB_TYPES: tuple[str, ...] = ("align", "asr", "rvc")
+WORKER_JOB_TYPES: tuple[str, ...] = tuple(env.name for env in ENVS if env.worker)
 
 WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
     ("align", CUDA_LINUX): "qwen-asr",
@@ -47,21 +48,17 @@ WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
 }
 
 JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
-    "align": ("align",),
-    "asr": ("asr",),
-    "rvc": ("rvc", "denoise"),
+    env.name: tuple(family.name for family in FAMILIES if family.env == env)
+    for env in ENVS
+    if env.worker
 }
 
-INSTALLABLE_JOB_TYPES: tuple[str, ...] = ("llm", "tts", *WORKER_JOB_TYPES)
+INSTALLABLE_JOB_TYPES: tuple[str, ...] = tuple(env.name for env in ENVS)
 
 INSTALLER_FOR: dict[str, str] = {
-    **{name: name for name in INSTALLABLE_JOB_TYPES},
-    **{
-        job_type: env
-        for env, served in JOB_TYPES_SERVED_BY_ENV.items()
-        for job_type in served
-    },
-    "pages": "llm",
+    **{env.name: env.name for env in ENVS},
+    **{family.name: family.env.name for family in FAMILIES if family.env is not None},
+    "pages": LLM_ENV.name,
 }
 
 

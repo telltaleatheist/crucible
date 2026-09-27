@@ -4,9 +4,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ...jobtypes import ALIGN_LONGFORM
 from ..align import QWEN3_LANGUAGES
 
-JOB_TYPE_NAME = "align-longform"
+JOB_TYPE_NAME = ALIGN_LONGFORM.name
 
 ALIGNER_MODEL = "qwen3-aligner"
 
