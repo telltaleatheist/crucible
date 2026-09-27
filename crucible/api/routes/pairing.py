@@ -6,15 +6,13 @@ from fastapi import Depends, Request, Response
 
 from ... import API_VERSION
 from ...connect import DecidePairing, PollPairing, StartPairing
-from ..deps import require_api_version
 from ..context import AppContext, Routers
+from ..deps import require_api_version
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
     public, private = routers.public, routers.private
     app, config = ctx.app, ctx.config
-
-    # ------------------------------------------------------------------ ping
 
     @public.get("/ping")
     async def ping() -> dict[str, Any]:

@@ -1,12 +1,3 @@
-"""API v1 — exactly the surface in DESIGN.md section 4.
-
-Base path is `/v1`. Protected routes need `Authorization: Bearer <token>` and
-`X-Crucible-Api: 1`, checked in that order. Public discovery (`GET /v1/ping`)
-and the limited pairing start/poll exchange do not require an existing token.
-Pairing approval always requires authentication; start/poll require the version header.
-Errors are always `{"error": {"code", "message", "details"?}}`.
-"""
-
 from .app import UI_DIR, create_app
 from .deps import require_api_version, require_auth
 from .proxy import (

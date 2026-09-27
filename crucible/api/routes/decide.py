@@ -19,6 +19,7 @@ from ...inflight import InFlight, read_act
 from ...manifests import load_manifest
 from ...settle import Settlement
 from ..caller import client_agent
+from ..context import AppContext, Routers
 from ..proxy import (
     JSON_HEADERS,
     _caller_gone,
@@ -30,13 +31,11 @@ from ..proxy import (
     _sent_across_the_wire,
     _unless_the_caller_leaves,
 )
-from ..context import AppContext, Routers
 
 
 def _decide_not_served(
     resident: Any, reason: str, extra: dict[str, Any] | None
 ) -> ApiError:
-    """503: the resident engine cannot return what a decision reads."""
     return ApiError(
         503,
         "decide_not_served",
@@ -48,12 +47,6 @@ def _decide_not_served(
 
 
 def _decide_engine_refused(resident: Any, response: httpx.Response) -> ApiError:
-    """502: the engine answered a decision's request with something other than 200.
-
-    Named `engine_error` and not relayed as it stood, unlike the chat door: a
-    decision is several requests and one answer, so there is no single engine
-    body to hand back — the one that failed is quoted instead.
-    """
     text = response.text
     return ApiError(
         502,
@@ -75,16 +68,6 @@ async def _decide_on_engine(
     max_logprobs: int | None,
     concurrency: int,
 ) -> DecideResponse:
-    """The prime, then every question, on the resident engine's chat route.
-
-    PHASE22 section 2.5. With more than one question the shared prefix goes
-    first and ALONE, so its KV is cached (vLLM) or its context checkpoint laid
-    down (llama-server, hybrid Qwen3.5) before the questions ask for it; then
-    the questions go out together, at most `concurrency` at once. Answers come
-    back in the request's question order, and when questions fail the one
-    reported is the first in THAT order, so a retry with the same body meets
-    the same refusal first.
-    """
     started = time.perf_counter()
     url = f"{resident.base_url}/v1/chat/completions"
     state_text = decide_core.render_state(body.state)
@@ -129,8 +112,6 @@ async def _decide_on_engine(
 
     prime: decide_core.ForwardTiming | None = None
     if len(plans) > 1:
-        # A PRIME IS NOT AN ANSWER (snap `3509bc5`): it asks for no logprobs
-        # and its token is never read, so a reply without them is no fault.
         reading, wall_ms = await forward(
             decide_core.prime_messages(state_text, images), None
         )
@@ -146,7 +127,7 @@ async def _decide_on_engine(
             reading, wall_ms = await forward(
                 decide_core.question_messages(state_text, images, item), k
             )
-        assert reading.top is not None  # want_probs=True always reads them
+        assert reading.top is not None
         dist = decide_core.label_distribution(
             reading.top, item, engine, missing=body.missing
         )
@@ -199,31 +180,16 @@ def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
     backend, residency = ctx.backend, ctx.residency
 
-    # --------------------------------------------------------------- decide
-
     @private.post(
         "/decide",
         response_model=None,
         responses={200: {"model": DecideResponse}},
     )
     async def decide(request: Request, body: DecideRequest) -> Response:
-        """One distribution per question, read off the resident model.
-
-        PHASE22-DECIDE.md is the contract. A decision is the chat door's
-        sibling and walks through the chat door's machinery — the act header,
-        the resident check, `chat_admission`, the `InFlight` record,
-        `_chat_over` — with a different body in and out. What is its own is the
-        reading (`crucible/decide.py`): the frame, the letters, the parser.
-
-        EVERY REFUSAL A CALLER CAN CAUSE IS MADE BEFORE ANYTHING IS SENT: the
-        act, an upstream id, a model that is not resident, too many images,
-        images on a text model, too many options, an engine that returns no
-        top logprobs or too few of them, a full door. A decision that spent the
-        card and then failed on a question the server could have read first
-        would be a decision the client paid for twice.
+        """One answer distribution per question, read off the resident model's
+        next-token logprobs. Every refusal a caller can cause is made before anything is
+        sent to the engine.
         """
-        # Read BEFORE the work starts, as on chat: an unknown act is a 400
-        # rather than a decision reported under a name nobody knows.
         act = read_act(request.headers)
         if upstreams.split_model(body.model) is not None:
             raise ApiError(
@@ -234,11 +200,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "Name the resident Crucible model id",
                 {"requested": body.model},
             )
-        # WAITED OUT AND ATOMIC, exactly as on the chat door (2026-09-24,
-        # Briefcase): a decision arriving mid-clearance is answered from the
-        # settled card, and the one it proxies is an `InFlight` row the
-        # settlement sees. Everything in this block is synchronous, which is
-        # what `settled_for` requires of it.
         async with residency.settled_for("a decision"):
             resident = residency.resident_model
             if resident is None or resident.model_id != body.model:
@@ -247,17 +208,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
             n_images = decide_core.check_image_count(body.images)
             if n_images:
-                # Read at decision time and only with images in hand: the record
-                # carries no modalities, and a manifest whose modalities changed
-                # also changed its engine line (`--language-model-only`, an
-                # `mmproj`), which is a reload either way.
-                #
-                # WHAT THIS BACKEND SERVES, not what the weights accept (PHASE22
-                # section 2.9). `qwen3.5-4b` accepts images everywhere and is
-                # served them on cuda-linux and llama-windows only: on the Mac its
-                # engine is mlx-lm, which is never handed a picture. Reading the
-                # model-wide list here would pass a page to an engine that drops it
-                # and answer from the text alone.
                 manifest = load_manifest(resident.model_id)
                 served = manifest.serves(backend.kind)
                 if "image" not in served:
@@ -324,8 +274,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
             else:
                 response = JSONResponse(content=answered.model_dump(mode="json"))
             inflight.close(entry)
-            # After the answer is written, as on chat: the card is cleared
-            # behind the decision, never in front of it.
             response.background = BackgroundTask(chat_over)
             return response
         except BaseException:

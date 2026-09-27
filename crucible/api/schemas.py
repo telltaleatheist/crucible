@@ -8,14 +8,7 @@ from ..tasks import TASK_TYPES
 
 
 class ArtifactRef(BaseModel):
-    """A previous job's artifact on THIS server, taken as an input.
-
-    Owen, 2026-09-25: a render's 2,510 chunk FLACs were downloaded, then read
-    back off a share and uploaded again (2.5 minutes, 1.25 GB) to the server
-    that made them, for the align. A reference takes them where they already
-    are. Usually of a HELD job (`POST /v1/jobs/{id}/hold`); an unheld one works
-    while its directory still exists.
-    """
+    """An artifact of a previous job on this server, taken as an input."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -24,8 +17,9 @@ class ArtifactRef(BaseModel):
 
 
 class JobInput(BaseModel):
-    """One named input: an uploaded blob, bytes inline in the request, or an
-    artifact of a previous job on this server."""
+    """One named input: an uploaded blob, inline base64 bytes, or a previous job's
+    artifact.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -54,33 +48,23 @@ class JobCreate(BaseModel):
     model: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
     inputs: dict[str, JobInput] = Field(default_factory=dict)
-    #: THE CLIENT'S OWN NAME FOR THIS WORK. Echoed back on the job record,
-    #: never read by this server, never parsed.
-    #:
-    #: It is for the restart. An `interrupted` job has to be matched to whatever
-    #: the client was doing when its own process went away too, and a job id it
-    #: may have lost alongside everything else is a poor key for that.
-    #: BookForge puts its queue step id here.
-    #:
-    #: Bounded like a client name and for the same reason (`_CLIENT_NAME`): it
-    #: is printed into logs and benches, so a control character in it is the
-    #: caller choosing what somebody's terminal does.
     client_ref: str | None = Field(
-        default=None, max_length=200, pattern=r"^[^\x00-\x1f\x7f]+$"
+        default=None,
+        max_length=200,
+        pattern=r"^[^\x00-\x1f\x7f]+$",
+        description="The client's own name for this work, echoed on the job record "
+        "and never read by the server.",
     )
-    #: HELD FROM BIRTH (2026-09-25). A render's client downloads each chunk as
-    #: it lands, so by `done` every artifact has been fetched and a hold taken
-    #: afterwards races the fetch-reap. `true` holds the job before it runs,
-    #: exactly as `POST /v1/jobs/{id}/hold` would, so there is no window.
-    hold: bool = False
+    hold: bool = Field(
+        default=False,
+        description="Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, "
+        "so its artifacts outlive being fetched.",
+    )
 
 
 class StreamOpen(BaseModel):
-    """`POST /v1/tts/stream` — PHASE3-TTS.md section 7.
-
-    Nothing has a default, for the render door's reason: a session opened in the
-    wrong language, or on a voice the client did not choose, is a silent
-    substitution and a whole afternoon of listening in the wrong accent.
+    """`POST /v1/tts/stream`: the voice and language of a streaming session; neither has
+    a default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -90,49 +74,27 @@ class StreamOpen(BaseModel):
 
 
 class TaskCreate(BaseModel):
-    """`POST /v1/tasks` — one operator operation. PHASE13-OPERATOR.md 3.3.
-
-    One model for three request shapes rather than three routes, because there
-    is one lane and one refusal (`task_busy`) governing all of them, and a
-    client that had to pick a path before it could be told "busy" would have to
-    know which of three doors to retry.
-
-    The validator is `StreamOp`'s in spirit: the `type` word decides which
-    fields are required and which are REFUSED. A `narrator_engine` sent with a
-    `pull`, or an `id` sent with an `install`, is a client that has confused two
-    requests, and accepting it silently would run the wrong one.
+    """`POST /v1/tasks`: one operator task. `type` decides which fields are required and
+    which are refused.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     type: str
-    # pull
     kind: str | None = None
     id: str | None = None
-    # install
     job_type: str | None = None
     narrator_engine: str | None = None
-    # module
     module: dict[str, Any] | None = None
-    # engine (PHASE15-HOST.md 4.7)
     target: str | None = None
 
-    #: Which fields each type owns. The validator reads this rather than three
-    #: hand-written branches, so a fourth task type is one row.
     FIELDS: ClassVar[dict[str, tuple[str, ...]]] = {
         "pull": ("kind", "id"),
         "install": ("job_type", "narrator_engine"),
         "module": ("module",),
         "engine": ("target",),
-        # PHASE17-ORCHESTRATOR.md 4.2: NO fields, and that is the whole
-        # request. There is exactly one engine on a machine and the
-        # orchestrator knows which — a `target` here would be a client
-        # naming a thing it cannot see.
         "engine-restart": (),
     }
-    #: ...and which of those may not be omitted. `narrator_engine` is absent
-    #: here because whether it is required depends on the job type, which is
-    #: `crucible/tasks.py`'s question and not this schema's.
     REQUIRED: ClassVar[dict[str, tuple[str, ...]]] = {
         "pull": ("kind", "id"),
         "install": ("job_type",),
@@ -165,7 +127,6 @@ class TaskCreate(BaseModel):
         return self
 
     def request(self) -> dict[str, Any]:
-        """The body as the task echoes it: this type's fields and no others."""
         return {
             "type": self.type,
             **{name: getattr(self, name) for name in self.FIELDS[self.type]},
@@ -173,20 +134,8 @@ class TaskCreate(BaseModel):
 
 
 class LeaseOpen(BaseModel):
-    """`POST /v1/models/{id}/lease` — a client saying it intends a run.
-
-    Both fields are required and neither has a default, for the streaming door's
-    reason. A default `act` would put a name nobody chose on a bench, which is
-    the thing `X-Crucible-Act` is refused for; a default `ttl_seconds` would be
-    this server picking how long somebody else's run is, which is the one number
-    only the client knows.
-
-    **There is no `kind`.** The id in the path is the resident thing's, of
-    whatever kind, and the card holds one thing — so the server reads the kind
-    off `Residency.resident` and a client has nothing to disambiguate. A `kind`
-    on the body would be a second owner of `resident.kind`, able to disagree with
-    it (R1), and would let a client be refused for spelling a fact it was never
-    asked to know.
+    """`POST /v1/models/{id}/lease`: the act the lease is for and how long it lasts;
+    neither has a default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -196,20 +145,8 @@ class LeaseOpen(BaseModel):
 
 
 class StreamOp(BaseModel):
-    """`POST /v1/tts/stream/{id}` — one op.
-
-        {"op": "say",    "id": "r12", "text": "...", "take": 0}
-        {"op": "cancel", "id": "r12"}
-        {"op": "cancel_all"}
-        {"op": "close"}
-
-    `take` is **required** on `say` and has no default here. The SDK's
-    `say(id, text, take?)` defaults it to 0 in the caller's own code, which is a
-    client choosing; a default on the wire would be the server choosing, and now
-    that the five fine-tunes declare a second rung that would be a render at a
-    take nobody asked for. A take past the end of the voice's ladder is a SEED
-    LANE at the voice's own sampling (2026-09-19) and is still never clamped —
-    take 4 is never take 2's numbers under take 4's name.
+    """`POST /v1/tts/stream/{id}`: one op. `say` needs `id`, `text` and `take` (no
+    default); `cancel` needs `id`; `cancel_all` and `close` take nothing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -228,8 +165,6 @@ class StreamOp(BaseModel):
             if not (self.id or "").strip():
                 raise ValueError("say needs an id; it is how every frame names its row")
             if not (self.text or "").strip():
-                # narrator answers an empty generate with a whole-request error,
-                # which would take the rest of the batch with it. Refused here.
                 raise ValueError(
                     "say needs text that is not blank; narrator refuses an empty "
                     "generate with a whole-request error, which would end the batch"

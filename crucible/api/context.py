@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from fastapi import APIRouter, FastAPI
 
 from ..backend import Backend
 from ..config import Config
 from ..errors import ApiError
-from ..leases import Leases
 from ..residency import Residency
 
 
@@ -26,6 +25,4 @@ class AppContext:
     config: Config
     backend: Backend
     residency: Residency
-    leases: Leases
-    registry: dict[str, Any]
     decide_here: Callable[[str], ApiError]

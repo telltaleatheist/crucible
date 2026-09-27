@@ -14,15 +14,6 @@ from ..errors import ApiError
 
 
 class BeforeEveryRequest:
-    """A synchronous step run before every HTTP request, and nothing else.
-
-    Pure ASGI on purpose: `receive` and `send` go to the app exactly as the
-    server made them. A middleware that wraps them decides what a route can
-    learn about its own caller, and the one this replaced (starlette's
-    `BaseHTTPMiddleware`) made every caller look present forever —
-    `_watch_for_disconnect` says how that was found.
-    """
-
     def __init__(self, app: ASGIApp, *, step: Callable[[], None]) -> None:
         self.app = app
         self.step = step
@@ -38,7 +29,6 @@ def _error_response(error: ApiError) -> JSONResponse:
 
 
 def _bearer_problem(request: Request) -> str | None:
-    """What is wrong with the request's bearer token, or None when it is this server's."""
     config: Config = request.app.state.config
     header = request.headers.get("authorization")
     if header is None:
@@ -52,7 +42,6 @@ def _bearer_problem(request: Request) -> str | None:
 
 
 def _presented_version(request: Request) -> tuple[str | None, int | None]:
-    """The version header as sent, and its major number, or None where it has none."""
     presented = request.headers.get(API_HEADER)
     if presented is None:
         return None, None
@@ -96,16 +85,6 @@ def require_api_version(request: Request) -> None:
 
 
 def require_peer_auth(request: Request) -> None:
-    """`require_auth`, refusing under the RELATION's name. PHASE17 2.1.
-
-    The same comparison against the same token, and a different code, because
-    the caller on this door is not an app: it is an orchestrator that has just
-    booted an engine and is telling it so. Told `unauthorized`, an
-    orchestrator cannot tell *"the token I copied out of the guest's pairing
-    file is stale"* — its own bug, and the thing its log must say — from
-    *"some app's token is wrong"*, which is not its business at all. One name
-    per relation, so a log line says which handshake failed.
-    """
     if _bearer_problem(request) is not None:
         raise ApiError(
             401,
@@ -119,13 +98,6 @@ def require_peer_auth(request: Request) -> None:
 
 
 def require_peer_api_version(request: Request) -> None:
-    """`require_api_version`, refusing `peer_version_incompatible`. PHASE17 2.1.
-
-    The API version travels in the header where every other call already
-    carries it, rather than in the claim body: a second copy in the body would
-    be a fact with two owners. What changes here is only the NAME of the
-    refusal, for `require_peer_auth`'s reason.
-    """
     presented, major = _presented_version(request)
     if major != API_VERSION:
         raise ApiError(
