@@ -438,3 +438,186 @@ def test_a_failing_import_is_refused_by_name_with_the_last_lines(
     assert refusal is not None
     assert refusal.startswith("env_smoke_failed:")
     assert "libcudart" in refusal
+
+
+def _live_server_double(
+    monkeypatch: pytest.MonkeyPatch, home: Path
+) -> list[tuple[str, str, object]]:
+    from crucible import apiclient
+
+    calls: list[tuple[str, str, object]] = []
+    doubled = apiclient.Connection(
+        url="http://127.0.0.1:7100", token="t", name="crucible@test", source="local"
+    )
+    monkeypatch.setattr(cli.common, "server_here", lambda _config, _backend: doubled)
+
+    def call(connection: object, method: str, path: str, json_body: object = None, **_: object):
+        assert connection is doubled
+        calls.append((method, path, json_body))
+        return {"voice": None, "path": str(home / "voices" / "pins.toml")}
+
+    monkeypatch.setattr(apiclient, "call", call)
+    return calls
+
+
+def test_remove_goes_through_the_server_when_one_answers(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from crucible.manifests import load_manifest
+
+    assert cli.main(["init", "--enable-llm"]) == 0
+    capsys.readouterr()
+
+    spec = load_manifest("qwen3.5-9b").spec(FAKE_BACKEND.kind)
+    directory = home / "models" / "qwen3.5-9b" / FAKE_BACKEND.kind
+    directory.mkdir(parents=True)
+    (directory / "crucible-pull.json").write_text(
+        json.dumps({
+            "model": "qwen3.5-9b", "backend": FAKE_BACKEND.kind,
+            "hf_repo": spec.hf_repo, "revision": spec.revision, "bytes": 1_000_000_000,
+            "seconds": 1.0, "pulled": "2026-09-27T00:00:00+0000",
+        }),
+        encoding="utf-8",
+    )
+    calls = _live_server_double(monkeypatch, home)
+    assert cli.main(["remove", "model", "qwen3.5-9b"]) == 0
+    assert calls == [("DELETE", "/v1/catalog/model/qwen3.5-9b", None)]
+    assert directory.exists(), "the server deletes; the CLI never reaches past it"
+    out = capsys.readouterr().out
+    assert "removed:  model qwen3.5-9b" in out
+    assert "through:  the server at http://127.0.0.1:7100" in out
+
+
+def test_remove_with_no_server_deletes_the_files_itself(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["init", "--enable-llm"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(cli.common, "server_here", lambda _config, _backend: None)
+    assert cli.main(["remove", "model", "qwen3.5-9b"]) == 1
+    err = capsys.readouterr().err
+    assert "subject_not_installed" in err
+    assert cli.main(["remove", "model", "no-such-model"]) == 1
+    err = capsys.readouterr().err
+    assert "subject_unknown" in err
+    assert "`crucible api catalog`" in err and "`crucible catalog`" not in err
+
+
+def test_voices_pin_goes_through_the_server_when_one_answers(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from types import SimpleNamespace
+
+    from crucible import voicerepo
+
+    assert cli.main(["init", "--enable-tts"]) == 0
+    capsys.readouterr()
+    calls = _live_server_double(monkeypatch, home)
+    voice = SimpleNamespace(
+        display="Mistborn", kind="checkpoint", narrator_engine="higgs-v3",
+        backends={"cuda-linux": None},
+    )
+    monkeypatch.setattr(voicerepo, "voice_for_pin", lambda _pin: voice)
+    sha = "a" * 40
+    assert cli.main(["voices", "pin", "mistborn", f"owenmorgan/mistborn-higgs-v3@{sha}"]) == 0
+    assert calls == [(
+        "PUT", "/v1/voices/mistborn",
+        {"pin": {"hf_repo": "owenmorgan/mistborn-higgs-v3", "revision": sha}},
+    )]
+    assert not (home / "voices" / "pins.toml").exists(), "the server writes the pin"
+    out = capsys.readouterr().out
+    assert out.startswith(f"mistborn: owenmorgan/mistborn-higgs-v3@{sha[:12]} -> ")
+    assert "Mistborn (checkpoint, higgs-v3), arms ['cuda-linux']" in out
+    assert "`crucible voices pull mistborn`" in out
+
+
+def test_models_list_refuses_on_a_backend_the_config_was_not_written_for(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from .conftest import FAKE_MAC_BACKEND
+
+    assert cli.main(["init", "--enable-llm"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    for argv in (["models", "list"], ["voices", "list"], ["rvc", "list"], ["denoise", "list"]):
+        assert cli.main(argv) == 1, argv
+        err = capsys.readouterr().err
+        assert "backend_not_here" in err, argv
+        assert "`crucible init --force`" in err, argv
+
+
+def test_no_viable_backend_names_the_next_step(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
+    assert cli.main(["init", "--enable-llm"]) == 0
+    capsys.readouterr()
+
+    def refuse() -> None:
+        raise NoViableBackend("no nvidia-smi on this Linux host (looked on PATH)")
+
+    monkeypatch.setattr(cli.common, "detect_backend", refuse)
+    monkeypatch.setattr(cli.common.sys, "platform", "linux")
+    assert cli.main(["models", "list"]) == 1
+    err = capsys.readouterr().err
+    assert "no viable backend: no nvidia-smi" in err
+    assert "NVIDIA driver on Windows" in err and "WSL" in err
+    monkeypatch.setattr(cli.common.sys, "platform", "darwin")
+    assert cli.main(["models", "list"]) == 1
+    assert "Apple silicon" in capsys.readouterr().err
+
+
+def test_every_doctor_problem_names_a_command_to_run(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from .conftest import FAKE_MAC_BACKEND
+
+    assert cli.main(
+        ["init", "--enable-llm", "--enable-tts", "--enable-asr", "--enable-align", "--enable-rvc"]
+    ) == 0
+    capsys.readouterr()
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["problems"]
+    for problem in report["problems"]:
+        assert "`crucible " in problem or "`chmod " in problem, problem
+
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    changed = [p for p in report["problems"] if p.startswith("backend_changed")]
+    assert len(changed) == 1
+    assert "`crucible init --force`" in changed[0]
+    assert str(config_path(home)) in changed[0]
+
+    def refuse() -> None:
+        raise NoViableBackend("no nvidia-smi on this Linux host")
+
+    monkeypatch.setattr(cli.common, "detect_backend", refuse)
+    assert cli.main(["doctor", "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    absent = [p for p in report["problems"] if p.startswith("no_viable_backend")]
+    assert len(absent) == 1 and "driver" in absent[0]
+
+
+def test_every_backticked_crucible_command_in_the_tree_exists() -> None:
+    import re
+
+    import crucible
+
+    parser = cli.build_parser()
+    top = {name for name in parser._subparsers._group_actions[0].choices}
+    root = Path(crucible.__file__).parent
+    pattern = re.compile(r"`crucible ([a-z][a-z-]*)")
+    missing: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for word in pattern.findall(line):
+                if word not in top:
+                    missing.append(f"{path.relative_to(root)}:{line_number}: crucible {word}")
+    assert missing == [], "\n".join(missing)

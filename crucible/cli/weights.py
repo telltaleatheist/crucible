@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import urllib.error
+from pathlib import Path
 
-from .. import catalog, denoisemodels, rvcbase, weights
+from .. import apiclient, catalog, denoisemodels, rvcbase, weights
 from ..alignmodels import AlignManifest, AlignManifestError, load_all_align_manifests
 from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
-from ..errors import ConfigError, CrucibleError, NoViableBackend
+from ..errors import CrucibleError
 from ..manifests import ManifestError, ModelManifest, load_all_manifests
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from . import common
-from .common import EXIT_OK, _backend_mismatch, _fail, _models_config
+from .common import EXIT_OK, _fail
 
 
 def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]:
@@ -28,35 +30,47 @@ def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]
     return merged
 
 
+def _nobody_holds(_subject: catalog.Subject) -> None:
+    return None
+
+
+def _remove_through_the_server(
+    server: apiclient.Connection,
+    found: weights.InstalledWeights,
+    args: argparse.Namespace,
+) -> tuple[Path, int] | int:
+    try:
+        apiclient.call(server, "DELETE", f"/v1/catalog/{args.kind}/{args.id}")
+    except urllib.error.HTTPError as exc:
+        return apiclient.report_http_error(exc, server)
+    except (urllib.error.URLError, OSError) as exc:
+        return _fail(
+            f"server_unreachable: the server at {server.url} answered a moment "
+            f"ago and not now ({exc}); nothing was removed. Run `crucible remove "
+            f"{args.kind} {args.id}` again"
+        )
+    return found.path, found.bytes
+
+
 def cmd_remove(args: argparse.Namespace) -> int:
+    config, backend = common.here()
+    server = common.server_here(config, backend)
     try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            _backend_mismatch(config.backend_kind, backend)
-            + f" ({config.path}); re-run `crucible init --force`"
-        )
-    subject = catalog.find(config, backend, args.kind, args.id)
-    if subject is None:
-        return _fail(
-            f"subject_unknown: this server has no {args.kind} called "
-            f"{args.id!r} for {backend.kind}. `crucible catalog` lists every "
-            "subject it can hold"
-        )
-    found = subject.installed()
-    if found is None:
-        return _fail(
-            f"subject_not_installed: {args.kind} {args.id!r} is not installed "
-            "on this server, so there is nothing to remove"
-        )
-    try:
-        gone = subject.remove()
+        if server is not None:
+            _subject, found = catalog.locate_installed(
+                config, backend, args.kind, args.id
+            )
+            outcome = _remove_through_the_server(server, found, args)
+            if isinstance(outcome, int):
+                return outcome
+            gone, bytes_freed = outcome
+        else:
+            removed = catalog.remove_subject(
+                config, backend, args.kind, args.id, holder=_nobody_holds
+            )
+            gone, bytes_freed = removed.path, removed.found.bytes
+    except catalog.RemoveRefused as exc:
+        return _fail(f"{exc.code}: {exc}")
     except weights.WeightsShared as exc:
         return _fail(str(exc))
     except weights.RemoveFailed as exc:
@@ -69,22 +83,22 @@ def cmd_remove(args: argparse.Namespace) -> int:
                 "kind": args.kind,
                 "id": args.id,
                 "path": str(gone),
-                "bytes_freed": found.bytes,
+                "bytes_freed": bytes_freed,
+                "through": "server" if server is not None else "files",
             },
             indent=2,
         ))
     else:
         print(f"removed:  {args.kind} {args.id}")
         print(f"path:     {gone}")
-        print(f"freed:    {found.bytes / 1e9:.2f} GB")
+        print(f"freed:    {bytes_freed / 1e9:.2f} GB")
+        if server is not None:
+            print(f"through:  the server at {server.url}, which checked nothing holds it")
     return EXIT_OK
 
 
 def cmd_models_list(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifests = _all_manifests()
     except (ManifestError, AsrManifestError, AlignManifestError) as exc:
@@ -136,10 +150,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
 
 
 def cmd_models_pull(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifests = _all_manifests()
     except (ManifestError, AsrManifestError, AlignManifestError) as exc:
@@ -169,10 +180,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_rvc_list(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifests = load_all_rvc_manifests()
     except RvcManifestError as exc:
@@ -224,10 +232,7 @@ def cmd_rvc_list(args: argparse.Namespace) -> int:
 
 
 def cmd_rvc_pull(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifest = load_rvc_manifest(args.model)
     except RvcManifestError as exc:
@@ -254,10 +259,7 @@ def cmd_rvc_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, _backend = resolved
+    config, _backend = common.here()
     try:
         assets = rvcbase.load_rvc_base()
     except rvcbase.RvcBaseError as exc:
@@ -285,10 +287,7 @@ def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
 
 
 def cmd_denoise_list(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifests = denoisemodels.load_all_denoise_manifests()
     except denoisemodels.DenoiseManifestError as exc:
@@ -355,10 +354,7 @@ def cmd_denoise_list(args: argparse.Namespace) -> int:
 
 
 def cmd_denoise_pull(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifest = denoisemodels.load_denoise_manifest(args.model)
     except denoisemodels.DenoiseManifestError as exc:
@@ -403,7 +399,7 @@ def add_model_parsers(subparsers: argparse._SubParsersAction) -> None:
     remove.add_argument(
         "kind",
         choices=list(catalog.KINDS),
-        help="the subject kind, as `crucible catalog` and GET /v1/catalog spell it",
+        help="the subject kind, as `crucible api catalog` and GET /v1/catalog spell it",
     )
     remove.add_argument("id", help="the subject id, e.g. qwen3.5-9b")
     remove.add_argument(

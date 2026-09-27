@@ -3,19 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
 from pathlib import Path
 
-from .. import weights
+from .. import apiclient, weights
 from ..config import config_path, crucible_home
+from ..errors import ConfigError
 from ..voices import VoiceError, load_all_voices, load_voice
-from .common import EXIT_OK, _fail, _models_config
+from . import common
+from .common import EXIT_OK, _fail
 
 
 def cmd_voices_list(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifests = load_all_voices()
     except VoiceError as exc:
@@ -77,10 +77,7 @@ def cmd_voices_list(args: argparse.Namespace) -> int:
 
 
 def cmd_voices_pull(args: argparse.Namespace) -> int:
-    resolved = _models_config()
-    if isinstance(resolved, int):
-        return resolved
-    config, backend = resolved
+    config, backend = common.here()
     try:
         manifest = load_voice(args.voice)
     except VoiceError as exc:
@@ -131,6 +128,27 @@ def _repo_manifest_for(reference: str):
     return parse_repo_manifest(text, path), pin
 
 
+def _pin_through_the_server(
+    server: apiclient.Connection, voice_id: str, repo: str, revision: str
+) -> Path | int:
+    try:
+        answer = apiclient.call(
+            server,
+            "PUT",
+            f"/v1/voices/{voice_id}",
+            json_body={"pin": {"hf_repo": repo, "revision": revision}},
+        )
+    except urllib.error.HTTPError as exc:
+        return apiclient.report_http_error(exc, server)
+    except (urllib.error.URLError, OSError) as exc:
+        return _fail(
+            f"server_unreachable: the server at {server.url} answered a moment "
+            f"ago and not now ({exc}); nothing was pinned. Run `crucible voices "
+            f"pin {voice_id} {repo}@{revision}` again"
+        )
+    return Path(answer["path"])
+
+
 def cmd_voices_pin(args: argparse.Namespace) -> int:
     from ..voicerepo import Pin, home_pins_path, voice_for_pin, write_home_pin
 
@@ -142,14 +160,24 @@ def cmd_voices_pin(args: argparse.Namespace) -> int:
             "that sha are the same commit, which is the whole point"
         )
     repo, revision = named
+    config, backend = common.here()
+    server = common.server_here(config, backend)
     try:
         voice = voice_for_pin(
             Pin(id=args.voice, hf_repo=repo, revision=revision, path=home_pins_path())
         )
-        pin = write_home_pin(args.voice, repo, revision)
+        if server is None:
+            pin = write_home_pin(args.voice, repo, revision)
+        else:
+            written = _pin_through_the_server(server, args.voice, repo, revision)
+            if isinstance(written, int):
+                return written
+            pin = Pin(id=args.voice, hf_repo=repo, revision=revision, path=written)
     except VoiceError as exc:
         return _fail(str(exc))
     print(f"{args.voice}: {pin.hf_repo}@{pin.revision[:12]} -> {pin.path}")
+    if server is not None:
+        print(f"  written by the server at {server.url}, which checked the voice is not loaded")
     print(f"  {voice.display} ({voice.kind}, {voice.narrator_engine}), arms "
           f"{sorted(voice.backends)}")
     print(f"  pull the weights with `crucible voices pull {args.voice}`")
@@ -158,21 +186,23 @@ def cmd_voices_pin(args: argparse.Namespace) -> int:
 
 def cmd_voices_check(args: argparse.Namespace) -> int:
     from ..config import tts_engine_footprints
-    from ..voicerepo import Pin, merge
+    from ..voicerepo import Pin, footprint_unset, merge
 
     try:
         repo, pin = _repo_manifest_for(args.reference)
     except VoiceError as exc:
         return _fail(str(exc))
     engine = repo.voice["narrator_engine"]
-    footprint = tts_engine_footprints(crucible_home()).get(engine)
+    try:
+        footprint = tts_engine_footprints(crucible_home()).get(engine)
+    except ConfigError as exc:
+        return _fail(f"config_unreadable: {exc}")
     if footprint is None:
         return _fail(
             f"engine_footprint_unset: this manifest is served by {engine!r} and "
             f"this machine's config states no [tts.{engine}] table, so the "
             "checks that depend on what the engine costs here cannot run and a "
-            "server here would refuse the voice. Run `crucible init`, or add the "
-            "table to config.toml"
+            f"server here would refuse the voice. {footprint_unset(engine)}"
         )
     identity = (
         Pin(id=args.id, hf_repo=pin.hf_repo, revision=pin.revision, path=pin.path)

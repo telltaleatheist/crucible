@@ -8,11 +8,10 @@ from pathlib import Path
 from .. import capability, hosttools, interpreter, jobenv, llamacpp
 from ..backend import Backend, CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from ..config import Config
-from ..errors import ConfigError, NoViableBackend
 from ..voices import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step
-from .common import _backend_mismatch, _env_spec, _fail
+from .common import _env_spec, _fail
 
 
 INSTALLABLE_JOB_TYPES = ("llm", "tts", *jobenv.WORKER_JOB_TYPES)
@@ -74,23 +73,11 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"there is no installer for job type {args.job_type!r}; this build "
             f"installs {sorted(INSTALLABLE_JOB_TYPES)}"
         )
-    try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            _backend_mismatch(config.backend_kind, backend)
-            + f" ({config.path}); re-run `crucible init --force`"
-        )
+    config, backend = common.here()
     if backend.kind == LLAMA_WINDOWS:
         return _install_llama_windows(config, backend, args)
     try:
-        spec = _env_spec(args.job_type, None, backend.kind)
+        spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
         recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         return _fail(str(exc))

@@ -286,3 +286,41 @@ def test_a_removal_that_fails_is_subject_remove_failed_with_the_path(
     assert error["code"] == "subject_remove_failed"
     assert error["details"]["path"] == str(directory)
     assert directory.exists()
+
+
+def test_remove_subject_asks_the_holder_before_touching_the_files(
+    home: Path, fake_weights: Callable[[str], Path], make_app: Callable[..., Any]
+) -> None:
+    from crucible import catalog
+    from crucible.config import load_config
+
+    make_app(enable_llm=True)
+    config = load_config(home)
+    directory = fake_weights("qwen3.5-9b")
+    asked: list[str] = []
+
+    def held(subject: catalog.Subject) -> dict[str, Any]:
+        asked.append(subject.id)
+        return {"who": "it is the model on the card right now", "fact": "resident"}
+
+    with pytest.raises(catalog.RemoveRefused) as caught:
+        catalog.remove_subject(config, FAKE_BACKEND, "model", "qwen3.5-9b", holder=held)
+    assert caught.value.code == "subject_in_use"
+    assert caught.value.status_code == 409
+    assert caught.value.details["fact"] == "resident"
+    assert asked == ["qwen3.5-9b"]
+    assert directory.exists(), "a held subject keeps its files"
+
+    removed = catalog.remove_subject(
+        config, FAKE_BACKEND, "model", "qwen3.5-9b", holder=lambda _subject: None
+    )
+    assert removed.found.bytes == 19_306_310_880
+    assert not directory.exists()
+
+    with pytest.raises(catalog.RemoveRefused) as unknown:
+        catalog.locate_installed(config, FAKE_BACKEND, "model", "no-such-model")
+    assert unknown.value.code == "subject_unknown"
+    assert "`crucible api catalog`" in str(unknown.value)
+    with pytest.raises(catalog.RemoveRefused) as gone:
+        catalog.locate_installed(config, FAKE_BACKEND, "model", "qwen3.5-9b")
+    assert gone.value.code == "subject_not_installed"

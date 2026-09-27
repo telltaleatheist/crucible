@@ -14,7 +14,7 @@ usage (argparse's own).
 |---|---|
 | `__init__` | `build_parser`, `main`, and the names other modules and tests import |
 | `__main__` | `python -m crucible.cli` |
-| `common` | exit codes, `_fail`, `_backend_mismatch`, `_env_spec`, `_models_config`; the one place `detect_backend` and `load_config` are reached from |
+| `common` | exit codes, `_fail`, `Refusal`, `here`, `server_here`, `_backend_mismatch`, `backend_changed_fix`, `no_viable_backend`, `_env_spec`; the one place `detect_backend` and `load_config` are reached from |
 | `init` | `init`, `--config-from` carrying, the desktop-reserve decision |
 | `install` | `install`, `INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT` |
 | `capability` | `capability`, `ladder`, and the measure and capability steps `install` runs |
@@ -51,12 +51,20 @@ its `--help` time. For the same reason `serve` imports `crucible.api` only when 
 
 `main` has no platform check. Windows is a backend (`llama-windows`), and every verb runs
 on win32. Whether this machine can run what the config says is a question about the
-backend, not the platform, and it is asked where a backend is read: `_backend_mismatch`
-(from `init --backend`, `serve`, `service install`, `install`, `remove`, `env patch`)
-refuses `backend_not_here` and names both kinds. It is the one wording for that fact. It
-appends `WINDOWS_REFUSAL` only for a `cuda-linux` config found on a Windows host, because
-that config is right about wanting vLLM and wrong about where it runs (inside the WSL2
-guest).
+backend, not the platform, and it is asked where a backend is read: `common.here()`
+loads the config, detects the backend and compares them, and every operator verb that
+needs both (`serve`, `service`, `install`, `remove`, `models`, `voices`, `rvc`,
+`denoise`, `env patch`, `capability`, `ladder`) starts with it. It raises one
+`common.Refusal`, which `main` prints; the wording is `backend_not_here` plus
+`backend_changed_fix` (both kinds, the config path, and `crucible init --force`), the same
+sentence `doctor` reports as `backend_changed`. A `NoViableBackend` reason is followed by
+the platform's next step (`DRIVER_HINTS`: the NVIDIA driver on Windows for WSL, Apple
+silicon on a Mac). `_backend_mismatch` remains for `init --backend`, which has no config
+yet. `WINDOWS_REFUSAL` is appended only for a `cuda-linux` config found on a Windows host,
+because that config is right about wanting vLLM and wrong about where it runs (inside the
+WSL2 guest). `capability` and `ladder` pass `tolerate_stale_record=True`, because
+`capability --write` is the command that repairs a `[capability]` record `load_config`
+otherwise refuses.
 
 `crucible orchestrator` still refuses off win32 (`host_windows_only`). This is a feature
 check, not a platform check: on Linux and macOS the service manager already supervises the
@@ -198,9 +206,14 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
   `denoise` have their own verbs and namespaces because their weights are not repo
   snapshots (one archive, or two named files), and so an RVC `sigma` cannot collide with a
   narrator voice `sigma`.
-- `remove` asks the door's questions in the door's order (unknown, not installed, in
-  use), except whether a running server holds the subject, which only the server process
-  knows. With a server up, `DELETE /v1/catalog/{kind}/{id}` is the one to use.
+- `remove` asks the door's questions in the door's order through
+  `catalog.remove_subject` (unknown, not installed, in use, then the files). Whether a
+  running server holds the subject only the server process knows, so `common.server_here`
+  first asks `GET /v1/info` on this config's own loopback address; when the answer names
+  this config and this backend, the CLI sends `DELETE /v1/catalog/{kind}/{id}` and the
+  server's holder check applies. When nothing answers, the CLI removes directly with a
+  holder that says nobody. The printed lines are the same either way, plus a `through:`
+  line when the server did it.
 - `denoise list` reports "stamped" and "present" separately. Two hand-placed files are
   usable but unstamped (`--force` pins them). `rvc pull-base` and `denoise pull` re-check
   the tree after the pull and refuse if a file is missing.
@@ -218,12 +231,19 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 - `voices export` prints the rows the repo schema does not carry on stderr. They move;
   they are not dropped silently.
 - `voices pin` loads the pin (`voice_for_pin`) before writing it, as
-  `PUT /v1/voices/{id}` does.
+  `PUT /v1/voices/{id}` does. With a server answering on this config's loopback address
+  (`common.server_here`), the write goes through that PUT so the server's `voice_in_use`
+  guard applies; otherwise the CLI writes `pins.toml` itself.
 - The training ladder parses `voices pull`'s `"<id>: <repo>@<sha12> for <arm>"` and
   `"<id>: N GB at <path>"` lines. Do not change them.
 
 ## `doctor`
 
+- Every problem ends in the command that fixes it (`_with_fix`, `_install_command`,
+  `backend_changed_fix`); a problem with no command is a bug, and
+  `test_every_doctor_problem_names_a_command_to_run` checks a fresh install's report.
+  `doctor` loads the config with `tolerate_stale_record=True` and reports a disagreeing
+  `[capability]` record as `capability_stale` instead of failing to read the file.
 - `problems` make the host unhealthy. `notes` never do. These are notes, not problems:
   stranded weights (`catalog.stranded_weights`), an unmeasured reserve that the ladder saw
   the desktop fit under (`desktop_reserve_unmeasured`), a type waiting only for weights

@@ -123,3 +123,74 @@ def test_the_stamp_is_taken_before_the_read(home: Path, make_client: Callable[..
         cli._write_capability(loaded, FAKE_BACKEND, (), {})
         assert loaded.follow_file() is True
         assert loaded.follow_file() is False
+
+
+
+def _disagreeing_record(**overrides: Any) -> Any:
+    import dataclasses
+
+    return dataclasses.replace(_record_with((_decide("echo"),)), **overrides)
+
+
+def _written_with(home: Path, record: Any, desktop_allowance_bytes: int) -> None:
+    from crucible.config import write_config
+
+    write_config(
+        home,
+        name="crucible@test",
+        host="127.0.0.1",
+        port=7100,
+        token=TOKEN,
+        backend_kind=FAKE_BACKEND.kind,
+        enable_echo=True,
+        enable_llm=False,
+        enable_asr=False,
+        enable_tts=False,
+        enable_align=False,
+        enable_rvc=False,
+        enable_denoise=False,
+        desktop_allowance_bytes=desktop_allowance_bytes,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
+        capability=record,
+    )
+
+
+def test_a_record_decided_for_another_backend_does_not_load(home: Path) -> None:
+    from crucible.errors import ConfigError
+
+    _written_with(home, _disagreeing_record(backend_kind="mlx-darwin"), 3 * 1024**3)
+    with pytest.raises(ConfigError) as caught:
+        load_config(home)
+    message = str(caught.value)
+    assert "'mlx-darwin'" in message and "'cuda-linux'" in message
+    assert "`crucible capability --write`" in message
+    assert load_config(home, tolerate_stale_record=True).capability is not None
+
+
+def test_a_record_decided_with_another_reserve_does_not_load(home: Path) -> None:
+    from crucible.errors import ConfigError
+
+    _written_with(home, _disagreeing_record(), 5 * 1024**3)
+    with pytest.raises(ConfigError) as caught:
+        load_config(home)
+    message = str(caught.value)
+    assert str(3 * 1024**3) in message and str(5 * 1024**3) in message
+    assert "[capability] desktop_allowance_bytes" in message
+    assert "[accelerator] desktop_allowance_bytes" in message
+    assert "`crucible capability --write`" in message
+    tolerated = load_config(home, tolerate_stale_record=True)
+    assert tolerated.desktop_allowance_bytes == 5 * 1024**3
+
+
+def test_capability_write_repairs_a_record_that_disagrees(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _written_with(home, _disagreeing_record(), 5 * 1024**3)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
+    assert cli.main(["capability", "--write"]) == 0
+    capsys.readouterr()
+    repaired = load_config(home)
+    assert repaired.capability is not None
+    assert repaired.capability.desktop_allowance_bytes == 5 * 1024**3

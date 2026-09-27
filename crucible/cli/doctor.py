@@ -31,12 +31,33 @@ from ..jobs import ALL_JOB_TYPES, build_registry
 from ..voices import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _card_facts, _card_line
-from .common import EXIT_OK, EXIT_REFUSED, _backend_mismatch, _env_spec, _fail
+from .common import EXIT_OK, EXIT_REFUSED, _env_spec, _fail
 from .install import INSTALLER_FOR
 
 
 def _no_python_env_dir(home: Path) -> Path:
     return home / "envs" / "none"
+
+
+def _with_fix(problem: str, command: str) -> str:
+    if f"`{command}`" in problem:
+        return problem
+    return f"{problem}. Run `{command}`"
+
+
+def _install_command(family: str) -> str | None:
+    installer = INSTALLER_FOR.get(family)
+    if installer is None:
+        return None
+    if installer != "tts":
+        return f"crucible install {installer}"
+    return " or ".join(
+        _tts_install_command(engine) for engine in sorted(NARRATOR_ENGINE_SAMPLING)
+    )
+
+
+def _tts_install_command(engine: str) -> str:
+    return f"crucible install tts --narrator-engine {engine}"
 
 
 def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
@@ -93,16 +114,16 @@ def _llama_engine_report(
 
 def _env_report(
     report: dict[str, Any], label: str, home: Path, spec: jobenv.EnvSpec,
-    backend_kind: str,
+    backend_kind: str, install: str,
 ) -> dict[str, Any]:
     try:
         status = jobenv.env_status(home, spec, backend_kind)
         recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
-        report["problems"].append(f"{label}: {exc}")
+        report["problems"].append(_with_fix(f"{label}: {exc}", install))
         return {"installed": False, "detail": str(exc)}
     if not status.installed:
-        report["problems"].append(f"{label}: {status.detail}")
+        report["problems"].append(_with_fix(f"{label}: {status.detail}", install))
     entry = status.to_dict()
     entry["provenance"] = _provenance(
         report,
@@ -110,6 +131,7 @@ def _env_report(
         status,
         recipe,
         _plan_or_refusal(lambda: jobenv.plan_install(home, spec, backend_kind)),
+        install,
     )
     return entry
 
@@ -127,6 +149,7 @@ def _provenance(
     status: jobenv.EnvStatus,
     recipe: Path,
     plan: "jobenv.EnvPlan | str",
+    install: str,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "recipe": recipe.name,
@@ -142,11 +165,11 @@ def _provenance(
         "detail": plan if isinstance(plan, str) else plan.detail,
     }
     if isinstance(plan, str):
-        report["problems"].append(f"{label}: {plan}")
+        report["problems"].append(_with_fix(f"{label}: {plan}", install))
     elif plan.action != jobenv.PLAN_NOTHING:
         report["problems"].append(
             f"{label}: {plan.action} — {plan.detail}. "
-            f"`crucible install` brings it up to {recipe.name}"
+            f"`{install}` brings it up to {recipe.name}"
         )
     return entry
 
@@ -197,6 +220,15 @@ def _capability_report(
             f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB; re-run "
             "`crucible capability --write`"
         )
+    if record.desktop_allowance_bytes != config.desktop_allowance_bytes:
+        entry["stale"] = True
+        report["problems"].append(
+            f"capability_stale: the record was decided with a "
+            f"{record.desktop_allowance_bytes / 1024 ** 3:.1f} GiB desktop "
+            f"reserve and [accelerator] now says "
+            f"{config.desktop_allowance_bytes / 1024 ** 3:.1f} GiB; re-run "
+            "`crucible capability --write`"
+        )
     for name in sorted({cls.job_type for cls in capability.CLASSES}):
         rows = [
             record.row(cls.name) for cls in capability.classes_for_job_type(name)
@@ -211,6 +243,7 @@ def _capability_report(
                 f"capability_contradicted: [jobs] enable_{name} is true and "
                 "nothing behind it fits this host — "
                 + "; ".join(f"{row.capability}: {row.reason}" for row in known)
+                + ". `crucible capability --write` turns the flag off"
             )
         if fits and not flagged and name in INSTALLER_FOR:
             entry["could_enable"].append(name)
@@ -247,7 +280,9 @@ def _doctor_report() -> dict[str, Any]:
         report["card"] = _card_facts(home, backend)
         report["ladder"] = ladder.summary(home, backend.gpu)
     except NoViableBackend as exc:
-        report["problems"].append(f"no_viable_backend: {exc.reason}")
+        report["problems"].append(
+            f"no_viable_backend: {exc.reason}. {common.backend_hint()}"
+        )
         backend = None
 
     shell_path = hosttools.search_path()
@@ -275,9 +310,13 @@ def _doctor_report() -> dict[str, Any]:
     report["path"] = path_report
 
     try:
-        config = common.load_config(home)
+        config = common.load_config(home, tolerate_stale_record=True)
     except ConfigError as exc:
-        report["problems"].append(f"config: {exc}")
+        report["problems"].append(
+            f"config: {exc}"
+            if "`crucible" in str(exc)
+            else _with_fix(f"config: {exc}", common.REINIT_COMMAND)
+        )
         config = None
 
     if config is not None:
@@ -306,12 +345,11 @@ def _doctor_report() -> dict[str, Any]:
         if sys.platform != "win32" and mode != "0o600":
             report["problems"].append(
                 f"config_permissions: {config.path} is mode {mode}; the token should "
-                "be readable only by its owner (chmod 600)"
+                f"be readable only by its owner. Run `chmod 600 {config.path}`"
             )
         if backend is not None and backend.kind != config.backend_kind:
             report["problems"].append(
-                f"backend_changed: config says {config.backend_kind}, this host is "
-                f"{backend.kind}"
+                f"backend_changed: {common.backend_changed_fix(config, backend)}"
             )
 
     if config is not None:
@@ -330,6 +368,7 @@ def _doctor_report() -> dict[str, Any]:
                     config.home,
                     jobenv.llm_env(backend.kind),
                     backend.kind,
+                    "crucible install llm",
                 )
         for job_type in jobenv.WORKER_JOB_TYPES:
             if not getattr(config, f"enable_{job_type}"):
@@ -340,10 +379,17 @@ def _doctor_report() -> dict[str, Any]:
                 report["worker_envs"].append(
                     {"job_type": job_type, "installed": False, "detail": str(exc)}
                 )
-                report["problems"].append(f"{job_type}_env: {exc}")
+                report["problems"].append(
+                    _with_fix(f"{job_type}_env: {exc}", f"crucible install {job_type}")
+                )
                 continue
             entry = _env_report(
-                report, f"{job_type}_env", config.home, spec, backend.kind
+                report,
+                f"{job_type}_env",
+                config.home,
+                spec,
+                backend.kind,
+                f"crucible install {job_type}",
             )
             report["worker_envs"].append({"job_type": job_type, **entry})
         if config.enable_tts:
@@ -354,6 +400,7 @@ def _doctor_report() -> dict[str, Any]:
                     config.home,
                     jobenv.tts_env(engine, backend.kind),
                     backend.kind,
+                    _tts_install_command(engine),
                 )
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING)
             }
@@ -372,7 +419,8 @@ def _doctor_report() -> dict[str, Any]:
                 if entry["status"] not in envpatches.SOUND_STATUSES:
                     report["problems"].append(
                         f"cuda_toolkit_link[{entry['engine']}:{entry['id']}]: "
-                        f"{entry['status']} — {entry['detail']}. {entry['why']}"
+                        f"{entry['status']} — {entry['detail']}. {entry['why']}. "
+                        f"`{_tts_install_command(entry['engine'])}` re-links it"
                     )
         if config.enable_llm:
             if backend.kind == LLAMA_WINDOWS:
@@ -399,8 +447,14 @@ def _doctor_report() -> dict[str, Any]:
                         f"job_type_awaiting_weights: {entry['name']}: {entry['detail']}"
                     )
                     continue
+                install = _install_command(ALL_JOB_TYPES[entry["name"]])
                 report["problems"].append(
                     f"job_type_not_ready: {entry['name']}: {entry['detail']}"
+                    + (
+                        f". `{install}` builds what it runs on"
+                        if install is not None
+                        else ". `crucible doctor --json` carries the detail"
+                    )
                 )
 
     if (
@@ -587,19 +641,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_env_patch(args: argparse.Namespace) -> int:
-    try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            _backend_mismatch(config.backend_kind, backend)
-            + f" ({config.path}); re-run `crucible init --force`"
-        )
+    config, backend = common.here()
     if envpatches.patches_for(args.job_type) is None:
         return _fail(
             f"job type {args.job_type!r} carries no site-packages patches; the "

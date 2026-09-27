@@ -286,20 +286,108 @@ def emit_line(value: Any) -> None:
     sys.stdout.flush()
 
 
-def report_http_error(exc: urllib.error.HTTPError) -> int:
-    raw = exc.read()
+@dataclass(frozen=True)
+class ServerError:
+
+    code: str
+    message: str
+    details: dict[str, Any]
+
+
+def error_in(raw: bytes) -> tuple[Any, ServerError | None]:
     try:
         body = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
+        return None, None
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return body, None
+    code, message = error.get("code"), error.get("message")
+    if not isinstance(code, str) or not isinstance(message, str):
+        return body, None
+    details = error.get("details")
+    return body, ServerError(
+        code=code, message=message,
+        details=details if isinstance(details, dict) else {},
+    )
+
+
+def host_of(connection: Connection | None) -> str:
+    if connection is None:
+        return "the server"
+    if connection.name:
+        return connection.name
+    return urllib.parse.urlsplit(connection.url).hostname or connection.url
+
+
+def _next_step(error: ServerError, connection: Connection | None) -> str | None:
+    host = host_of(connection)
+    if error.code == "unauthorized":
+        if connection is not None and connection.source == "local":
+            return (
+                f"{error.code}: this machine's own token is not accepted by "
+                f"{host} ({error.message}); the engine and the config disagree. "
+                "Run `crucible doctor` here"
+            )
+        return (
+            f"{error.code}: this pairing is not accepted by {host} "
+            f"({error.message}); re-run `crucible pair <address>` for it"
+        )
+    if error.code.startswith("api_version_"):
+        theirs = error.details.get("server_api_version")
+        ours = error.details.get("client_api_version")
+        if isinstance(theirs, int) and isinstance(ours, int) and theirs < ours:
+            return (
+                f"{error.code}: {host} speaks API version {theirs} and this "
+                f"computer speaks {ours}; {host} is older. Update Crucible on "
+                f"{host}"
+            )
+        return (
+            f"{error.code}: {host} speaks API version {theirs} and this computer "
+            f"speaks {API_VERSION}; this computer is older. Update Crucible here"
+        )
+    return None
+
+
+def report_http_error(
+    exc: urllib.error.HTTPError, connection: Connection | None = None
+) -> int:
+    raw = exc.read()
+    body, error = error_in(raw)
+    if body is None:
         text = raw.decode("utf-8", errors="replace").strip()
         print(f"crucible: HTTP {exc.code} from the server, and its body is not "
               f"Crucible's error shape:", file=sys.stderr)
         print(text if text else "(empty)", file=sys.stderr)
         return EXIT_REFUSED
+    step = None if error is None else _next_step(error, connection)
+    if step is not None:
+        print(f"crucible: HTTP {exc.code} {step}", file=sys.stderr)
+        return EXIT_REFUSED
     print(f"crucible: HTTP {exc.code}", file=sys.stderr)
     json.dump(body, sys.stderr, indent=2)
     sys.stderr.write("\n")
     return EXIT_REFUSED
+
+
+def unreachable(connection: Connection, exc: BaseException) -> str:
+    host = host_of(connection)
+    if connection.source == "local":
+        step = (
+            "This machine's engine is not answering: `crucible local status` "
+            "says whether it is running and `crucible doctor` whether it is "
+            "installed"
+        )
+    else:
+        step = (
+            f"On {host}, run `crucible doctor` to see whether Crucible is up; "
+            "if it is up but not reachable from this network, `crucible lan "
+            f"enable` there (Windows) opens it. {CONNECT_NOTE}"
+        )
+    return (
+        f"server_unreachable: {host} at {connection.url} (from "
+        f"{connection.source}) did not answer: {exc}. {step}"
+    )
 
 
 def read_text_argument(raw: str, flag: str) -> str:
@@ -941,13 +1029,9 @@ def _pair_call(origin: str, path: str, body: dict[str, Any] | None = None,
         with _opener().open(request, timeout=PAIR_TIMEOUT_SECONDS) as response:
             value = json.load(response)
     except urllib.error.HTTPError as exc:
-        try:
-            error = json.load(exc).get("error", {})
-            code, message = error.get("code"), error.get("message")
-        except (ValueError, AttributeError):
-            code = message = None
-        if isinstance(code, str) and isinstance(message, str):
-            raise ClientRefusal(f"{code}: {message}") from None
+        _body, error = error_in(exc.read())
+        if error is not None:
+            raise ClientRefusal(f"{error.code}: {error.message}") from None
         raise ClientRefusal(
             f"pair_not_crucible: {origin} answered HTTP {exc.code}, not as a Crucible"
         ) from None
@@ -1074,18 +1158,20 @@ def add_pair_parser(subparsers: Any) -> None:
 def command(args: argparse.Namespace) -> int:
     try:
         connection = resolve(args)
+    except ClientRefusal as exc:
+        print(f"crucible: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    try:
         return int(args.api_func(connection, args))
     except ClientRefusal as exc:
         print(f"crucible: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except urllib.error.HTTPError as exc:
-        return report_http_error(exc)
+        return report_http_error(exc, connection)
     except BrokenPipeError:
         return EXIT_OK
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-        target = getattr(args, "url", None) or "the local engine"
-        print(f"crucible: server_unreachable: {target} did not answer: {exc}. "
-              f"{CONNECT_NOTE}", file=sys.stderr)
+        print(f"crucible: {unreachable(connection, exc)}", file=sys.stderr)
         return EXIT_REFUSED
 
 

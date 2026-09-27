@@ -365,6 +365,82 @@ def find(
     return None
 
 
+LISTING = "`crucible api catalog` (GET /v1/catalog)"
+
+
+class RemoveRefused(CrucibleError):
+
+    def __init__(
+        self, status_code: int, code: str, message: str, details: dict[str, Any]
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.details = details
+
+
+@dataclass(frozen=True)
+class Removed:
+    subject: Subject
+    found: weights.InstalledWeights
+    path: Path
+
+
+def locate_installed(
+    config: Config, backend: Backend, kind: str, subject_id: str
+) -> tuple[Subject, weights.InstalledWeights]:
+    named = {"kind": kind, "id": subject_id}
+    if kind not in KINDS:
+        raise RemoveRefused(
+            404,
+            "subject_unknown",
+            f"{kind!r} is not a subject kind; they are {list(KINDS)}",
+            named,
+        )
+    subject = find(config, backend, kind, subject_id)
+    if subject is None:
+        raise RemoveRefused(
+            404,
+            "subject_unknown",
+            f"this server has no {kind} called {subject_id!r} for "
+            f"{backend.kind}. {LISTING} lists every subject it can hold",
+            named,
+        )
+    found = subject.installed()
+    if found is None:
+        raise RemoveRefused(
+            409,
+            "subject_not_installed",
+            f"{kind} {subject_id!r} is not installed on this server, so "
+            "there is nothing to remove. Refused rather than answered 204: "
+            "a caller told 'done' about a subject that was never there "
+            "would believe a migration had deleted something",
+            named,
+        )
+    return subject, found
+
+
+def remove_subject(
+    config: Config,
+    backend: Backend,
+    kind: str,
+    subject_id: str,
+    holder: Callable[[Subject], dict[str, Any] | None],
+) -> Removed:
+    subject, found = locate_installed(config, backend, kind, subject_id)
+    who = holder(subject)
+    if who is not None:
+        raise RemoveRefused(
+            409,
+            "subject_in_use",
+            f"{kind} {subject_id!r} cannot be removed: {who['who']}. "
+            "Deleting the files under a running engine would leave it "
+            "serving a model that is no longer on the disk",
+            who,
+        )
+    return Removed(subject=subject, found=found, path=subject.remove())
+
+
 def _floors_by_model() -> dict[str, list[str]]:
     built, _omitted = lineup.build()
     inverted: dict[str, list[str]] = {}
@@ -462,12 +538,17 @@ class Removals:
 
 __all__ = [
     "KINDS",
+    "LISTING",
     "Removals",
+    "RemoveRefused",
+    "Removed",
     "RVC_BASE_ID",
     "Subject",
     "declared_ids",
     "find",
     "ids_reading",
+    "locate_installed",
+    "remove_subject",
     "rows",
     "subjects",
 ]

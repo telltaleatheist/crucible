@@ -15,7 +15,6 @@ from ..config import (
     desktop_reserve_words,
     write_config,
 )
-from ..errors import ConfigError, NoViableBackend
 from . import common
 from .common import EXIT_OK, _fail
 
@@ -127,19 +126,7 @@ def _print_decisions(
 
 
 def cmd_capability(args: argparse.Namespace) -> int:
-    try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            f"this host detects backend {backend.kind}, but {config.path} was "
-            f"initialised for {config.backend_kind}; re-run `crucible init --force`"
-        )
+    config, backend = common.here(tolerate_stale_record=True)
 
     before: Config | None = None
     reserve: ladder.DesktopReserve | None = None
@@ -252,14 +239,7 @@ def _measure_step(config: Config, backend: Backend, *, gpu: bool) -> None:
 
 
 def cmd_ladder(args: argparse.Namespace) -> int:
-    try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
+    config, backend = common.here(tolerate_stale_record=True)
     rungs = tuple(args.rung) if args.rung else ladder.RUNGS
     say = None if args.json else (lambda line: print(line))
     try:

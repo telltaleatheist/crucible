@@ -8,26 +8,13 @@ import sys
 from .. import service
 from ..backend import Backend
 from ..config import Config
-from ..errors import ConfigError, NoViableBackend
 from . import common
-from .common import EXIT_OK, EXIT_REFUSED, _backend_mismatch, _fail
+from .common import EXIT_OK, EXIT_REFUSED, _fail
 from .token import PAIRING_NOT_PRINTED, _pairing_permission, _write_pairing_file
 
 
 def _service_context() -> tuple[Config, Backend, str] | int:
-    try:
-        config = common.load_config()
-    except ConfigError as exc:
-        return _fail(str(exc))
-    try:
-        backend = common.detect_backend()
-    except NoViableBackend as exc:
-        return _fail(f"no viable backend: {exc.reason}")
-    if backend.kind != config.backend_kind:
-        return _fail(
-            _backend_mismatch(config.backend_kind, backend)
-            + f" ({config.path}); re-run `crucible init --force`"
-        )
+    config, backend = common.here()
     try:
         mechanism = service.mechanism_for(backend.kind)
     except service.ServiceError as exc:

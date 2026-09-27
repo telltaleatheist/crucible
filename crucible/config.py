@@ -832,11 +832,33 @@ def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
 
 
 def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:
-    try:
-        _root, _path, table = _read_document(home)
-    except ConfigError:
-        return {}
+    _root, _path, table = _read_document(home)
     return {entry.engine: entry for entry in _tts_engine_records(table)}
+
+
+RECORD_COMMAND = "crucible capability --write"
+
+
+def _record_agrees(
+    record: CapabilityRecord | None, backend_kind: str, desktop_allowance_bytes: int
+) -> None:
+    if record is None:
+        return
+    if record.backend_kind != backend_kind:
+        raise ConfigError(
+            f"config [capability] backend_kind is {record.backend_kind!r} but "
+            f"[backend] kind is {backend_kind!r}: the capability record was "
+            f"decided for another backend. `{RECORD_COMMAND}` rewrites the "
+            "record from this host"
+        )
+    if record.desktop_allowance_bytes != desktop_allowance_bytes:
+        raise ConfigError(
+            f"config [capability] desktop_allowance_bytes is "
+            f"{record.desktop_allowance_bytes} but [accelerator] "
+            f"desktop_allowance_bytes is {desktop_allowance_bytes}: the "
+            "capability record was decided with another desktop reserve. "
+            f"`{RECORD_COMMAND}` rewrites the record with the reserve"
+        )
 
 
 def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
@@ -860,7 +882,9 @@ def own_engine_backend(home: Path | None = None) -> str | None:
     return _require(table, "backend", "kind", str)
 
 
-def load_config(home: Path | None = None) -> Config:
+def load_config(
+    home: Path | None = None, *, tolerate_stale_record: bool = False
+) -> Config:
     stamped = config_path(home if home is not None else crucible_home())
     try:
         before = stamped.stat()
@@ -870,6 +894,13 @@ def load_config(home: Path | None = None) -> Config:
     root, path, table = _read_document(home)
 
     upstreams = _upstream_records(table)
+    record = _capability_record(table)
+    if not tolerate_stale_record:
+        _record_agrees(
+            record,
+            _require(table, "backend", "kind", str),
+            _require(table, "accelerator", "desktop_allowance_bytes", int),
+        )
     return Config(
         path=path,
         home=root,
@@ -896,7 +927,7 @@ def load_config(home: Path | None = None) -> Config:
         ),
         desktop_allowance_basis=_desktop_basis(table),
         desktop_allowance_note=_desktop_note(table),
-        capability=_capability_record(table),
+        capability=record,
         routes=_route_records(table, upstreams),
         local_models=_local_model_records(table),
         upstreams=upstreams,
