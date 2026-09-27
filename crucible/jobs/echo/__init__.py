@@ -1,10 +1,3 @@
-"""`echo` — the test job type.
-
-Copies each input to an artifact of the same name, emitting progress between the
-copies so the SSE stream has something ordered to assert on. It touches no
-accelerator and serves no model. Registered only when `[jobs] enable_echo = true`.
-"""
-
 from __future__ import annotations
 
 import time
@@ -15,14 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...errors import JobError
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 
-# Cancellation is cooperative: the delay is slept in slices this long so that a
-# DELETE /jobs/{id} lands promptly instead of after the whole delay.
 _SLICE_SECONDS = 0.02
 
 
 class EchoParams(BaseModel):
-    """`params` for an echo job. Unknown keys are refused, not ignored."""
-
     model_config = ConfigDict(extra="forbid")
 
     delay_ms: int = Field(default=25, ge=0, le=60_000)
@@ -40,7 +29,6 @@ class EchoJobType:
         return 0
 
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
-        """Echo serves no models, so its artifacts name none."""
         if model is not None:
             raise JobError("unknown_model", f"echo serves no models, got {model!r}")
         return None
@@ -52,11 +40,6 @@ class EchoJobType:
         )
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
-        """Echo needs no host state, so there is nothing to refuse up front.
-
-        Its params are validated in `run()`, where a bad `delay_ms` becomes a
-        failed job — the phase-1 behaviour, unchanged.
-        """
         return None
 
     def run(self, job: Job, ctx: JobContext) -> None:
