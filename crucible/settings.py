@@ -587,7 +587,11 @@ def _validate(resolved: Resolved) -> None:
 
 
 def recomputed_capability(
-    config: Config, resolved: Resolved, *, gpu_vendor: str
+    config: Config,
+    resolved: Resolved,
+    *,
+    gpu_vendor: str,
+    compute_capability: str | None,
 ) -> CapabilityRecord | None:
     """`[capability]`, decided again with the new routes and allowance applied.
 
@@ -623,6 +627,11 @@ def recomputed_capability(
         # when the detected backend and the recorded one disagree, so the two
         # cannot drift apart under a running server.
         gpu_vendor=gpu_vendor,
+        # THE CARD'S GENERATION, live for the vendor's reason, and REQUIRED
+        # here: a settings write that re-decided without it would quietly
+        # re-enable a class the card cannot start (a bf16 model on a Turing
+        # card, fresh-install #48) the next time somebody pasted a key.
+        compute_capability=compute_capability,
         # The selections as this patch leaves them, not as the config had
         # them: a write that changes a choice must be decided on the NEW one,
         # or the record would describe the model the app just replaced.
@@ -637,7 +646,13 @@ def recomputed_capability(
     )
 
 
-def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
+def apply(
+    config: Config,
+    resolved: Resolved,
+    *,
+    gpu_vendor: str,
+    compute_capability: str | None,
+) -> None:
     """Write the file and adopt it into the Config this process holds.
 
     **In that order, and into the SAME object.** Every route, the residency,
@@ -679,7 +694,12 @@ def apply(config: Config, resolved: Resolved, *, gpu_vendor: str) -> None:
         # `engine_footprint_unset`.
         tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
-        capability=recomputed_capability(config, resolved, gpu_vendor=gpu_vendor),
+        capability=recomputed_capability(
+            config,
+            resolved,
+            gpu_vendor=gpu_vendor,
+            compute_capability=compute_capability,
+        ),
         routes=routes,
         upstreams=upstreams,
         local_models=local_models,

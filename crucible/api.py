@@ -1043,6 +1043,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             capability_class=query.get("class"),
             context_tokens=query.get(capability_classes.CONTEXT_TOKENS_PARAM),
             concurrency=query.get(capability_classes.CONCURRENCY_PARAM),
+            compute_capability=backend.gpu.compute_capability,
         )
         for row in document["classes"]:
             row["route"] = (
@@ -1115,7 +1116,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         # write must not stall a job's event stream.
         await asyncio.to_thread(
             lambda: settings_module.apply(
-                live, resolved, gpu_vendor=backend.gpu.vendor
+                live,
+                resolved,
+                gpu_vendor=backend.gpu.vendor,
+                compute_capability=backend.gpu.compute_capability,
             )
         )
         if resolved.changed:

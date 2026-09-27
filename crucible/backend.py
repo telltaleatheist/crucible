@@ -73,11 +73,104 @@ WINDOWS_REFUSAL = (
 )
 
 
+#: WHAT A CARD'S COMPUTE CAPABILITY SAYS IT CAN RUN (fresh-install #48,
+#: 2026-09-26). Owen, on kylies-pc's GTX 1660 SUPER: *"this gpu is also not
+#: capable of most things, so itll be useful to figure out how we can know what
+#: its capable of without direct measurements."* Memory was the only axis until
+#: then, and a card with room and without bf16 would have been told "yes" and
+#: then failed at the engine's first line.
+#:
+#: Each floor is the ENGINE'S OWN, read in the pinned llm env (vLLM 0.29.0,
+#: torch 2.13.0+cu130) rather than recalled, so a card is judged by the number
+#: the code that runs on it will judge it by:
+#:
+#:   bf16                8.0   vLLM `platforms/cuda.py` L237-246 (`supported_dtypes`:
+#:                             "Pascal, Volta and Turing NVIDIA GPUs, BF16 is not
+#:                             supported") and L622-640 (`check_if_supports_dtype`
+#:                             raises below 80); torch `cuda/__init__.py` L244
+#:                             (`is_bf16_supported`: native only at major >= 8,
+#:                             emulated below)
+#:   flash_attention_2   8.0   vLLM `v1/attention/backends/flash_attn.py` L198-199
+#:                             (`capability >= DeviceCapability(8, 0)`)
+#:   fp8                 8.9   vLLM `platforms/cuda.py` L571-572 (`supports_fp8`:
+#:                             `has_device_capability(89)`)
+#:
+#: A FEATURE NOTHING NEEDS IS STILL REPORTED. Nothing in this build's catalog
+#: needs FlashAttention 2 (vLLM falls back to its Triton attention, which
+#: `triton_attn.py` L373-374 allows on any capability) or fp8 (no cuda-linux
+#: block runs fp8 weights or fp8 KV). They are on `crucible capability` and
+#: `crucible doctor` because they are what a person asking "what can this card
+#: do" is asking, and the day a manifest needs one the fact is already here.
+BF16 = "bf16"
+FLASH_ATTENTION_2 = "flash_attention_2"
+FP8 = "fp8"
+
+#: `(feature, (major, minor), what it is)`, in report order. The one owner of
+#: every floor above: `card_features` reads it and nothing else types one.
+FEATURE_FLOORS: tuple[tuple[str, tuple[int, int], str], ...] = (
+    (BF16, (8, 0), "bfloat16 arithmetic"),
+    (FLASH_ATTENTION_2, (8, 0), "FlashAttention 2 kernels"),
+    (FP8, (8, 9), "fp8 weights and KV cache"),
+)
+
+
+def parse_compute_capability(text: str) -> tuple[int, int] | None:
+    """`"7.5"` as `(7, 5)`, or None for anything that is not `<major>.<minor>`."""
+    major, dot, minor = text.strip().partition(".")
+    if dot != "." or not major.isdigit() or not minor.isdigit():
+        return None
+    return int(major), int(minor)
+
+
+def sm_name(compute_capability: str) -> str:
+    """`"7.5"` as `"sm_75"`, the name a person reads on a spec sheet and in a
+    kernel's error, so a refusal can use the same words."""
+    parsed = parse_compute_capability(compute_capability)
+    if parsed is None:
+        return compute_capability
+    return f"sm_{parsed[0]}{parsed[1]}"
+
+
+def card_features(compute_capability: str | None) -> dict[str, bool] | None:
+    """Every feature in `FEATURE_FLOORS`, true where this card meets its floor.
+
+    None when the capability is unknown — a card nvidia-smi would not report it
+    for, or no card at all (a Mac, a CPU-only Windows box) — and None is not
+    "none of them": a caller that cannot tell the two apart would refuse bf16
+    on an M1 Ultra.
+    """
+    if compute_capability is None:
+        return None
+    parsed = parse_compute_capability(compute_capability)
+    if parsed is None:
+        return None
+    return {name: parsed >= floor for name, floor, _what in FEATURE_FLOORS}
+
+
+def feature_floor(feature: str) -> str:
+    """The floor a feature needs, as `"8.0"`. A name not in the table is refused."""
+    for name, (major, minor), _what in FEATURE_FLOORS:
+        if name == feature:
+            return f"{major}.{minor}"
+    raise KeyError(
+        f"{feature!r} is not a card feature this build knows; it knows "
+        f"{[name for name, _floor, _what in FEATURE_FLOORS]}"
+    )
+
+
 @dataclass(frozen=True)
 class Gpu:
     vendor: str
     name: str
     vram_bytes: int
+    #: `nvidia-smi --query-gpu=compute_cap`, as the driver prints it (`"7.5"`),
+    #: or None where there is no NVIDIA card or the driver would not say. The
+    #: one owner of "what generation is this card"; `card_features` is what it
+    #: means.
+    compute_capability: str | None = None
+
+    def features(self) -> dict[str, bool] | None:
+        return card_features(self.compute_capability)
 
 
 @dataclass(frozen=True)
@@ -144,6 +237,39 @@ def probe_nvidia_smi() -> tuple[str, int]:
             f"could not parse nvidia-smi memory.total {mib_text!r} as an integer"
         ) from exc
     return name, mib * 1024 * 1024
+
+
+def probe_compute_capability() -> str | None:
+    """GPU 0's compute capability (`"7.5"`), or None if the driver will not say.
+
+    A QUERY OF ITS OWN, not a third column on `probe_nvidia_smi`'s: a driver
+    that predates the `compute_cap` field rejects the WHOLE query as an invalid
+    field, and a detection that failed on it would turn "this card's generation
+    is unknown" into "this host has no backend". Unknown is reported as unknown
+    (`card_features` returns None) and never as a card that lacks everything.
+
+    The bootstrap installer asks the same field in shell before any Python
+    exists (`sdk/bootstrap/scripts/install.sh`'s compute-capability floor);
+    this is the Python side's one reading of it.
+    """
+    exe = nvidia_smi_path()
+    if exe is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [exe, "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines or parse_compute_capability(lines[0]) is None:
+        return None
+    return lines[0]
 
 
 def probe_mlx() -> str:
@@ -272,7 +398,12 @@ def detect_windows(arch: str) -> Backend:
         kind=LLAMA_WINDOWS,
         platform="windows",
         arch=arch,
-        gpu=Gpu(vendor="nvidia", name=name, vram_bytes=vram_bytes),
+        gpu=Gpu(
+            vendor="nvidia",
+            name=name,
+            vram_bytes=vram_bytes,
+            compute_capability=probe_compute_capability(),
+        ),
         detail=f"llama.cpp cuda build; nvidia-smi at {nvidia_smi_path()}",
     )
 
@@ -291,7 +422,12 @@ def detect_backend() -> Backend:
             kind=CUDA_LINUX,
             platform="linux",
             arch=arch,
-            gpu=Gpu(vendor="nvidia", name=name, vram_bytes=vram_bytes),
+            gpu=Gpu(
+                vendor="nvidia",
+                name=name,
+                vram_bytes=vram_bytes,
+                compute_capability=probe_compute_capability(),
+            ),
             detail=f"nvidia-smi at {nvidia_smi_path()}",
         )
 

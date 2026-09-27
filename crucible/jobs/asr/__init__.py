@@ -824,6 +824,11 @@ class AsrJobType:
             host_total_bytes=self._backend.gpu.vram_bytes,
             host_name=self._backend.gpu.name,
         )
+        # Qwen3-ASR's vLLM block runs bfloat16 by Owen's ruling, and vLLM
+        # refuses bfloat16 below compute capability 8.0 (fresh-install #48).
+        accelerator.refuse_if_card_lacks(
+            model_id=model_id, spec=spec, gpu=self._backend.gpu
+        )
         python = _python_for(self._config, spec.engine, backend_kind, model_id)
         try:
             installed = weights.require_installed(self._config, manifest, spec)

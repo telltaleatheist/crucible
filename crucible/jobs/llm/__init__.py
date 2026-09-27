@@ -610,6 +610,9 @@ def _require_loadable(
         host_total_bytes=backend.gpu.vram_bytes,
         host_name=backend.gpu.name,
     )
+    # And what no amount of room fixes either: a card too old for the block's
+    # dtype (fresh-install #48; a bf16 block on sm_75 dies at vLLM's first line).
+    accelerator.refuse_if_card_lacks(model_id=model_id, spec=spec, gpu=backend.gpu)
     if backend_kind == LLAMA_WINDOWS:
         # NO ENV. The engine is `llama-server.exe` from the pinned llama.cpp
         # release, and `env_missing` is still the right NAME for "this host
