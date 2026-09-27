@@ -92,8 +92,27 @@ RESTART_ENGINE = "restart-engine"
 STOP_ENGINE = "stop-engine"
 OPEN_LOG = "open-log"
 QUIT = "quit"
+#: PHASE19 2.5's Try again, IN THE TRAY (FRESH-INSTALL #16, 2026-09-26). On
+#: kylies-pc there was no app, and the only retry was a `POST /install` with the
+#: engine's bearer, which no person would ever find. Shown only when the move's
+#: outcome is `cannot` or `failed`, as 2.5 says of the apps' control.
+TRY_AGAIN = "try-again"
+#: A disabled line, not a verb: the move is waiting for a restart.
+RESTART_OWED = "restart-owed"
 
-ITEM_IDS = (OPEN_CONSOLE, INSTALL_ENGINE, RESTART_ENGINE, STOP_ENGINE, OPEN_LOG, QUIT)
+ITEM_IDS = (
+    OPEN_CONSOLE, INSTALL_ENGINE, RESTART_OWED, TRY_AGAIN, RESTART_ENGINE, STOP_ENGINE, OPEN_LOG, QUIT,
+)
+
+#: The outcome states Try again is offered for (2.5).
+TRY_AGAIN_STATES = frozenset({"cannot", "failed"})
+
+#: Labels. PLACEHOLDER WORDS (A1, 2026-09-26): the wording is A2's to settle
+#: with the rest of the restart and failure messages.
+TRY_AGAIN_LABEL = "Try again: set up the Linux engine"
+#: A disabled line while the move waits for a restart, so the tray itself says
+#: what is owed ("Update and restart", the 2026-09-26 ruling).
+RESTART_OWED_LABEL = "Restart Windows with Update and restart to finish setting up"
 
 #: 4.2's label, after section 0's amendment. It is an UPGRADE and says so: the
 #: `llama-windows` server already works, and what WSL adds is vLLM/SGLang
@@ -168,8 +187,26 @@ def quit_label(distro: Distro, owner: Owner) -> str:
     return "Quit"
 
 
-def menu_model(distro: Distro, engine: Engine, owner: Owner) -> MenuModel:
-    """4.2's menu for this state. Pure: no clock, no environment, no I/O."""
+def outcome_items(outcome_state: str | None, *, busy: bool) -> list[MenuItem]:
+    """What the move's outcome adds to a menu (FRESH-INSTALL #16, 2026-09-26).
+
+    Shared by this model and the desktop tray (`crucible/desktop.py`), which is
+    the icon a person actually sees, so the two cannot offer different things.
+    """
+    if outcome_state == "reboot-pending":
+        return [MenuItem(RESTART_OWED, RESTART_OWED_LABEL, False)]
+    if outcome_state in TRY_AGAIN_STATES:
+        return [MenuItem(TRY_AGAIN, TRY_AGAIN_LABEL, not busy)]
+    return []
+
+
+def menu_model(
+    distro: Distro, engine: Engine, owner: Owner, outcome_state: str | None = None
+) -> MenuModel:
+    """4.2's menu for this state. Pure: no clock, no environment, no I/O.
+
+    `outcome_state` is `wsl-outcome.json`'s `state` (PHASE19 2.2), or None.
+    """
     busy = engine is Engine.INSTALLING
     running = engine is Engine.RUNNING
     #: An engine this host did not start is one it does not act on. Every verb
@@ -189,6 +226,8 @@ def menu_model(distro: Distro, engine: Engine, owner: Owner) -> MenuModel:
                 not busy,
             )
         )
+    if not found:
+        items.extend(outcome_items(outcome_state, busy=busy))
     items.extend(
         [
             # Restart is offered in every state except while an install holds

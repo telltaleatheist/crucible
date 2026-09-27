@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -1211,9 +1212,9 @@ def test_the_classifier_reads_the_TABLES_partition_and_keeps_no_list_of_its_own(
     assert outcome.classify("step_failed") == outcome.FAILED
 
 
-def test_a_second_reboot_demand_is_terminal_and_says_twice(tmp_path: Path) -> None:
-    """2.4. The first demand is Windows being asked what it needs; the second,
-    on the run that already followed a restart, is a machine to look at."""
+def test_a_reboot_demand_past_the_budget_is_terminal_and_says_twice(tmp_path: Path) -> None:
+    """2.4, amended by FRESH-INSTALL #19 (2026-09-26): the demand that is
+    terminal is the one after `RESTART_BUDGET` restarts, not the second."""
     events: list[installer.Event] = []
     runner = Scripted(answers={"--status": bad("not recognized")})
     walk = installer.EngineInstall(
@@ -1222,7 +1223,8 @@ def test_a_second_reboot_demand_is_terminal_and_says_twice(tmp_path: Path) -> No
         release="1.0.5",
         home=tmp_path,
         install_sh_url="https://example.invalid/install.sh",
-        resuming=True,
+        restarts=installer.RESTART_BUDGET,
+        rebooted=True,
     )
     with pytest.raises(HostError) as caught:
         walk.run()
@@ -4670,25 +4672,34 @@ def test_a_machine_that_cannot_writes_cannot_with_the_tables_own_sentence(
 
 
 def test_a_reboot_writes_reboot_pending_and_the_NEXT_start_resumes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """2.3 and 2.4 together, on one machine, twice."""
+    """2.3 and 2.4 together, on one machine, with #19's restart budget."""
     runner = Scripted(answers={"--status": bad("not recognized")})
     host, _context = _real_sequence_host(tmp_path, runner)
     assert host.decide_engine() == "reboot-pending"
     first = outcome.read(tmp_path)
     assert first is not None and first.state == "reboot-pending"
     assert first.code == "wsl_reboot_required"
+    assert first.restarts == 1
 
-    # The machine restarts, the Startup item brings the tray back, and Windows
-    # asks for a restart AGAIN. That is 2.4's `cannot`, not a third restart.
-    again = Scripted(answers={"--status": bad("not recognized")})
-    host2, _c2 = _real_sequence_host(tmp_path, again)
+    # The machine restarts (the boot is after the outcome's `at`), the Startup
+    # item brings the tray back, and Windows asks for a restart AGAIN. Within
+    # the budget that is another restart; past it, 2.4's `cannot`.
+    monkeypatch.setattr(wslstate, "booted_at", lambda: time.time() + 3600)
+    for restarts in range(2, installer.RESTART_BUDGET + 1):
+        again = Scripted(answers={"--status": bad("not recognized")})
+        host_n, _cn = _real_sequence_host(tmp_path, again)
+        assert host_n.decide_engine() == "reboot-pending"
+        recorded = outcome.read(tmp_path)
+        assert recorded is not None and recorded.code == "wsl_reboot_still_owed"
+        assert recorded.restarts == restarts
+    last = Scripted(answers={"--status": bad("not recognized")})
+    host2, _c2 = _real_sequence_host(tmp_path, last)
     assert host2.decide_engine() == "cannot"
     second = outcome.read(tmp_path)
     assert second is not None and second.state == "cannot"
     assert second.code == "wsl_reboot_again"
-    assert second.sentence is not None and "twice" in second.sentence
 
 
 # ------------------------------------------- PHASE19 2.6 watching the door

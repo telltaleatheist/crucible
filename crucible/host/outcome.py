@@ -56,16 +56,35 @@ FAILED_ATTEMPT_CEILING = 2
 
 #: Codes that are `cannot` without being a row of the 4c table.
 #:
-#: `wsl_reboot_again` is 2.4's: `wsl --install` was run, Windows was restarted,
-#: and `wsl --status` still asks for a restart. There is no probe for that —
-#: it is the same state seen twice — so it is a code of its own rather than a
-#: row, and it is terminal for the tray because a machine that asks twice is
-#: one a person has to look at.
+#: `wsl_reboot_again` is 2.4's, AMENDED 2026-09-26 (FRESH-INSTALL #19): WSL was
+#: enabled, Windows was restarted `installer.RESTART_BUDGET` times, and servicing
+#: still has not committed it. It used to fire after ONE restart, and on
+#: kylies-pc one more restart was the whole answer. It is a code of its own
+#: rather than a row, and it is `cannot` for the move; the tray still re-probes
+#: it at every start (`TRANSIENT_CANNOT_CODES`).
 CANNOT_CODES: frozenset[str] = frozenset({"wsl_reboot_again"})
 
 #: The code `installer.py` raises when it stops for the restart `wsl --install`
 #: demands. Named here because the classifier is what turns it into a state.
 REBOOT_CODE = "wsl_reboot_required"
+
+#: A restart Crucible asked for happened, and servicing STILL owes one
+#: (FRESH-INSTALL #14/#19, kylies-pc 2026-09-26: the first restart after an
+#: enable was deferred behind a staged Windows update, and the second one
+#: committed both). It is `reboot-pending`, not `cannot`, until the restart
+#: budget (`installer.RESTART_BUDGET`) is spent.
+REBOOT_AGAIN_CODE = "wsl_reboot_still_owed"
+
+#: Every code that means "restart, then Crucible goes on by itself".
+REBOOT_CODES: frozenset[str] = frozenset({REBOOT_CODE, REBOOT_AGAIN_CODE})
+
+#: The `cannot`s whose cause can go away with no person changing anything
+#: (FRESH-INSTALL #16/#18). `wsl_reboot_again` is the restart budget spent: the
+#: next restart may still commit WSL (kylies-pc's did), so the tray re-probes it
+#: at every start and resumes the move the moment WSL is live. Every other
+#: `cannot` is a firmware setting, a VPN, a disk or a distro somebody else made,
+#: and stays put until a person presses Try again.
+TRANSIENT_CANNOT_CODES: frozenset[str] = frozenset({"wsl_reboot_again"})
 
 
 def _utc_now() -> str:
@@ -83,6 +102,10 @@ class Outcome:
     at: str
     release: str
     attempts: int
+    #: How many restarts this move has asked for in a row (FRESH-INSTALL #19,
+    #: 2026-09-26). Beside 2.2's shape rather than in `attempts`, which counts
+    #: consecutive FAILURES; a file written before it exists reads as 0.
+    restarts: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -92,7 +115,15 @@ class Outcome:
             "at": self.at,
             "release": self.release,
             "attempts": self.attempts,
+            "restarts": self.restarts,
         }
+
+    def at_epoch(self) -> float | None:
+        """`at` as a Unix time, or None when it is not ISO-8601."""
+        try:
+            return datetime.fromisoformat(self.at).timestamp()
+        except ValueError:
+            return None
 
 
 def path(home: Path) -> Path:
@@ -109,7 +140,7 @@ def classify(code: str) -> str:
     import that timed out, `install.sh` exiting non-zero, a repair that ran and
     changed nothing — is a `failed`, which is the one the tray retries.
     """
-    if code == REBOOT_CODE:
+    if code in REBOOT_CODES:
         return REBOOT_PENDING
     if code in CANNOT_CODES:
         return CANNOT
@@ -175,6 +206,9 @@ def read(home: Path) -> Outcome | None:
         raise HostError("wsl_outcome_invalid", f"{file} says code={code!r}.")
     if sentence is not None and not isinstance(sentence, str):
         raise HostError("wsl_outcome_invalid", f"{file} says sentence={sentence!r}.")
+    restarts = raw.get("restarts", 0)
+    if not isinstance(restarts, int) or isinstance(restarts, bool) or restarts < 0:
+        raise HostError("wsl_outcome_invalid", f"{file} says restarts={restarts!r}.")
     return Outcome(
         state=state,
         code=code,
@@ -182,6 +216,7 @@ def read(home: Path) -> Outcome | None:
         at=at,
         release=release,
         attempts=attempts,
+        restarts=restarts,
     )
 
 
@@ -193,6 +228,7 @@ def write(
     code: str | None = None,
     sentence: str | None = None,
     attempts: int,
+    restarts: int = 0,
     now: Callable[[], str] = _utc_now,
 ) -> Outcome:
     """Record one terminal point. Written whole, then moved into place.
@@ -220,6 +256,7 @@ def write(
         at=now(),
         release=release,
         attempts=attempts,
+        restarts=restarts,
     )
     home = Path(home)
     home.mkdir(parents=True, exist_ok=True)

@@ -119,6 +119,33 @@ def _fail(message: str) -> int:
 # --------------------------------------------------------------------- host
 
 
+def _orchestrator_try_again() -> int:
+    """`crucible orchestrator --try-again` (FRESH-INSTALL #16, 2026-09-26).
+
+    The door's `POST /install`, made by the product for a person who has no
+    app: the same move and the same claim as an app's Try again. It prints one
+    line per step and ends with the outcome's own sentence.
+    """
+    from .config import crucible_home
+    from .host import outcome as host_outcome
+    from .host.errors import HostError
+    from .host.retry import try_again
+
+    try:
+        ended = try_again(crucible_home())
+    except (HostError, OSError) as exc:
+        message = f"{exc.code}: {exc.message}" if isinstance(exc, HostError) else str(exc)
+        return _fail(message)
+    if ended is None:
+        return _fail("wsl_outcome_invalid: the move ended without recording how")
+    if ended.sentence:
+        print(ended.sentence)
+    if ended.state == host_outcome.DONE:
+        print("The Linux engine is set up and running.")
+        return EXIT_OK
+    return EXIT_REFUSED
+
+
 def cmd_orchestrator(args: argparse.Namespace) -> int:
     """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
 
@@ -139,6 +166,9 @@ def cmd_orchestrator(args: argparse.Namespace) -> int:
 
       --install-startup   write the Startup item and print its path
       --remove-startup    delete it, and say whether there was one
+      --try-again         PHASE19 2.5's Try again, for a machine with no app
+                          (FRESH-INSTALL #16): run the Linux-engine move once
+                          more, follow it, and say how it ended
       (bare)              the tray
     """
     from .host import startup as host_startup
@@ -153,6 +183,9 @@ def cmd_orchestrator(args: argparse.Namespace) -> int:
             "supervises it — `crucible service status` is the question you "
             "are asking."
         )
+
+    if getattr(args, "try_again", False):
+        return _orchestrator_try_again()
 
     runner = ProcessRunner(sys.platform, os.environ)
     try:
@@ -3383,6 +3416,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--remove-startup",
         action="store_true",
         help="delete the Startup shortcut and exit",
+    )
+    host_parser.add_argument(
+        "--try-again",
+        action="store_true",
+        help="set up the Linux engine again after it stopped, and say how it ended",
     )
     host_parser.set_defaults(func=cmd_orchestrator)
     host_parser.add_argument("--headless", action="store_true", help="Run the controller independently of the tray")
