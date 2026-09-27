@@ -1,33 +1,3 @@
-"""The two catalogs the weights migration reads, and the door it deletes through.
-
-PHASE15-HOST.md 3.5 (the weights rule) and 3.5a (`DELETE /v1/catalog/{kind}/{id}`).
-
-THE HOST NEVER TOUCHES A WEIGHTS FILE. 3.5a exists precisely so that it does
-not: `crucible/weights.py` owns where a subject's bytes live, and a host that
-deleted a directory it had composed itself would be a second owner of that
-layout. Preparation reads the two live APIs. After activation, retirement calls
-the stopped native catalog's existing owner functions; port 7100 then belongs
-to the guest and must never receive a deletion meant for the Windows copy.
-
-TWO PORTS, BECAUSE THE TWO SERVERS ARE REACHED DIFFERENTLY
------------------------------------------------------------
-During the move both servers want `127.0.0.1:7100`, and on Windows the
-Windows one has it. So:
-
-* the WINDOWS server is reached over loopback from this process
-  (`HttpCatalog`);
-* the GUEST server is reached by running `curl` INSIDE the distro
-  (`GuestCatalog`), which is the only address that is unambiguously its own.
-
-They speak the same three verbs and answer the same refusals, so the sequence
-in `installer.py` never branches on which side it is talking to — it is the
-ORDER that carries 3.5's rule, not the transport.
-
-ONE TOKEN. After `migrate-config` the guest holds the Windows server's token
-(4.3), which is what lets one bearer open both doors, and is the same fact
-that keeps every paired app paired.
-"""
-
 from __future__ import annotations
 
 import json
@@ -40,20 +10,13 @@ from .errors import HostError
 from .runner import Runner
 from .. import API_VERSION
 
-#: A catalog read is cheap, and a server that will not answer one is a server
-#: this step cannot reason about — so the timeout is short and the failure is
-#: a refusal rather than a retry.
 CATALOG_TIMEOUT_SECONDS = 60.0
 
-#: A pull is submitted as a TASK and returns as soon as it is accepted; the
-#: waiting is the caller's poll of the catalog, not a long request.
 SUBMIT_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
 class Subject:
-    """One row of `GET /v1/catalog`, reduced to what the migration needs."""
-
     kind: str
     id: str
     name: str
@@ -68,19 +31,6 @@ class Subject:
 
 
 def parse_catalog(document: Any, where: str) -> list[Subject]:
-    """`GET /v1/catalog`'s body to subjects. Refuses a shape it cannot read.
-
-    NOT tolerant, and the reason is specific to this caller: a catalog that
-    half-parses is indistinguishable from a server that ships fewer subjects,
-    and the difference here decides whether a weights file is deleted on
-    Windows before the guest has its own.
-    """
-    # `rows`, THE SERVER'S KEY (`GET /v1/catalog` in crucible/api.py). This read
-    # `subjects`, a key the route no longer answers with, so on kylies-pc
-    # (2026-09-26, the first move run against a current server) every 200 from
-    # the restarted guest raised here, and the move reported it as "did not
-    # accept the migrated token". The host and the guest are always the same
-    # release, so there is one shape to read and no older one to fall back to.
     rows = document.get("rows") if isinstance(document, dict) else None
     if not isinstance(rows, list):
         raise HostError(
@@ -120,22 +70,12 @@ def parse_catalog(document: Any, where: str) -> list[Subject]:
 
 
 class CatalogRefusal(HostError):
-    """A server's own refusal, with its code kept verbatim.
-
-    `subject_in_use` is the whole reason this class exists: the migration's
-    retry turns on that exact code, and a generic "it failed" would make the
-    step skip a subject that 3.5 says it must never skip. `who` carries
-    `details.who` (3.5a) — the lease, the resident model or the task holding
-    it — so the sentence a person reads names what to close.
-    """
-
     def __init__(self, code: str, message: str, who: str = "") -> None:
         super().__init__(code, message)
         self.who = who
 
 
 def refusal_from(body: bytes, status: int, where: str, what: str) -> CatalogRefusal:
-    """A server's `{"error": {code, message, details}}` as a refusal."""
     code = f"http_{status}"
     message = body.decode("utf-8", "replace").strip()[:400]
     who = ""
@@ -149,31 +89,25 @@ def refusal_from(body: bytes, status: int, where: str, what: str) -> CatalogRefu
             if isinstance(details, dict) and details.get("who"):
                 who = str(details["who"])
     except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-        # A body that is not the error envelope is still evidence; the status
-        # and the text are kept rather than replaced with a guess.
         pass
     return CatalogRefusal(code, f"{where}: {what}: {message}", who)
 
 
 class CatalogPort(Protocol):
-    """What the migration may do to a server. Three verbs and no more."""
-
     @property
     def where(self) -> str:
-        """A name for a sentence: "the Windows engine", "the guest"."""
+        ...
 
     def installed_subjects(self) -> list[Subject]: ...
 
     def pull(self, subject: Subject) -> None:
-        """`POST /v1/tasks {type: pull}`. Returns once it is accepted."""
+        ...
 
     def remove(self, subject: Subject) -> None:
-        """`DELETE /v1/catalog/{kind}/{id}` (3.5a). Refuses by the server's name."""
+        ...
 
 
 class HttpCatalog:
-    """The server this process can dial. Loopback, bearer, stdlib only."""
-
     def __init__(self, base_url: str, token: str, *, where: str) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
@@ -228,13 +162,6 @@ class HttpCatalog:
 
 
 class StoppedWindowsCatalog:
-    """Retire weights through their catalog owner after the native process exits.
-
-    Port 7100 belongs to the guest after activation; using the old HTTP client
-    there would delete the destination. The controller must establish ownership
-    and shutdown before constructing this adapter. Runtime binaries stay local.
-    """
-
     def __init__(self, config, backend, pending: set[tuple[str, str]]) -> None:
         from ..backend import LLAMA_WINDOWS
         if config.backend_kind != LLAMA_WINDOWS or backend.kind != LLAMA_WINDOWS:
@@ -256,7 +183,6 @@ class StoppedWindowsCatalog:
         unknown = self._pending - {(row.kind, row.id) for row in rows}
         if unknown:
             raise HostError("migration_cleanup_subject_unknown", f"The native catalog cannot retire these recorded subjects: {sorted(unknown)}")
-        # A deletion interrupted after removing its stamp must still be resumed.
         return [Subject(row.kind, row.id, row.name or row.id, True)
                 for row in rows if row.installed() is not None or (row.kind, row.id) in self._pending]
 
@@ -270,18 +196,12 @@ class StoppedWindowsCatalog:
         for row in self._subjects():
             if (row.kind, row.id) == subject.key:
                 try:
-                    # Downloads completed during preparation can add a subject.
-                    # Record it before deletion, so interruption after its stamp
-                    # disappears still has a named catalog operation to resume.
                     saved = cleanup_subjects(self._config.home)
                     if subject.key not in saved:
                         record_cleanup(self._config.home, saved | {subject.key})
                     row.remove()
                     self._pending.discard(subject.key)
                 except WeightsShared as exc:
-                    # Its own code, kept verbatim, because the migration ORDERS
-                    # on it: a base whose folder an alias still holds is retried
-                    # after the alias has gone, never failed as a broken delete.
                     raise CatalogRefusal(exc.code, str(exc)) from exc
                 except (OSError, CrucibleError) as exc:
                     raise CatalogRefusal("subject_remove_failed", str(exc)) from exc
@@ -290,21 +210,6 @@ class StoppedWindowsCatalog:
 
 
 class GuestCatalog:
-    """The server inside the distro, reached with the guest's own `curl`.
-
-    Not through a port forward and not through `\\wsl$`: while the move runs,
-    the WINDOWS server holds `127.0.0.1:7100` on this machine, so the guest's
-    only unambiguous address is its own loopback, from inside.
-
-    `--exec`, always: wsl.exe pre-expands `$var` in its implicit-shell form,
-    and every wsl call in this system uses `--exec` for that reason. The JSON
-    body travels as ONE argv element, so no quoting rule on either side of
-    wsl.exe can change a byte of it.
-    """
-
-    #: `-w` appends the status after the body. NOT `-f`: that would hide the
-    #: refusal document, and the refusal's CODE is the thing this whole step
-    #: turns on.
     STATUS_MARK = "\n<<<status:"
 
     def __init__(

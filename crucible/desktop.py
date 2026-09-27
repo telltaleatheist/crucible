@@ -1,4 +1,3 @@
-"""Optional desktop presence. Closing it never stops the controller or engine."""
 from __future__ import annotations
 
 import json
@@ -30,8 +29,6 @@ def close_tray() -> None:
         return
     (home / "tray.close").write_text("close\n")
     deadline = time.monotonic() + 15
-    # The tray removes its PID in finally, before Python has unloaded its
-    # runtime. A Windows pack cannot be replaced until that process exits.
     while True:
         if not _alive(int(raw)):
             pid_file.unlink(missing_ok=True)
@@ -95,7 +92,6 @@ def remove_desktop() -> None:
         loaded = subprocess.run(["launchctl", "print", target], capture_output=True, timeout=15)
         if loaded.returncode == 0:
             subprocess.run(["launchctl", "bootout", target], check=True, capture_output=True, timeout=15)
-        # Remove only our own named bundle, never the user's Applications tree.
         import shutil
         bundle = Path.home() / "Applications" / "Crucible.app"
         info = bundle / "Contents" / "Info.plist"
@@ -108,13 +104,6 @@ def remove_desktop() -> None:
 
 
 def _move_items(home: Path, retrying: bool, try_again: object) -> list:
-    """The Linux-engine move's items, from `wsl-outcome.json` (FRESH-INSTALL #16).
-
-    `host.menu.outcome_items` decides WHICH (Try again on `cannot`/`failed`, a
-    restart line on `reboot-pending`) so this icon and the host's own model
-    cannot disagree; this only turns them into pystray items. Windows only:
-    the move exists nowhere else.
-    """
     if sys.platform != "win32":
         return []
     import pystray
@@ -127,7 +116,7 @@ def _move_items(home: Path, retrying: bool, try_again: object) -> list:
         recorded = None
     items = []
     for entry in host_menu.outcome_items(None if recorded is None else recorded.state, busy=retrying):
-        handler = (lambda *_: try_again()) if entry.item_id == host_menu.TRY_AGAIN else None  # type: ignore[operator]
+        handler = (lambda *_: try_again()) if entry.item_id == host_menu.TRY_AGAIN else None
         items.append(pystray.MenuItem(entry.label, handler, enabled=entry.enabled))
     return items
 
@@ -233,12 +222,6 @@ def _run_tray(home: Path) -> None:
         threading.Thread(target=run, daemon=True).start()
 
     def try_again() -> None:
-        """FRESH-INSTALL #16: the Linux-engine move once more, from the menu.
-
-        Its own thread and not `busy`: a move can run for many minutes, and the
-        status line should keep updating meanwhile. Each plain line the move
-        reports becomes the menu's header line.
-        """
         if retrying.is_set():
             return
         retrying.set()

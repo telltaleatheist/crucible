@@ -1,42 +1,3 @@
-"""The orchestrator/engine relation. PHASE17-ORCHESTRATOR.md sections 2 and 3.
-
-Two halves of one handshake live in here, deliberately in one file:
-
-* the **engine's** side — {@link PeerState}, the claim an engine records about
-  itself and answers `/v1/info` and `/v1/peer` with;
-* the **orchestrator's** side — {@link claim_engine}, {@link release_engine}
-  and {@link read_peer}, three functions that make the calls.
-
-One file because the two are one contract, and a refusal name that lives
-beside the code that raises it but not beside the code that reads it is a name
-that drifts. Nothing in here imports FastAPI, httpx, or anything else the
-server stack drags in: the orchestrator half runs inside the Windows tray,
-which must start in well under a second at login and must not hold an event
-loop (`crucible/host/door.py` states the same rule for the same reason). So
-the client calls are `urllib.request`.
-
-WHY A CLAIM IS NOT A PERMISSION
---------------------------------
-An engine never checks its claim before doing anything. There is nothing an
-orchestrator asks an engine to do that an app may not also ask — the
-orchestrator's powers are all on the OTHER side of the relation, over
-`wsl.exe`, a child process and a systemd unit. So a claim is a STATEMENT OF
-FACT by the one process that knows it, recorded so that `/v1/info` can answer
-"who manages this", and nothing else. Reading it as an authorisation would
-invite exactly the mistake this system keeps finding: a second gate on a door
-that already has one.
-
-WHY IT IS NOT PERSISTED
-------------------------
-`managed_by` dies with the process. A claim written to `config.toml` would
-outlive the orchestrator that made it — uninstall the tray, reboot, and the
-engine still names a door that will never answer again — which is
-`docs/ARCHITECTURE.md`'s one shape: a fact with two owners and nothing
-comparing them. The relation is RE-ASSERTED instead: the orchestrator claims
-at presence-detection and again on every down-to-up edge of its watch, so an
-engine that restarted unmanaged is claimed again within one 15-second tick.
-"""
-
 from __future__ import annotations
 
 import json
@@ -48,46 +9,21 @@ from typing import Any
 from .errors import ApiError
 from .jobs.base import utcnow
 
-#: The two roles. A property of a PROCESS, never of an install: on a Windows
-#: machine with no WSL, ONE install runs both as two processes.
 ROLE_ENGINE = "engine"
 ROLE_ORCHESTRATOR = "orchestrator"
 ROLES: tuple[str, ...] = (ROLE_ENGINE, ROLE_ORCHESTRATOR)
 
-#: The orchestrator's backend kind — ON THE WIRE AND NOWHERE ELSE.
-#:
-#: `detect_backend()` never returns it, `crucible init --backend` never accepts
-#: it, and it is deliberately absent from `crucible/backend.py`'s
-#: `BACKEND_KINDS`, which is the list of backends a SERVER can be configured
-#: as. It is a literal in the orchestrator's own `/v1/info` because a client
-#: reading `host.backend` must get an answer that is true, and "what
-#: accelerator does the thing that plays nothing have" has exactly one honest
-#: answer.
 BACKEND_ORCHESTRATOR = "orchestrator"
 
-#: How an orchestrator HOLDS its engine (PHASE15 4.1a), on the wire.
-#:
-#: `child` and not 4.1a's internal `host-child`: on the wire the word "host" is
-#: the thing this phase renames, and the orchestrator is the only possible
-#: parent, so the qualifier says nothing the field does not.
 OWNER_WSL_UNIT = "wsl-unit"
 OWNER_CHILD = "child"
 OWNER_FOUND = "found"
 OWNERS: tuple[str, ...] = (OWNER_WSL_UNIT, OWNER_CHILD, OWNER_FOUND)
 
-#: The relation's three refusals. They are `unauthorized` and
-#: `api_version_mismatch` with the relation's name on them, and that is
-#: deliberate: the caller is not an app, it is an orchestrator that has just
-#: booted an engine and is telling it so. Told `unauthorized`, an orchestrator
-#: cannot tell "the token I copied out of the guest's pairing file is stale"
-#: from "some app's token is wrong" — one is its own bug and the other is not
-#: its business.
 PEER_TOKEN_MISMATCH = "peer_token_mismatch"
 PEER_VERSION_INCOMPATIBLE = "peer_version_incompatible"
 PEER_ALREADY_MANAGED = "peer_already_managed"
 
-#: How long an orchestrator waits on a claim. It is one small POST to loopback;
-#: a tray must not block its startup on a server that is wedged.
 CLAIM_TIMEOUT_SECONDS = 10.0
 
 CLAIM_PATH = "/v1/peer/claim"
@@ -95,40 +31,17 @@ PEER_PATH = "/v1/peer"
 
 
 def normalise_url(url: str) -> str:
-    """One spelling per orchestrator, so a re-claim is recognised as one.
-
-    `http://127.0.0.1:7101/` and `http://127.0.0.1:7101` are the same door, and
-    an engine that thought otherwise would answer `peer_already_managed` to the
-    very orchestrator that holds the claim — on its own watch tick, forever.
-    Only the trailing slash is touched: everything else about a URL is the
-    caller's to spell, and lowercasing a host or dropping a default port would
-    be this module inventing an opinion about addresses.
-    """
     return url.strip().rstrip("/")
 
 
 @dataclass(frozen=True)
 class Orchestrator:
-    """Who claimed this engine. Three strings and no more.
-
-    `version` is the orchestrator's SOFTWARE version, for an operator reading
-    a page and for a log line. The API version is not in here: it travels in
-    `X-Crucible-Api` on the claim, where every other call already
-    carries it, and a second copy in the body would be a fact with two owners.
-    """
-
     name: str
     url: str
     version: str
 
     @staticmethod
     def from_body(raw: Any) -> "Orchestrator":
-        """Read the `orchestrator` block, or refuse by name.
-
-        Every field is required. There is no default name and no default url —
-        an orchestrator that could not say who it was would be recorded as
-        something no operator could find and no release could match.
-        """
         if not isinstance(raw, dict):
             raise ApiError(
                 400,
@@ -155,38 +68,19 @@ class Orchestrator:
         )
 
     def to_dict(self) -> dict[str, str]:
-        """The block a claim sends. `managed_by` on the wire is NARROWER."""
         return {"name": self.name, "url": self.url, "version": self.version}
 
 
 @dataclass(frozen=True)
 class Claim:
-    """A live claim: who, and when they said so."""
-
     orchestrator: Orchestrator
     claimed: str
 
     def managed_by(self) -> dict[str, str]:
-        """What `/v1/info` and `/v1/peer` publish: the NAME and the URL only.
-
-        Not the version. `managed_by` answers "who manages this and where do I
-        reach them"; the orchestrator's own version is a fact about the
-        orchestrator, which is what `GET /v1/info` on ITS door is for. Two
-        copies of a version string in two documents is two things to keep in
-        step across an upgrade that changes exactly one of them.
-        """
         return {"name": self.orchestrator.name, "url": self.orchestrator.url}
 
 
 class PeerState:
-    """THE ENGINE'S HALF. One claim or none, in memory, for this process.
-
-    Not thread-safe by a lock and not needing one: every mutation happens on
-    the event loop, from a route handler, and the routes that touch it are two
-    short synchronous functions. A lock here would be ceremony around an
-    assignment.
-    """
-
     def __init__(self) -> None:
         self._claim: Claim | None = None
 
@@ -195,21 +89,9 @@ class PeerState:
         return self._claim
 
     def managed_by(self) -> dict[str, str] | None:
-        """`/v1/info`'s field. `None` is a complete, correct answer.
-
-        An engine nobody claims is a whole Crucible: the Mac, the droplet, and
-        any `crucible serve` run by hand.
-        """
         return None if self._claim is None else self._claim.managed_by()
 
     def claim(self, orchestrator: Orchestrator, *, force: bool = False) -> Claim:
-        """Record the claim, or refuse `peer_already_managed`.
-
-        **The same url re-claiming is success**, and it must be: an
-        orchestrator re-claims on every down-to-up edge of its watch, and an
-        engine that restarted has forgotten (section 2.3). Same url, new claim
-        time, 200.
-        """
         held = self._claim
         if held is not None and held.orchestrator.url != orchestrator.url and not force:
             raise ApiError(
@@ -233,13 +115,6 @@ class PeerState:
         return self._claim
 
     def release(self, orchestrator: Orchestrator | None, *, force: bool = False) -> None:
-        """Drop the claim. A release is a release.
-
-        Nothing claimed is not a refusal: "there is no claim" is the state the
-        caller asked for, so there is no `peer_not_managed` and never was.
-        Somebody ELSE's claim is refused, because releasing one by accident is
-        how an engine ends up unmanaged with a tray still watching it.
-        """
         held = self._claim
         if held is None:
             return
@@ -260,13 +135,6 @@ class PeerState:
         self._claim = None
 
     def document(self, uptime_s: float) -> dict[str, Any]:
-        """`GET /v1/peer` — the relation's own read (section 2.4).
-
-        `uptime_s` is the engine's MONOTONIC uptime, which is what tells an
-        orchestrator that an engine answering again is a NEW process rather
-        than the one it claimed — the signal that a re-claim is owed. A wall
-        clock would make that signal lie across an NTP correction.
-        """
         return {
             "role": ROLE_ENGINE,
             "managed_by": self.managed_by(),
@@ -274,21 +142,7 @@ class PeerState:
         }
 
 
-# --------------------------------------------------------------------------
-# THE ORCHESTRATOR'S HALF — three calls, `urllib` only.
-# --------------------------------------------------------------------------
-
-
 class PeerCallFailed(Exception):
-    """A claim, release or read that did not happen, with what was said.
-
-    NOT an `ApiError`: this is the orchestrator's side, and there is no HTTP
-    response being composed here. The orchestrator's answer to a failed claim
-    is a line in its log and a retry on the next watch tick — never a crash,
-    because an engine that will not be claimed is still an engine, and a tray
-    that died trying to tell it so would take the watch with it.
-    """
-
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
@@ -304,7 +158,6 @@ def _call(
     api_version: int,
     timeout_s: float,
 ) -> dict[str, Any]:
-    """One authenticated call to an engine's peer door, or `PeerCallFailed`."""
     from . import API_HEADER
 
     data = None if body is None else json.dumps(body).encode("utf-8")
@@ -339,14 +192,6 @@ def _call(
 
 
 def _refusal_code(body: str) -> str:
-    """The engine's OWN code out of its refusal body, or `peer_unreadable`.
-
-    The same rule `crucible/tasks.py`'s `_host_refusal_code` follows in the
-    other direction: a refusal carries a name, and inventing a second one here
-    would give one fact two names depending on which side read it. A body this
-    side cannot parse becomes `peer_unreadable`, which is the honest answer —
-    something refused, and it did not say what in a shape this understands.
-    """
     try:
         error = json.loads(body).get("error")
         code = error.get("code") if isinstance(error, dict) else None
@@ -364,13 +209,6 @@ def claim_engine(
     force: bool = False,
     timeout_s: float = CLAIM_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """`POST /v1/peer/claim` — tell an engine who manages it.
-
-    `force` defaults to False and **no orchestrator sends True on any code
-    path** (section 2.1). It is a person's act, through the page, because two
-    orchestrators on one engine is a machine misconfigured and the right first
-    answer is the refusal that names the other one.
-    """
     body: dict[str, Any] = {"orchestrator": orchestrator.to_dict()}
     if force:
         body["force"] = True
@@ -392,12 +230,6 @@ def release_engine(
     api_version: int,
     timeout_s: float = CLAIM_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """`DELETE /v1/peer/claim` — the orchestrator's Quit.
-
-    A tray that exits leaving `managed_by` pointing at a door that no longer
-    answers is PHASE15 3.6's "a file that exists and disagrees is worse than
-    none", one layer up.
-    """
     return _call(
         f"{normalise_url(engine_url)}{CLAIM_PATH}",
         token,
@@ -415,7 +247,6 @@ def read_peer(
     api_version: int,
     timeout_s: float = CLAIM_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """`GET /v1/peer` — `{role, managed_by, uptime_s}` (section 2.4)."""
     return _call(
         f"{normalise_url(engine_url)}{PEER_PATH}",
         token,
@@ -433,14 +264,6 @@ def read_info(
     api_version: int,
     timeout_s: float = CLAIM_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """`GET /v1/info` on the engine — what the orchestrator READS THROUGH.
-
-    PHASE17 3.2: the orchestrator's own `/v1/info` carries the engine's
-    `capabilities` block **verbatim and uncached**, re-read on every request.
-    A cached capability list is this system's one defect in a third place: the
-    engine pulls a model, the orchestrator keeps answering yesterday's list,
-    and a client picks a model the engine has and is told it does not.
-    """
     return _call(
         f"{normalise_url(engine_url)}/v1/info",
         token,

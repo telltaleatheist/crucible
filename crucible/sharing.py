@@ -1,10 +1,3 @@
-"""Explicit, owned Tailscale TCP sharing. Never changes the engine's bind.
-
-The host owns sharing.json and the Serve entry; tailscale_advertise in the engine
-is its projection. `reconcile` repairs opted-in sharing after a network restart.
-Status proves configuration and authenticated local engine access, not a remote
-client's route. An existing forward is adopted only with --adopt.
-"""
 from __future__ import annotations
 
 import argparse
@@ -85,14 +78,6 @@ def read(home: Path) -> dict[str, Any] | None:
 
 
 class Engine:
-    """The local engine's door, shared by `crucible sharing` and `crucible lan`.
-
-    `label` prefixes every refusal this class raises. It is REQUIRED and not
-    defaulted to "sharing": a `crucible lan` failure reporting itself as
-    `sharing_engine_unreachable` sends a person to read about Tailscale when
-    the thing that broke was a port forward.
-    """
-
     def __init__(self, home: Path, label: str):
         self.label = label
         line = read_pairing_file(home)
@@ -128,10 +113,9 @@ class Engine:
         ping = self.request("GET", "ping")
         if ping.get("crucible") is not True or ping.get("name") != self.pairing.name:
             raise SharingError(f"{self.label}_wrong_engine: local port is not the paired Crucible")
-        self.request("GET", "settings")  # proves the token, not just the name
+        self.request("GET", "settings")
 
     def advertise(self, field: str, authorities: list[str]) -> None:
-        """Publish this owner's addresses into ITS field, never another's."""
         result = self.request("PUT", "settings", {field: authorities})
         if result.get(field) != authorities:
             raise SharingError(
@@ -162,7 +146,6 @@ def enable(home: Path, runner: Runner, engine: Engine, *, port: int = 7100,
             raise SharingError("sharing_unowned: matching forward already exists; use --adopt to transfer ownership")
     record = {"schema_version": 1, "port": port, "target": engine.target,
               "authority": authority, "state": "pending"}
-    # Durable intent before a mutation: a failed publish can be reconciled.
     _write(home, record)
     if existing is None:
         _run(runner, ["tailscale", "serve", "--bg", f"--tcp={port}", "tcp://" + engine.target])
@@ -178,8 +161,6 @@ def disable(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
     record = read(home)
     if record is None:
         return {"state": "disabled"}
-    # Withdraw the projection first. If the engine cannot be reached, retain
-    # the record and forward so a retry never loses what it needs to clean up.
     engine.advertise("tailscale_advertise", [])
     existing = _entry(runner, record["port"])
     if existing is not None:
@@ -209,7 +190,6 @@ def status(home: Path, runner: Runner, engine: Engine) -> dict[str, Any]:
 
 
 def reconcile(home: Path, runner: Runner | None = None) -> dict[str, Any]:
-    """Repair only previously opted-in sharing, after local engine readiness."""
     record = read(home)
     if record is None:
         return {"state": "disabled"}

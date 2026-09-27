@@ -1,33 +1,3 @@
-"""Device pairing: how an app gets this engine's token without a person typing it.
-
-OPEN BY DEFAULT (Owen, 2026-09-17): *"i dont think we need the approve
-authentication. ollama allows anybody to connect if they can reach it. make that
-the case with crucible servers as well."* So a request is APPROVED the moment it
-is made, and connecting is: type the address, wait two seconds, connected.
-
-WHAT THAT MEANS, SAID PLAINLY. Reaching the port is the whole of the
-authorisation. The bearer token still exists and every other door still demands
-it, but it is no longer a secret this module withholds — it is handed to whoever
-asks. It is an identifier, not a lock. That is deliberate and it is Ollama's
-posture, which is the posture that was asked for.
-
-The one way this differs from Ollama, recorded because it is not obvious: an
-Ollama nobody guards leaks compute. A Crucible nobody guards also leaks the
-ability to SPEND a configured `[upstreams.*]` account — `GET /v1/settings` never
-returns a key (`upstreams.settings_entry`), so keys cannot be stolen through this,
-but a route to a cloud model can be called and billed. A machine with no upstream
-configured has nothing here that Ollama does not.
-
-THE MECHANISM IS KEPT, NOT DELETED. `[auth] open_pairing = false` restores the
-approval step exactly as it was, and everything that served it — the short code,
-the operator list, the decision door — still works. Deleting it would have made
-"open" the only thing this can ever be, and a default is a thing you can change.
-
-Unchanged either way: the app polls with a separate high-entropy secret, never
-with the short code; requests are bounded, expire after five minutes, and
-disappear on restart. Those are flood guards, not authentication, and an open
-door still wants them.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -78,17 +48,6 @@ class Entry:
 
 
 class PairingRequests:
-    """The pending table. `open_pairing` decides what a new request starts as.
-
-    REQUIRED, with no default. The ruled default lives in exactly one place --
-    `config._open_pairing`, where an absent `[auth] open_pairing` reads as True --
-    and a second statement of it here would be a second owner of one fact. That
-    is `docs/ARCHITECTURE.md`'s one shape, and it was not hypothetical: with a
-    default here, flipping it changed nothing observable, because `api.py` passes
-    the config's value over the top. A default nothing reads is a default that
-    lies to the next person who edits it.
-    """
-
     def __init__(self, clock: Callable[[], float] = time.monotonic,
                  *, open_pairing: bool):
         self.clock = clock
@@ -114,11 +73,6 @@ class PairingRequests:
                           raw[:4] + "-" + raw[4:], client_name.strip(), address, now, now + TTL,
                           state="pending" if self.open_pairing is False else "approved")
             self.entries[entry.id] = entry
-            # `approval_required` is ADDITIVE and it is the point: a client that
-            # reads it shows a short code only when a code is going to be needed,
-            # instead of displaying one nobody will ever be asked to approve. A
-            # client that ignores it still works — it polls, and the answer is
-            # already `approved`.
             return {"id": entry.id, "device_code": secret, "user_code": entry.user_code,
                     "expires_in": TTL, "interval": INTERVAL,
                     "approval_required": self.open_pairing is False}
@@ -156,6 +110,4 @@ class PairingRequests:
             if now - entry.last_poll < INTERVAL:
                 raise ApiError(429, "pairing_slow_down", "Wait two seconds between connection checks")
             entry.last_poll = now
-            # Approved responses may be retried with the same device secret until
-            # expiry, so a lost HTTP response does not strand an approved app.
             return entry.state
