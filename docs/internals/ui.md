@@ -22,9 +22,12 @@ is sometimes blank. Design reference: PHASE13-OPERATOR.md section 4.
 
 - **Refusals are shown with their code and message, verbatim, beside the control
   that caused them.** No toast, no "something went wrong", nothing told "maybe"
-  (ARCHITECTURE.md R3). A 409 `server_busy` shows `details.who`, the server's own
-  sentence about the holder: an operator told only "busy" concludes the button is
-  broken. A settings refusal is placed by `details.field` (the dotted path
+  (ARCHITECTURE.md R3). A 409 `server_busy` names its holder by `details.door`:
+  `job` (the lane; `details.holder` with the job's id, type and status) or
+  `operator` (the card; `details.fact` and `details.who`, the server's own
+  sentence about the holder). Any other refusal carrying `fact` and `who`
+  (`subject_in_use`) shows them the same way. An operator told only "busy"
+  concludes the button is broken. A settings refusal is placed by `details.field` (the dotted path
   refused) on the control that earned it. A non-Crucible error (proxy, gateway)
   is named as what it is, not dressed up as a Crucible refusal.
 - **No second copy of a server-side table.** Job types, narrator engines, subject

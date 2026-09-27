@@ -276,15 +276,13 @@
       el('code', { class: 'refusal-code', text: refusal.code }),
       el('span', { class: 'refusal-message', text: refusal.message })
     ]);
-    var details = refusal.details;
-    if (details && details.fact && details.who) {
+    var holder = holderLine(refusal.details);
+    if (holder) {
       box.appendChild(
-        el('span', { class: 'refusal-who' }, [
-          el('b', { text: details.fact + ' holds the card: ' }),
-          details.who
-        ])
+        el('span', { class: 'refusal-who' }, [el('b', { text: holder.what }), holder.who])
       );
     }
+    var details = refusal.details;
     if (details && details.problems && details.problems.length) {
       var problems = el('ul', { class: 'steps' });
       for (var index = 0; index < details.problems.length; index += 1) {
@@ -293,6 +291,24 @@
       box.appendChild(problems);
     }
     return box;
+  }
+
+  function holderLine(details) {
+    if (!details) {
+      return null;
+    }
+    if (details.door === 'job') {
+      var what = details.model ? details.type + ' ' + details.model : details.type;
+      var who = details.holder ? details.holder : 'an unnamed client';
+      return {
+        what: 'job ' + details.job_id + ' (' + what + ', ' + details.status + ') holds the lane: ',
+        who: who
+      };
+    }
+    if (details.fact && details.who) {
+      return { what: details.fact + ' holds the card: ', who: details.who };
+    }
+    return null;
   }
 
   function setRefusal(where, refusal) {

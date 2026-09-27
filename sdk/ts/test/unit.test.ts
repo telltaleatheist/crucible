@@ -18,6 +18,7 @@ import { after, before, test } from 'node:test';
 import {
   CrucibleAuthError,
   CrucibleBusy,
+  CrucibleCardHeld,
   CrucibleClient,
   CrucibleConfigError,
   CrucibleNotACrucible,
@@ -32,6 +33,7 @@ import {
 
 /** The body `crucible/jobs/queue.py` actually sends with a 409 server_busy. */
 const BUSY_DETAILS = {
+  door: 'job',
   holder: 'foundry/0.9.0',
   job_id: 'a1b2c3',
   type: 'tts',
@@ -305,6 +307,54 @@ test('an unnamed holder is reported as unnamed, never guessed', async () => {
       assert.equal(error.model, null);
       assert.equal(error.jobMessage, null);
       assert.equal(error.busyLine, 'busy: an unnamed client, tts, 62% done');
+      return true;
+    },
+  );
+});
+
+test('a server_busy is read by its door, not by guessing at its keys', async () => {
+  answer(409, {
+    error: {
+      code: 'server_busy',
+      message: 'this server cannot install anything right now: a job holds it',
+      details: { ...BUSY_DETAILS, door: 'operator', fact: 'a job', who: 'tts a1b2c3 (running)' },
+    },
+  });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleCardHeld, `got ${String(error)}`);
+      assert.equal(error instanceof CrucibleBusy, false);
+      assert.equal(error.fact, 'a job');
+      assert.equal(error.who, 'tts a1b2c3 (running)');
+      return true;
+    },
+  );
+});
+
+test('a server_busy with no door is read by whether it names a fact', async () => {
+  const { door: _door, ...undoored } = BUSY_DETAILS;
+  answer(409, { error: { code: 'server_busy', message: 'busy', details: undoored } });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleBusy, `got ${String(error)}`);
+      assert.equal(error.jobId, 'a1b2c3');
+      return true;
+    },
+  );
+  answer(409, {
+    error: {
+      code: 'server_busy',
+      message: 'busy',
+      details: { fact: 'a chat', who: '1 completion(s) in flight', in_flight: 1 },
+    },
+  });
+  await assert.rejects(
+    client().submit({ type: 'tts', params: {}, inputs: {} }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleCardHeld, `got ${String(error)}`);
+      assert.equal(error.fact, 'a chat');
       return true;
     },
   );

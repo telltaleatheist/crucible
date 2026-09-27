@@ -8,6 +8,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
+from crucible.api.routes.jobs import _job_state
 from crucible.errors import ApiError
 from crucible.jobs.queue import JobStore
 
@@ -90,6 +91,7 @@ def test_the_refusal_names_the_holder_and_what_it_is_doing(
         assert error["code"] == "server_busy"
 
         details = error["details"]
+        assert details["door"] == "job"
         assert details["holder"] == "bookforge/owens-pc crucible-client/0.4.0"
         assert details["job_id"] == first
         assert details["type"] == "echo"
@@ -243,11 +245,31 @@ def test_an_admitted_job_the_lane_has_not_reached_yet_still_refuses(
     assert caught.value.code == "server_busy"
     details = caught.value.details
     assert details is not None
+    assert details["door"] == "job"
     assert details["job_id"] == first.id
     assert details["status"] == "queued"
     assert details["holder"] == "foundry/owens-pc"
     assert details["since"] == first.created
     assert details["progress"] == 0.0
+
+
+def test_a_job_type_s_done_extra_cannot_overwrite_the_hold_fields(
+    client: TestClient,
+) -> None:
+    store: JobStore = client.app.state.store
+    job = store.create("echo", None, {}, client="foundry/owens-pc")
+    job.status = "done"
+    job.held_by = "foundry/owens-pc"
+    job.held_since = job.created
+    job.done_extra = {
+        "held_by": "somebody else",
+        "held_since": "never",
+        "resident": "the type's own news",
+    }
+    state = _job_state(store, job)
+    assert state["held_by"] == "foundry/owens-pc"
+    assert state["held_since"] == job.created
+    assert state["resident"] == "the type's own news"
 
 
 def test_enqueue_is_the_authority_and_refuses_on_its_own(

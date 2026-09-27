@@ -47,6 +47,7 @@ import {
   strArray,
   type Json,
 } from './shape.js';
+import { loadNodeBuiltins, requireFunctions } from './node-builtins.js';
 import { readSseFrames } from './sse.js';
 import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
@@ -663,6 +664,22 @@ export class CrucibleClient {
   /** `GET /v1/jobs/{id}/events` — the job's SSE stream, as typed events. */
   async *events(jobId: string, options: EventsOptions = {}): AsyncGenerator<JobEvent, void, undefined> {
     const id = requireText(jobId, 'jobId');
+    yield* this.#follow(
+      `/v1/jobs/${encodeURIComponent(id)}/events`,
+      `job ${id}`,
+      options,
+      readEvent,
+      TERMINAL_EVENTS,
+    );
+  }
+
+  async *#follow<Event extends { readonly id: number; readonly event: string }>(
+    path: string,
+    what: string,
+    options: EventsOptions,
+    read: (rawId: string | null, rawName: string | null, rawData: string) => Event,
+    terminal: readonly string[],
+  ): AsyncGenerator<Event, void, undefined> {
     const headers: Record<string, string> = { Accept: 'text/event-stream' };
     if (options.lastEventId !== undefined) {
       if (!Number.isInteger(options.lastEventId) || options.lastEventId < 0) {
@@ -674,29 +691,25 @@ export class CrucibleClient {
       headers['Last-Event-ID'] = String(options.lastEventId);
     }
 
-    const response = await this.#fetch(
-      `/v1/jobs/${encodeURIComponent(id)}/events`,
-      { method: 'GET', headers },
-      true,
-    );
+    const response = await this.#fetch(path, { method: 'GET', headers }, true);
     if (!response.ok) throw await this.#failure(response);
     const stream = response.body;
     if (stream === null) {
-      throw new CrucibleProtocolError(`the event stream for job ${id} carried no body`);
+      throw new CrucibleProtocolError(`the event stream for ${what} carried no body`);
     }
 
     let previousId = options.lastEventId === undefined ? 0 : options.lastEventId;
     try {
       for await (const frame of readSseFrames(stream)) {
-        const event = readEvent(frame.lastEventId, frame.event, frame.data);
+        const event = read(frame.lastEventId, frame.event, frame.data);
         if (event.id <= previousId) {
           throw new CrucibleProtocolError(
-            `event id ${event.id} does not follow ${previousId} on job ${id}`,
+            `event id ${event.id} does not follow ${previousId} on ${what}`,
           );
         }
         previousId = event.id;
         yield event;
-        if ((TERMINAL_EVENTS as readonly string[]).includes(event.event)) return;
+        if (terminal.includes(event.event)) return;
       }
     } finally {
       await stream.cancel().catch(() => undefined);
@@ -704,7 +717,7 @@ export class CrucibleClient {
 
     throw new CrucibleUnreachable(
       this.url,
-      `the event stream for job ${id} ended after event ${previousId} without a ` +
+      `the event stream for ${what} ended after event ${previousId} without a ` +
         'terminal event (done, failed or cancelled)',
     );
   }
@@ -1300,7 +1313,7 @@ export class CrucibleClient {
     }
     if (response.status >= 400) {
       if (code === SERVER_BUSY) {
-        return isHeldByAFact(details)
+        return heldAtTheOperatorDoor(details)
           ? heldRefusal(response.status, code, message, details)
           : busyRefusal(response.status, code, message, details);
       }
@@ -1402,48 +1415,12 @@ export class CrucibleClient {
     options: EventsOptions = {},
   ): AsyncGenerator<TaskEvent, void, undefined> {
     const id = requireText(taskId, 'taskId');
-    const headers: Record<string, string> = { Accept: 'text/event-stream' };
-    if (options.lastEventId !== undefined) {
-      if (!Number.isInteger(options.lastEventId) || options.lastEventId < 0) {
-        throw new CrucibleConfigError(
-          'lastEventId',
-          `must be a non-negative integer, got ${String(options.lastEventId)}`,
-        );
-      }
-      headers['Last-Event-ID'] = String(options.lastEventId);
-    }
-    const response = await this.#fetch(
+    yield* this.#follow(
       `/v1/tasks/${encodeURIComponent(id)}/events`,
-      { method: 'GET', headers },
-      true,
-    );
-    if (!response.ok) throw await this.#failure(response);
-    const stream = response.body;
-    if (stream === null) {
-      throw new CrucibleProtocolError(`the event stream for task ${id} carried no body`);
-    }
-
-    let previousId = options.lastEventId === undefined ? 0 : options.lastEventId;
-    try {
-      for await (const frame of readSseFrames(stream)) {
-        const event = readTaskEvent(frame.lastEventId, frame.event, frame.data);
-        if (event.id <= previousId) {
-          throw new CrucibleProtocolError(
-            `event id ${event.id} does not follow ${previousId} on task ${id}`,
-          );
-        }
-        previousId = event.id;
-        yield event;
-        if ((TASK_TERMINAL_STATES as readonly string[]).includes(event.event)) return;
-      }
-    } finally {
-      await stream.cancel().catch(() => undefined);
-    }
-
-    throw new CrucibleUnreachable(
-      this.url,
-      `the event stream for task ${id} ended after event ${previousId} without a ` +
-        'terminal event (done, failed or cancelled)',
+      `task ${id}`,
+      options,
+      readTaskEvent,
+      TASK_TERMINAL_STATES,
     );
   }
 
@@ -2546,52 +2523,26 @@ interface NodeFileApis {
   };
 }
 
-let nodeFileApis: Promise<NodeFileApis> | null = null;
-
 async function loadNodeFileApis(): Promise<NodeFileApis> {
-  if (nodeFileApis === null) {
-    nodeFileApis = (async () => {
-      const scheme = 'node:';
-      let fs: unknown;
-      let path: unknown;
-      try {
-        fs = await import(/* webpackIgnore: true */ `${scheme}fs/promises`);
-        path = await import(/* webpackIgnore: true */ `${scheme}path`);
-      } catch (cause) {
-        throw new CrucibleError(
-          "writeArtifactsTo needs node:fs/promises and node:path, and this " +
-            'runtime has neither. It writes the artifacts to disk itself because ' +
-            'there is no shared mount between a Crucible host and its client; in ' +
-            'a browser, fetch each artifact with artifact(jobId, name) and put ' +
-            'the bytes wherever that runtime keeps bytes.',
-          { cause },
-        );
-      }
-      return { fs: checkedFs(fs), path: checkedPath(path) };
-    })();
-  }
-  return nodeFileApis;
-}
-
-function checkedFs(module: unknown): NodeFileApis['fs'] {
-  const found = module as Record<string, unknown> | null;
-  for (const name of ['mkdir', 'writeFile', 'rename', 'rm']) {
-    if (found === null || typeof found[name] !== 'function') {
-      throw new CrucibleError(
-        `node:fs/promises on this runtime has no ${name}(); writeArtifactsTo ` +
-          'cannot write files atomically without it',
-      );
-    }
-  }
-  return found as unknown as NodeFileApis['fs'];
-}
-
-function checkedPath(module: unknown): NodeFileApis['path'] {
-  const found = module as Record<string, unknown> | null;
-  if (found === null || typeof found['join'] !== 'function') {
-    throw new CrucibleError('node:path on this runtime has no join()');
-  }
-  return found as unknown as NodeFileApis['path'];
+  const node = await loadNodeBuiltins(
+    'writeArtifactsTo needs node:fs/promises and node:path, and this ' +
+      'runtime has neither. It writes the artifacts to disk itself because ' +
+      'there is no shared mount between a Crucible host and its client; in ' +
+      'a browser, fetch each artifact with artifact(jobId, name) and put ' +
+      'the bytes wherever that runtime keeps bytes.',
+  );
+  requireFunctions(
+    node.fs,
+    ['mkdir', 'writeFile', 'rename', 'rm'],
+    (name) =>
+      `node:fs/promises on this runtime has no ${name}(); writeArtifactsTo ` +
+      'cannot write files atomically without it',
+  );
+  requireFunctions(node.path, ['join'], (name) => `node:path on this runtime has no ${name}()`);
+  return {
+    fs: node.fs as unknown as NodeFileApis['fs'],
+    path: node.path as unknown as NodeFileApis['path'],
+  };
 }
 
 let temporaryCounter = 0;
@@ -2837,8 +2788,13 @@ function busyRefusal(
   }
 }
 
-function isHeldByAFact(details: unknown): boolean {
-  return typeof details === 'object' && details !== null && 'fact' in details;
+const OPERATOR_DOOR = 'operator';
+
+function heldAtTheOperatorDoor(details: unknown): boolean {
+  if (typeof details !== 'object' || details === null) return false;
+  const door = (details as Record<string, unknown>)['door'];
+  if (typeof door === 'string') return door === OPERATOR_DOOR;
+  return 'fact' in details;
 }
 
 function heldRefusal(

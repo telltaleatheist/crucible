@@ -542,7 +542,7 @@ class TaskStore:
             f"this server cannot install anything right now: {held}. An install "
             "rewrites config.toml and reloads this server's job registry, so it "
             "waits until nothing holds the card",
-            {"fact": held.fact, "who": held.who, **held.details},
+            {"fact": held.fact, "who": held.who, **held.details, "door": "operator"},
         )
 
 

@@ -288,6 +288,7 @@ test('an install refused server_busy for a lease names the holder verbatim', asy
       code: 'server_busy',
       message: 'this server cannot install anything right now',
       details: {
+        door: 'operator',
         fact: 'a lease',
         who: "'foundry/owens-pc' for 'translate'",
         lease_id: 'l1',

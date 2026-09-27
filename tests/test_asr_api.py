@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, hosttools, jobenv
+from crucible import accelerator, hosttools, jobenv, tasks
 from crucible.accelerator import GIB, ComputeApp
 from crucible.asrmodels import load_asr_manifest
 from crucible.jobs import asr as asr_job
@@ -278,17 +278,22 @@ def test_compute_type_is_not_a_wire_parameter(
     assert response.json()["error"]["code"] == "invalid_params"
 
 
-def test_a_missing_env_is_named(
+def test_a_missing_env_is_installed_on_submit(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     ffmpeg: str,
     idle_card: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_asr=True) as client:
         response = submit(client, auth)
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "env_missing"
-    assert "crucible install asr" in response.json()["error"]["message"]
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the asr environment" in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "asr"}]
 
 
 def test_missing_weights_are_named_with_the_pull_command(

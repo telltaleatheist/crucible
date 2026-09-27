@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -11,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator
-from crucible import accelerator, jobenv
+from crucible import accelerator, jobenv, tasks
 from crucible.accelerator import GIB, ComputeApp
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
@@ -539,18 +540,22 @@ memory_bytes_estimate = 3000000000
     assert "mlx-darwin" in error["message"]
 
 
-def test_a_missing_env_is_env_missing(
+def test_a_missing_env_is_installed_on_submit(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_weights(MODEL)
+    monkeypatch.setattr(tasks, "install_command", lambda: sys.executable)
     with make_client(enable_llm=True) as client:
         response = submit(client, auth, type="load-model", model=MODEL)
-    assert response.status_code == 409
-    error = response.json()["error"]
-    assert error["code"] == "env_missing"
-    assert "crucible install llm" in error["message"]
+        assert response.status_code == 409
+        error = response.json()["error"]
+        assert error["code"] == "installing"
+        assert "installing the llm environment" in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "llm"}]
 
 
 def test_missing_weights_are_model_not_installed(
