@@ -102,6 +102,10 @@ def holder(home: Path) -> Residency:
         enable_align=False,
         enable_rvc=False,
         desktop_allowance_bytes=3 * 1024 ** 3,
+        enable_denoise=False,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     return Residency(load_config(home))
 

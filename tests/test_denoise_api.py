@@ -745,6 +745,9 @@ def test_check_reports_what_is_missing_in_order(
         enable_rvc=False,
         enable_denoise=True,
         desktop_allowance_bytes=3 * GIB,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     config = load_config(home)
     plugin = denoise_job.DenoiseJobType(config, FAKE_BACKEND, frozenset)

@@ -60,7 +60,11 @@ def a_config(home: Path, **overrides: Any) -> None:
         enable_tts=False,
         enable_align=False,
         enable_rvc=False,
+        enable_denoise=False,
         desktop_allowance_bytes=3 * 1024 ** 3,
+        retention_days=DEFAULT_RETENTION_DAYS,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
         **overrides,
     )
 

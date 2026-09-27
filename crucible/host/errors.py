@@ -58,6 +58,10 @@ HOST_ERROR_CODES: dict[str, str] = {
         "the flag is that the token survives the move to the guest; a file "
         "without one carries nothing."
     ),
+    "config_from_no_reserve": (
+        "`--config-from` was given a document with no `[accelerator]` "
+        "desktop_allowance_bytes and desktop_allowance_basis to carry."
+    ),
     "pairing_acl_failed": (
         "the pairing file's ACL could not be set to this user only. The file is "
         "DELETED rather than left readable by everybody with a token in it."

@@ -107,14 +107,13 @@ DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
 #:               3 GiB on an NVIDIA card it could not sample, 25% of unified
 #:               memory on a Mac (`default_desktop_allowance_bytes`).
 #:   "stated"    A person said so — `--desktop-allowance-bytes`, the Settings
-#:               page — or the config predates this key.
+#:               page.
 #:
-#: ABSENT READS AS "stated", AND NOTHING EVER CHANGES A STATED RESERVE ON ITS
-#: OWN (Owen, 2026-09-26). Every config written before this key has no basis,
-#: and one of them is owens-pc's, which keeps 3 GiB deliberately because it
-#: streams: a measurement that happened to run while he was not streaming must
-#: not lower it. Only the deliberate verb (`crucible capability
-#: --measure-desktop`) replaces a stated reserve, and it says old and new.
+#: NOTHING EVER CHANGES A STATED RESERVE ON ITS OWN (Owen, 2026-09-26).
+#: owens-pc keeps 3 GiB deliberately because it streams: a measurement that
+#: happened to run while he was not streaming must not lower it. Only the
+#: deliberate verb (`crucible capability --measure-desktop`) replaces a stated
+#: reserve, and it says old and new.
 DESKTOP_BASIS_MEASURED = "measured"
 DESKTOP_BASIS_DECLARED = "declared"
 DESKTOP_BASIS_STATED = "stated"
@@ -288,12 +287,7 @@ class CapabilityRow:
     #: The same verdict for somebody who is not an operator — see
     #: `capability.Decision.summary`. A bare phrase starting with the verb, so
     #: the CALLER supplies the subject it is the only one that knows.
-    #:
-    #: DEFAULTED, unlike its neighbours, because this is a RECORD written into
-    #: config.toml and an older config has no such key. Empty means "this row
-    #: was decided before the field existed", which a reader can tell from a
-    #: real answer; `decide()` never produces an empty one.
-    summary: str = ""
+    summary: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -376,9 +370,8 @@ class EngineFootprint:
     max_num_seqs: int
     max_num_seqs_note: str
     #: SGLang's `--mem-fraction-static` and the engine's context in tokens, or
-    #: None for narrator's own launcher defaults (0.60 and 4096). Optional
-    #: because every `[tts.<engine>]` table written before 2026-09-19 states
-    #: neither and must keep loading, and each owes its note when stated.
+    #: None for narrator's own launcher defaults (0.60 and 4096). Each owes its
+    #: note when stated.
     mem_fraction: float | None = None
     mem_fraction_note: str | None = None
     context_length: int | None = None
@@ -427,10 +420,9 @@ class Config:
     #: whose first request refuses.
     enable_denoise: bool
     desktop_allowance_bytes: int
-    #: Capability flags this config did not carry, so they were read as off.
-    #: Empty for a config written by this build. `crucible doctor` prints it, so
-    #: "the type is not enabled" and "the config predates the type" are told
-    #: apart by a reader rather than guessed at.
+    #: `[accelerator] desktop_allowance_basis` — where `desktop_allowance_bytes`
+    #: came from (`DESKTOP_BASES`).
+    desktop_allowance_basis: str
     #: ADDRESSES SOMETHING ELSE FORWARDS TO THIS SERVER FROM, stated because
     #: they cannot be derived.
     #:
@@ -475,43 +467,32 @@ class Config:
     #: `[jobs] retention_days` — how many days a FINISHED job's directory and
     #: its record survive when nothing fetched its artifacts. See
     #: `DEFAULT_RETENTION_DAYS` for the ruling and `JobStore.reap` for what
-    #: reads it. Defaulted for `_capability_flag`'s reason: every config in
-    #: existence was written before this key, and absent means the ruled seven.
+    #: reads it. Absent means the ruled seven.
     retention_days: int = DEFAULT_RETENTION_DAYS
-    #: `[accelerator] desktop_allowance_basis` and `_note` — where
-    #: `desktop_allowance_bytes` came from (`DESKTOP_BASES`) and, for a measured
-    #: one, what was seen and when. Defaulted for `retention_days`'s reason:
-    #: every config in existence predates them, and absent reads as "stated",
-    #: which nothing changes on its own (2026-09-26).
-    desktop_allowance_basis: str = DESKTOP_BASIS_STATED
+    #: `[accelerator] desktop_allowance_note` — what was seen and when, or why.
     desktop_allowance_note: str = ""
     #: `[jobs] install_on_submit` — see `DEFAULT_INSTALL_ON_SUBMIT`. Read by
     #: `POST /v1/jobs` on every request, so turning it off needs no restart.
     install_on_submit: bool = DEFAULT_INSTALL_ON_SUBMIT
-    flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
-    #: decided anything here yet — a config written by `crucible init` alone, or
-    #: one written before this field existed. None is a REPORTED state, not a
+    #: decided anything here yet — a config written by `crucible init` alone.
+    #: None is a REPORTED state, not a
     #: guess: the refusal in `crucible/jobs/__init__.py` says "no selection has
     #: been recorded here" rather than inventing a reason for a disabled type.
     capability: CapabilityRecord | None = None
     #: `[routes]` — where each routable class's work runs (PHASE15-HOST.md
-    #: section 2). Empty means every class is local, which is what every server
-    #: written before this phase says, so an old config needs no migration.
+    #: section 2). Empty means every class is local.
     routes: tuple[RouteRecord, ...] = ()
     #: `[upstreams.*]` — the services this server may forward a chat to on the
     #: operator's account. PRESENT MEANS CONFIGURED: `load_config` refuses an
     #: entry missing its one field, so nothing downstream has to ask twice.
     upstreams: tuple[UpstreamRecord, ...] = ()
     #: `[local_models]` — the local model an app CHOSE for a class, where it
-    #: chose one. Empty means every class is decided automatically, which is
-    #: what every config written before this field says, so an old one needs
-    #: no migration.
+    #: chose one. Empty means every class is decided automatically.
     local_models: tuple[LocalModelRecord, ...] = ()
     #: `[tts.<engine>]` — this box's serving footprint per narrator engine
-    #: (PHASE21 section 2.3). Empty means nobody has stated one here, which is
-    #: what every config written before this phase says; a voice that needs one
-    #: is refused by name rather than defaulted.
+    #: (PHASE21 section 2.3). Empty means nobody has stated one here; a voice
+    #: that needs one is refused by name rather than defaulted.
     tts_engines: tuple[EngineFootprint, ...] = ()
     #: `(st_mtime_ns, st_size)` of config.toml as it was when THIS document was
     #: read — taken BEFORE the read, so a write that lands between the stat and
@@ -702,9 +683,7 @@ def _retention_days(table: dict[str, Any]) -> int:
     """`[jobs] retention_days`, defaulting to the ruled seven when absent.
 
     Absent means seven on `_open_pairing`'s terms rather than as a fallback
-    hiding a missing value: every config on every machine was written before
-    this key existed, and demanding it would make an upgrade unable to read its
-    own file — the failure `_capability_flag` above was written for.
+    hiding a missing value.
 
     ZERO AND NEGATIVE ARE REFUSED, not read as "never reap". Retention is how
     long a finished job survives, and a server that kept nothing would delete a
@@ -727,16 +706,7 @@ def _retention_days(table: dict[str, Any]) -> int:
 
 
 def _desktop_basis(table: dict[str, Any]) -> str:
-    """`[accelerator] desktop_allowance_basis`, "stated" when absent.
-
-    Absent is "stated" by ruling (Owen, 2026-09-26; `DESKTOP_BASES`): a config
-    written before the key holds a reserve somebody lived with, and treating it
-    as a guess to be re-measured is how owens-pc would lose the 3 GiB it keeps
-    for streaming. A value outside the three words is refused by name.
-    """
-    section = table.get("accelerator") or {}
-    if "desktop_allowance_basis" not in section:
-        return DESKTOP_BASIS_STATED
+    """`[accelerator] desktop_allowance_basis`, one of `DESKTOP_BASES`."""
     value = _require(table, "accelerator", "desktop_allowance_basis", str)
     if value not in DESKTOP_BASES:
         raise ConfigError(
@@ -866,35 +836,6 @@ def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
     return value
 
 
-def _capability_flag(table: dict[str, Any], key: str) -> bool:
-    """`[jobs] enable_<type>`, where ABSENT means off and that is not a fallback.
-
-    Every other key in this file is required, and stays required: a config that
-    forgets its token or its backend is broken, and guessing one would hide the
-    break. A capability flag is a different animal. `enable_rvc` was not missing
-    from a config written in phase 2 — `rvc` did not exist. Demanding it means
-    that adding a job type INVALIDATES EVERY CONFIG IN EXISTENCE, and the only
-    repair on offer, `crucible init --force`, mints a new token and breaks every
-    client that had one.
-
-    Found on Owen's Mac on 2026-09-13: its server had been running since before
-    `asr`, `tts`, `align` and `rvc` were built, and after an upgrade the CLI
-    could not read its own config to print its own token.
-
-    So: absent means off. It fails SAFELY (a capability cannot switch itself on)
-    and it fails VISIBLY — `crucible doctor` lists which flags were absent, and
-    `/v1/info`'s `job_types` shows the type is not there. A wrong type or an
-    unknown key in `[jobs]` is still a refusal; it is only absence that is
-    allowed to mean "written before this existed".
-    """
-    section = table.get("jobs")
-    if section is None:
-        raise ConfigError("config is missing the [jobs] section")
-    if key not in section:
-        return False
-    return _require(table, "jobs", key, bool)
-
-
 #: Every capability flag, in the order `crucible init` writes them.
 CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_echo",
@@ -918,38 +859,18 @@ _CAPABILITY_ROW_REQUIRED: dict[str, type] = {
     "enabled": bool,
     "selected": str,
     "reason": str,
-    "shortfall_bytes": int,
-}
-
-#: Keys a row MAY carry, defaulted when absent.
-#:
-#: SEPARATE FROM `_REQUIRED` BECAUSE A CONFIG OUTLIVES THE BUILD THAT WROTE IT.
-#: This table is read from `config.toml` on a machine that may have been written
-#: to by an older Crucible, and the parser refuses unknown keys — so a field
-#: added to the record makes every pre-existing config unreadable, the record
-#: loads as None, and `crucible doctor` silently stops checking whether the
-#: capability record is stale. That happened on 2026-09-20 with `summary` and is
-#: what this table exists to prevent.
-#:
-#: NOT the lockstep rule (`docs/`, Owen 2026-09-20): that is about a CLIENT and a
-#: SERVER, which this repo upgrades together. A config file on disk has no
-#: version to move in step with.
-_CAPABILITY_ROW_OPTIONAL: dict[str, type] = {
     "summary": str,
+    "shortfall_bytes": int,
 }
 
 
 def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
     """`[capability]`, or None when this config has never had one written.
 
-    ABSENT means "nobody has decided", exactly as `_capability_flag`'s absence
-    means "written before this existed", and for the same reason: a config from
-    phase 8 must still load on a phase 9 build. Where the two differ is what an
-    absence is allowed to become. A missing FLAG becomes `False`, because a
-    capability that switches itself on is the dangerous direction. A missing
-    RECORD becomes None and stays None — it must never become an empty record,
-    because an empty record reads as "the card was probed and nothing fit", which
-    is a different and false statement about the host.
+    ABSENT means "nobody has decided". It becomes None and stays None — it must
+    never become an empty record, because an empty record reads as "the card was
+    probed and nothing fit", which is a different and false statement about the
+    host.
 
     PRESENT and malformed is a refusal, like every other table in this file: a
     `[capability]` block with a misspelled key must not load with that class
@@ -990,20 +911,12 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
         where = f"config [[capability.classes]][{index}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where} must be a table")
-        allowed = {**_CAPABILITY_ROW_REQUIRED, **_CAPABILITY_ROW_OPTIONAL}
-        unknown = sorted(set(raw) - set(allowed))
+        unknown = sorted(set(raw) - set(_CAPABILITY_ROW_REQUIRED))
         if unknown:
             raise ConfigError(
                 f"{where}: unknown key(s) {unknown}; a row takes "
-                f"{sorted(_CAPABILITY_ROW_REQUIRED)} and may carry "
-                f"{sorted(_CAPABILITY_ROW_OPTIONAL)}"
+                f"{sorted(_CAPABILITY_ROW_REQUIRED)}"
             )
-        for key, kind in _CAPABILITY_ROW_OPTIONAL.items():
-            if key in raw and not isinstance(raw[key], kind):
-                raise ConfigError(
-                    f"{where}: {key} must be {kind.__name__}, got "
-                    f"{type(raw[key]).__name__}"
-                )
         for key, kind in _CAPABILITY_ROW_REQUIRED.items():
             if key not in raw:
                 raise ConfigError(f"{where}: missing required key {key!r}")
@@ -1029,10 +942,7 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
                 selected=raw["selected"],
                 reason=raw["reason"],
                 shortfall_bytes=raw["shortfall_bytes"],
-                # Absent on a row written before the field existed, which reads
-                # as "this row has no plain-language half" rather than as a
-                # parse failure that would cost the whole record.
-                summary=raw.get("summary", ""),
+                summary=raw["summary"],
             )
         )
     return CapabilityRecord(
@@ -1565,18 +1475,15 @@ def load_config(home: Path | None = None) -> Config:
         token=_require(table, "auth", "token", str),
         open_pairing=_open_pairing(table),
         backend_kind=_require(table, "backend", "kind", str),
-        enable_echo=_capability_flag(table, "enable_echo"),
-        enable_llm=_capability_flag(table, "enable_llm"),
-        enable_asr=_capability_flag(table, "enable_asr"),
-        enable_tts=_capability_flag(table, "enable_tts"),
-        enable_align=_capability_flag(table, "enable_align"),
-        enable_rvc=_capability_flag(table, "enable_rvc"),
-        enable_denoise=_capability_flag(table, "enable_denoise"),
+        enable_echo=_require(table, "jobs", "enable_echo", bool),
+        enable_llm=_require(table, "jobs", "enable_llm", bool),
+        enable_asr=_require(table, "jobs", "enable_asr", bool),
+        enable_tts=_require(table, "jobs", "enable_tts", bool),
+        enable_align=_require(table, "jobs", "enable_align", bool),
+        enable_rvc=_require(table, "jobs", "enable_rvc", bool),
+        enable_denoise=_require(table, "jobs", "enable_denoise", bool),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
-        flags_absent=tuple(
-            flag for flag in CAPABILITY_FLAGS if flag not in table.get("jobs", {})
-        ),
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),
@@ -1605,35 +1512,19 @@ def write_config(
     enable_tts: bool,
     enable_align: bool,
     enable_rvc: bool,
+    enable_denoise: bool,
     desktop_allowance_bytes: int,
-    #: Defaulted, and it is the ONE flag that is, because a config's every other
-    #: writer passes it: `_write_capability` builds its call from
-    #: `CAPABILITY_FLAGS`, so it always states this, and `crucible init` states
-    #: it too. What the default serves is a caller written before this job type
-    #: existed — a test, a script — for which `False` is the same answer
-    #: `_capability_flag` gives an absent key, and the safe direction.
-    enable_denoise: bool = False,
-    #: Defaulted for `enable_denoise`'s reason and with its hazard: a caller
-    #: that REWRITES an existing config must pass the loaded value, or the
-    #: rewrite silently puts an operator's retention window back to seven.
-    #: `cli._write_capability` and `settings.apply` both do.
-    retention_days: int = DEFAULT_RETENTION_DAYS,
+    retention_days: int,
     #: Where `desktop_allowance_bytes` came from, and what was seen
-    #: (`DESKTOP_BASES`). Defaulted to "stated" — the reading an absent key
-    #: gets, and the one nothing changes on its own — with `retention_days`'s
-    #: hazard: **a caller that REWRITES an existing config must pass the loaded
-    #: values**, or a measured reserve silently becomes a stated one.
-    #: `cli._write_capability` and `settings.apply` both do.
-    desktop_allowance_basis: str = DESKTOP_BASIS_STATED,
-    desktop_allowance_note: str = "",
+    #: (`DESKTOP_BASES`).
+    desktop_allowance_basis: str,
+    desktop_allowance_note: str,
     #: None keeps what the file on disk says (`_kept_install_on_submit`),
     #: so a rewriter written before the key cannot turn an operator's
     #: `false` back on.
     install_on_submit: bool | None = None,
     capability: CapabilityRecord | None = None,
-    #: `[routes]` and `[upstreams.*]`. Defaulted to empty for the same reason
-    #: `enable_denoise` is defaulted: a caller written before this phase states
-    #: neither, and empty is what such a config already means. **Every caller
+    #: `[routes]` and `[upstreams.*]`, defaulted to empty. **Every caller
     #: that REWRITES an existing config must pass the loaded values**, or the
     #: rewrite silently unroutes a server — `cli._write_capability` does, and a
     #: test pins it.

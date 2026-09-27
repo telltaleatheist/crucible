@@ -46,6 +46,10 @@ def config(home: Path):
         enable_align=False,
         enable_rvc=True,
         desktop_allowance_bytes=0,
+        enable_denoise=False,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     return load_config(home)
 

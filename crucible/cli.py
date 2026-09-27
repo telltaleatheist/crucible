@@ -82,6 +82,7 @@ from .config import (
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_RETENTION_DAYS,
     DESKTOP_BASES,
     DESKTOP_BASIS_DECLARED,
     DESKTOP_BASIS_MEASURED,
@@ -297,29 +298,29 @@ def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
     return token, carried
 
 
-def carried_reserve(path: Path) -> tuple[int, str, str] | None:
-    """`--config-from`'s desktop reserve: (bytes, basis, note), or None.
-
-    None when the carried file states no reserve — an older host's extract,
-    which carried three tables only — and `crucible init` then decides the
-    reserve as a fresh init would. A reserve with no basis carries as "stated",
-    `config._desktop_basis`'s reading of the same absence.
-    """
+def carried_reserve(path: Path) -> tuple[int, str, str]:
+    """`--config-from`'s desktop reserve: (bytes, basis, note)."""
     import tomllib
 
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return None  # `carried_from` has already refused this file by name
+    except OSError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} could not be read: {exc}")
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"config_from_unreadable: {path} is not TOML: {exc}")
     section = document.get("accelerator")
-    if not isinstance(section, dict):
-        return None
-    value = section.get("desktop_allowance_bytes")
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        return None
-    basis = section.get("desktop_allowance_basis", DESKTOP_BASIS_STATED)
-    if basis not in DESKTOP_BASES:
-        basis = DESKTOP_BASIS_STATED
+    value = section.get("desktop_allowance_bytes") if isinstance(section, dict) else None
+    basis = section.get("desktop_allowance_basis") if isinstance(section, dict) else None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or basis not in DESKTOP_BASES
+    ):
+        raise ConfigError(
+            f"config_from_no_reserve: {path} has no [accelerator] "
+            "desktop_allowance_bytes and desktop_allowance_basis to carry"
+        )
     note = section.get("desktop_allowance_note", "")
     return value, basis, note if isinstance(note, str) else ""
 
@@ -329,8 +330,8 @@ def _existing_stated_reserve(path: Path) -> tuple[int, str] | None:
 
     Owen, 2026-09-26: an existing reserve is never changed automatically. A
     re-init mints a new token; it is not a request to lower owens-pc's 3 GiB
-    because nothing was streaming that minute. So a stated reserve (and a
-    config from before the basis existed reads as stated) survives the re-init;
+    because nothing was streaming that minute. So a stated reserve survives the
+    re-init;
     `crucible capability --measure-desktop` is the deliberate way to replace it.
     """
     if not path.exists():
@@ -371,10 +372,8 @@ def _decide_reserve(
             "stated",
         )
     if args.config_from is not None:
-        carried = carried_reserve(Path(args.config_from))
-        if carried is not None:
-            value, basis, note = carried
-            return value, basis, note, f"{basis}, carried from {args.config_from}"
+        value, basis, note = carried_reserve(Path(args.config_from))
+        return value, basis, note, f"{basis}, carried from {args.config_from}"
     if args.force:
         kept = _existing_stated_reserve(config_path(home))
         if kept is not None:
@@ -439,12 +438,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     # on an NVIDIA card since 2026-09-26, what its desktop actually holds
     # (`_decide_reserve` gives the order). BEFORE the config is written, so a
     # measurement never sees a half-written home.
-    (
-        desktop_allowance_bytes,
-        desktop_basis,
-        desktop_note,
-        desktop_source,
-    ) = _decide_reserve(args, backend, home)
+    try:
+        (
+            desktop_allowance_bytes,
+            desktop_basis,
+            desktop_note,
+            desktop_source,
+        ) = _decide_reserve(args, backend, home)
+    except ConfigError as exc:
+        return _fail(str(exc))
 
     # The token is minted HERE unless the caller brought one. `--token` exists
     # for `@crucible/bootstrap` (PHASE12-BOOTSTRAP.md): the app that installs a
@@ -484,6 +486,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_rvc=args.enable_rvc,
         enable_denoise=args.enable_denoise,
         desktop_allowance_bytes=desktop_allowance_bytes,
+        retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
         desktop_allowance_note=desktop_note,
         # THIS BOX'S SERVING FOOTPRINT PER NARRATOR ENGINE (PHASE21 section
@@ -2851,11 +2854,6 @@ def _doctor_report() -> dict[str, Any]:
                 config.desktop_allowance_bytes, config.desktop_allowance_basis
             ),
             "backend_kind": config.backend_kind,
-            # Which capability flags this config did not carry. A config written
-            # before a job type existed reads that type as off, which is the only
-            # answer that does not invalidate every server on an upgrade — and
-            # this is how it says so out loud instead of looking like a choice.
-            "flags_absent": list(config.flags_absent),
         }
         # NOT ON WIN32. A Windows file has no POSIX mode: `os.chmod` there
         # sets one read-only bit and `stat` reports 0o666 whatever the ACL
@@ -3125,13 +3123,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"reserve: {config['desktop_reserve']}")
             if config["desktop_allowance_note"]:
                 print(f"         {config['desktop_allowance_note']}")
-            if config["flags_absent"]:
-                absent = ", ".join(config["flags_absent"])
-                print(
-                    f"note:    this config predates {absent}; those job types are "
-                    "off. Add the keys to [jobs] to turn them on — do NOT run "
-                    "`crucible init --force`, which mints a new token"
-                )
         env = report["llm_env"]
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
