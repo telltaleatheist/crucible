@@ -445,3 +445,38 @@ removes the question.
 cold load, about 2.4x real time on the GTX 1660 SUPER. Output: 48 kHz, **16-bit** (the input was
 24-bit), 2,879,040 samples against 2,880,000, **20 ms short**. The caller's join (resample, then trim
 or pad to the input's exact frame count) makes the joined master sample-exact regardless.
+
+## LAN, and the run starting (22:45)
+
+`lan enable` succeeded with Owen at the console (UAC accepted, 8 s): a portproxy 0.0.0.0:7100 to
+127.0.0.1:7100 plus the rule "Crucible engine (LAN)". It reported `"state": "configured"` and
+`"remote_reachability": "not_tested"`.
+
+### 46. LAN access "configured" and unreachable: the Ethernet is on the Public profile
+- **What:** from owens-pc, 192.168.68.88:7100 didn't answer; 100.64.0.7:7100 (tailnet) answered 200.
+  kylies-pc's Ethernet profile is Public (Tailscale's is Private), and `lan enable` reported
+  `"private_network": true` and "configured" without testing from outside.
+- **Tonight:** the tailnet address, which is a direct LAN path (tailscale `direct
+  192.168.68.88:41641`, 1 ms), not via triton.
+- **Should be:** `lan enable` checks the profile of the interface it's opening and either covers it
+  or says "this network is marked Public; switch it to Private or LAN machines can't reach this",
+  and it tests reachability from outside rather than reporting "not_tested".
+
+### 47. The WSL NAT address is offered as a pairing line
+`token --url` lists `192.168.96.1:7100`, the WSL vEthernet address, which no other machine can use.
+Only addresses another machine can reach belong there.
+
+## Where it ended
+At 22:45, kylies-pc served sigma rvc to owens-pc over the tailnet, and training-pc-1's queue (d3k,
+then lp) started from `C:	mp\crucible-pairing\kylies.txt`.
+
+About 1 h 15 min from the first install, and:
+- **Crucible releases along the way:** 1.0.44 through 1.0.49, each fixing a fresh-machine bug.
+- **Restarts:** two Windows restarts.
+- **At the console:** three logins or UAC acceptances.
+- **Retries and manual steps:** four Try again or upgrade reruns, plus two service restarts over SSH.
+
+The Crucible bugs found were #20 (empty WSL), #21 (the catalog key), #22 (cloud-init),
+#27/#32 (root then relocated, a new token), #30 (no compiler), #36 (truncated errors), #37/#38
+(interop), #39 (the old binary's shutdown), and #42 (install not reaching the running server).
+Everything else is a hand step that shouldn't exist.
