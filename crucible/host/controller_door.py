@@ -296,7 +296,7 @@ class DoorRequest(BaseHTTPRequestHandler):
             f"this orchestrator serves {INSTALL_PATH}, {INSTALL_EVENTS_PATH}, "
             f"{RESTART_PATH}, "
             f"{QUIT_PATH}, {INFO_PATH} and {PING_PATH}, and nothing else "
-            f"(PHASE17-ORCHESTRATOR.md 3.2); {self.path} is not a door. An "
+            f"(docs/internals/host-and-platform.md, \"The door\"); {self.path} is not a door. An "
             f"app wanting anything else reads {INFO_PATH}'s `engine.url` "
             "and goes there.",
         )
@@ -467,7 +467,7 @@ def _start_install(request: DoorRequest) -> None:
             f"one install on a machine; attach to {INSTALL_EVENTS_PATH} "
             "and watch the one in flight rather than starting a second. "
             "On a fresh install the runner is usually this machine's own "
-            "tray, which starts the move at every start (PHASE19 2.3).",
+            "tray, which starts the move at every start (docs/internals/host-and-platform.md, \"The Windows to WSL move\").",
         )
         return
     _run_install(request)

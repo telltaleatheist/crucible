@@ -794,9 +794,9 @@ class EngineInstall:
         self._step("install-job-types")
         self._line(
             "no job types were installed: the list comes from the coordinate "
-            "records the Windows server keeps for each connected app (4.7), and "
+            "records the Windows server keeps for each connected app, and "
             "this build has no door onto them yet. The apps' own coordinate step "
-            "(PHASE14 4a) installs what they need on first connect to the guest."
+            "(docs/internals/host-and-platform.md, \"The Windows to WSL move\") installs what they need on first connect to the guest."
         )
         self._finish("install-job-types", "none: the coordinate records are the server's")
 
@@ -823,7 +823,7 @@ class EngineInstall:
             self._line(
                 "nothing to migrate: this machine had no Windows engine, so there "
                 "is no catalog to move from. Whatever the apps need, the guest's "
-                "own coordinate step pulls on first connect (PHASE14 4a)."
+                "own coordinate step pulls on first connect (docs/internals/host-and-platform.md, \"The Windows to WSL move\")."
             )
             self._finish("migrate-weights", "no Windows engine; nothing to move")
             return

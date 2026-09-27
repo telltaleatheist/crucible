@@ -528,7 +528,7 @@ def _check_source(where: str, block: dict[str, Any]) -> _Source:
         raise VoiceError(
             f"{where}: names no weights. A backend block declares either "
             "hf_repo + revision (a pin) or path + identity (a directory on the "
-            "machine that serves it); see PHASE18-UNCERTIFIED.md section 3"
+            "machine that serves it); see docs/internals/voices.md, \"The voice schema\""
         )
     return _pinned_source(where, block) if pinned else _local_source(where, block)
 
@@ -1180,7 +1180,7 @@ def home_voice_path(voice_id: str) -> Path:
     if voice_id in RESERVED_VOICE_IDS:
         raise VoiceError(
             f"voice id {voice_id!r} is reserved: {PINS_FILE} in this directory is "
-            "this machine's pin list (PHASE21 section 2.2), so a voice of that "
+            "this machine's pin list (docs/internals/voices.md, \"Pins\"), so a voice of that "
             "name would be written over it"
         )
     return home_voices_dir() / f"{voice_id}.toml"

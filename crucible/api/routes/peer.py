@@ -53,7 +53,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "invalid_request",
                 "`force` is a boolean. It takes an engine away from another "
                 "orchestrator and is a person's act through the page, never "
-                "an orchestrator's own (PHASE17-ORCHESTRATOR.md 2.1)",
+                "an orchestrator's own (docs/internals/host-and-platform.md, \"Orchestrator/engine relation\")",
             )
         claim = ctx.peer.claim(orchestrator, force=bool(force))
         return {

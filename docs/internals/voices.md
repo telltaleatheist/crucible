@@ -282,7 +282,8 @@ round-trips it through `tomli_w`, and writes it atomically. `voice_document` is
   message. `CANCEL_GRACE_SECONDS` (120) starts at the cancel and is **not**
   reset by output. A narrator that keeps rendering past it raises
   `EngineWouldNotStop` (measured: 11 minutes of rows after a cancel).
-- **Stop** sends `quit` on stdin (30 s) and then SIGTERM, never SIGKILL.
+- **Stop** sends `quit` on stdin and waits `QUIT_GRACE_SECONDS` (210 s) before
+  SIGTERM, never SIGKILL.
   `detach` closes stdin first and closes stdout only after the reader thread
   finishes: closing a pipe another thread is reading deadlocks.
 - `load` sends only the voice id and `warm` (`modelDir` is refused by

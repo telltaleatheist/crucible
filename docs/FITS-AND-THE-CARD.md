@@ -180,7 +180,7 @@ init` measures the desktop and keeps `min(peak + max(peak, 1 GiB), 3 GiB)`, with
 Owen: *"WE use 3 gb for desktop. kylies pc doesnt use that much ... it only has 1
 monitor connected and its low resolution"*. The rule, its reasons and the
 re-measure verb (`crucible capability --measure-desktop`) are in
-PHASE9-CAPABILITY.md section 1.1, amended.
+docs/history/PHASE9-CAPABILITY.md section 1.1, amended.
 
 ## 6. The ceiling, and how Ollama gets it wrong
 

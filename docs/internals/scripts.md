@@ -31,7 +31,7 @@ the repair `--check` names when they disagree.
 
 ### What a release carries (`release.sh`)
 
-Our code and nothing published elsewhere (PHASE20-CODE-NOT-ENVIRONMENTS.md section 1), under
+Our code and nothing published elsewhere (`config-envs-weights.md`, "Code, not environments"), under
 one tag `v<version>`: the sdist, the `py3-none-any` wheel, `<wheel>.sha256`, the client
 tarball, the bootstrap tarball, `install.sh` and `install.ps1`. The interpreter
 (python-build-standalone, pinned by digest in `crucible/interpreter.py` and
@@ -81,7 +81,7 @@ metadata cannot prove that, so nothing automates it (`ship.sh` only prints the c
 Order: clean and pushed tree; `bump.py`; commit and push; `release.sh`; optionally `deploy.sh`
 (`--deploy`); print the promote command; print a timing table.
 
-- **No test step, and no flag to add one.** Owen, 2026-09-18 (PHASE20 section 7): *"Normal
+- **No test step, and no flag to add one.** Owen, 2026-09-18: *"Normal
   deploy does not need 25 minutes worth of tests. We should run one or two focused tests on
   the area of code we changed before we reach the deploy stage. By the time we reach deploy,
   we should know it's going to work already."* Tests run on the branch via `tests.sh`; the
@@ -106,7 +106,7 @@ different operator has a different list.
   not name the release is a failure). Readers print a version, `none`, or `unreachable`;
   unreachable is never reported as up to date.
 - **The PC has two records and one install.** Only `install.ps1` runs; the host carries the
-  guest (PHASE15-HOST.md 4.3/4.4). Owen, 2026-09-18: *"windows is the driver; the thing moving
+  guest (`host-and-platform.md`, "The Windows to WSL move", guest carry). Owen, 2026-09-18: *"windows is the driver; the thing moving
   wsl forward. use the established, installed, functional system to drive the new one."* A
   deploy must never be a second driver of the guest. The PC's reading collapses to a bare
   version only when host and guest agree, otherwise `host:<a> guest:<b>`, which cannot equal
@@ -216,7 +216,7 @@ a voice it does not mention is fine, and non-band keys (`_README`) are skipped.
 - The BookForge checkout is `--bookforge`, else `$CRUCIBLE_BOOKFORGE`, else `bookforge`
   beside this checkout. The manifests are `--voices` (default `./voices`); a directory with no
   voice manifest refuses, where it used to print "0 voice band(s) agree". Voice manifests left
-  the repo with PHASE21 (they travel with their weights), so pass the directory that holds them.
+  the repo (they travel with their weights), so pass the directory that holds them.
 
 ## Live keepers and measurement
 

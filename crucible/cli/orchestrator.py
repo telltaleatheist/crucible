@@ -81,7 +81,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "orchestrator",
         help="win32 only: the tray that manages this machine's engine",
         description=(
-            "The Windows ORCHESTRATOR (PHASE15-HOST.md section 4, PHASE17): a "
+            "The Windows ORCHESTRATOR (docs/internals/host-and-platform.md): a "
             "notification-area icon that boots this machine's engine at login, "
             "claims it, watches it, restarts it, and runs the move from the "
             "Windows engine to WSL2 when the operator page asks. It serves zero "

@@ -388,7 +388,7 @@ class Host:
             log(
                 "claim: the engine on this machine was already answering when "
                 "this controller started, so it is watched and not claimed "
-                "(owner=found, PHASE15 4.1a)"
+                "(owner=found; docs/internals/host-and-platform.md, \"Ownership\")"
             )
             return False
         if owner not in (Owner.WSL_UNIT, Owner.HOST_CHILD):
@@ -456,7 +456,7 @@ class Host:
                 "guessing, and on the machine this rule was found on the "
                 "guess (`systemctl restart user@1000`) would have killed a "
                 "five-thousand-step LoRA trainer. Restart it where it was "
-                "started (PHASE15-HOST.md 4.1a).",
+                "started (docs/internals/host-and-platform.md, \"Ownership\").",
             )
 
     def _restart_by_owner(self, owner: Owner, emit: Callable[[installer.Event], None]) -> bool:
@@ -607,7 +607,7 @@ def _watcher_for(home: Path, runner: Runner, log: HostLog) -> PresenceWatcher:
         return PresenceWatcher(runner, log)
     log.write(
         f'consent: config.toml names "{consented}" as the distro this '
-        "controller may manage (PHASE17 2.5); its engine is claimed and "
+        "controller may manage (docs/internals/host-and-platform.md, \"Ownership\"); its engine is claimed and "
         "its unit restarted if there is one, and the recipes that would "
         "restart everything uid 1000 owns in it stay refused"
     )
@@ -659,7 +659,7 @@ def run(argv: list[str] | None = None, *, headless: bool = True) -> int:
         presence=Presence(Distro.UNKNOWN, Engine.STARTING, "starting", Owner.NONE),
         name=orchestrator_name(),
     )
-    log.write(f"role: orchestrator, as {context.name} (PHASE17-ORCHESTRATOR.md)")
+    log.write(f"role: orchestrator, as {context.name}")
     host = Host(context)
     if host.stopped_by_operator:
         context.presence = Presence(Distro.UNKNOWN, Engine.STOPPED, operator_stop.REASON, Owner.NONE)

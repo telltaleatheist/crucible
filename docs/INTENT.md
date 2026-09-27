@@ -270,4 +270,4 @@ those in the dated work log and release validation report.
 
 Related contracts: [architecture](ARCHITECTURE.md),
 [local lifecycle](LOCAL-LIFECYCLE.md), [installation](INSTALL-UNINSTALL.md), and
-[historical build plan](PLAN.md).
+[historical build plan](history/PLAN.md).

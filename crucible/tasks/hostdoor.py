@@ -51,7 +51,7 @@ def door_for_move(backend: Backend, target: str) -> str:
             "engine_target_unknown",
             f"{target!r} is not an engine this build moves to; the targets are "
             f"{list(ENGINE_TARGETS)}. Moving BACK to Windows is an explicit "
-            "operator act (PHASE15-HOST.md section 6) and is refused rather "
+            "operator act (docs/internals/host-and-platform.md, \"The Windows to WSL move\") and is refused rather "
             "than half-done",
             {"target": target, "targets": list(ENGINE_TARGETS)},
         )

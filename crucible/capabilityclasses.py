@@ -117,7 +117,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         binary_note=(
             "This build ships no 4-bit 9B, and the 4B and 0.8B it does ship are "
             "below cleanup's 9B floor, so there is nothing smaller to fall back "
-            "to (PHASE9-CAPABILITY.md section 1.1)."
+            "to (docs/internals/engines-and-capability.md, \"Classes\")."
         ),
     ),
     CapabilityClass(
@@ -192,11 +192,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
                 "tile: ~24 blocks with 12 of context each side) shared through "
                 f"the prefix cache by up to {UNSTATED_ENGINE_CONCURRENCY} "
                 "questions (enginespec.UNSTATED_ENGINE_CONCURRENCY), whose tails at "
-                "one 544-token vLLM block each (PHASE22 section 8a) come to "
+                "one 544-token vLLM block each (docs/internals/engines-and-capability.md, \"The decision door\") come to "
                 "about one more state"
             ),
         ),
-        purpose="one-forward-pass decisions (the decision door, PHASE22)",
+        purpose="one-forward-pass decisions (the decision door)",
         plainly="decide",
         noun=TEXT_FAMILIES_NOUN,
         candidates=_from_catalog(load_all_manifests, *TEXT_FAMILIES, aliases=True),

@@ -10,7 +10,7 @@ An error is always a JSON body under an `error` key holding `code`, `message` an
 sometimes `details`. Crucible refuses by name and with numbers: branch on `code`,
 show a person the `message`.
 
-The prose for WHY a field exists lives in the phase docs (`docs/PHASE*.md`); what
+The prose for WHY a field exists lives in the internals docs (`docs/internals/*.md`); what
 is here is what you may send and what comes back.
 
 ## Discovery
@@ -504,7 +504,7 @@ One voice's settings as a whole local manifest document, ready to edit and send 
 
 ## Streaming narration
 
-A long-lived session that takes text and gives audio back over SSE, instead of one render per request (PHASE3-TTS.md section 7).
+A long-lived session that takes text and gives audio back over SSE, instead of one render per request.
 
 ### `POST /v1/tts/stream`
 
@@ -650,7 +650,7 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 
 ## Peers
 
-Orchestrator and engine talking to each other (PHASE17-ORCHESTRATOR.md). Not an app-facing surface.
+Orchestrator and engine talking to each other (docs/internals/host-and-platform.md). Not an app-facing surface.
 
 ### `GET /v1/peer`
 
@@ -921,7 +921,7 @@ A decision: one distribution per question.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `model` | ModelProvenance | yes | — | Which weights answered (PHASE2-LLM.md section 5's triple). |
+| `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars"). |
 | `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
 | `answers` | Answers | yes | — | Question name to answer, in the request's question order. |
 | `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |

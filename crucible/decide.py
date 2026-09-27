@@ -335,7 +335,7 @@ class DecideResponse(_Strict):
     """A decision: one distribution per question."""
 
     model: ModelProvenance
-    """Which weights answered (PHASE2-LLM.md section 5's triple)."""
+    """Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars")."""
     engine: str
     """The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`."""
     answers: dict[str, Answer]
@@ -712,7 +712,7 @@ def refuse_images_not_served(
         f"{backend_kind} (its weights accept "
         f"{list(manifest.modalities)}) and this decision carries "
         f"{n_images} image(s). Whether a model answers images HERE is "
-        "its manifest's backend block (`serves`, PHASE22 section 2.9)",
+        "its manifest's backend block (`serves`, docs/internals/engines-and-capability.md \"The decision door\")",
         {"model": model_id, "backend": backend_kind,
          "serves": list(served),
          "modalities": list(manifest.modalities),

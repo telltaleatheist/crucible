@@ -2,7 +2,7 @@
 
 What changes in BookForge and Foundry once the server can do the work, in what order, and
 what has to be decided before the first file is deleted. Written 2026-09-13 from
-`docs/CLIENT-SURFACES.md` sections 2, 5 and 8.
+`docs/history/CLIENT-SURFACES.md` sections 2, 5 and 8.
 
 Crucible's own rule up to here has been **the app changes little or nothing**: phases 1 and
 2 shipped with the CLI as the only consumer, no UI, no IPC, no settings row. That was right
@@ -118,7 +118,7 @@ if the relay is wrong is immediate and obvious rather than subtle. That is the w
 to keep the port rather than point the extension at Crucible: the extension is the one
 client Owen uses without looking at it.
 
-`PHASE3-TTS.md` section 7's frames were shaped to make this relay thin — client-assigned
+`docs/history/PHASE3-TTS.md` section 7's frames were shaped to make this relay thin — client-assigned
 row ids, base64 PCM per row, out-of-order retirement — because a relay that has to re-window
 or re-order audio is a relay that will drift. The base64 is not a cost here at all: the pool
 already hands the extension base64 PCM16, so the relay forwards the encoding it is given
@@ -252,7 +252,7 @@ behaviour change, if Owen disagrees.~~
 > nothing — so there is no window, no timer and no key that turns the rule off. "Done" is
 > read from **four facts**: no job on the lane, no lease open, no streaming session holding
 > the claim, no chat in flight. The moment the last of them goes false, the resident thing
-> is unloaded and says why. **PHASE7-LANES.md section 5.3** is the ruling;
+> is unloaded and says why. **docs/history/PHASE7-LANES.md section 5.3** is the ruling;
 > `crucible/settle.py` is the code.
 >
 > What makes it safe rather than a 44-second reload between every book is section 5.2's

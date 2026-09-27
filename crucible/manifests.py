@@ -836,7 +836,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                     f"{where}: [model] modalities declares 'image' and this block "
                     f"serves it ({list(serves_here)}), and it names no `mmproj`. Half a vision model is a model "
                     "that loads and then cannot see; the projector is not "
-                    "optional (PHASE15-HOST.md section 3.10, fact 2)"
+                    "optional (docs/internals/config-envs-weights.md, \"Model manifests\")"
                 )
             if "image" not in serves_here and "mmproj" in block:
                 raise ManifestError(
@@ -869,7 +869,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                 f"reserving for an image, so it belongs only to a model this "
                 f"server serves text-only; take it out and measure "
                 f"--gpu-memory-utilization again with the image profiled in "
-                f"(PHASE3-VLM.md section 3)"
+                f"(docs/internals/config-envs-weights.md, \"Model manifests\")"
             )
         if "image" in serves_here and LANGUAGE_MODEL_ONLY in engine_args:
             raise ManifestError(

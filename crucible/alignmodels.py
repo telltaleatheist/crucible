@@ -170,7 +170,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
                 f"{where}: {kind!r} is not an align backend; the align backends are "
                 f"{sorted(ALIGN_BACKEND_ENGINES)}, and both run "
                 "'qwen3-forced-aligner' on the same weights. Windows is never a "
-                "backend (docs/PHASE15-HOST.md)"
+                "backend (docs/internals/engines-and-capability.md, \"Backends\")"
             )
         if not isinstance(block, dict):
             raise AlignManifestError(f"{where}: must be a table")

@@ -1,6 +1,6 @@
 # Crucible — build plan
 
-Product direction is defined by [the intent of Crucible](INTENT.md), recorded
+Product direction is defined by [the intent of Crucible](../INTENT.md), recorded
 2026-09-16. This historical implementation plan must be read subject to that
 contract, especially native Windows independence, optional WSL, app-owned model
 selection and avoiding duplicate downloads. Phase completion is not evidence that

@@ -43,7 +43,7 @@ def decide_engine(context: HostContext, move: Callable[[str], EngineDecision]) -
     if context.presence.owner is Owner.FOUND:
         log(
             "engine: this machine's engine is one this controller did not "
-            "start (owner=found), so nothing is moved (PHASE17 4.1a)"
+            "start (owner=found), so nothing is moved (docs/internals/host-and-platform.md, \"Ownership\")"
         )
         return EngineDecision.FOUND
     try:

@@ -61,19 +61,19 @@ HOST_ERROR_CODES: dict[str, str] = {
     "orchestrator_distro_invalid": (
         "`[orchestrator] distro` in the Windows config names something that is "
         "not a distribution name. A person who wrote it meant to grant "
-        "something, so it is refused rather than ignored (PHASE17 2.5)."
+        "something, so it is refused rather than ignored (docs/internals/host-and-platform.md, \"Ownership\")."
     ),
     "orchestrator_wsl_invalid": (
         "`[orchestrator] wsl` in the Windows config holds something other than "
         '"never". It is the one way to keep a machine native on purpose '
-        "(PHASE19 1), so a value nobody defined is refused rather than ignored."
+        "(docs/internals/host-and-platform.md, \"Ownership\"), so a value nobody defined is refused rather than ignored."
     ),
     "wsl_reboot_required": (
         "WSL was enabled and Windows must restart to install it. The person is "
         'told to choose "Update and restart", because Windows installs WSL in '
         "the same servicing step as its waiting updates. The move stops here "
         "and the tray resumes it once somebody signs in after the restart "
-        "(PHASE19 2.3)."
+        "(docs/internals/host-and-platform.md, \"The Windows to WSL move\")."
     ),
     "wsl_reboot_still_owed": (
         "Windows restarted and servicing has still not installed WSL, which is "
@@ -85,12 +85,12 @@ HOST_ERROR_CODES: dict[str, str] = {
         "the restart budget is spent and WSL is still not installed, usually "
         "because the restarts skipped or postponed waiting updates. The person "
         'is told to install the updates and choose "Update and restart"; the '
-        "tray re-checks at every start and goes on when WSL is live (PHASE19 "
-        "2.4, #14, #19)."
+        "tray re-checks at every start and goes on when WSL is live (docs/internals/host-and-platform.md, "
+        "\"The Windows to WSL move\")."
     ),
     "wsl_outcome_invalid": (
-        "`wsl-outcome.json` is present and is not the document PHASE19 2.2 "
-        "describes. It is what the tray decides from, so it is refused rather "
+        "`wsl-outcome.json` is present and is not the document docs/internals/host-and-platform.md, "
+        "\"Outcome file\", describes. It is what the tray decides from, so it is refused rather "
         "than read as 'nothing has happened here yet'."
     ),
     "wsl_state_unknown": (
