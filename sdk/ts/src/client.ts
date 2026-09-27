@@ -3354,7 +3354,7 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     maxChars: nullableNum(entry, 'max_chars', where),
     // A fact about the voice that is never null: a client writing FLACs or
     // playing PCM cannot be handed a null sample rate.
-    sampleRate: num(entry, 'sample_rate', where),
+    sampleRate: nullableNum(entry, 'sample_rate', where),
     // How many rungs the voice's ladder has, for a caller spreading retakes.
     // A take past the end is a seed lane, never an error, so a caller that
     // does not know it loses nothing but the spread.
@@ -3362,7 +3362,7 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     // `null` for a voice with no serving table.
     serving: readVoiceServing(entry, where),
     needsReference,
-    pace: readVoicePace(objectField(entry, 'pace', where), `${where}.pace`),
+    pace: readNullableVoicePace(entry, where),
   };
 }
 
@@ -3410,6 +3410,11 @@ function readVoiceServing(entry: Json, where: string): VoiceServing | null {
  * loader's to enforce: this client reads the wire and does not keep a second
  * copy of the server's rules to disagree with it.
  */
+function readNullableVoicePace(entry: Json, where: string): VoicePace | null {
+  const block = nullableObject(entry, 'pace', where);
+  return block === null ? null : readVoicePace(block, `${where}.pace`);
+}
+
 function readVoicePace(entry: Json, where: string): VoicePace {
   // Each value is nullable ("this voice states none"). The triple rule below
   // is strict: a half-stated band is the wire disagreeing with itself.

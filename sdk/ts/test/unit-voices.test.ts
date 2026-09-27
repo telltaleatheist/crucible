@@ -324,9 +324,9 @@ test('a voice with no measured pace parses, and states three nulls rather than a
     },
   }]);
   const [voice] = await client().voices();
-  assert.equal(voice!.pace.paceCharsPerSec, null);
-  assert.equal(voice!.pace.maxCharsPerSec, null);
-  assert.equal(voice!.pace.minCharsPerSec, null);
+  assert.equal(voice!.pace!.paceCharsPerSec, null);
+  assert.equal(voice!.pace!.maxCharsPerSec, null);
+  assert.equal(voice!.pace!.minCharsPerSec, null);
 });
 
 test('a HALF-stated band is refused by name: all three or none, on both sides', async () => {
@@ -481,7 +481,7 @@ test("info() reads the tts capability's rows with the /voices reader", async () 
   assert.ok(isTtsCapability(tts), 'the tts capability narrows to the /voices rows');
   assert.equal(tts.models.length, 1);
   assert.equal(tts.models[0]!.fingerprint, `deathstalker@${VOICE_REVISION}`);
-  assert.equal(tts.models[0]!.pace.safeMaxChars, 800);
+  assert.equal(tts.models[0]!.pace!.safeMaxChars, 800);
   assert.deepEqual(tts.unreadableRows, []);
 });
 

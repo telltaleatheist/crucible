@@ -1735,7 +1735,7 @@ export interface VoiceInfo {
    * because 24000 everywhere in today's catalog is exactly the kind of
    * coincidence that becomes a hard-coded number if it is not written down.
    */
-  readonly sampleRate: number;
+  readonly sampleRate: number | null;
   /**
    * How many rungs this voice's take ladder has, never below 1 — take 0
    * exists whether or not the manifest says so — except `0` on a pinned voice
@@ -1800,7 +1800,7 @@ export interface VoiceInfo {
    * Never null: the block is load-bearing, because a client that packs needs
    * it. Its values are each nullable ("this voice states none").
    */
-  readonly pace: VoicePace;
+  readonly pace: VoicePace | null;
 }
 
 /**
