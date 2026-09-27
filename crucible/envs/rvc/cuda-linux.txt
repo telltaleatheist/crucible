@@ -80,6 +80,16 @@
 # PyTorch's own index, not PyPI. `pip freeze` prints the local version but not the
 # index it came from; without this line the resolved set is unresolvable.
 --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# PREBUILT WHEELS, FROM CRUCIBLE'S OWN RELEASE (2026-09-26, kylies-pc). diffq
+# 0.2.4 is on PyPI only as source, and its C extension needs a compiler. A stock
+# Ubuntu WSL guest has none at all (no gcc, cc or clang), so `crucible install
+# rvc` failed on a fresh machine. The wheel was built once, with Crucible's own
+# CPython on Ubuntu 24.04 (glibc 2.39), and published on the `wheels` release;
+# the pin below stays `diffq==0.2.4`, and pip takes the wheel from this page
+# over PyPI's sdist. sha256 8582b364...d43, in the release notes. Owen:
+# "downloading from gh releases is probably the most trustworthy/correct way".
+--find-links https://github.com/telltaleatheist/crucible/releases/expanded_assets/wheels
 
 # --- the env's own ffmpeg and sox ---
 # urvc's convert path prefers an ffmpeg on PATH over anything it vendors, and

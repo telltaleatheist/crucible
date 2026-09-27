@@ -269,3 +269,56 @@ Timeline, local time:
 - "954 GiB free at /root/.crucible" is the ext4.vhdx virtual maximum; C: has about 283 GB.
 - The upgrade logged `claim: release did not land: peer_unreachable` against an engine it had just
   stopped itself (harmless, noisy).
+
+## The move completes (1.0.46)
+
+Timeline, local time:
+- 22:04:48 to 22:05:38: the 1.0.46 upgrade, 31 s for the installer.
+- 22:05:25 to 22:05:38: the new tray's "guest release" re-ran the guest installer by itself.
+- 22:08:47: the Try again, done in 1 s. `wsl-outcome.json` `done`, attempts 4, and Windows
+  127.0.0.1:7100 is now `wslrelay` forwarding into the guest.
+- Total from the first install (21:29:48) to a running Linux engine: about 39 minutes, three
+  Crucible releases (1.0.44 to 1.0.46), two restarts and three hand retries.
+
+### 27. The upgrade moved the engine from root to the `crucible` user, and minted a NEW token
+- **What:** the tray's automatic "guest release" step installed 1.0.46 into `/home/crucible/.crucible`
+  (a system unit running as crucible, linger granted to crucible), which resolves #24's root
+  question, but it minted a fresh token (hash add8356888a8) instead of carrying the migrated one
+  (9a735f51374a, still in Windows' config.toml and in the abandoned `/root/.crucible`). The
+  orchestrator door then refused the Windows token (`host_unauthorized`), and anything paired before
+  the upgrade was silently unpaired. The tray also logged that it could read neither the guest's
+  pairing line nor its token, so it wrote no pairing file and made no claim.
+- **Should be:** a relocation carries the token (the same rule migrate-config already follows), the
+  tray reads the guest's pairing from wherever the guest now lives, and the old `/root/.crucible` is
+  removed or at least reported.
+
+### 28. The installer prints a stale outcome as if it were current
+- **What:** the 1.0.46 installer's last console line was "The restarted guest did not accept the
+  migrated token": 1.0.45's failure sentence, read back from `wsl-outcome.json`.
+- **Should be:** say which run the sentence belongs to (its `at` and `release`), or clear it when a
+  new install starts.
+
+### 29. The hand steps address the guest by `~`, and `~` depends on the default user
+- **What:** `wsl -d crucible -- ~/.crucible/server/bin/crucible ...` means /home/crucible or /root
+  depending on who runs it; the engine moved between the two during this install.
+- **Should be:** the Windows host carries a `crucible` shim that forwards into the guest as the right
+  user, so nobody spells a guest path.
+
+## Step 2: the rvc env (fixed in 1.0.47)
+
+### 30. `install rvc` cannot finish on a fresh guest: diffq needs a C compiler, and there is none
+- **What:** 22:10:51 to 22:12:15, 84 s, then exit 1. diffq 0.2.4 has no wheel on PyPI, and a stock
+  ubuntu-noble-wsl rootfs has no clang, gcc, cc or make. 1.0.44's compiler fix only helps when SOME
+  compiler exists. owens-pc's guest had gcc, so it never showed.
+- **Fixed (1.0.47), Owen's way:** a `wheels` release on the crucible repo (never "latest") carries
+  `diffq-0.2.4-cp311-cp311-linux_x86_64.whl`, built with Crucible's CPython on Ubuntu 24.04 and
+  sha256 8582b36409ed4b62cd0f0cef54bc7e4826d90b541c053c070ca97f65d35a8d43. The recipe keeps
+  `diffq==0.2.4` and adds `--find-links` to that release, so pip takes the wheel. Checked: pip
+  resolves diffq==0.2.4 through the page to that exact file, and it imports with its extension.
+- **Pattern for the rest:** any recipe package that is source-only goes the same way. The ffmpeg
+  build (#25) belongs on the same kind of release.
+
+### 31. The install error names pip, not the package that failed
+- **What:** "`pip install -r cuda-linux.txt` exited 1"; the actual cause ("diffq ... No such file or
+  directory: 'clang'") was 40 lines up.
+- **Should be:** name the package that failed to build and why, in one line.
