@@ -728,6 +728,25 @@ class Host:
         else:
             self._c.log.write(f"guest release: carried the guest to {carried}")
             self._refresh()
+        # WHAT THE #27 RELOCATION LEFT BEHIND, put right by the product
+        # (fresh-install #27/#32, 2026-09-26): a guest token that is not the one
+        # this PC's apps paired with, and an abandoned /root/.crucible. Once the
+        # guest is on this release, so the repair runs the new code. A token
+        # carried back changes the guest's pairing line, so the Windows copy
+        # and the claim follow it at once rather than at the next login.
+        try:
+            recarried = walk.repair_relocation()
+        except HostError as exc:
+            self._c.log.write(f"guest repair: {exc.code}: {exc.message}")
+            return
+        except Exception as exc:  # noqa: BLE001 - a thread that dies silently is worse
+            self._c.log.write(f"guest repair: could not be run: {exc}")
+            return
+        if recarried:
+            _write_pairing(self._c)
+            self._claimed = False
+            self.claim()
+            self._refresh()
 
     # -------------------------------------------- PHASE19 2.3 the decision
 
@@ -1341,6 +1360,16 @@ class Host:
                     )
                     # 7b.4c: the hold is what keeps the VM there at all, so it is
                     # taken again the tick after it dies rather than at the next login.
+                    #
+                    # AND TAKEN THE FIRST TIME BY A TICK, TOO (fresh-install #23,
+                    # 2026-09-26). `start()` holds only an owner it decided, and
+                    # an owner is often decided later, by this loop: a boot that
+                    # outlived its wait (39 s of cloud-init on Canonical's image),
+                    # a guest that came up after a failed move. `rehold` retakes
+                    # only a hold that existed, so such a guest was never held,
+                    # and WSL stopped the distro ~25 s after the last session.
+                    if self._c.watcher.held_distro is None:
+                        self._hold()
                     self._c.watcher.rehold()
                     if (self._c.presence.owner is Owner.WSL_UNIT
                             and self._c.presence.engine is Engine.RUNNING
@@ -1370,7 +1399,7 @@ class Host:
                 # the unmeasured owner this exists to prevent.
                 self._presence_settled.set()
 
-    def quit(self) -> None:
+    def quit(self, *, handover: bool = False) -> None:
         """THE stop. PHASE17 4.4 — one implementation, two callers.
 
         `menu.QUIT` and the door's `POST /quit` both arrive here, for 4.2's
@@ -1383,6 +1412,13 @@ class Host:
         was sent `taskkill /PID`, stayed up for 25 s and wrote **nothing**, so
         "did the stop run at all" was unanswerable from the one artefact a
         console-less `pythonw` leaves. Now every stop says so before it acts.
+
+        `handover` is an UPGRADE's quit (`local shutdown` sends
+        `X-Crucible-Handover: 1` with its `/quit`; fresh-install #35,
+        2026-09-26). Everything is the
+        same except the hold: a bounded one is left behind for the next tray
+        (`PresenceWatcher.hand_over`), because the engine this quit leaves
+        running is only running while something holds its distro.
         """
         owner = self._c.presence.owner
         claim = "released" if self._claimed else "not held, so nothing to release"
@@ -1405,7 +1441,10 @@ class Host:
         # a `found` engine's distro too (`_hold`), so it is let go for one too
         # — the hold is THIS process's session whoever started the engine in
         # it, and the distro stays up as long as the engine's own session does.
-        self._c.watcher.release()
+        if handover:
+            self._c.watcher.hand_over()
+        else:
+            self._c.watcher.release()
         if owner is Owner.HOST_CHILD:
             # In host mode the server is this process's child and 4.2's Quit
             # label already said it goes too. An engine the host FOUND is not

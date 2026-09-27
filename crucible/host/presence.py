@@ -122,16 +122,20 @@ def guest_pairing_argv(distro: str) -> list[str]:
     lets wsl.exe pre-expand `$CRUCIBLE_HOME` on the WINDOWS side, where it is
     empty (BookForge's `wsl-exe-implicit-shell-trap.md`). `installer.py` reads
     the guest's home with the same line for the same reason.
+
+    AS THE USER THE ENGINE RUNS AS (`guest_argv`), fresh-install #27,
+    2026-09-26. This spelled `wsl.exe -d <distro> --exec` itself, so it ran as
+    whatever the distro's default user was at that moment: root straight after
+    the import, `crucible` after a restart. `$HOME/.crucible` then named
+    whichever home that user had, and on kylies-pc the tray read neither the
+    guest's pairing nor its token after the engine moved from /root to
+    /home/crucible, wrote no pairing file and made no claim. `guest_argv` names
+    the user in Crucible's own distro and keeps a foreign distro's default.
     """
-    return [
-        "wsl.exe",
-        "-d",
+    return guest_argv(
         distro,
-        "--exec",
-        "bash",
-        "-lc",
-        'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/pairing"',
-    ]
+        ["bash", "-lc", 'cat "${CRUCIBLE_HOME:-$HOME/.crucible}/pairing"'],
+    )
 
 
 def keepalive_argv(distro: str) -> list[str]:
@@ -151,6 +155,13 @@ def keepalive_argv(distro: str) -> list[str]:
     wait for.
     """
     return guest_argv(distro, ["sleep", "infinity"])
+
+
+#: How long an upgrading tray's handed-over hold lasts (#35, 2026-09-26). The
+#: 1.0.48 host upgrade took 55 s from the old tray's quit to the new tray's
+#: start; ten minutes covers a slow download of the interpreter as well, and
+#: costs nothing but a guest kept up a little longer if no new tray comes.
+HANDOVER_SECONDS = 600
 
 
 def pairing_line_authority(line: str) -> str | None:
@@ -1088,6 +1099,33 @@ class PresenceWatcher:
         self._log.write(f'hold: the session on "{self.held_distro}" ended; taking it again')
         distro, self.held, self.held_distro = self.held_distro, None, None
         return self.hold(distro)
+
+    def hand_over(self, seconds: int = HANDOVER_SECONDS) -> Child | None:
+        """Leave a BOUNDED hold behind for the next tray, then let ours go.
+
+        Fresh-install #35 (2026-09-26, kylies-pc). An upgrade quits this tray
+        and starts the new one about a minute later, and a distro terminates
+        seconds after its last `wsl.exe` session ends (7b.4c): the old tray
+        let go, WSL idled the guest, and the new tray found nothing on :7100
+        for 30 s before a recovery recipe started the unit again. So the old
+        tray starts a `sleep <seconds>` session it does NOT wait for, before
+        it ends its own. It is a child nobody reaps, which is why it is
+        bounded: it ends by itself whether or not a new tray ever arrives,
+        and a new tray that does arrive takes its own hold regardless.
+
+        The new session is started BEFORE ours is released, so there is no
+        instant with no session on the distro. None when nothing was held.
+        """
+        if self.held_distro is None:
+            return None
+        distro = self.held_distro
+        bridge = self._runner.spawn(guest_argv(distro, ["sleep", str(int(seconds))]))
+        self._log.write(
+            f'hold: "{distro}" is handed over to pid {bridge.pid} for {int(seconds)} s, '
+            "so the next tray finds its engine still up (#35)"
+        )
+        self.release()
+        return bridge
 
     def release(self) -> None:
         """Let the distro go. Quit's job, and the hold's own re-take."""

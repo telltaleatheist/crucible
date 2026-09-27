@@ -203,8 +203,9 @@ def test_service_install_ends_with_the_pairing_line(
     capsys.readouterr()
     assert cli.main(["service", "install"]) == 0
     out = capsys.readouterr().out
-    assert "pairing: paste one of these" in out
-    assert load_config(home).token in out
+    # #33 (2026-09-26): says where the line is, never prints the secret.
+    assert cli.PAIRING_NOT_PRINTED in out
+    assert load_config(home).token not in out
 
 
 def test_init_ends_with_the_pairing_line(
@@ -213,8 +214,9 @@ def test_init_ends_with_the_pairing_line(
     assert cli.main(["init"]) == 0
     out = capsys.readouterr().out
     assert "pairing:" in out
-    assert f"crucible://" in out
-    assert load_config(home).token in out
+    # #33 (2026-09-26): an install's log must not capture the token.
+    assert "crucible://" not in out
+    assert load_config(home).token not in out
 
 
 def test_token_show_prints_the_token(

@@ -151,7 +151,9 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
         assert not stopped and not local_calls
         return
     local.shutdown()
-    assert local_calls == (["stop"] if contract == 1 else [])
+    # #35 (2026-09-26): only a native child is stopped; a guest serves on
+    # through the Windows swap.
+    assert local_calls == (["stop"] if contract == 1 and owner == "child" else [])
     assert stopped == [True]
     assert not any("/local/" in url for url in calls)
 

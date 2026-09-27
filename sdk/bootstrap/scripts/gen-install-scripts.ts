@@ -34,7 +34,7 @@ import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from '../src/interpr
 import { HOST_BACKEND, RELEASE_REPO, wheelAssetName, wheelShaAssetName } from '../src/release.js';
 import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/runtime.js';
 import type { RunResult } from '../src/runner.js';
-import { installJobTypesSh, installSteps, interpreterSh, uninstallSh, wheelSh, type StepPlan } from '../src/steps.js';
+import { installJobTypesSh, installSteps, interpreterSh, serverPreludeSh, uninstallSh, wheelFetchSh, wheelInstallSh, type StepPlan } from '../src/steps.js';
 import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
@@ -287,7 +287,7 @@ function fromSourceSh(): string {
     'rm -rf "$src"',
     `git clone --filter=blob:none "https://github.com/${RELEASE_REPO}" "$src" || die "from_source_clone_failed: https://github.com/${RELEASE_REPO}"`,
     'git -C "$src" checkout --detach "$FROM_SOURCE" || die "from_source_ref_unknown: the checkout has no ref called $FROM_SOURCE"',
-    'if [ -x "$dest/bin/crucible" ]; then "$dest/bin/crucible" local shutdown || true; fi',
+    'crucible_quiesce || say "server: the running server did not stop; installing the checkout and stopping it with that"',
     '"$dest/bin/python3" -m pip install --upgrade --no-input "$src" || die "from_source_install_failed: pip would not install $src into $dest"',
     `if [ "$(uname -s)" = Darwin ]; then "$dest/bin/python3" -m pip install ${DESKTOP_PACKAGES.join(' ')} || die "from_source_install_failed: desktop packages could not be installed"; fi`,
     // The stamp records the COMMIT as the release, because that is what is
@@ -295,6 +295,7 @@ function fromSourceSh(): string {
     // says so rather than comparing a sha with a version number.
     `printf 'python_sha256=%s\\npython_version=%s\\nrelease=%s\\n' "$py_sha" "$py_version" "$(git -C "$src" rev-parse HEAD)" > "$dest/${STAMP_NAME}"`,
     'CRUCIBLE="$dest/bin/crucible"',
+    'crucible_quiesce_after',
     'say "server: installed $("$CRUCIBLE" --version) from $(git -C "$src" rev-parse --short HEAD)"',
   ].join('\n');
 }
@@ -414,11 +415,21 @@ export function generateInstallSh(): string {
       // replaces the second half only, so the first is emitted once, outside
       // the `if` — which is also the one place this file would otherwise have
       // two copies of a pin. Neither branch is the other's fallback.
+      //
+      // THE WHEEL IS FETCHED BEFORE THE INTERPRETER HALF (fresh-install #39,
+      // 2026-09-26), so whichever half replaces the running server's tree
+      // first can stop that server with the NEW release's code
+      // (`crucible_quiesce`). `--from-source` has no wheel to stage, and
+      // falls back to the installed binary and then the new one.
+      lines.push(serverPreludeSh().trimEnd());
+      lines.push('if [ -z "$FROM_SOURCE" ]; then');
+      lines.push(indent(wheelFetchSh().trimEnd()));
+      lines.push('fi');
       lines.push(interpreterSh().trimEnd());
       lines.push('if [ -n "$FROM_SOURCE" ]; then');
       lines.push(indent(fromSourceSh()));
       lines.push('else');
-      lines.push(indent(wheelSh().trimEnd()));
+      lines.push(indent(wheelInstallSh().trimEnd()));
       lines.push('fi');
     } else {
       lines.push(step.sh.trimEnd());

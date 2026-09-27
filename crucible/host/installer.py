@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import landoor, wslstate
-from .presence import guest_argv
+from .presence import GUEST_USER, guest_argv
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .errors import HostError
 from ..errors import CrucibleError
@@ -816,6 +816,104 @@ class EngineInstall:
         self._guest_install()
         return self._release
 
+    # ------------------------------------- what the #27 relocation left behind
+
+    def repair_relocation(self) -> bool:
+        """Put right what the root -> crucible relocation left. True if the token moved.
+
+        Fresh-install #27 and #32 (2026-09-26, kylies-pc). Before 1.0.48 the
+        move's first guest commands ran as root, so the engine landed in
+        /root/.crucible; after the distro's next start the default user was
+        `crucible`, the carry found no home there, and install.sh built a new
+        one WITH A NEW TOKEN. The root cause is fixed (`guest_argv`), but a
+        machine that went through it is left with two things nobody at the
+        keyboard can see or fix:
+
+        * the engine's token is not the one this PC's apps paired with, so
+          every one of them was silently unpaired. The Windows `config.toml`
+          still holds the paired token, and carrying it in is the move's own
+          `migrate-config` step (`init --force --config-from`), which is what
+          recovered kylies-pc by hand. It is run here, by the product, and the
+          log says so by name (`token_rotated`);
+        * `/root/.crucible`, a whole abandoned install with the old token in
+          it. Removed (its downloaded models moved into the live home first),
+          unless it is the only home or the service still runs from it.
+
+        CRUCIBLE'S OWN DISTRO ONLY. A consented distro is somebody else's, its
+        engine's token is its own business, and /root in it is not ours.
+        Asked at every tray start, after the carry, and it is two quick reads
+        on a machine that needs nothing.
+        """
+        if self._distro != CRUCIBLE_DISTRO:
+            return False
+        carried = self._carry_rotated_token()
+        self._retire_abandoned_root_home()
+        return carried
+
+    def _carry_rotated_token(self) -> bool:
+        windows = _config_token(self._home / "config.toml")
+        if windows is None:
+            # No Windows server ever ran here, so the guest minted the only
+            # token this machine has had, and there is nothing to compare.
+            return False
+        read = self._runner.run(
+            guest_argv(
+                self._distro,
+                ["bash", "-lc", '"${CRUCIBLE_HOME:-$HOME/.crucible}/server/bin/crucible" token --show'],
+            ),
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        guest = read.stdout.strip() if read.ok else ""
+        if guest == "" or any(ch.isspace() for ch in guest):
+            self._line(f"token check: the guest would not say its token ({read.said()}); nothing was changed", "stderr")
+            return False
+        if guest == windows:
+            return False
+        self._line(
+            f"token_rotated: the engine in \"{self._distro}\" holds a different token "
+            f"({_fingerprint(guest)}) from the one this PC's apps were paired with "
+            f"({_fingerprint(windows)}), which an install before 1.0.48 did when it "
+            "moved the engine's home. Carrying the paired token back in.",
+            "stderr",
+        )
+        self._migrate_config()
+        return True
+
+    def _retire_abandoned_root_home(self) -> None:
+        script = (
+            f"old=/root/.crucible; user={GUEST_USER}\n"
+            '[ -d "$old" ] || exit 0\n'
+            'owner_home="$(getent passwd "$user" | cut -d: -f6)"; live="$owner_home/.crucible"\n'
+            'if [ -z "$owner_home" ] || [ "$live" = "$old" ] || [ ! -x "$live/server/bin/crucible" ]; then\n'
+            '  echo "kept: $old is the only Crucible home in this distro"; exit 0\n'
+            'fi\n'
+            'if grep -qs -- "$old" /etc/systemd/system/crucible.service; then\n'
+            '  echo "kept: $old is what crucible.service still runs"; exit 0\n'
+            'fi\n'
+            'if [ -d "$old/models" ]; then\n'
+            '  mkdir -p "$live/models" && chown "$user:$user" "$live/models"\n'
+            '  for entry in "$old/models"/* "$old/models"/.[!.]*; do\n'
+            '    [ -e "$entry" ] || continue\n'
+            '    name="$(basename "$entry")"\n'
+            '    [ -e "$live/models/$name" ] && continue\n'
+            '    mv "$entry" "$live/models/$name" && chown -R "$user:$user" "$live/models/$name" '
+            '&& echo "moved: models/$name into $live/models"\n'
+            '  done\n'
+            'fi\n'
+            'if grep -qs -- "$old" /root/.local/bin/crucible; then rm -f /root/.local/bin/crucible; fi\n'
+            'size="$(du -sh "$old" 2>/dev/null | cut -f1)"\n'
+            'rm -rf "$old" && echo "removed: $old ($size), left behind when the engine moved to $live"\n'
+        )
+        result = self._runner.run(
+            ["wsl.exe", "-d", self._distro, "-u", "root", "--exec", "bash", "-c", script],
+            timeout_s=QUICK_TIMEOUT_SECONDS,
+        )
+        for line in result.stdout.splitlines():
+            if line.strip():
+                self._line(f"abandoned home: {line.strip()}", "stderr")
+        if not result.ok:
+            self._line(f"abandoned home: /root/.crucible could not be checked ({result.said()})", "stderr")
+
     def _guest_install(self) -> None:
         """`install.sh`, inside the distro. The guest half has ONE owner."""
         self._step("guest-install")
@@ -858,16 +956,16 @@ class EngineInstall:
         # wsl.exe, can change a byte of somebody's key. `umask 077` before the
         # redirect, so the file is never briefly readable.
         payload = base64.b64encode(carried.encode("utf-8")).decode("ascii")
+        # AS THE USER THAT READS IT (`guest_argv`; fresh-install #27,
+        # 2026-09-26). This spelled `wsl.exe -d <distro> --exec` itself, so on a
+        # distro not yet restarted since its import it ran as ROOT and left a
+        # root-owned 0600 file that `init --config-from`, running as
+        # `crucible` two lines down, could not open.
         written = self._runner.run(
-            [
-                "wsl.exe",
-                "-d",
+            guest_argv(
                 self._distro,
-                "--exec",
-                "bash",
-                "-c",
-                f"umask 077 && printf %s {payload} | base64 -d > {remote}",
-            ],
+                ["bash", "-c", f"umask 077 && printf %s {payload} | base64 -d > {remote}"],
+            ),
             timeout_s=QUICK_TIMEOUT_SECONDS,
         )
         if not written.ok:
@@ -1256,6 +1354,33 @@ def elevated(argv: Sequence[str]) -> list[str]:
         "-Command",
         f"Start-Process -Verb RunAs -Wait -FilePath '{program}'{arguments}",
     ]
+
+
+def _config_token(path: Path) -> str | None:
+    """`[auth] token` out of a config.toml, or None when there is none to read.
+
+    With `tomllib`, for `app.read_token`'s reason (the same document
+    `crucible/config.py` reads); spelled here because `app` imports this
+    module and not the other way round.
+    """
+    import tomllib
+
+    if not path.is_file():
+        return None
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    auth = document.get("auth")
+    token = auth.get("token") if isinstance(auth, dict) else None
+    return token if isinstance(token, str) and token.strip() else None
+
+
+def _fingerprint(token: str) -> str:
+    """A token's first twelve sha256 hex digits: names it in a log, never shows it."""
+    import hashlib
+
+    return "hash " + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 def carried_config(config_text: str) -> str:
