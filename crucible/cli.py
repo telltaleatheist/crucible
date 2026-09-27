@@ -64,12 +64,15 @@ from .asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from .backend import (
     BACKEND_KINDS,
     CUDA_LINUX,
+    FEATURE_FLOORS,
     LLAMA_WINDOWS,
     MLX_DARWIN,
     WINDOWS_REFUSAL,
     Backend,
     backend_not_here,
     detect_backend,
+    feature_floor,
+    sm_name,
 )
 from .config import (
     CAPABILITY_FLAGS,
@@ -690,7 +693,46 @@ def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision,
         # would write a record naming a different model than the settings
         # document reports, and nothing would be comparing the two.
         chosen={entry.capability: entry.model for entry in config.local_models},
+        # WHAT GENERATION THIS CARD IS, beside how big (fresh-install #48): a
+        # 6 GB Turing card and a 6 GB Ampere one hold the same bytes and do
+        # not start the same engines.
+        compute_capability=backend.gpu.compute_capability,
     )
+
+
+def _card_facts(backend: Backend) -> dict[str, Any]:
+    """What this card IS, beside how much it holds: `crucible capability` and
+    `crucible doctor` print the same facts from this one function.
+
+    `features` is null where the generation is unknown — no NVIDIA card, or a
+    driver that would not report `compute_cap` — and never all-false, which
+    would read as a card that can do nothing.
+    """
+    capability_text = backend.gpu.compute_capability
+    return {
+        "name": backend.gpu.name,
+        "compute_capability": capability_text,
+        "sm": None if capability_text is None else sm_name(capability_text),
+        "features": backend.gpu.features(),
+        "floors": {name: feature_floor(name) for name, _floor, _what in FEATURE_FLOORS},
+    }
+
+
+def _card_line(facts: dict[str, Any]) -> str:
+    """One line a person can read: `sm_75 (7.5): bf16 no (needs 8.0), ...`."""
+    if facts["compute_capability"] is None:
+        return (
+            "compute capability not reported (no NVIDIA card, or a driver too "
+            "old to answer `nvidia-smi --query-gpu=compute_cap`); card features "
+            "unknown"
+        )
+    features = facts["features"] or {}
+    said = ", ".join(
+        f"{name} {'yes' if features.get(name) else 'NO'} "
+        f"(needs {facts['floors'][name]})"
+        for name in facts["floors"]
+    )
+    return f"{facts['sm']} ({facts['compute_capability']}): {said}"
 
 
 def _write_capability(
@@ -760,6 +802,10 @@ def _print_decisions(
     )
     gib = 1024 ** 3
     print(f"backend:  {backend.kind} ({backend.gpu.name})")
+    if backend.kind != MLX_DARWIN and backend.gpu.vendor != capability.CPU_VENDOR:
+        # A Mac and a cardless Windows box have no compute capability to
+        # report, and a line saying "unknown" there would read as a fault.
+        print(f"card:     {_card_line(_card_facts(backend))}")
     print(
         f"pool:     {backend.gpu.vram_bytes / gib:.1f} GiB "
         f"{capability.POOL_NAME[backend.kind]}"
@@ -822,6 +868,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "backend": backend.kind,
+                    "card": _card_facts(backend),
                     "total_bytes": backend.gpu.vram_bytes,
                     "desktop_allowance_bytes": config.desktop_allowance_bytes,
                     "available_bytes": capability.available_bytes(
@@ -2329,6 +2376,7 @@ def _doctor_report() -> dict[str, Any]:
         "home": str(home),
         "config": None,
         "backend": None,
+        "card": None,
         "job_types": [],
         "llm_env": None,
         "worker_envs": [],
@@ -2362,6 +2410,11 @@ def _doctor_report() -> dict[str, Any]:
     try:
         backend = detect_backend()
         report["backend"] = backend.to_dict()
+        # THE CARD'S FACTS, beside its size (fresh-install #48): what
+        # generation it is and what that lets it run. A report, never a
+        # problem: an old card is not an unhealthy server, and the classes it
+        # cannot start already say so on their own capability rows.
+        report["card"] = _card_facts(backend)
     except NoViableBackend as exc:
         report["problems"].append(f"no_viable_backend: {exc.reason}")
         backend = None
@@ -2604,6 +2657,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 f"gpu:     {gpu['vendor']} {gpu['name']} "
                 f"({gpu['vram_bytes'] / 1024 ** 3:.1f} GiB) — {backend['detail']}"
             )
+            if (
+                report["card"] is not None
+                and backend["kind"] != MLX_DARWIN
+                and gpu["vendor"] != capability.CPU_VENDOR
+            ):
+                print(f"card:    {_card_line(report['card'])}")
         path_entry = report["path"]
         if path_entry is not None:
             print(f"PATH (this shell):   {path_entry['shell'] or '(empty)'}")

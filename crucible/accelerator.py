@@ -97,10 +97,14 @@ from .backend import (
     CUDA_LINUX,
     LLAMA_WINDOWS,
     MLX_DARWIN,
+    card_features,
+    feature_floor,
     nvidia_smi_path,
     physical_memory_figures,
+    sm_name,
 )
 from .capability import available_bytes
+from .engines.vllm import card_needs
 from .errors import ApiError, CrucibleError, NoViableBackend
 
 GIB = 1024 ** 3
@@ -520,6 +524,50 @@ def refuse_if_larger_than_host(
             "needed_bytes": need_bytes,
             "total_bytes": host_total_bytes,
             "free_bytes": None,
+        },
+    )
+
+
+def refuse_if_card_lacks(
+    *, model_id: str, spec: Any, gpu: Any
+) -> None:
+    """Refuse a model this card's generation can never start, whatever its room.
+
+    The sibling of `refuse_if_larger_than_host`, run beside it and for its
+    reason: no install, pull or free memory fixes it, so it is said before
+    anybody is sent to fetch weights. Fresh-install #48, 2026-09-26: a bf16
+    block on a Turing card is otherwise a vLLM process that starts, prints
+    *"Bfloat16 is only supported on GPUs with compute capability of at least
+    8.0"* and dies — a job failing, which is the one way Owen's rule says a
+    person must never find out.
+
+    What the block needs is `engines.vllm.card_needs`'s answer and what the
+    card has is `backend.card_features`'s, so the capability walk and this
+    guard cannot disagree about a model. A card whose generation is unknown is
+    NOT refused here, for `capability.Candidate.lacks`' reason.
+    """
+    needs = card_needs(spec)
+    features = card_features(gpu.compute_capability)
+    if not needs or features is None:
+        return
+    missing = [need for need in needs if not features.get(need, False)]
+    if not missing:
+        return
+    floors = " and ".join(
+        f"{need} (compute capability {feature_floor(need)} or newer)"
+        for need in missing
+    )
+    raise ApiError(
+        409,
+        "card_lacks_feature",
+        f"cannot load {model_id!r} on this card, ever: its engine needs "
+        f"{floors}, and {gpu.name} is {sm_name(gpu.compute_capability)} "
+        f"({gpu.compute_capability})",
+        {
+            "model": model_id,
+            "needs": missing,
+            "compute_capability": gpu.compute_capability,
+            "card": gpu.name,
         },
     )
 

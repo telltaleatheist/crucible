@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..backend import BF16
 from .base import EngineError, SubprocessEngine, int_flag
 
 MODULE = "vllm.entrypoints.openai.api_server"
@@ -106,6 +107,71 @@ ENVIRONMENT: dict[str, str] = {
     # the failure it prevents is a load that dies at the last step.
     "VLLM_USE_FLASHINFER_SAMPLER": "0",
 }
+
+
+#: What the model catalog names this engine (`manifests.BACKEND_ENGINES`), and
+#: what the asr catalog names it (`asrmodels.VLLM_ENGINE`). The two catalogs
+#: spell it the same; `card_needs` is the one question that reads it from both.
+ENGINE_NAME = "vllm"
+
+#: The dtype vLLM runs when a block states none: `--dtype` defaults to `auto`.
+AUTO_DTYPE = "auto"
+
+
+def dtype_of(engine_args: "tuple[str, ...] | list[str]") -> str:
+    """The `--dtype` a block's engine args state, or `auto` when they state none.
+
+    Both spellings argparse takes: `--dtype bfloat16` and `--dtype=bfloat16`.
+    """
+    args = list(engine_args)
+    for index, arg in enumerate(args):
+        if arg == "--dtype" and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--dtype="):
+            return arg.partition("=")[2]
+    return AUTO_DTYPE
+
+
+def card_needs(spec: object) -> tuple[str, ...]:
+    """What a backend block needs from the CARD for vLLM to start it at all.
+
+    Fresh-install #48, 2026-09-26. Read in vLLM 0.29.0, the llm env's pin, not
+    recalled:
+
+    * **A STATED `bfloat16` IS A HARD REFUSAL BELOW 8.0.** `v1/worker/
+      gpu_worker.py` L414 calls `check_if_supports_dtype` in `init_device`,
+      and `platforms/cuda.py` L622-640 raises *"Bfloat16 is only supported on
+      GPUs with compute capability of at least 8.0"* — after the process has
+      started, before a weight is read. The qwen3.5 blocks state
+      `--dtype bfloat16` in their `engine_args`, and the Qwen3-ASR blocks'
+      `dtype = "bfloat16"` reaches `LLM(dtype=...)` the same way
+      (`jobs/asr/qwen_worker.py`, `load_vllm`), so on a Turing card every one
+      of them is a job that fails at its first line.
+    * **`auto` is not.** `config/model.py` L2268-2309 (`_resolve_auto_dtype`)
+      falls back from a bfloat16 checkpoint to float16 with a warning — the
+      same two bytes a parameter, so the memory arithmetic is unchanged — and
+      `dots-ocr` and the 27B-4bit state no `--dtype`. Whether a bf16-trained
+      checkpoint reads pages or translates as well in float16 has not been
+      measured; that is a quality question for the ladder
+      (docs/PROPOSAL-GPU-LADDER.md), not a refusal this function may invent.
+    * **FlashAttention 2 is not needed.** Below 8.0 vLLM selects its Triton
+      attention (`v1/attention/backends/triton_attn.py` L373-374 allows every
+      capability; FlashInfer is floored at 8.0 in `flashinfer.py` L506-510).
+
+    The feature names are `backend.FEATURE_FLOORS`', so the need and the card's
+    answer are compared by one vocabulary. Every other engine answers `()`:
+    nothing this build runs elsewhere refuses a card by its generation (the
+    torch workers emulate bf16 below 8.0 — `torch.cuda.is_bf16_supported`,
+    `including_emulation` — which is slower and not a refusal).
+
+    `spec` is any catalog's backend block: a model block carries its dtype in
+    `engine_args`, an asr block in `dtype`.
+    """
+    if getattr(spec, "engine", None) != ENGINE_NAME:
+        return ()
+    stated = getattr(spec, "dtype", None)
+    dtype = stated if stated is not None else dtype_of(getattr(spec, "engine_args", ()))
+    return (BF16,) if dtype == "bfloat16" else ()
 
 
 class VllmEngine(SubprocessEngine):

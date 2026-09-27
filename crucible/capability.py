@@ -21,7 +21,7 @@ certain size. we cant (or wont) quantize that. if higgs doesnt fit in a card tha
 crucible is installed on, it's disabled on that gpu."* It is the same rule with a
 family of one, and it needs no special case here.
 
-Four decisions this file makes, and why each one is the way it is
+Five decisions this file makes, and why each one is the way it is
 -----------------------------------------------------------------
 **1. Candidates are ordered by DECLARED SIZE, descending, and the first that fits
 wins.** Not by a `precision` field in the manifests, because there is no such
@@ -69,6 +69,22 @@ wrong.
 Owen runs both of those today. A selection rule that has never been run against an
 answer somebody already knows is a rule nobody has tested.
 
+**5. A card's GENERATION is asked before its memory (fresh-install #48,
+2026-09-26).** kylies-pc's GTX 1660 SUPER is sm_75, and Owen: *"this gpu is also
+not capable of most things, so itll be useful to figure out how we can know what
+its capable of without direct measurements."* Section 1.1 point 3 of the phase
+doc said not to grow the probe until a rule needed it; this is the rule. vLLM
+refuses a stated bfloat16 below compute capability 8.0 at its first line, so a
+card with the room and without bf16 was being told "yes" about a job that could
+only fail. Now `Candidate.needs` (derived by `engines.vllm.card_needs` from the
+dtype the block already states — no new manifest key) is compared with
+`backend.card_features` (the probe's `compute_cap`, against floors read in the
+pinned engines), a candidate the card cannot start is set aside before the
+memory walk, and a class left with none is refused with the feature, its floor
+and the card's number (`lacking_features`). An UNKNOWN capability refuses
+nothing and says what it did not check. Speed and quality on an old card are
+not this rule's: they are measurements (docs/PROPOSAL-GPU-LADDER.md).
+
 Units
 -----
 Every figure this module prints is GiB, because its messages sit beside
@@ -84,10 +100,19 @@ from typing import Any, Callable, Mapping
 
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
-from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
+from .backend import (
+    CUDA_LINUX,
+    FEATURE_FLOORS,
+    LLAMA_WINDOWS,
+    MLX_DARWIN,
+    card_features,
+    feature_floor,
+    sm_name,
+)
 from .config import CapabilityRecord, CapabilityRow
 from .decide import UNSTATED_ENGINE_CONCURRENCY
 from .denoisemodels import load_all_denoise_manifests
+from .engines.vllm import card_needs
 from .errors import ApiError
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .pages import PAGE_CONCURRENCY
@@ -214,6 +239,14 @@ class Candidate:
     #: catalog that is not measured in tokens (voices, aligners, RVC, ASR,
     #: denoise).
     served_context: int | None = None
+    #: What this candidate needs from the CARD, beyond room: feature names from
+    #: `backend.FEATURE_FLOORS` (`"bf16"`). Derived, never declared: the block
+    #: already states the dtype its engine runs in, and `engines.vllm.
+    #: card_needs` is the one owner of what that dtype demands of a card, so a
+    #: `requires = [...]` key in the manifest would be a second owner of the
+    #: same fact (ARCHITECTURE.md R1). Empty on every engine that refuses no
+    #: card by its generation. Fresh-install #48, 2026-09-26.
+    needs: tuple[str, ...] = ()
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
@@ -245,7 +278,31 @@ class Candidate:
                 if hasattr(manifest, "max_context_for")
                 else None
             ),
+            # Asked of every catalog's block alike: the engine decides what
+            # its dtype needs, and a block whose engine refuses no card
+            # answers ().
+            needs=card_needs(manifest.spec(backend_kind)),
         )
+
+    def lacks(self, compute_capability: str | None) -> tuple[str, ...]:
+        """The features this candidate needs that THIS card does not have.
+
+        Empty when it needs nothing, when the card has all of it, and when the
+        card's generation is unknown (`card_features` is None): an unknown
+        capability is said out loud by `unchecked`, never read as "lacks
+        everything" — that would refuse bf16 on a card nvidia-smi merely
+        would not describe.
+        """
+        features = card_features(compute_capability)
+        if features is None:
+            return ()
+        return tuple(need for need in self.needs if not features.get(need, False))
+
+    def unchecked(self, compute_capability: str | None) -> tuple[str, ...]:
+        """What this candidate needs that could not be checked on this card."""
+        if not self.needs or card_features(compute_capability) is not None:
+            return ()
+        return self.needs
 
     def context_ceiling(
         self, available_bytes: int, concurrency: int
@@ -334,6 +391,7 @@ class Candidate:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "memory": None if self.memory is None else self.memory.to_dict(),
             "served_context": self.served_context,
+            "needs": list(self.needs),
         }
 
 
@@ -1045,6 +1103,12 @@ class Decision:
     available_bytes: int
     candidates: tuple[Candidate, ...]
     fit_count: int
+    #: THE CARD FEATURES THAT TURNED THIS CLASS OFF, or `()`. The feature half
+    #: of what `shortfall_bytes` is for memory: the fact that stopped it, as
+    #: data and not only inside `reason` (ARCHITECTURE.md R4). Non-empty only
+    #: on a refusal where every candidate that would otherwise have been
+    #: considered needs a feature this card lacks (`"bf16"` on sm_75).
+    lacking_features: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1055,6 +1119,7 @@ class Decision:
             "reason": self.reason,
             "summary": self.summary,
             "shortfall_bytes": self.shortfall_bytes,
+            "lacking_features": list(self.lacking_features),
             "available_bytes": self.available_bytes,
             "fit_count": self.fit_count,
             "candidates": [c.to_dict() for c in self.candidates],
@@ -1127,6 +1192,88 @@ def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
     )
 
 
+def _feature_order(features: "set[str] | tuple[str, ...]") -> tuple[str, ...]:
+    """Feature names in `FEATURE_FLOORS` order, so every sentence lists them
+    the same way whatever order the candidates were walked in."""
+    return tuple(name for name, _floor, _what in FEATURE_FLOORS if name in features)
+
+
+def _needs_phrase(features: tuple[str, ...], compute_capability: str | None) -> str:
+    """`bf16 (compute capability 8.0 or newer), and this card is sm_75 (7.5)`.
+
+    THE FACT THAT STOPPED IT, in the operator's sentence (fresh-install #48):
+    the feature, the floor it needs and the card's own number, so nobody has
+    to know that Turing is 7.5 to read why a Turing card was refused.
+    """
+    needs = " and ".join(
+        f"{feature} (compute capability {feature_floor(feature)} or newer)"
+        for feature in features
+    )
+    card = (
+        "a card whose compute capability could not be read"
+        if compute_capability is None
+        else f"{sm_name(compute_capability)} ({compute_capability})"
+    )
+    return f"{needs}, and this card is {card}"
+
+
+def _too_old_phrase(features: tuple[str, ...], compute_capability: str | None) -> str:
+    """The person's half of `_needs_phrase`: no feature jargon up front."""
+    floors = ", ".join(
+        f"{feature} needs {feature_floor(feature)} or newer" for feature in features
+    )
+    return (
+        f"this graphics card is too old for it ({floors}; this card is "
+        f"{compute_capability})"
+    )
+
+
+def _barred_note(barred: tuple[Candidate, ...], compute_capability: str | None) -> str:
+    """One clause for the candidates this card cannot start, or `""`.
+
+    Said on every verdict that walked past them, enabled or not, so a reader
+    who expected the bigger model can see it was the card's generation and not
+    its memory that ruled it out.
+    """
+    if not barred:
+        return ""
+    missing = _feature_order({f for c in barred for f in c.lacks(compute_capability)})
+    return (
+        f" {len(barred)} more — {', '.join(c.id for c in barred)} — "
+        f"{'needs' if len(barred) == 1 else 'need'} "
+        f"{_needs_phrase(missing, compute_capability)}."
+    )
+
+
+def _unchecked_note(candidate: Candidate, compute_capability: str | None) -> str:
+    """Said when the chosen candidate has a card need nobody could check.
+
+    Unknown is not refused (`Candidate.lacks`), and it is not silent either:
+    the verdict says which need went unchecked, so a load that then fails at
+    its first line is not a surprise the capability record hid.
+    """
+    missing = candidate.unchecked(compute_capability)
+    if not missing:
+        return ""
+    return (
+        f" {candidate.id} needs {' and '.join(missing)}, and this card's compute "
+        "capability could not be read (nvidia-smi --query-gpu=compute_cap), so "
+        "that was not checked."
+    )
+
+
+def _with_notes(text: str, *notes: str) -> str:
+    """`text`, closed with a full stop and followed by every non-empty note.
+
+    Unchanged when every note is empty, so a verdict with nothing to add reads
+    exactly as it did before the card's generation was an axis.
+    """
+    said = "".join(notes)
+    if not said:
+        return text
+    return text.rstrip(".") + "." + said
+
+
 def _over_served(
     entry: CapabilityClass, candidate: Candidate, work: "WorkingContext | None"
 ) -> bool:
@@ -1170,6 +1317,7 @@ def decide(
     gpu_vendor: str,
     chosen: str | None,
     work: "WorkingContext | None" = None,
+    compute_capability: str | None = None,
 ) -> Decision:
     """Walk one class's candidates best-first and take the first that fits.
 
@@ -1177,6 +1325,18 @@ def decide(
     given for a `client_sized` class; omitted, the class's own `work` is the
     work. The omission is the class's declared default, not a guess: every
     class states one, with its source.
+
+    `compute_capability` is the card's generation (`Gpu.compute_capability`,
+    `"7.5"`), and it is the SECOND axis a candidate must pass before memory is
+    asked at all (fresh-install #48, 2026-09-26: Owen, *"figure out how we can
+    know what its capable of without direct measurements"*). A candidate whose
+    engine refuses this card (`Candidate.lacks`: vLLM and a stated bfloat16 on
+    a card below 8.0) is not a candidate here, whatever it weighs, and a class
+    left with none is refused with the feature, its floor and the card's own
+    number. None means unknown — no card, or a driver that would not say — and
+    is never a refusal: the verdict says what went unchecked instead
+    (`_unchecked_note`). Every production caller passes the probe's value;
+    the default is for the arithmetic's own tests, which have no card.
 
     `gpu_vendor` is REQUIRED and has no default, because on `llama-windows` it
     is the difference between two true answers and there is no safe guess: a
@@ -1264,11 +1424,19 @@ def decide(
         if backend_kind == LLAMA_WINDOWS and gpu_vendor == CPU_VENDOR
         else ""
     )
+    # WHAT THIS CARD CAN START AT ALL, before what it can hold. A candidate
+    # whose engine refuses this card's generation is set aside here and named
+    # in every verdict below (`_barred_note`), so "the 9B was skipped" reads
+    # as the card's bf16 and not as its memory. Unknown capability sets
+    # nothing aside (`Candidate.lacks`).
+    usable = tuple(c for c in found if not c.lacks(compute_capability))
+    barred = tuple(c for c in found if c.lacks(compute_capability))
+    barred_note = _barred_note(barred, compute_capability)
     # THE ONE LINE THE REFRAME CHANGES. `need_bytes` answers the question this
     # class is actually asking — its own working context, its own concurrency —
     # instead of the question the model's `context_default` asks. On a block with
     # no terms it answers with the collapsed estimate, so nothing moves.
-    fitting = [c for c in found if _fits(entry, c, work, budget)]
+    fitting = [c for c in usable if _fits(entry, c, work, budget)]
 
     if chosen is not None:
         # AN APP'S OWN CHOICE, and the reason the best-first walk below is not
@@ -1298,6 +1466,34 @@ def decide(
                 available_bytes=budget,
                 candidates=found,
                 fit_count=len(fitting),
+            )
+        missing = picked.lacks(compute_capability)
+        if missing:
+            # A CHOICE THIS CARD CANNOT START, whatever it weighs. Refused
+            # rather than replaced, for the reason every choice is: the app
+            # chose it, and a quiet substitute would make the settings
+            # document a suggestion.
+            return Decision(
+                capability=entry.name,
+                job_type=entry.job_type,
+                enabled=False,
+                selected="",
+                reason=(
+                    f"disabled: {picked.id} was chosen for {entry.name}; its "
+                    f"engine needs {_needs_phrase(missing, compute_capability)}. "
+                    "It refuses to start on this card whatever the memory."
+                    + (UPSTREAM_OFFER if entry.routable else "")
+                ),
+                summary=(
+                    f"cannot {entry.plainly} — it is set to use {picked.id}, and "
+                    f"{_too_old_phrase(missing, compute_capability)}. Choose "
+                    "another in Settings"
+                ),
+                shortfall_bytes=0,
+                available_bytes=budget,
+                candidates=found,
+                fit_count=len(fitting),
+                lacking_features=missing,
             )
         if _over_served(entry, picked, work):
             # A CLIENT-SIZED class asked for more than this model's engine is
@@ -1358,10 +1554,11 @@ def decide(
             job_type=entry.job_type,
             enabled=True,
             selected=picked.id,
-            reason=(
+            reason=_with_notes(
                 f"{picked.id} was chosen for {entry.name}: it needs "
                 f"{spell_out(picked, work)} and there is {arithmetic}; "
-                f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}"
+                f"{len(fitting)} of {len(found)} {entry.noun} fit{cpu_note}",
+                _unchecked_note(picked, compute_capability),
             ),
             summary=f"can {entry.plainly}, using {picked.id}",
             shortfall_bytes=0,
@@ -1377,10 +1574,12 @@ def decide(
             job_type=entry.job_type,
             enabled=True,
             selected=best.id,
-            reason=(
+            reason=_with_notes(
                 f"{best.id} fits: it needs {spell_out(best, work)} and "
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
-                f"{entry.noun} fit{cpu_note}"
+                f"{entry.noun} fit{cpu_note}",
+                barred_note,
+                _unchecked_note(best, compute_capability),
             ),
             summary=f"can {entry.plainly}, using {best.id}",
             shortfall_bytes=0,
@@ -1389,18 +1588,63 @@ def decide(
             fit_count=len(fitting),
         )
 
-    smallest = found[-1]
+    if not usable:
+        # EVERY CANDIDATE NEEDS SOMETHING THIS CARD DOES NOT HAVE. Not a
+        # memory refusal and not worded as one: no amount of room, no smaller
+        # allowance and no other choice among these would start any of them
+        # here. The feature, its floor and the card's own number, so the
+        # sentence answers "why" without anybody knowing Turing is 7.5.
+        missing = _feature_order(
+            {f for c in barred for f in c.lacks(compute_capability)}
+        )
+        return Decision(
+            capability=entry.name,
+            job_type=entry.job_type,
+            enabled=False,
+            selected="",
+            reason=(
+                "disabled: "
+                + (
+                    "the only candidate"
+                    if len(found) == 1
+                    else f"all {len(found)} candidates"
+                )
+                + f" this build ships for {entry.name} on {backend_kind} — "
+                f"{', '.join(c.id for c in found)} — "
+                f"{'needs' if len(found) == 1 else 'need'} "
+                f"{_needs_phrase(missing, compute_capability)}. The engine "
+                "refuses to start on this card whatever the memory, so this "
+                "is not a sizing choice."
+                + (UPSTREAM_OFFER if entry.routable else "")
+            ),
+            summary=(
+                f"cannot {entry.plainly} — "
+                f"{_too_old_phrase(missing, compute_capability)}"
+            ),
+            shortfall_bytes=0,
+            available_bytes=budget,
+            candidates=found,
+            fit_count=0,
+            lacking_features=missing,
+        )
+
+    smallest = usable[-1]
     shortfall = smallest.need_bytes(work) - budget
     note = f" {entry.binary_note}" if entry.binary_note else ""
+    of_these = (
+        f"{len(found)} {entry.noun}"
+        if not barred
+        else f"{len(usable)} {entry.noun} this card can start"
+    )
     return Decision(
         capability=entry.name,
         job_type=entry.job_type,
         enabled=False,
         selected="",
         reason=(
-            f"disabled: the smallest of {len(found)} {entry.noun} is {smallest.id} "
+            f"disabled: the smallest of {of_these} is {smallest.id} "
             f"at {spell_out(smallest, work)} and there is only "
-            f"{arithmetic} — short by {_gib(shortfall)}.{note}"
+            f"{arithmetic} — short by {_gib(shortfall)}.{barred_note}{note}"
             + (UPSTREAM_OFFER if entry.routable else "")
         ),
         summary=(
@@ -1421,6 +1665,7 @@ def decide_all(
     desktop_allowance_bytes: int,
     gpu_vendor: str,
     chosen: Mapping[str, str],
+    compute_capability: str | None = None,
 ) -> tuple[Decision, ...]:
     """Every class, decided on one host. The order of `CLASSES`.
 
@@ -1429,6 +1674,9 @@ def decide_all(
     for the reason `gpu_vendor` is: a caller that forgot it would silently
     un-choose every model an app had picked, while the config went on saying
     otherwise, and the two would disagree with nothing comparing them.
+
+    `compute_capability` is `decide`'s, passed through; every production
+    caller hands it the probe's `Gpu.compute_capability`.
     """
     return tuple(
         decide(
@@ -1438,6 +1686,7 @@ def decide_all(
             desktop_allowance_bytes=desktop_allowance_bytes,
             gpu_vendor=gpu_vendor,
             chosen=chosen.get(entry.name),
+            compute_capability=compute_capability,
         )
         for entry in CLASSES
     )
@@ -1535,16 +1784,24 @@ def context_ceilings(
     *,
     available_bytes: int,
     concurrency: int,
+    compute_capability: str | None = None,
 ) -> tuple[ContextCeiling, ...]:
     """Every candidate's context ceiling for this class on this host, best-first.
 
     Empty for a class whose candidates are not token-shaped. Published on the
     client-sized rows of `GET /v1/capability` so an app reads the ceiling
     BEFORE it asks rather than discovering it as a refusal.
+
+    A candidate this card cannot start (`Candidate.lacks`) has no ceiling here:
+    publishing one would invite a request no engine on this card can serve.
     """
     if entry.candidates is None:
         return ()
-    found = entry.candidates(backend_kind)
+    found = tuple(
+        c
+        for c in entry.candidates(backend_kind)
+        if not c.lacks(compute_capability)
+    )
     ceilings = (c.context_ceiling(available_bytes, concurrency) for c in found)
     return tuple(ceiling for ceiling in ceilings if ceiling is not None)
 
@@ -1556,6 +1813,7 @@ def check_ceiling(
     available_bytes: int,
     work: WorkingContext,
     chosen: str | None,
+    compute_capability: str | None = None,
 ) -> tuple[ContextCeiling, ...]:
     """Refuse a stated context above this host's ceiling, or return the ceilings.
 
@@ -1583,6 +1841,7 @@ def check_ceiling(
         backend_kind,
         available_bytes=available_bytes,
         concurrency=work.concurrency,
+        compute_capability=compute_capability,
     )
     if not ceilings or entry.candidates is None:
         return ceilings
@@ -1598,7 +1857,8 @@ def check_ceiling(
     holds_weights = [
         c
         for c in entry.candidates(backend_kind)
-        if c.memory is None or c.memory.fixed_bytes < available_bytes
+        if not c.lacks(compute_capability)
+        and (c.memory is None or c.memory.fixed_bytes < available_bytes)
     ]
     if not holds_weights or work.tokens <= governing.tokens:
         return ceilings
@@ -1790,8 +2050,13 @@ def served_rows(
     capability_class: str | None,
     context_tokens: str | None,
     concurrency: str | None,
+    compute_capability: str | None = None,
 ) -> list[dict[str, Any]]:
     """`GET /v1/capability`'s rows: the record, with each row's WORK stated.
+
+    `compute_capability` is a LIVE host fact, as `gpu_vendor` is: the card
+    this server detected at start-up (`Gpu.compute_capability`), which
+    `cmd_serve`'s backend check keeps the same card the record describes.
 
     Every row carries `work` — the working context its fit was computed for,
     and `from`, which is `"default"` (the class's own, `CLASSES`) or
@@ -1862,6 +2127,7 @@ def served_rows(
                 available_bytes=budget,
                 work=requested,
                 chosen=chosen.get(entry.name),
+                compute_capability=compute_capability,
             )
 
     rows: list[dict[str, Any]] = []
@@ -1888,6 +2154,7 @@ def served_rows(
                 gpu_vendor=gpu_vendor,
                 chosen=chosen.get(found.name),
                 work=requested,
+                compute_capability=compute_capability,
             )
             fresh = decision.row()
             model = routes.get(found.name)
@@ -1904,6 +2171,7 @@ def served_rows(
                     record.backend_kind,
                     available_bytes=budget,
                     concurrency=work.concurrency,
+                    compute_capability=compute_capability,
                 )
             ]
         rows.append(row)
