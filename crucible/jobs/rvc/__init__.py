@@ -1,4 +1,4 @@
-"""The `rvc` job type: sentence audio in, the same sentences in another voice out.
+"""The `rvc` job type: audio of any length in, the same audio in another voice out.
 
 PHASE4-AUDIO.md section 4. **Every input must produce an output** — a missing one
 is a failed job, not a short answer — and that single sentence decides most of
@@ -8,8 +8,10 @@ What is the client's and what is the server's
 ---------------------------------------------
 The client says which model and the four numbers that change the sound:
 `index_rate`, `protect_rate`, `n_semitones`, and optionally `f0_method` and
-`hop_length`. Everything else is the server's: the batch size, the staging, the
-environment hardening, and the fact that urvc is spawned rather than imported.
+`hop_length` — and, optionally, how long inputs are cut and joined (`piece_s`,
+`overlap_s`, `crossfade_s`), which move the seams and never the voice.
+Everything else is the server's: the batch size, the staging, the environment
+hardening, and the fact that urvc is spawned rather than imported.
 
 Three details that are not obvious, all measured, each enforced at one line
 --------------------------------------------------------------------------
@@ -27,10 +29,24 @@ Three details that are not obvious, all measured, each enforced at one line
   "absent" is a meaningful wire value rather than a refusal, and the reason is
   that urvc's defaults are the measured ones: filling them in here would put
   Crucible's guess in a client's output with nothing to say it had happened.
-- **Batching is a memory bound, not a throughput choice.** 96 files per recycled
-  worker process, proven necessary on a 64 GB Mac (2026-07-17). It is engine
-  knowledge: the server does it, the client never sees it, and the model reload
-  it costs is the server's problem to reduce later. See `worker.py`.
+- **Batching is a memory bound, not a throughput choice.** A recycled worker
+  process per 96 pieces or `BATCH_AUDIO_SECONDS` of audio, proven necessary on a
+  64 GB Mac (2026-07-17). It is engine knowledge: the server does it, the client
+  never sees it, and the model reload it costs is the server's problem to
+  reduce later. See `worker.py`.
+
+Any length in, the same length out (fresh-install #5 and #45, 2026-09-26)
+-------------------------------------------------------------------------
+Owen: Crucible must be idiot proof, so a caller may send a 12-hour master
+whole and name its inputs without extensions. The worker cuts every input at
+quiet points into pieces of at most `piece_s` (asr's rule), converts them with
+`overlap_s` of real audio each side, and stitches them back with a
+`crossfade_s` fade, so memory is bounded by a piece and never by the input.
+**The output is the input's container, sample format, sample rate and exact
+frame count, in one channel** — the rvc row of docs/API-CLI.md says so to the
+caller, and `worker.py` says why each of the three numbers defaults as it does.
+The format is read from each input's BYTES, so the input's name is only a name
+and the artifact comes back under it unchanged.
 
 The base models are the engine's, and Crucible pulls them now
 -------------------------------------------------------------
@@ -59,7 +75,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ... import accelerator, rvcbase, weights, workerenv, workers
 from ...config import Config
@@ -85,6 +108,36 @@ JOB_TYPE = "rvc"
 #: parameter — a client that could set this could set it to a number that OOMs
 #: the host.
 BATCH_SIZE = 96
+
+#: Seconds of audio per recycled urvc process, the bound a long input needs
+#: (fresh-install #5, 2026-09-26). 96 is the right count for sentences and the
+#: wrong one for pieces of a master: 96 ten-minute pieces is sixteen hours of
+#: audio through one process that leaks ~1.5 GB per ten minutes. Twenty minutes
+#: is ~3 GB at the Mac's measured rate, against a model reload of about ten
+#: seconds per batch — 2% of the batch's conversion at 2.4x real time.
+#: UNMEASURED on a CUDA host: the leak rate there is owed a measurement.
+BATCH_AUDIO_SECONDS = 1200.0
+
+#: Pieces (#5, 2026-09-26). Owen's asr ruling carries over: "make it so the
+#: caller can determine how big the chunks are and whether they overlap. and by
+#: how much". `worker.py`'s docstring says what each costs and buys.
+#:
+#: - 60 s by default: the length of the first real job on kylies-pc, which ran
+#:   on a 6 GB card at 2.4x real time. 10 s is the floor (below it the 1 s tail
+#:   rule and the 10 s quiet-point search stop making sense); 600 s is the ten
+#:   minutes whose leak BookForge measured, and nothing longer is known safe.
+#: - 0.5 s of overlap by default: real context for the pitch model at each edge,
+#:   and room to absorb urvc's ~20 ms-per-minute shortfall in audio that is
+#:   thrown away. 1.7% more audio through the model at 60 s pieces.
+#: - 20 ms of crossfade by default, never more than twice the overlap: click
+#:   removal at the seam, short because the two sides are not phase-aligned.
+DEFAULT_PIECE_S = 60.0
+MIN_PIECE_S = 10.0
+MAX_PIECE_S = 600.0
+DEFAULT_OVERLAP_S = 0.5
+MAX_OVERLAP_S = 5.0
+DEFAULT_CROSSFADE_S = 0.02
+MAX_CROSSFADE_S = 1.0
 
 #: How long the server waits on a worker that has said *nothing at all*. Not a
 #: run deadline: every message resets it, and urvc reports per file. 900 s covers
@@ -177,6 +230,84 @@ class RvcParams(BaseModel):
     #: Crepe-family only, and absent for the same reason and with the same
     #: meaning as `f0_method`. Range is urvc's own 1-512.
     hop_length: int | None = Field(default=None, ge=1, le=512)
+
+    #: Pieces, overlap and seam fade, in seconds (#5, 2026-09-26). Null or
+    #: absent means this server's default (`DEFAULT_PIECE_S` and the rest). They
+    #: change where the seams fall and how they are joined, never the voice.
+    piece_s: float | None = None
+    overlap_s: float | None = None
+    crossfade_s: float | None = None
+
+    @field_validator("piece_s")
+    @classmethod
+    def piece_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (MIN_PIECE_S <= value <= MAX_PIECE_S):
+            raise ValueError(
+                f"piece_s is {value}; a piece is {MIN_PIECE_S:g} to {MAX_PIECE_S:g} "
+                "seconds — ten minutes is the longest whose memory cost is "
+                "measured. Send null for this server's default "
+                f"({DEFAULT_PIECE_S:g}); the input itself may be any length"
+            )
+        return value
+
+    @field_validator("overlap_s")
+    @classmethod
+    def overlap_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (0.0 <= value <= MAX_OVERLAP_S):
+            raise ValueError(
+                f"overlap_s is {value}; it is 0 to {MAX_OVERLAP_S:g} seconds of real "
+                "audio converted on each side of a piece and then dropped. Send "
+                f"null for this server's default ({DEFAULT_OVERLAP_S:g})"
+            )
+        return value
+
+    @field_validator("crossfade_s")
+    @classmethod
+    def crossfade_in_range(cls, value: float | None) -> float | None:
+        if value is not None and not (0.0 <= value <= MAX_CROSSFADE_S):
+            raise ValueError(
+                f"crossfade_s is {value}; it is 0 to {MAX_CROSSFADE_S:g} seconds. "
+                "Longer fades blend two conversions whose pitch agrees and whose "
+                "phase does not. Send null for this server's default "
+                f"({DEFAULT_CROSSFADE_S:g})"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def pieces_fit_together(self) -> "RvcParams":
+        piece, overlap = self.piece_seconds(), self.overlap_seconds()
+        if overlap * 2 >= piece:
+            raise ValueError(
+                f"overlap_s {overlap:g} on both sides of a {piece:g} s piece "
+                "converts more of its neighbours than of itself; keep the overlap "
+                "under half the piece"
+            )
+        if self.crossfade_s is not None and self.crossfade_s > 2 * overlap:
+            raise ValueError(
+                f"crossfade_s {self.crossfade_s:g} is longer than the "
+                f"{2 * overlap:g} s of converted audio both pieces share at a seam "
+                f"(twice overlap_s {overlap:g}); raise overlap_s to at least "
+                f"{self.crossfade_s / 2:g}, or shorten the fade"
+            )
+        return self
+
+    def piece_seconds(self) -> float:
+        """The piece length this job runs under: the caller's, or the default."""
+        return self.piece_s if self.piece_s is not None else DEFAULT_PIECE_S
+
+    def overlap_seconds(self) -> float:
+        """The overlap this job runs under: the caller's, or the default."""
+        return self.overlap_s if self.overlap_s is not None else DEFAULT_OVERLAP_S
+
+    def crossfade_seconds(self) -> float:
+        """The caller's fade, or the default cut to what the overlap allows.
+
+        A caller who sets `overlap_s: 0` and says nothing about the fade has
+        asked for hard seams, not for a refusal about a fade they never sent.
+        """
+        if self.crossfade_s is not None:
+            return self.crossfade_s
+        return min(DEFAULT_CROSSFADE_S, 2 * self.overlap_seconds())
 
 
 # ------------------------------------------------------------------ helpers
@@ -509,7 +640,7 @@ class RvcJobType:
             raise JobError(exc.code, exc.message) from None
         ctx.warming(state.detail)
 
-        names, extension = self._inputs(ctx)
+        names = self._inputs(ctx)
         models_dir = self._stage_models(ctx, base, weights_dir, manifest)
         output_dir = ctx.scratch / "converted"
 
@@ -519,11 +650,14 @@ class RvcJobType:
             "input_dir": str(ctx.job.inputs_dir),
             "output_dir": str(output_dir),
             "inputs": names,
-            "extension": extension,
             "index_rate": params.index_rate,
             "protect_rate": params.protect_rate,
             "n_semitones": params.n_semitones,
             "batch_size": BATCH_SIZE,
+            "batch_audio_s": BATCH_AUDIO_SECONDS,
+            "piece_s": params.piece_seconds(),
+            "overlap_s": params.overlap_seconds(),
+            "crossfade_s": params.crossfade_seconds(),
         }
         # Present only when the client sent them. Their ABSENCE is what tells the
         # worker to omit the flag and leave urvc on its own tuned default, so a
@@ -534,23 +668,38 @@ class RvcJobType:
             request["hop_length"] = params.hop_length
 
         total = len(names)
+        pieces = [total]
 
         def on_ready(message: dict[str, Any]) -> None:
+            # `pieces` is what progress counts from here on: a 12-hour master is
+            # one file and 720 pieces, and "0 of 1 file(s)" for six hours is no
+            # progress report at all.
+            pieces[0] = int(message.get("pieces", message["files"]))
             ctx.warming(
-                f"{message['files']} file(s) through {manifest.model_name} in "
-                f"{message['batches']} batch(es) of {message['batch_size']} — the "
-                "batch is a memory bound, not a throughput choice"
+                f"{message['files']} file(s), cut into {pieces[0]} piece(s), "
+                f"through {manifest.model_name} in {message['batches']} batch(es) "
+                "— the batch is a memory bound, not a throughput choice"
             )
 
         def on_progress(message: dict[str, Any]) -> None:
             processed = int(message["processed"])
+            if message["stage"] == "cutting":
+                # Before `ready`: finding the quiet points, one read per input.
+                ctx.progress(
+                    0.0,
+                    f"finding quiet points: {processed} of {total} file(s) read",
+                    stage="cutting",
+                    processed=processed,
+                    total=total,
+                )
+                return
             ctx.progress(
-                min(1.0, processed / total),
-                f"converted {processed} of {total} file(s) "
+                min(1.0, processed / pieces[0]),
+                f"converted {processed} of {pieces[0]} piece(s) of {total} file(s) "
                 f"(batch {message['batch']} of {message['batches']})",
                 stage=message["stage"],
                 processed=processed,
-                total=total,
+                total=pieces[0],
             )
 
         try:
@@ -596,42 +745,41 @@ class RvcJobType:
             processed=total,
             total=total,
         )
-        ctx.done_extra(files=total, model_name=manifest.model_name)
+        ctx.done_extra(
+            files=total,
+            pieces=pieces[0],
+            model_name=manifest.model_name,
+            # What each artifact IS, since its name need not say (#45).
+            outputs={
+                name: {
+                    key: result[key]
+                    for key in ("frames", "sample_rate", "format", "subtype")
+                    if key in result
+                }
+                for name, result in zip(names, results)
+            },
+        )
 
     # -------------------------------------------------------------- helpers
 
     @staticmethod
-    def _inputs(ctx: JobContext) -> tuple[list[str], str]:
-        """The input names in a stable order, and the one extension they share.
+    def _inputs(ctx: JobContext) -> list[str]:
+        """The input names, in a stable order. ANY names, and any mix of formats.
 
-        **One extension for the whole job**, because urvc's `convert-dir` takes a
-        single `--input-glob` and a single `--output-ext`, and because "one
-        artifact per input, same name" is only true when the output keeps the
-        input's extension. A mixed-format job is refused by name rather than half
-        converted — a session's sentences are one format, and a job that has two
-        is a client that sent the wrong directory.
+        Fresh-install #45, 2026-09-26: this used to refuse `c000` because the
+        NAME had no extension, and a job with two formats, both because urvc was
+        handed the client's files with one `--input-glob`. The worker now reads
+        each input's format from its bytes and hands urvc pieces it wrote
+        itself, so neither refusal has a reason left. An input that is not audio
+        is refused by the worker, before any conversion, in a sentence that is
+        about the bytes and not the name.
         """
         inputs = ctx.inputs()
         if not inputs:
             raise JobError(
                 "invalid_inputs", "an rvc job with no audio to convert is not a job"
             )
-        names = sorted(inputs)
-        extensions = {Path(name).suffix.lstrip(".").lower() for name in names}
-        if "" in extensions:
-            raise JobError(
-                "invalid_inputs",
-                "every rvc input needs a file extension; urvc selects them with a "
-                "glob and writes the output under the same name",
-            )
-        if len(extensions) != 1:
-            raise JobError(
-                "invalid_inputs",
-                f"this job's inputs are {sorted(extensions)}; an rvc job converts "
-                "one format at a time, because urvc takes one input glob and one "
-                "output extension and the artifacts keep the inputs' names",
-            )
-        return names, next(iter(extensions))
+        return sorted(inputs)
 
     @staticmethod
     def _stage_models(
