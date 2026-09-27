@@ -57,8 +57,10 @@ shape — a proxy's HTML, say — the raw bytes are printed, also unchanged.
 WHAT IS DELIBERATELY NOT HERE
 ------------------------------
 `POST /v1/pairing/start` and `/poll` are the REQUESTING app's half of the
-connect dance; a CLI that already holds the token has nothing to do with them,
-and `crucible token --url` is how a credential is handed out. `/v1/peer*` is the
+connect dance; a CLI that already holds the token has nothing to do with them.
+A CLI that does NOT hold it — owens-pc wanting kylies-pc, FRESH-INSTALL #4 —
+is a requesting app, and `crucible pair <address>` (below, a top-level verb)
+is that half, saving the line for `--server`. `/v1/peer*` is the
 orchestrator's relation to its engine (PHASE17), authenticated under its own
 names for its own reason, and a client borrowing that door would be a second
 claimant. Everything else the API serves has a verb below.
@@ -163,12 +165,16 @@ def resolve(args: argparse.Namespace) -> Connection:
     given_pairing = getattr(args, "pairing", None)
     pairing_file = getattr(args, "pairing_file", None)
     pairing_env = os.environ.get(PAIRING_ENV) or None
+    # `--server NAME` is `--pairing-file` at the place `crucible pair` saved it
+    # (FRESH-INSTALL #4, 2026-09-26): a name to type, never a path or a token.
+    given_server = getattr(args, "server", None)
 
     sources = [
         name
         for name, value in (
             ("--pairing", given_pairing),
             ("--pairing-file", pairing_file),
+            ("--server", given_server),
             (f"${PAIRING_ENV}", pairing_env),
             ("--url/--token", given_url or given_token),
         )
@@ -180,6 +186,13 @@ def resolve(args: argparse.Namespace) -> Connection:
             "pass exactly one. (An environment variable counts: unset "
             f"{PAIRING_ENV} to use a flag.)"
         )
+    if given_server is not None:
+        pairing_file = str(saved_pairing_path(given_server))
+        if not Path(pairing_file).is_file():
+            raise ClientRefusal(
+                f"server_not_paired: this computer has not paired with "
+                f"{given_server!r}. Run `crucible pair <its address>` once first"
+            )
     if pairing_file is not None:
         try:
             lines = [
@@ -1267,6 +1280,226 @@ def cmd_lease_release(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ------------------------------------------------------------------- pairing
+#
+# FRESH-INSTALL #4 (kylies-pc, 2026-09-26): registering kylies-pc on owens-pc
+# meant running `crucible token --url` inside kylies-pc's guest and copying the
+# line across by hand. The apps never do that — they call `/v1/pairing/start`
+# with the address and, with open pairing (`connect.py`, the default since
+# 1.0.0), hold the token two seconds later (PHASE19 section 3, "Another
+# computer"). The CLI had no such door; `crucible pair <address>` is it, and
+# it is the same two requests the TS SDK's `startPairing`/`pollPairing` make.
+#
+# What it is NOT: discovery. Nothing here finds kylies-pc on its own; the
+# person still says its address once. The SDK README rules out port scanning
+# and multicast, and changing that is Owen's call, not this verb's.
+
+#: Where `crucible pair` keeps the lines it fetched: `<home>/servers/<slug>.pairing`.
+SERVERS_DIR = "servers"
+
+PAIR_TIMEOUT_SECONDS = 10.0
+
+#: The engine's own default port, which a bare address takes (as `crucibleAddress`).
+PAIR_DEFAULT_PORT = 7100
+
+
+def server_slug(name: str) -> str:
+    """A server's name as a filename: `crucible@kylies-pc` -> `crucible-kylies-pc`."""
+    slug = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in name.strip())
+    slug = slug.strip(".-")
+    if not slug:
+        raise ClientRefusal(f"server_name_invalid: {name!r} names no server")
+    return slug
+
+
+def saved_pairing_path(name: str) -> Path:
+    return crucible_home() / SERVERS_DIR / f"{server_slug(name)}.pairing"
+
+
+def _pair_origin(address: str) -> str:
+    """`192.168.68.88` -> `http://192.168.68.88:7100`. The SDK's `crucibleAddress` rule."""
+    raw = address.strip()
+    if not raw or any(ch in raw for ch in " @?#"):
+        raise ClientRefusal(
+            "pair_bad_address: give the other computer's address, like "
+            "192.168.68.88 or kylies-pc, with no token or path in it"
+        )
+    if "://" not in raw:
+        if raw.count(":") > 1 and not raw.startswith("["):
+            raw = f"[{raw}]"
+        raw = "http://" + raw
+    parts = urllib.parse.urlsplit(raw)
+    try:
+        port = parts.port
+    except ValueError:
+        port = -1
+    if (parts.scheme not in ("http", "https") or not parts.hostname
+            or parts.path not in ("", "/") or port == -1):
+        raise ClientRefusal(
+            f"pair_bad_address: {address!r} is not an address this can dial; "
+            "give an IP address or a computer name, e.g. 192.168.68.88"
+        )
+    if port is None:
+        port = 443 if parts.scheme == "https" else PAIR_DEFAULT_PORT
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    return f"{parts.scheme}://{host}:{port}"
+
+
+def _pair_call(origin: str, path: str, body: dict[str, Any] | None = None,
+               token: str | None = None) -> dict[str, Any]:
+    headers = {API_HEADER: str(API_VERSION), "User-Agent": f"crucible-cli/{VERSION}"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        origin + path, method="GET" if body is None else "POST", headers=headers,
+        data=None if body is None else json.dumps(body).encode("utf-8"),
+    )
+    try:
+        with _opener().open(request, timeout=PAIR_TIMEOUT_SECONDS) as response:
+            value = json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.load(exc).get("error", {})
+            code, message = error.get("code"), error.get("message")
+        except (ValueError, AttributeError):
+            code = message = None
+        if isinstance(code, str) and isinstance(message, str):
+            raise ClientRefusal(f"{code}: {message}") from None
+        raise ClientRefusal(
+            f"pair_not_crucible: {origin} answered HTTP {exc.code}, not as a Crucible"
+        ) from None
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise ClientRefusal(
+            f"pair_unreachable: nothing answered at {origin} from this computer "
+            f"({getattr(exc, 'reason', exc)}). On that computer, Crucible has to be "
+            "running and shared with the network: on Windows that is "
+            "`crucible lan enable` there, which also says if its network is "
+            "marked Public. Check the address, then try again"
+        ) from None
+    except ValueError:
+        raise ClientRefusal(f"pair_not_crucible: {origin} did not answer with JSON") from None
+    if not isinstance(value, dict):
+        raise ClientRefusal(f"pair_not_crucible: {origin} did not answer as a Crucible")
+    return value
+
+
+def pair(address: str, *, client_name: str, sleep: Callable[[float], None] | None = None,
+         notify: Callable[[str], None] | None = None) -> tuple[str, str, str]:
+    """(name, url, token) for the Crucible at `address`, by its connect door."""
+    import time
+
+    sleep = time.sleep if sleep is None else sleep
+    origin = _pair_origin(address)
+    ping = _pair_call(origin, "/v1/ping")
+    name = ping.get("name")
+    if ping.get("crucible") is not True or not isinstance(name, str) or not name:
+        raise ClientRefusal(f"pair_not_crucible: {origin} is not a Crucible")
+    if ping.get("api_version") != API_VERSION:
+        raise ClientRefusal(
+            f"api_version_mismatch: {name} speaks API version "
+            f"{ping.get('api_version')} and this computer speaks {API_VERSION}. "
+            "Update whichever of the two is older"
+        )
+    if ping.get("pairing_version") != 1:
+        raise ClientRefusal(
+            f"pairing_unavailable: {name} is too old to connect by address; "
+            "update Crucible on that computer"
+        )
+    start = _pair_call(origin, "/v1/pairing/start", {"client_name": client_name[:80]})
+    if start.get("name") != name or not isinstance(start.get("id"), str) \
+            or not isinstance(start.get("device_code"), str):
+        raise ClientRefusal(f"pair_not_crucible: {origin} returned an incompatible pairing request")
+    if start.get("approval_required") is not False and notify is not None:
+        notify(
+            f"{name} asks for approval: on that computer, open Crucible's console "
+            f"and approve the code {start.get('user_code')}. Waiting..."
+        )
+    interval = max(2.0, float(start.get("interval") or 2))
+    remaining = float(start.get("expires_in") or 300)
+    first = True
+    while remaining > 0:
+        if not first:
+            sleep(interval)
+            remaining -= interval
+        first = False
+        try:
+            answer = _pair_call(origin, "/v1/pairing/poll",
+                                {"id": start["id"], "device_code": start["device_code"]})
+        except ClientRefusal as exc:
+            if str(exc).startswith("pairing_slow_down"):
+                continue
+            raise
+        status = answer.get("status")
+        if status == "approved":
+            token = answer.get("token")
+            if answer.get("name") != name or not isinstance(token, str) or not token:
+                raise ClientRefusal(f"pair_not_crucible: {origin} returned an incompatible approval")
+            # The token is proved on an authenticated door before it is kept.
+            _pair_call(origin, "/v1/info", token=token)
+            return name, origin, token
+        if status == "denied":
+            raise ClientRefusal(f"pair_denied: {name} turned this computer's request down")
+        if status == "expired":
+            break
+    raise ClientRefusal(
+        f"pair_expired: nobody approved the request on {name} in time; run this again"
+    )
+
+
+def cmd_pair(args: argparse.Namespace) -> int:
+    """`crucible pair <address>`: fetch the pairing line, keep it, print where.
+
+    The token is never printed (FRESH-INSTALL #33's rule, for another machine's
+    token too): the line goes into a file readable by this user only, and the
+    output says how to use it — `crucible api --server <name> …`.
+    """
+    import socket
+
+    try:
+        name, url, token = pair(
+            args.address,
+            client_name=f"crucible on {socket.gethostname()}",
+            notify=lambda line: print(f"crucible: {line}", file=sys.stderr, flush=True),
+        )
+        target = Path(args.save) if args.save else saved_pairing_path(name)
+        from .pairing import pairing_line, write_pairing_line
+
+        write_pairing_line(target, pairing_line(name, url, token),
+                           private_directory=not args.save)
+    except ClientRefusal as exc:
+        print(f"crucible: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    except (CrucibleError, OSError) as exc:
+        print(f"crucible: pair_save_failed: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    emit({
+        "name": name,
+        "url": url,
+        "pairing_file": str(target),
+        "use": (f"crucible api --pairing-file \"{target}\" <verb>" if args.save
+                else f"crucible api --server {server_slug(name)} <verb>"),
+    })
+    return EXIT_OK
+
+
+def add_pair_parser(subparsers: Any) -> None:
+    """`crucible pair`. Top level, not under `api`: `api` resolves a connection
+    before any verb runs, and this verb is how a connection comes to exist."""
+    parser = subparsers.add_parser(
+        "pair",
+        help="connect to the Crucible on another computer by its address; no token to copy",
+    )
+    parser.add_argument("address", help="that computer's address, e.g. 192.168.68.88")
+    parser.add_argument(
+        "--save", default=None, metavar="PATH",
+        help="where to keep the pairing line (default: this machine's Crucible "
+             f"home, {SERVERS_DIR}/<name>.pairing, used by `crucible api --server`)",
+    )
+    parser.set_defaults(func=cmd_pair)
+
+
 # ------------------------------------------------------------------- the verb
 
 
@@ -1331,6 +1564,13 @@ def _connection_flags(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="read the pairing line from this file (exactly one line), so the "
              "token never appears in argv",
+    )
+    group.add_argument(
+        "--server",
+        default=None,
+        metavar="NAME",
+        help="a server this computer paired with by `crucible pair <address>`, "
+             "by its name (e.g. crucible@kylies-pc or crucible-kylies-pc)",
     )
 
 

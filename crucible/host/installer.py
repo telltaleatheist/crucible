@@ -1179,9 +1179,12 @@ class EngineInstall:
             # `adopt=True`: a forward this machine already had is not a reason to
             # stop an install the operator asked for. It is still VERIFIED and
             # still recorded, so `lan disable` remains able to shut what it opened.
+            # `say`: FRESH-INSTALL #44 — the prompt is announced as it is raised.
+            # No `ask_private`: nobody is at an install's keyboard to answer, so
+            # a Public network is reported below and never changed silently.
             result = lan_door.enable(
                 self._home, self._runner, Engine(self._home, "lan"),
-                port=ENGINE_PORT, adopt=True,
+                port=ENGINE_PORT, adopt=True, say=self._line,
             )
         except CrucibleError as exc:
             raise self._fail(
@@ -1192,6 +1195,9 @@ class EngineInstall:
             )
         for url in result["urls"]:
             self._line(f"other devices on this network can reach the engine at {url}")
+        if result.get("next"):
+            # #46: a Public network, said plainly, with what to do about it.
+            self._line(result["next"])
         self._finish("lan-door", result["detail"])
 
     def _stop_windows_server(self) -> None:

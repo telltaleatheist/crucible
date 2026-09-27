@@ -44,6 +44,12 @@ somebody else's behalf. `detect()` therefore also reports whether any connected
 network IS Private — a Private-scoped rule on a machine whose only network is
 Public is precisely the silent no-op this codebase refuses to ship.
 
+"Any network" was not enough (FRESH-INSTALL #46, kylies-pc 2026-09-26): its
+Tailscale adapter was Private and its Ethernet Public, so the LAN was shut while
+this said Private. `read_network` / `admits` below answer it per interface, and
+`crucible/lan.py` decides from those. The rule stays Private-only; a Public
+network is marked Private only when a person says it is theirs.
+
 WHAT THIS MODULE DOES NOT DO
 -----------------------------
 It does not run `netsh` as a side effect of anything. `detect()` READS, and the
@@ -337,6 +343,268 @@ def detect(runner: Runner, port: int = ENGINE_PORT) -> LanDoor:
         firewall=firewall,
         private_network=private,
     )
+
+
+# ------------------------------------------------ which networks, and are they open
+#
+# FRESH-INSTALL #46 and #47 (kylies-pc, 2026-09-26). `detect()` answers "is ANY
+# connected network Private", and on kylies-pc that was true and useless: the
+# Tailscale adapter was Private, the Ethernet was Public, so `lan enable` said
+# `"private_network": true` and "configured" while nothing on the LAN could get
+# in. And the addresses it published included 192.168.96.1, the WSL vEthernet
+# adapter's, which no other machine can dial. Both are one question asked per
+# INTERFACE instead of per machine, so this reads everything it needs in one
+# PowerShell call: each address with its interface, each interface's network
+# and category, the firewall's effective settings per profile, and whether this
+# process already holds an administrator token (#44).
+#
+# Every read here answers an unprivileged caller; measured on owens-pc
+# 2026-09-26 with a non-elevated shell.
+
+#: The Hyper-V virtual switches that exist only inside this PC. WSL's own
+#: adapter normally has no connection profile at all (measured on owens-pc:
+#: "vEthernet (WSL (Hyper-V firewall))" is absent from Get-NetConnectionProfile),
+#: which is what excludes it; the name is checked as well because the Default
+#: Switch can carry an "Unidentified network" profile and is just as private
+#: to this machine. An External switch bound to the real NIC is NOT on this
+#: list — that one IS the LAN address.
+_INTERNAL_SWITCH = re.compile(r"^vEthernet \((WSL|Default Switch)", re.IGNORECASE)
+
+#: `NetworkCategory` spelled as the firewall profile that governs it.
+_CATEGORY_PROFILE = {
+    "private": "Private",
+    "public": "Public",
+    "domainauthenticated": "Domain",
+}
+
+
+@dataclass(frozen=True)
+class NetworkInterface:
+    """One IPv4 address, the interface it is on, and the network behind it."""
+
+    address: str
+    alias: str
+    index: int
+    #: The network's own name ("PrettyFlyForAWifi"), or None when Windows has
+    #: no connection profile for the interface.
+    network: str | None
+    #: "Private", "Public", "DomainAuthenticated", or None with `network`.
+    category: str | None
+
+    @property
+    def profile(self) -> str | None:
+        """The firewall profile that decides what this interface admits."""
+        if self.category is None:
+            return None
+        return _CATEGORY_PROFILE.get(self.category.strip().lower())
+
+    @property
+    def label(self) -> str:
+        """How a person recognises it: the network's name, then the adapter's."""
+        if self.network and self.network != self.alias:
+            return f'"{self.network}" ({self.alias})'
+        return f'"{self.alias}"'
+
+
+@dataclass(frozen=True)
+class FirewallProfile:
+    """One firewall profile's EFFECTIVE settings (policy store ActiveStore)."""
+
+    enabled: bool
+    inbound_allowed_by_default: bool
+    #: False is "Block all incoming connections, including allowed apps".
+    allow_inbound_rules: bool
+    #: False when group policy ignores rules made on this PC.
+    allow_local_rules: bool
+
+
+@dataclass(frozen=True)
+class NetworkFacts:
+    interfaces: tuple[NetworkInterface, ...]
+    firewall: Mapping[str, FirewallProfile]
+    #: The profiles an ENABLED inbound allow named `RULE_NAME` covers. Empty
+    #: when there is no such rule, or it is disabled.
+    rule_profiles: frozenset[str]
+    #: This process already holds an administrator token, so a change needs no
+    #: prompt at all (an administrator's SSH session on Windows is one).
+    elevated: bool
+
+
+def network_argv() -> list[str]:
+    """Every fact `read_network` needs, as one compact JSON document."""
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$p=@(Get-NetConnectionProfile | ForEach-Object {[pscustomobject]@{"
+        "index=[int]$_.InterfaceIndex;alias=[string]$_.InterfaceAlias;"
+        "name=[string]$_.Name;category=[string]$_.NetworkCategory}});"
+        "$a=@(Get-NetIPAddress -AddressFamily IPv4 -AddressState Preferred | "
+        "ForEach-Object {[pscustomobject]@{address=[string]$_.IPAddress;"
+        "index=[int]$_.InterfaceIndex;alias=[string]$_.InterfaceAlias}});"
+        "$f=@(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object "
+        "{[pscustomobject]@{profile=[string]$_.Name;enabled=[string]$_.Enabled;"
+        "inbound=[string]$_.DefaultInboundAction;"
+        "allow_rules=[string]$_.AllowInboundRules;"
+        "local_rules=[string]$_.AllowLocalFirewallRules}});"
+        f"$r=@(Get-NetFirewallRule -DisplayName '{RULE_NAME}' -ErrorAction "
+        "SilentlyContinue | ForEach-Object {[pscustomobject]@{"
+        "enabled=[string]$_.Enabled;profile=[string]$_.Profile;"
+        "action=[string]$_.Action;direction=[string]$_.Direction}});"
+        "$e=([Security.Principal.WindowsPrincipal][Security.Principal."
+        "WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal."
+        "WindowsBuiltInRole]::Administrator);"
+        "[pscustomobject]@{profiles=$p;addresses=$a;firewall=$f;rule=$r;"
+        "elevated=$e} | ConvertTo-Json -Compress -Depth 4"
+    )
+    return ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _flag(value: object, *, unset: bool) -> bool:
+    """A GpoBoolean as text: "True", "False", or "NotConfigured" (= Windows' default)."""
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return unset
+
+
+def _rows(value: object) -> list[dict]:
+    rows = value if isinstance(value, list) else ([] if value is None else [value])
+    if not all(isinstance(row, dict) for row in rows):
+        raise ValueError("expected a list of objects")
+    return rows
+
+
+def parse_network(text: str) -> NetworkFacts:
+    """`network_argv`'s output. Raises ValueError on anything else."""
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("expected an object")
+    profiles = {int(row["index"]): row for row in _rows(data.get("profiles"))}
+    interfaces = []
+    for row in _rows(data.get("addresses")):
+        index = int(row["index"])
+        profile = profiles.get(index)
+        interfaces.append(NetworkInterface(
+            address=str(row["address"]),
+            alias=str(row["alias"]),
+            index=index,
+            network=None if profile is None else (str(profile.get("name") or "") or None),
+            category=None if profile is None else (str(profile.get("category") or "") or None),
+        ))
+    firewall = {
+        str(row["profile"]): FirewallProfile(
+            enabled=_flag(row.get("enabled"), unset=True),
+            inbound_allowed_by_default=str(row.get("inbound", "")).strip().lower() == "allow",
+            allow_inbound_rules=_flag(row.get("allow_rules"), unset=True),
+            allow_local_rules=_flag(row.get("local_rules"), unset=True),
+        )
+        for row in _rows(data.get("firewall"))
+    }
+    covered: set[str] = set()
+    for row in _rows(data.get("rule")):
+        if (not _flag(row.get("enabled"), unset=False)
+                or str(row.get("action", "")).strip().lower() != "allow"
+                or str(row.get("direction", "")).strip().lower() != "inbound"):
+            continue
+        for word in str(row.get("profile", "")).split(","):
+            word = word.strip().lower()
+            if word == "any":
+                covered.update(("Domain", "Private", "Public"))
+            elif word in ("domain", "private", "public"):
+                covered.add(word.capitalize())
+    return NetworkFacts(
+        interfaces=tuple(interfaces),
+        firewall=firewall,
+        rule_profiles=frozenset(covered),
+        elevated=data.get("elevated") is True,
+    )
+
+
+def read_network(runner: Runner) -> NetworkFacts:
+    """Run `network_argv` and parse it. Raises ValueError, naming why."""
+    result = runner.run(network_argv(), timeout_s=WSLCONFIG_TIMEOUT_SECONDS)
+    if not result.ok:
+        raise ValueError(f"Windows would not describe its networks ({result.said()})")
+    return parse_network(result.stdout)
+
+
+def offered(facts: NetworkFacts) -> list[NetworkInterface]:
+    """The interfaces another machine could dial. #47.
+
+    Out: loopback and link-local (as `crucible/interfaces.py` rules), any
+    interface Windows has no network profile for, and the Hyper-V switches that
+    exist only inside this PC (`_INTERNAL_SWITCH`). Order is Windows' own.
+    """
+    found: list[NetworkInterface] = []
+    for interface in facts.interfaces:
+        if interface.address.startswith(("127.", "169.254.", "0.")):
+            continue
+        if interface.category is None or _INTERNAL_SWITCH.match(interface.alias):
+            continue
+        if all(seen.address != interface.address for seen in found):
+            found.append(interface)
+    return found
+
+
+def admits(interface: NetworkInterface, facts: NetworkFacts) -> tuple[bool, str]:
+    """Would Windows Firewall let another computer's TCP connection in here?
+
+    Decided from the effective profile settings and the rule, which is exactly
+    what Windows decides from. It says nothing about a router that keeps its
+    devices apart (guest Wi-Fi does) or a third-party firewall; `lan.py` says so.
+    """
+    profile = interface.profile
+    if profile is None:
+        return False, f"Windows does not know what kind of network {interface.label} is"
+    settings = facts.firewall.get(profile)
+    if settings is None:
+        return False, f"Windows did not report its firewall settings for {profile} networks"
+    if not settings.enabled:
+        return True, f"Windows Firewall is off for {profile} networks"
+    if not settings.allow_inbound_rules:
+        return False, (
+            f"Windows Firewall is set to block ALL incoming connections on "
+            f"{profile} networks, which overrides every allow rule"
+        )
+    if settings.inbound_allowed_by_default:
+        return True, f"Windows Firewall lets incoming connections in on {profile} networks"
+    if profile in facts.rule_profiles:
+        if not settings.allow_local_rules:
+            return False, (
+                "this PC's firewall is managed by an organization's policy, which "
+                f'ignores the "{RULE_NAME}" rule set on this PC'
+            )
+        return True, f'the "{RULE_NAME}" rule lets TCP in on {profile} networks'
+    if profile == "Public":
+        return False, (
+            f"this network {interface.label} is marked Public, and Windows keeps "
+            "other computers out of a Public network"
+        )
+    if profile == "Domain":
+        return False, (
+            f"{interface.label} is an organization's (domain) network, and "
+            f'"{RULE_NAME}" only covers home (Private) networks'
+        )
+    return False, f'no enabled "{RULE_NAME}" rule covers {profile} networks'
+
+
+def make_private_argv(interface: NetworkInterface) -> list[str]:
+    """Mark one network Private. Run ELEVATED; `lan.py` asks the person first.
+
+    A nested `powershell.exe -Command` rather than the cmdlet as an argv,
+    because `lan.elevated_argv` quotes every word, and a quoted `'-InterfaceIndex'`
+    is a string to PowerShell, not a parameter name. The index is an int this
+    module parsed, so nothing a network's name contains reaches the command.
+    """
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        f"Set-NetConnectionProfile -InterfaceIndex {int(interface.index)} "
+        "-NetworkCategory Private",
+    ]
 
 
 #: What a person is told before the one UAC prompt this module causes. Named

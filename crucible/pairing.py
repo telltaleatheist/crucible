@@ -280,10 +280,35 @@ def write_pairing_file(
     `subprocess.run` — the one legitimate default here, because it is the
     platform's own and not a guess at a value.
     """
+    return write_pairing_line(
+        pairing_file_path(Path(home)), line, platform=platform, env=env, run=run,
+        private_directory=True,
+    )
+
+
+def write_pairing_line(
+    path: Path,
+    line: str,
+    *,
+    platform: str = sys.platform,
+    env: Mapping[str, str] | None = None,
+    run: "object | None" = None,
+    private_directory: bool = False,
+) -> Path:
+    """`write_pairing_file`'s rules, at any path.
+
+    Split out 2026-09-26 for `crucible pair` (FRESH-INSTALL #4), which saves
+    ANOTHER machine's line on this one and must hold it exactly as carefully:
+    a pairing line is a bearer token whichever server it names.
+
+    `private_directory` makes the directory 0700 on POSIX. True for a
+    directory Crucible owns; never for one a person named, which may be
+    `/tmp` and is not this function's to lock.
+    """
     environment = os.environ if env is None else env
-    directory = Path(home)
+    path = Path(path)
+    directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
-    path = pairing_file_path(directory)
     body = line if line.endswith("\n") else line + "\n"
 
     if platform == "win32":
@@ -308,7 +333,8 @@ def write_pairing_file(
         return path
 
     # POSIX: 0600 from the outset, under a 0700 home.
-    os.chmod(directory, 0o700)
+    if private_directory:
+        os.chmod(directory, 0o700)
     handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(handle, "wb") as stream:
         stream.write(body.encode("utf-8"))
@@ -342,4 +368,5 @@ __all__ = [
     "reachable_urls",
     "read_pairing_file",
     "write_pairing_file",
+    "write_pairing_line",
 ]
