@@ -528,15 +528,6 @@ def test_an_override_row_still_says_it_is_one(
     assert row["max_chars_basis"] is None
 
 
-def test_a_packaged_voice_row_says_packaged(
-    tts_client: TestClient, auth: dict[str, str]
-) -> None:
-    rows = tts_client.get("/v1/voices", headers=auth).json()
-    by_id = {row["id"]: row for row in rows}
-    assert by_id["mistborn"]["manifest"] == "packaged"
-    assert by_id["zeroshot"]["manifest"] == "engine"
-
-
 # ------------------------------------------------------- the ladder's lifecycle
 #
 # 2026-09-21: a DELETE of the screening voice raced a restart and `ladder-screen`

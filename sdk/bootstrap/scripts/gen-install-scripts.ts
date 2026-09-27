@@ -15,7 +15,7 @@
  *
  * THE THIRD OUTPUT IS PYTHON, AND THAT IS WHY IT IS HERE (PHASE15 4.3)
  * --------------------------------------------------------------------
- * `crucible host` drives the same 4c table, and it is Python. Two hand-written
+ * `crucible orchestrator` drives the same 4c table, and it is Python. Two hand-written
  * copies of a ten-row table with ten sentences in it is exactly the shape
  * ARCHITECTURE.md R1 forbids, so the table's DATA is emitted into
  * `crucible/host/wsl_states.py` from this file, and `--check` refuses a drift
@@ -532,7 +532,7 @@ export function generateInstallPs1(): string {
     '#',
     '# PHASE15-HOST.md 4.4. This script used to walk the WSL states itself and',
     '# then run install.sh inside an imported distribution. It no longer does,',
-    '# and that is the point of the phase: `crucible host` owns that sequence',
+    '# and that is the point of the phase: `crucible orchestrator` owns that sequence',
     '# (4.3), it can carry a reboot across because it starts at login, and the',
     '# page drives it as a task (4.7) — an app that asks for an install talks',
     '# to the SAME implementation through the host loopback door. Two walks of',
@@ -880,7 +880,7 @@ export function generateInstallPs1(): string {
     // #28: the moment this install began its move. An outcome written before
     // it is an EARLIER run's, and is said as history, never as this one's.
     "$Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')",
-    'Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"',
+    'Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","orchestrator"',
     '$said = @(Native { & $Cmd local start })',
     'if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }',
     '',
@@ -1045,7 +1045,7 @@ export function generateWslStatesPy(): string {
   return [
     BANNER('#').trimEnd(),
     '#',
-    '# The WSL state table of PHASE14-ENVPACKS.md 4c, as DATA, for `crucible host`',
+    '# The WSL state table of PHASE14-ENVPACKS.md 4c, as DATA, for `crucible orchestrator`',
     '# (PHASE15-HOST.md 4.3). The ORDER is the order they are tried: deepest cause',
     '# first, so "virtualization is off in the firmware" is never reported as "WSL',
     '# is not installed".',

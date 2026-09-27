@@ -413,16 +413,15 @@ def voice_rows(
                 "inherited_from": manifest.inherited_from,
                 # WHICH KIND OF FILE THIS ROW'S FACTS CAME OUT OF: `"repo"` is
                 # a `crucible-voice.toml` in the weights' own repo at the
-                # pinned revision, `"override"` a whole manifest written to
-                # this machine through `PUT /v1/voices/{id}`, `"engine"` the
-                # narrator engine's own base behaviour (section 2.6), and
-                # `"packaged"` one of the manifests this build still ships,
-                # which section 8.3 deletes.
+                # pinned revision, `"override"` a whole manifest on this
+                # machine (`PUT /v1/voices/{id}` or `$CRUCIBLE_VOICES_DIR`),
+                # `"engine"` the narrator engine's own base behaviour
+                # (section 2.6).
                 "manifest": manifest.manifest_source,
                 "sample_rate": manifest.sample_rate,
                 # How many rungs this voice's ladder has, so a client can ask
-                # how many takes exist BEFORE it submits one — `take: N` is
-                # refused as `unknown_take` past the end and never clamped,
+                # how many takes exist BEFORE it submits one — `take: N` past
+                # the end is a seed lane at take 0's numbers, never clamped,
                 # and a client spreading N candidates across the ladder (which
                 # is what BookForge's Correct Sentences does) has to know N.
                 # The rungs' NUMBERS are deliberately not here, for the same

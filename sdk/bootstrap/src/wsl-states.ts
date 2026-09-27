@@ -283,13 +283,8 @@ export function wslStates(inputs: WslStateInputs): WslStateDef[] {
       // (or WSL1, which has no `-u root` at all). Everything else above we can
       // do; this one we cannot.
       //
-      // IT USED TO BE CALLED `linger_unreadable` AND USED TO BE ABOUT LINGER.
-      // Two things changed on 2026-09-16. The guest's server became a SYSTEM
-      // unit, so root is no longer what makes it survive a logout — it is what
-      // lets it be INSTALLED: /etc/systemd/system is root's and so is the
-      // system manager. And `linger_unreadable` is already a real refusal from
-      // linger.ts about actual linger, so the old name was one code meaning two
-      // different machine states.
+      // The guest's server is a SYSTEM unit, so root is what lets it be
+      // INSTALLED: /etc/systemd/system is root's and so is the system manager.
       code: 'guest_root_unreachable',
       automatic: false,
       probe: 'guest-root',

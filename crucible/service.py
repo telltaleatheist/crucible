@@ -277,33 +277,13 @@ def root_prefix(environ: Mapping[str, str] | None = None) -> list[str]:
 
 
 def installed_scope(home: Path) -> str | None:
-    """Which scope this machine's unit is ACTUALLY in, or None for neither.
-
-    `systemd_scope()` answers a different question: where an install would PUT
-    a unit on this host. During an UPGRADE those two disagree, and acting on the
-    wrong one is how 0.6.6's own install failed on the first machine it ran on:
-
-        systemd would not stop crucible.service:
-        `wsl.exe -d Ubuntu -u root --exec systemctl stop crucible.service`
-        exited 5: Failed to stop crucible.service: Unit crucible.service not
-        loaded.
-
-    The guest was a USER unit being upgraded onto a SYSTEM one, the runtime swap
-    stops the service first, and it asked the system manager about a unit the
-    user manager was holding. Every verb that acts on a unit ALREADY THERE —
-    stop, start, status, uninstall — has to ask where it is rather than where it
-    would go. `install` is the one that legitimately uses `systemd_scope()`,
-    because it is the thing deciding.
+    """`systemd_scope()` when this machine's unit file is there, else None.
 
     Read from the FILESYSTEM and not from either manager: a unit file is there
-    or it is not, and that answer needs no bus, no root and no session — the
-    same property that makes `id -u` the right first question of a distro.
+    or it is not, and that answer needs no bus, no root and no session.
     """
-    if unit_path(home, SYSTEM_SCOPE).is_file():
-        return SYSTEM_SCOPE
-    if unit_path(home, USER_SCOPE).is_file():
-        return USER_SCOPE
-    return None
+    scope = systemd_scope()
+    return scope if unit_path(home, scope).is_file() else None
 
 
 def acting_scope(home: Path, verb: str) -> str:
@@ -311,9 +291,8 @@ def acting_scope(home: Path, verb: str) -> str:
     scope = installed_scope(home)
     if scope is None:
         raise ServiceError(
-            f"there is no {UNIT_NAME} on this machine to {verb}: neither "
-            f"{unit_path(home, SYSTEM_SCOPE)} nor {unit_path(home, USER_SCOPE)} "
-            "exists. Run `crucible service install` first"
+            f"there is no {UNIT_NAME} on this machine to {verb}: "
+            f"{unit_path(home)} does not exist. Run `crucible service install` first"
         )
     return scope
 
@@ -352,17 +331,9 @@ def serve_log_path(crucible_home: Path) -> Path:
 
 
 def definition_path(mechanism: str, home: Path) -> Path:
-    """The unit or the plist THIS MACHINE HAS, or where one would go.
-
-    `installed_scope` first, because during an upgrade the unit that exists and
-    the scope an install would choose are different answers, and every caller of
-    this asks "is there one, and where". `systemd_scope()` only when there is no
-    unit at all — which is not a fallback for a missing value but the honest
-    answer to "where would it be", the question a caller with nothing installed
-    is really asking.
-    """
+    """The unit or the plist THIS MACHINE HAS, or where one would go."""
     if mechanism == SYSTEMD:
-        return unit_path(home, installed_scope(home) or systemd_scope())
+        return unit_path(home)
     if mechanism == LAUNCHD:
         return plist_path(home)
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
@@ -553,7 +524,7 @@ def systemd_unit_text(
     was the defect of 2026-09-14: a clean `SIGTERM` (a `wsl --terminate`, an
     OOM killer's polite half, a shutdown that raced the guest) exits 0, and the
     engine then stayed down at 16:10 with nothing noticing, because on Windows
-    nothing was watching. `crucible host` is now the thing that watches, and the
+    nothing was watching. `crucible orchestrator` is now the thing that watches, and the
     unit's own `Restart=` is what it deliberately does NOT reimplement (4.1:
     "It never loops on restart; the systemd unit's own `Restart=` handles
     crashes") — so the unit has to be the half that is total.
@@ -652,7 +623,7 @@ def launchd_plist_text(
     `<true/>`: restart a crash, leave a deliberate stop alone. This is NO
     LONGER what the systemd unit does — see the ruling in `systemd_unit_text` —
     and the difference is deliberate rather than an oversight: that unit is
-    watched by `crucible host`, which distinguishes "systemd stopped it" from
+    watched by `crucible orchestrator`, which distinguishes "systemd stopped it" from
     "it died", and this agent is watched by nobody, so `launchctl stop` on the
     Mac is the only stop there is and `KeepAlive: true` would undo it.
     `RunAtLoad` is what starts it at login.
@@ -756,8 +727,7 @@ def read_recorded_path(mechanism: str, home: Path) -> str | None:
     see.
 
     Three different `None`s are deliberately one `None`: no definition file, a
-    definition with no PATH in it (a unit written before 0.6.0), and a plist
-    this build cannot read. All three mean "there is no recorded PATH to
+    definition with no PATH in it, and a plist this build cannot read. All three mean "there is no recorded PATH to
     compare against", which is what a caller needs; the file's own path is
     already on `Status.definition` for anybody who wants to look.
 
@@ -782,14 +752,9 @@ def read_recorded_path(mechanism: str, home: Path) -> str | None:
             if separator != "=" or name.strip() != "Environment":
                 continue
             value = value.strip()
-            # QUOTED SINCE 2026-09-15, and both shapes are read. A unit written
-            # before that carries `Environment=PATH=...` bare, and it is on
-            # disk until the operator reinstalls the service — a reader that
-            # knew only the new shape would answer "no recorded PATH" for a
-            # service that has one, which is the third `None` above pretending
-            # to be the second.
-            if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]
+            if len(value) < 2 or not value.startswith('"') or not value.endswith('"'):
+                continue
+            value = value[1:-1]
             key, is_pair, recorded = value.partition("=")
             if is_pair == "=" and key == "PATH":
                 # `systemd_unit_text` doubles every `%` because systemd
@@ -854,26 +819,6 @@ def read_linger(runner: Runner, user: str) -> bool | None:
     return value.lower() == "yes"
 
 
-def user_manager_active(runner: Runner, manager: str) -> bool | None:
-    """Is the manager that HOLDS this user's units running? None if unaskable.
-
-    `user@<uid>.service` is a SYSTEM unit, so this reaches it through the
-    system manager, whose bus WSLg does not overmount — the same asymmetry
-    `stop_user_manager` relies on, asked instead of acted on.
-
-    NO ROOT. `writing_door` already rules that reading is free, and it has to
-    be free here: `status` runs inside the unit's own environment, where
-    `WSL_DISTRO_NAME` is absent and `root_prefix()` therefore RAISES (see
-    `in_wsl`). A status that elevated would refuse to answer precisely when it
-    is the service asking about itself.
-    """
-    ran = runner(["systemctl", "show", manager, "--property=ActiveState"])
-    if not ran.ok:
-        return None
-    state = parse_systemctl_show(ran.stdout).get("ActiveState")
-    return None if state is None else state == "active"
-
-
 def status(
     mechanism: str, home: Path, *, runner: Runner, user: str | None = None
 ) -> Status:
@@ -882,7 +827,7 @@ def status(
     installed = definition.is_file()
     if mechanism == SYSTEMD:
         # The scope `definition` was just resolved in, by the same rule.
-        scope = installed_scope(home) or systemd_scope()
+        scope = systemd_scope()
         ran = runner(
             systemctl_argv(
                 scope,
@@ -896,37 +841,16 @@ def status(
         )
         linger = read_linger(runner, user if user is not None else getpass.getuser())
         if not ran.ok:
-            # THE STOP DESTROYS THE EVIDENCE THAT IT WORKED. `stop_user_manager`
-            # takes down `user@<uid>.service`, which is the only thing that was
-            # answering for the user bus, so the wait that confirms the stop
-            # then cannot reach a manager at all. Measured 2026-09-17 on
-            # owens-pc: 0.6.8 stopped the guest correctly and the install failed
-            # anyway with `local_stop_failed: Engine did not answer`.
-            #
-            # A unit whose manager is not running is not running. That is
-            # systemd's own model, not an inference about this machine, and the
-            # system manager answers it without a session bus.
-            unreachable = (
-                f"systemctl could not be asked: `{' '.join(ran.argv)}` exited "
-                f"{ran.returncode}: {ran.text()}"
-            )
-            running: bool | None = None
-            detail = unreachable
-            if scope == USER_SCOPE:
-                manager = f"user@{os.getuid()}.service"
-                if user_manager_active(runner, manager) is False:
-                    running = False
-                    detail = (
-                        f"inactive: {manager} is not running, so nothing it "
-                        f"holds is either. {unreachable}"
-                    )
             return Status(
                 mechanism=mechanism,
                 definition=definition,
                 installed=installed,
-                running=running,
+                running=None,
                 pid=None,
-                detail=detail,
+                detail=(
+                    f"systemctl could not be asked: `{' '.join(ran.argv)}` exited "
+                    f"{ran.returncode}: {ran.text()}"
+                ),
                 linger=linger,
             )
         properties = parse_systemctl_show(ran.stdout)
@@ -1059,84 +983,6 @@ def write_definition(
     return path, before is not None and before != text
 
 
-def stop_user_manager(runner: Runner, why: str, *, elevate: Sequence[str] | None = None) -> None:
-    """Stop a USER unit in a WSL guest the only way that works: its manager, as root.
-
-    WSLg overmounts `/run/user/<uid>` and COVERS the user manager's bus socket
-    (`systemd_scope`), so `systemctl --user` fails for root and user alike, and
-    setting `XDG_RUNTIME_DIR` does not help — the socket is not missing, it is
-    covered. What always answers is the SYSTEM manager, which owns
-    `user@<uid>.service`. Stopping that stops every unit the user manager was
-    running, this one included.
-
-    THIS IS WHY AN UPGRADE COULD NOT LAND ON A GUEST INSTALLED BEFORE THE SCOPE
-    MOVED. `install.sh` swaps the runtime by calling `crucible local shutdown`
-    first, that reaches `stop()`, and `stop()` asked the unit's own manager.
-    Measured 2026-09-17 on owens-pc, which sat on 0.6.3 while releases reached
-    0.6.8 — and note that the two failures READ completely differently:
-
-        0.6.6: `systemctl stop crucible.service` (as root, system manager)
-               -> Failed to stop: Unit crucible.service not loaded
-        0.6.7: `systemctl --user stop crucible.service`
-               -> Failed to connect to bus: No such file or directory
-
-    0.6.7 fixed the SCOPE (`installed_scope`, a4841d8) and so began asking the
-    right manager — which is unreachable. One bug behind two messages.
-
-    The cost is honest: any other service that user was running in this distro
-    restarts. A WSL distro that exists to hold an inference server is the case
-    this is for, and a Linux host never reaches here at all.
-    """
-    _require(
-        runner,
-        [*(root_prefix() if elevate is None else elevate),
-         "systemctl", "stop", f"user@{os.getuid()}.service"],
-        why,
-    )
-
-
-def retire_user_unit(home: Path, runner: Runner, elevate: Sequence[str]) -> list[str]:
-    """Take down a pre-7b.9 USER unit before a SYSTEM unit takes its port.
-
-    A guest installed before the scope moved has `crucible.service` under
-    `~/.config/systemd/user`, enabled, running, and holding 7100. The new
-    system unit's `enable --now` would then fail to bind, and the failure would
-    read as a port conflict rather than as the upgrade it is.
-
-    It cannot be retired through its own manager. The reason the scope moved at
-    all is that WSLg overmounts `/run/user/<uid>` and HIDES that manager's bus
-    socket (`systemd_scope`), so `systemctl --user` there fails for root and
-    user alike — setting `XDG_RUNTIME_DIR` does not help, because the socket is
-    not missing, it is covered.
-
-    What always answers is the SYSTEM manager, which owns `user@<uid>.service`.
-    Stopping that stops every unit the user manager was running, this one
-    included. The file is removed FIRST, so a manager that comes back — linger
-    brings it back on demand — comes back without it. One mechanism, no
-    second-guessing about which door happens to be open.
-
-    The cost is honest: any other service that user was running in this distro
-    restarts. A WSL distro that exists to hold an inference server is the case
-    this is for, and a Linux host never reaches here at all.
-    """
-    stale = unit_path(home, USER_SCOPE)
-    if not stale.is_file():
-        return []
-    # STOP FIRST, then remove. A stop that fails must leave the file where it
-    # is: the next install then sees a stale unit and retires it again, instead
-    # of finding nothing to retire and meeting the old server at the port.
-    stop_user_manager(
-        runner,
-        "the old user manager would not stop, so its Crucible still holds the port",
-        elevate=elevate,
-    )
-    stale.unlink()
-    return [
-        f"retired the user unit at {stale} and stopped the user manager that "
-        "was running it"
-    ]
-
-
 def install(
     mechanism: str,
     *,
@@ -1182,8 +1028,6 @@ def install(
         # says how root is reached, and it answers `[]` for the user scope and
         # for a process that already is root.
         elevate = writing_door(scope)
-        if scope == SYSTEM_SCOPE:
-            lines.extend(retire_user_unit(home, runner, elevate))
         path, changed = write_definition(
             unit_path(home, scope),
             systemd_unit_text(
@@ -1411,13 +1255,6 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
         scope = installed_scope(home)
         if scope is None:
             return [f"nothing to stop: there is no {UNIT_NAME} on this machine"]
-        if scope == USER_SCOPE and in_wsl():
-            # A user unit in a WSL guest is a pre-scope-move installation, and
-            # its own manager cannot be reached to stop it. See
-            # `stop_user_manager` for the measurement; without this an upgrade
-            # can never quiesce the server it is replacing.
-            stop_user_manager(runner, f"systemd would not stop {UNIT_NAME}")
-            return [f"stopped {UNIT_NAME} by stopping the user manager running it"]
         _require(
             runner,
             [*writing_door(scope), *systemctl_argv(scope, "stop", UNIT_NAME)],

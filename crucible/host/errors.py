@@ -16,7 +16,7 @@ from ..errors import CrucibleError
 HOST_ERROR_CODES: dict[str, str] = {
     "host_door_unavailable": "The local controller could not bind its control port; its owned child was stopped.",
     "host_windows_only": (
-        "`crucible host` is a Windows verb. On Linux and macOS the server runs "
+        "`crucible orchestrator` is a Windows verb. On Linux and macOS the server runs "
         "on the machine and its service manager already supervises it (4.4: "
         "there is no host on the Mac)."
     ),
@@ -35,7 +35,7 @@ HOST_ERROR_CODES: dict[str, str] = {
         "install on a machine and the second caller waits."
     ),
     "host_already_running": (
-        "another `crucible host` already holds this machine's tray. Two trays "
+        "another `crucible orchestrator` already holds this machine's tray. Two trays "
         "would boot the same distro twice and watch each other's recoveries."
     ),
     "host_no_pack": (
@@ -75,12 +75,6 @@ HOST_ERROR_CODES: dict[str, str] = {
         "`[orchestrator] wsl` in the Windows config holds something other than "
         '"never". It is the one way to keep a machine native on purpose '
         "(PHASE19 1), so a value nobody defined is refused rather than ignored."
-    ),
-    "orchestrator_recipe_not_ours": (
-        "a recovery recipe that restarts everything uid 1000 owns was asked "
-        "for in a distribution Crucible did not import. CONSENT widens "
-        "watching, claiming and the unit restart; it never widens this "
-        "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
     ),
     # The sentences a PERSON reads for the three restart codes are
     # `installer.REBOOT_SENTENCE`, `REBOOT_STILL_OWED_SENTENCE` and

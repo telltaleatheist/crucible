@@ -157,7 +157,7 @@ def remove_argv(env: Mapping[str, str]) -> list[str]:
 
 
 def install(runner: Runner) -> StartupOutcome:
-    """`crucible host --install-startup`. Idempotent: it rewrites in place."""
+    """`crucible orchestrator --install-startup`. Idempotent: it rewrites in place."""
     lnk = shortcut_path(runner.env)
     result = runner.run(install_argv(runner.env), timeout_s=SHORTCUT_TIMEOUT_SECONDS)
     if not result.ok:
@@ -173,7 +173,7 @@ def install(runner: Runner) -> StartupOutcome:
 
 
 def remove(runner: Runner) -> StartupOutcome:
-    """`crucible host --remove-startup`. Says whether there was one."""
+    """`crucible orchestrator --remove-startup`. Says whether there was one."""
     lnk = shortcut_path(runner.env)
     result = runner.run(remove_argv(runner.env), timeout_s=SHORTCUT_TIMEOUT_SECONDS)
     if not result.ok:

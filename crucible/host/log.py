@@ -89,7 +89,7 @@ class HostLog:
         self.previous = Path(previous)
         self.roll_bytes = roll_bytes
         self._clock = clock
-        # `crucible host --install` runs the sequence in the foreground (4.3),
+        # `crucible orchestrator --install` runs the sequence in the foreground (4.3),
         # and a person watching it should see what the log says WITHOUT opening
         # it. The tray passes nothing and the file is the only reader.
         self._echo = echo

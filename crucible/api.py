@@ -2853,16 +2853,6 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         if body.op == "say":
             manifest = known_voice(session.voice)
             sampling = require_sayable(manifest, body.take)
-            # NO LENGTH REFUSAL HERE SINCE 2026-09-19. `chunk_too_long` stood
-            # between these two lines — the cap certificate, refused rather
-            # than re-split — and it is retired with the render door's twin
-            # (PHASE18-UNCERTIFIED.md section 4, `jobs/tts/render.py`). Owen:
-            # *"I don't think it's crucible's place to refuse chunks outside
-            # the band… especially if we add a different tts engine."*
-            # Chunking is still the client's and the cap is still advertised on
-            # `/v1/voices` for it to pack to; what this server no longer does
-            # is act on a number that a screening checkpoint may not have and
-            # that another engine's frame arithmetic would not be described by.
             return {"id": session.say(body.id, body.text, body.take, sampling)}
         if body.op == "cancel":
             return {"id": body.id, "outcome": session.cancel(body.id)}

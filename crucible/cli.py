@@ -6,7 +6,6 @@
     crucible serve      run the API in the foreground
     crucible service    install/start/stop the machine service that runs `serve`
     crucible orchestrator  win32 only: the tray that manages this machine's engine
-                        (`crucible host` is the same verb, deprecated)
     crucible models     list and pull model weights
     crucible voices     list and pull voice weights
     crucible doctor     probe the host and every job type; exit 0 only when healthy
@@ -52,7 +51,6 @@ from . import (
     jobenv,
     ladder,
     llamacpp,
-    narratorpatches,
     pairing,
     rvcbase,
     service,
@@ -165,14 +163,6 @@ def cmd_guest(args: argparse.Namespace) -> int:
 
 def cmd_orchestrator(args: argparse.Namespace) -> int:
     """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
-
-    **`crucible host` is the same verb**, kept as an argparse alias and
-    deprecated in PHASE17-ORCHESTRATOR.md section 7 rather than in code: the
-    Startup shortcut installed on Owen's PC on 2026-09-15 has
-    `-m crucible.cli host` baked into it, and `--install-startup` still writes
-    exactly that string, so a pack rebuilt after tonight starts the tray the
-    shortcut already points at. The alias goes when a release changes the
-    shortcut, and that is not tonight.
 
     The verb is refused `host_windows_only` everywhere else, and that is not a
     platform check standing in for a feature check: on Linux and macOS the
@@ -426,7 +416,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # `--backend` STATES what the caller expects this host to be, and is
     # checked against what it is. Section 2: *"`crucible init --backend
     # llama-windows` is legal only on win32 … `cuda-linux`/`mlx-darwin` on
-    # win32 are refused the same way"*. `crucible host` passes it (4.3) so a
+    # win32 are refused the same way"*. `crucible orchestrator` passes it (4.3) so a
     # host that somehow ran on the wrong machine says so here instead of
     # writing a config the server would refuse to start from.
     if args.backend is not None and args.backend != backend.kind:
@@ -1268,7 +1258,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     # with them. What the recipe path does to an env that is already there is
     # `jobenv.plan_install`'s answer, not this function's.
     try:
-        spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+        spec = _env_spec(args.job_type, None, backend.kind)
         recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         return _fail(str(exc))
@@ -2681,7 +2671,7 @@ def _doctor_report() -> dict[str, Any]:
         "llm_env": None,
         "worker_envs": [],
         "tts_envs": {},
-        "narrator_patches": [],
+        "cuda_toolkit_links": [],
         "llm_patches": [],
         "capability": None,
         # THE TWO PATHS, because the Mac audit of 2026-09-14 found the same
@@ -2857,24 +2847,9 @@ def _doctor_report() -> dict[str, Any]:
                 )
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING)
             }
-            # The two site-packages edits pip cannot express (PHASE3-TTS.md
-            # section 4). They are reported SEPARATELY from the env row and not
-            # folded into it, because an env whose pins all match is otherwise
-            # reported ready — and a reader has no way to tell that from an env
-            # that will render every chunk with 240 ms of garbage on the end.
-            patched_spec = jobenv.tts_env(
-                narratorpatches.PATCHED_ENGINE, backend.kind
-            )
-            report["narrator_patches"] = narratorpatches.check(
-                jobenv.env_dir(config.home, patched_spec),
-                jobenv.recipe_pins(jobenv.recipe_for(patched_spec)),
-            )
-            # AND THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
-            # ASK ABOUT. Reported in the same rows for the same reason, and
-            # needed MORE here than the patches are: the SGLang stack has no
-            # site-packages patches at all, so without these this section would
-            # be empty on the very host whose env holds the one thing that can
-            # be silently missing.
+            # THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
+            # ASK ABOUT. Reported SEPARATELY from the env row, because an env
+            # whose pins all match is otherwise reported ready.
             #
             # GATED ON THE ENV EXISTING, and that gate is the point rather than
             # an optimisation. With no `tts` env installed the links cannot be
@@ -2882,26 +2857,23 @@ def _doctor_report() -> dict[str, Any]:
             # and "lib/libcudart.so is missing" — for one cause the env row
             # already states in full ("no venv at ... run `crucible install
             # tts`"). Three sentences about one fact is how a reader ends up
-            # chasing the wrong one. The patches avoid this a different way
-            # (`not_applicable`, when the recipe does not install what they
-            # edit); this recipe DOES pin nvidia-cuda-runtime-cu13, so the
-            # honest answer is not "not applicable" but "not yet asked".
-            patched_env = jobenv.env_dir(config.home, patched_spec)
-            if (
-                backend.kind == "cuda-linux"
-                and narratorpatches.site_packages(patched_env) is not None
-            ):
-                report["narrator_patches"].extend(
-                    narratorpatches.check_cuda_toolkit_links(patched_env)
-                )
-            for entry in report["narrator_patches"]:
-                # `applied` is not the test. Both patches edit the vLLM stack,
-                # which `mlx-darwin`'s recipe does not install, and a Mac that
-                # has nothing to patch is sound rather than broken.
-                if entry["status"] not in narratorpatches.SOUND_STATUSES:
+            # chasing the wrong one.
+            if backend.kind == "cuda-linux":
+                for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+                    engine_env = jobenv.env_dir(
+                        config.home, jobenv.tts_env(engine, backend.kind)
+                    )
+                    if envpatches.site_packages(engine_env) is None:
+                        continue
+                    for entry in envpatches.check_cuda_toolkit_links(engine_env):
+                        report["cuda_toolkit_links"].append(
+                            {"engine": engine, **entry}
+                        )
+            for entry in report["cuda_toolkit_links"]:
+                if entry["status"] not in envpatches.SOUND_STATUSES:
                     report["problems"].append(
-                        f"narrator_patch[{entry['id']}]: {entry['status']} — "
-                        f"{entry['detail']}. {entry['why']}"
+                        f"cuda_toolkit_link[{entry['engine']}:{entry['id']}]: "
+                        f"{entry['status']} — {entry['detail']}. {entry['why']}"
                     )
         if config.enable_llm:
             # THE `llm` ENV's PATCHES (`crucible/envpatches.py`): mlx-lm's
@@ -2920,8 +2892,8 @@ def _doctor_report() -> dict[str, Any]:
                 # `no_env` is the llm env row's fact, stated there in full with
                 # the command that fixes it; a second problem for the same
                 # cause is how a reader ends up chasing the wrong sentence.
-                if entry["status"] not in narratorpatches.SOUND_STATUSES and (
-                    entry["status"] != narratorpatches.NO_ENV
+                if entry["status"] not in envpatches.SOUND_STATUSES and (
+                    entry["status"] != envpatches.NO_ENV
                 ):
                     report["problems"].append(
                         f"llm_patch[{entry['id']}]: {entry['status']} — "
@@ -3064,14 +3036,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"tts env ({engine}): {mark} — {entry['detail']}")
             if "provenance" in entry:
                 print(f"         {_provenance_line(entry['provenance'])}")
-        for entry in report["narrator_patches"]:
-            if entry["status"] == narratorpatches.NOT_APPLICABLE:
-                mark = "n/a"
-            else:
-                mark = "applied" if entry["applied"] else entry["status"].upper()
-            print(f"narrator patch ({entry['id']}): {mark} — {entry['detail']}")
+        for entry in report["cuda_toolkit_links"]:
+            mark = "applied" if entry["applied"] else entry["status"].upper()
+            print(
+                f"cuda toolkit link ({entry['engine']}, {entry['id']}): {mark} — "
+                f"{entry['detail']}"
+            )
         for entry in report["llm_patches"]:
-            if entry["status"] == narratorpatches.NOT_APPLICABLE:
+            if entry["status"] == envpatches.NOT_APPLICABLE:
                 mark = "n/a"
             else:
                 mark = "applied" if entry["applied"] else entry["status"].upper()
@@ -3183,7 +3155,7 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
         rows = envpatches.check("llm", config.home / "envs" / "none", {})
     else:
         try:
-            spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
+            spec = _env_spec(args.job_type, None, backend.kind)
             recipe = jobenv.recipe_for(spec)
             pins = jobenv.recipe_pins(recipe)
         except jobenv.EnvError as exc:
@@ -3200,11 +3172,11 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
             rows = envpatches.apply(
                 args.job_type, directory, python, pins, on_line=print
             )
-        except narratorpatches.PatchError as exc:
+        except envpatches.PatchError as exc:
             return _fail(f"env_patch_failed: {exc}")
     for row in rows:
         print(f"{args.job_type} patch ({row['id']}): {row['status']} — {row['detail']}")
-    unsound = [r for r in rows if r["status"] not in narratorpatches.SOUND_STATUSES]
+    unsound = [r for r in rows if r["status"] not in envpatches.SOUND_STATUSES]
     if unsound:
         return _fail(
             "env_patch_failed: "
@@ -3471,7 +3443,7 @@ def build_parser() -> argparse.ArgumentParser:
             "the backend this host is EXPECTED to be, checked against what it "
             "detects. A backend runs where its engine runs and nowhere else "
             "(PHASE15-HOST.md 3.5), so this never chooses one — it refuses "
-            "backend_not_here when the two disagree. `crucible host` passes "
+            "backend_not_here when the two disagree. `crucible orchestrator` passes "
             "--backend llama-windows"
         ),
     )
@@ -3825,10 +3797,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     host_parser = subparsers.add_parser(
         "orchestrator",
-        # `host` KEPT, and it is the spelling the installed Startup shortcut
-        # uses (PHASE17-ORCHESTRATOR.md section 7). Deprecated in the doc, not
-        # in code, so tonight's tray survives a pack rebuild.
-        aliases=["host"],
         help="win32 only: the tray that manages this machine's engine",
         description=(
             "The Windows ORCHESTRATOR (PHASE15-HOST.md section 4, PHASE17): a "
@@ -3837,8 +3805,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Windows engine to WSL2 when the operator page asks. It serves zero "
             "job types and carries no data — control is Windows's, data is the "
             "card's. Refused `host_windows_only` on Linux and macOS, where the "
-            "service manager already supervises the server. `crucible host` is "
-            "the same verb and is deprecated."
+            "service manager already supervises the server."
         ),
     )
     host_parser.add_argument(
@@ -3989,12 +3956,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     env_patch.add_argument("job_type", choices=sorted(envpatches.patched_job_types()))
-    env_patch.add_argument(
-        "--narrator-engine",
-        default=None,
-        choices=sorted(NARRATOR_ENGINE_SAMPLING),
-        help="which tts env; required for 'tts', refused for 'llm'",
-    )
     env_patch.set_defaults(func=cmd_env_patch)
 
     token = subparsers.add_parser(
@@ -4051,7 +4012,7 @@ def main(argv: list[str] | None = None) -> int:
     both kinds. A platform test standing in for a backend test was the shape
     R1 forbids: two owners for "can this machine do it".
 
-    `crucible host` still refuses off win32, by its own name
+    `crucible orchestrator` still refuses off win32, by its own name
     (`host_windows_only`), because a tray on a machine whose service manager
     already supervises the server is a second owner of presence — a feature
     check, not a platform one wearing a feature's clothes.

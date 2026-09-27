@@ -64,10 +64,9 @@ from typing import Any
 from .errors import CrucibleError
 
 #: Total reference audio narrator will accept, from `v3_served
-#: .MAX_REFERENCE_SECONDS`: vllm-omni answers HTTP 400 "Reference audio too
-#: long" above it, and `check_reference_budget` refuses it client-side first.
-#: Mirrored here for `crucible/narratorpatches.py`'s reason — a Crucible server
-#: must not need a BookForge checkout to answer "will this clip load" — and
+#: .MAX_REFERENCE_SECONDS`: `check_reference_budget` refuses above it.
+#: Mirrored here because a Crucible server must not need a BookForge checkout
+#: to answer "will this clip load", and
 #: checked at the door so the refusal names the clip rather than arriving from
 #: inside an engine that has already started.
 MAX_REFERENCE_SECONDS = 30.0

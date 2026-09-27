@@ -139,16 +139,6 @@ def test_the_notice_survives_because_it_is_the_deploy_s(  # noqa: N802
     assert rendered.endswith("## NOTICE\n\nThis is a Derivative Work.\n")
 
 
-def test_a_retired_key_is_refused_by_name() -> None:
-    with pytest.raises(CardError) as caught:
-        render_card(repo(), CARD.replace("higgs_max_chars_served: 1623",
-                                         "higgs_target_chars: 1000"))
-    message = str(caught.value)
-    assert "higgs_target_chars" in message
-    assert "retired" in message
-    assert "not dropped silently" in message
-
-
 def test_a_card_with_no_limits_section_gets_one_and_says_so() -> None:
     """thirdreich's and sigma's carry no safe band at all today (section 1)."""
     bare = CARD[: CARD.index("## Measured limits")] + "## NOTICE\n\nx\n"

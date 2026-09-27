@@ -34,7 +34,7 @@
 # mlx-community repo in the picture.
 #
 # The Mac also runs the engines IN PROCESS rather than starting a server
-# underneath narrator, which is why nothing here corresponds to `vllm-omni`.
+# underneath narrator, which is why nothing here is a serving stack.
 #
 # TWO OF THESE PINS ARE EXACT FOR MEASURED REASONS, IN NARRATOR'S OWN WORDS
 # ------------------------------------------------------------------------

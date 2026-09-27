@@ -101,7 +101,7 @@ Contract: `docs/PHASE18-UNCERTIFIED.md`. Owen has not ruled on the rest of the b
 
 **2026-09-15: PHASE17 — orchestrator and engine.** Every Crucible process now
 has a `role` on `/v1/info`. `crucible host` was always an orchestrator and is now named one
-(`crucible orchestrator`, `host` kept as an alias); it CLAIMS the one engine it manages,
+(`crucible orchestrator`); it CLAIMS the one engine it manages,
 restarts it by the owner-appropriate means, and still never carries a byte of data. Apps keep
 ONE address per machine and it is the engine's — `engineOf(info)` is the whole of the new
 client rule. Contract: `docs/PHASE17-ORCHESTRATOR.md`; the block is below, before Phase 1.
@@ -388,13 +388,13 @@ that file is the record. WSL has no boot — nothing starts a distro at login �
 engine was down after every reboot until an app happened to poke it, and a clean stop
 that afternoon left it down at 16:10 with nobody noticing. The only process that can own
 "the engine is running" is one that is itself running on Windows, and that is
-`crucible host`: a tray icon, a login item, a 15 s watch, and the loopback door
+`crucible orchestrator`: a tray icon, a login item, a 15 s watch, and the loopback door
 (`POST /install` on 127.0.0.1:7101) that the operator page's engine switch and
 `@crucible/bootstrap` both drive, so the Windows→WSL2 move has ONE implementation.
 
 Four things in it are worth reading before the server half lands beside it:
 
-- **The 4c state table crosses into Python by GENERATION.** `crucible host` walks the same
+- **The 4c state table crosses into Python by GENERATION.** `crucible orchestrator` walks the same
   ten rows `install.ps1` used to, and it is Python. Rather than a second hand-written copy,
   `sdk/bootstrap/scripts/gen-install-scripts.ts` gained a third output —
   `crucible/host/wsl_states.py` — and `npm run gen:install -- --check` refuses a drift in it

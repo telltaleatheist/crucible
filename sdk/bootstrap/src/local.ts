@@ -91,12 +91,8 @@ async function invoke(action: string, options: LocalOptions, runner: Runner): Pr
     return { schema_version: 1, state: 'broken', name: '', url: '', detail: String(error) };
   }
   if (install === null) {
-    const home = root(options, runner);
-    const paths = runner.platform === 'win32' ? path.win32 : path.posix;
-    const legacy = ['config.toml', 'pairing'].some(file => runner.fileExists(paths.join(home, file)));
     if (action !== 'status') throw new LocalInstallationError('local_not_registered', 'Repair or update Crucible to register its local controls');
-    return { schema_version: 1, state: legacy ? 'broken' : 'absent', name: '', url: '',
-      detail: legacy ? 'An existing Crucible needs an installer update to register its local controls.' : 'Crucible is not installed on this computer.' };
+    return { schema_version: 1, state: 'absent', name: '', url: '', detail: 'Crucible is not installed on this computer.' };
   }
   const result = await runner.run([install.control.command, ...install.control.args, action, '--json'], {
     timeoutMs: action === 'status' ? 15_000 : 120_000,

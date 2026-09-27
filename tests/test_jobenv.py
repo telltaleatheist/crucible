@@ -667,9 +667,9 @@ def test_a_moved_environment_half_pips_into_the_venv_that_is_there(
         lambda _h, _s: {"torch": "2.13.1", "narrator": "0.1.0"},
     )
     ran = _record_runs(monkeypatch)
-    monkeypatch.setattr(jobenv.narratorpatches, "apply", lambda *a, **k: None)
+    monkeypatch.setattr(jobenv.envpatches, "apply", lambda *a, **k: None)
     monkeypatch.setattr(
-        jobenv.narratorpatches, "ensure_cuda_toolkit_links", lambda *a, **k: None
+        jobenv.envpatches, "ensure_cuda_toolkit_links", lambda *a, **k: None
     )
     plan = jobenv.plan_install(home, spec, "cuda-linux")
     assert plan.action == jobenv.PLAN_RECIPE

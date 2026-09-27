@@ -93,7 +93,7 @@ ABSENT_MARKER = "mx.async_eval(self._next_tokens, self._next_logprobs, token_con
 
 
 def site_packages_file(prefix: str, rel: str) -> str:
-    """`rel` inside the env, deduped by real path (patch_vllm.py's reason)."""
+    """`rel` inside the env, deduped by real path."""
     hits = sorted(
         {
             os.path.realpath(p)
