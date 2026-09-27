@@ -90,7 +90,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     if backend.kind == LLAMA_WINDOWS:
         return _install_llama_windows(config, backend, args)
     try:
-        spec = _env_spec(args.job_type, None, backend.kind)
+        spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
         recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         return _fail(str(exc))

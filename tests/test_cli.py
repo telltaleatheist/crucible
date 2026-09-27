@@ -287,6 +287,26 @@ def test_installing_tts_needs_a_narrator_engine(
     assert "needs --narrator-engine" in capsys.readouterr().err
 
 
+def test_installing_tts_builds_the_env_of_the_named_narrator_engine(
+    home: Path,
+    viable: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["init", "--enable-tts"]) == 0
+    capsys.readouterr()
+    asked: list[jobenv.EnvSpec] = []
+
+    def install_env(home_dir: Path, spec: jobenv.EnvSpec, backend_kind: str, **_: object):
+        asked.append(spec)
+        raise jobenv.EnvError("stopped by the test before pip ran")
+
+    monkeypatch.setattr(jobenv, "install_env", install_env)
+    assert cli.main(["install", "tts", "--narrator-engine", "higgs-v3"]) == 1
+    assert "stopped by the test before pip ran" in capsys.readouterr().err
+    assert asked == [jobenv.tts_env("higgs-v3", FAKE_BACKEND.kind)]
+
+
 def test_installing_llm_refuses_a_narrator_engine(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
