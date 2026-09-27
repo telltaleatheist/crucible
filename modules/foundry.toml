@@ -1,25 +1,8 @@
-# What Foundry needs from a Crucible. PHASE13-OPERATOR.md section 5.4.
-#
-# Foundry is text and pages: one job type, and four capability classes it asks
-# for by NAME OF CLASS rather than by model id. That is the whole argument for
-# generating this file. Foundry already vendors `foundry-lineup.json` from
-# these same manifests; a second file beside it, typed by hand, would restate
-# `qwen3.8-27b-4bit` with nothing comparing the two copies — and the day that
-# manifest is renamed the lineup would be regenerated and the module would not.
-
 [module]
 name = "foundry"
 
 [[job_types]]
 type = "llm"
-
-# ---------------------------------------------------------------- the classes
-#
-# Owen's ruling, 2026-09-13: translation is binary per server and needs a
-# 27B-class model. `clean` is the 9B work. These resolve through
-# `crucible/lineup.py`'s floors and the class table in
-# `crucible/capability.py`; no model id is typed here except where the catalog
-# genuinely cannot decide.
 
 [[needs]]
 class = "clean"
@@ -30,17 +13,8 @@ class = "translate"
 [[needs]]
 class = "simplify"
 
-# `analysis` travels as a CLASS like the other three, since PHASE15-HOST.md
-# 5.3a. It used to carry `model = "qwen3.8-27b-4bit"` because this generator
-# refuses to pick between the two 27Bs — and that refusal is still right HERE,
-# where there is no card to pick against. What changed is that the choice is
-# not this file's to make: the SERVER resolves every class through its own
-# capability record, which does decide, per machine. The id this line used to
-# carry is the cuda-linux answer, and posting it to the Mac is exactly the
-# defect 5.3a was written for.
 [[needs]]
 class = "analysis"
 
-# The VLM page reader. One candidate, resolved.
 [[needs]]
 class = "pages"

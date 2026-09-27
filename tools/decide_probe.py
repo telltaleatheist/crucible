@@ -1,12 +1,3 @@
-"""Drive `crucible.decide`'s reading against a REAL OpenAI-compatible engine, no server.
-
-    python tools/decide_probe.py http://127.0.0.1:8500 qwen3.5-0.8b
-
-The same functions the door calls, in the same order (prime, then the questions), against
-the engine's /v1/chat/completions. It exists to answer the one question the fake engine
-cannot: that a real engine's reply parses and reads as the contract says. Prints the
-answers, label_mass and per-call wall/prompt/cached tokens.
-"""
 from __future__ import annotations
 
 import json
@@ -17,7 +8,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from crucible import decide as d  # noqa: E402
+from crucible import decide as d
 
 base, served = sys.argv[1].rstrip("/"), sys.argv[2]
 max_logprobs = int(sys.argv[3]) if len(sys.argv) > 3 else 32
