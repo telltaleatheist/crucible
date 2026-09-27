@@ -145,6 +145,17 @@ def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (22 * GIB, 24 * GIB))
 
 
+@pytest.fixture(autouse=True)
+def ffmpeg_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rvc refuses `ffmpeg_missing` up front (2026-09-26); these tests are about
+    everything else, so the probe answers for the machine running the suite."""
+    monkeypatch.setattr(
+        rvc_job,
+        "ffmpeg_paths",
+        lambda: {"ffmpeg": "/usr/bin/ffmpeg", "ffprobe": "/usr/bin/ffprobe"},
+    )
+
+
 @pytest.fixture
 def fake_worker(monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(rvc_job, "WORKER_SCRIPT", FAKE_WORKER)

@@ -116,7 +116,7 @@ The wire, in full
     stdin   one object: {models_dir, model_name, output_dir, input_dir, inputs,
                          index_rate, protect_rate, n_semitones, batch_size,
                          batch_audio_s, piece_s, overlap_s, crossfade_s,
-                         f0_method?, hop_length?}
+                         ffmpeg, ffprobe, f0_method?, hop_length?}
             `f0_method` and `hop_length` are THE ONLY optional keys in any phase
             4 worker's request, and their absence is meaningful rather than a
             refusal — see `_convert_args`.
@@ -557,7 +557,7 @@ class Stitcher:
 # ------------------------------------------------------------------ engine
 
 
-def _run_batch(argv: list[str], models_dir: str, on_line) -> None:
+def _run_batch(argv: list[str], models_dir: str, tool_dirs: list[str], on_line) -> None:
     """One urvc process, its stdout read line by line, raising on a bad exit.
 
     The child inherits this worker's environment, which the SERVER set
@@ -567,19 +567,25 @@ def _run_batch(argv: list[str], models_dir: str, on_line) -> None:
     worker itself is running:
 
     - `URVC_MODELS_DIR`, the model root the server staged for this job.
-    - **this env's `bin` at the front of PATH.** urvc's convert path prefers an
-      ffmpeg on PATH over anything it vendors, and the env installs its own
-      through `static-ffmpeg` and `static-sox` — which are beside this
-      interpreter and nowhere a bare `crucible serve` would have on its PATH.
-      BookForge does the same thing for the same reason
-      (`electron/rvc-bridge.ts`, `relocatableEnvBinDirs`). Prepended, not
-      appended: the point is that the env's own tools win.
+    - **PATH: the ffmpeg and ffprobe the server checked, then this env's `bin`,
+      then what was inherited.** urvc's `_add_ffmpeg_paths` asks PATH for
+      ffmpeg and ffprobe and, finding none, reaches for `static_ffmpeg` — which
+      the recipe no longer carries (2026-09-26, #25): the ffmpeg is Crucible's
+      pinned build in `~/.crucible/tools/bin`, found by `hosttools` and named
+      in the request. The env's `bin` still comes next, for `static-sox` and
+      the env's own scripts, which are beside this interpreter and nowhere a
+      bare `crucible serve` would have on its PATH (BookForge's
+      `relocatableEnvBinDirs`, `electron/rvc-bridge.ts`).
     """
     environment = dict(os.environ)
     environment["URVC_MODELS_DIR"] = models_dir
     own_bin = os.path.dirname(os.path.abspath(sys.executable))
+    first: list[str] = []
+    for entry in [*tool_dirs, own_bin]:
+        if entry and entry not in first:
+            first.append(entry)
     environment["PATH"] = os.pathsep.join(
-        [own_bin, environment.get("PATH", "")]
+        [*first, environment.get("PATH", "")]
     ).rstrip(os.pathsep)
     process = subprocess.Popen(
         argv,
@@ -667,6 +673,9 @@ def main() -> int:
         piece_s = float(require(request, "piece_s", (int, float)))
         overlap_s = float(require(request, "overlap_s", (int, float)))
         crossfade_s = float(require(request, "crossfade_s", (int, float)))
+        tool_dirs = [
+            os.path.dirname(require(request, tool, str)) for tool in ("ffmpeg", "ffprobe")
+        ]
         require(request, "index_rate", (int, float))
         require(request, "protect_rate", (int, float))
         require(request, "n_semitones", int)
@@ -815,6 +824,7 @@ def main() -> int:
                     _run_batch(
                         _convert_args(request, staging, converted_dir),
                         models_dir,
+                        tool_dirs,
                         on_line,
                     )
                 except Exception as exc:

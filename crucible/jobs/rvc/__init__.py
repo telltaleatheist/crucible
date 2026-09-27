@@ -84,7 +84,7 @@ from pydantic import (
     model_validator,
 )
 
-from ... import accelerator, rvcbase, weights, workerenv, workers
+from ... import accelerator, hosttools, rvcbase, weights, workerenv, workers
 from ...config import Config
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
@@ -179,6 +179,44 @@ WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
 def rvc_base_dir(config: Config) -> Path:
     """Where urvc's shared base assets live. See the module docstring."""
     return rvcbase.base_root(config)
+
+
+#: The two programs urvc calls by itself: `_add_ffmpeg_paths` in its
+#: `core/generate/common.py` wants BOTH on PATH, and without them reaches for
+#: `static_ffmpeg`, which the recipe no longer carries (#25, 2026-09-26).
+FFMPEG_TOOLS: tuple[str, ...] = ("ffmpeg", "ffprobe")
+
+
+def ffmpeg_paths() -> dict[str, str | None]:
+    """Where ffmpeg and ffprobe are on this host, each or None.
+
+    A module-level probe, for the reason `jobs/asr/__init__.py` gives about its
+    own: a test replaces it. The search is `hosttools`', which looks in
+    Crucible's own `tools/bin` first and is the one owner of what was searched.
+    """
+    return {tool: hosttools.which(tool) for tool in FFMPEG_TOOLS}
+
+
+def _require_ffmpeg() -> dict[str, str]:
+    """ffmpeg's and ffprobe's paths, or `ffmpeg_missing` before the job queues.
+
+    2026-09-26 (package D's hand-off, fresh-install #25): asr, align and tts
+    refuse this by name at submit time, and rvc used to find out an hour into
+    a batch. urvc decodes every piece through ffmpeg and probes it with
+    ffprobe, so neither is optional.
+    """
+    found = ffmpeg_paths()
+    absent = [tool for tool, path in found.items() if path is None]
+    if absent:
+        raise ApiError(
+            409,
+            "ffmpeg_missing",
+            f"this server has no {' and no '.join(absent)}; ultimate-rvc decodes "
+            "every piece with ffmpeg and probes it with ffprobe. `crucible install rvc` "
+            "places Crucible's pinned build. " + hosttools.searched_note(),
+            {"missing": absent, "path": hosttools.search_path()},
+        )
+    return {tool: str(path) for tool, path in found.items()}
 
 
 def _base_assets() -> "rvcbase.RvcBaseAssets":
@@ -483,6 +521,16 @@ class RvcJobType:
             return JobTypeStatus(ready=False, detail=str(exc))
         if not env.installed:
             return JobTypeStatus(ready=False, detail=env.detail)
+        absent_tools = [tool for tool, path in ffmpeg_paths().items() if path is None]
+        if absent_tools:
+            return JobTypeStatus(
+                ready=False,
+                detail=(
+                    f"{env.detail}; but there is no {' and no '.join(absent_tools)}: "
+                    "urvc decodes every piece with ffmpeg and probes it with "
+                    "ffprobe — `crucible install rvc` places Crucible's pinned build"
+                ),
+            )
         root = rvc_base_dir(self._config)
         try:
             absent = rvcbase.missing(self._config, _base_assets())
@@ -508,12 +556,16 @@ class RvcJobType:
             is not None
         ]
         if not installed:
+            # A NOTE IN `crucible doctor`, NOT A PROBLEM (2026-09-26, #40, as
+            # denoise does): the env, the tools and the base assets are all
+            # here, and nothing is broken until somebody asks for a voice.
             return JobTypeStatus(
                 ready=False,
                 detail=(
                     f"{env.detail}; no RVC model is installed — "
                     "`crucible rvc pull <id>`"
                 ),
+                awaiting_weights=True,
             )
         return JobTypeStatus(ready=True, detail=f"{env.detail}; installed: {installed}")
 
@@ -577,6 +629,9 @@ class RvcJobType:
             raise ApiError(400, "model_required", f"{self.name} needs a model")
         validated = _params(params)
         manifest, spec, _, _ = self._require_runnable(model)
+        # After what no install can fix (`_require_runnable`'s order), with the
+        # other things an install fixes.
+        _require_ffmpeg()
         self._require_index(manifest, validated)
         _require_base_assets(self._config)
         accelerator.guard(
@@ -625,6 +680,7 @@ class RvcJobType:
 
         try:
             manifest, spec, python, weights_dir = self._require_runnable(model)
+            tools = _require_ffmpeg()
             self._require_index(manifest, params)
             base = _require_base_assets(self._config)
             # The card can change between the queue and the lane, so the guard
@@ -658,6 +714,10 @@ class RvcJobType:
             "piece_s": params.piece_seconds(),
             "overlap_s": params.overlap_seconds(),
             "crossfade_s": params.crossfade_seconds(),
+            # The exact programs checked above, put first on urvc's PATH by the
+            # worker, so the engine runs what the refusal vouched for.
+            "ffmpeg": tools["ffmpeg"],
+            "ffprobe": tools["ffprobe"],
         }
         # Present only when the client sent them. Their ABSENCE is what tells the
         # worker to omit the flag and leave urvc on its own tuned default, so a
