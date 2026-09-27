@@ -679,7 +679,7 @@ export function generateWslStatesPy(): string {
 export const GENERATED = [
   { path: join(SCRIPTS, 'install.sh'), text: generateInstallSh() },
   { path: join(SCRIPTS, 'install.ps1'), text: generateInstallPs1() },
-  { path: join(REPO, 'crucible', 'host', 'wsl_states.py'), text: generateWslStatesPy() },
+  { path: join(REPO, 'crucible', 'platform', 'wsl_table.py'), text: generateWslStatesPy() },
 ];
 
 function main(): void {

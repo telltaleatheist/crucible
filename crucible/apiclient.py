@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import API_HEADER, API_VERSION, VERSION
+from . import API_HEADER, API_VERSION
+from .protocol import ACT_HEADER, user_agent
 from .config import crucible_home
 from .errors import ConfigError, CrucibleError
 from .pairing import parse_pairing_line
@@ -149,7 +150,7 @@ def _headers(connection: Connection) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {connection.token}",
         API_HEADER: str(API_VERSION),
-        "User-Agent": f"crucible-cli/{VERSION}",
+        "User-Agent": user_agent("cli"),
     }
 
 
@@ -490,7 +491,7 @@ def cmd_settings(connection: Connection, args: argparse.Namespace) -> int:
         emit(call(connection, "GET", "/v1/settings"))
         return EXIT_OK
     patch = read_json_argument(args.patch, "--patch")
-    extra = None if args.act is None else {"X-Crucible-Act": args.act}
+    extra = None if args.act is None else {ACT_HEADER: args.act}
     emit(call(connection, "PUT", "/v1/settings", json_body=patch, extra_headers=extra))
     return EXIT_OK
 
@@ -541,7 +542,7 @@ def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
         }
     if args.stream:
         body = dict(body, stream=True)
-    extra = None if args.act is None else {"X-Crucible-Act": args.act}
+    extra = None if args.act is None else {ACT_HEADER: args.act}
 
     if not args.stream:
         emit(call(
@@ -643,7 +644,7 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     body["questions"] = decide_questions(args.questions)
     if args.missing is not None:
         body["missing"] = args.missing
-    extra = None if args.act is None else {"X-Crucible-Act": args.act}
+    extra = None if args.act is None else {ACT_HEADER: args.act}
     emit(call(connection, "POST", "/v1/decide", json_body=body, extra_headers=extra))
     return EXIT_OK
 
@@ -1016,7 +1017,7 @@ def _pair_origin(address: str) -> str:
 
 def _pair_call(origin: str, path: str, body: dict[str, Any] | None = None,
                token: str | None = None) -> dict[str, Any]:
-    headers = {API_HEADER: str(API_VERSION), "User-Agent": f"crucible-cli/{VERSION}"}
+    headers = {API_HEADER: str(API_VERSION), "User-Agent": user_agent("cli")}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if token is not None:

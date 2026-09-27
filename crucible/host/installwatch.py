@@ -8,16 +8,16 @@ import sys
 import textwrap
 import time
 import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TextIO
 
+from .. import controller_client, local
+from ..platform.paths import LOG_NAME, door_url
 from . import outcome
 from .errors import HostError
 from .installer import STEP_WORDS, TRY_AGAIN_HINT
 from .log import plain
-from .paths import LOG_NAME, door_url
 
 BRIEF_SECONDS = 10.0
 
@@ -86,21 +86,19 @@ TRAY_GONE_SENTENCE = (
     "and carries on by itself. Its log is:"
 )
 
-CONTROLLER_START_SECONDS = 90.0
+CONTROLLER_START_SECONDS = controller_client.START_SECONDS
 
 
 def start_controller(home: Path) -> bool:
-    from ..local import _spawn_controller
-
     try:
-        _spawn_controller(home)
+        local._spawn_controller(home)
     except (OSError, AttributeError, ValueError):
         return False
     return True
 
 RESTART_BANNER = 'ACTION NEEDED: restart Windows with "Update and restart".'
 
-RESTART_CODES = outcome.REBOOT_CODES | {"wsl_reboot_again"}
+RESTART_CODES = outcome.RESTART_BANNER_CODES
 
 
 def one_line(text: object, limit: int = LINE_LIMIT) -> str:
@@ -217,27 +215,15 @@ class Console:
 
 
 def _token(home: Path) -> str | None:
-    from ..local import LocalError, connection
-
-    try:
-        return connection(home)[2]
-    except (LocalError, OSError, ValueError):
-        return None
+    return controller_client.bearer(home)
 
 
 def _open(path: str, token: str | None, timeout: float):
-    headers = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
-    request = urllib.request.Request(door_url(path), headers=headers)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return opener.open(request, timeout=timeout)
+    return controller_client.open_url(door_url(path), token=token, timeout=timeout)
 
 
 def door_alive() -> bool:
-    try:
-        with _open("/v1/ping", None, 3.0) as response:
-            return json.load(response).get("crucible") is True
-    except (OSError, ValueError, AttributeError, urllib.error.URLError, http.client.HTTPException):
-        return False
+    return controller_client.is_up()
 
 
 def door_status(token: str | None) -> dict[str, object] | None:

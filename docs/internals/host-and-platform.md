@@ -108,12 +108,53 @@ itself. Plans and rationale live in `docs/PHASE15-HOST.md`, `PHASE17-ORCHESTRATO
   only. `RunResult.said` keeps the **tail** of output (a failing `install.sh` prints curl's
   progress meter first and its error last).
 
+## Layering: who imports whom
+
+`host/` is the orchestrator and the outer shell. What any Windows-side code needs, and what
+is not the orchestrator, lives beside it so `lan.py`, `sharing.py`, `local.py` and
+`uninstall.py` never import the orchestrator:
+
+- `crucible/platform/`: `paths` (install layout, the loopback URLs, `HOST_DOOR_ENV`), `runner`
+  (the argv runner; a stream past its budget is asked to stop, never killed), `landoor`,
+  `portholder`, `startup` (the Startup shortcut), `powershell` (the one `-Command` and RunAs
+  builder), `hostconfig` (the one host-side `config.toml` reader: token, backend kind, consent
+  and the WSL decline) and `errors.HostError`.
+- `crucible/protocol.py`: header names, `API_VERSION`, the engine and door ports and the
+  User-Agent builder. `crucible/__init__.py` and `inflight.py` re-export them.
+- `crucible/wsl.py`: every `wsl.exe` argv, the guest home expression
+  `${CRUCIBLE_HOME:-$HOME/.crucible}` and the one distro-list parser (it reads `wsl -l -v`
+  and `wsl -l -q` alike). `guest_argv` enters Crucible's distro as the `crucible` user, whose
+  home holds the server, and any other distro as its default user; `default_user_argv` is for
+  commands that read nothing from a home (curl to the guest's loopback); `root_argv` is for
+  `systemctl` and the import's finishing script.
+- `crucible/controller_client.py`: the one client of the controller's door: proxy-free
+  opener, headers, `ping` (a non-orchestrator answer names the port's holder), `answering`,
+  `ensure_running` (spawn, then poll for `START_SECONDS`), `bearer` (pairing file, then
+  `[auth].token`) and `call` (a 401 is retried with every token this PC holds).
+- `crucible/atomicjson.write_json`: every small record (`wsl-outcome.json`,
+  `migration-cleanup.json`, `installation.json`, `landoor.json`, `sharing.json`).
+- `crucible/traylife.py`: the `tray.pid` / `tray.close` handshake.
+- `host/state.py`: the presence enums (`Distro`, `Engine`, `Owner`), `MoveState` and
+  `EngineDecision`; `menu.py` and `presence.py` import them from there.
+
+`desktop.py` is the composition root and may import `host`. The generated WSL table stays at
+`platform/wsl_table.py` because `sdk/bootstrap/scripts/gen-install-scripts.ts` writes it there;
+`wsl.py` is the one neutral module that reads it. `crucible.host.{paths,runner,landoor,
+portholder,startup}` are the platform modules under their old names for one release: each old
+module replaces itself in `sys.modules`, so a patch through either name reaches the same
+object.
+
 ## The orchestrator (`crucible/host/`)
 
 **Imports.** Importing `crucible.host` must not need pystray, Pillow or tkinter: pytest runs
-in WSL without them. `tray.py` imports them inside functions and makes no decisions; the menu
-is a pure function (`menu.menu_model`) tested cell by cell. Paths take the environment as a
-parameter (`paths.py`) and `LOCALAPPDATA`/`APPDATA` are read, never assembled from a username.
+in WSL without them. `tray.py` draws the icon with Pillow imported inside the function; the
+tray itself is `desktop.py`. Paths take the environment as a parameter (`platform/paths.py`)
+and `LOCALAPPDATA`/`APPDATA` are read, never assembled from a username.
+
+**The orchestrator has no icon of its own.** The Startup shortcut runs `crucible local tray`
+(`desktop.py`), which starts the orchestrator headless (`crucible orchestrator --headless`)
+when its door does not answer. `app.run` always runs headless; the in-process pystray menu it
+once carried never ran in production and is gone.
 
 **Nothing in the host runs a model.** It picks which server runs, starts it at login, boots
 the guest, watches, and runs the install move.
@@ -125,10 +166,10 @@ treated as alive.
 **Start order** (`app.run`): Startup item if absent → consent read (before the watcher,
 because it decides which distro is watched) → presence → pairing file → claim (needs the
 owner and the pairing token) → door (before the carry thread, so a mid-move `POST /install`
-gets 409 and attaches) → tray and watch → carry thread (waits on the watch's first settled
+gets 409 and attaches) → watch → carry thread (waits on the watch's first settled
 presence, bounded by `WATCH_SECONDS + RECIPE_TIMEOUT_SECONDS + BOOT_WAIT_SECONDS`).
 
-### Ownership (`menu.Owner`)
+### Ownership (`state.Owner`)
 
 - `WSL_UNIT`: the guest's unit in the managed distro; the host may restart and stop it.
 - `HOST_CHILD`: the `llama-windows` server this process spawned; Quit takes it down.
@@ -223,13 +264,11 @@ console. Written with PowerShell's `WScript.Shell` COM (no pywin32). `CreateShor
 in place, so install is idempotent. The entry is what makes "restart, then Crucible continues"
 true.
 
-### Tray and menu
+### Tray items from the move
 
-`install-engine` is absent (not greyed) unless the distro is absent or unknown. Restart is
-offered in every state except during an install, including FAILED. Open log is always
-present. Try again appears only for outcome `cannot` or `failed`; a disabled restart line
-shows while `reboot-pending`. `menu.outcome_items` is shared with `desktop.py` so both icons
-offer the same items. The icon is drawn with Pillow, not shipped.
+Try again appears only for outcome `cannot` or `failed`; a disabled restart line shows while
+`reboot-pending`. `menu.outcome_items` computes those items from `Outcome.state` and
+`desktop.py` shows them. The icon is drawn with Pillow (`host/tray.icon_image`), not shipped.
 
 ## The Windows to WSL move (`installer.py`, `outcome.py`)
 
@@ -283,7 +322,13 @@ offer the same items. The icon is drawn with Pillow, not shipped.
 ### Outcome file (`wsl-outcome.json`)
 
 Five states: `done`, `declined` (no code/sentence), `reboot-pending`, `cannot`, `failed`
-(always code and sentence). `failed` is retried once at the next start (attempts counts
+(always code and sentence). In memory `Outcome.state` is a `state.MoveState` (a `StrEnum`,
+so the file keeps the same strings) and `Host.decide_engine` returns a `state.EngineDecision`,
+which adds `found`, `unreadable`, `no_door` and `already_running` to the five. The restart
+codes: `wsl_reboot_required` (first ask) and `wsl_reboot_still_owed` (within the budget) are
+`reboot-pending`; `wsl_reboot_again` (budget spent) is a transient `cannot` re-checked at every
+start. `outcome.RESTART_BANNER_CODES` is all three, which is what the console shows its
+restart banner for. `failed` is retried once at the next start (attempts counts
 consecutive failures). `restarts` counts consecutive restart asks. `classify` derives
 `cannot` from the generated table's `automatic` partition. The record is written **before**
 the terminal event is emitted. `outcome.read` refuses a present but unreadable file by name;
@@ -316,10 +361,10 @@ the exact `Remove-Item -Recurse -Force` command. A registered `crucible` distro 
 `/etc/wsl.conf` lacks `WSL_CONF_MARKER` is refused `distro_unmarked` naming the distro, that
 Crucible did not make it, `wsl --unregister crucible`, and that this deletes the distro's files.
 
-### The controller port (`host/portholder.py`)
+### The controller port (`platform/portholder.py`)
 
 When 7101 cannot be bound, or answers as something other than the orchestrator
-(`wrong_controller` in `local.py`), the message names the occupant: `netstat -ano -p tcp`
+(`wrong_controller` in `controller_client.py`), the message names the occupant: `netstat -ano -p tcp`
 gives the listening pid (rows are matched by a `:0` foreign address, never by the localised
 state word) and `tasklist /FI "PID eq N" /FO CSV` its image name. The sentence is "port 7101
 is held by <name> (pid N); stop it or run `crucible local shutdown`"; when the lookup cannot
@@ -331,8 +376,9 @@ Waits for a real ending (up to 2 min for the tray to decide), prints steps and t
 ASCII wrapped words. An outcome older than the install start (`--since`) is printed as
 history, never as this run's result. With `--brief` (an app ran the script) it keeps the short
 wait. When the door is not answering after the decision window, the console starts the
-controller itself (`local._spawn_controller`, the same call `retry.py` and `desktop.py` use)
-and waits `CONTROLLER_START_SECONDS`; only when that spawn fails or the door still does not
+controller itself (`controller_client.spawn`, the same call `retry.py`, `local.py` and
+`desktop.py` make through `controller_client.ensure_running`) and waits
+`controller_client.START_SECONDS`, the one controller start deadline; only when that spawn fails or the door still does not
 answer does it print the sign-out-and-back-in advice, and then with the host log path on its
 own line. Every "did not start" message in `retry.py` and `local.py` names `<home>\host.log`;
 every "reinstall" names `paths.INSTALL_ONE_LINER`, the same `irm ... install.ps1 | iex` line
@@ -341,12 +387,12 @@ the README documents (a test holds them equal).
 ### One `alive` (`processlock.alive`)
 
 `OpenProcess` failing with `ERROR_ACCESS_DENIED` means the pid exists and belongs to somebody
-else, so it is alive. `host/app.py` (`_alive`), `uninstall.py` (`_alive`), `desktop.py` and
+else, so it is alive. `host/app.py` (`_alive`), `uninstall.py` (`_alive`), `traylife.py` and
 `local.py` all read the one implementation in `processlock.py`; the copy in `uninstall.py`
 that read a denied handle as dead is gone (it could have called a live tray stale and planned
 around it).
 
-## LAN door (`host/landoor.py`, `lan.py`)
+## LAN door (`platform/landoor.py`, `lan.py`)
 
 - The WSL engine binds `127.0.0.1` and keeps doing so; `0.0.0.0` inside the NAT'd guest widens
   exposure without reachability. The crossing is a Windows-side fact.
@@ -381,8 +427,9 @@ around it).
 
 - Reads never elevate (`portproxy show`, `firewall show rule`, connection profiles, CIM
   features all answer a standard user). Only a change prompts.
-- The host raises prompts (`wslstate.elevated_argv`, `Start-Process -Verb RunAs`); bootstrap
-  only spells them. The tray is a process the person can see.
+- The host raises prompts through the one builder, `platform/powershell.runas_argv`
+  (`Start-Process -Verb RunAs`); `wslstate.elevated_argv` and `lan.elevated_argv` feed it.
+  Bootstrap only spells them. The tray is a process the person can see.
 - Multiple elevated commands go under **one** prompt as `-EncodedCommand` (base64 UTF-16LE),
   never a temp script file (a user-writable file run as admin is an escalation surface).
 - The elevated exit code is not authority (netsh reports only its last command; UAC can be
@@ -395,8 +442,10 @@ around it).
 ## Tailscale sharing (`sharing.py`)
 
 The host owns `sharing.json` and the Serve entry; `tailscale_advertise` in the engine is a
-projection. Same durable-intent and withdraw-first rules as the LAN door. `Engine.label`
-prefixes refusals so a LAN failure is not reported as a sharing failure.
+projection. Same durable-intent and withdraw-first rules as the LAN door.
+`PairedEngine.label` (default `sharing`) prefixes refusals so a LAN failure is not reported as
+a sharing failure. `PairedEngine` is the paired local engine as an HTTP client; it is not the
+presence enum `state.Engine`.
 
 ## Pairing (`pairing.py`, `connect.py`)
 
@@ -436,8 +485,9 @@ raises (`503 interfaces_unreadable`), never an empty list.
   installation with no `[server]` section runs no engine; an unreadable config is a refusal,
   not "ours". An engine that reports no version is not stale.
 - On Windows a 401 during start is waited out: the tray rewrites the pairing file from the
-  guest within seconds. `door_call` re-reads the pairing file, then asks the guest for its
-  token (Crucible's distro, then the consented one).
+  guest within seconds. `door_call` (`controller_client.call`) tries the pairing file's token,
+  then `[auth].token`, then asks the guest for its token (Crucible's distro, then the
+  consented one).
 - **Upgrade shutdown**: only a `child` engine is stopped; a guest (`wsl-unit` or `found`) keeps
   serving through the Windows swap and is carried by the new tray. The quit sends the handover
   header. A controller is gone when connects are **refused or reset** (ECONNRESET/WinError
@@ -519,8 +569,9 @@ raises (`503 interfaces_unreadable`), never an empty list.
   (a buffered stdin lock in a daemon thread can deadlock interpreter shutdown). A stop requested
   before uvicorn finishes starting is held until it is ready (early `should_exit` skips
   lifespan shutdown). Owned engines use the same keep-alive constant as `crucible serve`.
-- `desktop.close_tray` waits for the tray process to exit: a Windows pack cannot be replaced
-  while it runs.
+- `traylife.close_tray(home)` writes `tray.close` and waits for the tray process to exit: a
+  Windows pack cannot be replaced while it runs. `local shutdown` and `desktop.close_tray`
+  both call it.
 
 ## Host tools (`hosttools.py`)
 

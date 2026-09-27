@@ -5,27 +5,25 @@ import subprocess
 import sys
 from typing import Sequence
 
-GUEST_CRUCIBLE_SH = 'exec "${CRUCIBLE_HOME:-$HOME/.crucible}/server/bin/crucible" "$@"'
+from .. import wsl
+
+GUEST_CRUCIBLE_SH = f'exec "{wsl.GUEST_CRUCIBLE}" "$@"'
 
 
 def guest_command_argv(distro: str, words: Sequence[str]) -> list[str]:
-    from .presence import guest_argv
-
-    return guest_argv(distro, ["bash", "-lc", GUEST_CRUCIBLE_SH, "crucible", *words])
+    return wsl.guest_argv(distro, ["bash", "-lc", GUEST_CRUCIBLE_SH, "crucible", *words])
 
 
 def managed_distro() -> str:
     from ..config import crucible_home
-    from .app import consented_distro
-    from .wsl_states import CRUCIBLE_DISTRO
+    from ..platform.hostconfig import consented_distro
 
-    return consented_distro(crucible_home()) or CRUCIBLE_DISTRO
+    return consented_distro(crucible_home()) or wsl.CRUCIBLE_DISTRO
 
 
 def run(words: Sequence[str]) -> int:
+    from ..platform.runner import ProcessRunner
     from .errors import HostError
-    from .presence import parse_wsl_list, wsl_list_argv
-    from .runner import ProcessRunner
 
     if sys.platform != "win32":
         print(
@@ -47,8 +45,8 @@ def run(words: Sequence[str]) -> int:
     except HostError as exc:
         print(f"crucible: {exc.code}: {exc.message}", file=sys.stderr)
         return 1
-    listed = ProcessRunner(sys.platform, os.environ).run(wsl_list_argv(), timeout_s=60.0)
-    if not listed.ok or distro not in parse_wsl_list(listed.stdout):
+    listed = ProcessRunner(sys.platform, os.environ).run(wsl.list_argv(), timeout_s=60.0)
+    if not listed.ok or distro not in wsl.parse_distro_list(listed.stdout):
         print(
             f'crucible: guest_absent: this PC has no Linux engine yet (no "{distro}" '
             "WSL distribution). Crucible sets it up by itself: open its icon in the "

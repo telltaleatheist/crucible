@@ -43,8 +43,6 @@ PAGE_CONCURRENCY = 12
 
 DIALECT = "dots-json"
 
-CLASS_NAME = "pages"
-
 MODEL_ID = "dots-ocr"
 
 TRUNCATED_FINISH_REASON = "length"
@@ -114,7 +112,6 @@ def engine_block(
 
 
 __all__ = [
-    "CLASS_NAME",
     "DIALECT",
     "DOTS_PROMPT",
     "DPI",

@@ -11,8 +11,7 @@ from typing import Any, Iterator
 from .capability import CLASSES
 from .clock import utcnow
 from .errors import ApiError
-
-ACT_HEADER = "X-Crucible-Act"
+from .protocol import ACT_HEADER
 
 RECENT_DURATIONS = 20
 

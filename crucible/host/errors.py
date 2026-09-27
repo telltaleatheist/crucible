@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..errors import CrucibleError
+from ..platform.errors import HostError
 
 HOST_ERROR_CODES: dict[str, str] = {
     "host_door_unavailable": "The local controller could not bind its control port; its owned child was stopped.",
@@ -97,8 +97,4 @@ HOST_ERROR_CODES: dict[str, str] = {
 }
 
 
-class HostError(CrucibleError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-        self.message = message
+__all__ = ["HOST_ERROR_CODES", "HostError"]

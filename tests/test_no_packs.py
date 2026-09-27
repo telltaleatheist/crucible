@@ -15,7 +15,7 @@ GONE_ASSETS = ("envpacks.json", "crucible-env-", "crucible-rootfs-")
 GENERATED = (
     "sdk/bootstrap/scripts/install.sh",
     "sdk/bootstrap/scripts/install.ps1",
-    "crucible/host/wsl_states.py",
+    "crucible/platform/wsl_table.py",
 )
 
 

@@ -17,17 +17,23 @@ from .backend import (
     feature_floor,
     sm_name,
 )
-from .config import CapabilityRecord, CapabilityRow, desktop_reserve_words
-from .decide import UNSTATED_ENGINE_CONCURRENCY
+from .capabilityrecord import CapabilityRecord, CapabilityRow, desktop_reserve_words
+from .classnames import CLASS_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .denoisemodels import load_all_denoise_manifests
-from .engines import vllm as vllm_engine
-from .engines.vllm import bf16_fallback, card_needs
+from .enginespec import (
+    UNSTATED_ENGINE_CONCURRENCY,
+    bf16_fallback,
+    card_needs,
+    declared_dtype,
+    dtype_on,
+)
 from .errors import ApiError
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .pages import PAGE_CONCURRENCY
 from .precision import below_floor, weight_bits
 from . import asrplan, ttsplan
 from .ttsplan import ServingVariant
+from .upstreamrecord import UPSTREAM_DISPLAY, UPSTREAM_FIELD, UPSTREAM_NAMES
 from .precision import label as precision_label
 from .rvcmodels import load_all_rvc_manifests
 from .voices import load_all_voices
@@ -63,10 +69,32 @@ CPU_BUILD_REASON = (
 
 LOCAL_ANSWER_PREFIX = "the local answer would be: "
 
-UPSTREAM_OFFER = (
-    " This class can run somewhere else instead: add an API key for Anthropic or "
-    "OpenAI in settings and this host will route it rather than refuse it."
-)
+
+def _either(names: list[str]) -> str:
+    if len(names) < 2:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def _upstream_offer() -> str:
+    keyed = [
+        UPSTREAM_DISPLAY[name] for name in UPSTREAM_NAMES if UPSTREAM_FIELD[name] == "key"
+    ]
+    addressed = [
+        UPSTREAM_DISPLAY[name] for name in UPSTREAM_NAMES if UPSTREAM_FIELD[name] == "url"
+    ]
+    ways = []
+    if keyed:
+        ways.append(f"an API key for {_either(keyed)}")
+    if addressed:
+        ways.append(f"the address of a server running {_either(addressed)}")
+    return (
+        f" This class can run somewhere else instead: in settings, add "
+        f"{', or '.join(ways)}, and this host will route it rather than refuse it."
+    )
+
+
+UPSTREAM_OFFER = _upstream_offer()
 
 
 @dataclass(frozen=True)
@@ -81,13 +109,6 @@ class WorkingContext:
             "concurrency": self.concurrency,
             "source": self.source,
         }
-
-
-def _stated_dtype(spec: Any) -> str | None:
-    if getattr(spec, "engine", None) == vllm_engine.ENGINE_NAME:
-        stated = vllm_engine.stated_dtype(spec)
-        return None if stated == vllm_engine.AUTO_DTYPE else stated
-    return getattr(spec, "dtype", None)
 
 
 @dataclass(frozen=True)
@@ -115,7 +136,7 @@ class Candidate:
             ),
             needs=card_needs(manifest.spec(backend_kind)),
             bits=weight_bits(manifest.spec(backend_kind)),
-            dtype=_stated_dtype(manifest.spec(backend_kind)),
+            dtype=declared_dtype(manifest.spec(backend_kind)),
             bf16_fallback=bf16_fallback(manifest.spec(backend_kind)),
             serving=(
                 ttsplan.ladder_for(manifest, manifest.spec(backend_kind), backend_kind)
@@ -146,13 +167,7 @@ class Candidate:
         return tuple(need for need in self.needs if card.has(need) is False)
 
     def run_dtype(self, card: "CardFacts | None") -> str | None:
-        if (
-            self.bf16_fallback is not None
-            and card is not None
-            and card.has(BF16) is False
-        ):
-            return self.bf16_fallback
-        return self.dtype
+        return dtype_on(self.dtype, self.bf16_fallback, card)
 
     def precision_on(self, card: "CardFacts | None") -> str:
         return precision_label(self.bits, self.run_dtype(card))
@@ -463,7 +478,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
                 f"one {DECIDE_STATE_TOKENS}-token state (Foundry's Categorize "
                 "tile: ~24 blocks with 12 of context each side) shared through "
                 f"the prefix cache by up to {UNSTATED_ENGINE_CONCURRENCY} "
-                "questions (decide.UNSTATED_ENGINE_CONCURRENCY), whose tails at "
+                "questions (enginespec.UNSTATED_ENGINE_CONCURRENCY), whose tails at "
                 "one 544-token vLLM block each (PHASE22 section 8a) come to "
                 "about one more state"
             ),
@@ -537,17 +552,44 @@ CLASSES: tuple[CapabilityClass, ...] = (
 
 BY_NAME: dict[str, CapabilityClass] = {entry.name: entry for entry in CLASSES}
 
-ROUTABLE_CLASSES: tuple[str, ...] = tuple(
-    entry.name for entry in CLASSES if entry.routable
-)
 
-SELECTABLE_CLASSES: tuple[str, ...] = tuple(
-    entry.name for entry in CLASSES if entry.candidates is not None
-)
+def _names_agree_with_classnames() -> None:
+    stated = {
+        "CLASS_NAMES": (CLASS_NAMES, tuple(entry.name for entry in CLASSES)),
+        "ROUTABLE_CLASSES": (
+            ROUTABLE_CLASSES,
+            tuple(entry.name for entry in CLASSES if entry.routable),
+        ),
+        "SELECTABLE_CLASSES": (
+            SELECTABLE_CLASSES,
+            tuple(entry.name for entry in CLASSES if entry.candidates is not None),
+        ),
+    }
+    for name, (named, built) in stated.items():
+        if named != built:
+            raise RuntimeError(
+                f"crucible/classnames.py {name} is {named} but capability.CLASSES "
+                f"builds {built}; change crucible/classnames.py to match"
+            )
+
+
+_names_agree_with_classnames()
 
 
 def classes_for_job_type(job_type: str) -> tuple[CapabilityClass, ...]:
     return tuple(entry for entry in CLASSES if entry.job_type == job_type)
+
+
+def models_by_class() -> dict[str, set[str]]:
+    served: dict[str, set[str]] = {}
+    for entry in CLASSES:
+        source = entry.candidates
+        if not isinstance(source, CatalogCandidates):
+            continue
+        if source.load is not load_all_manifests:
+            continue
+        served[entry.name] = {c.id for kind in BACKEND_ENGINES for c in source(kind)}
+    return served
 
 
 def classes_for_model(model_id: str) -> tuple[str, ...]:
@@ -557,17 +599,9 @@ def classes_for_model(model_id: str) -> tuple[str, ...]:
             f"{model_id!r} is not a model in this build's catalog; it ships "
             f"{sorted(catalog)}"
         )
-    names: list[str] = []
-    for entry in CLASSES:
-        source = entry.candidates
-        if not isinstance(source, CatalogCandidates):
-            continue
-        if source.load is not load_all_manifests:
-            continue
-        served = {c.id for kind in BACKEND_ENGINES for c in source(kind)}
-        if model_id in served:
-            names.append(entry.name)
-    return tuple(names)
+    return tuple(
+        name for name, served in models_by_class().items() if model_id in served
+    )
 
 
 @dataclass(frozen=True)
@@ -1764,6 +1798,7 @@ __all__ = [
     "available_bytes",
     "classes_for_job_type",
     "classes_for_model",
+    "models_by_class",
     "decide",
     "decide_all",
     "job_type_enabled",

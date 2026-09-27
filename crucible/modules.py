@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from . import VERSION, catalog, lineup
-from .capability import BY_NAME, CLASSES, WSL_ONLY_JOB_TYPES, CatalogCandidates
+from .capability import BY_NAME, WSL_ONLY_JOB_TYPES, models_by_class
 from .backend import LLAMA_WINDOWS
 from .errors import ApiError, CrucibleError
-from .manifests import BACKEND_ENGINES, load_all_manifests
+from .manifests import BACKEND_ENGINES
 from .tasks import require_installable, require_narrator_engine
 
 DIR_NAME = "modules"
@@ -23,29 +23,13 @@ class ModuleError(CrucibleError):
     ...
 
 
-def _model_classes() -> dict[str, set[str]]:
-    served: dict[str, set[str]] = {}
-    for entry in CLASSES:
-        source = entry.candidates
-        if not isinstance(source, CatalogCandidates):
-            continue
-        if source.load is not load_all_manifests:
-            continue
-        served[entry.name] = {
-            candidate.id
-            for backend_kind in BACKEND_ENGINES
-            for candidate in source(backend_kind)
-        }
-    return served
-
-
-def resolve_class(capability_class: str, named: str | None) -> str:
+def check_class(capability_class: str) -> set[str]:
     if capability_class not in BY_NAME:
         raise ModuleError(
             f"{capability_class!r} is not a capability class; this build knows "
             f"{sorted(BY_NAME)}"
         )
-    served = _model_classes()
+    served = models_by_class()
     if capability_class not in served:
         raise ModuleError(
             f"the {capability_class!r} class does not select a model — it selects "
@@ -53,7 +37,11 @@ def resolve_class(capability_class: str, named: str | None) -> str:
             f"Name what you want with a [[subjects]] entry instead; a generator "
             f"picking one of them would be choosing on the app's behalf"
         )
-    candidates = served[capability_class]
+    return served[capability_class]
+
+
+def resolve_class(capability_class: str, named: str | None) -> str:
+    candidates = check_class(capability_class)
     if not candidates:
         raise ModuleError(
             f"nothing in this build's catalog serves the {capability_class!r} "
@@ -83,21 +71,6 @@ def resolve_class(capability_class: str, named: str | None) -> str:
 
 def declared_models() -> list[str]:
     return catalog.declared_ids()["model"]
-
-
-def check_class(capability_class: str) -> None:
-    if capability_class not in BY_NAME:
-        raise ModuleError(
-            f"{capability_class!r} is not a capability class; they are "
-            f"{sorted(BY_NAME)}"
-        )
-    served = _model_classes()
-    if capability_class not in served:
-        raise ModuleError(
-            f"the {capability_class!r} class does not select a model — it "
-            "selects a voice, an aligner or nothing at all. Name what it "
-            "needs under [[subjects]] instead"
-        )
 
 
 def read_declaration(path: Path) -> dict[str, Any]:

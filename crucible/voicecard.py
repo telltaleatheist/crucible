@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from .voicerepo import REPO_MANIFEST_NAME, REPO_SCHEMA, RepoManifest
-from .voices import VoiceError
+from .voices import MAX_CHARS_BASES, PACE_BASES, VoiceError, check_pace
 
 FM_OWNED: tuple[str, ...] = (
     "higgs_max_chars_served",
@@ -184,8 +184,6 @@ def export_manifest(
     max_chars_basis: str | None,
     uncertified: bool,
 ) -> tuple[str, list[str]]:
-    from .voices import MAX_CHARS_BASES, PACE_BASES
-
     pace = manifest.pace
     has_band = pace.pace_chars_per_sec is not None
     packs = pace.target_chars is not None or pace.safe_min_chars is not None
@@ -360,8 +358,6 @@ def export_manifest(
                 "override"
             )
 
-    from .voices import _check_pace
-
     if has_band or packs:
         table = {
             key: value
@@ -376,7 +372,7 @@ def export_manifest(
             if value is not None
         }
         try:
-            _check_pace(f"{manifest.id} [voice.pace]", table)
+            check_pace(f"{manifest.id} [voice.pace]", table)
         except VoiceError as exc:
             raise CardError(
                 f"the file this would write is one the loader refuses: {exc}. If "

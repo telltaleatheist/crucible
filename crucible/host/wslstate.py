@@ -4,9 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
+from .. import wsl
+from ..platform.powershell import query_argv, runas_argv
+from ..platform.runner import RunResult, Runner
 from .errors import HostError
-from .runner import RunResult, Runner
-from .wsl_states import WSL_STATE_CODES, WSL_STATES, WslStateDef
+from ..platform.wsl_table import WSL_STATE_CODES, WSL_STATES, WslStateDef
 
 NO_HYPERVISOR = re.compile(
     r"HCS_E_HYPERV_NOT_INSTALLED|0x80370102|hypervisor|virtual machine platform",
@@ -94,14 +96,10 @@ def wsl_answer_line(result: RunResult) -> str:
 
 def feature_query_argv() -> list[str]:
     names = " or ".join(f"Name='{name}'" for name in WSL_FEATURES)
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
+    return query_argv(
         f'Get-CimInstance Win32_OptionalFeature -Filter "{names}" | '
-        "ForEach-Object { $_.Name + '=' + $_.InstallState }",
-    ]
+        "ForEach-Object { $_.Name + '=' + $_.InstallState }"
+    )
 
 
 def parse_features(text: str) -> dict[str, int | None]:
@@ -202,7 +200,7 @@ def probe_live(
     signals: Callable[[], tuple[str, ...] | None] = servicing_signals,
 ) -> LiveWsl:
     if status is None:
-        status = runner.run(["wsl.exe", "--status"], timeout_s=PROBE_TIMEOUT_SECONDS)
+        status = runner.run(wsl.status_argv(), timeout_s=PROBE_TIMEOUT_SECONDS)
     queried = runner.run(feature_query_argv(), timeout_s=FEATURE_QUERY_TIMEOUT_SECONDS)
     features = parse_features(queried.stdout) if queried.ok else {name: None for name in WSL_FEATURES}
     return LiveWsl(answer=read_wsl_answer(status), features=features, signals=signals())
@@ -319,12 +317,6 @@ def _wheel_url_template() -> str:
 _WHEEL_URL_TEMPLATE = _wheel_url_template()
 
 
-def parse_distro_names(text: str) -> list[str]:
-    from .presence import parse_wsl_list
-
-    return parse_wsl_list(text)
-
-
 def detect(
     runner: Runner,
     *,
@@ -409,14 +401,4 @@ def elevated_argv(state: WslState) -> list[str]:
             "wsl_state_unknown",
             f"{state.code}'s action is {state.action_kind}, which is not elevated",
         )
-    program, *rest = state.action_argv
-    quoted = ",".join("'" + word.replace("'", "''") + "'" for word in rest)
-    arguments = "" if quoted == "" else f" -ArgumentList {quoted}"
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        f"Start-Process -Verb RunAs -Wait -FilePath '{program}'{arguments}",
-    ]
+    return runas_argv(state.action_argv)

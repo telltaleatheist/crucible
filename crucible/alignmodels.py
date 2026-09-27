@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +8,8 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
+from .manifests import MODELS_PULL_COMMAND
+from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
 ALIGN_DIR_ENV = "CRUCIBLE_ALIGN_DIR"
 
@@ -31,10 +32,6 @@ _BACKEND_REQUIRED: dict[str, type] = {
 }
 
 DTYPES = frozenset({"bfloat16", "float16", "float32"})
-
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 class AlignManifestError(CrucibleError):
@@ -76,6 +73,13 @@ class AlignManifest:
     backends: dict[str, AlignBackendSpec]
     path: Path
 
+    @property
+    def pull_command(self) -> str:
+        return f"{MODELS_PULL_COMMAND} {self.id}"
+
+    def aliases(self) -> "tuple[AlignManifest, ...]":
+        return ()
+
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
 
@@ -113,27 +117,6 @@ def align_manifests_dir() -> Path:
     return path
 
 
-def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    unknown = sorted(set(table) - set(required))
-    if unknown:
-        raise AlignManifestError(
-            f"{where}: unknown key(s) {unknown}; this table takes exactly "
-            f"{sorted(required)}"
-        )
-    missing = sorted(set(required) - set(table))
-    if missing:
-        raise AlignManifestError(f"{where}: missing required key(s) {missing}")
-    for key, kind in required.items():
-        value = table[key]
-        wrong = not isinstance(value, kind)
-        if kind is int and isinstance(value, bool):
-            wrong = True
-        if wrong:
-            raise AlignManifestError(
-                f"{where}: {key} must be {kind.__name__}, got {type(value).__name__}"
-            )
-
-
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManifest:
     unknown = sorted(set(document) - {"model", "backends"})
     if unknown:
@@ -149,10 +132,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
     model = document["model"]
     if not isinstance(model, dict):
         raise AlignManifestError(f"{path.name}: [model] must be a table")
-    _check_table(f"{path.name} [model]", model, _MODEL_REQUIRED)
+    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, error=AlignManifestError)
 
     model_id = model["id"]
-    if not _MODEL_ID.match(model_id):
+    if not MODEL_ID_PATTERN.match(model_id):
         raise AlignManifestError(
             f"{path.name}: model.id {model_id!r} must be lower-case and start with "
             "a letter or digit ([a-z0-9][a-z0-9._-]*)"
@@ -191,7 +174,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
             )
         if not isinstance(block, dict):
             raise AlignManifestError(f"{where}: must be a table")
-        _check_table(where, block, _BACKEND_REQUIRED)
+        check_table(where, block, _BACKEND_REQUIRED, error=AlignManifestError)
 
         engine = block["engine"]
         if engine != ALIGN_BACKEND_ENGINES[kind]:
@@ -199,12 +182,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AlignManif
                 f"{where}: engine {engine!r} does not align on {kind}; that "
                 f"backend's align engine is {ALIGN_BACKEND_ENGINES[kind]!r}"
             )
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise AlignManifestError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise AlignManifestError(
                 f"{where}: revision {block['revision']!r} must be a full 40-character "
                 "commit sha, so a pull is reproducible; branch names are not pins"

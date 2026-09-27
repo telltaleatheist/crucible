@@ -9,6 +9,7 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
+from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, SHA256_PATTERN, check_table
 
 RVC_DIR_ENV = "CRUCIBLE_RVC_DIR"
 
@@ -33,11 +34,10 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
 }
 
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 _ARCHIVE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._/-]+\.tar\.gz$")
+
+
+PULL_COMMAND = "crucible rvc pull"
 
 
 class RvcManifestError(CrucibleError):
@@ -83,6 +83,13 @@ class RvcManifest:
     backends: dict[str, RvcBackendSpec]
     path: Path
 
+    @property
+    def pull_command(self) -> str:
+        return f"{PULL_COMMAND} {self.id}"
+
+    def aliases(self) -> "tuple[RvcManifest, ...]":
+        return ()
+
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
 
@@ -121,27 +128,6 @@ def rvc_manifests_dir() -> Path:
     return path
 
 
-def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    unknown = sorted(set(table) - set(required))
-    if unknown:
-        raise RvcManifestError(
-            f"{where}: unknown key(s) {unknown}; this table takes exactly "
-            f"{sorted(required)}"
-        )
-    missing = sorted(set(required) - set(table))
-    if missing:
-        raise RvcManifestError(f"{where}: missing required key(s) {missing}")
-    for key, kind in required.items():
-        value = table[key]
-        wrong = not isinstance(value, kind)
-        if kind is int and isinstance(value, bool):
-            wrong = True
-        if wrong:
-            raise RvcManifestError(
-                f"{where}: {key} must be {kind.__name__}, got {type(value).__name__}"
-            )
-
-
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifest:
     unknown = sorted(set(document) - {"model", "backends"})
     if unknown:
@@ -157,10 +143,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifes
     model = document["model"]
     if not isinstance(model, dict):
         raise RvcManifestError(f"{path.name}: [model] must be a table")
-    _check_table(f"{path.name} [model]", model, _MODEL_REQUIRED)
+    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, error=RvcManifestError)
 
     model_id = model["id"]
-    if not _MODEL_ID.match(model_id):
+    if not MODEL_ID_PATTERN.match(model_id):
         raise RvcManifestError(
             f"{path.name}: model.id {model_id!r} must be lower-case and start with "
             "a letter or digit ([a-z0-9][a-z0-9._-]*)"
@@ -196,7 +182,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifes
             )
         if not isinstance(block, dict):
             raise RvcManifestError(f"{where}: must be a table")
-        _check_table(where, block, _BACKEND_REQUIRED)
+        check_table(where, block, _BACKEND_REQUIRED, error=RvcManifestError)
 
         engine = block["engine"]
         if engine != RVC_BACKEND_ENGINES[kind]:
@@ -204,12 +190,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifes
                 f"{where}: engine {engine!r} does not convert on {kind}; that "
                 f"backend's rvc engine is {RVC_BACKEND_ENGINES[kind]!r}"
             )
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise RvcManifestError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise RvcManifestError(
                 f"{where}: revision {block['revision']!r} must be a full 40-character "
                 "commit sha, so a pull is reproducible; branch names are not pins"
@@ -220,7 +206,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcManifes
                 "`.tar.gz` path with no leading slash and no `..`; it is fetched by "
                 "name and unpacked onto this host's disk"
             )
-        if not _SHA256.match(block["archive_sha256"]):
+        if not SHA256_PATTERN.match(block["archive_sha256"]):
             raise RvcManifestError(
                 f"{where}: archive_sha256 {block['archive_sha256']!r} must be 64 "
                 "lower-case hex characters"

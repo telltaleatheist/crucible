@@ -90,9 +90,12 @@ therefore the model family. Crucible picks the quantization.
 ### Precision (`precision`, Owen 2026-09-26: *"we can quantize if we need to. no less than 4."*)
 
 - A stated bf16 on a card without bf16 runs as **fp16**
-  (`engines.vllm.bf16_fallback` / `card_args` add `--dtype float16`). It uses
+  (`enginespec.bf16_fallback` / `card_args` add `--dtype float16`). It uses
   the same bytes, keeps the same place in the walk, and the verdict names the
   precision (`_precision_note`). vLLM itself picks fp16 for `auto` on such a card.
+- The stated dtype is `enginespec.declared_dtype`, the one rule `capability`,
+  `precision` and `engines.vllm` share; `enginespec` imports only `backend`, so
+  neither `capability` nor `precision` loads an engine adapter.
 - **Floor: 4 bits** (`precision.MIN_WEIGHT_BITS`). Nothing below it is ever
   a candidate, and a GGUF that names one is refused at load
   (`manifests._gguf_name`).
@@ -101,7 +104,7 @@ therefore the model family. Crucible picks the quantization.
   `INT4`, ...), then a stated dtype. A block that states none (faster-whisper,
   RVC, separator) is unknown and is not refused.
 - Only a measured fact can bar a candidate at every precision: today that is
-  `vllm` false (`engines.vllm.card_needs`). A class left with only barred
+  `vllm` false (`enginespec.card_needs`). A class left with only barred
   candidates is refused with that fact (`Decision.lacking_features`).
 - **No quality check on quantization.** A lower precision is chosen from
   memory and card facts alone. Crucible never measures whether the result

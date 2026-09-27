@@ -6,31 +6,39 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from ..atomicjson import write_json
 from .errors import HostError
-from .wsl_states import WSL_OUTCOME_NAME, WSL_STATES
+from .state import MoveState
+from ..platform.wsl_table import WSL_OUTCOME_NAME, WSL_STATES
 
 OUTCOME_NAME = WSL_OUTCOME_NAME
 
-DONE = "done"
-REBOOT_PENDING = "reboot-pending"
-CANNOT = "cannot"
-FAILED = "failed"
-DECLINED = "declined"
-STATES: tuple[str, ...] = (DONE, REBOOT_PENDING, CANNOT, FAILED, DECLINED)
+DONE = MoveState.DONE
+REBOOT_PENDING = MoveState.REBOOT_PENDING
+CANNOT = MoveState.CANNOT
+FAILED = MoveState.FAILED
+DECLINED = MoveState.DECLINED
+STATES: tuple[str, ...] = tuple(state.value for state in MoveState)
 
 FAILED_ATTEMPT_CEILING = 2
 
-CANNOT_CODES: frozenset[str] = frozenset({"wsl_reboot_again"})
+REBOOT_REQUIRED_CODE = "wsl_reboot_required"
 
-REBOOT_CODE = "wsl_reboot_required"
+REBOOT_STILL_OWED_CODE = "wsl_reboot_still_owed"
 
-REBOOT_AGAIN_CODE = "wsl_reboot_still_owed"
+REBOOT_BUDGET_SPENT_CODE = "wsl_reboot_again"
 
-REBOOT_CODES: frozenset[str] = frozenset({REBOOT_CODE, REBOOT_AGAIN_CODE})
+REBOOT_CODES: frozenset[str] = frozenset({REBOOT_REQUIRED_CODE, REBOOT_STILL_OWED_CODE})
 
-TRANSIENT_CANNOT_CODES: frozenset[str] = frozenset({"wsl_reboot_again"})
+TRANSIENT_CANNOT_CODES: frozenset[str] = frozenset({REBOOT_BUDGET_SPENT_CODE})
+
+RESTART_BANNER_CODES: frozenset[str] = REBOOT_CODES | TRANSIENT_CANNOT_CODES
 
 FIRMWARE_CANNOT_CODES: frozenset[str] = frozenset({"virtualization_disabled"})
+
+REBOOT_CODE = REBOOT_REQUIRED_CODE
+
+CANNOT_CODES = TRANSIENT_CANNOT_CODES
 
 
 def _utc_now() -> str:
@@ -39,7 +47,7 @@ def _utc_now() -> str:
 
 @dataclass(frozen=True)
 class Outcome:
-    state: str
+    state: MoveState
     code: str | None
     sentence: str | None
     at: str
@@ -49,7 +57,7 @@ class Outcome:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "state": self.state,
+            "state": self.state.value,
             "code": self.code,
             "sentence": self.sentence,
             "at": self.at,
@@ -69,7 +77,7 @@ def path(home: Path) -> Path:
     return Path(home) / OUTCOME_NAME
 
 
-def classify(code: str) -> str:
+def classify(code: str) -> MoveState:
     if code in REBOOT_CODES:
         return REBOOT_PENDING
     if code in CANNOT_CODES:
@@ -132,7 +140,7 @@ def read(home: Path) -> Outcome | None:
     if not isinstance(restarts, int) or isinstance(restarts, bool) or restarts < 0:
         raise HostError("wsl_outcome_invalid", f"{file} says restarts={restarts!r}.")
     return Outcome(
-        state=state,
+        state=MoveState(state),
         code=code,
         sentence=sentence,
         at=at,
@@ -159,7 +167,7 @@ def read_or_quarantine(home: Path, log: Callable[[str], None]) -> Outcome | None
 def write(
     home: Path,
     *,
-    state: str,
+    state: MoveState | str,
     release: str,
     code: str | None = None,
     sentence: str | None = None,
@@ -179,7 +187,7 @@ def write(
             "an outcome names the release its move was for, and this one names none.",
         )
     outcome = Outcome(
-        state=state,
+        state=MoveState(state),
         code=code,
         sentence=sentence,
         at=now(),
@@ -187,9 +195,5 @@ def write(
         attempts=attempts,
         restarts=restarts,
     )
-    home = Path(home)
-    home.mkdir(parents=True, exist_ok=True)
-    staged = path(home).with_suffix(".tmp")
-    staged.write_text(json.dumps(outcome.to_dict(), indent=2) + "\n", encoding="utf-8")
-    staged.replace(path(home))
+    write_json(path(home), outcome.to_dict())
     return outcome

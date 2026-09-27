@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from .enginespec import UNSTATED_ENGINE_CONCURRENCY
 from .errors import ApiError
 
 
@@ -32,8 +33,6 @@ YESNO_OPTIONS: tuple[str, str] = ("Yes", "No")
 MAX_IMAGES = 8
 
 LABEL_MARGIN = 4
-
-UNSTATED_ENGINE_CONCURRENCY = 16
 
 SYSTEM_PROMPT = (
     "You are a precise classifier. You are shown a state and one question about it, with "
