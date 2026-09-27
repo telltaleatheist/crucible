@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -129,15 +130,7 @@ class AlignLongformJobType:
 
     def run(self, job: Job, ctx: JobContext) -> None:
         params = validate(job.params)
-        inputs = ctx.inputs()
-        if len(inputs) != 1:
-            raise JobError(
-                "one_audio_input",
-                f"{self.name} takes exactly one input — the audiobook — and got "
-                f"{len(inputs)} ({sorted(inputs)}). The EPUB never crosses: the sentences "
-                "are in params, as text.",
-            )
-        audio = next(iter(inputs.values()))
+        audio = _the_one_audio(self.name, ctx)
         ffmpeg = hosttools.ffmpeg_path()
         if ffmpeg is None:
             raise JobError(
@@ -145,120 +138,177 @@ class AlignLongformJobType:
                 "align-longform decodes the audiobook and cuts its windows with ffmpeg, "
                 "and there is none on this host's PATH.",
             )
-
         aligner = load_all_align_manifests()[job.model or ALIGNER_MODEL]
         aligner_spec = aligner.backends[self._config.backend_kind]
         aligner_weights = weights.require_installed(self._config, aligner, aligner_spec).path
         rough = load_all_asr_manifests()[params.rough_model]
         rough_spec = rough.backends[self._config.backend_kind]
         rough_weights = weights.require_installed(self._config, rough, rough_spec).path
-
+        book = _Book(
+            config=self._config, job=job, ctx=ctx, params=params, audio=audio,
+            ffmpeg=ffmpeg, aligner=aligner, aligner_spec=aligner_spec,
+            aligner_weights=aligner_weights, rough_weights=rough_weights,
+        )
         try:
-            duration = stages.probe_duration(ffmpeg, audio)
-
-            ctx.progress(0.0, "transcribing the audiobook", stage=STAGES[0])
-            words = stages.transcribe(
-                python=jobenv.env_python(
-                    self._config.home,
-                    jobenv.worker_env("asr", self._config.backend_kind),
-                ),
-                weights_dir=rough_weights,
-                ffmpeg=ffmpeg,
-                audio=audio,
-                language=params.language,
-                log_path=self._config.logs_dir / f"alf-asr-{job.id}.log",
-                on_progress=lambda m: ctx.progress(
-                    STAGE_END["transcribe"] * min(1.0, float(m.get("processed_s", 0))
-                                                  / max(1.0, duration)),
-                    "transcribing the audiobook", stage=STAGES[0],
-                ),
-                cancelled=lambda: ctx.cancelled,
-            )
-            ctx.raise_if_cancelled()
-
-            ctx.progress(STAGE_END["transcribe"], "placing the book against the transcript",
-                         stage=STAGES[1])
-            rough_times = coarse.coarse_align(
-                [s.text for s in params.sentences],
-                [(coarse._norm(w), t) for w, t in words],
-            )
-            ctx.raise_if_cancelled()
-
-            chunk_plan = plan.plan_chunks(
-                rough_times.rough, rough_times.first_index, rough_times.last_index,
-                duration, params.chunk_s,
-            )
-            warning = plan.capped_warning(chunk_plan, params.chunk_s)
-            if warning:
-                ctx.progress(STAGE_END["coarse-align"], warning, stage=STAGES[1])
-            if not chunk_plan.chunks:
-                raise JobError(
-                    "nothing_narrated",
-                    "no sentence could be placed in the audio, so there is nothing to align. "
-                    "Either the book and the audiobook are different works, or the language is "
-                    "wrong for this narration.",
-                )
-
-            ctx.progress(STAGE_END["coarse-align"], f"aligning {len(chunk_plan.chunks)} window(s)",
-                         stage=STAGES[2])
-            chunk_dir = ctx.scratch / "chunks"
-            chunk_dir.mkdir(parents=True, exist_ok=True)
-            files: list[Path] = []
-            texts: list[str] = []
-            for chunk in chunk_plan.chunks:
-                out = chunk_dir / f"{chunk.index}.wav"
-                stages.slice_chunk(ffmpeg, audio, chunk.start, chunk.end, out)
-                files.append(out)
-                texts.append(" ".join(params.sentences[i].text for i in chunk.sentences))
-            ctx.raise_if_cancelled()
-
-            aligned = stages.align_chunks(
-                python=jobenv.env_python(
-                    self._config.home,
-                    jobenv.worker_env("align", self._config.backend_kind),
-                ),
-                weights_dir=aligner_weights,
-                ffmpeg=ffmpeg,
-                language_name=params.language_name,
-                chunk_files=files,
-                chunk_texts=texts,
-                max_audio_s=params.chunk_s * 2,
-                log_path=self._config.logs_dir / f"alf-align-{job.id}.log",
-                spec=aligner_spec,
-                cancelled=lambda: ctx.cancelled,
-            )
-
-            ctx.progress(STAGE_END["align"], "writing the transcript", stage=STAGES[3])
-            written = _build_cues(params, chunk_plan, aligned)
-            if not written:
-                raise JobError(
-                    "no_cues",
-                    "the aligner placed no item, so there is nothing to write. A bare WEBVTT "
-                    "is not a transcript.",
-                )
-            vtt = cues.write_vtt(written)
-            vtt_path = ctx.scratch / "alignment.vtt"
-            vtt_path.write_text(vtt, encoding="utf-8")
-            ctx.artifact("alignment.vtt", vtt_path)
-            report_path = ctx.scratch / "align-report.json"
-            stages.write_report(report_path, {
-                "sentences": len(params.sentences),
-                "placed": len(written),
-                "dropped": rough_times.dropped,
-                "rate_tokens_per_second": round(rough_times.rate, 3),
-                "chunks": len(chunk_plan.chunks),
-                "capped": chunk_plan.capped,
-                "duration_s": round(duration, 3),
-                "rough_model": params.rough_model,
-                "aligner": f"{aligner.id}@{aligner_spec.revision}",
-            })
-            ctx.artifact("align-report.json", report_path)
-            ctx.progress(1.0, f"placed {len(written)} of {len(params.sentences)} sentence(s)",
-                         stage=STAGES[3])
+            _run_stages(book)
         except stages.StageFailed as exc:
             raise JobError(exc.code, str(exc)) from None
         except cues.NoCues as exc:
             raise JobError("no_cues", str(exc)) from None
+
+
+@dataclass
+class _Book:
+
+    config: Config
+    job: Job
+    ctx: JobContext
+    params: Any
+    audio: Path
+    ffmpeg: str
+    aligner: Any
+    aligner_spec: Any
+    aligner_weights: Path
+    rough_weights: Path
+    duration: float = 0.0
+
+    def worker_python(self, job_type: str) -> Path:
+        return jobenv.env_python(
+            self.config.home, jobenv.worker_env(job_type, self.config.backend_kind)
+        )
+
+
+def _the_one_audio(name: str, ctx: JobContext) -> Path:
+    inputs = ctx.inputs()
+    if len(inputs) != 1:
+        raise JobError(
+            "one_audio_input",
+            f"{name} takes exactly one input — the audiobook — and got "
+            f"{len(inputs)} ({sorted(inputs)}). The EPUB never crosses: the sentences "
+            "are in params, as text.",
+        )
+    return next(iter(inputs.values()))
+
+
+def _run_stages(book: _Book) -> None:
+    ctx = book.ctx
+    book.duration = stages.probe_duration(book.ffmpeg, book.audio)
+    words = _transcribe(book)
+    ctx.raise_if_cancelled()
+    rough_times = _place_sentences(book, words)
+    ctx.raise_if_cancelled()
+    chunk_plan = _plan_windows(book, rough_times)
+    aligned = _align_windows(book, chunk_plan)
+    _write_transcript(book, rough_times, chunk_plan, aligned)
+
+
+def _transcribe(book: _Book) -> list[tuple[str, float]]:
+    ctx = book.ctx
+    ctx.progress(0.0, "transcribing the audiobook", stage=STAGES[0])
+    return stages.transcribe(
+        python=book.worker_python("asr"),
+        weights_dir=book.rough_weights,
+        ffmpeg=book.ffmpeg,
+        audio=book.audio,
+        language=book.params.language,
+        log_path=book.config.logs_dir / f"alf-asr-{book.job.id}.log",
+        on_progress=lambda m: ctx.progress(
+            STAGE_END["transcribe"] * min(1.0, float(m.get("processed_s", 0))
+                                          / max(1.0, book.duration)),
+            "transcribing the audiobook", stage=STAGES[0],
+        ),
+        cancelled=lambda: ctx.cancelled,
+    )
+
+
+def _place_sentences(book: _Book, words: list[tuple[str, float]]) -> coarse.CoarseResult:
+    book.ctx.progress(STAGE_END["transcribe"], "placing the book against the transcript",
+                      stage=STAGES[1])
+    return coarse.coarse_align(
+        [s.text for s in book.params.sentences],
+        [(coarse._norm(w), t) for w, t in words],
+    )
+
+
+def _plan_windows(book: _Book, rough_times: coarse.CoarseResult) -> Any:
+    chunk_s = book.params.chunk_s
+    chunk_plan = plan.plan_chunks(
+        rough_times.rough, rough_times.first_index, rough_times.last_index,
+        book.duration, chunk_s,
+    )
+    warning = plan.capped_warning(chunk_plan, chunk_s)
+    if warning:
+        book.ctx.progress(STAGE_END["coarse-align"], warning, stage=STAGES[1])
+    if not chunk_plan.chunks:
+        raise JobError(
+            "nothing_narrated",
+            "no sentence could be placed in the audio, so there is nothing to align. "
+            "Either the book and the audiobook are different works, or the language is "
+            "wrong for this narration.",
+        )
+    return chunk_plan
+
+
+def _align_windows(book: _Book, chunk_plan: Any) -> list[dict[str, Any]]:
+    ctx = book.ctx
+    ctx.progress(STAGE_END["coarse-align"], f"aligning {len(chunk_plan.chunks)} window(s)",
+                 stage=STAGES[2])
+    chunk_dir = ctx.scratch / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    files: list[Path] = []
+    texts: list[str] = []
+    for chunk in chunk_plan.chunks:
+        out = chunk_dir / f"{chunk.index}.wav"
+        stages.slice_chunk(book.ffmpeg, book.audio, chunk.start, chunk.end, out)
+        files.append(out)
+        texts.append(" ".join(book.params.sentences[i].text for i in chunk.sentences))
+    ctx.raise_if_cancelled()
+    return stages.align_chunks(
+        python=book.worker_python("align"),
+        weights_dir=book.aligner_weights,
+        ffmpeg=book.ffmpeg,
+        language_name=book.params.language_name,
+        chunk_files=files,
+        chunk_texts=texts,
+        max_audio_s=book.params.chunk_s * 2,
+        log_path=book.config.logs_dir / f"alf-align-{book.job.id}.log",
+        spec=book.aligner_spec,
+        cancelled=lambda: ctx.cancelled,
+    )
+
+
+def _write_transcript(
+    book: _Book, rough_times: coarse.CoarseResult, chunk_plan: Any,
+    aligned: list[dict[str, Any]],
+) -> None:
+    ctx = book.ctx
+    params = book.params
+    ctx.progress(STAGE_END["align"], "writing the transcript", stage=STAGES[3])
+    written = _build_cues(params, chunk_plan, aligned)
+    if not written:
+        raise JobError(
+            "no_cues",
+            "the aligner placed no item, so there is nothing to write. A bare WEBVTT "
+            "is not a transcript.",
+        )
+    vtt_path = ctx.scratch / "alignment.vtt"
+    vtt_path.write_text(cues.write_vtt(written), encoding="utf-8")
+    ctx.artifact("alignment.vtt", vtt_path)
+    report_path = ctx.scratch / "align-report.json"
+    stages.write_report(report_path, {
+        "sentences": len(params.sentences),
+        "placed": len(written),
+        "dropped": rough_times.dropped,
+        "rate_tokens_per_second": round(rough_times.rate, 3),
+        "chunks": len(chunk_plan.chunks),
+        "capped": chunk_plan.capped,
+        "duration_s": round(book.duration, 3),
+        "rough_model": params.rough_model,
+        "aligner": f"{book.aligner.id}@{book.aligner_spec.revision}",
+    })
+    ctx.artifact("align-report.json", report_path)
+    ctx.progress(1.0, f"placed {len(written)} of {len(params.sentences)} sentence(s)",
+                 stage=STAGES[3])
 
 
 def _build_cues(params: Any, chunk_plan: Any, aligned: list[dict[str, Any]]) -> list[cues.Cue]:

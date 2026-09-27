@@ -28,7 +28,12 @@ The domain the routes call:
 | `crucible/decide.py` | `decide_on_engine` (the HTTP post is injected), `refuse_images_not_served`, `refuse_unreadable_labels` |
 | `crucible/voicerepo.py` | `repin` and `pinned_backends` (the hub lookup is injected) |
 
-Route handlers are closures inside `register(routers, ctx)`. They read every
+Route handlers are closures over `ctx`, attached by `register(routers, ctx)`. In
+`activity.py` and `catalog.py` each route has a module-level factory
+`_<handler>_handler(ctx)` returning the handler under its original name and docstring
+(the name is the OpenAPI operationId), and `register` only attaches them; the bodies
+are small module-level helpers (`_activity_body` and its `_*_section` parts,
+`_refuse_if_held` and `_subject_holder` for a removal). Handlers read every
 service through `ctx` (`ctx.store`, `ctx.leases`, `ctx.http`, …) and never touch
 `request.app.state`. `app.state` stays the storage: `crucible serve` writes
 `bind_host`/`bind_port` into it and tests read and swap services there, so each

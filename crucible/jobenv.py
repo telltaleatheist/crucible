@@ -441,110 +441,115 @@ def installed_packages(home: Path, spec: EnvSpec) -> dict[str, str]:
     }
 
 
-def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
-    directory = env_dir(home, spec)
-    python = env_python(home, spec)
-    install = f"crucible install {spec.job_type}"
-    if not python.is_file():
-        return EnvStatus(
-            installed=False,
-            path=directory,
-            detail=f"no venv at {directory} — run `{install}`",
-            python_version=None,
-            packages={},
-        )
-    stamp = stamp_path(home, spec)
-    if not stamp.is_file():
-        return EnvStatus(
-            installed=False,
-            path=directory,
-            detail=(
-                f"{directory} exists but {stamp.name} does not: the last "
-                f"`{install}` did not finish. Re-run it."
-            ),
-            python_version=None,
-            packages={},
-        )
-    record = _read_stamp(stamp)
-    if record is None:
-        return EnvStatus(
-            installed=False,
-            path=directory,
-            detail=(
-                f"{stamp} was written by an older Crucible and does not say what "
-                f"this env was built from — run `{install}`"
-            ),
-            python_version=None,
-            packages={},
-        )
-    environment_sha256 = environment_digest(record["recipe_text"])
-    direct_references = record["direct_references"]
-    recipe_text = record["recipe_text"]
-    if record["backend"] != backend_kind:
-        return EnvStatus(
-            installed=False,
-            path=directory,
-            detail=(
-                f"{directory} was installed for backend {record['backend']!r}, this "
-                f"host is {backend_kind!r} — run `{install} --force`"
-            ),
-            python_version=record["python_version"],
-            packages={},
-            environment_sha256=environment_sha256,
-            direct_references=direct_references,
-            recipe_text=recipe_text,
-        )
+@dataclass(frozen=True)
+class _EnvFindings:
 
-    present = installed_packages(home, spec)
-    recipe = recipe_for(spec)
-    pins = recipe_pins(recipe)
-    wrong = sorted(
+    installed: bool
+    detail: str
+    stamped: dict[str, Any] | None = None
+    packages: dict[str, str] | None = None
+
+
+def _stamped(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "environment_sha256": environment_digest(record["recipe_text"]),
+        "direct_references": record["direct_references"],
+        "recipe_text": record["recipe_text"],
+        "python_version": record["python_version"],
+    }
+
+
+def _pin_drift(pins: dict[str, str], present: dict[str, str]) -> list[str]:
+    return sorted(
         f"{name} is {present.get(name, 'absent')}, recipe pins {version}"
         for name, version in pins.items()
         if present.get(name) != version
     )
-    built_from = installed_direct_references(home, spec)
-    pinned_references = recipe_direct_references(recipe)
-    wrong += sorted(
+
+
+def _reference_drift(pinned: dict[str, str], built_from: dict[str, str]) -> list[str]:
+    return sorted(
         f"{name} was installed from "
         f"{built_from.get(name, 'no recorded commit')}, recipe pins {commit}"
-        for name, commit in pinned_references.items()
+        for name, commit in pinned.items()
         if built_from.get(name) != commit
     )
-    if wrong:
-        return EnvStatus(
-            installed=False,
-            path=directory,
-            detail=f"{directory} does not match {recipe.name}: " + "; ".join(wrong),
-            python_version=record["python_version"],
-            packages=present,
-            environment_sha256=environment_sha256,
-            direct_references=direct_references,
-            recipe_text=recipe_text,
-        )
+
+
+def _headline_words(
+    spec: EnvSpec, directory: Path, recipe: Path,
+    pinned_references: dict[str, str], present: dict[str, str],
+) -> str:
     if spec.headline in pinned_references:
-        headline = f"{spec.headline} @ {pinned_references[spec.headline][:12]}"
-    elif spec.headline in present:
-        headline = f"{spec.headline} {present[spec.headline]}"
-    else:
-        raise EnvError(
-            f"{directory} matches {recipe.name}, but {spec.headline!r} — the "
-            f"package the {spec.key} env exists for — is not installed in it. "
-            "Either the recipe no longer installs it or the headline names the "
-            "wrong thing; both are bugs in this build, not in the env."
-        )
+        return f"{spec.headline} @ {pinned_references[spec.headline][:12]}"
+    if spec.headline in present:
+        return f"{spec.headline} {present[spec.headline]}"
+    raise EnvError(
+        f"{directory} matches {recipe.name}, but {spec.headline!r} — the "
+        f"package the {spec.key} env exists for — is not installed in it. "
+        "Either the recipe no longer installs it or the headline names the "
+        "wrong thing; both are bugs in this build, not in the env."
+    )
+
+
+def _contents_findings(
+    home: Path, spec: EnvSpec, directory: Path, stamped: dict[str, Any]
+) -> _EnvFindings:
+    present = installed_packages(home, spec)
+    recipe = recipe_for(spec)
+    wrong = _pin_drift(recipe_pins(recipe), present)
+    built_from = installed_direct_references(home, spec)
+    pinned_references = recipe_direct_references(recipe)
+    wrong += _reference_drift(pinned_references, built_from)
+    if wrong:
+        detail = f"{directory} does not match {recipe.name}: " + "; ".join(wrong)
+        return _EnvFindings(False, detail, stamped, present)
+    headline = _headline_words(spec, directory, recipe, pinned_references, present)
+    detail = (
+        f"{headline}, python {stamped['python_version']}, "
+        f"{len(present)} packages"
+    )
+    return _EnvFindings(True, detail, stamped, present)
+
+
+def _env_findings(home: Path, spec: EnvSpec, backend_kind: str) -> _EnvFindings:
+    directory = env_dir(home, spec)
+    install = f"crucible install {spec.job_type}"
+    if not env_python(home, spec).is_file():
+        return _EnvFindings(False, f"no venv at {directory} — run `{install}`")
+    stamp = stamp_path(home, spec)
+    if not stamp.is_file():
+        return _EnvFindings(False, (
+            f"{directory} exists but {stamp.name} does not: the last "
+            f"`{install}` did not finish. Re-run it."
+        ))
+    record = _read_stamp(stamp)
+    if record is None:
+        return _EnvFindings(False, (
+            f"{stamp} was written by an older Crucible and does not say what "
+            f"this env was built from — run `{install}`"
+        ))
+    stamped = _stamped(record)
+    if record["backend"] != backend_kind:
+        return _EnvFindings(False, (
+            f"{directory} was installed for backend {record['backend']!r}, this "
+            f"host is {backend_kind!r} — run `{install} --force`"
+        ), stamped)
+    return _contents_findings(home, spec, directory, stamped)
+
+
+def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
+    found = _env_findings(home, spec, backend_kind)
+    stamped = found.stamped or {}
     return EnvStatus(
-        installed=True,
-        path=directory,
-        detail=(
-            f"{headline}, python {record['python_version']}, "
-            f"{len(present)} packages"
-        ),
-        python_version=record["python_version"],
-        packages=present,
-        environment_sha256=environment_sha256,
-        direct_references=direct_references,
-        recipe_text=recipe_text,
+        installed=found.installed,
+        path=env_dir(home, spec),
+        detail=found.detail,
+        python_version=stamped.get("python_version"),
+        packages={} if found.packages is None else found.packages,
+        environment_sha256=stamped.get("environment_sha256"),
+        direct_references=stamped.get("direct_references"),
+        recipe_text=stamped.get("recipe_text"),
     )
 
 
@@ -718,6 +723,91 @@ def plan_install(
     )
 
 
+def _build_venv(
+    home: Path, spec: EnvSpec, backend_kind: str, recipe: Path, on_line: Any
+) -> Path:
+    directory = env_dir(home, spec)
+    refuse_without_room(
+        job_type=spec.job_type, recipe=recipe, directory=directory
+    )
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    if directory.exists():
+        shutil.rmtree(directory)
+    _run(
+        [
+            interpreter_for(spec, home, backend_kind, on_line=on_line),
+            "-m",
+            "venv",
+            str(directory),
+        ],
+        f"could not create the venv at {directory}",
+        on_line,
+    )
+    python = env_python(home, spec)
+    if not python.is_file():
+        raise EnvError(
+            f"`python -m venv {directory}` returned 0 but there is no {python}"
+        )
+    _run(
+        [str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"],
+        f"could not upgrade pip in the {spec.job_type} env",
+        on_line,
+    )
+    return python
+
+
+def _stamped_python_version(home: Path, spec: EnvSpec) -> str | None:
+    return json.loads(
+        stamp_path(home, spec).read_text(encoding="utf-8")
+    )["python_version"]
+
+
+def _reinstall_references(
+    python: Path, lines: tuple[str, ...], directory: Path, on_line: Any
+) -> None:
+    for line in lines:
+        _run(
+            [
+                str(python), "-m", "pip", "install",
+                "--no-deps", "--force-reinstall", line,
+            ],
+            f"could not reinstall {line} into {directory}",
+            on_line,
+        )
+
+
+def _install_recipe(
+    spec: EnvSpec, backend_kind: str, python: Path, recipe: Path,
+    directory: Path, on_line: Any,
+) -> None:
+    _run(
+        [str(python), "-m", "pip", "install", "-r", str(recipe)],
+        f"could not install {recipe} into {directory}",
+        on_line,
+    )
+    try:
+        envpatches.apply(
+            spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line
+        )
+        if spec.job_type == "tts" and backend_kind == "cuda-linux":
+            envpatches.ensure_cuda_toolkit_links(directory, on_line=on_line)
+    except envpatches.PatchError as exc:
+        raise EnvError(str(exc)) from exc
+
+
+def _python_version_of(python: Path) -> str:
+    return subprocess.run(
+        [
+            str(python),
+            "-c",
+            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    ).stdout.strip()
+
+
 def install_env(
     home: Path,
     spec: EnvSpec,
@@ -733,84 +823,19 @@ def install_env(
         return env_status(home, spec, backend_kind)
     if on_line is not None:
         on_line(f"{plan.action}: {plan.detail}")
-
     started = time.monotonic()
     python_version: str | None = None
-
     if plan.action == PLAN_BUILD:
-        refuse_without_room(
-            job_type=spec.job_type, recipe=recipe, directory=directory
-        )
-        directory.parent.mkdir(parents=True, exist_ok=True)
-        if directory.exists():
-            shutil.rmtree(directory)
-        _run(
-            [
-                interpreter_for(spec, home, backend_kind, on_line=on_line),
-                "-m",
-                "venv",
-                str(directory),
-            ],
-            f"could not create the venv at {directory}",
-            on_line,
-        )
-        python = env_python(home, spec)
-        if not python.is_file():
-            raise EnvError(
-                f"`python -m venv {directory}` returned 0 but there is no {python}"
-            )
-        _run(
-            [str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"],
-            f"could not upgrade pip in the {spec.job_type} env",
-            on_line,
-        )
+        python = _build_venv(home, spec, backend_kind, recipe, on_line)
     else:
         python = env_python(home, spec)
-        python_version = json.loads(
-            stamp_path(home, spec).read_text(encoding="utf-8")
-        )["python_version"]
-
+        python_version = _stamped_python_version(home, spec)
     if plan.action == PLAN_REFERENCES:
-        for line in plan.lines:
-            _run(
-                [
-                    str(python), "-m", "pip", "install",
-                    "--no-deps", "--force-reinstall", line,
-                ],
-                f"could not reinstall {line} into {directory}",
-                on_line,
-            )
+        _reinstall_references(python, plan.lines, directory, on_line)
     else:
-        _run(
-            [str(python), "-m", "pip", "install", "-r", str(recipe)],
-            f"could not install {recipe} into {directory}",
-            on_line,
-        )
-
-        try:
-            envpatches.apply(
-                spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line
-            )
-        except envpatches.PatchError as exc:
-            raise EnvError(str(exc)) from exc
-
-        if spec.job_type == "tts" and backend_kind == "cuda-linux":
-            try:
-                envpatches.ensure_cuda_toolkit_links(directory, on_line=on_line)
-            except envpatches.PatchError as exc:
-                raise EnvError(str(exc)) from exc
-
+        _install_recipe(spec, backend_kind, python, recipe, directory, on_line)
     if python_version is None:
-        python_version = subprocess.run(
-            [
-                str(python),
-                "-c",
-                "import sys; print('.'.join(map(str, sys.version_info[:3])))",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        ).stdout.strip()
+        python_version = _python_version_of(python)
     _write_stamp(
         home, spec, backend_kind,
         recipe=recipe,

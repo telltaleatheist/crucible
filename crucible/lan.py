@@ -266,9 +266,8 @@ def _ask_on_terminal(public: Sequence[landoor.NetworkInterface]) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGINE_PORT,
-           adopt: bool = False, ask_private: AskPrivate | None = None,
-           say: Say | None = None) -> dict[str, Any]:
+def _door_to_enable(home: Path, runner: Runner, engine: PairedEngine, port: int,
+                    adopt: bool) -> landoor.LanDoor:
     if type(port) is not int or not 1 <= port <= 65535:
         raise LanError("lan_bad_port: expected a port from 1 to 65535")
     _require_windows(runner)
@@ -292,13 +291,21 @@ def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGI
             "lan_unowned: a port forward for this port already exists and "
             "Crucible did not create it; use --adopt to take ownership of it"
         )
-    facts = _network(runner)
-    candidates = _candidates(facts)
+    return door
+
+
+def _networks_to_mark(candidates: list[landoor.NetworkInterface],
+                      facts: landoor.NetworkFacts,
+                      ask_private: AskPrivate | None) -> list[landoor.NetworkInterface]:
     shut = [
         interface for interface in candidates
         if interface.profile == "Public" and not landoor.admits(interface, facts)[0]
     ]
-    to_mark = list(shut) if shut and ask_private is not None and ask_private(shut) else []
+    return list(shut) if shut and ask_private is not None and ask_private(shut) else []
+
+
+def _pending_record(port: int, candidates: list[landoor.NetworkInterface],
+                    to_mark: list[landoor.NetworkInterface]) -> dict[str, Any]:
     record: dict[str, Any] = {
         "schema_version": 1,
         "port": port,
@@ -308,8 +315,12 @@ def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGI
     }
     if to_mark:
         record["made_private"] = [interface.label for interface in to_mark]
-    _write(home, record)
-    missing = [
+    return record
+
+
+def _missing_commands(door: landoor.LanDoor, port: int,
+                      to_mark: list[landoor.NetworkInterface]) -> list[list[str]]:
+    return [
         command
         for present, command in (
             (door.forward, landoor.add_argv(port)),
@@ -317,25 +328,43 @@ def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGI
         )
         if not present
     ] + [landoor.make_private_argv(interface) for interface in to_mark]
-    result = _apply(runner, missing, elevated=facts.elevated, say=say) if missing else None
-    after = landoor.detect(runner, port)
-    if not (after.forward and after.firewall):
-        raise _not_applied(result, runner, after.detail)
-    record["state"] = "open"
-    _write(home, record)
+
+
+def _publish_admitted(home: Path, runner: Runner, engine: PairedEngine,
+                      record: dict[str, Any], port: int) -> list[dict[str, Any]]:
     networks = _networks(_network(runner))
     authorities = [f"{row['address']}:{port}" for row in networks if row["admitted"]]
     record["authorities"] = authorities
     record["private_network"] = bool(authorities)
     _write(home, record)
     engine.advertise("lan_advertise", authorities)
+    return networks
+
+
+def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGINE_PORT,
+           adopt: bool = False, ask_private: AskPrivate | None = None,
+           say: Say | None = None) -> dict[str, Any]:
+    door = _door_to_enable(home, runner, engine, port, adopt)
+    facts = _network(runner)
+    candidates = _candidates(facts)
+    to_mark = _networks_to_mark(candidates, facts, ask_private)
+    record = _pending_record(port, candidates, to_mark)
+    _write(home, record)
+    missing = _missing_commands(door, port, to_mark)
+    result = _apply(runner, missing, elevated=facts.elevated, say=say) if missing else None
+    after = landoor.detect(runner, port)
+    if not (after.forward and after.firewall):
+        raise _not_applied(result, runner, after.detail)
+    record["state"] = "open"
+    _write(home, record)
+    networks = _publish_admitted(home, runner, engine, record, port)
     forward = _forward_answers(runner, candidates[0].address, port)
     state, reachability, following = _verdict(networks, forward)
     record["state"] = state
     _write(home, record)
     report: dict[str, Any] = {
         **record,
-        "urls": [f"http://{authority}" for authority in authorities],
+        "urls": [f"http://{authority}" for authority in record["authorities"]],
         "detail": after.detail,
         "networks": networks,
         "forward_answers": forward,

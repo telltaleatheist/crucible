@@ -503,6 +503,11 @@ request goes in on stdin and newline-delimited JSON comes back on fd 1.
   (align, denoise, qwen asr) calls `workerio.serve(label, OPS)`: blank lines are skipped, and the
   first unreadable request, unknown op, `KeyError` from `require` or other exception from a
   handler is answered `failed` and ends the worker with exit 1; end of input exits 0.
+- A one-shot worker's `main` is `read_request`, `parse_request`, then the work. A step
+  that cannot go on raises the worker's own failure (`WorkerFailed` in the asr workers,
+  `RvcFailed` in rvc) and `main` answers it with `fail`, so the order of `failed`
+  and cleanup stays in one place. rvc's batch loop is `Conversion` (`announce`, `run`,
+  `deliver`, `finish`); asr's windows are `transcribe_window` under `transcribe`.
 - `workerio` imports only the standard library at load (numpy only inside `decode`), because no
   worker env has `crucible`. Workers load it by path (`load_sibling`) and never leave
   `crucible/jobs/` on `sys.path`, where `queue.py` would shadow the stdlib `queue`.
@@ -619,6 +624,11 @@ through `crucible.tasks` at call time rather than binding their own copies.
   `index` (narrator's `i`). One artifact per requested index: a split chunk is joined by
   narrator. A failed row is reported and the run continues. `done` lists the failed indices. A
   batch that ends short is a protocol failure.
+- `_render` builds the request (`_batch_request`) and hands each engine message to a
+  `_BatchTally`: `claim` enforces the protocol (unknown row, row answered twice, a message
+  with no type; `batch_done` and `stopped` are passed over), `record` counts the row,
+  `require_complete` refuses a short batch. `_require_band` is `_require_band_keys`,
+  `_band_rate` per rate and `_require_band_order`.
 - FLAC is encoded by ffmpeg (`s16le` at the rate narrator reported on `loaded`, which was already
   checked against the manifest), not soundfile, because the server process takes no compiled
   audio dependency. A row at another sample rate is a failed row, never resampled. Reported

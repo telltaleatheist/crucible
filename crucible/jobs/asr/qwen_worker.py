@@ -260,6 +260,63 @@ def load(request: dict) -> None:
     send("done")
 
 
+def _decoded(ffmpeg: str, source: str, speech, speechonly, progress):
+    key = (source, json.dumps(speech, sort_keys=True))
+    if _STATE["decoded_source"] == key:
+        return _STATE["decoded"]
+    wav = decode(ffmpeg, source, progress)
+    samples, kept = int(wav.shape[0]), None
+    if samples <= 0:
+        raise RuntimeError(f"{source} decoded to zero length")
+    if speech is not None:
+        wav, kept = speechonly.cut_for_worker(wav, speech, source, progress)
+    _STATE["decoded_source"], _STATE["decoded"] = key, (wav, samples, kept)
+    return wav, samples, kept
+
+
+def _region_bounds(region, total_samples: int, source: str) -> tuple[int, int]:
+    if region is None:
+        return 0, total_samples
+    region_first = max(0, int(round(float(region[0]) * SAMPLE_RATE)))
+    region_last = min(total_samples, int(round(float(region[1]) * SAMPLE_RATE)))
+    if region_last <= region_first:
+        total = total_samples / float(SAMPLE_RATE)
+        raise ValueError(f"region_s {region} holds no audio in {total:.1f}s of {source}")
+    return region_first, region_last
+
+
+def _region_joins(speechonly, kept, region_first: int, region_last: int) -> list:
+    if kept is None:
+        return []
+    return [
+        point - region_first
+        for point in speechonly.joins(kept)
+        if region_first < point < region_last
+    ]
+
+
+def _write_piece(wav, path: str, core: tuple[int, int], pad: int) -> None:
+    import numpy
+
+    core_first, core_last = core
+    total_samples = int(wav.shape[0])
+    audio_first = max(0, core_first - pad)
+    audio_last = min(total_samples, core_last + pad)
+    samples = wav[audio_first:audio_last]
+    minimum = int(MIN_PIECE_SECONDS * SAMPLE_RATE)
+    if samples.shape[0] < minimum:
+        samples = numpy.pad(samples, (0, minimum - samples.shape[0]))
+    write_wav(path, samples)
+    send(
+        "result",
+        offset_s=core_first / float(SAMPLE_RATE),
+        duration_s=(core_last - core_first) / float(SAMPLE_RATE),
+        audio_offset_s=audio_first / float(SAMPLE_RATE),
+        audio_duration_s=(audio_last - audio_first) / float(SAMPLE_RATE),
+        wav=path,
+    )
+
+
 def split(request: dict) -> None:
     ffmpeg = require(request, "ffmpeg", str)
     source = require(request, "source", str)
@@ -274,37 +331,10 @@ def split(request: dict) -> None:
     speechonly = workerio.load_sibling("speechonly", __file__)
     speech = speechonly.from_request(request)
     os.makedirs(out_dir, exist_ok=True)
-    progress = workerio.decode_reporter()
-
-    key = (source, json.dumps(speech, sort_keys=True))
-    if _STATE["decoded_source"] == key:
-        wav, samples, kept = _STATE["decoded"]
-    else:
-        wav = decode(ffmpeg, source, progress)
-        samples, kept = int(wav.shape[0]), None
-        if samples <= 0:
-            raise RuntimeError(f"{source} decoded to zero length")
-        if speech is not None:
-            wav, kept = speechonly.cut_for_worker(wav, speech, source, progress)
-        _STATE["decoded_source"], _STATE["decoded"] = key, (wav, samples, kept)
-    total_samples = int(wav.shape[0])
-    total = total_samples / float(SAMPLE_RATE)
-    if region is None:
-        region_first, region_last = 0, total_samples
-    else:
-        region_first = max(0, int(round(float(region[0]) * SAMPLE_RATE)))
-        region_last = min(total_samples, int(round(float(region[1]) * SAMPLE_RATE)))
-        if region_last <= region_first:
-            raise ValueError(f"region_s {region} holds no audio in {total:.1f}s of {source}")
-    joins = (
-        []
-        if kept is None
-        else [
-            point - region_first
-            for point in speechonly.joins(kept)
-            if region_first < point < region_last
-        ]
-    )
+    wav, samples, kept = _decoded(ffmpeg, source, speech, speechonly, workerio.decode_reporter())
+    total = int(wav.shape[0]) / float(SAMPLE_RATE)
+    region_first, region_last = _region_bounds(region, int(wav.shape[0]), source)
+    joins = _region_joins(speechonly, kept, region_first, region_last)
     spans = split_points(wav[region_first:region_last], max_piece_s, joins)
     send(
         "ready",
@@ -314,31 +344,12 @@ def split(request: dict) -> None:
         speech_s=None if kept is None else total,
         kept=kept,
     )
-
-    import numpy
-
-    minimum = int(MIN_PIECE_SECONDS * SAMPLE_RATE)
     pad = int(round(overlap_s * SAMPLE_RATE))
     stem = os.path.splitext(os.path.basename(source))[0]
     tag = "" if region is None else f".r{region_first}"
     for position, (first, last_sample) in enumerate(spans):
-        core_first = region_first + first
-        core_last = region_first + last_sample
-        audio_first = max(0, core_first - pad)
-        audio_last = min(total_samples, core_last + pad)
-        samples = wav[audio_first:audio_last]
-        if samples.shape[0] < minimum:
-            samples = numpy.pad(samples, (0, minimum - samples.shape[0]))
         path = os.path.join(out_dir, f"{stem}{tag}.{position:05d}.wav")
-        write_wav(path, samples)
-        send(
-            "result",
-            offset_s=core_first / float(SAMPLE_RATE),
-            duration_s=(core_last - core_first) / float(SAMPLE_RATE),
-            audio_offset_s=audio_first / float(SAMPLE_RATE),
-            audio_duration_s=(audio_last - audio_first) / float(SAMPLE_RATE),
-            wav=path,
-        )
+        _write_piece(wav, path, (region_first + first, region_first + last_sample), pad)
     send("done")
 
 

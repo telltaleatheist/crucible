@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from . import capability as capability_classes
 from . import upstreams as upstream_module
@@ -201,8 +201,7 @@ def _require_object(patch: Any, field: str) -> dict[str, Any]:
     return patch
 
 
-def resolve(config: Config, patch: Any) -> Resolved:
-    body = _require_object(patch, ROOT_FIELD)
+def _refuse_unknown_fields(body: dict[str, Any]) -> None:
     unknown = sorted(set(body) - PATCH_KEYS)
     if unknown:
         raise ApiError(
@@ -212,190 +211,264 @@ def resolve(config: Config, patch: Any) -> Resolved:
             f"{sorted(PATCH_KEYS)}",
             {"field": unknown[0], "unknown": unknown},
         )
+
+
+def _resolve_upstreams(config: Config, resolved: Resolved, value: Any) -> None:
+    table = _require_object(value, "upstreams")
+    for name in sorted(table):
+        field = f"upstreams.{name}"
+        upstream_module.require_name(name, field)
+        _resolve_upstream(resolved, name, table[name], field)
+
+
+def _resolve_upstream(resolved: Resolved, name: str, value: Any, field: str) -> None:
+    if value is None:
+        if name in resolved.upstreams:
+            del resolved.upstreams[name]
+            resolved.removed.add(name)
+            resolved.changed.append(f"{field} removed")
+        return
+    resolved.upstreams[name] = upstream_module.record_from_patch(name, value, field)
+    resolved.changed.append(f"{field} set")
+
+
+def _resolve_routes(config: Config, resolved: Resolved, value: Any) -> None:
+    table = _require_object(value, "routes")
+    resolved.touched_routes = True
+    for name in sorted(table):
+        _resolve_route(resolved, name, table[name])
+
+
+def _require_routable(name: str, field: str) -> None:
+    if name in capability_classes.ROUTABLE_CLASSES:
+        return
+    raise ApiError(
+        400,
+        "route_not_routable",
+        f"{name!r} cannot run anywhere but this server's card. The "
+        f"classes a route may name are "
+        f"{list(capability_classes.ROUTABLE_CLASSES)}; every other "
+        "class is local and there is no upstream that does its kind "
+        "of work",
+        {
+            "field": field,
+            "capability": name,
+            "routable": list(capability_classes.ROUTABLE_CLASSES),
+        },
+    )
+
+
+def _require_upstream_model_id(value: str, field: str) -> None:
+    upstream_name, _, rest = value.partition("/")
+    if upstream_name in UPSTREAM_NAMES and rest != "":
+        return
+    raise ApiError(
+        400,
+        "route_bad_model",
+        f"{value!r} is not an upstream model id. A route's value is "
+        f"`<upstream>/<model>` with the upstream one of "
+        f"{list(UPSTREAM_NAMES)}, or the word \"local\"",
+        {
+            "field": field,
+            "model": value,
+            "known": list(UPSTREAM_NAMES),
+        },
+    )
+
+
+def _resolve_route(resolved: Resolved, name: str, value: Any) -> None:
+    field = f"routes.{name}"
+    _require_routable(name, field)
+    if not isinstance(value, str) or value == "":
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"{field} must be \"local\" or an upstream model id, got "
+            f"{type(value).__name__}",
+            {"field": field},
+        )
+    if value == "local":
+        if name in resolved.routes:
+            del resolved.routes[name]
+            resolved.changed.append(f"{field} = local")
+        return
+    _require_upstream_model_id(value, field)
+    resolved.routes[name] = value
+    resolved.changed.append(f"{field} = {value}")
+
+
+def _resolve_desktop_allowance(config: Config, resolved: Resolved, value: Any) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ApiError(
+            400,
+            "invalid_request",
+            "desktop_allowance_bytes must be a non-negative integer number "
+            f"of bytes, got {value!r}",
+            {"field": "desktop_allowance_bytes"},
+        )
+    if value == resolved.desktop_allowance_bytes:
+        return
+    resolved.desktop_allowance_bytes = value
+    resolved.desktop_allowance_basis = DESKTOP_BASIS_STATED
+    resolved.desktop_allowance_note = f"set in Settings on {utcnow()[:10]}"
+    resolved.changed.append(f"desktop_allowance_bytes = {value}")
+
+
+def _resolve_local_models(config: Config, resolved: Resolved, value: Any) -> None:
+    table = _require_object(value, "local_models")
+    record = config.capability
+    for name in sorted(table):
+        _resolve_local_model(record, resolved, name, table[name])
+
+
+def _require_selectable(name: str, field: str) -> None:
+    if name in capability_classes.SELECTABLE_CLASSES:
+        return
+    raise ApiError(
+        400,
+        "local_model_not_selectable",
+        f"{name!r} has no local models to choose between. The classes "
+        f"that do are "
+        f"{list(capability_classes.SELECTABLE_CLASSES)}",
+        {
+            "field": field,
+            "capability": name,
+            "selectable": list(capability_classes.SELECTABLE_CLASSES),
+        },
+    )
+
+
+def _require_decided(
+    record: CapabilityRecord | None, name: str, field: str
+) -> CapabilityRecord:
+    if record is not None:
+        return record
+    raise ApiError(
+        503,
+        "capability_undecided",
+        "This server has not decided its capability yet, so a local "
+        "model cannot be chosen on it. Run `crucible capability "
+        "--write` on the host first",
+        {"field": field, "capability": name},
+    )
+
+
+def _offered_candidate(
+    record: CapabilityRecord, name: str, value: str, field: str
+) -> Any:
+    entry = capability_classes.BY_NAME[name]
+    assert entry.candidates is not None
+    offered = entry.candidates(record.backend_kind)
+    picked = next((c for c in offered if c.id == value), None)
+    if picked is not None:
+        return picked
+    raise ApiError(
+        400,
+        "local_model_unknown",
+        f"{value!r} is not among the {len(offered)} {entry.noun} "
+        f"this build ships for {name} on {record.backend_kind}",
+        {
+            "field": field,
+            "capability": name,
+            "model": value,
+            "choices": [c.id for c in offered],
+        },
+    )
+
+
+def _require_fits(
+    record: CapabilityRecord, resolved: Resolved, picked: Any, name: str, field: str
+) -> None:
+    value = picked.id
+    budget = capability_classes.available_bytes(
+        record.total_bytes, resolved.desktop_allowance_bytes
+    )
+    if picked.memory_bytes_estimate <= budget:
+        return
+    shortfall = picked.memory_bytes_estimate - budget
+    raise ApiError(
+        409,
+        "local_model_does_not_fit",
+        f"{value} needs "
+        f"{picked.memory_bytes_estimate / 2**30:.1f} GiB and there "
+        f"is {budget / 2**30:.1f} GiB available "
+        f"({record.total_bytes / 2**30:.1f} GiB less a "
+        f"{resolved.desktop_allowance_bytes / 2**30:.1f} GiB desktop "
+        f"allowance) — short by {shortfall / 2**30:.1f} GiB",
+        {
+            "field": field,
+            "capability": name,
+            "model": value,
+            "memory_bytes_estimate": picked.memory_bytes_estimate,
+            "available_bytes": budget,
+            "shortfall_bytes": shortfall,
+        },
+    )
+
+
+def _resolve_local_model(
+    record: CapabilityRecord | None, resolved: Resolved, name: str, value: Any
+) -> None:
+    field = f"local_models.{name}"
+    _require_selectable(name, field)
+    if value is None:
+        if resolved.local_models.pop(name, None) is not None:
+            resolved.changed.append(f"local_models.{name} = automatic")
+        return
+    if not isinstance(value, str) or value == "":
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"{field} must be a model id, or null for automatic, got "
+            f"{type(value).__name__}",
+            {"field": field},
+        )
+    decided = _require_decided(record, name, field)
+    picked = _offered_candidate(decided, name, value, field)
+    _require_fits(decided, resolved, picked, name, field)
+    if resolved.local_models.get(name) != value:
+        resolved.local_models[name] = value
+        resolved.changed.append(f"local_models.{name} = {value}")
+
+
+def _advertise_list(value: Any, field: str) -> tuple[str, ...]:
+    try:
+        return _advertised({"server": {"advertise": value}})
+    except ConfigError as exc:
+        raise ApiError(400, "invalid_request", str(exc), {"field": field}) from exc
+
+
+def _resolve_tailscale_advertise(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.tailscale_advertise = _advertise_list(value, "tailscale_advertise")
+    if resolved.tailscale_advertise != config.tailscale_advertise:
+        resolved.changed.append("tailscale_advertise")
+
+
+def _resolve_lan_advertise(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.lan_advertise = _advertise_list(value, "lan_advertise")
+    if resolved.lan_advertise != config.lan_advertise:
+        resolved.changed.append("lan_advertise")
+
+
+SectionResolver = Callable[[Config, Resolved, Any], None]
+
+SECTION_RESOLVERS: tuple[tuple[str, SectionResolver], ...] = (
+    ("upstreams", _resolve_upstreams),
+    ("routes", _resolve_routes),
+    ("desktop_allowance_bytes", _resolve_desktop_allowance),
+    ("local_models", _resolve_local_models),
+    ("tailscale_advertise", _resolve_tailscale_advertise),
+    ("lan_advertise", _resolve_lan_advertise),
+)
+
+
+def resolve(config: Config, patch: Any) -> Resolved:
+    body = _require_object(patch, ROOT_FIELD)
+    _refuse_unknown_fields(body)
     resolved = Resolved(config)
-
-    if "upstreams" in body:
-        table = _require_object(body["upstreams"], "upstreams")
-        for name in sorted(table):
-            field = f"upstreams.{name}"
-            upstream_module.require_name(name, field)
-            value = table[name]
-            if value is None:
-                if name in resolved.upstreams:
-                    del resolved.upstreams[name]
-                    resolved.removed.add(name)
-                    resolved.changed.append(f"{field} removed")
-                continue
-            resolved.upstreams[name] = upstream_module.record_from_patch(
-                name, value, field
-            )
-            resolved.changed.append(f"{field} set")
-
-    if "routes" in body:
-        table = _require_object(body["routes"], "routes")
-        resolved.touched_routes = True
-        for name in sorted(table):
-            field = f"routes.{name}"
-            if name not in capability_classes.ROUTABLE_CLASSES:
-                raise ApiError(
-                    400,
-                    "route_not_routable",
-                    f"{name!r} cannot run anywhere but this server's card. The "
-                    f"classes a route may name are "
-                    f"{list(capability_classes.ROUTABLE_CLASSES)}; every other "
-                    "class is local and there is no upstream that does its kind "
-                    "of work",
-                    {
-                        "field": field,
-                        "capability": name,
-                        "routable": list(capability_classes.ROUTABLE_CLASSES),
-                    },
-                )
-            value = table[name]
-            if not isinstance(value, str) or value == "":
-                raise ApiError(
-                    400,
-                    "invalid_request",
-                    f"{field} must be \"local\" or an upstream model id, got "
-                    f"{type(value).__name__}",
-                    {"field": field},
-                )
-            if value == "local":
-                if name in resolved.routes:
-                    del resolved.routes[name]
-                    resolved.changed.append(f"{field} = local")
-                continue
-            upstream_name, _, rest = value.partition("/")
-            if upstream_name not in UPSTREAM_NAMES or rest == "":
-                raise ApiError(
-                    400,
-                    "route_bad_model",
-                    f"{value!r} is not an upstream model id. A route's value is "
-                    f"`<upstream>/<model>` with the upstream one of "
-                    f"{list(UPSTREAM_NAMES)}, or the word \"local\"",
-                    {
-                        "field": field,
-                        "model": value,
-                        "known": list(UPSTREAM_NAMES),
-                    },
-                )
-            resolved.routes[name] = value
-            resolved.changed.append(f"{field} = {value}")
-
-    if "desktop_allowance_bytes" in body:
-        value = body["desktop_allowance_bytes"]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ApiError(
-                400,
-                "invalid_request",
-                "desktop_allowance_bytes must be a non-negative integer number "
-                f"of bytes, got {value!r}",
-                {"field": "desktop_allowance_bytes"},
-            )
-        if value != resolved.desktop_allowance_bytes:
-            resolved.desktop_allowance_bytes = value
-            resolved.desktop_allowance_basis = DESKTOP_BASIS_STATED
-            resolved.desktop_allowance_note = f"set in Settings on {utcnow()[:10]}"
-            resolved.changed.append(f"desktop_allowance_bytes = {value}")
-
-    if "local_models" in body:
-        table = _require_object(body["local_models"], "local_models")
-        record = config.capability
-        for name in sorted(table):
-            field = f"local_models.{name}"
-            if name not in capability_classes.SELECTABLE_CLASSES:
-                raise ApiError(
-                    400,
-                    "local_model_not_selectable",
-                    f"{name!r} has no local models to choose between. The classes "
-                    f"that do are "
-                    f"{list(capability_classes.SELECTABLE_CLASSES)}",
-                    {
-                        "field": field,
-                        "capability": name,
-                        "selectable": list(capability_classes.SELECTABLE_CLASSES),
-                    },
-                )
-            value = table[name]
-            if value is None:
-                if resolved.local_models.pop(name, None) is not None:
-                    resolved.changed.append(f"local_models.{name} = automatic")
-                continue
-            if not isinstance(value, str) or value == "":
-                raise ApiError(
-                    400,
-                    "invalid_request",
-                    f"{field} must be a model id, or null for automatic, got "
-                    f"{type(value).__name__}",
-                    {"field": field},
-                )
-            if record is None:
-                raise ApiError(
-                    503,
-                    "capability_undecided",
-                    "This server has not decided its capability yet, so a local "
-                    "model cannot be chosen on it. Run `crucible capability "
-                    "--write` on the host first",
-                    {"field": field, "capability": name},
-                )
-            entry = capability_classes.BY_NAME[name]
-            assert entry.candidates is not None
-            offered = entry.candidates(record.backend_kind)
-            picked = next((c for c in offered if c.id == value), None)
-            if picked is None:
-                raise ApiError(
-                    400,
-                    "local_model_unknown",
-                    f"{value!r} is not among the {len(offered)} {entry.noun} "
-                    f"this build ships for {name} on {record.backend_kind}",
-                    {
-                        "field": field,
-                        "capability": name,
-                        "model": value,
-                        "choices": [c.id for c in offered],
-                    },
-                )
-            budget = capability_classes.available_bytes(
-                record.total_bytes, resolved.desktop_allowance_bytes
-            )
-            if picked.memory_bytes_estimate > budget:
-                shortfall = picked.memory_bytes_estimate - budget
-                raise ApiError(
-                    409,
-                    "local_model_does_not_fit",
-                    f"{value} needs "
-                    f"{picked.memory_bytes_estimate / 2**30:.1f} GiB and there "
-                    f"is {budget / 2**30:.1f} GiB available "
-                    f"({record.total_bytes / 2**30:.1f} GiB less a "
-                    f"{resolved.desktop_allowance_bytes / 2**30:.1f} GiB desktop "
-                    f"allowance) — short by {shortfall / 2**30:.1f} GiB",
-                    {
-                        "field": field,
-                        "capability": name,
-                        "model": value,
-                        "memory_bytes_estimate": picked.memory_bytes_estimate,
-                        "available_bytes": budget,
-                        "shortfall_bytes": shortfall,
-                    },
-                )
-            if resolved.local_models.get(name) != value:
-                resolved.local_models[name] = value
-                resolved.changed.append(f"local_models.{name} = {value}")
-
-    if "tailscale_advertise" in patch:
-        try:
-            resolved.tailscale_advertise = _advertised({"server": {"advertise": patch["tailscale_advertise"]}})
-        except ConfigError as exc:
-            raise ApiError(400, "invalid_request", str(exc), {"field": "tailscale_advertise"}) from exc
-        if resolved.tailscale_advertise != config.tailscale_advertise:
-            resolved.changed.append("tailscale_advertise")
-    if "lan_advertise" in patch:
-        try:
-            resolved.lan_advertise = _advertised({"server": {"advertise": patch["lan_advertise"]}})
-        except ConfigError as exc:
-            raise ApiError(400, "invalid_request", str(exc), {"field": "lan_advertise"}) from exc
-        if resolved.lan_advertise != config.lan_advertise:
-            resolved.changed.append("lan_advertise")
+    for key, resolver in SECTION_RESOLVERS:
+        if key in body:
+            resolver(config, resolved, body[key])
     _validate(resolved)
     return resolved
 

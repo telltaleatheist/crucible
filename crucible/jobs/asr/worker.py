@@ -80,63 +80,72 @@ def serialise(segment, want_words: bool) -> dict:
     return row
 
 
-def main() -> int:
-    request = workerio.read_request("asr")
-    if request is None:
-        return 1
+class WorkerFailed(Exception):
+    pass
 
-    try:
-        model_dir = require(request, "model_dir", str)
-        ffmpeg = require(request, "ffmpeg", str)
-        audio = require(request, "audio", str)
-        device = require(request, "device", str)
-        compute_type = require(request, "compute_type", str)
-        vad_filter = require(request, "vad_filter", bool)
-        word_timestamps = require(request, "word_timestamps", bool)
-        window_s = require(request, "window_s", int)
-        overlap_s = require(request, "overlap_s", int)
-        if "language" not in request:
-            raise KeyError(
-                "the asr request has no 'language'; null means auto-detect, which "
-                "is a choice and has to be made explicitly"
-            )
-        language = request["language"]
-        if language is not None and not isinstance(language, str):
-            raise KeyError(
-                f"the asr request's 'language' must be a string or null, got "
-                f"{type(language).__name__}"
-            )
-        initial_prompt = require_prompt(request)
-        speech = speechonly.from_request(request)
-    except KeyError as exc:
-        return fail(str(exc.args[0]))
 
+def require_language(request: dict) -> "str | None":
+    if "language" not in request:
+        raise KeyError(
+            "the asr request has no 'language'; null means auto-detect, which "
+            "is a choice and has to be made explicitly"
+        )
+    language = request["language"]
+    if language is not None and not isinstance(language, str):
+        raise KeyError(
+            f"the asr request's 'language' must be a string or null, got "
+            f"{type(language).__name__}"
+        )
+    return language
+
+
+def parse_request(request: dict) -> dict:
+    return {
+        "model_dir": require(request, "model_dir", str),
+        "ffmpeg": require(request, "ffmpeg", str),
+        "audio": require(request, "audio", str),
+        "device": require(request, "device", str),
+        "compute_type": require(request, "compute_type", str),
+        "vad_filter": require(request, "vad_filter", bool),
+        "word_timestamps": require(request, "word_timestamps", bool),
+        "window_s": require(request, "window_s", int),
+        "overlap_s": require(request, "overlap_s", int),
+        "language": require_language(request),
+        "initial_prompt": require_prompt(request),
+        "speech": speechonly.from_request(request),
+    }
+
+
+def load_model(params: dict):
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
-        return fail(
+        raise WorkerFailed(
             f"faster-whisper is not importable in {sys.executable}: {exc}. "
             "The asr env is installed with `crucible install asr`."
-        )
-
+        ) from None
+    model_dir, device, compute_type = params["model_dir"], params["device"], params["compute_type"]
     try:
-        model = WhisperModel(model_dir, device=device, compute_type=compute_type)
+        return WhisperModel(model_dir, device=device, compute_type=compute_type)
     except Exception as exc:
-        return fail(
+        raise WorkerFailed(
             f"could not load {model_dir} on {device} at {compute_type}: "
             f"{type(exc).__name__}: {exc}"
-        )
+        ) from None
 
-    if initial_prompt is not None:
-        ceiling = int(model.max_length) // 2 - 1
-        count = len(
-            model.hf_tokenizer.encode(
-                " " + initial_prompt.strip(), add_special_tokens=False
-            ).ids
-        )
-        if count > ceiling:
-            return fail(prompt_too_long(count, ceiling))
 
+def check_prompt_fits(model, initial_prompt: "str | None") -> None:
+    if initial_prompt is None:
+        return
+    ceiling = int(model.max_length) // 2 - 1
+    count = len(
+        model.hf_tokenizer.encode(" " + initial_prompt.strip(), add_special_tokens=False).ids
+    )
+    if count > ceiling:
+        raise WorkerFailed(prompt_too_long(count, ceiling))
+
+
+def decode_source(ffmpeg: str, audio: str):
     total_container = probe_duration(ffmpeg, audio, "asr")
     try:
         waveform = decode(
@@ -145,95 +154,123 @@ def main() -> int:
             workerio.decode_reporter(total_s=round(total_container, 1), cues=0),
         )
     except Exception as exc:
-        return fail(f"could not decode {audio}: {type(exc).__name__}: {exc}")
+        raise WorkerFailed(f"could not decode {audio}: {type(exc).__name__}: {exc}") from None
+    if len(waveform) / float(SAMPLE_RATE) <= 0:
+        raise WorkerFailed(f"{audio} decoded to zero length")
+    return waveform
 
-    samples = len(waveform)
-    source_total = samples / float(SAMPLE_RATE)
-    if source_total <= 0:
-        return fail(f"{audio} decoded to zero length")
-    kept = None
-    if speech is not None:
-        try:
-            waveform, kept = speechonly.cut_for_worker(
-                waveform,
-                speech,
-                audio,
-                workerio.decode_reporter(total_s=round(source_total, 1), cues=0),
-            )
-        except Exception as exc:
-            return fail(f"speech detection failed: {type(exc).__name__}: {exc}")
-    total = len(waveform) / float(SAMPLE_RATE)
 
-    windows = int(math.ceil(total / window_s))
-    send(
-        "ready",
-        duration_s=source_total,
-        windows=windows,
-        device=device,
-        compute_type=compute_type,
-        samples=samples,
-        speech_s=None if kept is None else total,
-        kept=kept,
-    )
+def keep_speech(waveform, speech, audio: str, source_total: float):
+    if speech is None:
+        return waveform, None
+    try:
+        return speechonly.cut_for_worker(
+            waveform,
+            speech,
+            audio,
+            workerio.decode_reporter(total_s=round(source_total, 1), cues=0),
+        )
+    except Exception as exc:
+        raise WorkerFailed(f"speech detection failed: {type(exc).__name__}: {exc}") from None
 
-    emitted = 0
-    last_fraction = [-1.0]
-    last_wall = [time.time()]
 
-    def transcribe_progress(processed: float) -> None:
-        fraction = min(1.0, processed / total)
+class TranscribeProgress:
+    def __init__(self, total: float) -> None:
+        self.total = total
+        self.emitted = 0
+        self.last_fraction = -1.0
+        self.last_wall = time.time()
+
+    def report(self, processed: float) -> None:
+        fraction = min(1.0, processed / self.total)
         now = time.time()
         if (
-            fraction - last_fraction[0] < PROGRESS_FRACTION_STEP
-            and now - last_wall[0] < PROGRESS_WALL_SECONDS
+            fraction - self.last_fraction < PROGRESS_FRACTION_STEP
+            and now - self.last_wall < PROGRESS_WALL_SECONDS
         ):
             return
-        last_fraction[0] = fraction
-        last_wall[0] = now
+        self.last_fraction = fraction
+        self.last_wall = now
+        self.send(processed)
+
+    def send(self, processed: float) -> None:
         send(
             "progress",
             stage="transcribing",
             processed_s=round(processed, 1),
-            total_s=round(total, 1),
-            cues=emitted,
+            total_s=round(self.total, 1),
+            cues=self.emitted,
         )
 
-    for index in range(windows):
-        start = index * float(window_s)
-        boundary = min(start + window_s, total)
-        first = int(start * SAMPLE_RATE)
-        last = int(min(boundary + overlap_s, total) * SAMPLE_RATE)
-        try:
-            segments, info = model.transcribe(
-                waveform[first:last],
-                language=language,
-                word_timestamps=word_timestamps,
-                vad_filter=vad_filter,
-                initial_prompt=initial_prompt,
-            )
-            rows = []
-            for segment in segments:
-                rows.append(serialise(segment, word_timestamps))
-                emitted += 1
-                transcribe_progress(min(total, start + float(segment.end)))
-        except Exception as exc:
-            send("result", error=f"{type(exc).__name__}: {exc}")
-            continue
-        send(
-            "result",
-            segments=rows,
-            language=info.language,
-            language_probability=float(info.language_probability),
-        )
 
+def transcribe_window(model, waveform, params: dict, index: int, progress: TranscribeProgress) -> None:
+    window_s, total = params["window_s"], progress.total
+    start = index * float(window_s)
+    boundary = min(start + window_s, total)
+    first = int(start * SAMPLE_RATE)
+    last = int(min(boundary + params["overlap_s"], total) * SAMPLE_RATE)
+    try:
+        segments, info = model.transcribe(
+            waveform[first:last],
+            language=params["language"],
+            word_timestamps=params["word_timestamps"],
+            vad_filter=params["vad_filter"],
+            initial_prompt=params["initial_prompt"],
+        )
+        rows = []
+        for segment in segments:
+            rows.append(serialise(segment, params["word_timestamps"]))
+            progress.emitted += 1
+            progress.report(min(total, start + float(segment.end)))
+    except Exception as exc:
+        send("result", error=f"{type(exc).__name__}: {exc}")
+        return
     send(
-        "progress",
-        stage="transcribing",
-        processed_s=round(total, 1),
-        total_s=round(total, 1),
-        cues=emitted,
+        "result",
+        segments=rows,
+        language=info.language,
+        language_probability=float(info.language_probability),
     )
+
+
+def transcribe(params: dict) -> None:
+    model = load_model(params)
+    check_prompt_fits(model, params["initial_prompt"])
+    waveform = decode_source(params["ffmpeg"], params["audio"])
+    samples = len(waveform)
+    source_total = samples / float(SAMPLE_RATE)
+    waveform, kept = keep_speech(waveform, params["speech"], params["audio"], source_total)
+    total = len(waveform) / float(SAMPLE_RATE)
+    windows = int(math.ceil(total / params["window_s"]))
+    send(
+        "ready",
+        duration_s=source_total,
+        windows=windows,
+        device=params["device"],
+        compute_type=params["compute_type"],
+        samples=samples,
+        speech_s=None if kept is None else total,
+        kept=kept,
+    )
+    progress = TranscribeProgress(total)
+    for index in range(windows):
+        transcribe_window(model, waveform, params, index, progress)
+    progress.send(total)
     send("done")
+
+
+def main() -> int:
+    request = workerio.read_request("asr")
+    if request is None:
+        return 1
+    try:
+        params = parse_request(request)
+    except KeyError as exc:
+        return fail(str(exc.args[0]))
+    try:
+        transcribe(params)
+    except WorkerFailed as exc:
+        return fail(str(exc))
     return 0
 
 

@@ -150,24 +150,27 @@ def plan_input(path: str, piece_s: float, on_progress=None) -> tuple[list, int]:
     return spans, total
 
 
+def _read_exactly(source, need: int, path: str):
+    more = source.read(need, dtype="float32", always_2d=True)
+    if more.shape[0] != need:
+        raise RuntimeError(
+            f"{path} ended {need - more.shape[0]} frame(s) earlier on "
+            "the second read than on the first; the input changed "
+            "while the job was reading it"
+        )
+    return more
+
+
 def read_pieces(path: str, spans: list, total: int, pad: int):
     with soundfile.SoundFile(path) as source:
-        channels = source.channels
-        held = numpy.zeros((0, channels), dtype=numpy.float32)
+        held = numpy.zeros((0, source.channels), dtype=numpy.float32)
         held_first = 0
         for first, last in spans:
             audio_first = max(0, first - pad)
             audio_last = min(total, last + pad)
             need = audio_last - (held_first + held.shape[0])
             if need > 0:
-                more = source.read(need, dtype="float32", always_2d=True)
-                if more.shape[0] != need:
-                    raise RuntimeError(
-                        f"{path} ended {need - more.shape[0]} frame(s) earlier on "
-                        "the second read than on the first; the input changed "
-                        "while the job was reading it"
-                    )
-                held = numpy.concatenate((held, more))
+                held = numpy.concatenate((held, _read_exactly(source, need, path)))
             drop = audio_first - held_first
             if drop > 0:
                 held = held[drop:]
@@ -325,63 +328,84 @@ class Stitcher:
                 pass
 
 
+def _linux_host_memory() -> tuple[int, int]:
+    fields: dict[str, int] = {}
+    with open("/proc/meminfo", encoding="ascii") as handle:
+        for line in handle:
+            key, _, value = line.partition(":")
+            parts = value.split()
+            if parts and parts[0].isdigit():
+                fields[key.strip()] = int(parts[0]) * 1024
+    return fields["MemAvailable"], fields["MemTotal"]
+
+
+def _vm_stat_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        digits = value.strip().rstrip(".")
+        if digits.isdigit():
+            counts[key.strip()] = int(digits)
+    return counts
+
+
+def _darwin_host_memory() -> tuple[int, int] | None:
+    text = subprocess.run(
+        ["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=30
+    ).stdout
+    page_match = re.search(r"page size of (\d+)", text)
+    if page_match is None:
+        return None
+    counts = _vm_stat_counts(text)
+    wanted = ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable")
+    available = sum(counts.get(key, 0) for key in wanted) * int(page_match.group(1))
+    total = int(
+        subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    )
+    return available, total
+
+
 def host_memory() -> tuple[int, int] | None:
     try:
         if sys.platform.startswith("linux"):
-            fields: dict[str, int] = {}
-            with open("/proc/meminfo", encoding="ascii") as handle:
-                for line in handle:
-                    key, _, value = line.partition(":")
-                    parts = value.split()
-                    if parts and parts[0].isdigit():
-                        fields[key.strip()] = int(parts[0]) * 1024
-            return fields["MemAvailable"], fields["MemTotal"]
+            return _linux_host_memory()
         if sys.platform == "darwin":
-            text = subprocess.run(
-                ["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=30
-            ).stdout
-            page_match = re.search(r"page size of (\d+)", text)
-            if page_match is None:
-                return None
-            counts: dict[str, int] = {}
-            for line in text.splitlines():
-                key, _, value = line.partition(":")
-                digits = value.strip().rstrip(".")
-                if digits.isdigit():
-                    counts[key.strip()] = int(digits)
-            wanted = ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable")
-            available = sum(counts.get(key, 0) for key in wanted) * int(page_match.group(1))
-            total = int(
-                subprocess.run(
-                    ["/usr/sbin/sysctl", "-n", "hw.memsize"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                ).stdout.strip()
-            )
-            return available, total
+            return _darwin_host_memory()
     except (OSError, KeyError, ValueError, subprocess.SubprocessError):
         return None
     return None
 
 
+def _linux_process_memory(pid: int) -> int:
+    held = 0
+    with open(f"/proc/{pid}/status", encoding="ascii") as handle:
+        for line in handle:
+            if line.startswith(("VmRSS:", "VmSwap:")):
+                held += int(line.split()[1]) * 1024
+    return held
+
+
+def _darwin_process_memory(pid: int) -> int | None:
+    out = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    return int(out) * 1024 if out else None
+
+
 def process_memory(pid: int) -> int | None:
     try:
         if sys.platform.startswith("linux"):
-            held = 0
-            with open(f"/proc/{pid}/status", encoding="ascii") as handle:
-                for line in handle:
-                    if line.startswith(("VmRSS:", "VmSwap:")):
-                        held += int(line.split()[1]) * 1024
-            return held
+            return _linux_process_memory(pid)
         if sys.platform == "darwin":
-            out = subprocess.run(
-                ["ps", "-o", "rss=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).stdout.strip()
-            return int(out) * 1024 if out else None
+            return _darwin_process_memory(pid)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return None
@@ -513,71 +537,97 @@ def _describe_unreadable(name: str, exc: Exception) -> str:
     )
 
 
-def main() -> int:
-    request = workerio.read_request("rvc")
-    if request is None:
-        return 1
+class RvcFailed(Exception):
+    pass
 
-    try:
-        models_dir = require(request, "models_dir", str)
-        model_name = require(request, "model_name", str)
-        input_dir = require(request, "input_dir", str)
-        output_dir = require(request, "output_dir", str)
-        inputs = require(request, "inputs", list)
-        batch_size = require(request, "batch_size", int)
-        piece_s = float(require(request, "piece_s", (int, float)))
-        overlap_s = float(require(request, "overlap_s", (int, float)))
-        crossfade_s = float(require(request, "crossfade_s", (int, float)))
-        rate_choice = require(request, "output_rate", str)
-        channel_choice = require(request, "output_channels", str)
-        staging_root = require(request, "staging_dir", str)
-        tool_dirs = [
+
+def parse_request(request: dict) -> dict:
+    job = {
+        "models_dir": require(request, "models_dir", str),
+        "model_name": require(request, "model_name", str),
+        "input_dir": require(request, "input_dir", str),
+        "output_dir": require(request, "output_dir", str),
+        "inputs": require(request, "inputs", list),
+        "batch_size": require(request, "batch_size", int),
+        "piece_s": float(require(request, "piece_s", (int, float))),
+        "overlap_s": float(require(request, "overlap_s", (int, float))),
+        "crossfade_s": float(require(request, "crossfade_s", (int, float))),
+        "rate_choice": require(request, "output_rate", str),
+        "channel_choice": require(request, "output_channels", str),
+        "staging_root": require(request, "staging_dir", str),
+        "tool_dirs": [
             os.path.dirname(require(request, tool, str)) for tool in ("ffmpeg", "ffprobe")
-        ]
-        require(request, "index_rate", (int, float))
-        require(request, "protect_rate", (int, float))
-        require(request, "n_semitones", int)
-        budget_bytes, batch_audio_s, budget_basis = memory_plan(request)
-    except KeyError as exc:
-        return fail(str(exc.args[0]))
-    if not inputs:
-        return fail("the rvc request lists no inputs")
-    if batch_size < 1:
-        return fail(f"batch_size must be at least 1, got {batch_size}")
+        ],
+    }
+    require(request, "index_rate", (int, float))
+    require(request, "protect_rate", (int, float))
+    require(request, "n_semitones", int)
+    job["budget_bytes"], job["batch_audio_s"], job["budget_basis"] = memory_plan(request)
+    return job
+
+
+def check_job(job: dict) -> None:
+    if not job["inputs"]:
+        raise RvcFailed("the rvc request lists no inputs")
+    if job["batch_size"] < 1:
+        raise RvcFailed(f"batch_size must be at least 1, got {job['batch_size']}")
+    rate_choice, channel_choice = job["rate_choice"], job["channel_choice"]
     if rate_choice not in OUTPUT_RATES or channel_choice not in OUTPUT_CHANNELS:
-        return fail(
+        raise RvcFailed(
             f"output_rate {rate_choice!r}, output_channels {channel_choice!r}: "
             "the server validates these, so this is a server bug"
         )
+    piece_s, overlap_s, crossfade_s = job["piece_s"], job["overlap_s"], job["crossfade_s"]
     if piece_s < 4 * MIN_TAIL_SECONDS or overlap_s < 0 or crossfade_s < 0:
-        return fail(
+        raise RvcFailed(
             f"piece_s {piece_s}, overlap_s {overlap_s}, crossfade_s {crossfade_s}: "
             "the server validates these, so this is a server bug"
         )
 
+
+def _cut_reporter(number: int, count: int):
+    def on_cut(seconds: float) -> None:
+        send(
+            "progress",
+            stage="cutting",
+            processed=number - 1,
+            total=count,
+            at_s=round(seconds, 1),
+        )
+
+    return on_cut
+
+
+def plan_one(path: str, piece_s: float, on_cut):
+    info = soundfile.info(path)
+    container, subtype = _output_format(info, int(info.frames))
+    if not soundfile.check_format(container, subtype):
+        raise RuntimeError(
+            f"this build can read {info.format}/{info.subtype} and not "
+            "write it back"
+        )
+    spans, total = plan_input(path, piece_s, on_cut)
+    return info, spans, total
+
+
+def _unreadable_message(unreadable: list[str], count: int) -> str:
+    return (
+        f"{len(unreadable)} of {count} input(s) cannot be converted, so "
+        "nothing was: " + "; ".join(unreadable[:20])
+        + (f" (and {len(unreadable) - 20} more)" if len(unreadable) > 20 else "")
+    )
+
+
+def plan_inputs(job: dict) -> list:
+    inputs = job["inputs"]
     plans = []
     unreadable = []
     for number, name in enumerate(inputs, start=1):
-        path = os.path.join(input_dir, name)
+        path = os.path.join(job["input_dir"], name)
         try:
-            info = soundfile.info(path)
-            container, subtype = _output_format(info, int(info.frames))
-            if not soundfile.check_format(container, subtype):
-                raise RuntimeError(
-                    f"this build can read {info.format}/{info.subtype} and not "
-                    "write it back"
-                )
-
-            def on_cut(seconds: float, number: int = number) -> None:
-                send(
-                    "progress",
-                    stage="cutting",
-                    processed=number - 1,
-                    total=len(inputs),
-                    at_s=round(seconds, 1),
-                )
-
-            spans, total = plan_input(path, piece_s, on_cut)
+            info, spans, total = plan_one(
+                path, job["piece_s"], _cut_reporter(number, len(inputs))
+            )
         except Exception as exc:
             unreadable.append(_describe_unreadable(name, exc))
             continue
@@ -587,187 +637,246 @@ def main() -> int:
         plans.append((name, path, info, spans, total))
         send("progress", stage="cutting", processed=number, total=len(inputs))
     if unreadable:
-        return fail(
-            f"{len(unreadable)} of {len(inputs)} input(s) cannot be converted, so "
-            "nothing was: " + "; ".join(unreadable[:20])
-            + (f" (and {len(unreadable) - 20} more)" if len(unreadable) > 20 else "")
-        )
+        raise RvcFailed(_unreadable_message(unreadable, len(inputs)))
+    return plans
 
+
+def list_pieces(plans: list, overlap_s: float) -> list:
     pieces = []
-    for plan_number, (name, path, info, spans, total) in enumerate(plans):
+    for plan_number, (_, _, info, spans, total) in enumerate(plans):
         rate = int(info.samplerate)
         pad = int(round(overlap_s * rate))
         for piece_number, (first, last) in enumerate(spans):
             audio_first = max(0, first - pad)
             audio_last = min(total, last + pad)
-            pieces.append(
-                (plan_number, piece_number, audio_first, audio_last, rate)
-            )
-    durations = [(last - first) / float(rate) for _, _, first, last, rate in pieces]
+            pieces.append((plan_number, piece_number, audio_first, audio_last, rate))
+    return pieces
 
-    planned = len(_batches(durations, batch_size, batch_audio_s))
-    os.makedirs(output_dir, exist_ok=True)
-    send(
-        "ready",
-        files=len(inputs),
-        pieces=len(pieces),
-        batches=planned,
-        batch_size=batch_size,
-        batch_audio_s=round(batch_audio_s, 1),
-        memory_budget_bytes=budget_bytes,
-        memory_basis=budget_basis,
-        model=model_name,
-    )
 
-    readers: dict[int, object] = {}
-    stitchers: dict[int, Stitcher] = {}
+class _Batch:
+    def __init__(self, size: int, audio_s: float) -> None:
+        self.size = size
+        self.audio_s = audio_s
+        self.indices: list[int] = []
+        self.seconds = 0.0
 
-    def reader_for(plan_number: int):
-        if plan_number not in readers:
-            name, path, info, spans, total = plans[plan_number]
-            pad = int(round(overlap_s * int(info.samplerate)))
-            readers[plan_number] = read_pieces(path, spans, total, pad)
-        return readers[plan_number]
+    def fits(self, length: float) -> bool:
+        return not self.indices or (
+            len(self.indices) < self.size and self.seconds + length <= self.audio_s
+        )
 
-    def stitcher_for(plan_number: int, converted_rate: int) -> Stitcher:
-        if plan_number not in stitchers:
-            name, path, info, spans, total = plans[plan_number]
+    def take(self, index: int, length: float) -> None:
+        self.indices.append(index)
+        self.seconds += length
+
+
+class Conversion:
+    def __init__(self, request: dict, job: dict, plans: list) -> None:
+        self.request = request
+        self.job = job
+        self.plans = plans
+        self.pieces = list_pieces(plans, job["overlap_s"])
+        self.durations = [
+            (last - first) / float(rate) for _, _, first, last, rate in self.pieces
+        ]
+        self.planned = len(_batches(self.durations, job["batch_size"], job["batch_audio_s"]))
+        self.readers: dict[int, object] = {}
+        self.stitchers: dict[int, Stitcher] = {}
+        self.carried: list[tuple[int, str]] = []
+        self.next_new = 0
+        self.done_count = 0
+        self.number = 0
+        self.holding = ""
+
+    def announce(self) -> None:
+        job = self.job
+        os.makedirs(job["output_dir"], exist_ok=True)
+        send(
+            "ready",
+            files=len(job["inputs"]),
+            pieces=len(self.pieces),
+            batches=self.planned,
+            batch_size=job["batch_size"],
+            batch_audio_s=round(job["batch_audio_s"], 1),
+            memory_budget_bytes=job["budget_bytes"],
+            memory_basis=job["budget_basis"],
+            model=job["model_name"],
+        )
+
+    def reader_for(self, plan_number: int):
+        if plan_number not in self.readers:
+            name, path, info, spans, total = self.plans[plan_number]
+            pad = int(round(self.job["overlap_s"] * int(info.samplerate)))
+            self.readers[plan_number] = read_pieces(path, spans, total, pad)
+        return self.readers[plan_number]
+
+    def stitcher_for(self, plan_number: int, converted_rate: int) -> Stitcher:
+        if plan_number not in self.stitchers:
+            job = self.job
+            name, path, info, spans, total = self.plans[plan_number]
             rate = int(info.samplerate)
-            stitchers[plan_number] = Stitcher(
-                os.path.join(output_dir, name),
+            self.stitchers[plan_number] = Stitcher(
+                os.path.join(job["output_dir"], name),
                 info,
                 spans,
                 total,
-                int(round(overlap_s * rate)),
-                crossfade_s,
-                output_rate(rate_choice, rate, converted_rate),
-                1 if channel_choice == "mono" else int(info.channels),
+                int(round(job["overlap_s"] * rate)),
+                job["crossfade_s"],
+                output_rate(job["rate_choice"], rate, converted_rate),
+                1 if job["channel_choice"] == "mono" else int(info.channels),
             )
-        return stitchers[plan_number]
+        return self.stitchers[plan_number]
 
-    os.makedirs(staging_root, exist_ok=True)
-    holding = tempfile.mkdtemp(prefix="crucible-rvc-", dir=staging_root)
-    carried: list[tuple[int, str]] = []
-    next_new = 0
-    done_count = 0
-    number = 0
+    def run(self) -> int:
+        os.makedirs(self.job["staging_root"], exist_ok=True)
+        self.holding = tempfile.mkdtemp(prefix="crucible-rvc-", dir=self.job["staging_root"])
+        try:
+            while self.done_count < len(self.pieces):
+                self.run_batch()
+        except RvcFailed as exc:
+            return fail(str(exc))
+        except Exception as exc:
+            return fail(f"{type(exc).__name__}: {exc}")
+        finally:
+            for stitcher in self.stitchers.values():
+                stitcher.abandon()
+            shutil.rmtree(self.holding, ignore_errors=True)
+        return 0
+
+    def run_batch(self) -> None:
+        self.number += 1
+        staging = os.path.join(self.holding, f"batch-{self.number}")
+        converted_dir = os.path.join(staging, "out")
+        os.makedirs(converted_dir)
+        batch = self.fill_batch(staging)
+        finished = self.convert(batch, staging, converted_dir)
+        self.carried = [
+            (piece_index, _park(self.holding, staging, slot, piece_index))
+            for slot, piece_index in enumerate(batch)
+            if slot >= finished
+        ] + self.carried
+        for slot, piece_index in enumerate(batch[:finished]):
+            self.deliver(slot, piece_index, converted_dir)
+        self.done_count += finished
+        shutil.rmtree(staging, ignore_errors=True)
+
+    def fill_batch(self, staging: str) -> list[int]:
+        batch = _Batch(self.job["batch_size"], self.job["batch_audio_s"])
+        while self.carried and batch.fits(self.durations[self.carried[0][0]]):
+            piece_index, waiting = self.carried.pop(0)
+            os.replace(waiting, os.path.join(staging, f"{len(batch.indices)}.wav"))
+            batch.take(piece_index, self.durations[piece_index])
+        while (
+            not self.carried
+            and self.next_new < len(self.pieces)
+            and batch.fits(self.durations[self.next_new])
+        ):
+            self.stage_new(os.path.join(staging, f"{len(batch.indices)}.wav"))
+            batch.take(self.next_new, self.durations[self.next_new])
+            self.next_new += 1
+        return batch.indices
+
+    def stage_new(self, target: str) -> None:
+        plan_number, _, audio_first, audio_last, rate = self.pieces[self.next_new]
+        got_first, got_last, samples = next(self.reader_for(plan_number))
+        assert (got_first, got_last) == (audio_first, audio_last)
+        soundfile.write(target, samples, rate, subtype="FLOAT")
+
+    def progress_line(self, offset: int, batch_number: int):
+        def on_line(text: str) -> None:
+            match = PROGRESS_LINE.match(text.strip())
+            if match is None:
+                return
+            send(
+                "progress",
+                stage="converting",
+                processed=offset + int(match.group(1)),
+                total=len(self.pieces),
+                batch=batch_number,
+                batches=max(self.planned, batch_number),
+            )
+
+        return on_line
+
+    def convert(self, batch: list[int], staging: str, converted_dir: str) -> int:
+        budget_bytes = self.job["budget_bytes"]
+        try:
+            stopped_at, peak = _run_batch(
+                _convert_args(self.request, staging, converted_dir),
+                self.job["models_dir"],
+                self.job["tool_dirs"],
+                self.progress_line(self.done_count, self.number),
+                budget_bytes,
+            )
+        except Exception as exc:
+            raise RvcFailed(
+                f"batch {self.number} failed: {type(exc).__name__}: {exc}"
+            ) from None
+        finished = len(batch) if stopped_at is None else stopped_at
+        if peak is not None:
+            print(
+                f"[rvc] batch {self.number}: {finished} of {len(batch)} piece(s), "
+                f"urvc peaked at {peak / 1e9:.2f} GB of a "
+                f"{budget_bytes / 1e9:.2f} GB budget"
+            )
+        return finished
+
+    def deliver(self, slot: int, piece_index: int, converted_dir: str) -> None:
+        plan_number, piece_number, audio_first, audio_last, rate = self.pieces[piece_index]
+        name, _, _, spans, _ = self.plans[plan_number]
+        first, last = spans[piece_number]
+        where = (
+            f"piece {piece_number + 1} of {len(spans)} of {name!r} "
+            f"({first / rate:.2f}-{last / rate:.2f} s)"
+        )
+        produced = os.path.join(converted_dir, f"{slot}.wav")
+        if not os.path.isfile(produced):
+            raise RvcFailed(f"urvc wrote no output for {where}")
+        converted, converted_rate = soundfile.read(produced, dtype="float32")
+        os.remove(produced)
+        stitcher = self.stitcher_for(plan_number, int(converted_rate))
+        fitted = fit_piece(
+            converted, int(converted_rate), stitcher.rate,
+            stitcher.out(audio_last) - stitcher.out(audio_first), where,
+        )
+        stitcher.add(piece_number, stitcher.out(audio_first), fitted)
+        if piece_number == len(spans) - 1:
+            self.finish(plan_number, stitcher)
+
+    def finish(self, plan_number: int, stitcher: Stitcher) -> None:
+        stitcher.close()
+        del self.stitchers[plan_number]
+        self.readers.pop(plan_number, None)
+        send(
+            "result",
+            bytes=os.path.getsize(stitcher.path),
+            frames=stitcher.written,
+            sample_rate=stitcher.rate,
+            channels=stitcher.channels,
+            format=stitcher.format,
+            subtype=stitcher.subtype,
+        )
+
+
+def main() -> int:
+    request = workerio.read_request("rvc")
+    if request is None:
+        return 1
     try:
-        while done_count < len(pieces):
-            number += 1
-            staging = os.path.join(holding, f"batch-{number}")
-            converted_dir = os.path.join(staging, "out")
-            os.makedirs(converted_dir)
-            batch: list[int] = []
-            seconds = 0.0
-
-            def fits(piece_index: int) -> bool:
-                return not batch or (
-                    len(batch) < batch_size
-                    and seconds + durations[piece_index] <= batch_audio_s
-                )
-
-            while carried and fits(carried[0][0]):
-                piece_index, waiting = carried.pop(0)
-                os.replace(waiting, os.path.join(staging, f"{len(batch)}.wav"))
-                batch.append(piece_index)
-                seconds += durations[piece_index]
-            while not carried and next_new < len(pieces) and fits(next_new):
-                plan_number, _, audio_first, audio_last, rate = pieces[next_new]
-                got_first, got_last, samples = next(reader_for(plan_number))
-                assert (got_first, got_last) == (audio_first, audio_last)
-                soundfile.write(
-                    os.path.join(staging, f"{len(batch)}.wav"),
-                    samples,
-                    rate,
-                    subtype="FLOAT",
-                )
-                batch.append(next_new)
-                seconds += durations[next_new]
-                next_new += 1
-
-            def on_line(text: str, offset: int = done_count, batch_number: int = number) -> None:
-                match = PROGRESS_LINE.match(text.strip())
-                if match is None:
-                    return
-                send(
-                    "progress",
-                    stage="converting",
-                    processed=offset + int(match.group(1)),
-                    total=len(pieces),
-                    batch=batch_number,
-                    batches=max(planned, batch_number),
-                )
-
-            try:
-                stopped_at, peak = _run_batch(
-                    _convert_args(request, staging, converted_dir),
-                    models_dir,
-                    tool_dirs,
-                    on_line,
-                    budget_bytes,
-                )
-            except Exception as exc:
-                return fail(
-                    f"batch {number} failed: {type(exc).__name__}: {exc}"
-                )
-            finished = len(batch) if stopped_at is None else stopped_at
-            if peak is not None:
-                print(
-                    f"[rvc] batch {number}: {finished} of {len(batch)} piece(s), "
-                    f"urvc peaked at {peak / 1e9:.2f} GB of a "
-                    f"{budget_bytes / 1e9:.2f} GB budget"
-                )
-            carried = [
-                (piece_index, _park(holding, staging, slot, piece_index))
-                for slot, piece_index in enumerate(batch)
-                if slot >= finished
-            ] + carried
-
-            for slot, piece_index in enumerate(batch[:finished]):
-                plan_number, piece_number, audio_first, audio_last, rate = pieces[
-                    piece_index
-                ]
-                name, _, _, spans, _ = plans[plan_number]
-                first, last = spans[piece_number]
-                where = (
-                    f"piece {piece_number + 1} of {len(spans)} of {name!r} "
-                    f"({first / rate:.2f}-{last / rate:.2f} s)"
-                )
-                produced = os.path.join(converted_dir, f"{slot}.wav")
-                if not os.path.isfile(produced):
-                    return fail(f"urvc wrote no output for {where}")
-                converted, converted_rate = soundfile.read(produced, dtype="float32")
-                os.remove(produced)
-                stitcher = stitcher_for(plan_number, int(converted_rate))
-                fitted = fit_piece(
-                    converted, int(converted_rate), stitcher.rate,
-                    stitcher.out(audio_last) - stitcher.out(audio_first), where,
-                )
-                stitcher.add(piece_number, stitcher.out(audio_first), fitted)
-                if piece_number == len(spans) - 1:
-                    stitcher.close()
-                    del stitchers[plan_number]
-                    readers.pop(plan_number, None)
-                    send(
-                        "result",
-                        bytes=os.path.getsize(stitcher.path),
-                        frames=stitcher.written,
-                        sample_rate=stitcher.rate,
-                        channels=stitcher.channels,
-                        format=stitcher.format,
-                        subtype=stitcher.subtype,
-                    )
-            done_count += finished
-            shutil.rmtree(staging, ignore_errors=True)
-    except Exception as exc:
-        return fail(f"{type(exc).__name__}: {exc}")
-    finally:
-        for stitcher in stitchers.values():
-            stitcher.abandon()
-        shutil.rmtree(holding, ignore_errors=True)
-
-    send("done")
-    return 0
+        job = parse_request(request)
+    except KeyError as exc:
+        return fail(str(exc.args[0]))
+    try:
+        check_job(job)
+        plans = plan_inputs(job)
+    except RvcFailed as exc:
+        return fail(str(exc))
+    conversion = Conversion(request, job, plans)
+    conversion.announce()
+    code = conversion.run()
+    if code == 0:
+        send("done")
+    return code
 
 
 def _park(holding: str, staging: str, slot: int, piece_index: int) -> str:
