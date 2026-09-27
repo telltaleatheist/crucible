@@ -173,7 +173,7 @@ def mlx_render_profile(narrator_engine: str, total_bytes: int) -> MlxTier:
         )
     return row
 
-QUIT_GRACE_SECONDS = 30.0
+QUIT_GRACE_SECONDS = 210.0
 
 POLL_SECONDS = 0.5
 
