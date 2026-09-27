@@ -88,7 +88,7 @@ Why an overlap AND a crossfade, and why the crossfade is short
   the end) are zero-padded silence; an input almost always ends in silence
   anyway, and padding the file's end would add `overlap_s` of conversion to
   every one-piece sentence to save it. **Owen accepted this end padding as it
-  is, 2026-09-26** (up to ~20 ms per minute of the last piece, at the very end
+  is, 2026-09-26:** *"i guess we can accept 20 ms of padding"* (up to ~20 ms per minute of the last piece, at the very end
   of an input only): not a defect to fix, and nobody should add an end pad
   to "fix" it. Cost: `2 * overlap_s`
   more audio through the model per piece, 1.7% at the defaults.
