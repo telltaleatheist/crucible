@@ -149,6 +149,7 @@ from ...journal import Identity
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from . import qwen, speechonly
+from .document import progress_decoding, transcript_document, worker_failed
 
 __all__ = ["AsrJobType", "AsrParams"]
 
@@ -1149,19 +1150,7 @@ class AsrJobType:
         ctx.warming(state.detail)
         speech = params.speech_settings(self._speech_detector(ctx, params))
 
-        # Zeros rather than absent fields: every `stage` line carries the same
-        # three numbers, so a consumer reads one shape and never has to ask
-        # whether this particular event happens to have them. A `total_s` of 0
-        # is what "the container has not been probed yet" looks like, and it is
-        # what BookForge's own decode line reports before ffprobe answers.
-        ctx.progress(
-            0.0,
-            f"decoding {audio.name}",
-            stage="decoding",
-            processed_s=0.0,
-            total_s=0.0,
-            cues=0,
-        )
+        progress_decoding(ctx, f"decoding {audio.name}")
 
         if spec.engine in QWEN_ASR_ENGINES:
             document = qwen.QwenAsrRun(
@@ -1226,10 +1215,8 @@ class AsrJobType:
         )
 
         windows = outcome.ready["windows"]
-        try:
+        with worker_failed():
             results = workers.require_positional_results(outcome, windows, "window")
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
 
         failures = [
             f"window {index} ({index * WINDOW_SECONDS}s): {result['error']}"
@@ -1353,7 +1340,7 @@ class AsrJobType:
                 cues=message["cues"],
             )
 
-        try:
+        with worker_failed():
             return workers.run_worker(
                 python=python,
                 script=_for_engine(
@@ -1374,8 +1361,6 @@ class AsrJobType:
                 on_progress=on_progress,
                 cancelled=lambda: ctx.cancelled,
             )
-        except workers.WorkerError as exc:
-            raise JobError("worker_failed", str(exc)) from None
 
     # ----------------------------------------------------------- transcript
 
@@ -1402,7 +1387,8 @@ class AsrJobType:
         region holding its middle, so no word is stretched across removed
         audio.
         """
-        timeline = _timeline(outcome.ready, speech)
+        with worker_failed(ValueError):
+            timeline = speechonly.timeline_for(outcome.ready, speech)
         segments: list[dict[str, Any]] = []
         for index, result in enumerate(results):
             offset = index * float(WINDOW_SECONDS)
@@ -1434,8 +1420,7 @@ class AsrJobType:
             ):
                 continue
             deduplicated.append(segment)
-        if timeline is not None:
-            deduplicated = [_to_source(segment, timeline) for segment in deduplicated]
+        deduplicated = [speechonly.to_source(segment, timeline) for segment in deduplicated]
 
         # Every window detects the language independently when none was given.
         # The first window's answer is the document's, because that is the one
@@ -1443,50 +1428,26 @@ class AsrJobType:
         # answer on any real book and the disagreement is not something Crucible
         # is in a position to adjudicate.
         first = results[0]
-        return {
-            "model": model,
-            "revision": spec.revision,
-            "hf_repo": spec.hf_repo,
-            "language": first["language"],
-            "language_probability": first["language_probability"],
-            "language_requested": params.language,
-            "vad_filter": params.vad_filter,
-            "word_timestamps": params.word_timestamps,
+        return transcript_document(
+            model=model,
+            spec=spec,
+            engine={},
+            language=first["language"],
+            language_probability=first["language_probability"],
+            language_requested=params.language,
+            vad_filter=params.vad_filter,
+            word_timestamps=params.word_timestamps,
             # null when none was sent, so the document names the rule it was
             # made under whichever way the client spelled "no prompt".
-            "initial_prompt": params.initial_prompt,
-            "duration_s": outcome.ready["duration_s"],
-            "window_s": WINDOW_SECONDS,
-            "overlap_s": OVERLAP_SECONDS,
-            "windows": outcome.ready["windows"],
-            **speechonly.report(speech, timeline),
-            "segments": deduplicated,
-        }
-
-
-# ------------------------------------------------------------ speech only
-
-
-def _timeline(
-    ready: dict[str, Any], speech: dict[str, Any] | None
-) -> speechonly.Timeline | None:
-    """The worker's `kept` table as a timeline, or None when speech_only is off."""
-    if speech is None:
-        return None
-    try:
-        return speechonly.Timeline.from_ready(ready)
-    except ValueError as exc:
-        raise JobError("worker_failed", str(exc)) from None
-
-
-def _to_source(segment: dict[str, Any], timeline: speechonly.Timeline) -> dict[str, Any]:
-    """One segment, and its words, from the shortened timeline to the source's."""
-    moved = dict(segment)
-    moved["start"], moved["end"] = timeline.span(segment["start"], segment["end"])
-    if "words" in segment:
-        words = []
-        for word in segment["words"]:
-            start, end = timeline.word(word["start"], word["end"])
-            words.append({**word, "start": start, "end": end})
-        moved["words"] = words
-    return moved
+            initial_prompt=params.initial_prompt,
+            prompt={},
+            duration_s=outcome.ready["duration_s"],
+            layout={
+                "window_s": WINDOW_SECONDS,
+                "overlap_s": OVERLAP_SECONDS,
+                "windows": outcome.ready["windows"],
+            },
+            speech=speech,
+            timeline=timeline,
+            segments=deduplicated,
+        )
