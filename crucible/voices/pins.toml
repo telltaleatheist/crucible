@@ -12,7 +12,7 @@ revision = "5885e74691be8c39d137dd8dd5b03813f822d1c4"
 
 [sigma]
 hf_repo = "owenmorgan/sigma-higgs-v3"
-revision = "f331ac7ec7919e8539a86c1b6663b2aba68d0271"
+revision = "8f6b3ca274cbc7b83a537ce25e05d223eb35c987"
 
 [thirdreich]
 hf_repo = "owenmorgan/thirdreich-higgs-v3"
