@@ -310,11 +310,11 @@ test('install.ps1 installs the PINNED interpreter and THIS release\'s wheel into
   assert.ok(ps1.includes(interpreterUrl(HOST_PIN)), 'from python-build-standalone, not from our release');
   assert.match(ps1, /\$HostDir = Join-Path \$Root 'host'/);
   assert.match(ps1, /\[string\]\$Root = "\$env:LOCALAPPDATA\\Crucible"/);
-  assert.ok(ps1.includes(`& curl.exe ${CURL_ARGS.join(' ')} -o $archive`), 'the same curl flags');
+  assert.ok(ps1.includes(`& curl.exe ${CURL_ARGS.join(' ')} -sS -o $archive`), 'the same curl flags');
   assert.ok(ps1.includes(`& $Tar ${TAR_ARGS.join(' ')} $archive -C $Partial`), 'the same tar flags');
   assert.ok(ps1.includes(`$Wheel = "${wheelAssetName('$Release')}"`), 'the wheel is named the one way');
-  assert.match(ps1, /pip install --upgrade --no-input \$WheelPath/);
-  assert.match(ps1, /pip install pystray pillow/, 'the tray, which is not a wheel dependency');
+  assert.match(ps1, /pip install --quiet --disable-pip-version-check --no-warn-script-location --upgrade --no-input \$WheelPath/);
+  assert.match(ps1, /pip install --quiet --disable-pip-version-check --no-warn-script-location pystray pillow/, 'the tray, which is not a wheel dependency');
 });
 
 test('install.ps1 names the tar it uses rather than resolving one through PATH', () => {

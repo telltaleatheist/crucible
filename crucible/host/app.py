@@ -1034,7 +1034,13 @@ class Host:
             # Quitting is not a thing that fails. An engine that could not be
             # told is an engine whose `managed_by` is stale until it restarts,
             # which is a display and not a behaviour.
-            self._c.log.write(f"claim: release did not land: {exc.code}: {exc.message}")
+            if exc.code == "peer_unreachable":
+                # #26 (kylies-pc, 2026-09-26): an upgrade stops the engine and
+                # THEN quits the tray, so there is nobody left to tell. That is
+                # the claim ending with its engine, not a failure to report.
+                self._c.log.write("claim: the engine is already stopped; nothing to release")
+            else:
+                self._c.log.write(f"claim: release did not land: {exc.code}: {exc.message}")
         self._claimed = False
 
     def _orchestrator_ref(self) -> peer_module.Orchestrator:

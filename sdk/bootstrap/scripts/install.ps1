@@ -60,6 +60,19 @@ $Pythonw = Join-Path $HostDir "pythonw.exe"
 
 function Say($m) { Write-Host "crucible: $m" }
 function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; exit 1 }
+# A native program, with its stderr as plain text (#34, fresh install on
+# kylies-pc, 2026-09-26). Under Windows PowerShell 5.1 a native program's
+# stderr, once redirected (ssh, an app reading the output), arrives as
+# ErrorRecords, and a blank one prints as a bare
+# "System.Management.Automation.RemoteException". Every native call a person
+# may see goes through here: records become their text, blank lines go, and
+# $LASTEXITCODE is still the program's.
+function Native([scriptblock]$Command) {
+  & $Command 2>&1 | ForEach-Object {
+    if ($_ -is [System.Management.Automation.ErrorRecord]) { "$($_.Exception.Message)" } else { "$_" }
+  } | Where-Object { $_.Trim() -ne '' }
+}
+function Show { process { Write-Host "  $_" } }
 $Previous = "$HostDir.previous"
 foreach ($target in @($HostDir, $Partial, $Previous, $DownloadDir)) {
   $absolute = [System.IO.Path]::GetFullPath($target)
@@ -188,7 +201,7 @@ if ($have -eq $PySha -and (Test-Path $PythonExe)) {
   $archive = Join-Path $DownloadDir $PyAsset
   if (Test-Path $archive) { Remove-Item $archive -Force }
   Say "host: python $PyVersion from python-build-standalone"
-  & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -o $archive "$PyUrl"
+  Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $archive "$PyUrl" } | Show
   if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }
   $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
   if ($got -ne $PySha) {
@@ -238,7 +251,7 @@ $Wheel = "crucible-$Release-py3-none-any.whl"
 $WheelPath = Join-Path $DownloadDir $Wheel
 if (Test-Path $WheelPath) { Remove-Item $WheelPath -Force }
 Say "host: $Wheel"
-& curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -o $WheelPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel"
+Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $WheelPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" }
 $wantRaw = & curl.exe -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256"
 if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256" }
@@ -250,12 +263,13 @@ if ($gotWheel -ne $want) {
   Die "runtime_sha_mismatch: $Wheel hashes $gotWheel, the release says $want. The download was deleted"
 }
 if (Test-Path -LiteralPath $Cmd) { & $Cmd local shutdown | Out-Null }
-& $PythonExe -m pip install --upgrade --no-input $WheelPath
+Say "host: installing Crucible into $HostDir (about a minute)"
+Native { & $PythonExe -m pip install --quiet --disable-pip-version-check --no-warn-script-location --upgrade --no-input $WheelPath } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: pip would not install $Wheel into $HostDir" }
 # The tray, which is not a dependency of the wheel: pyproject.toml is what
 # every Crucible installs from, and a headless Linux server must not carry
 # a GUI toolkit. See DESKTOP_PACKAGES in sdk/bootstrap/src/interpreter.ts.
-& $PythonExe -m pip install pystray pillow
+Native { & $PythonExe -m pip install --quiet --disable-pip-version-check --no-warn-script-location pystray pillow } | Show
 if ($LASTEXITCODE -ne 0) { Die "runtime_install_failed: the tray packages would not install" }
 Remove-Item $WheelPath -Force
 
@@ -285,42 +299,40 @@ Say "host: $Release installed at $HostDir (Python $PyVersion)"
 # than writing a .lnk of its own, so there is one spelling of what it points
 # at and one place that changes when it moves.
 foreach ($action in @("register", "install-cli", "install-desktop")) {
-  & $Cmd local $action
-  if ($LASTEXITCODE -ne 0) { Die "local setup failed: $action (exit $LASTEXITCODE)" }
+  $said = @(Native { & $Cmd local $action })
+  if ($LASTEXITCODE -ne 0) { $said | Show; Die "local setup failed: $action (exit $LASTEXITCODE). Run this installer again; it carries on from where it stopped." }
 }
 
 # --- 7. start the host, and stop ------------------------------------------
 # pythonw, not the .cmd: a tray program has no console window (4.1).
 Say "starting the tray"
+$Began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
 Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucible.cli","host"
-& $Cmd local start
-if ($LASTEXITCODE -ne 0) { Die "Crucible installed but did not become ready. Run crucible local status for the named failure." }
+$said = @(Native { & $Cmd local start })
+if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }
 
 # --- 8. what happens next, read rather than asserted ----------------------
 # PHASE19-AUTOMATIC-WSL.md 2.7. This script used to end by saying the Linux
 # engine was "available from its console", which stopped being true the
 # moment the tray began starting the move by itself at every start (2.3).
 #
-# It has no logic of its own and does not decide anything: the tray writes
-# wsl-outcome.json within seconds of coming up, and this READS it. A machine
-# that cannot run the Linux engine has that file's own sentence, verbatim, and
-# every other machine is told the move is under way. Waiting a few seconds is
-# the whole of the mechanism - the tray has to settle a presence first - and a
-# file that never appears means the move has not been decided yet, which is
-# what the general sentence already says.
-$Outcome = Join-Path $Root 'wsl-outcome.json'
-$Deadline = (Get-Date).AddSeconds(10)
-$Verdict = $null
-while ((Get-Date) -lt $Deadline) {
-  if (Test-Path -LiteralPath $Outcome) {
-    try { $Verdict = Get-Content -Raw $Outcome | ConvertFrom-Json } catch { $Verdict = $null }
-    if ($Verdict) { break }
-  }
-  Start-Sleep -Milliseconds 500
-}
+# It has no logic of its own and decides nothing about the move: the tray
+# runs the move and publishes it, and `crucible.host.installwatch` READS that
+# (the door of 2.6, and wsl-outcome.json) and says it in plain words.
+#
+# THE CONSOLE IS THE APP (#6, #7, fresh install on kylies-pc, 2026-09-26).
+# This used to wait ten seconds, say "the app you installed from will show
+# its progress" and exit - and twelve seconds later the move stopped for a
+# restart that only host.log mentioned. A person at a console now watches
+# every step here until the move ends: done, a restart owed (and how to do
+# it), cannot, or failed. An APP that ran this script watches the move
+# itself through the same door, so it still gets the short ending.
+# It is an app when it runs a saved crucible-install.ps1 with its output piped.
 Say "Crucible is ready in your notification area."
-if ($Verdict -and $Verdict.sentence) {
-  Say $Verdict.sentence
-} else {
-  Say "It is setting up its Linux engine now; the app you installed from will show its progress."
+$FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq 'crucible-install.ps1') -and [Console]::IsOutputRedirected)
+$Watch = @('-m', 'crucible.host.installwatch', '--home', $Root, '--since', $Began)
+if ($FromApp) { $Watch += '--brief' }
+Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }
+if ($LASTEXITCODE -ne 0) {
+  Say "The Linux engine sets itself up in the background; the Crucible icon by the clock shows how it is going."
 }

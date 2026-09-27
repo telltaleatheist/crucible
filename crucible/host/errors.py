@@ -78,15 +78,22 @@ HOST_ERROR_CODES: dict[str, str] = {
         "watching, claiming and the unit restart; it never widens this "
         "(PHASE15-HOST.md 4.1a, PHASE17 2.5)."
     ),
+    # The sentences a PERSON reads for these two are `installer.REBOOT_SENTENCE`
+    # and `installer.REBOOT_AGAIN_SENTENCE`; both name "Update and restart",
+    # because WSL is installed by Windows' servicing step and a restart that
+    # skips or postpones waiting updates installs nothing (#14, Owen's ruling,
+    # 2026-09-26).
     "wsl_reboot_required": (
-        "`wsl --install` ran and Windows needs a restart before it can start a "
-        "Linux virtual machine. The move stops here and the tray resumes it "
-        "after the restart (PHASE19 2.3); the outcome file records it."
+        "WSL was enabled and Windows must restart to install it. The person is "
+        'told to choose "Update and restart", because Windows installs WSL in '
+        "the same servicing step as its waiting updates. The move stops here "
+        "and the tray resumes it after the restart and sign-in (PHASE19 2.3)."
     ),
     "wsl_reboot_again": (
-        "Windows asked for a restart a SECOND time, on a run that was already "
-        "the one after the first. Nothing here can repair that and asking again "
-        "would be a loop, so it is terminal for the tray (PHASE19 2.4)."
+        "Windows was restarted and WSL is still not installed, usually because "
+        "the restart skipped or postponed waiting updates. The person is told "
+        'to install the updates and choose "Update and restart"; it can take '
+        "more than one restart (PHASE19 2.4, #14)."
     ),
     "wsl_outcome_invalid": (
         "`wsl-outcome.json` is present and is not the document PHASE19 2.2 "
