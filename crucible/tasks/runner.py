@@ -7,13 +7,15 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import interpreter, tasks
+from .. import interpreter, procgroup, tasks
 from ..errors import ApiError
 from .states import Task
 
 PROGRESS_INTERVAL_SECONDS = 0.5
 
 TERMINATE_GRACE_SECONDS = 10.0
+
+INSTALL_CHILD_LEFT_RUNNING = 75
 
 REASON_PREFIX = "crucible: "
 
@@ -87,10 +89,24 @@ def run_install_process(task: Task, argv: list[str], home: Path, emit: Emit) -> 
             if task.cancel_requested and process.poll() is None:
                 process.terminate()
             relay_install_line(task, line.rstrip("\n"), throttle, emit)
-        code = process.wait(timeout=TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        code = process.wait()
+        try:
+            code = process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            code = _stop_without_sigkill(process, argv, emit)
     finally:
         task.process = None
     return code
+
+
+def _stop_without_sigkill(
+    process: "subprocess.Popen[Any]", argv: list[str], emit: Emit
+) -> int:
+    what = f"the install child `{' '.join(argv)}`"
+    try:
+        procgroup.stop_gracefully(
+            process, what, procgroup.STOP_TIMEOUT_SECONDS, "its task events"
+        )
+    except procgroup.ProcessGroupError as exc:
+        emit("progress", {"line": str(exc)})
+        return INSTALL_CHILD_LEFT_RUNNING
+    return process.wait()
