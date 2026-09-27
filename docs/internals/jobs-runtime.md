@@ -64,7 +64,38 @@ implementation rules are repeated here.
   against a six-method `JobType` once met a seventh added in another branch. The resulting
   `AttributeError` happened inside `_finish`, so no terminal event was sent and client streams
   hung forever.
+  - `OPTIONAL_JOB_TYPE_MEMBERS` (`journal_identity`) are declared on the Protocol with a
+    default of `None` and left out of that check. `journal_identity` is `None` on every type
+    that keeps no resume journal and a method on the one that does (`asr`). `api/inputs.py`
+    reads it with `getattr(..., None)`, so a type without it refuses `resume` with
+    `resume_unsupported`.
 - Every job type must map to a capability class, or a refusal would have nothing to name.
+- The registry's installer facts (`INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`,
+  `no_installer`) live in `crucible/jobenv.py`, derived from `WORKER_JOB_TYPES`,
+  `JOB_TYPES_SERVED_BY_ENV` and the headline packages. The server side (`jobs`, `tasks`,
+  `installonsubmit`, `api/routes/capability.py`) imports them from there and never imports
+  `crucible.cli`; `tests/test_layering.py` holds that line.
+
+### Layering leaves
+
+These modules import nothing heavier than `backend`, `config` or `errors`, so the lane,
+leases, the journal and the job types can use them without pulling in residency, the
+ladder or the CLI:
+
+- `crucible/clock.py`: `now()` (an aware UTC `datetime`), `utcnow()` (its ISO string) and
+  `utcnow_to_the_second()` (the ladder's record stamps). The old names (`jobs.base.utcnow`,
+  `jobs.queue._now`, `journal.utcnow`, `leases._utcnow`, `ladder._now`, `residency._now`)
+  are aliases of these, kept so tests can still patch them per module.
+- `crucible/cardkinds.py`: the four resident kinds (`KIND_*`) and `KIND_NOUNS`. `leases`
+  reads them from here; `residency` re-exports them.
+- `crucible/cardfacts.py`: the ladder record reader (`record_path`, `load_record`,
+  `stale_reason`, `card_for`, the rung and outcome names, `RungResult`). The job types read
+  `card_for` from here; `ladder` re-exports it and keeps the measuring.
+- `crucible/capabilitystore.py`: `decide_for(config, backend)` (decisions on the card's
+  total bytes, the config's reserve and local models, and `card_for`),
+  `decide_on(...)` for callers deciding on recorded numbers (`settings`), `record_of(...)`
+  and `write_capability(config, backend, decisions, flags)`. The CLI, `api/app.py`'s
+  first-request decision, `installonsubmit.live_decisions` and `settings` all go through it.
 
 ## 3. The lane and the job record (`crucible/jobs/queue.py`, `base.py`)
 
@@ -78,7 +109,9 @@ implementation rules are repeated here.
 - The refusal is `409 server_busy` with facts (`busy_details`): holder, job, state, `since`
   (`started` for a running job, `created` for an admitted one) and the latest progress line.
   A bare "busy" makes clients poll, and polling rewards luck rather than who asked first.
-  `busy_details` is also what `POST /v1/tasks` reads through `Settlement.holder()`.
+  `Job.busy_details()` builds them (`jobs.queue.busy_details` delegates to it); it is also what
+  `POST /v1/tasks` reads through `Settlement.holder()`, which is why `settle` needs no import of
+  the queue.
 - `position`, `queue_depth` and cancel are unchanged. Under the admission rule they only take
   the values 0, 1 or null.
 - `discard` forgets a created job that was never admitted. A leftover record would sit at

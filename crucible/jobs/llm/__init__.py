@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, jobenv, ladder, llamacpp, vram, weights
+from ... import accelerator, jobenv, llamacpp, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...capability import (
     MIN_LOAD_CONTEXT,
@@ -13,6 +13,7 @@ from ...capability import (
     check_load_context,
 )
 from ... import ollamastore
+from ...cardfacts import card_for
 from ...config import Config
 from ...engines import EngineError
 from ...engines import vllm as vllm_engine
@@ -321,7 +322,7 @@ def _require_loadable(
     spec = worker_type.require_block(manifest, model_id, backend_kind, "model")
     worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)
     accelerator.refuse_if_card_lacks(
-        model_id=model_id, spec=spec, card=ladder.card_for(config.home, backend.gpu)
+        model_id=model_id, spec=spec, card=card_for(config.home, backend.gpu)
     )
     if backend_kind == LLAMA_WINDOWS:
         engine = llm_engine_status(config, backend)
@@ -527,7 +528,7 @@ class LoadModelJobType:
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
                 card_args=vllm_engine.card_args(
-                    spec, ladder.card_for(self._config.home, self._backend.gpu)
+                    spec, card_for(self._config.home, self._backend.gpu)
                 ),
             )
         except EngineError as exc:

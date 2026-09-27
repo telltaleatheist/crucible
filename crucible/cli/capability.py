@@ -8,26 +8,10 @@ from typing import Any
 
 from .. import capability, ladder
 from ..backend import Backend, MLX_DARWIN
-from ..config import (
-    CAPABILITY_FLAGS,
-    Config,
-    DESKTOP_BASIS_MEASURED,
-    desktop_reserve_words,
-    write_config,
-)
+from ..capabilitystore import decide_for, write_capability
+from ..config import Config, DESKTOP_BASIS_MEASURED, desktop_reserve_words
 from . import common
 from .common import EXIT_OK, _fail
-
-
-def _decide_here(config: Config, backend: Backend) -> tuple[capability.Decision, ...]:
-    return capability.decide_all(
-        backend.kind,
-        total_bytes=backend.gpu.vram_bytes,
-        desktop_allowance_bytes=config.desktop_allowance_bytes,
-        gpu_vendor=backend.gpu.vendor,
-        chosen={entry.capability: entry.model for entry in config.local_models},
-        card=ladder.card_for(config.home, backend.gpu),
-    )
 
 
 def _card_facts(home: Path, backend: Backend) -> dict[str, Any]:
@@ -57,43 +41,6 @@ def _card_line(facts: dict[str, Any]) -> str:
         f"{facts['sm']} ({facts['compute_capability']}): "
         + ", ".join(said(name) for name in known)
         + measured
-    )
-
-
-def _write_capability(
-    config: Config,
-    backend: Backend,
-    decisions: tuple[capability.Decision, ...],
-    flags: dict[str, bool],
-) -> Path:
-    values = {
-        flag: flags.get(flag, getattr(config, flag)) for flag in CAPABILITY_FLAGS
-    }
-    return write_config(
-        config.home,
-        name=config.name,
-        host=config.host,
-        port=config.port,
-        token=config.token,
-        backend_kind=config.backend_kind,
-        desktop_allowance_bytes=config.desktop_allowance_bytes,
-        desktop_allowance_basis=config.desktop_allowance_basis,
-        desktop_allowance_note=config.desktop_allowance_note,
-        retention_days=config.retention_days,
-        tts_engines=config.tts_engines,
-        capability=capability.record(
-            backend.kind,
-            total_bytes=backend.gpu.vram_bytes,
-            desktop_allowance_bytes=config.desktop_allowance_bytes,
-            decisions=decisions,
-            routes={entry.capability: entry.model for entry in config.routes},
-        ),
-        routes=config.routes,
-        upstreams=config.upstreams,
-        advertise=config.advertise,
-        tailscale_advertise=config.tailscale_advertise,
-        lan_advertise=config.lan_advertise,
-        **values,
     )
 
 
@@ -145,7 +92,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
             desktop_allowance_basis=DESKTOP_BASIS_MEASURED,
             desktop_allowance_note=reserve.note,
         )
-    decisions = _decide_here(config, backend)
+    decisions = decide_for(config, backend)
 
     turn_off = {
         f"enable_{name}": False
@@ -212,7 +159,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
             )
         return EXIT_OK
 
-    written = _write_capability(config, backend, decisions, turn_off)
+    written = write_capability(config, backend, decisions, turn_off)
     if not args.json:
         print(f"recorded in {written}")
         for flag in sorted(turn_off):
@@ -263,7 +210,7 @@ def cmd_ladder(args: argparse.Namespace) -> int:
 
 
 def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
-    decisions = _decide_here(config, backend)
+    decisions = decide_for(config, backend)
     flags: dict[str, bool] = {}
     disabled: list[str] = []
     print("capability:")
@@ -279,7 +226,7 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
                 f"{job_type!r} is DISABLED on this host: "
                 + "; ".join(f"{d.capability} — {d.reason}" for d in mine)
             )
-    written = _write_capability(config, backend, decisions, flags)
+    written = write_capability(config, backend, decisions, flags)
     print(f"recorded in {written}")
     card = ladder.card_for(config.home, backend.gpu)
     pool = capability.pool_name(backend.kind, backend.gpu.vendor)

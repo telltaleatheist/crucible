@@ -3,11 +3,12 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
+from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
+from .clock import now as _utcnow
 from .errors import ApiError
-from .residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
 
 MIN_TTL_SECONDS = 30
 MAX_TTL_SECONDS = 3600
@@ -35,10 +36,6 @@ CARD_EFFECTS: dict[str, CardEffect] = {
     "rvc": CardEffect(),
     "align-longform": CardEffect(),
 }
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def require_ttl(ttl_seconds: int) -> int:

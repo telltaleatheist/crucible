@@ -9,13 +9,12 @@ from ... import ladder
 from ...config import Config
 from ...errors import ApiError
 from ...installonsubmit import live_decisions
+from ...jobenv import INSTALLER_FOR
 from ...voices import NARRATOR_ENGINE_SAMPLING
 from ..context import AppContext, Routers
 
 
 def installable_job_type_rows() -> list[dict[str, Any]]:
-    from ...cli import INSTALLER_FOR
-
     ordered: list[str] = []
     classes_of: dict[str, list[str]] = {}
     for entry in capability_classes.CLASSES:

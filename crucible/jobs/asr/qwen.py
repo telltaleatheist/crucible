@@ -20,7 +20,7 @@ from ...asrmodels import (
 from ...config import Config
 from ...engines.vllm import ENVIRONMENT as VLLM_ENVIRONMENT
 from ...engines.vllm import run_dtype
-from ...ladder import card_for
+from ...cardfacts import card_for
 from ...errors import ApiError, JobError
 from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
 from ..align import device_for as align_device_for
