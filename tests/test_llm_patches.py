@@ -26,10 +26,22 @@ MLX_ARGS = [
 ]
 MAC_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("mlx-darwin")))
 CUDA_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("cuda-linux")))
+ALL_SCRIPTS = tuple(
+    envpatches.LLM_SCRIPTS_DIR / patch.script for patch in envpatches.LLM_PATCHES
+)
+ALL_IDS = [patch.id for patch in envpatches.LLM_PATCHES]
+STOCK_GENERATION_THREAD = (
+    "\n\nclass ResponseGenerator:\n"
+    "    def __init__(self, model_provider, prompt_cache):\n"
+    "        self.model_provider = model_provider\n"
+    "        self._generation_thread = Thread(target=self._generate)\n"
+    "        self._generation_thread.start()\n"
+)
 
 
 def pristine() -> str:
-    return FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
+    validator = FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return validator + STOCK_GENERATION_THREAD
 
 
 def pristine_generate() -> str:
@@ -88,8 +100,8 @@ def run_script(env: Path, script: Path = SCRIPT) -> subprocess.CompletedProcess:
     )
 
 
-def patch_both(env: Path) -> None:
-    for script in (SCRIPT, FP32_SCRIPT):
+def patch_all(env: Path) -> None:
+    for script in ALL_SCRIPTS:
         done = run_script(env, script)
         assert done.returncode == 0, done.stderr
 
@@ -172,10 +184,10 @@ def test_the_patch_is_selected_by_the_recipe_not_by_a_backend_name(tmp_path: Pat
     assert FP32.distribution in MAC_PINS and FP32.distribution not in CUDA_PINS
     for pins in (CUDA_PINS, {}):
         rows = envpatches.check("llm", env, pins)
-        assert [row["status"] for row in rows] == [envpatches.NOT_APPLICABLE] * 2
+        assert [row["status"] for row in rows] == [envpatches.NOT_APPLICABLE] * len(ALL_IDS)
         assert [
             row["status"] for row in envpatches.apply("llm", env, Path(sys.executable), pins)
-        ] == [envpatches.NOT_APPLICABLE] * 2
+        ] == [envpatches.NOT_APPLICABLE] * len(ALL_IDS)
         assert server_of(env).read_text(encoding="utf-8") == pristine()
         assert generate_of(env).read_text(encoding="utf-8") == pristine_generate()
 
@@ -184,9 +196,9 @@ def test_apply_through_the_registry_patches_and_proves_it(tmp_path: Path) -> Non
     env = make_env(tmp_path)
     said: list[str] = []
     rows = envpatches.apply("llm", env, Path(sys.executable), MAC_PINS, on_line=said.append)
-    assert [row["id"] for row in rows] == ["mlx-lm-top-logprobs-40", "mlx-lm-fp32-logprobs"]
-    assert [row["status"] for row in rows] == [envpatches.APPLIED] * 2
-    assert sum(line.startswith("PATCHED") for line in said) == 2
+    assert [row["id"] for row in rows] == ALL_IDS
+    assert [row["status"] for row in rows] == [envpatches.APPLIED] * len(ALL_IDS)
+    assert sum(line.startswith("PATCHED") for line in said) == len(ALL_IDS)
 
 
 def _llm_install_ready(home: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[jobenv.EnvSpec, Path]:
@@ -273,7 +285,7 @@ def test_an_env_without_the_fp32_patch_is_refused_at_engine_start(tmp_path: Path
 
 def test_a_patched_env_passes_the_gate(tmp_path: Path) -> None:
     env = make_env(tmp_path)
-    patch_both(env)
+    patch_all(env)
     engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
     with pytest.raises(EngineError) as caught:
         engine.start(tmp_path / "no-weights", "m", 0, MLX_ARGS)
@@ -285,7 +297,7 @@ def test_an_argv_that_does_not_state_its_batch_is_refused_at_engine_start(
     tmp_path: Path, missing: str
 ) -> None:
     env = make_env(tmp_path)
-    patch_both(env)
+    patch_all(env)
     args = list(MLX_ARGS)
     at = args.index(missing)
     del args[at : at + 2]
@@ -417,7 +429,7 @@ def test_doctor_reports_an_unpatched_mac_llm_env_as_a_problem(
     _mac_llm_env(home, pristine())
     report = _doctor(capsys)
     rows = {row["id"]: row for row in report["llm_patches"]}
-    assert set(rows) == {"mlx-lm-top-logprobs-40", "mlx-lm-fp32-logprobs"}
+    assert set(rows) == set(ALL_IDS)
     assert all(row["status"] == "missing" for row in rows.values())
     assert any(p.startswith("llm_patch[mlx-lm-top-logprobs-40]: missing") for p in report["problems"])
     assert any(p.startswith("llm_patch[mlx-lm-fp32-logprobs]: missing") for p in report["problems"])
@@ -432,9 +444,9 @@ def test_doctor_reports_a_patched_mac_llm_env_as_sound(
     env = _mac_llm_env(home, pristine())
     (env / "bin").mkdir()
     (env / "bin" / "python").write_text("", encoding="utf-8")
-    patch_both(env)
+    patch_all(env)
     report = _doctor(capsys)
-    assert [row["status"] for row in report["llm_patches"]] == ["applied", "applied"]
+    assert [row["status"] for row in report["llm_patches"]] == ["applied"] * len(ALL_IDS)
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -445,7 +457,9 @@ def test_doctor_says_not_applicable_on_cuda_linux(
     assert cli.main(["init", "--enable-llm"]) == 0
     capsys.readouterr()
     report = _doctor(capsys)
-    assert [row["status"] for row in report["llm_patches"]] == ["not_applicable"] * 2
+    assert [row["status"] for row in report["llm_patches"]] == (
+        ["not_applicable"] * len(ALL_IDS)
+    )
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -456,7 +470,7 @@ def test_doctor_does_not_repeat_a_missing_env_as_a_patch_problem(
     assert cli.main(["init", "--enable-llm"]) == 0
     capsys.readouterr()
     report = _doctor(capsys)
-    assert [row["status"] for row in report["llm_patches"]] == ["no_env"] * 2
+    assert [row["status"] for row in report["llm_patches"]] == ["no_env"] * len(ALL_IDS)
     assert not any("llm_patch" in p for p in report["problems"])
 
 
@@ -477,7 +491,8 @@ def test_env_patch_llm_applies_and_exits_zero(
     assert cli.main(["env", "patch", "llm"]) == 0
     out = capsys.readouterr().out
     assert "llm patch (mlx-lm-top-logprobs-40): applied" in out
-    assert "llm patch (mlx-lm-fp32-logprobs): applied" in out
+    for patch_id in ALL_IDS:
+        assert f"llm patch ({patch_id}): applied" in out
     assert PATCH.marker in server_of(env).read_text(encoding="utf-8")
     assert FP32.marker in generate_of(env).read_text(encoding="utf-8")
 

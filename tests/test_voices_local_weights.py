@@ -252,7 +252,7 @@ def test_the_list_command_does_not_offer_a_pull_that_would_refuse(
     row = {r["id"]: r for r in json.loads(capsys.readouterr().out)}["screening"]
     assert row["installed"] is False
     assert "crucible voices pull" not in row["detail"]
-    assert str(screening) in row["detail"]
+    assert screening.as_posix() in row["detail"]
 
 
 def test_a_local_token_voice_is_refused_by_name_and_not_by_a_subscript(

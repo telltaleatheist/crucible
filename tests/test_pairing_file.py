@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -35,6 +36,10 @@ def test_the_line_is_the_loopback_one_whatever_the_bind_is(tmp_path: Path) -> No
     assert "127.0.0.1" in path.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="a file mode is the filesystem's answer, and NTFS reports 0o666 for every file",
+)
 def test_the_file_is_user_only(tmp_path: Path) -> None:
     home = tmp_path / "home"
     path = write_pairing_file(home, name="crucible@pc", port=7100, token="tok3n")

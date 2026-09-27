@@ -495,6 +495,9 @@ def test_the_server_and_not_the_client_chooses_how_it_runs(
                          / FAKE_BACKEND.kind),
         "device": "cuda",
         "dtype": "bfloat16",
+        "memory_cap_bytes": load_align_manifest(MODEL)
+        .spec(FAKE_BACKEND.kind)
+        .memory_bytes_estimate,
     }
     assert align["max_audio_s"] == 300.0
     assert align["ffmpeg"] == ffmpeg

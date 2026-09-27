@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ from crucible.voicecard import (
 )
 from crucible.voicerepo import REPO_MANIFEST_NAME, parse_repo_manifest
 from crucible.voices import VoiceError, load_voice
+
+from .conftest import configure_box
 
 GOOD = """
 schema = 1
@@ -64,6 +67,11 @@ A LoRA fine-tune (training run `mb_hp_rvcbed1`, checkpoint 4257).
 
 This is a Derivative Work.
 """
+
+
+@pytest.fixture(autouse=True)
+def a_configured_box() -> None:
+    configure_box(Path(os.environ["CRUCIBLE_HOME"]))
 
 
 def repo():

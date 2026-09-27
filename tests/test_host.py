@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -13,12 +14,17 @@ import pytest
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
 from crucible.host import door as door_module
-from crucible.host import installer, landoor, log, menu, outcome, paths, presence, startup, wslstate
+from crucible.host import installer, landoor, log, outcome, paths, presence, startup, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES, HostError
 from crucible.host.menu import Distro, Engine, Owner
 from crucible.host.runner import RunResult
 from crucible.host.wsl_states import CRUCIBLE_DISTRO, WSL_STATE_CODES, WSL_STATES
+
+WINDOWS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="the install window and the Windows host pack exist only on a Windows host",
+)
 
 WINDOWS_ENV = {
     "LOCALAPPDATA": r"C:\Users\tellt\AppData\Local",
@@ -169,72 +175,6 @@ def test_a_log_line_is_timestamped_and_returned(host_log: log.HostLog) -> None:
     line = host_log.write("boot: hello")
     assert line.endswith("boot: hello")
     assert line[:4].isdigit()
-
-
-def test_every_cell_of_the_distro_by_engine_table_has_a_title_and_an_item_set() -> None:
-    seen: set[str] = set()
-    for distro in Distro:
-        owner = Owner.WSL_UNIT if distro is Distro.PRESENT else Owner.HOST_CHILD
-        for engine in Engine:
-            model = menu.menu_model(distro, engine, owner)
-            assert model.title.startswith("Crucible — ")
-            seen.add(model.title)
-            ids = [item.item_id for item in model.items]
-            assert ids[0] == menu.OPEN_CONSOLE
-            assert ids[-1] == menu.QUIT
-            assert menu.OPEN_LOG in ids
-            assert (menu.INSTALL_ENGINE in ids) == (distro is not Distro.PRESENT)
-            assert model.item(menu.OPEN_CONSOLE).enabled == (engine is Engine.RUNNING)
-            assert model.item(menu.STOP_ENGINE).enabled == (engine is Engine.RUNNING)
-            assert model.item(menu.RESTART_ENGINE).enabled == (engine is not Engine.INSTALLING)
-    assert "Crucible — running (WSL)" in seen
-    assert "Crucible — running (llama-windows)" in seen
-    assert "Crucible — engine did not start — open the log" in seen
-    assert "Crucible — installing…" in seen
-    assert "Crucible — stopped" in seen
-
-
-def test_the_title_names_the_backend_after_section_zeros_amendment() -> None:
-    running = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD)
-    assert running.title == "Crucible — running (llama-windows)"
-    assert "host mode" not in running.title
-
-
-def test_quits_label_says_what_quitting_costs_and_it_differs_by_server() -> None:
-    assert menu.menu_model(Distro.PRESENT, Engine.RUNNING, Owner.WSL_UNIT).item(menu.QUIT).label == (
-        "Quit (the engine keeps running)"
-    )
-    assert menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD).item(menu.QUIT).label == (
-        "Quit (stops the engine)"
-    )
-
-
-def test_an_unreadable_wsl_still_offers_the_install_and_never_claims_a_server() -> None:
-    model = menu.menu_model(Distro.UNKNOWN, Engine.RUNNING, Owner.NONE)
-    assert model.item(menu.INSTALL_ENGINE) is not None
-    assert "WSL unreadable" in model.title
-
-
-def test_an_engine_the_host_found_is_named_by_that_and_not_by_a_backend() -> None:
-    model = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.FOUND)
-    assert model.title == "Crucible — running (found on this machine)"
-    assert "llama-windows" not in model.title
-
-
-def test_the_host_offers_no_verb_that_would_act_on_an_engine_it_did_not_start() -> None:
-    model = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.FOUND)
-    assert model.item(menu.INSTALL_ENGINE) is None
-    assert model.item(menu.RESTART_ENGINE).enabled is False
-    assert model.item(menu.STOP_ENGINE).enabled is False
-    assert model.item(menu.OPEN_CONSOLE).enabled is True
-    assert model.item(menu.OPEN_LOG).enabled is True
-    assert model.item(menu.QUIT).label == "Quit (the engine keeps running)"
-
-
-def test_the_install_item_reads_as_an_upgrade_not_as_an_absence() -> None:
-    label = menu.menu_model(Distro.ABSENT, Engine.RUNNING, Owner.HOST_CHILD).item(menu.INSTALL_ENGINE).label
-    assert label.startswith("Install the WSL2 engine")
-    assert "TTS" in label
 
 
 def test_every_wsl_call_uses_exec_so_wsl_exe_cannot_pre_expand_a_variable() -> None:
@@ -489,27 +429,6 @@ def test_a_guest_engine_whose_line_cannot_be_read_writes_NO_file(
     assert "worse than no file" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
 
-def test_the_host_refuses_to_restart_or_stop_an_engine_it_did_not_start(
-    tmp_path: Path,
-) -> None:
-    runner = Scripted(
-        answers={
-            "-l -v --running": ok(OWENS_PC_LIST),
-            "-l -v": ok(OWENS_PC_LIST),
-            "cat ": ok(GUEST_LINE),
-        },
-        pings=[200, 200],
-    )
-    context = _context(tmp_path, runner)
-    host = app_module.Host(context)
-    host.start()
-    runner.calls.clear()
-    host.on_click(menu.STOP_ENGINE)
-    host.on_click(menu.RESTART_ENGINE)
-    assert not any("systemctl" in " ".join(call) for call in runner.calls)
-    assert context.presence.engine is Engine.RUNNING
-
-
 def test_the_startup_shortcut_is_exactly_where_4_1_says() -> None:
     path = str(startup.shortcut_path(WINDOWS_ENV))
     assert path == (
@@ -549,14 +468,14 @@ def test_login_preserves_custom_home_without_inherited_environment(monkeypatch) 
     import sys
     home = r"E:\Crucible installs\Owen's engine"
     env = dict(WINDOWS_ENV, CRUCIBLE_HOME=home)
-    monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
+    monkeypatch.setenv("CRUCIBLE_HOME", "overwritten by the login item")
     monkeypatch.setattr(sys, "argv", [])
     calls = []
     monkeypatch.setattr(runpy, "run_module", lambda module, **kwargs:
                         calls.append((module, kwargs, os.environ["CRUCIBLE_HOME"], list(sys.argv))))
     exec(startup.startup_python(env), {})
-    assert calls == [("crucible.cli", {"run_name": "__main__"}, home, ["crucible", "local", "tray"])]
     monkeypatch.delenv("CRUCIBLE_HOME")
+    assert calls == [("crucible.cli", {"run_name": "__main__"}, home, ["crucible", "local", "tray"])]
 
 
 def test_the_remove_script_is_powershell_that_parses(monkeypatch) -> None:
@@ -904,6 +823,7 @@ def test_an_outcome_round_trips_every_field_2_2_names(tmp_path: Path) -> None:
         "at": "2026-09-19T00:00:00+00:00",
         "release": "1.0.5",
         "attempts": 1,
+        "restarts": 0,
     }
 
 
@@ -967,7 +887,9 @@ def test_a_reboot_demand_past_the_budget_is_terminal_and_says_twice(tmp_path: Pa
     with pytest.raises(HostError) as caught:
         walk.run()
     assert caught.value.code == "wsl_reboot_again"
-    assert "twice" in caught.value.message
+    assert "restarted several times" in caught.value.message
+    assert "Windows Update" in caught.value.message
+    assert '"Try again"' in caught.value.message
     assert outcome.classify(caught.value.code) == outcome.CANNOT
 
 
@@ -1141,8 +1063,8 @@ def test_a_reboot_state_ends_the_task_with_the_sentence_4_7_requires(
     with pytest.raises(HostError) as caught:
         walk.run()
     assert caught.value.code == "wsl_reboot_required"
-    assert "has to restart" in caught.value.message
-    assert "goes on from here" in caught.value.message
+    assert "needs to restart" in caught.value.message
+    assert "carries on by itself" in caught.value.message
     assert "press Install" not in caught.value.message
     assert not (tmp_path / "wsl-reboot-pending").exists()
     assert outcome.classify(caught.value.code) == outcome.REBOOT_PENDING
@@ -1619,7 +1541,7 @@ def test_there_is_no_platform_gate_left_in_main(monkeypatch, tmp_path: Path) -> 
         )
     )
     monkeypatch.setattr(
-        cli, "load_config", lambda *a, **k: (_ for _ in ()).throw(
+        cli.common, "load_config", lambda *a, **k: (_ for _ in ()).throw(
             ConfigError("no config here")
         )
     )
@@ -1923,7 +1845,7 @@ def test_failed_activation_keeps_all_windows_models_and_resume_record(tmp_path: 
 
 def test_malformed_installed_flag_cannot_authorize_source_deletion() -> None:
     with pytest.raises(HostError):
-        catalog_module.parse_catalog({"subjects": [{"kind": "model", "id": "a", "installed": "false"}]}, "guest")
+        catalog_module.parse_catalog({"rows": [{"kind": "model", "id": "a", "installed": "false"}]}, "guest")
 
 
 def test_stopped_catalog_resumes_partial_deletion_through_the_weights_owner(tmp_path, monkeypatch):
@@ -2095,7 +2017,7 @@ def test_no_windows_engine_is_a_fact_the_step_states_and_not_a_failure(
 
 def test_a_catalog_row_missing_a_field_is_refused_rather_than_half_read() -> None:
     with pytest.raises(HostError) as caught:
-        catalog_module.parse_catalog({"subjects": [{"kind": "model"}]}, "the guest")
+        catalog_module.parse_catalog({"rows": [{"kind": "model"}]}, "the guest")
     assert caught.value.code == "catalog_unreadable"
     assert "'id'" in caught.value.message or "'installed'" in caught.value.message
 
@@ -2139,7 +2061,7 @@ def test_the_guest_is_reached_with_exec_and_the_body_is_one_argument() -> None:
 
 def test_the_guest_port_reads_the_status_curl_appended() -> None:
     runner = Scripted(
-        default=ok('{"subjects": [{"kind": "model", "id": "a", "installed": true}]}'
+        default=ok('{"rows": [{"kind": "model", "id": "a", "installed": true}]}'
                    + catalog_module.GuestCatalog.STATUS_MARK + "200")
     )
     guest = catalog_module.GuestCatalog(runner, "crucible", "tok", 7100, where="the guest")
@@ -2345,68 +2267,17 @@ def test_nothing_claimed_means_nothing_released(tmp_path: Path, monkeypatch) -> 
         assert engine.releases == []
 
 
-class FakeIcon:
-
-    def __init__(self) -> None:
-        self.stopped = False
-
-    def stop(self) -> None:
-        self.stopped = True
-
-
-def _quit_trace(host: app_module.Host, engine: FakeEngine, runner: Scripted) -> dict:
-    return {
-        "releases": len(engine.releases),
-        "hold_released": host._c.watcher.held is None,
-        "child_stopped": host._c.watcher.child is None,
-        "exited": host._icon.stopped,
-        "systemctl": [c for c in runner.calls if "systemctl" in " ".join(c)],
-    }
-
-
 def _a_quitting_host(
     tmp_path: Path, owner: Owner, engine: FakeEngine, monkeypatch
 ) -> tuple[app_module.Host, Scripted]:
-    from crucible.host import tray as tray_module
-
     tmp_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(tray_module, "update", lambda *_args: None)
     runner = Scripted()
     host = _orchestrator(tmp_path, runner, owner, engine, monkeypatch)
-    host._icon = FakeIcon()
     host.claim()
     host._c.watcher.hold("Ubuntu")
     host._c.watcher.child = FakeChild()
     runner.calls.clear()
     return host, runner
-
-
-@pytest.mark.parametrize("owner", [Owner.WSL_UNIT, Owner.HOST_CHILD, Owner.FOUND])
-def test_the_doors_quit_is_THE_MENUS_quit_and_never_a_second_copy(
-    tmp_path: Path, monkeypatch, owner: Owner
-) -> None:
-    with FakeEngine() as engine:
-        clicked, clicked_runner = _a_quitting_host(
-            tmp_path / "menu", owner, engine, monkeypatch
-        )
-        clicked.on_click(menu.QUIT)
-        by_menu = _quit_trace(clicked, engine, clicked_runner)
-
-    with FakeEngine() as engine:
-        posted, posted_runner = _a_quitting_host(
-            tmp_path / "door", owner, engine, monkeypatch
-        )
-        door_module.OrchestratorDoor(
-            posted._c.log,
-            lambda _emit: None,
-            token=lambda: "tok",
-            orchestrator=posted,
-        ).quit()
-        by_door = _quit_trace(posted, engine, posted_runner)
-
-    assert by_menu == by_door, owner
-    assert by_door["exited"] is True, "every owner still ends the process"
-    assert by_door["hold_released"] is True, "the wsl.exe session is this process's"
 
 
 def test_a_quit_that_holds_a_claim_RELEASES_it(tmp_path: Path, monkeypatch) -> None:
@@ -2418,7 +2289,7 @@ def test_a_quit_that_holds_a_claim_RELEASES_it(tmp_path: Path, monkeypatch) -> N
         ).quit()
         assert len(engine.releases) == 1
         assert engine.releases[0]["orchestrator"]["url"] == paths.door_url("")
-        assert host._icon.stopped is True
+        assert host._shutdown_complete.is_set()
 
 
 def test_a_FOUND_engines_orchestrator_releases_NOTHING_and_still_stops(
@@ -2435,7 +2306,7 @@ def test_a_FOUND_engines_orchestrator_releases_NOTHING_and_still_stops(
         assert child.terminated is False, "an engine it did not start is not stopped"
         assert not any("systemctl" in " ".join(c) for c in runner.calls)
         assert host._c.watcher.held is None
-        assert host._icon.stopped is True
+        assert host._shutdown_complete.is_set()
     assert "owner=found" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
 
@@ -2544,7 +2415,11 @@ def test_a_restarted_engine_is_CLAIMED_AGAIN_because_it_forgot(
 ) -> None:
     with FakeEngine() as engine:
         host = _orchestrator(
-            tmp_path, Scripted(pings=[200]), Owner.WSL_UNIT, engine, monkeypatch
+            tmp_path,
+            Scripted(answers={"is-enabled": ok("enabled\n")}, pings=[200]),
+            Owner.WSL_UNIT,
+            engine,
+            monkeypatch,
         )
         host.claim()
         assert len(engine.claims) == 1
@@ -2808,8 +2683,6 @@ def test_a_socket_that_is_truly_absent_is_still_found_with_the_reason(
             "-l -v --running": ok(OWENS_PC_LIST),
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
-            "id -u": ok("1000\n"),
-            "-u root --exec systemctl is-enabled": bad("Failed to connect to bus"),
             "is-enabled": bad("Failed to connect to bus: No such file or directory"),
         },
         pings=[200],
@@ -2828,7 +2701,7 @@ def test_a_socket_that_is_truly_absent_is_still_found_with_the_reason(
     assert "stays owner=found" in written
 
 
-def test_an_unreadable_uid_leaves_the_owner_found_and_runs_no_recipe(
+def test_an_unreadable_unit_leaves_the_owner_found_and_runs_no_recipe(
     tmp_path: Path,
 ) -> None:
     host_log = log.HostLog(tmp_path / "host.log", tmp_path / "host.log.1")
@@ -2837,7 +2710,7 @@ def test_an_unreadable_uid_leaves_the_owner_found_and_runs_no_recipe(
             "-l -v --running": ok(OWENS_PC_LIST),
             "-l -v": ok(OWENS_PC_LIST),
             "cat ": ok(GUEST_LINE),
-            "id -u": bad("no such distribution"),
+            "is-enabled": bad("no such distribution"),
         },
         pings=[200],
     )
@@ -2851,7 +2724,8 @@ def test_an_unreadable_uid_leaves_the_owner_found_and_runs_no_recipe(
     )
     probe = watcher.probe_unit()
     assert probe.readable is False
-    assert "could not be read" in probe.detail
+    assert "no system crucible.service" in probe.detail
+    assert "no such distribution" in probe.detail
     assert watcher.boot().owner is Owner.FOUND
     assert not any(
         verb in " ".join(call)
@@ -3524,12 +3398,34 @@ def test_a_wsl_key_nobody_defined_is_refused_and_moves_nothing(tmp_path: Path) -
     assert ran == [], "a setting this build cannot carry out is not a licence to move"
 
 
-def test_cannot_is_TERMINAL_for_the_tray_and_is_never_retried(tmp_path: Path) -> None:
+def test_cannot_stays_cannot_while_virtualization_is_still_off(tmp_path: Path) -> None:
+    _recorded(tmp_path, "cannot", code="virtualization_disabled", sentence="VT-x is off")
+    runner = Scripted(answers={"--status": bad("HCS_E_HYPERV_NOT_INSTALLED 0x80370102")})
+    context = _native(tmp_path, runner)
+    host, ran = _decider(context)
+    assert host.decide_engine() == "cannot"
+    assert ran == []
+    assert any("--status" in call for call in runner.calls), "it looked again at this start"
+
+
+def test_virtualization_turned_on_since_resumes_the_move_at_the_next_start(
+    tmp_path: Path,
+) -> None:
     _recorded(tmp_path, "cannot", code="virtualization_disabled", sentence="VT-x is off")
     context = _native(tmp_path, Scripted())
     host, ran = _decider(context)
+    assert host.decide_engine() == "done"
+    assert ran == ["the move ran"]
+
+
+def test_a_cannot_that_is_not_the_firmware_is_never_retried(tmp_path: Path) -> None:
+    _recorded(tmp_path, "cannot", code="wsl_blocked_by_policy", sentence="policy says no")
+    runner = Scripted()
+    context = _native(tmp_path, runner)
+    host, ran = _decider(context)
     assert host.decide_engine() == "cannot"
-    assert ran == [], "a person changes the BIOS and presses Try again (2.5)"
+    assert ran == []
+    assert runner.calls == []
 
 
 def test_a_failed_move_is_retried_ONCE_and_then_left_alone(tmp_path: Path) -> None:
@@ -3950,6 +3846,7 @@ def _stepping_clock(step: float) -> Callable[[], float]:
     return clock
 
 
+@WINDOWS_ONLY
 def test_installwatch_starts_the_controller_before_it_gives_the_sign_in_advice(tmp_path: Path, monkeypatch) -> None:
     import io
     from datetime import datetime, timezone
@@ -3971,6 +3868,7 @@ def test_installwatch_starts_the_controller_before_it_gives_the_sign_in_advice(t
     assert "Sign out of Windows" in text, "the sign-in advice is the fallback, after the start"
 
 
+@WINDOWS_ONLY
 def test_installwatch_names_the_log_when_the_controller_cannot_be_started(tmp_path: Path, monkeypatch) -> None:
     import io
     from datetime import datetime, timezone
@@ -4017,6 +3915,7 @@ def test_the_install_one_liner_is_the_one_the_readme_documents() -> None:
     assert "install.ps1 | iex" in paths.INSTALL_ONE_LINER
 
 
+@WINDOWS_ONLY
 def test_a_missing_console_cmd_names_the_install_one_liner_and_a_silent_child_names_the_log(
     tmp_path: Path, host_log: log.HostLog
 ) -> None:

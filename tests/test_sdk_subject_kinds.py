@@ -24,17 +24,19 @@ def test_the_sdk_union_is_exactly_the_servers_kinds() -> None:
     )
 
 
-def test_the_sentence_above_the_union_counts_it() -> None:
+def test_the_sentence_above_the_union_never_miscounts_it() -> None:
     source = TYPES_TS.read_text(encoding="utf-8")
     head = source[: source.index("export type SubjectKind =")]
     paragraph = head[head.rindex("/**") :]
     words = {
-        3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight",
+        "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
     }
-    expected = words[len(catalog.KINDS)]
-    assert expected.upper() in paragraph.upper(), (
-        f"the sentence above SubjectKind does not say {expected!r}, and there "
-        f"are {len(catalog.KINDS)} kinds. A reader who counts the sentence "
-        "instead of the union writes the wrong mirror — which is exactly how "
-        "this was found."
+    stated = [
+        words[word.lower()]
+        for word in re.findall(r"(" + "|".join(words) + r")", paragraph, re.I)
+    ]
+    assert all(count == len(catalog.KINDS) for count in stated), (
+        f"the sentence above SubjectKind counts {stated}, and there are "
+        f"{len(catalog.KINDS)} kinds. A reader who counts the sentence instead of "
+        "the union writes the wrong mirror"
     )

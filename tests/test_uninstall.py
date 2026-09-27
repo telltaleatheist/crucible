@@ -438,16 +438,21 @@ def test_wsl_too_never_touches_a_distro_crucible_did_not_import(
 
 def test_the_guest_argv_lets_the_GUESTs_bash_expand_its_own_home() -> None:
     argv = uninstall.wsl_uninstall_argv(purge_weights=True, dry_run=False)
-    assert argv[:6] == [
+    assert argv[:8] == [
         "wsl.exe",
         "-d",
         uninstall.CRUCIBLE_DISTRO,
+        "-u",
+        "crucible",
         "--exec",
         "bash",
         "-lc",
     ]
-    assert argv[6] == '"$HOME/.crucible/server/bin/crucible" uninstall --json --purge-weights'
-    assert "--wsl-too" not in argv[6], "there is no distro inside the distro"
+    assert argv[8] == (
+        '"${CRUCIBLE_HOME:-$HOME/.crucible}/server/bin/crucible" uninstall --json '
+        "--purge-weights"
+    )
+    assert "--wsl-too" not in argv[8], "there is no distro inside the distro"
 
 
 def test_wsl_too_off_windows_is_refused_by_name(installed_home: Path) -> None:

@@ -203,6 +203,10 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
             else:
                 output = ""
             return RunResult(0, output, "", None)
+        def download(self, url, destination, *, timeout_s, on_progress=None, attempts=1):
+            self.calls.append(["download", url])
+            Path(destination).write_bytes(b"")
+            return RunResult(0, str(destination), "", None)
     runner = ImportRunner()
     walk = EngineInstall(runner, lambda event: None, release="0.6.0", home=tmp_path,
                          install_sh_url="https://example.invalid/install.sh")

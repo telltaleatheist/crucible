@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from crucible.jobs.base import Job
 from crucible.settle import Held, Settlement
 
 
@@ -72,6 +73,8 @@ class _Job:
     created = "2026-09-20T18:29:30+00:00"
     progress = 0.25
     message = "rendering 118 of 280"
+
+    busy_details = Job.busy_details
 
 
 def _settlement(

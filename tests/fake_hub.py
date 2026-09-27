@@ -8,6 +8,8 @@ from typing import Any
 
 CHUNK = 1024
 
+VOICE_MANIFEST = "crucible-voice.toml"
+
 
 class FakeHub:
 
@@ -60,6 +62,12 @@ class FakeHub:
         tqdm_class: Any = None,
         **_ignored: Any,
     ) -> str:
+        if filename not in self.files and filename == VOICE_MANIFEST:
+            from .conftest import _pinned_manifest_or_offline
+
+            return _pinned_manifest_or_offline(
+                repo_id, filename, revision=revision, local_dir=local_dir
+            )
         self.asked.append((repo_id, revision))
         target = Path(local_dir) / filename
         target.parent.mkdir(parents=True, exist_ok=True)

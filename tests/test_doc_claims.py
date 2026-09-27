@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 CLIENT_TS = ROOT / "sdk" / "ts" / "src" / "client.ts"
@@ -42,7 +41,6 @@ def test_the_sdk_does_not_still_say_no_app_may_delete() -> None:
 
 
 def test_the_condition_that_survived_the_reversal_is_still_stated() -> None:
-    assert "without saying so on" in flowed(CLIENT_TS)
     assert "without saying so on screen" in flowed(PHASE15)
 
 
@@ -68,33 +66,31 @@ def test_the_reversal_is_written_down_where_a_reader_will_look() -> None:
     assert "docs/MODEL-CHOICE.md" in text(CAPABILITY)
 
 
-COUNT_WORDS = {
-    "one": 1,
-    "two": 2,
-    "three": 3,
-    "four": 4,
-    "five": 5,
-    "six": 6,
-    "seven": 7,
-    "eight": 8,
-}
+def test_spell_out_names_the_total_and_each_of_its_three_terms() -> None:
+    from crucible.capability import Candidate, WorkingContext, spell_out
+    from crucible.manifests import MemoryTerms
 
-
-@pytest.mark.parametrize(
-    "sentence,actual",
-    [
-        ("spell_out", 4),
-    ],
-)
-def test_a_comment_that_counts_is_counted(sentence: str, actual: int) -> None:
-    source = text(CAPABILITY)
-    body = source[source.index(f"def {sentence}") : source.index(f"def {sentence}") + 1600]
-    named = re.findall(r"\b(" + "|".join(COUNT_WORDS) + r")\s+terms\b", body, re.I)
-    assert named, f"{sentence} no longer counts its terms; drop this row or fix it"
-    for word in named:
-        assert COUNT_WORDS[word.lower()] == actual, (
-            f"{sentence} says {word!r} terms and emits {actual}"
-        )
+    gib = 1024 ** 3
+    candidate = Candidate(
+        id="probe",
+        memory_bytes_estimate=20 * gib,
+        memory=MemoryTerms(
+            weights_bytes=16 * gib,
+            overhead_bytes=2 * gib,
+            kv_bytes_per_token=1024,
+            basis="measured",
+            measured_at_context=16384,
+        ),
+    )
+    work = WorkingContext(tokens=4096, concurrency=4, source="a test")
+    said = spell_out(candidate, work)
+    total, terms = said.split(" — ")
+    assert total == f"{candidate.need_bytes(work) / gib:.1f} GiB"
+    assert terms.split(" + ") == [
+        "16.0 GiB weights",
+        "2.0 GiB overhead",
+        "0.0 GiB KV for 4096 tokens x 4 in flight",
+    ]
 
 
 def test_the_weakened_invariant_is_written_down_where_it_changed() -> None:

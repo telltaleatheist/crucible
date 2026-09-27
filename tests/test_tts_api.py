@@ -16,10 +16,12 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
+from crucible.voicerepo import REPO_MANIFEST_NAME
 from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
 
 from .conftest import (
     FAKE_BACKEND,
+    PINNED_VOICE_MANIFESTS,
     a_clearance_to_hold,
     parse_sse,
     wav_base64,
@@ -29,6 +31,36 @@ from .fake_engine import FakeEngine
 
 VOICE = "deathstalker"
 OTHER_VOICE = "thirdreich"
+
+CUDA_ONLY_VOICE = """
+[voice]
+id = "cuda-only"
+display = "CUDA only"
+kind = "checkpoint"
+narrator_engine = "higgs-v3"
+language = "en"
+sample_rate = 24000
+
+[voice.pace]
+pace_chars_per_sec = 16.0
+max_chars_per_sec = 20.8
+min_chars_per_sec = 12.3
+safe_min_chars = 600
+safe_max_chars = 800
+
+[voice.serving]
+max_num_seqs = 16
+max_num_seqs_note = "vllm-omni's own stage-0 value."
+
+[voice.backends.cuda-linux]
+hf_repo = "owenmorgan/cuda-only-higgs-v3"
+revision = "0123456789abcdef0123456789abcdef01234567"
+memory_bytes_estimate = 19_000_000_000
+estimate_basis = "declared"
+estimate_note = "a test voice's declared figure"
+max_chars = 800
+sampling = { temperature = 0.8, top_p = 0.95, top_k = 50 }
+"""
 
 RECIPE_PINS = {"narrator": "0.1.0", "torch": "2.13.0"}
 
@@ -65,14 +97,16 @@ def fake_env(
 def fake_weights(home: Path) -> Callable[[str], Path]:
 
     def stamp(voice_id: str) -> Path:
-        spec = load_voice(voice_id).spec(FAKE_BACKEND.kind)
-        directory = home / "voices" / voice_id / FAKE_BACKEND.kind
+        voice = load_voice(voice_id)
+        spec = voice.spec(FAKE_BACKEND.kind)
+        store_id = voice.weights_of or voice_id
+        directory = home / "voices" / store_id / FAKE_BACKEND.kind
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "crucible-pull.json").write_text(
             json.dumps(
                 {
                     "family": "voices",
-                    "id": voice_id,
+                    "id": store_id,
                     "backend": FAKE_BACKEND.kind,
                     "hf_repo": spec.hf_repo,
                     "revision": spec.revision,
@@ -83,9 +117,21 @@ def fake_weights(home: Path) -> Callable[[str], Path]:
             ),
             encoding="utf-8",
         )
+        pinned = pinned_manifest(spec.hf_repo, spec.revision)
+        if pinned is not None:
+            (directory / REPO_MANIFEST_NAME).write_bytes(pinned.read_bytes())
         return directory
 
     return stamp
+
+
+def pinned_manifest(hf_repo: str | None, revision: str | None) -> Path | None:
+    if hf_repo is None or revision is None:
+        return None
+    path = (
+        PINNED_VOICE_MANIFESTS / hf_repo.replace("/", "--") / revision / REPO_MANIFEST_NAME
+    )
+    return path if path.is_file() else None
 
 
 @pytest.fixture
@@ -147,8 +193,8 @@ def test_a_voice_with_everything_in_place_is_loadable(
     assert row["needs_reference"] is False
     assert row["estimate_basis"] == "declared"
     assert row["fingerprint"] == f"{VOICE}@{row['revision']}"
-    assert row["pace"]["pace_chars_per_sec"] == 15.91
-    assert row["pace"]["safe_min_chars"] == 500
+    assert row["pace"]["pace_chars_per_sec"] == 16.14
+    assert row["pace"]["safe_min_chars"] == 400
 
 
 def test_a_row_never_carries_the_sampling(
@@ -205,13 +251,7 @@ def test_a_backend_this_host_is_not_gets_nulls_and_not_zeroes(
 ) -> None:
     directory = tmp_path / "voices"
     directory.mkdir()
-    (directory / "cuda-only.toml").write_text(
-        (Path(__file__).resolve().parent.parent / "crucible" / "voices" / "deathstalker.toml")
-        .read_text(encoding="utf-8")
-        .replace('id = "deathstalker"', 'id = "cuda-only"')
-        .split("[voice.backends.mlx-darwin]")[0],
-        encoding="utf-8",
-    )
+    (directory / "cuda-only.toml").write_text(CUDA_ONLY_VOICE, encoding="utf-8")
     monkeypatch.setenv("CRUCIBLE_VOICES_DIR", str(directory))
     from .conftest import FAKE_MAC_BACKEND
 
@@ -283,13 +323,7 @@ def test_a_voice_with_no_block_for_this_backend_is_refused(
 ) -> None:
     directory = tmp_path / "voices"
     directory.mkdir()
-    (directory / "cuda-only.toml").write_text(
-        (Path(__file__).resolve().parent.parent / "crucible" / "voices" / "deathstalker.toml")
-        .read_text(encoding="utf-8")
-        .replace('id = "deathstalker"', 'id = "cuda-only"')
-        .split("[voice.backends.mlx-darwin]")[0],
-        encoding="utf-8",
-    )
+    (directory / "cuda-only.toml").write_text(CUDA_ONLY_VOICE, encoding="utf-8")
     monkeypatch.setenv("CRUCIBLE_VOICES_DIR", str(directory))
     from .conftest import FAKE_MAC_BACKEND
 
@@ -614,7 +648,7 @@ def test_unload_voice_will_not_take_a_model_off_the_card(
 def test_a_resident_voice_is_what_a_model_load_would_reclaim(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from crucible.config import load_config, write_config
+    from crucible.config import declared_tts_footprints, load_config, write_config
 
     write_config(
         home,
@@ -634,6 +668,7 @@ def test_a_resident_voice_is_what_a_model_load_would_reclaim(
         retention_days=7,
         desktop_allowance_basis="stated",
         desktop_allowance_note="",
+        tts_engines=declared_tts_footprints(FAKE_BACKEND.kind),
     )
     holder = residency_module.Residency(load_config(home))
     assert holder.reclaimable_bytes() == 0

@@ -89,6 +89,8 @@ print("fake installer: recorded in " + str(config.path), flush=True)
         encoding="utf-8",
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    if sys.platform == "win32":
+        pytest.skip("the fake installer is a #! script, which Windows cannot execute")
     monkeypatch.setattr(tasks, "install_command", lambda: str(script))
     return script
 
@@ -268,14 +270,47 @@ def test_adopt_refuses_a_config_from_another_home(
         assert mine.enable_llm is False
 
 
+def _frozen_writes(path: Path) -> list[str]:
+    import ast
+
+    found: list[str] = []
+
+    def visit(node: ast.AST, function: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = (
+                child.name
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else function
+            )
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == "__setattr__"
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id == "object"
+            ):
+                found.append(function)
+            visit(child, name)
+
+    visit(ast.parse(path.read_text(encoding="utf-8")), "<module>")
+    return found
+
+
 def test_nothing_but_adopt_writes_to_a_frozen_config() -> None:
     package = Path(__file__).resolve().parent.parent / "crucible"
-    offenders = [
-        path.relative_to(package).as_posix()
+    writes = {
+        path.relative_to(package).as_posix(): _frozen_writes(path)
         for path in package.rglob("*.py")
-        if "object.__setattr__" in path.read_text(encoding="utf-8")
-    ]
-    assert offenders == ["config.py"]
+    }
+    assert writes["config.py"] == ["adopt"]
+    elsewhere = {
+        name: functions for name, functions in writes.items()
+        if name != "config.py" and functions
+    }
+    assert all(
+        functions == ["__post_init__"] * len(functions)
+        for functions in elsewhere.values()
+    ), f"only a dataclass deriving its own field in __post_init__ may: {elsewhere}"
 
 
 def test_a_module_is_validated_whole_and_names_every_problem(
@@ -677,7 +712,10 @@ def test_a_holder_that_arrives_during_the_install_fails_the_task_by_name(
     assert events[-1]["event"] == "failed"
     assert events[-1]["data"]["code"] == "reload_refused"
     assert "a chat" in events[-1]["data"]["message"]
-    assert "load-model" not in info["job_types"]
+    assert "load-model" in info["job_types"], (
+        "the install wrote the flag; once the card is free the server follows the "
+        "config file and takes the type up"
+    )
 
 
 def test_a_module_runs_its_entries_in_order_and_ends_done(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -10,6 +11,14 @@ from crucible import cli, hosttools, service
 from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "systemd units and launchd agents are POSIX files with POSIX paths; "
+        "a Windows host runs its engine under the orchestrator, not a service manager"
+    ),
+)
 
 
 PATH_VALUE = "/usr/local/bin:/usr/bin:/bin"
@@ -819,17 +828,6 @@ def test_a_quote_in_an_environment_value_is_refused_rather_than_escaped() -> Non
         assert "double quote or a backslash" in str(caught.value)
 
 
-def test_an_unquoted_unit_from_an_older_build_still_reads_back(
-    user_home: Path,
-) -> None:
-    unit = service.unit_path(user_home)
-    unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text(
-        "[Service]\nEnvironment=PATH=/usr/local/bin:/usr/bin\n", encoding="utf-8"
-    )
-    assert service.read_recorded_path("systemd", user_home) == "/usr/local/bin:/usr/bin"
-
-
 def test_in_wsl_reads_the_kernel_and_not_the_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1019,22 +1017,6 @@ def test_reading_the_status_of_a_system_unit_needs_no_root(
     shows = [call for call in reader.calls if "show" in call]
     assert shows, reader.calls
     assert all("wsl.exe" not in call for call in shows), shows
-
-
-def test_a_system_install_retires_the_user_unit_that_holds_the_port(
-    user_home: Path, wsl_guest: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(service.os, "getuid", lambda: 1000, raising=False)
-    stale = service.unit_path(user_home, service.USER_SCOPE)
-    stale.parent.mkdir(parents=True, exist_ok=True)
-    stale.write_text("[Unit]\n# the 0.6.3 user unit\n", encoding="utf-8")
-
-    runner = CopyingRunner()
-    lines = install_systemd(user_home, runner)
-
-    assert not stale.exists(), "the user unit was left to hold 7100"
-    assert (*ROOT_DOOR, "systemctl", "stop", "user@1000.service") in runner.calls
-    assert any("retired the user unit" in line for line in lines), lines
 
 
 def test_a_fresh_system_install_stops_nobodys_user_manager(

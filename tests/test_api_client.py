@@ -479,12 +479,19 @@ def test_voice_write_carries_the_whole_manifest_document(
     assert refusal["error"]["code"] == "voice_invalid"
 
 
-def test_voice_remove_reaches_the_route_and_is_told_there_is_no_overlay(
+def test_voice_remove_reaches_the_route_and_is_told_a_shipped_voice_is_not_custom(
     tts_base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(tts_base, "voice-remove", "made-up") == 1
+    assert run(tts_base, "voice-remove", "zeroshot") == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "voice_not_custom"
+
+
+def test_voice_remove_of_an_unknown_id_is_not_an_error(
+    tts_base: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(tts_base, "voice-remove", "made-up") == 0
+    assert json.loads(capsys.readouterr().out) == {"removed": {"manifest": "made-up"}}
 
 
 def test_a_params_file_is_read_and_sent(
@@ -721,6 +728,8 @@ EXCLUDED: dict[str, str] = {
     "GET /v1/peer": "PHASE17: the orchestrator's relation, not a client's",
     "POST /v1/peer/claim": "PHASE17: the orchestrator's relation, not a client's",
     "DELETE /v1/peer/claim": "PHASE17: the orchestrator's relation, not a client's",
+    "GET /v1/capability/plan": "the operator page's install modal reads its sentences",
+    "GET /v1/voices/{voice_id}/manifest": "the operator page's voice editor reads it",
 }
 
 

@@ -15,10 +15,18 @@ from crucible.errors import ApiError
 from crucible.jobs import asr as asr_jobs
 from crucible.jobs.tts import render as render_jobs
 from crucible.residency import KIND_TTS
+from crucible.voicerepo import REPO_MANIFEST_NAME
 from crucible.voices import load_voice
 
 from . import fake_narrator_engine
-from .conftest import FAKE_BACKEND, holding_the_card, parse_sse, wav_base64, wav_bytes
+from .conftest import (
+    FAKE_BACKEND,
+    configure_box,
+    holding_the_card,
+    parse_sse,
+    wav_base64,
+    wav_bytes,
+)
 from .test_tts_api import (
     fake_env,
     fake_weights,
@@ -604,7 +612,10 @@ def test_a_narrower_width_is_forwarded_and_nothing_is_restarted(
     assert len(narrator) == 1, "narrowing a job restarted the engine"
 
 
-def test_on_the_mlx_arm_a_stated_width_travels_and_this_door_refuses_none() -> None:
+def test_on_the_mlx_arm_a_stated_width_travels_and_this_door_refuses_none(
+    home: Path,
+) -> None:
+    configure_box(home)
     manifest = load_voice(VOICE)
     wide = render_jobs.TtsParams(language="en", take=0, chunks=CHUNKS, width=32)
 
@@ -850,10 +861,10 @@ def test_a_render_writes_the_voices_document_narrator_reads(
     assert entry["kind"] == "checkpoint"
     assert entry["checkpointDir"] == str(home / "voices" / VOICE / "cuda-linux")
     assert entry["maxChars"] == 800
-    assert entry["safeMinChars"] == 500
-    assert entry["safeMaxChars"] == 800
+    assert entry["safeMinChars"] == 400
+    assert entry["safeMaxChars"] == 700
     assert entry["sampling"] == {"temperature": 0.8, "topP": 0.95, "topK": 50}
-    assert entry["paceCharsPerSec"] == 15.91
+    assert entry["paceCharsPerSec"] == 16.14
     assert narrator[0].environment()["NARRATOR_HIGGS_VOICES"] == str(document)
 
 
@@ -1014,20 +1025,14 @@ def test_a_sample_rate_the_engine_disagrees_with_is_refused_not_resampled(
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_weights(VOICE)
-    voices = tmp_path / "voices"
-    voices.mkdir()
-    source = Path(__file__).resolve().parent.parent / "crucible" / "voices"
-    for manifest in source.glob("*.toml"):
-        shutil.copyfile(manifest, voices / manifest.name)
-    text = (voices / f"{VOICE}.toml").read_text(encoding="utf-8")
-    (voices / f"{VOICE}.toml").write_text(
-        text.replace("sample_rate = 24000", "sample_rate = 48000"), encoding="utf-8"
+    pulled = fake_weights(VOICE) / REPO_MANIFEST_NAME
+    text = pulled.read_text(encoding="utf-8")
+    assert "sample_rate     = 24000" in text
+    pulled.write_text(
+        text.replace("sample_rate     = 24000", "sample_rate     = 48000"),
+        encoding="utf-8",
     )
-    monkeypatch.setenv("CRUCIBLE_VOICES_DIR", str(voices))
 
     events = run_job(tts_client, auth, type="load-voice", model=VOICE)
     assert terminal(events)["event"] == "failed"

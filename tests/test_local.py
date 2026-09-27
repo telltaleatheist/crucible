@@ -270,6 +270,7 @@ def _stub_the_service_path(monkeypatch):
     from types import SimpleNamespace
     from crucible import service as service_module
 
+    monkeypatch.setattr(local.sys, "platform", "linux")
     monkeypatch.setattr(local, "load_config",
                         lambda _h: SimpleNamespace(backend_kind="cuda-linux"))
     monkeypatch.setattr(service_module, "start", lambda *a, **k: None)

@@ -44,6 +44,22 @@ GGUF_KEYS = ["kind", "hf_repo", "revision", "file", "mmproj", "downloadGB", "nee
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _git_reads_this_checkout() -> bool:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, check=False
+        ).returncode == 0
+    except OSError:
+        return False
+
+
+needs_git_here = pytest.mark.skipif(
+    not _git_reads_this_checkout(),
+    reason="the generator stamps git HEAD, and git on this platform cannot read "
+    "this checkout (a worktree made by the other side of WSL)",
+)
+
+
 def _checked_in() -> dict:
     return json.loads(CHECKED_IN.read_text(encoding="utf-8"))
 
@@ -78,12 +94,14 @@ def test_the_checked_in_file_is_exactly_what_render_writes() -> None:
     assert b"\r\n" not in CHECKED_IN.read_bytes()
 
 
+@needs_git_here
 def test_check_passes_on_the_checked_in_file() -> None:
     ran = _run("--check")
     assert ran.returncode == 0, ran.stderr
     assert "matches the manifests" in ran.stdout
 
 
+@needs_git_here
 def test_check_fails_by_name_when_a_row_has_moved(tmp_path: Path) -> None:
     doc = _checked_in()
     doc["models"][0]["local"]["downloadGB"] += 1
@@ -95,12 +113,14 @@ def test_check_fails_by_name_when_a_row_has_moved(tmp_path: Path) -> None:
     assert f"{doc['models'][0]['id']}: differs in ['local']" in ran.stderr
 
 
+@needs_git_here
 def test_check_fails_when_the_file_is_missing(tmp_path: Path) -> None:
     ran = _run("--check", "--output", str(tmp_path / "absent.json"))
     assert ran.returncode == 1
     assert "absent.json" in ran.stderr
 
 
+@needs_git_here
 def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> None:
     target = tmp_path / "out" / lineup.FILE_NAME
     wrote = _run("--verbose", "--output", str(target))

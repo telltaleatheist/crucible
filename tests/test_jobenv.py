@@ -20,6 +20,8 @@ from crucible.jobenv import (
 )
 from crucible.voices import NARRATOR_ENGINE_SAMPLING
 
+from .conftest import write_env_stamp
+
 
 def tts_specs() -> list[jobenv.EnvSpec]:
     seen: dict[str, jobenv.EnvSpec] = {}
@@ -34,17 +36,7 @@ def stamp_env(home: Path, backend_kind: str) -> Path:
     directory = env_dir(home, llm_env(backend_kind))
     (directory / "bin").mkdir(parents=True, exist_ok=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": backend_kind,
-                "recipe": f"{backend_kind}.txt",
-                "python_version": "3.11.16",
-                "seconds": 196.4,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_env_stamp(home, llm_env(backend_kind), backend_kind, seconds=196.4)
     return directory
 
 
@@ -374,18 +366,8 @@ def test_an_env_built_from_another_commit_is_not_ready(
     directory = env_dir(home, spec)
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
-    (directory / "crucible-env.json").write_text(
-        json.dumps(
-            {
-                "backend": "cuda-linux",
-                "recipe": "higgs-v3-cuda-linux.txt",
-                "python_version": "3.11.16",
-                "seconds": 1.0,
-            }
-        ),
-        encoding="utf-8",
-    )
     _recipe(tmp_path, monkeypatch, f"{REFERENCE}\ntorch==2.13.0\n")
+    write_env_stamp(home, spec, "cuda-linux")
     monkeypatch.setattr(
         jobenv, "installed_packages", lambda _home, _spec: {"torch": "2.13.0"}
     )

@@ -110,7 +110,10 @@ def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
         )
         assert spec.config_bytes == 895
         assert spec.memory_bytes_estimate == 913_106_900 + 1_610_612_736
-    assert "COMPUTED, NOT MEASURED" in manifest.path.read_text(encoding="utf-8")
+    runtime = (
+        Path(__file__).resolve().parents[1] / "docs" / "internals" / "jobs-runtime.md"
+    ).read_text(encoding="utf-8")
+    assert "denoise: the checkpoint plus that 1.5 GiB" in runtime
 
 
 @pytest.mark.parametrize(
