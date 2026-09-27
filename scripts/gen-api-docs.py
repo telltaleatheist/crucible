@@ -178,6 +178,9 @@ def build_app() -> Any:
         enable_rvc=True,
         enable_denoise=True,
         desktop_allowance_bytes=3 * 1024 ** 3,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     return create_app(load_config(home), backend)
 

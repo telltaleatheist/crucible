@@ -160,6 +160,9 @@ def test_open_pairing_survives_a_config_round_trip(home):
         write_config(
             home, name="crucible@test", host="127.0.0.1", port=7100, token=TOKEN,
             backend_kind="cuda-linux", desktop_allowance_bytes=1,
+            retention_days=7,
+            desktop_allowance_basis="stated",
+            desktop_allowance_note="",
             enable_echo=True, enable_llm=False, enable_asr=False, enable_tts=False,
             enable_align=False, enable_rvc=False, enable_denoise=False,
             open_pairing=chosen,

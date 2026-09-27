@@ -903,6 +903,10 @@ def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:  # noq
             enable_align=False,
             enable_rvc=False,
             desktop_allowance_bytes=3 * 1024 ** 3,
+            enable_denoise=False,
+            retention_days=7,
+            desktop_allowance_basis="stated",
+            desktop_allowance_note="",
             tts_engines=declared_tts_footprints(backend_kind),
         )
         found = load_config(home).engine_footprint("higgs-v3")

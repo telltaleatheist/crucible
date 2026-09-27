@@ -221,6 +221,10 @@ def rows_for(backend: Backend) -> dict[str, dict[str, Any]]:
         enable_align=False,
         enable_rvc=False,
         desktop_allowance_bytes=DESKTOP,
+        enable_denoise=False,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
     )
     config = load_config(home)
     return {row["id"]: row for row in model_rows(config, backend, Residency(config))}

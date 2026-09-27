@@ -99,6 +99,9 @@ write_config(
     token=config.token,
     backend_kind=config.backend_kind,
     desktop_allowance_bytes=config.desktop_allowance_bytes,
+    retention_days=config.retention_days,
+    desktop_allowance_basis=config.desktop_allowance_basis,
+    desktop_allowance_note=config.desktop_allowance_note,
     **values,
 )
 print("fake installer: recorded in " + str(config.path), flush=True)
@@ -291,6 +294,10 @@ def test_adopt_refuses_a_config_from_another_home(
             enable_align=False,
             enable_rvc=False,
             desktop_allowance_bytes=0,
+            enable_denoise=False,
+            retention_days=7,
+            desktop_allowance_basis="stated",
+            desktop_allowance_note="",
         )
         with pytest.raises(ConfigError, match="different server"):
             mine.adopt(load_config(elsewhere))

@@ -114,6 +114,9 @@ def make_app(home: Path) -> Callable[..., FastAPI]:
             enable_rvc=enable_rvc,
             enable_denoise=enable_denoise,
             desktop_allowance_bytes=desktop_allowance_bytes,
+            retention_days=7,
+            desktop_allowance_basis="stated",
+            desktop_allowance_note="",
             capability=capability,
             open_pairing=open_pairing,
             tts_engines=(
