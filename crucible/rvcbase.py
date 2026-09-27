@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any, Callable
 from . import weights
 from .config import Config
 from .errors import CrucibleError
+from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, SHA256_PATTERN, check_table
 
 RVC_BASE_DIR_ENV = "CRUCIBLE_RVC_BASE_DIR"
 
@@ -17,10 +17,6 @@ ULTIMATE_RVC = "ultimate-rvc"
 
 PULL_COMMAND = "crucible rvc pull-base"
 
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_ENGINE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 _ENGINE_REQUIRED: dict[str, type] = {
     "id": str,
@@ -104,27 +100,6 @@ def base_root(config: Config) -> Path:
     return config.home / "rvc-base"
 
 
-def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    unknown = sorted(set(table) - set(required))
-    if unknown:
-        raise RvcBaseError(
-            f"{where}: unknown key(s) {unknown}; this table takes exactly "
-            f"{sorted(required)}"
-        )
-    missing = sorted(set(required) - set(table))
-    if missing:
-        raise RvcBaseError(f"{where}: missing required key(s) {missing}")
-    for key, kind in required.items():
-        value = table[key]
-        wrong = not isinstance(value, kind)
-        if kind is int and isinstance(value, bool):
-            wrong = True
-        if wrong:
-            raise RvcBaseError(
-                f"{where}: {key} must be {kind.__name__}, got {type(value).__name__}"
-            )
-
-
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcBaseAssets:
     unknown = sorted(set(document) - {"engine", "files"})
     if unknown:
@@ -137,10 +112,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcBaseAss
     engine = document["engine"]
     if not isinstance(engine, dict):
         raise RvcBaseError(f"{path.name}: [engine] must be a table")
-    _check_table(f"{path.name} [engine]", engine, _ENGINE_REQUIRED)
+    check_table(f"{path.name} [engine]", engine, _ENGINE_REQUIRED, error=RvcBaseError)
 
     engine_id = engine["id"]
-    if not _ENGINE_ID.match(engine_id):
+    if not MODEL_ID_PATTERN.match(engine_id):
         raise RvcBaseError(
             f"{path.name}: engine.id {engine_id!r} must be lower-case and start "
             "with a letter or digit ([a-z0-9][a-z0-9._-]*)"
@@ -150,12 +125,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcBaseAss
             f"{path.name}: engine.id is {engine_id!r} but the file is named "
             f"{expected_id!r}; the id and the filename are the same thing"
         )
-    if not _HF_REPO.match(engine["hf_repo"]):
+    if not HF_REPO_PATTERN.match(engine["hf_repo"]):
         raise RvcBaseError(
             f"{path.name}: hf_repo {engine['hf_repo']!r} is not an <owner>/<name> "
             "HuggingFace repo id"
         )
-    if not _REVISION.match(engine["revision"]):
+    if not REVISION_PATTERN.match(engine["revision"]):
         raise RvcBaseError(
             f"{path.name}: revision {engine['revision']!r} must be a full "
             "40-character commit sha, so a pull is reproducible; `main` is what "
@@ -174,8 +149,8 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcBaseAss
         where = f"{path.name} [[files]][{index}]"
         if not isinstance(raw, dict):
             raise RvcBaseError(f"{where}: must be a table")
-        _check_table(where, raw, _FILE_REQUIRED)
-        if not _SHA256.match(raw["sha256"]):
+        check_table(where, raw, _FILE_REQUIRED, error=RvcBaseError)
+        if not SHA256_PATTERN.match(raw["sha256"]):
             raise RvcBaseError(
                 f"{where}: sha256 {raw['sha256']!r} is not a 64-character digest. "
                 "A file fetched by path gets the assurance a snapshot download "

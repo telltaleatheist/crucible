@@ -7,6 +7,7 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .engines.base import EngineError
+from .narratorengines import DOCUMENT_READERS
 from .voicereference import ClipEntry, VoiceReference, place
 from .voices import VoiceBackendSpec, VoiceManifest
 from .weights import PINNED
@@ -16,8 +17,6 @@ DOCUMENT_VARIABLE = "NARRATOR_HIGGS_VOICES"
 MLX_MODEL_VARIABLE = "NARRATOR_HIGGS3_MLX_MODEL"
 
 DOCUMENT_NAME = "narrator-higgs-voices.json"
-
-DOCUMENT_READERS: frozenset[str] = frozenset({"higgs-v3"})
 
 _KIND_ON_THE_WIRE: dict[str, str] = {
     "checkpoint": "checkpoint",

@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .engines import EngineError, NarratorEngine
 from .jobs.base import utcnow
 from .errors import ApiError, JobCancelled, JobError
+from .narratorengines import HIGGS_V3
 from .narratorvoices import take_sampling
 from .residency import KIND_TTS, Residency, describe_resident
 from .voices import VoiceManifest
@@ -35,7 +36,7 @@ STREAM_SILENCE_TIMEOUT_SECONDS = 600.0
 
 DURATION_TOLERANCE_SECONDS = 0.05
 
-STREAM_BATCH_WIDTH = {"higgs-v3": 1}
+STREAM_BATCH_WIDTH = {HIGGS_V3: 1}
 
 BATCH_COALESCE_SECONDS = 0.025
 

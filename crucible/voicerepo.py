@@ -6,7 +6,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from .manifests import check_table
+from .narratorengines import HIGGS_V3, declared_tts_footprints
+from .tomltable import (
+    HF_REPO_PATTERN,
+    REVISION_PATTERN,
+    VOICE_ID_PATTERN,
+    check_table,
+)
 from .voices import (
     MANIFEST_REPO,
     MAX_CHARS_BASES,
@@ -114,8 +120,6 @@ def home_pins_path() -> Path:
 
 
 def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
-    from .voices import _HF_REPO, _REVISION, _VOICE_ID
-
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -123,11 +127,11 @@ def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
     pins: dict[str, Pin] = {}
     for voice_id in sorted(document):
         where = f"{path.name} [{voice_id}]"
-        if not _VOICE_ID.match(voice_id):
+        if not VOICE_ID_PATTERN.match(voice_id):
             raise VoiceError(
                 f"{where}: {voice_id!r} is not a voice id (lower-case letters, "
                 "digits, dot, dash and underscore, starting with a letter or "
-                "digit). A pins file is one table per voice id and nothing else"
+                "digit, at most 64 characters). A pins file is one table per voice id and nothing else"
             )
         block = document[voice_id]
         if not isinstance(block, dict):
@@ -137,12 +141,12 @@ def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
                 "every row is [<voice id>]"
             )
         check_table(where, block, _PIN_REQUIRED, {}, error=VoiceError)
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise VoiceError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise VoiceError(
                 f"{where}: revision {block['revision']!r} must be a full "
                 "40-character commit sha, so the manifest at that sha and the "
@@ -230,16 +234,6 @@ def remove_home_pin(voice_id: str) -> bool:
         temporary.unlink(missing_ok=True)
         raise VoiceError(f"could not write {path}: {exc}") from exc
     return True
-
-
-def is_home_pin(voice_id: str) -> bool:
-    path = home_pins_path()
-    if not path.is_file():
-        return False
-    try:
-        return voice_id in tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
 
 
 def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
@@ -503,7 +497,7 @@ def merge(repo: RepoManifest, pin: Pin, footprint: Any):
     }
     if repo.takes is not None:
         document["voice"]["takes"] = repo.takes
-    if engine != "higgs-v3":
+    if engine != HIGGS_V3:
         del document["voice"]["serving"]
 
     manifest = _parse(document, repo.path, pin.id)
@@ -632,7 +626,7 @@ def _read(path: Path) -> str:
 
 def footprint_unset(engine: str) -> str:
     from .backend import CUDA_LINUX, MLX_DARWIN
-    from .config import config_path, crucible_home, declared_tts_footprints
+    from .config import config_path, crucible_home
 
     written_by_init = {
         entry.engine
@@ -648,7 +642,7 @@ def footprint_unset(engine: str) -> str:
     return (
         f"no Crucible command writes a [tts.{engine}] table yet: measure the "
         f"engine here, then add [tts.{engine}] to {config_path(crucible_home())} "
-        "with the keys [tts.higgs-v3] carries (memory_bytes_estimate, "
+        f"with the keys [tts.{HIGGS_V3}] carries (memory_bytes_estimate, "
         "estimate_basis, max_num_seqs, max_num_seqs_note)"
     )
 

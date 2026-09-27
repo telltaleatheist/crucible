@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -11,22 +10,24 @@ import tomli_w
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
-from .manifests import check_table
+from .narratorengines import ESTIMATE_BASES, HIGGS_V3, NARRATOR_ENGINE_SAMPLING
+from .tomltable import (
+    HF_REPO_PATTERN,
+    REVISION_PATTERN,
+    VOICE_ID_PATTERN,
+    check_table,
+)
 from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
 
-NARRATOR_ENGINE_SAMPLING: dict[str, dict[str, float]] = {
-    "higgs-v3": {"temperature": 0.8, "top_p": 0.95, "top_k": 50},
-}
+VOICES_PULL_COMMAND = "crucible voices pull"
 
 VOICE_KINDS = frozenset({"checkpoint", "zeroshot", "token"})
 
 VOICE_BACKENDS = frozenset({CUDA_LINUX, MLX_DARWIN})
 
 CLIPS_FROM_REQUEST = "from-request"
-
-ESTIMATE_BASES = frozenset({"measured", "declared"})
 
 VERIFIED = "verified"
 ASSERTED = "asserted"
@@ -102,10 +103,6 @@ _CLIP_REQUIRED: dict[str, type] = {
 }
 
 _TAKE_OPTIONAL: dict[str, type] = {"reason": str}
-
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_VOICE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 class VoiceError(CrucibleError):
@@ -266,6 +263,13 @@ class VoiceManifest:
 
     weights_family = "voices"
 
+    @property
+    def pull_command(self) -> str:
+        return f"{VOICES_PULL_COMMAND} {self.id}"
+
+    def aliases(self) -> "tuple[VoiceManifest, ...]":
+        return voice_aliases_of(self)
+
     def extra_files(self, backend_kind: str) -> tuple[str, ...]:
         return ()
 
@@ -366,7 +370,7 @@ def _number(where: str, key: str, value: Any) -> float:
     return float(value)
 
 
-def _check_pace(where: str, table: dict[str, Any]) -> Pace:
+def check_pace(where: str, table: dict[str, Any]) -> Pace:
     check_table(
         where,
         table,
@@ -511,7 +515,7 @@ def _check_source(where: str, block: dict[str, Any]) -> _Source:
                     f"was fetched — so a second {key} beside it would be a fact with "
                     "two owners"
                 )
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise VoiceError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
@@ -522,7 +526,7 @@ def _check_source(where: str, block: dict[str, Any]) -> _Source:
                 "pin is a repo AND a commit; `PUT /v1/voices/{id}` is the door that "
                 "may omit one, and it resolves it before the manifest is written"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise VoiceError(
                 f"{where}: revision {block['revision']!r} must be a full 40-character "
                 "commit sha, so a pull is reproducible; branch names are not pins"
@@ -663,7 +667,7 @@ def _check_serving(
 ) -> Serving | None:
     where = f"{path.name} [voice.serving]"
     block = voice.get("serving")
-    if narrator_engine != "higgs-v3":
+    if narrator_engine != HIGGS_V3:
         if block is not None:
             raise VoiceError(
                 f"{where}: narrator_engine is {narrator_engine!r}, which reads no "
@@ -820,16 +824,17 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
     }
     weights_of = voice.get("weights_of")
     if weights_of is not None and not (
-        isinstance(weights_of, str) and _VOICE_ID.match(weights_of)
+        isinstance(weights_of, str) and VOICE_ID_PATTERN.match(weights_of)
     ):
         raise VoiceError(f"{path.name}: voice.weights_of {weights_of!r} is not a voice id")
     check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
 
     voice_id = voice["id"]
-    if not _VOICE_ID.match(voice_id):
+    if not VOICE_ID_PATTERN.match(voice_id):
         raise VoiceError(
-            f"{path.name}: voice.id {voice_id!r} must be lower-case and start with "
-            "a letter or digit ([a-z0-9][a-z0-9._-]*)"
+            f"{path.name}: voice.id {voice_id!r} must be lower-case, start with "
+            "a letter or digit and be at most 64 characters "
+            "([a-z0-9][a-z0-9._-]{0,63})"
         )
     if voice_id != expected_id:
         raise VoiceError(
@@ -857,7 +862,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
 
     if "pace" in voice and not isinstance(voice["pace"], dict):
         raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-    pace = _check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
+    pace = check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
     serving = _check_serving(path, voice, narrator_engine)
 
     if "backends" not in voice:
@@ -1190,11 +1195,8 @@ def _engine_voices() -> dict[str, VoiceManifest]:
     return found
 
 
-_VOICE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-
-
 def home_voice_path(voice_id: str) -> Path:
-    if not _VOICE_ID.match(voice_id):
+    if not VOICE_ID_PATTERN.match(voice_id):
         raise VoiceError(
             f"voice id {voice_id!r} is not usable as a manifest name: lower-case "
             "letters, digits, dot, dash and underscore, starting with a letter or "
@@ -1249,13 +1251,6 @@ def remove_home_voice(voice_id: str) -> bool:
     except OSError as exc:
         raise VoiceError(f"could not remove {path}: {exc}") from exc
     return True
-
-
-def is_home_voice(voice_id: str) -> bool:
-    try:
-        return home_voice_path(voice_id).is_file()
-    except VoiceError:
-        return False
 
 
 def _voices_in(root: Path) -> dict[str, VoiceManifest]:
