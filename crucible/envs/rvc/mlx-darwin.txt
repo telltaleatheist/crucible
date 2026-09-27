@@ -1,87 +1,4 @@
-# crucible `rvc` env — mlx-darwin (ultimate-rvc on Apple Silicon, through Metal).
-#
 # archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
-#   THE MLX TOTAL, and the only measured mlx number there is: that table prices
-#   the five cuda recipes one by one and the five mlx ones together. So every
-#   mlx recipe carries the total rather than a share of it invented here — it
-#   overstates one env and can never understate it, and a floor may only ever
-#   be wrong in that direction (PHASE19-AUTOMATIC-WSL.md ruling 6). An ARCHIVE
-#   size; the unpacked env is larger. Replace this line the day one mlx env is
-#   measured on its own — one recipe, one measured number, one owner.
-#
-# The Mac IS a real rvc backend, unlike `asr`. ultimate-rvc is torch, torch has
-# an MPS backend, and the app runs this on Owen's Mac today — the 96-file recycle
-# in `crucible/jobs/rvc/worker.py` exists BECAUSE of what a 64 GB Mac did without
-# it (2026-07-17). No device flag is needed anywhere: torch selects MPS on its
-# own, which is why nothing in the job type mentions one.
-#
-# The same commit pin as `cuda-linux.txt`, for the same reason: `generate
-# convert-dir` is in Owen's fork and not on PyPI, and both call themselves
-# 0.5.11.
-#
-# A RESOLVED SET NOW, AND THE INSTALL THAT RESOLVED IT REALLY HAPPENED
-# --------------------------------------------------------------------
-# This file used to carry a notice saying it was NOT a resolved set: the
-# library versions had been read off a WINDOWS env and had three CUDA-only
-# lines swapped for platform-neutral equivalents, which is a reasoned
-# substitution and not a measurement. That notice is discharged.
-#
-# What follows is `pip freeze` from `~/.crucible/envs/rvc` on Owen's Mac
-# Studio, read on 2026-09-14. That env's own stamp says how it got there —
-# `{"job_type": "rvc", "backend": "mlx-darwin", "recipe": "mlx-darwin.txt",
-# "python_version": "3.11.16", "seconds": 43.4}` — so these 104 lines are what
-# THIS FILE produced on a real Apple Silicon machine, not a set anybody
-# reasoned about. The three substitutions the old notice asked to have checked
-# are all confirmed by it:
-#
-#   torch==2.7.0+cu128    -> torch==2.7.0        CONFIRMED (the macOS wheel
-#                                                is the Metal build)
-#   torchvision==...cu128 -> torchvision==0.22.0 CONFIRMED
-#   onnxruntime-gpu       -> onnxruntime==1.27.0 CONFIRMED
-#
-# and so are `torchaudio==2.7.0`, `audio-separator==0.31.1`, `static_ffmpeg==3.0`
-# and `static-sox==1.0.2`.
-#
-# NOTHING HERE IS PRUNED, and two names are worth explaining before somebody
-# tidies them away. `twine` (with keyring, readme_renderer, docutils, id, nh3,
-# rfc3986, requests-toolbelt, backports.tarfile and the jaraco.* set) is
-# `static_ffmpeg`'s own declared dependency — `pip show twine` in that env
-# reports `Required-by: static_ffmpeg` — and `beartype` is audio-separator's.
-# They are recorded because this file's job is to describe an env that WORKS,
-# which is the rule `envs/align/cuda-linux.txt` states at length about gradio
-# and flask. Trimming the tree is a separate piece of work with its own
-# measurement.
-#
-# `onnx-weekly==1.24.0.dev20260914` is a development build and it is here
-# because it is what pip resolved on that day; it is the one line most likely
-# to be unreproducible later, and the first install that disagrees should
-# replace this file rather than be patched around.
-#
-# ONE THING TO PRESERVE ON ANY REBUILD. BookForge's Mac env carries a patch that
-# makes ultimate_rvc free Metal buffers per file: it only freed GPU cache under
-# `if torch.cuda.is_available()`, a no-op on MPS, so buffers accumulated across a
-# long convert-dir batch until unified memory ballooned to ~50 GB and the machine
-# swapped (`packaging/env/patch-urvc-mps-memory.py`). That patch is NOT in this
-# recipe, because it is a source patch rather than a package, and it is not
-# needed for correctness here: the 96-file process recycle is the guaranteed
-# bound and the patch only softens the peak inside one batch. If a future fork
-# commit carries the fix, this comment is how somebody will know it mattered.
-#
-# ONE DIFFERENCE FROM `cuda-linux.txt` THAT IS NOT A PACKAGE: audio-separator's
-# `use_autocast` is CUDA-only by its own documentation, so the denoise job asks
-# for it on cuda-linux and not here — `crucible/jobs/denoise/__init__.py` reads
-# that off the backend rather than off a manifest, because it is a property of
-# the accelerator and not of the model.
-#
-# The base assets — the contentvec embedder and the rmvpe predictor — are not
-# installed by this recipe. See `cuda-linux.txt` for why, and
-# `crucible/jobs/rvc/__init__.py` for the refusal that names them.
-#
-# Regenerate after any deliberate bump with:
-#     ~/.crucible/envs/rvc/bin/pip freeze
-
-
-# --- the set that env holds, recorded exactly ---
 
 absl-py==2.5.0
 annotated-types==0.8.0
@@ -167,10 +84,6 @@ soundfile==0.13.1
 sox==1.5.0
 soxr==0.5.0.post1
 static-sox==1.0.2
-# KEPT HERE, dropped from cuda-linux.txt (2026-09-26, fresh-install #25). The
-# Mac has no pinned ffmpeg in `crucible/hosttools.py` yet and uses Homebrew's
-# on PATH; with none there, this is urvc's only fallback. It goes when a
-# darwin-arm64 build is pinned.
 static_ffmpeg==3.0
 sympy==1.14.0
 threadpoolctl==3.6.0

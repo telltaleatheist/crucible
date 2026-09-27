@@ -1,41 +1,3 @@
-"""Make the logprobs mlx-lm RETURNS float32, so a decision's label mass is a
-probability mass.
-
-WHY. mlx-lm 0.31.3 normalizes with `logprobs = logits - mx.logsumexp(logits)`
-in the model's own dtype, which for Crucible's Qwen3.5/3.8 builds is bfloat16
-(`mlx_lm/generate.py` L420, L549, L1352 — every site whose result is returned,
-read on the Mac Studio 2026-09-24). bfloat16 keeps 8 significant bits: at a
-log-sum-exp between 16 and 32 its spacing is 0.125, so the rounded lse is off by
-up to 0.0625 and EVERY returned logprob is shifted by that one error. The mass
-of a distribution read back through `exp` is then off by a common factor of up
-to exp(+-0.0625) = 0.939-1.065. That is what the decide door measured: a
-qwen3.5-2b triage over 1,362 yes/no questions had `label_mass` quantiles 5%
-0.940, median 0.997, 75% 1.023, 95% 1.055 — above 1, which no probability mass
-can be. Reproduced on the Mac's CPU with mlx itself (2026-09-24, 400 synthetic
-peaked distributions at logit ~25 over the 248320 vocabulary): bf16 mass
-0.946 / 1.008 / 1.056 (5% / median / 95%), float32 0.998 / 1.000 / 1.000.
-
-WHAT CHANGES, AND WHAT DOES NOT. Each site now computes BOTH: the stock-dtype
-logprobs, which the sampler reads exactly as before — so what is GENERATED is
-unchanged at every temperature, not only at 0 — and a float32 copy
-(`logits.astype(mx.float32)` before `logsumexp`), which is what the site
-returns and therefore what `server.py` reports as `logprob` and
-`top_logprobs`. The cost is one extra log-sum-exp over the vocabulary per
-sequence per step, about 1 MB of float32 per row.
-
-USAGE: `<env python> patch_mlx_lm_fp32_logprobs.py <env prefix>` (or set
-`CRUCIBLE_LLM_ENV`), the same shape as `patch_mlx_lm_top_logprobs.py`:
-
-- IDEMPOTENT: already patched is asked of the LIVE file by the marker `crucible
-  doctor` greps for, and prints `ALREADY_PATCHED`.
-- PATCHED FROM THE LIVE FILE, never from `.orig`.
-- VERSION-PINNED: derived against mlx-lm 0.31.3 byte for byte, and it refuses
-  `VERSION_MISMATCH` (exit 2) on any other `mlx_lm/_version.py`, before it
-  looks at an anchor.
-- ALL OR NOTHING: every anchor must be there exactly once or nothing is
-  written (`ANCHOR_NOT_FOUND`, exit 2). A file with some sites float32 and
-  some not would be an engine that states one precision and returns two.
-"""
 import glob
 import os
 import re
@@ -48,9 +10,6 @@ EXPECTED_VERSION = "0.31.3"
 
 TAG = "# PATCH (crucible 2026-09-24, envs/llm/patches/patch_mlx_lm_fp32_logprobs.py)"
 
-#: The helper, inserted once before `generate_step`. Its own lines never spell
-#: `logits - mx.logsumexp(logits`, so `ABSENT_MARKER` can prove that no stock
-#: site is left anywhere in the file.
 HELPER_ANCHOR = "\n\ndef generate_step(\n"
 HELPER = (
     "\n\n" + TAG + ":\n"
@@ -66,10 +25,6 @@ HELPER = (
     "\n\ndef generate_step(\n"
 )
 
-#: (stock, patched) pairs, byte-exact, indentation included. `generate_step`'s
-#: `_step` (L420-422), `speculative_generate_step`'s `_process_and_sample`
-#: (L549-551), and `GenerationBatch._step` (L1351-1352 and L1368) — the
-#: batched path the server takes for every batchable request.
 EDITS = (
     (
         "            logprobs = logits - mx.logsumexp(logits, keepdims=True)\n"
@@ -102,17 +57,12 @@ EDITS = (
     ),
 )
 
-#: What the doctor greps for: the EFFECTIVE float32 line of the helper.
-#: Kept identical to `crucible/envpatches.py`'s table; a keeper asserts it.
 MARKER = "wide = x.astype(mx.float32)"
 
-#: The stock normalization must be GONE from every site, not merely joined by
-#: the helper.
 ABSENT_MARKER = "logits - mx.logsumexp(logits"
 
 
 def site_packages_file(prefix: str, rel: str) -> str:
-    """`rel` inside the env, deduped by real path."""
     hits = sorted(
         {
             os.path.realpath(p)
@@ -170,8 +120,6 @@ def main() -> None:
     for old, new in anchors:
         patched = patched.replace(old, new)
     if MARKER not in patched or ABSENT_MARKER in patched:
-        # Unreachable on the file this was derived against; kept so a future
-        # edit to EDITS that misses a site cannot write a half-patched file.
         print(f"INCOMPLETE: a stock site survived the edits in {path}", file=sys.stderr)
         sys.exit(2)
 

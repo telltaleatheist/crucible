@@ -1,36 +1,3 @@
-"""Weights on disk — `~/.crucible/<family>/<id>/<backend>/`.
-
-Pulled by `crucible models pull <id>` (or `crucible voices pull <id>`) with
-`huggingface_hub` at the manifest's pinned revision, never from GitHub Releases
-(PHASE2-LLM.md section 1). A pull that finishes writes `crucible-pull.json`
-beside the weights; nothing downstream treats a directory without that stamp as
-installed, so an interrupted 19 GB download can never be handed to an engine as
-if it were a model.
-
-`family` is `models`, `voices` or `rvc`, and it comes off the manifest
-(`weights_family`) rather than being passed around. Those are separate namespaces
-— nothing stops a voice being called `qwen3.5-9b` — and one directory holding two
-kinds would let a `crucible voices pull` overwrite a 19 GB model with an 8.5 GB
-checkpoint and leave a stamp that reads as installed to either.
-
-Three shapes of pull, and each of the second two exists because of how a real
-repo is laid out rather than because anybody wanted another shape:
-
-* `pull` snapshot-downloads a whole repo, which is what a model or a voice is.
-* `pull_archive` fetches ONE file, verifies its SHA-256 against the manifest and
-  unpacks it, which is what an RVC model is (see `crucible/rvcmodels.py`).
-* `pull_files` fetches NAMED files and places each one exactly where an engine
-  looks for it, which is what ultimate-rvc's shared base assets are: four files
-  scattered through a repo that also holds six pretrained GAN checkpoints, read
-  back from a tree with different names (see `crucible/rvcbase.py`). It is also
-  what a separator checkpoint is — two files out of a mirror of every UVR model
-  there is, landing under the two names audio-separator resolves by (see
-  `crucible/denoisemodels.py`), which is why it takes a `stamp_name`: that
-  target root holds one set per model rather than one set.
-
-All three write the same stamp, so nothing downstream has to know which ran.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -53,18 +20,6 @@ STAMP_NAME = "crucible-pull.json"
 
 
 class _QuietUnauthenticated(logging.Filter):
-    """Drops the Hub's "unauthenticated requests" warning, and nothing else.
-
-    2026-09-26, fresh-install #41. Every pull on kylies-pc printed "Warning:
-    You are sending unauthenticated requests to the HF Hub. Please set a
-    HF_TOKEN ...". It is harmless and it reads like a failure: every repo
-    Crucible pulls is public, and a token is only ever asked for by name when a
-    repo is gated (`HF_TOKEN_ENV`). The Hub sends it as an `X-HF-Warning:
-    unauthenticated; ...` header on the resolve, and huggingface_hub logs it
-    through `huggingface_hub.utils._http` (checked against the live Hub and
-    huggingface_hub 2.0.0's `_warn_on_warning_headers`). Filtered by its text,
-    so any other warning from that logger still shows.
-    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         return "unauthenticated requests to the HF Hub" not in record.getMessage()
@@ -72,26 +27,9 @@ class _QuietUnauthenticated(logging.Filter):
 
 logging.getLogger("huggingface_hub.utils._http").addFilter(_QuietUnauthenticated())
 
-#: WHERE A BACKEND BLOCK'S BYTES COME FROM (PHASE18-UNCERTIFIED.md section 3).
-#:
-#:   PINNED  bytes Crucible FETCHED at something it can name — an HF repo at a
-#:           commit for a model, a voice or an RVC archive, and the llama.cpp
-#:           release for the engine row (`crucible/llamacpp.py`). This module
-#:           fetches it, stamps it, and the catalog owns it.
-#:   LOCAL   a directory somebody else put on the serving machine. This module
-#:           NEVER fetches, stamps or deletes it, and it may vanish between
-#:           jobs without that being an error.
-#:
-#: The vocabulary lives here rather than in `crucible/voices.py` because this is
-#: the module that ACTS on the difference — everything downstream only reports
-#: it — and because `crucible/llamacpp.py` needs the word too and has no
-#: business importing a voice schema.
 PINNED = "pinned"
 LOCAL = "local"
 
-#: What to call the thing, and which command pulls it, per weights family. A
-#: refusal that says "run `crucible models pull deathstalker`" for a voice sends
-#: its reader to a command that will tell them there is no such model.
 _FAMILY_WORDS: dict[str, tuple[str, str]] = {
     "models": ("model", "crucible models pull"),
     "voices": ("voice", "crucible voices pull"),
@@ -101,13 +39,6 @@ _FAMILY_WORDS: dict[str, tuple[str, str]] = {
 
 @runtime_checkable
 class WeightsSubject(Protocol):
-    """What this module needs from a manifest, model or voice alike.
-
-    Structural rather than a base class: `ModelManifest` and `VoiceManifest`
-    describe different things and share no fields beyond these, and inventing a
-    parent for them would put the id and the path somewhere neither schema's
-    reader would look for them.
-    """
 
     id: str
     path: Path
@@ -116,71 +47,21 @@ class WeightsSubject(Protocol):
 
 @runtime_checkable
 class WeightsSource(Protocol):
-    """What this module needs from a backend block.
-
-    `files` is the one place "which files does this backend fetch" is
-    answered, and every spec answers it. An EMPTY tuple means *the repository
-    is the weights* — `snapshot_download` of the whole thing, which is what
-    every safetensors backend does and what this module did unconditionally
-    until PHASE15. A NON-EMPTY tuple means *these files and no others*, which
-    is what `llama-windows` needs: `unsloth/Qwen3.8-27B-GGUF` holds every
-    quantization, hundreds of gigabytes, and a row there IS one of them.
-
-    Two things read it and they must not be able to disagree: `pull` passes it
-    as `allow_patterns`, and `installed` requires every one of them present.
-    That second half is what makes `dots-ocr` report `installed: false` when
-    the text tower arrived and the vision projector did not (PHASE15-HOST.md
-    3.10, fact 2 — the mmproj is not optional), and what makes 3.5's *"the
-    catalog's `installed` list is the input to the host's weights migration"*
-    exact rather than approximately right.
-    """
 
     backend: str
-    #: BOTH None ON A LOCAL VOICE BLOCK, which names a `path` instead
-    #: (PHASE18-UNCERTIFIED.md section 3). Declared nullable here rather than
-    #: left saying `str`, because this protocol is what a reader consults
-    #: before writing `spec.revision[:12]` — and every such line is a
-    #: TypeError on the shape that declares no pin. `local_source` is the
-    #: question to ask first; it answers None for the three spec types that
-    #: can only ever be pinned.
     hf_repo: str | None
     revision: str | None
     files: tuple[str, ...]
 
 
 class WeightsError(CrucibleError):
-    """Weights are missing, half-pulled, or could not be fetched."""
+    ...
 
 
 class PullCancelled(CrucibleError):
-    """A pull stopped because its caller's progress hook said to stop.
-
-    Its own type and NOT a `WeightsError`, because the two must never be caught
-    together: a failed pull is news and a cancelled one is what was asked for.
-    Every `except Exception` in this module re-raises it untouched for that
-    reason — wrapped in a `WeightsError` it would reach an operator as "pulling
-    … failed", which is a lie about their own cancel.
-
-    Whatever was on disk is REMOVED before this leaves the module. R6 does not
-    apply and PHASE13-OPERATOR.md section 3.3 says why: half a safetensors file
-    is not partial work anybody can resume or use, and leaving it would make the
-    next `installed()` read a directory with no stamp — which is honest, but
-    also several gigabytes of nothing.
-    """
+    ...
 
 
-#: What a caller is told while bytes are arriving: `(done, total|None, file)`.
-#:
-#: `total` is None where the server did not say how big the file is, which
-#: happens and must not be reported as zero. `file` is the name the hub is
-#: fetching, so a progress line says which of a repo's forty shards is in
-#: flight.
-#:
-#: THE HOOK IS ALSO THE CANCEL POINT, and that is not a second job bolted onto
-#: it — it is the only place in a `snapshot_download` where this process's own
-#: code runs. A hook that raises `PullCancelled` stops the pull; nothing else
-#: can, because a thread cannot be killed and the hub takes no cancellation
-#: token. See `crucible/tasks.py`, whose `DELETE /v1/tasks/{id}` is the caller.
 ProgressHook = Callable[[int, "int | None", str], None]
 
 
@@ -190,17 +71,7 @@ class InstalledWeights:
     hf_repo: str | None
     revision: str | None
     bytes: int
-    #: When the pull finished. None for a LOCAL entry: no download ever
-    #: happened, and a timestamp there would make a directory that has sat on
-    #: the machine for a month read as a recent install.
     pulled: str | None
-    #: `"pinned"` or `"local"` (`crucible/voices.py`). A LOCAL entry is not an
-    #: install: nothing was fetched, there is no stamp, `hf_repo` and `pulled`
-    #: are None because no download ever happened, and the bytes may be gone
-    #: by the next job. It is reported through this type anyway because every
-    #: caller is asking the same question — "can this be served, and from
-    #: where" — and a second return type would make each of them branch before
-    #: it could read a path.
     source: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -230,49 +101,21 @@ def stamp_path(
     return weights_dir(config, family, subject_id, backend_kind) / STAMP_NAME
 
 
-# ------------------------------------------------------ one copy, two rows
-#
-# PHASE22-DECIDE.md section 2.9, Owen 2026-09-23: *"One copy on disk, two fit
-# rows in the catalog."* A model manifest may declare `[model] weights_of =
-# "<base id>"` (crucible/manifests.py, `resolve_weights_of`): an ALIAS. Its
-# weights are the base's download, in the base's folder, and what it owns on
-# disk is only what its block names beyond the base's (`extra_files` — the
-# llama-windows projector). Every function below that touches the store asks
-# `_store_id` where that is, so an alias cannot be downloaded twice by any door.
-
-
 def _store_id(subject: Any) -> str:
-    """The id whose folder holds this subject's weights.
-
-    `getattr` because only a MODEL or an ASR manifest can be an alias: a voice
-    and an RVC model have no `weights_of` in their schemas, and this is asking
-    which schema the subject is, exactly as `local_source` does.
-    """
     weights_of = getattr(subject, "weights_of", None)
     return subject.id if weights_of is None else weights_of
 
 
 def _extra_files(subject: Any, spec: WeightsSource) -> tuple[str, ...]:
-    """What an alias owns on this backend; () for anything that is not one."""
     if getattr(subject, "weights_of", None) is None:
         return ()
     return subject.extra_files(spec.backend)
 
 
 def subject_dir(config: Config, subject: WeightsSubject, backend_kind: str) -> Path:
-    """Where THIS subject's weights are for `backend_kind` — the base's folder
-    for an alias. The one question every reader of the layout should ask."""
     return weights_dir(config, subject.weights_family, _store_id(subject), backend_kind)
 
 
-#: Beside the base's stamp, one per alias PULLED into that folder. It is the
-#: alias's statement that it was asked for here, and it is what makes "an alias
-#: exists on this machine" a fact on backends where the alias owns no file of
-#: its own (cuda-linux: the whole repo is shared). Without it, removing the
-#: base could never be refused there, and removing the alias could never end
-#: the refusal. It does NOT decide `installed` — the ruling is "the base's
-#: stamp AND its own extra files present" — it decides only whether removing
-#: the base would take a pulled alias away.
 ALIAS_RECORD_PREFIX = "crucible-alias-"
 
 
@@ -281,8 +124,6 @@ def alias_record_path(config: Config, alias: Any, backend_kind: str) -> Path:
 
 
 class WeightsShared(WeightsError):
-    """`weights_shared`: a base's folder is also an alias's, and it was asked
-    to go. Carries the aliases by id so a refusal can name each of them."""
 
     code = "weights_shared"
 
@@ -303,21 +144,12 @@ class WeightsShared(WeightsError):
 def aliases_holding(
     config: Config, manifest: WeightsSubject, backend_kind: str
 ) -> tuple[str, ...]:
-    """The aliases, by id, that were pulled into this base's folder and are
-    installed there now. Empty for anything that is not a model base.
-
-    Installed AND recorded, both: a record beside an alias whose projector was
-    deleted by hand names an alias that is not there any more, and refusing the
-    base for it would leave nothing any door could remove to lift the refusal.
-    """
     from .asrmodels import AsrManifest, asr_aliases_of
     from .manifests import ModelManifest, aliases_of
     from .voices import VoiceManifest, voice_aliases_of
 
     if getattr(manifest, "weights_of", None) is not None:
         return ()
-    # Two catalogs can alias (models/ and, since 2026-09-24, asr/); each asks
-    # its own directory who shares its folder.
     if isinstance(manifest, ModelManifest):
         aliases = aliases_of(manifest)
     elif isinstance(manifest, AsrManifest):
@@ -341,53 +173,21 @@ def aliases_holding(
 def refuse_if_shared(
     config: Config, manifest: WeightsSubject, backend_kind: str
 ) -> None:
-    """`WeightsShared` if deleting this subject's folder would take an alias."""
     holding = aliases_holding(config, manifest, backend_kind)
     if holding:
         raise WeightsShared(manifest.id, backend_kind, holding)
 
 
 def missing_files(directory: Path, spec: WeightsSource) -> tuple[str, ...]:
-    """The files this spec NAMES that are not on disk, in the spec's order.
-
-    Empty for a spec that names none, which is every safetensors backend: the
-    repository is the weights and `snapshot_download` either wrote it or did
-    not. For `llama-windows` it is the whole of "is this subject complete" —
-    a `dots-ocr` directory holding the text tower and no `mmproj` is a
-    directory `llama-server` will start against, answer `/v1/models` from,
-    and then refuse every page (3.10, fact 2).
-    """
     return tuple(name for name in spec.files if not (directory / name).is_file())
 
 
 def local_source(spec: Any) -> Path | None:
-    """The directory a LOCAL spec names, or None for a pinned one.
-
-    `getattr` and not an attribute on `WeightsSource`, because only a VOICE can
-    be local today (PHASE18-UNCERTIFIED.md section 3). A model is a catalog
-    subject with a download, an installer, a host migration and a `crucible
-    models pull` behind it, and not one of those has been designed for bytes
-    this server does not own; adding the member to the protocol would advertise
-    a capability three spec types do not have.
-    """
     found = getattr(spec, "local_path", None)
     return None if found is None else Path(found)
 
 
 def _local_installed(directory: Path, spec: Any) -> InstalledWeights | None:
-    """A local directory reported as servable, or None when it is not there.
-
-    NOTHING IS VERIFIED HERE beyond existence and the files the spec names. The
-    bytes were not fetched by this server, there is no stamp to compare a pin
-    against, and the `identity` on the row is the registrant's word (section
-    3.1). `pulled` is None because no download ever happened — reporting a
-    timestamp would make a directory that has sat there for a month look like a
-    recent install.
-
-    `bytes` is a stat walk rather than a read: it is the same
-    `directory_bytes` every other caller uses and it costs nothing next to an
-    8 GiB checkpoint load.
-    """
     if not directory.is_dir():
         return None
     if missing_files(directory, spec):
@@ -395,12 +195,6 @@ def _local_installed(directory: Path, spec: Any) -> InstalledWeights | None:
     return InstalledWeights(
         path=directory,
         hf_repo=None,
-        # `spec.identity` and NOT `getattr(spec, "identity", None)`. The
-        # `getattr` in `local_source` asks a question every spec type may
-        # answer no to; this one is reached only after it answered yes, so a
-        # spec that names a path and no identity is a schema the loader let
-        # through — and a None here would be reported as this voice's
-        # revision. Loud by name is the answer to that, not a default.
         revision=spec.identity,
         bytes=directory_bytes(directory),
         pulled=None,
@@ -411,29 +205,10 @@ def _local_installed(directory: Path, spec: Any) -> InstalledWeights | None:
 def installed(
     config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights | None:
-    """The installed weights for this (model or voice, backend), or None.
-
-    A stamp naming a different revision than the manifest pins is *not* installed:
-    the manifest moved, and serving the old bytes under the new id would be a
-    silent substitution.
-
-    A stamp beside a MISSING NAMED FILE is not installed either, and that is
-    not the same check wearing a second hat: the stamp says a pull finished,
-    and `spec.files` says what finishing means for this backend. A subject
-    whose mmproj was deleted by hand has a perfectly good stamp.
-
-    A LOCAL SPEC IS NEVER STAMPED and is answered off the directory itself —
-    see `_local_installed`.
-    """
     local = local_source(spec)
     if local is not None:
         return _local_installed(local, spec)
 
-    # AN ALIAS READS ITS BASE'S FOLDER AND ITS BASE'S STAMP (section 2.9): the
-    # pins are equal by `resolve_weights_of`, so the base's stamp answers for
-    # the alias's pin as well. `missing_files` below then asks for every file
-    # the ALIAS's block names — the base's GGUF and its own projector — so a
-    # base-only pull reads as not installed here, honestly.
     directory = subject_dir(config, manifest, spec.backend)
     stamp = directory / STAMP_NAME
     if not stamp.is_file():
@@ -449,10 +224,6 @@ def installed(
         hf_repo=record["hf_repo"],
         revision=record["revision"],
         source=PINNED,
-        # THE BYTES THIS SUBJECT OWNS. An alias's download is its base's and is
-        # counted once, on the base (section 2.9); what the alias adds is its
-        # extra files, which is also exactly what removing it frees — 0 where
-        # it adds none.
         bytes=(
             record["bytes"]
             if getattr(manifest, "weights_of", None) is None
@@ -465,20 +236,12 @@ def installed(
 def require_installed(
     config: Config, manifest: WeightsSubject, spec: WeightsSource
 ) -> InstalledWeights:
-    """Installed weights, or `model_not_installed` / `voice_not_installed`."""
     found = installed(config, manifest, spec)
     if found is not None:
         return found
 
     local = local_source(spec)
     if local is not None:
-        # NOT "not installed", and not an instruction to pull. Nothing here was
-        # ever installed, and there is no command that would fetch it: the
-        # directory belongs to whoever put it there (section 3), so a refusal
-        # that said `crucible voices pull` would send its reader to a command
-        # that cannot help. The bytes going away mid-run is EXPECTED of a
-        # screening merge — 8 GiB deleted the moment its renders land — so this
-        # is a plain statement of what is not there.
         absent = missing_files(local, spec)
         if local.is_dir() and absent:
             raise WeightsError(
@@ -499,9 +262,6 @@ def require_installed(
     stamp = directory / STAMP_NAME
     base = getattr(manifest, "weights_base", None)
     if base is not None:
-        # AN ALIAS SAYS WHICH HALF IS MISSING: the shared download, or its own
-        # files beside it. "No weights at <the base's folder>" would send its
-        # reader to look at a directory that may be full.
         extras = _extra_files(manifest, spec)
         if installed(config, base, base.spec(spec.backend)) is None:
             raise WeightsError(
@@ -523,9 +283,6 @@ def require_installed(
             record["revision"] == spec.revision
             and record["hf_repo"] == spec.hf_repo
         ):
-            # The pin matches and the stamp is there, so what is wrong is a
-            # NAMED FILE that is not. Said as itself rather than as a pin
-            # mismatch, which is what the sentence below would claim.
             absent = missing_files(directory, spec)
             raise WeightsError(
                 f"{directory} is stamped for {spec.hf_repo}@{spec.revision[:12]} "
@@ -545,13 +302,6 @@ def require_installed(
 
 
 class RemoveFailed(WeightsError):
-    """A subject's files would not go. Carries the path that refused.
-
-    Its own type because PHASE15-HOST.md 3.5a gives it its own name and its
-    own `details.path`: "this subject is not installed" and "this file is
-    locked by something" are different things to do about, and a caller told
-    one about the other deletes the wrong problem.
-    """
 
     def __init__(self, path: Path, message: str) -> None:
         super().__init__(message)
@@ -559,7 +309,6 @@ class RemoveFailed(WeightsError):
 
 
 def _remove(path: Path) -> None:
-    """One file or one tree, with the failure named by its own path."""
     try:
         if path.is_dir():
             shutil.rmtree(path)
@@ -572,13 +321,6 @@ def _remove(path: Path) -> None:
 
 
 def _prune_empty(directory: Path, stop: Path) -> None:
-    """Remove `directory` and its empty parents, up to but not past `stop`.
-
-    3.5a: *"and the subject's directory if it is then empty"*. A directory
-    left behind is not a failure — it is a directory — so this never raises
-    for one that is not empty; what it refuses to do is climb past the tree
-    this module owns.
-    """
     current = directory
     while current != stop and stop in current.parents:
         try:
@@ -596,13 +338,6 @@ def _prune_empty(directory: Path, stop: Path) -> None:
 
 
 def _refuse_local(spec: Any, manifest: WeightsSubject, verb: str, why: str) -> None:
-    """Refuse a door that would fetch or delete bytes this server does not own.
-
-    Both refusals in one place because they are one rule — Crucible manages a
-    PIN and does not manage a PATH (PHASE18-UNCERTIFIED.md section 3) — and two
-    hand-written copies would be two answers about one voice the first time
-    either was edited.
-    """
     local = local_source(spec)
     if local is None:
         return
@@ -613,26 +348,6 @@ def _refuse_local(spec: Any, manifest: WeightsSubject, verb: str, why: str) -> N
 
 
 def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Path:
-    """Delete this subject's weights for this backend. Returns what went.
-
-    PHASE15-HOST.md 3.5a, and it is the door the host's weights migration
-    needs so that it never reaches into this module's layout from outside
-    (`crucible/host/catalog.py` says why at length).
-
-    A LOCAL SPEC IS REFUSED (section 3): the bytes are not Crucible's and
-    deleting somebody else's 8 GiB directory because a manifest mentioned it is
-    the one thing this door must never do.
-
-    **The whole backend directory**, not a file list, and the difference is
-    only visible on `llama-windows`: that backend's directory holds exactly
-    the files its spec names plus the stamp, so removing the directory and
-    removing the named files are the same act with one fewer way to leave a
-    stamp behind. Every other backend's directory IS the snapshot.
-
-    What it does NOT touch is another backend's copy of the same subject. A
-    machine that ran `cuda-linux` yesterday and `llama-windows` today has
-    two, and 3.5's migration deletes one of them.
-    """
     _refuse_local(
         spec,
         manifest,
@@ -643,16 +358,10 @@ def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Pat
     )
     directory = subject_dir(config, manifest, spec.backend)
     if getattr(manifest, "weights_of", None) is not None:
-        # AN ALIAS TAKES ONLY WHAT IS ITS OWN (section 2.9): its extra files
-        # and its record. Never the folder, never the base's stamp, never a
-        # byte of the shared download.
         for name in _extra_files(manifest, spec):
             _remove(directory / name)
         _remove(alias_record_path(config, manifest, spec.backend))
         return directory
-    # A BASE'S FOLDER IS REFUSED WHILE AN ALIAS HOLDS IT, by name, here in the
-    # store rather than in either door, so the CLI, the API and the host's
-    # migration cannot come to disagree about it.
     refuse_if_shared(config, manifest, spec.backend)
     _remove(directory)
     _prune_empty(
@@ -667,13 +376,6 @@ def remove_files(
     *,
     stamp_name: str = STAMP_NAME,
 ) -> Path:
-    """Delete a NAMED FILE SET and its stamp, leaving the directory alone.
-
-    The counterpart of `pull_files`, and the reason it cannot be `remove`:
-    `~/.crucible/denoise-models/` holds every separator in one flat directory
-    (`crucible/denoisemodels.py` says why), so removing the directory would
-    remove somebody else's model. One stamp per set, one removal per set.
-    """
     for name in targets:
         _remove(_safe_target(target_root, name))
     _remove(target_root / stamp_name)
@@ -682,7 +384,6 @@ def remove_files(
 
 @dataclass(frozen=True)
 class StrandedWeights:
-    """A directory under the store that no manifest in this build owns."""
 
     family: str
     subject_id: str
@@ -706,18 +407,6 @@ def stranded(
     backends: Sequence[str],
     declared_backends: Callable[[str], Sequence[str]],
 ) -> list[StrandedWeights]:
-    """Every `<family>/<id>/<backend>` directory nothing in this build declares.
-
-    `backends` is every backend kind a directory may be named for, and
-    `declared_backends(id)` which of them this build has a manifest block for;
-    the caller supplies both because the store does not load manifests. A
-    directory named for anything else is not a weights directory and is not
-    this function's business.
-
-    THE RECONCILER FOR THE STORE (CLAUDE.md: every hold has an owner, and a
-    reconciler finds orphans). It REPORTS and never deletes: the bytes may be
-    an operator's only copy of something, and the operator decides.
-    """
     root = weights_root(config, family)
     if not root.is_dir():
         return []
@@ -740,20 +429,10 @@ def stranded(
 
 
 def hf_token(config: Config) -> str | None:
-    """`$HF_TOKEN`, else `[hf] token` in config.toml, else None."""
     return hf_token_at(config.path)
 
 
 def hf_token_at(config_path: Path) -> str | None:
-    """The same credential, asked of a PATH rather than of a loaded Config.
-
-    `crucible/voicerepo.py` fetches a voice's manifest out of a private repo
-    while merging the catalog, and it does that without a `Config` — the merge
-    happens inside `load_all_voices()`, which the CLI, the tests and three job
-    types call with no server around. One reader either way: `hf_token` is this
-    function with a Config's path, so there is no second answer to "which token
-    does this machine use".
-    """
     from_env = os.environ.get(HF_TOKEN_ENV)
     if from_env is not None and from_env.strip() != "":
         return from_env.strip()
@@ -772,33 +451,9 @@ def hf_token_at(config_path: Path) -> str | None:
 
 
 def resolve_revision(config: Config, hf_repo: str) -> str:
-    """The repo's current head sha, so a caller can pin what it just looked at.
-
-    ── Why the ENGINE resolves this and not the app ───────────────────────────
-
-    A voice manifest requires a full 40-character commit sha, never a branch
-    name, so that a pull is reproducible (`crucible/voices.py`). That makes
-    "add the voice at this repo" impossible to ask for without first turning a
-    repo id into a sha — and the thing that should do the turning is the thing
-    that will do the fetching. This process already holds the HuggingFace
-    credential (`hf_token`) and already talks to the Hub; an app resolving the
-    sha would need its own copy of the token to read a private repo, which is
-    the credential sprawl PHASE15 section 0 exists to prevent.
-
-    ── It pins the head, and that is a MOMENT rather than a promise ───────────
-
-    Between this call and the pull the repo may move. That is not a race worth
-    locking: the point of the pin is that whatever is fetched is *recorded*, so
-    two machines asked for the same voice get the same bytes. A caller that
-    wants a specific older revision passes one and never reaches here.
-
-    Refuses by name. `revision_unresolved` carries the Hub's own words, because
-    "no such repo", "you are not authorised" and "the Hub is down" are three
-    different things to do about it and only the Hub can tell them apart.
-    """
     try:
         from huggingface_hub import HfApi
-    except Exception as exc:  # pragma: no cover - import guard
+    except Exception as exc:
         raise WeightsError(
             f"huggingface_hub is not importable: {exc}"
         ) from exc
@@ -821,41 +476,14 @@ def resolve_revision(config: Config, hf_repo: str) -> str:
 
 
 def reporting_tqdm(on_progress: ProgressHook) -> Any:
-    """A `tqdm_class` for `huggingface_hub` that reports bytes to `on_progress`.
-
-    R4, applied to the one thing in this module that was only ever a log line: a
-    pull's progress existed exclusively as the hub's own progress BAR on
-    somebody's terminal, so a client that asked a server to pull 19 GB could be
-    told "pulling" and then nothing for twenty minutes. The bar is untouched —
-    `on_line` still prints what it always printed — and the fact is promoted to
-    an event beside it.
-
-    **Only byte bars are reported.** `snapshot_download` also raises a bar
-    counting FILES (`unit="it"`), and forwarding both would interleave two
-    different meanings of the same three numbers into one event stream. The
-    file count is recoverable from the sequence of `file` names; a byte count
-    mistaken for a file count is not recoverable from anything.
-    """
     try:
         from huggingface_hub.utils import tqdm as hub_tqdm
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         raise WeightsError(
             f"huggingface_hub is not importable: {exc}"
         ) from exc
 
-    class _Reporting(hub_tqdm):  # type: ignore[misc, valid-type]
-        """A hub progress bar that also reports, and reports even when hidden.
-
-        THE COUNTING IS OUR OWN, and that is not redundancy. `tqdm.update`
-        returns immediately when the bar is `disable`d, and `tqdm.__init__`
-        does not even set `self.unit` or `self.desc` in that case — so a server
-        whose environment carries `HF_HUB_DISABLE_PROGRESS_BARS` would have
-        emitted no `progress` events at all, and, far worse, would have had
-        **no cancel point**: the hook is the only place a
-        `snapshot_download` can be interrupted (see `PullCancelled`). A
-        download nobody can stop because somebody turned off a progress bar is
-        exactly the kind of coupling ARCHITECTURE.md R4 is about.
-        """
+    class _Reporting(hub_tqdm):
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self._crucible_unit = kwargs.get("unit")
@@ -867,9 +495,6 @@ def reporting_tqdm(on_progress: ProgressHook) -> Any:
             displayed = super().update(n)
             if self._crucible_unit == "B":
                 self._crucible_done += int(n or 0)
-                # `self.total` IS set on a disabled bar, and the hub revises it
-                # once it has read the content length, so it is asked rather
-                # than remembered.
                 on_progress(
                     self._crucible_done, self.total, self._crucible_desc
                 )
@@ -895,11 +520,6 @@ def pull(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    """Fetch this model's or voice's weights for this backend at its pin.
-
-    AN ALIAS (`[model] weights_of`) is `_pull_alias`: its base's download, then
-    only the files its own block adds, into the one folder.
-    """
     _refuse_local(
         spec,
         manifest,
@@ -919,8 +539,6 @@ def pull(
     if existing is not None and not force:
         return existing
     if force and target.exists():
-        # A forced pull empties the folder, and an alias's projector and record
-        # are in it: the same act as a removal, refused by the same rule.
         refuse_if_shared(config, manifest, spec.backend)
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
@@ -943,18 +561,10 @@ def pull(
             patterns=spec.files, on_progress=on_progress,
         )
     except PullCancelled:
-        # The caller asked for this. Everything written so far goes, and the
-        # cancellation travels untouched — see `PullCancelled`.
         shutil.rmtree(target, ignore_errors=True)
         raise
 
     elapsed = time.monotonic() - started
-    # BEFORE THE STAMP. A stamp is this module's statement that the subject is
-    # complete, and writing one over a repo that answered for the text tower
-    # and not for the projector would make `installed` say yes about a server
-    # that will refuse every page. `allow_patterns` silently matches nothing
-    # when a name is wrong, so this is the only thing that catches a manifest
-    # with a typo in it.
     absent = missing_files(target, spec)
     if absent:
         raise WeightsError(
@@ -971,8 +581,6 @@ def pull(
         "backend": spec.backend,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,
-        # What the pin MEANT on this backend, so a reader of the stamp alone
-        # can see that a repo was fetched in part and which part.
         "files": list(spec.files),
         "bytes": size,
         "seconds": round(elapsed, 1),
@@ -985,7 +593,7 @@ def pull(
             f"({size / 1e6 / max(elapsed, 1e-6):.0f} MB/s)"
         )
     result = installed(config, manifest, spec)
-    if result is None:  # pragma: no cover - the stamp was just written
+    if result is None:
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
     return result
 
@@ -999,18 +607,6 @@ def _snapshot(
     patterns: Sequence[str],
     on_progress: ProgressHook | None,
 ) -> None:
-    """`snapshot_download` of `spec`'s pin into `target`, refusals by name.
-
-    `patterns` empty = the whole repo. Non-empty = ONLY those files: without
-    it a `llama-windows` row on `unsloth/Qwen3.8-27B-GGUF` fetches every
-    quantization in the repo — hundreds of gigabytes for one 16 GB file.
-    `allow_patterns` takes literal names as well as globs, and these are
-    literal: the manifest names the file, so a pattern that matched two would
-    be this module deciding which.
-
-    A `PullCancelled` travels out untouched; what to delete on a cancel is the
-    caller's, because a base owns its whole folder and an alias only its files.
-    """
     try:
         from huggingface_hub import snapshot_download
         from huggingface_hub.errors import (
@@ -1018,7 +614,7 @@ def _snapshot(
             RepositoryNotFoundError,
             RevisionNotFoundError,
         )
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         raise WeightsError(
             f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
         ) from exc
@@ -1069,23 +665,6 @@ def _pull_alias(
     on_line: Callable[[str], None] | None,
     on_progress: ProgressHook | None,
 ) -> InstalledWeights:
-    """An alias's pull: the base's download, then the alias's own files.
-
-    PHASE22-DECIDE.md section 2.9. **The base is pulled as the base** — the
-    same `pull`, the same stamp, the same folder — so a machine that pulls
-    `qwen3.5-9b-vl` first and `qwen3.5-9b` second downloads once. Then only
-    what the alias's block names beyond the base's (`extra_files`: the
-    llama-windows projector; nothing on a whole-repo backend) is fetched into
-    that folder, and the alias's record is written beside the base's stamp.
-
-    `force` re-fetches the ALIAS's files only. It never forces the base: that
-    is a pull of the base, asked for by name, and it is refused while an alias
-    holds the folder (`refuse_if_shared`).
-
-    A cancel removes only the files this pull was fetching. The folder is the
-    base's, and a cancelled projector download must not take a 19 GB model
-    with it.
-    """
     base = alias.weights_base
     base_spec = base.spec(spec.backend)
     target = subject_dir(config, alias, spec.backend)
@@ -1141,7 +720,6 @@ def _pull_alias(
         "backend": spec.backend,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,
-        # What this alias OWNS in the folder, which is what removing it frees.
         "files": list(extras),
         "bytes": own,
         "seconds": round(time.monotonic() - started, 1),
@@ -1154,23 +732,13 @@ def _pull_alias(
             f"at {target}"
         )
     result = installed(config, alias, spec)
-    if result is None:  # pragma: no cover - checked just above
+    if result is None:
         raise WeightsError(f"wrote {record_path} but {alias.id} does not read as installed")
     return result
 
 
-# ------------------------------------------------------------ one file, unpacked
-
-
 @runtime_checkable
 class ArchiveSource(Protocol):
-    """A backend block whose weights are ONE file in a shared repo.
-
-    `crucible/rvcmodels.py` is the only user and explains why it exists: every
-    RVC model Owen has published is a `.tar.gz` under `rvc/` in one repo
-    alongside six others and the XTTS weights, so `snapshot_download` would fetch
-    about 800 MB to get at 80.
-    """
 
     backend: str
     hf_repo: str
@@ -1188,19 +756,6 @@ def pull_archive(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    """Fetch one archive from a repo, verify it, and unpack it into the weights dir.
-
-    The stamp it writes is byte-identical in shape to `pull`'s, so `installed`
-    and `require_installed` read either without knowing which one ran — which is
-    the point of putting this here rather than in `rvcmodels.py`.
-
-    **The digest is checked before anything is unpacked**, and a mismatch is a
-    refusal rather than a warning. `snapshot_download` verifies what it fetches
-    against the revision; a single file fetched by path gets the same assurance
-    from the manifest, because the failure it prevents is a truncated or
-    substituted checkpoint that converts a whole book into something subtly
-    wrong and says nothing.
-    """
     try:
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import (
@@ -1209,7 +764,7 @@ def pull_archive(
             RepositoryNotFoundError,
             RevisionNotFoundError,
         )
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         raise WeightsError(
             f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
         ) from exc
@@ -1232,10 +787,6 @@ def pull_archive(
             f"({'with' if token else 'without'} an HF token)"
         )
     started = time.monotonic()
-    # Into a staging directory beside the target, never into the hub's shared
-    # cache-by-default: an interrupted download must not leave bytes somewhere a
-    # later run would treat as complete, and the target is the one place this
-    # module cleans up.
     staging = target / ".crucible-archive"
     if staging.exists():
         shutil.rmtree(staging)
@@ -1315,26 +866,13 @@ def pull_archive(
     if on_line is not None:
         on_line(f"unpacked {size / 1e9:.2f} GB in {elapsed:.0f}s at {target}")
     result = installed(config, manifest, spec)
-    if result is None:  # pragma: no cover - the stamp was just written
+    if result is None:
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
     return result
 
 
-# ------------------------------------------------- named files, placed exactly
-
-
 @runtime_checkable
 class FileSource(Protocol):
-    """One file to fetch by path, verify, and put somewhere specific.
-
-    The third shape of pull, and the reason it exists is a layout nobody chose:
-    ultimate-rvc's shared base assets are four files scattered through one
-    HuggingFace repo that also holds six pretrained GAN checkpoints, and the
-    engine reads them from a tree of its own with different names and different
-    directories (`crucible/rvcbase.py`). `pull` would fetch the whole repo;
-    `pull_archive` has nothing to unpack. This fetches exactly what is named and
-    puts each file exactly where the engine looks.
-    """
 
     source: str
     target: str
@@ -1349,20 +887,6 @@ def files_installed(
     *,
     stamp_name: str = STAMP_NAME,
 ) -> InstalledWeights | None:
-    """The stamped file set at `target_root`, or None.
-
-    A stamp naming a different repo or revision is *not* installed, for
-    `installed`'s reason: the declaration moved, and serving the old bytes under
-    the new pin would be a silent substitution. Every target is checked for
-    presence too — a stamp beside a file somebody deleted is a stamp that lies.
-
-    `stamp_name` is the default when one directory holds exactly one set, which
-    is ultimate-rvc's base assets. It is NOT the default for
-    `~/.crucible/denoise-models`, where audio-separator reads every separator
-    model by filename out of one flat directory: one stamp there would be
-    overwritten by the second model's pull and would then report the first as
-    never installed. One stamp per set, named after the set.
-    """
     stamp = target_root / stamp_name
     if not stamp.is_file():
         return None
@@ -1383,7 +907,6 @@ def files_installed(
 
 
 def _safe_target(target_root: Path, target: str) -> Path:
-    """`target_root/target`, or a refusal if it would land outside it."""
     root = target_root.resolve()
     destination = (root / target).resolve()
     if destination != root and root not in destination.parents:
@@ -1408,25 +931,6 @@ def pull_files(
     on_line: Callable[[str], None] | None = None,
     on_progress: ProgressHook | None = None,
 ) -> InstalledWeights:
-    """Fetch each named file at one revision, verify it, and place it.
-
-    **Every digest is checked before ANY file is placed.** The same rule
-    `pull_archive` follows and for the same reason: a half-placed set is a tree
-    an engine will happily start against, and the failure then arrives inside
-    somebody's book rather than here. Files land in a staging directory under
-    the target root, are hashed there, and are moved into place only once all of
-    them have passed.
-
-    `label` is what the progress lines call this set, because a caller pulling
-    "ultimate-rvc's base assets" should not read lines about a model id.
-
-    `stamp_name` is `files_installed`'s: a target root that holds more than one
-    set — `~/.crucible/denoise-models`, where audio-separator reads every
-    separator by filename out of one flat directory — needs one stamp per set,
-    or the second pull's stamp says the first was never made. Note that force
-    does NOT empty the target root, unlike `pull` and `pull_archive`: it
-    replaces this set's files and leaves anybody else's alone.
-    """
     try:
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import (
@@ -1435,7 +939,7 @@ def pull_files(
             RepositoryNotFoundError,
             RevisionNotFoundError,
         )
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         raise WeightsError(
             f"huggingface_hub is not importable in {config.name}'s interpreter: {exc}"
         ) from exc
@@ -1454,9 +958,6 @@ def pull_files(
     target_root.mkdir(parents=True, exist_ok=True)
     stamp = target_root / stamp_name
     if stamp.exists():
-        # Removed FIRST: from here until the new stamp is written this tree is
-        # honestly "not installed", so a run interrupted half way cannot be read
-        # as a complete set by anything downstream.
         stamp.unlink()
     staging = target_root / ".crucible-files"
     if staging.exists():
@@ -1488,9 +989,6 @@ def pull_files(
                     **extra,
                 )
             except PullCancelled:
-                # Nothing has been MOVED yet — every file is placed only after
-                # all of them verify — so the staging tree the `finally` below
-                # removes is the whole of what this pull wrote.
                 raise
             except GatedRepoError as exc:
                 raise WeightsError(
@@ -1560,13 +1058,12 @@ def pull_files(
     result = files_installed(
         target_root, hf_repo, revision, stamp_name=stamp_name
     )
-    if result is None:  # pragma: no cover - the stamp was just written
+    if result is None:
         raise WeightsError(f"wrote {stamp} but it does not read back as installed")
     return result
 
 
 def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
-    """The file's SHA-256, read in chunks so a 180 MB archive is not held twice."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(chunk), b""):
@@ -1575,14 +1072,6 @@ def sha256_of(path: Path, chunk: int = 1 << 20) -> str:
 
 
 def _unpack(archive: Path, target: Path) -> None:
-    """Extract a `.tar.gz` into `target`, refusing any member that escapes it.
-
-    `filter="data"` is python 3.12+'s extraction filter and is exactly this rule
-    — no absolute paths, no `..`, no devices, no links out — but this server
-    supports 3.11, where the default is the permissive one and the argument is
-    absent. So the check is written out: a member whose resolved destination is
-    not under `target` is a refusal naming it, never a skip.
-    """
     try:
         with tarfile.open(archive, "r:gz") as handle:
             members = handle.getmembers()
