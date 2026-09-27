@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .backend import CUDA_LINUX
+from .memorybudget import available_bytes
 from .narratorengines import HIGGS_V3 as HIGGS_ENGINE
+from .servingplan import ServingVariant
 
 BF16_ONE_AT_A_TIME_BYTES = 10_000_000_000
 
@@ -27,37 +30,6 @@ BASIS = (
     "backbone, 8.49 GB bf16 + 0.81 GB codec, ~144 KiB/token KV, ~2,000 tokens a "
     "passage); unmeasured"
 )
-
-
-@dataclass(frozen=True)
-class ServingVariant:
-    bits: int
-    width: int
-    need_bytes: int
-    available: bool
-    basis: str
-    unit: str = "passage"
-
-    @property
-    def full_precision(self) -> bool:
-        return self.bits >= 16
-
-    def label(self) -> str:
-        if self.full_precision:
-            precision = "full quality (bf16)" if self.unit == "passage" else "full precision"
-        else:
-            precision = f"{self.bits}-bit"
-        pace = f"one {self.unit} at a time" if self.width == 1 else f"{self.width} {self.unit}s at a time"
-        return f"{precision}, {pace}"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "bits": self.bits,
-            "width": self.width,
-            "need_bytes": self.need_bytes,
-            "available": self.available,
-            "basis": self.basis,
-        }
 
 
 def bf16_need(width: int) -> int:
@@ -84,7 +56,7 @@ def variants(declared_width: int, declared_need_bytes: int) -> tuple[ServingVari
 
 
 def ladder_for(manifest: Any, spec: Any, backend_kind: str) -> tuple[ServingVariant, ...] | None:
-    if backend_kind != "cuda-linux":
+    if backend_kind != CUDA_LINUX:
         return None
     if getattr(manifest, "narrator_engine", None) != HIGGS_ENGINE:
         return None
@@ -149,7 +121,7 @@ def load_plan(
         estimate = spec.memory_bytes_estimate
         return LoadPlan(estimate, None, estimate, None)
     floor = min(v.need_bytes for v in ladder if v.available)
-    budget = max(0, total_bytes - desktop_allowance_bytes)
+    budget = available_bytes(total_bytes, desktop_allowance_bytes)
     chosen = choose(ladder, budget)
     if chosen is None:
         return LoadPlan(floor, None, floor, None)
