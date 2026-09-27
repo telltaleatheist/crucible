@@ -1,64 +1,3 @@
-"""Which site-packages patches each env TYPE carries — the one registry.
-
-A patch is a distribution, a file, a marker (and optionally a string that must
-be gone), an idempotent applier that refuses by name, and a check. Selection is
-by the recipe that built the env — a patch whose distribution is not pinned is
-`not_applicable`, never skipped silently — so the same patch table is right on
-every backend without naming one. This module maps a job type to its table and
-its appliers' directory, and `jobenv.install_env`, `crucible doctor` and
-`crucible env patch` all ask here.
-
-THE `llm` PATCH: mlx-lm's `top_logprobs` ceiling, 11 -> 40
-----------------------------------------------------------
-PHASE22-DECIDE.md section 2.6. The decide door asks for K = labels + 4 top
-logprobs and refuses above the engine's stated cap; stock mlx-lm 0.31.3
-validates `top_logprobs` to at most 11, so the Mac could not read a question
-with more than seven options (Briefcase needs 11 and 26). The applier is
-`envs/llm/patches/patch_mlx_lm_top_logprobs.py`. It edits `mlx-lm`, which only
-the `mlx-darwin` llm recipe pins: on `cuda-linux` (vLLM) it is `not_applicable`,
-and `llama-windows` has no llm recipe at all (its engine is llama.cpp's own
-binary release), which is asked with empty pins and answers the same.
-
-`MlxLmEngine` states `max_logprobs = 40` BECAUSE of this patch, and refuses to
-START on an env where `check` does not say `applied` (`engines/mlx_lm.py`), so
-the door can never be told 40 by an engine that would answer 400.
-
-THE SECOND `llm` PATCH (2026-09-24): the logprobs mlx-lm returns, in float32
-------------------------------------------------------------------------
-PHASE22-DECIDE.md, the label-mass note. Stock mlx-lm 0.31.3 normalizes
-`logits - mx.logsumexp(logits)` in the model's dtype, bf16 for every model
-Crucible serves on the Mac, so every returned logprob carries one common
-rounding error of up to 0.0625 and a decision's `label_mass` came back 0.94-1.06
-(a live qwen3.5-2b triage: 95th percentile 1.055). The applier is
-`envs/llm/patches/patch_mlx_lm_fp32_logprobs.py`; it returns float32 logprobs
-from all three sites that feed returned logprobs and leaves the sampler reading
-the stock ones, so generation is unchanged. `MlxLmEngine.start` refuses
-`llm_env_unpatched` unless EVERY patch in `LLM_PATCHES` is `applied`.
-
-THE THIRD `llm` PATCH (2026-09-26): a dead generation thread exits the engine
-----------------------------------------------------------------------------
-mlx-lm 0.31.3 generates on one thread and lets an exception end only that
-thread, so the server stays up answering nothing (upstream ml-explore/mlx-lm
-#1672). ContentStudio's 27B died that way twice on 2026-09-25 (`metal::malloc
-Resource limit (499000) exceeded`) and its chat sat in flight for 17-20 minutes.
-The applier is `envs/llm/patches/patch_mlx_lm_fatal_generation_thread.py`: the
-thread's target is wrapped so an exception prints its traceback and calls
-`os._exit(70)`. From then on it is an engine that EXITED, which the chat door
-and the residency already name.
-
-THE FOURTH `llm` PATCH (2026-09-26): the cache counters are evaluated every step
--------------------------------------------------------------------------------
-What killed that thread. mlx-lm 0.31.3's batched caches move `left_padding`,
-`lengths`, `offset` and `_idx` with lazy arithmetic nothing forces, so each
-decode step extends an unevaluated graph, and the prompt cache stores it with
-every finished reply. On a Qwen3.5/3.8 model (ArraysCache layers) the next
-request's first step evaluates it and passes Metal's buffer count limit, 499000.
-Reproduced on the Mac 27B with ContentStudio's real request bytes: title 2 died
-after title 1 with the prompt cache on, and survived alone or with the cache off.
-The applier is `envs/llm/patches/patch_mlx_lm_cache_counters.py`: the counters
-join the decode step's existing `mx.async_eval`, which stays asynchronous.
-"""
-
 from __future__ import annotations
 
 import os
@@ -67,57 +6,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-#: Statuses a patch check can report. `stale` is its own answer rather than a
-#: kind of `missing`, because an env carrying v1 of a patch looks patched to
-#: every marker grep and renders wrongly anyway.
 APPLIED = "applied"
 MISSING = "missing"
 STALE = "stale"
 NO_FILE = "no_such_file"
 NO_ENV = "no_env"
-#: The recipe that built this env does not install the distribution this patch
-#: edits, so there is nothing here to patch and nothing wrong. Distinct from
-#: `no_such_file`, which means the package SHOULD be here and is not.
 NOT_APPLICABLE = "not_applicable"
 
-#: The statuses that are not a problem. `crucible doctor` reads this rather than
-#: testing `applied`, because `applied` answers "is the marker in the file" and a
-#: patch with no file to be in has no honest answer to that question.
 SOUND_STATUSES: frozenset[str] = frozenset({APPLIED, NOT_APPLICABLE})
 
 
 @dataclass(frozen=True)
 class EnvPatch:
-    """One edit, where it lands, and how to tell whether it is there."""
 
     id: str
-    #: The pinned distribution this patch edits, as the recipe names it. A patch
-    #: whose distribution the recipe does not install is `not_applicable`.
     distribution: str
-    #: Relative to the env's `site-packages`.
     rel_path: str
-    #: A string the patched file must contain.
     marker: str
-    #: A string the patched file must NOT contain, when there is one. A marker
-    #: alone answers "did somebody apply something here"; this answers "and is
-    #: the thing it replaced actually gone".
     absent_marker: str | None
-    #: Present only in the CURRENT version of the patch. Marker present and this
-    #: absent is an env carrying an older one, which is reported STALE.
     stale_marker: str | None
-    #: The applier in `envs/<job type>/patches/`, run as `<env python> <script> <env>`.
-    #: Every script is idempotent and refuses by name (`ANCHOR_NOT_FOUND`) when
-    #: upstream has moved the code it edits, rather than skipping quietly.
     script: str
     why: str
 
 
 class PatchError(RuntimeError):
-    """A patch could not be applied, or was not there after applying it."""
+    ...
 
 
 def script_path(patch: EnvPatch, scripts_dir: Path) -> Path:
-    """The applier for this patch, or `PatchError` naming the missing file."""
     path = scripts_dir / patch.script
     if not path.is_file():
         raise PatchError(
@@ -138,26 +54,6 @@ def apply_patches(
     patches: tuple[EnvPatch, ...],
     scripts_dir: Path,
 ) -> list[dict[str, Any]]:
-    """Re-apply every patch this env's recipe makes applicable, then prove it.
-
-    Called by `jobenv.install_env` AFTER pip and BEFORE the stamp is written, so
-    an env that is stamped installed is an env whose patches are in. pip is what
-    reverts them — it writes the distribution's own file over the edit — so this
-    is the only place the two can be kept in step.
-
-    `recipe_pins` selects the same way `check_patches` does: a patch whose
-    distribution the recipe does not install is not run at all.
-
-    THE PROOF IS `check_patches`, NOT THE EXIT CODE. Each script prints `PATCHED` or
-    `ALREADY_PATCHED` and exits 0, and its own idea of success is the anchor it
-    replaced — not the marker `crucible doctor` will grep for tomorrow. Running
-    the checker over the result is what makes those one fact; anything short of
-    `applied` raises, because an env that pip built and nobody patched is
-    exactly the failure this function exists for.
-
-    `runner` is for tests: a callable taking the argv and returning an object
-    with `returncode` and `stdout`. The default runs it.
-    """
     run = runner if runner is not None else _run_script
     for patch in patches:
         if patch.distribution not in recipe_pins:
@@ -188,9 +84,6 @@ def apply_patches(
 
 
 def _run_script(argv: list[str]) -> Any:
-    # stderr JOINED to stdout: the scripts say `NOT_FOUND`, `AMBIGUOUS` and
-    # `ANCHOR_NOT_FOUND` on stderr and `PATCHED` on stdout, and the refusal this
-    # function raises has to quote whichever one it was.
     return subprocess.run(
         argv,
         stdout=subprocess.PIPE,
@@ -202,12 +95,6 @@ def _run_script(argv: list[str]) -> Any:
 
 
 def site_packages(env_dir: Path) -> Path | None:
-    """This venv's `site-packages`, or None when there is no venv.
-
-    The python version is GLOBBED rather than assumed, exactly as BookForge's own
-    patch scripts do it: the env is built from whatever interpreter the server is
-    running under, which is not necessarily 3.11.
-    """
     for candidate in sorted((env_dir / "lib").glob("python*/site-packages")):
         if candidate.is_dir():
             return candidate
@@ -220,14 +107,6 @@ def check_patches(
     *,
     patches: tuple[EnvPatch, ...],
 ) -> list[dict[str, Any]]:
-    """One row per patch: what it is, whether it is in, and what breaks if not.
-
-    `recipe_pins` is `jobenv.recipe_pins(jobenv.recipe_for(spec))` for the env
-    being checked — the caller passes it rather than this module reading it,
-    because this module must work against a directory in a test with no recipes
-    dir at all. A patch whose distribution is absent from those pins is
-    `not_applicable`.
-    """
     packages = site_packages(env_dir)
     rows: list[dict[str, Any]] = []
     for patch in patches:
@@ -301,8 +180,6 @@ def _row(patch: EnvPatch, status: str, detail: str) -> dict[str, Any]:
     }
 
 
-#: The `llm` env's appliers. Shipped by `pyproject.toml`'s
-#: `crucible = ["envs/**/*"]`.
 LLM_SCRIPTS_DIR = Path(__file__).resolve().parent / "envs" / "llm" / "patches"
 
 MLX_LM_TOP_LOGPROBS = EnvPatch(
@@ -380,20 +257,13 @@ LLM_PATCHES: tuple[EnvPatch, ...] = (
 )
 
 
-#: Inside the env's `site-packages`. The wheel that provides it is
-#: `nvidia-cuda-runtime-cu13`, which the cuda-linux tts recipe pins.
 CUDA_TOOLKIT_REL = "nvidia/cu13"
 
-#: `(link, target)`, both relative to {@link CUDA_TOOLKIT_REL}. The target is
-#: written VERBATIM as a relative symlink, so the pair survives the env being
-#: moved or the whole guest being copied — an absolute target would point at the
-#: path the env was built at.
 CUDA_TOOLKIT_LINKS: tuple[tuple[str, str], ...] = (
     ("lib64", "lib"),
     ("lib/libcudart.so", "libcudart.so.13"),
 )
 
-#: Why any of this matters, in one sentence, for the row `doctor` prints.
 CUDA_TOOLKIT_WHY = (
     "flashinfer JIT-builds SGLang's attention kernels with the nvcc inside the "
     "pip wheel and only does so when that directory looks like a toolkit; "
@@ -408,17 +278,6 @@ def _toolkit_dir(env_dir: Path) -> Path | None:
 
 
 def ensure_cuda_toolkit_links(env_dir: Path, on_line: Any = None) -> None:
-    """Create the two symlinks, idempotently. Raises `PatchError` by name.
-
-    Called after pip and BEFORE the stamp, for the same reason `apply` is: an
-    env that is stamped installed is one whose links are in, or there is no
-    stamp.
-
-    A link that already points where it should is left alone and said so. One
-    that exists and points somewhere ELSE is REFUSED rather than replaced —
-    somebody or something put it there on purpose, and silently overwriting it
-    would destroy the evidence of whatever did.
-    """
     toolkit = _toolkit_dir(env_dir)
     if toolkit is None:
         raise PatchError(
@@ -457,7 +316,6 @@ def ensure_cuda_toolkit_links(env_dir: Path, on_line: Any = None) -> None:
 
 
 def check_cuda_toolkit_links(env_dir: Path) -> list[dict[str, Any]]:
-    """One row per link, in the shape `doctor` already prints for patches."""
     toolkit = _toolkit_dir(env_dir)
     rows: list[dict[str, Any]] = []
     for link_rel, target in CUDA_TOOLKIT_LINKS:
@@ -497,14 +355,11 @@ def _link_row(row_id: str, rel: str, status: str, detail: str) -> dict[str, Any]
 
 @dataclass(frozen=True)
 class PatchSet:
-    """One env type's patches and the directory its appliers live in."""
 
     patches: tuple[EnvPatch, ...]
     scripts_dir: Path
 
 
-#: Job type -> its patches. A job type absent here has none, and `check`
-#: answers it with no rows rather than inventing any.
 REGISTRY: dict[str, PatchSet] = {
     "llm": PatchSet(LLM_PATCHES, LLM_SCRIPTS_DIR),
 }
@@ -527,11 +382,6 @@ def apply(
     on_line: Any = None,
     runner: Any = None,
 ) -> list[dict[str, Any]]:
-    """Apply and prove this env type's patches; `[]` for a type with none.
-
-    Raises `PatchError` by name, exactly as `apply_patches` does — it IS that
-    function, over this type's table.
-    """
     found = REGISTRY.get(job_type)
     if found is None:
         return []
@@ -549,7 +399,6 @@ def apply(
 def check(
     job_type: str, env_dir: Path, recipe_pins: dict[str, str]
 ) -> list[dict[str, Any]]:
-    """One row per patch of this env type; `[]` for a type with none."""
     found = REGISTRY.get(job_type)
     if found is None:
         return []
@@ -557,12 +406,6 @@ def check(
 
 
 def require_applied(patch: EnvPatch, env_dir: Path) -> None:
-    """Raise `PatchError` naming the status unless `patch` is applied here.
-
-    For an engine that states a number BECAUSE of a patch: it is asked with the
-    patch's own distribution as the pins, since the engine running at all means
-    that distribution is what it runs.
-    """
     [row] = check_patches(env_dir, {patch.distribution: ""}, patches=(patch,))
     if row["status"] != APPLIED:
         raise PatchError(

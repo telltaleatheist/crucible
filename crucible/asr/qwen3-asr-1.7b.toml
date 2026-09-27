@@ -1,172 +1,27 @@
-# Qwen3-ASR 1.7B: the transcriber that keeps the ums, with word times from the
-# Qwen3 aligner.
-#
-# WHY THIS MODEL. Owen, 2026-09-24: *"we're fully switching over to qwen for
-# transcribing and aligning. it seems flawless. 1.7b - the biggest one"*.
-# ContentStudio's live test on the Mac Studio that day is the evidence behind
-# it: whisper-large-v3-turbo transcribed a 3.9-hour stream with 76 fillers in
-# it; Qwen3-ASR-1.7B with a context prompt found about 70 ums and 34 uhs, kept
-# repeats verbatim, and cuts made at the aligner's word boundaries were
-# "flawless" by Owen's ear.
-#
-# THE LINEUP, 2026-09-24 (Owen's ruling, later that day): the caller picks from
-# this one, `whisper-large-v3-turbo` and `whisper-tiny`, each ONE id across both
-# backends, plus the Mac-only fast port `qwen3-asr-1.7b-mlx` (added the same
-# evening after the first live run; see this file's mlx-darwin block). Every other whisper size
-# (base, small, medium, large-v3, distil-large-v3) was removed, and the two
-# whispers that stayed lost their backend prefixes (`crucible/asrmodels.py`).
-#
-# ONE ID, BOTH MACHINES, ONE SET OF BYTES. Both blocks pin the official
-# checkpoint at the same revision, and the loader refuses a two-block manifest
-# that does not (crucible/asrmodels.py). vLLM reads these safetensors directly,
-# and so does Qwen's own package on the Mac. FULL PRECISION on both, by
-# Owen's ruling of 2026-09-24: bfloat16, and never the 8-bit MLX build.
-#
-# repo/revision, read from the hub's API on 2026-09-24:
-#   GET /api/models/Qwen/Qwen3-ASR-1.7B/refs  -> main = the sha below
-#   GET /api/models/Qwen/Qwen3-ASR-1.7B/tree/<sha>?recursive=1
-#     -> model-00001-of-00002.safetensors  4,220,320,824 B
-#        model-00002-of-00002.safetensors    478,200,688 B
-#        = 4,698,521,512 B of bfloat16, and the tokenizer, chat template,
-#        preprocessor and generation configs beside them
-#   config.json at that sha: thinker text model 28 layers, 8 KV heads,
-#   head_dim 128, hidden 2048, vocab 151,936, `tie_word_embeddings: true` in
-#   the text config. The index nevertheless ships `thinker.lm_head.weight`
-#   (151,936 x 2,048 x 2 B = 622,329,856 B): a tied copy both engines skip.
-#
-# memory_bytes_estimate on BOTH blocks is COMPUTED, NOT MEASURED. Nothing here
-# has run under Crucible on either card: the GPUs were off limits when this was
-# written. Each block lists its terms and says which were read, which were
-# derived and which were declared. docs/PHASE25-QWEN-ASR.md section 8 lists
-# the measurements that replace them.
-#
-# THE ESTIMATE IS THE ASR ENGINE'S ALONE. A job with word timestamps also holds
-# the aligner that `aligner` names, and `crucible/jobs/asr/qwen.py` adds that
-# model's own manifest figure to the guard's need rather than folding a copy
-# of it in here, where it would go stale the day the aligner is measured
-# again.
-
 [model]
 id = "qwen3-asr-1.7b"
 family = "qwen3-asr"
-# The card's name counts the text model. The safetensors hold about 2.35B
-# parameters (4,698,521,512 B / 2), which includes the audio tower and the tied
-# lm_head copy.
 parameters_m = 1700
 
 [backends.cuda-linux]
-# vLLM 0.29.0, the llm env's own pin. It registers
-# `Qwen3ASRForConditionalGeneration` natively
-# (`vllm/model_executor/models/registry.py` L565 at tag v0.29.0) and builds
-# the model from the Qwen3-Omni audio tower and `Qwen3ForCausalLM`
-# (`models/qwen3_asr.py`), so no extra package is needed: `qwen-asr`, whose
-# `[vllm]` extra pins vllm==0.14.0, is NOT involved on this backend.
 engine = "vllm"
 hf_repo = "Qwen/Qwen3-ASR-1.7B"
 revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
-# bf16 on every card that has it. On a card below compute capability 8.0 vLLM
-# refuses bfloat16, and Crucible starts this block in float16 instead: Owen,
-# 2026-09-26, "we can quantize if we need to. no less than 4" (fresh-install
-# #48, crucible/asrmodels.py QWEN_ASR_DTYPES). Same bytes, same estimate.
 dtype = "bfloat16"
 aligner = "qwen3-aligner"
-# vLLM's `max_num_seqs`: how many pieces decode at once. 8 pieces of 180 s is
-# 24 minutes of audio in flight, and the KV pool below is sized to hold all 8.
-# vLLM captures a CUDA graph per batch size up to this, so it is also what
-# warm-up costs. A DECISION, not a measurement; the first live run reports the
-# realtime factor it buys.
 max_batch = 8
 max_new_tokens = 4096
-# THE CONTEXT vLLM IS STARTED WITH. COMPUTED: the longest piece is 180 s x 13
-# audio tokens a second = 2,340 (vLLM's `_get_feat_extract_output_lengths`),
-# plus a context of at most 1,024 tokens, plus 64 of chat scaffolding, plus
-# 4,096 new tokens = 7,524. 8192 is the power of two above it, and the loader
-# refuses anything below 7,524.
 max_model_len = 8192
-# THE KV POOL, COMPUTED:
-#   114,688 B/token = 2 (K and V) x 28 layers x 8 KV heads x 128 head_dim x
-#                     2 B (bfloat16), from config.json at the pinned sha
-#   x 4,096 tokens  = what one piece of real speech occupies with room: 2,340
-#                     audio tokens + the context + roughly 700 tokens of
-#                     transcript for 180 s at 3 words a second
-#   x 8 pieces      = max_batch
-#   = 3,758,096,384 B (3.5 GiB). It also holds four worst-case 8,192-token
-#   sequences, so a runaway piece never starves the pool; vLLM preempts and
-#   recomputes if it ever did.
-# Passed to vLLM as `kv_cache_memory_bytes`, which makes vLLM skip its own
-# memory profiling (`v1/worker/gpu_worker.py` L527-546 at v0.29.0). That is
-# why the audio-tower reserve below is a stated term: nothing else reserves it.
 kv_cache_memory_bytes = 3758096384
-# The KV one token holds: 2 (K and V) x 28 layers x 8 KV heads x 128 head_dim
-# x 2 B, READ from config.json at the pinned sha (above). DECLARED here
-# 2026-09-26 for crucible/asrplan.py: a card that cannot hold 8 pieces at once
-# runs fewer at full precision before a smaller model is taken (Owen: "yes,
-# fewer at once before quantizing for asr too"), and vLLM will not start with
-# a pool smaller than one max_model_len sequence (8,192 x this = 896 MiB).
 kv_bytes_per_token = 114688
-# 11,006,754,728 B = 10.25 GiB, COMPUTED:
-#   4,698,521,512  the two safetensors, exactly. An UPPER bound: 622,329,856 B
-#                  of it is the tied lm_head copy vLLM does not load.
-# + 1,476,395,008  non-KV overhead (non-torch memory, activation peak, CUDA
-#                  graphs), the 9B's MEASURED figure (models/qwen3.5-9b.toml,
-#                  calibrated 2026-09-18), carried as an UPPER bound the way
-#                  models/qwen3.5-4b.toml carries it: the 0.8B measured 0.75 GiB
-#                  for the same term, and this text model (hidden 2048,
-#                  28 layers) is smaller than the 4B.
-# + 1,073,741,824  the audio tower's activations for 8 pieces of 180 s in one
-#                  prefill, DECLARED at 1 GiB. The tower is 24 layers at
-#                  d_model 1024 over windowed attention, which is hundreds of
-#                  megabytes; 1 GiB is the round number above it.
-# + 3,758,096,384  the KV pool above.
-# The job's guard adds the aligner's 5,905,580,032 (align/qwen3-aligner.toml,
-# measured 2026-09-26), so a word-timestamped job needs 16,912,334,760 B
-# (15.75 GiB) of the 3090 Ti's 24 GiB. It does not fit beside a resident 9B, and it is refused by name there
-# rather than unloading somebody's model.
 memory_bytes_estimate = 11006754728
 
 [backends.mlx-darwin]
-# QWEN'S OWN PACKAGE ON TORCH MPS, not the MLX port. Changed 2026-09-24 after
-# the first live runs on this Mac. The same 10 minutes of ContentStudio's stream
-# (1:00:00-1:10:00, its filler prompt), same weights, greedy, fillers counted
-# with one regex (`\bum\b`, `\buh\b`) on the transcript text, and, what makes
-# it an ENGINE comparison, the SAME PIECES fed to both engines through this
-# worker:
-#
-#   pieces cut by qwen_asr's own splitter       qwen-asr 8+5 = 13   55 s
-#                                              mlx-audio 8+1 =  9   22 s
-#   pieces cut by this worker's splitter        qwen-asr 6+5 = 11   53 s
-#                                              mlx-audio 7+3 = 10   22 s
-#
-# The official package hears a few more fillers than the port and is 2.5x
-# slower. Fillers are fragile: the same engine on the same cuts moved between
-# runs of the reference (ContentStudio's `transcribe()` counted 19; the same
-# engine, same cuts, through this worker 13), because a sample rounded
-# differently tips a borderline "um". And NOT cutting (one 600 s decode, the
-# package without timestamps) found ZERO, which is why every Qwen job here is
-# cut at <= 180 s. Owen chose the official engine as the default and kept the
-# port as its own id for when speed matters more: `qwen3-asr-1.7b-mlx`.
-#
-# The package is the one the align env already runs for the aligner
-# (`envs/align/mlx-darwin.txt`: qwen-asr 0.0.6, transformers 4.57.6,
-# torch 2.14.0, exactly ContentStudio's versions), so the worker runs in that
-# env and nothing new is installed.
 engine = "qwen-asr"
 hf_repo = "Qwen/Qwen3-ASR-1.7B"
 revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
 dtype = "bfloat16"
 aligner = "qwen3-aligner"
-# ONE, and the loader refuses anything else: one piece per `generate`, so the
-# loop guard reads that piece's own token count. It is also the memory fix.
-# ContentStudio's 41 GB was this package batching 4 pieces (full-prompt logits
-# of 151,936 x ~2,460 x 4 in bfloat16, held by torch's MPS caching allocator),
-# and its default batch of 32 aborted the process outright.
 max_batch = 1
 max_new_tokens = 4096
-# 9,126,805,504 B = 8.5 GiB, MEASURED, and an UPPER bound for the ASR alone.
-# `torch.mps.driver_allocated_memory()` sampled at 20 Hz through the run above,
-# with `max_inference_batch_size=1`, peaked at 8.5 GiB. That process also held
-# the 0.6B forced aligner (the package loads it beside the model), so the ASR
-# engine alone is less. The guard adds the aligner's own measured
-# 5,885,296,640 on this backend (align/qwen3-aligner.toml), which counts the
-# aligner twice rather than risk counting it not at all.
 memory_bytes_estimate = 9126805504

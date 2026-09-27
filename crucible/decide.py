@@ -1,31 +1,3 @@
-"""The decision door's reading: `POST /v1/decide` (PHASE22-DECIDE.md).
-
-A state and some questions with fixed answer sets go in; a probability
-distribution over each answer set comes out, read off ONE forward pass of an
-ordinary instruct model. No decoding: the prompt ends where the answer begins,
-the engine reports the next-token distribution at that position, and the letters
-`A`..`Z` that tag the options are read off it by token string, renormalised and
-returned.
-
-WHY THIS IS CRUCIBLE'S AND NOT THE APP'S
-----------------------------------------
-Everything here was snap's (`C:\\Users\\tellt\\Projects\\snap`: `prompt.py`,
-`labels.py`, the pure half of `decide.py`, and `chat_engine.py`'s reader), and
-it moved because the frame that makes an instruct model report a distribution
-is a fact about the WEIGHTS it is read from — `pages.py` is the precedent: the
-page prompt lives here because the model it addresses does (PHASE22 section
-2.3). The client sends the ORDER: the state, the questions, the options. It
-never sends the system prompt, the legend or the letters.
-
-WHAT THIS MODULE IS NOT
------------------------
-It holds no HTTP. The door in `crucible/api.py` owns the wire, the admission,
-the in-flight record and the engine; this module owns the request and answer
-shapes, the messages, the letters, the reply parser and the arithmetic, all of
-them pure so the semantics snap measured are tested without a socket
-(`tests/test_decide_core.py`).
-"""
-
 from __future__ import annotations
 
 import base64
@@ -48,84 +20,32 @@ from pydantic import (
 
 from .errors import ApiError
 
-# ------------------------------------------------------------------- numbers
 
-#: The label alphabet. Bare capital letters, because each is ONE token on every
-#: tokenizer snap measured and because an engine reports decoded token strings
-#: (vLLM, llama-server) or raw BPE pieces (mlx-lm's `convert_ids_to_tokens`), and
-#: a bare capital letter is the same string in both: `A` is `A`, where a leading
-#: space would be `" A"` on one and `"ĠA"` on the other.
 LETTERS: tuple[str, ...] = tuple(string.ascii_uppercase)
 
-#: A choice question's ceiling, and the reason `too_many_options` exists: past
-#: `Z` there is no single-token label left to read.
-MAX_OPTIONS = len(LETTERS)  # 26
+MAX_OPTIONS = len(LETTERS)
 
-#: A score's ceiling (PHASE22 section 2.2: "2–10 unique ordered levels"). A
-#: score is an expected value over an ordered scale; past ten the scale is a
-#: choice question pretending to be a number.
 MAX_LEVELS = 10
 
-#: `yesno` is A = Yes, B = No, always, in that order (snap `labels.py`).
 YESNO_OPTIONS: tuple[str, str] = ("Yes", "No")
 
-#: Images per request. snap's number and snap's reason: each image costs up to
-#: 4096 tokens on a Qwen-VL projector (llama.cpp `clip.cpp`,
-#: `set_limit_image_tokens(8, 4096)`), so 8 keeps a request inside a modest
-#: context and makes a runaway client fail by name.
 MAX_IMAGES = 8
 
-#: How many tokens past the labels the engine is asked for. A margin for the
-#: tokens that outrank a letter when the model wanted to say something else —
-#: which `label_mass` then reports — so a letter that came fifth behind four
-#: fillers is still read rather than refused (PHASE22 section 2.4).
 LABEL_MARGIN = 4
 
-#: How many questions of one decision are in flight at once when the engine
-#: states no admission of its own. That was vLLM until 2026-09-24; vLLM now
-#: states `--max-num-seqs` (read off its argv, `engines/vllm.py`), so every
-#: engine that serves a decision states one and this is the fallback for an
-#: engine that might serve one later without doing so. snap's
-#: `DEFAULT_CONCURRENCY` for its openai-chat engine; a number of Crucible's and
-#: never the wire's. An engine that DOES state one is held to that instead
-#: (`crucible.engines.chat_admission`), because a serial engine given sixteen
-#: at once is the starvation 1.0.10 fixed on the Mac.
 UNSTATED_ENGINE_CONCURRENCY = 16
 
-#: The frame. snap's words, unchanged: its accuracy checks were measured with
-#: exactly this sentence, and a rewording is a re-measurement.
 SYSTEM_PROMPT = (
     "You are a precise classifier. You are shown a state and one question about it, with "
     "lettered options. Reply with the single letter of the best option and nothing else."
 )
 
-#: Where the state begins, inside the SYSTEM message. The state is shared by
-#: every question of a decision, and it is placed in the system message so the
-#: shared prefix ends exactly where the question begins: at the start of the
-#: user turn. mlx-lm 0.31.3 can reuse a hybrid model's (Qwen3.5) prompt cache
-#: only from an entry that is an EXACT prefix of the new prompt, and it saves
-#: entries only at the end of the system segment and the end of the user
-#: segment (`server.py` `_tokenize`, the batch path's `end_of_segment` save);
-#: with the state in the user turn nothing the prime saved was a prefix of any
-#: question, and every question re-prefilled the whole state (PHASE22 section
-#: 2.5.1). The words `State:` are snap's; only where they sit moved.
 STATE_HEADER = "\n\nState:\n"
 
-#: Said in the system message when the state has images: the chat templates
-#: refuse an image in a system message (Qwen3.5: "System message cannot contain
-#: images."), so they open the user turn instead, and the model is told where.
 IMAGES_NOTE = "The state's images open the user message."
 
-#: The prime's whole user turn. Fixed, short and NEVER empty: mlx-lm finds the
-#: system segment's end by rendering `system + [user ""]` and taking the first
-#: token where that differs from the prompt, and a prime whose user content
-#: was empty would not differ before the render ran out — no system segment,
-#: nothing cached. Its reply is never read.
 PRIME_USER_TEXT = "The questions follow."
 
-#: What a request's image bytes are recognised as, by their own magic numbers.
-#: The data URI names a media type and the engine decodes by it, so a type
-#: guessed wrong is an image read wrong; one that matches nothing is refused.
 IMAGE_SIGNATURES: tuple[tuple[bytes, int, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", 0, "png"),
     (b"\xff\xd8\xff", 0, "jpeg"),
@@ -135,17 +55,10 @@ IMAGE_SIGNATURES: tuple[tuple[bytes, int, str], ...] = (
 )
 
 
-# ------------------------------------------------------------------ request
-
-
 _NonEmpty = Annotated[str, StringConstraints(min_length=1)]
 
 
 class _Strict(BaseModel):
-    # `use_attribute_docstrings`: the string under each field becomes its
-    # OpenAPI description, which `scripts/gen-api-docs.py` carries into
-    # `docs/API.md`. A field with no docstring is a field the reference cannot
-    # explain.
     model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
 
@@ -196,11 +109,7 @@ Question = Annotated[
 
 
 class DecideRequest(_Strict):
-    """`POST /v1/decide` — PHASE22-DECIDE.md section 2.2.
-
-    One forward pass per question at the RESIDENT model; nothing is decoded and
-    nothing is loaded to answer it.
-    """
+    """`POST /v1/decide`: one forward pass per question at the resident model, nothing decoded or loaded."""
 
     model: _NonEmpty
     """The Crucible model id, which must already be resident (`409
@@ -238,9 +147,6 @@ class DecideRequest(_Strict):
     @field_validator("questions")
     @classmethod
     def _names_are_path_members(cls, value: dict[str, Any]) -> dict[str, Any]:
-        # Deferred: `crucible.capability` reads this module's fan-out ceiling
-        # to size the `decide` class, and importing `crucible.jobs` at module
-        # level would run `jobs/__init__`, which imports `capability` back.
         from .jobs.base import validate_member_name
 
         for name in value:
@@ -250,10 +156,6 @@ class DecideRequest(_Strict):
     @field_validator("images")
     @classmethod
     def _images_are_strict_base64(cls, value: list[str] | None) -> list[str] | None:
-        # Strict, for snap's measured reason: llama-server's `base64_decode`
-        # (tools/server/server-common.cpp) stops silently at the first character
-        # outside the alphabet, so a line-wrapped string or a pasted data URI
-        # would reach the model as a truncated file. Refused here, by index.
         for index, text in enumerate(value or []):
             if not text:
                 raise ValueError(f"images[{index}] is empty")
@@ -281,24 +183,9 @@ class DecideRequest(_Strict):
         return self
 
 
-# ------------------------------------------------------------------- answer
-
-
 class _Answer(_Strict):
-    """What every answer shares: `missing_labels` is on the wire only in report
-    mode. Each answer declares `label_mass` and `missing_labels` itself, last,
-    so they print after the distribution they qualify."""
-
     @model_serializer(mode="wrap")
-    def _missing_only_when_reported(self, handler):  # type: ignore[no-untyped-def]
-        # Refuse-mode answers carry NO `missing_labels` key: in that mode a
-        # missing label is a refusal, so the field could only ever say `[]`,
-        # and the SDK reads the key's presence against the mode it asked for.
-        #
-        # NO RETURN ANNOTATION, on purpose: pydantic takes a wrap serializer's
-        # annotation as the serialised schema, and `-> Any` (or a dict) turned
-        # every answer in the OpenAPI document — and so `docs/API.md` — into
-        # `{}`. Unannotated, the model's own field schema stands.
+    def _missing_only_when_reported(self, handler):
         data = handler(self)
         if getattr(self, "missing_labels") is None:
             data.pop("missing_labels", None)
@@ -459,18 +346,11 @@ class DecideResponse(_Strict):
     """Prompt sizes."""
 
 
-# -------------------------------------------------------------------- plans
-
-
 @dataclass(frozen=True)
 class Plan:
-    """One question, resolved: its letters and the legend the model reads."""
-
     name: str
     question: ChoiceQuestion | ScoreQuestion | YesNoQuestion
-    #: `[(letter, option name)]`, in option order.
     labels: tuple[tuple[str, str], ...]
-    #: `[(letter, text shown after it)]`.
     legend: tuple[tuple[str, str], ...]
 
     @property
@@ -479,7 +359,6 @@ class Plan:
 
 
 def assign_labels(names: list[str], question: str) -> tuple[tuple[str, str], ...]:
-    """`[(letter, option name)]` in the order given. Past 26: `too_many_options`."""
     if len(names) > MAX_OPTIONS:
         raise ApiError(
             400,
@@ -492,7 +371,6 @@ def assign_labels(names: list[str], question: str) -> tuple[tuple[str, str], ...
 
 
 def plan(name: str, question: ChoiceQuestion | ScoreQuestion | YesNoQuestion) -> Plan:
-    """Letters and legend for one question. Raises before anything is sent."""
     if isinstance(question, ChoiceQuestion):
         labels = assign_labels(list(question.options), name)
         legend = tuple(
@@ -508,13 +386,10 @@ def plan(name: str, question: ChoiceQuestion | ScoreQuestion | YesNoQuestion) ->
 
 
 def plan_all(request: DecideRequest) -> list[Plan]:
-    """Every question resolved BEFORE the first forward pass, so one bad question
-    refuses the whole decision instead of after GPU time was spent on the rest."""
     return [plan(name, question) for name, question in request.questions.items()]
 
 
 def check_image_count(images: list[str] | None) -> int:
-    """How many images, or `too_many_images` by name."""
     count = len(images or [])
     if count > MAX_IMAGES:
         raise ApiError(
@@ -528,25 +403,17 @@ def check_image_count(images: list[str] | None) -> int:
 
 
 def top_k(n_labels: int, max_logprobs: int | None) -> int:
-    """How many top tokens to ask the engine for: the labels plus the margin,
-    never more than the engine returns. `max_logprobs` None is an engine with no
-    small cap (llama-server: bounded only by the vocabulary)."""
     wanted = n_labels + LABEL_MARGIN
     return wanted if max_logprobs is None else min(wanted, max_logprobs)
 
 
-# ----------------------------------------------------------------- messages
-
-
 def render_state(state: Any) -> str:
-    """Strings pass through verbatim; any other JSON value becomes compact JSON."""
     if isinstance(state, str):
         return state
     return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
 def question_block(kind: str, instructions: str, legend: tuple[tuple[str, str], ...]) -> str:
-    """The question: the whole text of the user turn. snap's words, unchanged."""
     if kind == "yesno":
         head = f"Statement: {instructions}\nIs this statement true of the state above?"
     else:
@@ -556,7 +423,6 @@ def question_block(kind: str, instructions: str, legend: tuple[tuple[str, str], 
 
 
 def image_format(raw: bytes) -> str | None:
-    """`png`/`jpeg`/`gif`/`webp` by the file's own first bytes, else None."""
     for magic, offset, name in IMAGE_SIGNATURES:
         if raw[offset : offset + len(magic)] == magic:
             if name == "webp" and raw[:4] != b"RIFF":
@@ -566,21 +432,13 @@ def image_format(raw: bytes) -> str | None:
 
 
 def image_part(encoded: str) -> dict[str, Any]:
-    """One OpenAI `image_url` content part, the encoding `pages.py` sends."""
     kind = image_format(base64.b64decode(encoded, validate=True))
-    if kind is None:  # pragma: no cover - DecideRequest refuses it first
+    if kind is None:
         raise ApiError(400, "invalid_request", "an image is not a known format")
     return {"type": "image_url", "image_url": {"url": f"data:image/{kind};base64,{encoded}"}}
 
 
 def system_content(state_text: str, has_images: bool) -> str:
-    """The system turn: snap's frame, then `State:` and the state text.
-
-    Byte-identical for the prime and every question of one decision, which is
-    the whole of the prefix property: the shared prefix is the system turn and
-    ends where the user turn begins. An empty state (images carry it) leaves
-    `State:` with the note alone.
-    """
     content = SYSTEM_PROMPT + STATE_HEADER + state_text
     if has_images:
         content += ("\n\n" if state_text else "") + IMAGES_NOTE
@@ -588,12 +446,6 @@ def system_content(state_text: str, has_images: bool) -> str:
 
 
 def _user_content(images: list[str], text: str) -> str | list[dict[str, Any]]:
-    """The user turn: the images (if any) as content parts, then `text`.
-
-    Text only, it is the one string. With images it is the OpenAI content
-    parts `pages.py` sends — every image, then one text part — so a prime's
-    parts and a question's differ only in that last text part.
-    """
     if not images:
         return text
     parts: list[dict[str, Any]] = [image_part(encoded) for encoded in images]
@@ -602,15 +454,6 @@ def _user_content(images: list[str], text: str) -> str | list[dict[str, Any]]:
 
 
 def messages(state_text: str, images: list[str], block: str | None) -> list[dict[str, Any]]:
-    """System (frame + state) + user (images + the question). `block` None is
-    the prime, whose user turn is `PRIME_USER_TEXT`.
-
-    ONE LAYOUT FOR EVERY ENGINE, reasoned per engine in PHASE22 section 2.5.1:
-    the state ends at the system/user boundary, which is where mlx-lm saves a
-    reusable cache entry, where llama-server b10970 lays down a context
-    checkpoint (the start of the last user message), and a plain token prefix
-    for vLLM's block cache.
-    """
     user_text = PRIME_USER_TEXT if block is None else block
     return [
         {"role": "system", "content": system_content(state_text, bool(images))},
@@ -630,20 +473,6 @@ def prime_messages(state_text: str, images: list[str]) -> list[dict[str, Any]]:
 def request_body(
     engine_model_name: str, msgs: list[dict[str, Any]], k: int | None
 ) -> dict[str, Any]:
-    """The engine's chat body for one forward pass. `k` None is the prime.
-
-    Every knob a reading depends on is STATED, and no manifest `[defaults]` is
-    applied, for a measured reason: mlx-lm computes its logprobs AFTER its
-    logits processors (`mlx_lm/generate.py` L409-420, 0.31.3), so a manifest's
-    `repetition_penalty` would move the letters — and the letters appear in the
-    legend, which is exactly the context a repetition penalty punishes.
-    `enable_thinking: false` is stated for the chat door's reason (Qwen3.5
-    spends a bounded budget on reasoning otherwise), and a stated key is one no
-    manifest default can override (`crucible/sampling.py`).
-
-    The prime asks for no logprobs at all: its reply is never read for letters
-    (PHASE22 section 2.5), and asking would only spend the engine's cap.
-    """
     body: dict[str, Any] = {
         "model": engine_model_name,
         "messages": msgs,
@@ -658,16 +487,10 @@ def request_body(
     return body
 
 
-# -------------------------------------------------------------------- reply
-
-
 @dataclass(frozen=True)
 class Reading:
-    """What one engine reply said."""
-
     prompt_tokens: int
     cached_tokens: int | None
-    #: `[(token string, probability)]` in the engine's order; None for a prime.
     top: tuple[tuple[str, float], ...] | None
 
 
@@ -694,19 +517,6 @@ def _engine_error(engine: str, detail: str) -> ApiError:
 
 
 def read_reply(data: Any, engine: str, *, want_probs: bool) -> Reading:
-    """`usage` and, for a question, `choices[0].logprobs.content[0].top_logprobs`.
-
-    ONE PARSER FOR THREE ENGINES, because they answer in one shape (PHASE22
-    section 1): vLLM 0.29.0's `ChatCompletionLogProbsContent` (`{token,
-    logprob, bytes, top_logprobs}`), llama-server b10970's
-    `probs_vector_to_json` (the same plus `id`), and mlx-lm 0.31.3's
-    `dict(i[0], top_logprobs=i)` (`{id, token, logprob, top_logprobs}`, no
-    `bytes`). Only `token` and `logprob` are read.
-
-    `cached_tokens` is null when the engine did not say: vLLM without
-    `--enable-prompt-tokens-details` omits `prompt_tokens_details`, and vLLM
-    WITH it can still send `cached_tokens: null` (`PromptTokenUsageInfo`).
-    """
     usage = _require(data, "usage", dict, "reply", engine)
     prompt_tokens = _require(usage, "prompt_tokens", int, "usage", engine)
     details = usage.get("prompt_tokens_details")
@@ -756,15 +566,8 @@ def read_reply(data: Any, engine: str, *, want_probs: bool) -> Reading:
 
 @dataclass(frozen=True)
 class Distribution:
-    """One question's letters, read and renormalised."""
-
-    #: Option name to renormalised p, in option order. None only for a label
-    #: outside the engine's top-K under `missing: "report"`.
     probabilities: dict[str, float | None]
-    #: The raw probability the RETURNED letters held together.
     mass: float
-    #: The option names that were missing, in option order (always empty in
-    #: refuse mode, where a missing label is a refusal).
     missing: tuple[str, ...]
 
 
@@ -774,19 +577,6 @@ def label_distribution(
     engine: str,
     missing: Literal["refuse", "report"] = "refuse",
 ) -> Distribution:
-    """The renormalised distribution and `label_mass`, labels matched BY TOKEN
-    STRING.
-
-    A label is the entry whose token string IS the letter — `"A"`, never `" A"`.
-    Two entries with one string are possible in general (byte-level pieces
-    decode alike), so only a LABEL's string appearing twice is refused: that
-    one would make the answer ambiguous. Renormalising p_i / Σp over the labels
-    is a softmax over the label logits.
-
-    A label outside the top-K is `label_not_in_probs` in refuse mode; in
-    report mode it is None and the renormalisation runs over the letters that
-    came back. A question with NO label returned is refused in both modes.
-    """
     letters = set(item.letters)
     by_token: dict[str, float] = {}
     for token, probability in top:
@@ -813,8 +603,6 @@ def label_distribution(
                 {"question": item.name, "letter": letter, "option": option,
                  "engine": engine, "top_k": len(top)},
             )
-        # REPORT MODE NEVER INVENTS A NUMBER: the label is named, its value is
-        # null, and the arithmetic below runs over the letters returned.
         raw[option] = None
         absent.append(option)
     if len(absent) == len(item.labels):
@@ -848,32 +636,21 @@ def label_distribution(
 
 
 def _ln(p: float | None) -> float | None:
-    """ln p, or None where there is no finite one: `-Infinity` is not JSON."""
     return None if p is None or p <= 0.0 else math.log(p)
 
 
 def answer(
     item: Plan, dist: Distribution, missing: Literal["refuse", "report"]
 ) -> ChoiceAnswer | ScoreAnswer | YesNoAnswer:
-    """snap's answer shapes and arithmetic (`snap/decide.py _answer`), plus the
-    log-probabilities and, in report mode, `missing_labels`.
-
-    Every aggregate — the argmax, `confidence`, the expected-value `score` —
-    runs over the labels the engine RETURNED; a missing one is null in the
-    distribution and takes no part. In refuse mode nothing is ever missing (the
-    reading refused first), so these are snap's numbers unchanged.
-    """
     question = item.question
     probabilities = dist.probabilities
     missing_labels = list(dist.missing) if missing == "report" else None
     if isinstance(question, YesNoQuestion):
-        # With `No` missing, `Yes` renormalised alone is 1.0; with `Yes`
-        # missing, P(Yes) is the complement of `No` alone: 0.0.
         p_yes, p_no = probabilities["Yes"], probabilities["No"]
         if p_yes is not None:
             p = p_yes
         else:
-            assert p_no is not None  # label_distribution refused an all-missing one
+            assert p_no is not None
             p = 1.0 - p_no
         return YesNoAnswer(
             p=p, logprob=_ln(p), label_mass=dist.mass, missing_labels=missing_labels

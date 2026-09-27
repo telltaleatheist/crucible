@@ -1,31 +1,3 @@
-"""The model card is RENDERED from the manifest, and the manifest from a file.
-
-PHASE21-VOICES-FROM-HF.md sections 2.5 and 4. Two directions, one pair of
-facts:
-
-    `card`    `crucible-voice.toml` -> the repo's `README.md` frontmatter and
-              its `## Measured limits` section. One writer, in the repo with the
-              loader, so "what the loader reads" and "what the card says" cannot
-              be two things. Until 2026-09-19 the card was written by a regex in
-              a campaign script generated fresh per deploy.
-
-    `export`  a packaged `voices/<id>.toml` -> a `crucible-voice.toml`, plus the
-              MACHINE rows it drops, printed. The bridge from today's files, and
-              section 8.2's cross-check against what the training side writes
-              out of the measurement database. A disagreement between the two is
-              a finding, not something to average.
-
-── WHAT THIS MODULE WILL NOT INVENT ─────────────────────────────────────────
-
-`max_chars_basis` and `[voice.pace] basis` do not exist in the packaged schema,
-and the whole reason section 2.1 adds them is that an inherited pace and a
-placeholder cap are real states that shipped as measured facts — thirdreich's
-`higgs_max_chars_mlx: 900` was never measured, and deathstalker's 16.64 survived
-onto weights that measured 15.91. So `export` REFUSES to guess them: it asks the
-person running it, by name, and writes what they say. A default here would
-launder exactly the two defects the field exists to expose.
-"""
-
 from __future__ import annotations
 
 import re
@@ -34,11 +6,6 @@ from typing import Any
 from .voicerepo import REPO_MANIFEST_NAME, REPO_SCHEMA, RepoManifest
 from .voices import VoiceError
 
-#: The frontmatter keys the card writer owns. Everything else in a card's
-#: frontmatter is left exactly as it was — this list is the whole of what one
-#: run of `crucible voices card` may change, and it is a TABLE here rather than
-#: a regex in a campaign script so that adding one is an edit to a list a test
-#: reads.
 FM_OWNED: tuple[str, ...] = (
     "higgs_max_chars_served",
     "higgs_max_chars_mlx",
@@ -50,9 +17,6 @@ FM_OWNED: tuple[str, ...] = (
     "higgs_max_chars_mlx_basis",
 )
 
-#: Which arm each cap key states. The two are not always equal — thirdreich
-#: carried 1623 served against 900 on mlx — which is why the card has two keys
-#: and the manifest has two arms.
 _CAP_KEYS: dict[str, str] = {
     "higgs_max_chars_served": "cuda-linux",
     "higgs_max_chars_mlx": "mlx-darwin",
@@ -63,10 +27,7 @@ _LIMITS_SECTION = re.compile(r"## (?:Measured|Recorded) limits.*?(?=\n## |\Z)", 
 
 
 class CardError(VoiceError):
-    """A card cannot be rendered, or would lose something if it were."""
-
-
-# ------------------------------------------------------------------- the card
+    ...
 
 
 def _pace_lines(repo: RepoManifest) -> list[str]:
@@ -84,17 +45,6 @@ def _pace_lines(repo: RepoManifest) -> list[str]:
 
 
 def render_frontmatter(repo: RepoManifest, existing: str) -> str:
-    """The card's frontmatter with this manifest's facts in it.
-
-    EVERY LINE THIS FILE DOES NOT OWN SURVIVES, in its original order. The owned
-    keys are removed wherever they were and re-added at the end, which is what
-    the campaign script did and is what keeps a hand-written `license:` or
-    `tags:` block untouched.
-
-    A KEY WITH NOTHING TO SAY IS NOT WRITTEN AT ALL. An uncertified voice has no
-    pace, and a card carrying `higgs_pace_chars_per_sec:` with nothing after it
-    is a field an audit script reads as zero.
-    """
     keep = [
         line
         for line in existing.split("\n")
@@ -106,11 +56,6 @@ def render_frontmatter(repo: RepoManifest, existing: str) -> str:
     for key, arm in _CAP_KEYS.items():
         block = repo.arms.get(arm)
         if block is None or "max_chars" not in block:
-            # An arm with no measured cap writes no line at all, rather than a
-            # line saying zero or null: the frontmatter is read by audit
-            # scripts, and `higgs_max_chars_served: null` is a field one of them
-            # reads as a cap. Absence is the only honest spelling here
-            # (2026-09-19, PHASE18-UNCERTIFIED.md section 4).
             continue
         owned.append(f"{key}: {block['max_chars']}")
         owned.append(f"{key}_basis: {repo.max_chars_basis[arm]}")
@@ -118,14 +63,6 @@ def render_frontmatter(repo: RepoManifest, existing: str) -> str:
 
 
 def render_limits(repo: RepoManifest) -> str:
-    """The `## Measured limits` section, out of the manifest and nothing else.
-
-    Every claim here has a field behind it. The campaign template carried five
-    values the manifest does not hold (`pace_n`, `clean`, `pace_extra`,
-    `pace_on`, the run and checkpoint), and that is precisely why the card and
-    the manifest drifted: half the section was typed per deploy. The manifest's
-    own `measured_from` is the one prose field, and it is reproduced verbatim.
-    """
     pace = repo.pace or {}
     lines = ["## Measured limits (from this repo's crucible-voice.toml)", ""]
     rate = pace.get("pace_chars_per_sec")
@@ -142,10 +79,6 @@ def render_limits(repo: RepoManifest) -> str:
             f"({repo.pace_basis}), with the band running "
             f"{pace['min_chars_per_sec']} to {pace['max_chars_per_sec']}."
         )
-        # THE BASIS'S OWN SENTENCE, whichever basis it is. An inherited pace
-        # is served exactly like a measured one — it is a certificate the voice
-        # states — and the card is where a person finds out WHICH other weights
-        # it came from, which is the whole of whether to trust it.
         if repo.measured_from:
             lines.append(f"  {repo.measured_from}")
         if repo.inherited_from:
@@ -190,19 +123,10 @@ def render_limits(repo: RepoManifest) -> str:
         f"- **Retake ladder:** {rungs} rung(s). A client asks for take N; what "
         "take N is belongs to the server."
     )
-    # ONE trailing newline, not two. The section is spliced in where another one
-    # was, and the blank line before the next `##` heading is that heading's own
-    # — a second one here widens the gap every time the card is re-rendered.
     return "\n".join(lines) + "\n"
 
 
 def render_card(repo: RepoManifest, existing: str) -> tuple[str, bool]:
-    """The whole card, and whether the limits section had to be ADDED.
-
-    Added rather than refused, because thirdreich's and sigma's cards have no
-    limits section at all today (section 1) and the point of this command is to
-    give them one. It is reported so nobody discovers it in a diff.
-    """
     matched = _FRONTMATTER.match(existing)
     if matched is None:
         raise CardError(
@@ -214,10 +138,6 @@ def render_card(repo: RepoManifest, existing: str) -> tuple[str, bool]:
     limits = render_limits(repo)
     body, replaced = _LIMITS_SECTION.subn(lambda _m: limits, body, count=1)
     if replaced == 0:
-        # BEFORE THE FIRST OTHER SECTION, so a card that has no limits section
-        # today — thirdreich's and sigma's, which carry no safe band at all
-        # (section 1) — gets one where a reader expects it rather than above the
-        # title. A card with no `##` heading at all gets it at the end.
         at = body.find("\n## ")
         if at == -1:
             body = body.rstrip("\n") + "\n\n" + limits
@@ -230,12 +150,6 @@ def render_card(repo: RepoManifest, existing: str) -> tuple[str, bool]:
 
 
 def read_frontmatter(card: str) -> dict[str, str]:
-    """The card's frontmatter as flat key -> text. What a test parses back.
-
-    Deliberately not a YAML parser: the keys this module writes are scalars on
-    one line each, and a dependency that could read a nested block would invite
-    one to be written.
-    """
     matched = _FRONTMATTER.match(card)
     if matched is None:
         raise CardError("this card has no YAML frontmatter")
@@ -248,26 +162,13 @@ def read_frontmatter(card: str) -> dict[str, str]:
     return found
 
 
-# ----------------------------------------------------------------- the export
-
-
 def _toml_number(value: float) -> str:
-    """A rate or a sampling value, written the way the catalog writes it.
-
-    A WHOLE NUMBER IS WRITTEN WHOLE. Every value that reaches here has been
-    through `crucible/voices.py`'s `_number()`, which returns a float, so
-    `top_k` 50 would otherwise be written `50.0` — read back identically by that
-    same `_number()`, and read by a PERSON as a different number from the 50 the
-    catalog states everywhere else. The loader takes either; this is about the
-    file being readable by whoever has to check it before it is pushed.
-    """
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)
 
 
 def _toml_string(value: str) -> str:
-    """A TOML string — multi-line for prose, so a note stays readable."""
     if "\n" in value or len(value) > 90:
         escaped = value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
         return f'"""{escaped}"""'
@@ -283,14 +184,6 @@ def export_manifest(
     max_chars_basis: str | None,
     uncertified: bool,
 ) -> tuple[str, list[str]]:
-    """A packaged manifest as a `crucible-voice.toml`, and the rows it drops.
-
-    Section 4. The dropped rows are RETURNED rather than logged, so the caller
-    prints them and nothing goes silently: every one of them is a machine fact
-    that now lives in that machine's `config.toml` (`[tts.<engine>]`) or in the
-    pin, and a person converting a file has to be able to see that they moved
-    rather than vanished.
-    """
     from .voices import MAX_CHARS_BASES, PACE_BASES
 
     pace = manifest.pace
@@ -302,10 +195,6 @@ def export_manifest(
             "write is an UNCERTIFIED voice (PHASE18 section 4.1) — a real state, "
             "and one worth stating on purpose. Pass --uncertified to say so"
         )
-    # A `[voice.pace]` TABLE THAT EXISTS OWES A `basis`, band or no band: the key
-    # certifies the table, and a packing target taken from a predecessor is the
-    # same hazard as a pace taken from one. A voice with nothing to say here
-    # omits the table in whole, which is what `--uncertified` alone produces.
     if has_band or packs:
         if pace_basis not in PACE_BASES:
             raise CardError(
@@ -316,10 +205,6 @@ def export_manifest(
                 "which is exactly how deathstalker's 16.64 survived onto weights "
                 "that measured 15.91"
             )
-        # EACH BASIS OWES EXACTLY ITS OWN SENTENCE, and this writer refuses to
-        # invent either (ruled 2026-09-19; `voicerepo._repo_pace` is the reader
-        # of the same rule). The packaged schema states neither, so there is
-        # nothing here to carry across — only a person who knows.
         owed, given, refused_name, refused_value = (
             ("--measured-from", measured_from, "--inherited-from", inherited_from)
             if pace_basis == "measured"
@@ -346,12 +231,6 @@ def export_manifest(
                 f"Each basis owes exactly its own sentence — {owed} — and the "
                 "other would be prose about a measurement this voice did not make"
             )
-    # THE BASIS IS OWED BY THE CAPS THAT EXIST, and by nothing else
-    # (2026-09-19). A packaged manifest whose arms state no `max_chars` is an
-    # uncertified voice — no sweep has run on these weights — and demanding a
-    # word describing how its absent caps were got would be asking for a
-    # certificate about a number that is not there. Every arm carries a cap or
-    # none does: they come from one sweep.
     capped_arms = [
         arm for arm in sorted(manifest.backends)
         if manifest.backends[arm].max_chars is not None
@@ -430,8 +309,6 @@ def export_manifest(
             "-> config.toml [tts."
             f"{manifest.narrator_engine}] max_num_seqs (+ its note)"
         )
-        # The two levers added 2026-09-19 go the same way and for the same
-        # reason: they size the SERVER, which is a fact about the box.
         for key in ("mem_fraction", "context_length"):
             value = getattr(manifest.serving, key)
             if value is not None:
@@ -442,8 +319,6 @@ def export_manifest(
     for arm in sorted(manifest.backends):
         spec = manifest.backends[arm]
         lines += ["", f"[voice.arms.{arm}]"]
-        # The cap and its basis are one statement and are written together or
-        # not at all — `voicerepo._check_arm_cap` refuses either alone.
         if spec.max_chars is not None:
             lines.append(f"max_chars       = {spec.max_chars}")
             lines.append(f"max_chars_basis = {_toml_string(max_chars_basis)}")
@@ -485,13 +360,6 @@ def export_manifest(
                 "override"
             )
 
-    # THE EXPORTED PACE IS READ BACK BY THE LOADER'S OWN CHECKER before this
-    # function returns anything. There is one thing `voices/<id>.toml` can state
-    # that this file has no field for — `edges = "percentile"`, which is how a
-    # band read off a distribution says its lopsidedness is real — because
-    # `Pace` deliberately does not carry it (it never reaches the wire). So such
-    # a voice would export to a file the loader refuses, and the person
-    # converting it has to hear that HERE rather than at the first pull.
     from .voices import _check_pace
 
     if has_band or packs:

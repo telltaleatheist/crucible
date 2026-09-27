@@ -1,76 +1,3 @@
-"""The Qwen3-ASR repetition-loop guard: what counts as a loop, and the budget.
-
-docs/PHASE25-QWEN-ASR.md section 5. Pure functions over what a decode and an
-alignment returned, so every threshold here is tested without a model.
-
-THE FAILURE THIS EXISTS FOR (ContentStudio, Mac Studio, 2026-09-24). Once in 78
-pieces, a 180-second piece came back as ONE LINE REPEATED ABOUT 60 TIMES — 2,388
-words — until the decoder ran out of `max_new_tokens`. The aligner then did what
-a forced aligner does with text that is not in the audio: it stamped every one of
-those words at one instant, zero-length spans, and the real three minutes of
-speech were simply gone. Nothing in the output said so. A transcript with a hole
-in it looks exactly like a transcript without one, which is the whole argument
-`crucible/jobs/asr/__init__.py` makes about a failed window, and it gets the same
-answer here: never accept a collapsed span silently.
-
-A LOOP IS WEATHER, SO IT GETS A BUDGET AND THEN A NAME. Greedy decoding is
-deterministic, so re-decoding the same audio the same way reproduces the loop;
-what changes the outcome is different INPUT. So the budget is a ladder of
-smaller windows over the same audio (`window_ladder`): a piece that loops is
-re-cut at quiet points into pieces half its length and decoded again, and one
-that still loops is re-cut to a quarter. A piece that loops at the last rung
-fails the job by name — `asr_decode_loop`, with its time range — because at
-that length there is nothing smaller to try that is still a transcript.
-
-THE LADDER STARTS AT THE CALLER'S PIECE LENGTH since 2026-09-26 (Owen: the
-caller chooses how big the pieces are). It was a fixed 180 / 60 / 20 when every
-job cut at 180 s.
-
-WHY NOT A REPETITION PENALTY. It was considered and refused. vLLM's
-`repetition_penalty` and mlx-audio's both scale down EVERY token already in the
-prompt or the output, and the prompt is the context, which is exactly where
-ContentStudio's "um, uh, ah, er, hmm" live. A penalty is a thumb on the scale
-against the very fillers this model was chosen to keep, and against the verbatim
-repeats Owen wants kept ("repeats kept verbatim"). A smaller window changes
-nothing about what the model is asked to write down. `no_repeat_ngram_size` is
-not offered by vLLM's `SamplingParams` at 0.29.0 at all, and would forbid a
-real repeated phrase outright.
-
-The four signals, and where each threshold comes from
------------------------------------------------------
-Every threshold is a DECISION, set from the one loop anyone has seen and from
-ordinary speech rates, not measured over a corpus. The first live run should
-count each signal over a long stream; docs/PHASE25-QWEN-ASR.md section 8 says
-how.
-
-1. **The decode hit its token budget** (`hit_token_limit`). A piece of speech
-   ends on its own; one that is still writing when its budget runs out is not
-   transcribing. The budget per piece is `token_budget`: 4096 tokens per 180 s,
-   ContentStudio's own operating point, scaled to the piece and floored.
-2. **Words per second of audio above `WORDS_PER_SECOND_CEILING` = 8.0.** Brisk
-   conversational English is about 3 words a second (180 wpm); 8 a second is
-   480 wpm, past any sustained human speech a livestream carries. The loop
-   ContentStudio saw was 2,388 words in 180 s = 13.3 a second. Only applied
-   past `RATE_MIN_WORDS`, so a short padded piece with four quick words in it is
-   not a loop.
-3. **A phrase of `REPEAT_MIN_WORDS`..`REPEAT_MAX_WORDS` words repeated
-   back-to-back at least `REPEAT_MIN_COUNT` = 8 times.** A verbatim repeat
-   ("I, I, I think") is one or two words a few times; eight consecutive copies
-   of a four-word phrase is not something people say. ContentStudio's loop was
-   one line about 60 times.
-4. **The aligner collapsed: `COLLAPSE_RUN_ITEMS` = 12 consecutive items with a
-   zero-length span.** The aligner's resolution is 80 ms (`timestamp_segment_time`
-   in Qwen3-ForcedAligner's config); a real word occupies at least one step. One
-   or two zero-length items happen at a piece's edges; twelve in a row is text
-   with no audio under it — exactly the signature of the loop above.
-
-The text signals (1-3) are counted on whitespace-separated words, so they are
-calibrated for languages written with spaces. On Chinese, Japanese and
-Cantonese the word count undercounts and rules 2-3 under-fire; rules 1 and 4
-still hold there, and a missed loop in those languages ends in rule 4's named
-failure rather than in a silent hole.
-"""
-
 from __future__ import annotations
 
 import math
@@ -78,15 +5,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-#: Each rung after the first is this fraction of the one before: small enough
-#: to change what the decoder hears, large enough to still hold a sentence at
-#: the default 30 s piece (30 -> 15 -> 7.5).
 WINDOW_LADDER_RATIO = 0.5
 WINDOW_LADDER_RUNGS = 3
 
 
 def window_ladder(piece_s: float) -> tuple[float, ...]:
-    """The windows a job decodes at, largest first: the piece length, then halves."""
     return tuple(piece_s * WINDOW_LADDER_RATIO**rung for rung in range(WINDOW_LADDER_RUNGS))
 
 WORDS_PER_SECOND_CEILING = 8.0
@@ -97,15 +20,8 @@ REPEAT_MAX_WORDS = 40
 REPEAT_MIN_COUNT = 8
 
 COLLAPSE_RUN_ITEMS = 12
-#: A span at most this long is zero-length. The aligner reports seconds to
-#: three decimals (`round(..., 3)` in qwen_asr's `_offset_align_result`), so
-#: anything under a millisecond is the same instant.
 ZERO_SPAN_SECONDS = 0.0005
 
-#: The per-piece token budget, as a rate: 4096 new tokens for 180 s of audio,
-#: ContentStudio's own settings, i.e. about 22.8 tokens a second — roughly
-#: seven times what 3 words a second of English costs. Floored so a short piece
-#: still has room for a fast speaker.
 BUDGET_TOKENS_PER_SECOND = 4096 / 180
 BUDGET_FLOOR_TOKENS = 256
 
@@ -114,24 +30,17 @@ _WORD_EDGES = re.compile(r"^\W+|\W+$", re.UNICODE)
 
 @dataclass(frozen=True)
 class LoopSignal:
-    """Why a piece is taken to be a loop. `kind` is stable; `detail` is prose."""
 
     kind: str
     detail: str
 
 
 def token_budget(duration_s: float, max_new_tokens: int) -> int:
-    """How many new tokens one piece of `duration_s` may generate."""
     scaled = math.ceil(duration_s * BUDGET_TOKENS_PER_SECOND)
     return min(max_new_tokens, max(BUDGET_FLOOR_TOKENS, scaled))
 
 
 def words_of(text: str) -> list[str]:
-    """The words the text rules count and compare: lower-cased, edges stripped.
-
-    Punctuation at a word's edges is dropped so that "um," and "um" compare
-    equal; a word that was only punctuation is not a word.
-    """
     words = []
     for raw in text.split():
         word = _WORD_EDGES.sub("", raw).lower()
@@ -141,10 +50,6 @@ def words_of(text: str) -> list[str]:
 
 
 def repeated_phrase(words: Sequence[str]) -> tuple[int, int, int] | None:
-    """`(phrase_words, copies, first_index)` of a back-to-back repeat, or None.
-
-    The shortest qualifying phrase is reported, at its first position.
-    """
     total = len(words)
     for size in range(REPEAT_MIN_WORDS, REPEAT_MAX_WORDS + 1):
         if size * REPEAT_MIN_COUNT > total:
@@ -164,7 +69,6 @@ def repeated_phrase(words: Sequence[str]) -> tuple[int, int, int] | None:
 def text_signal(
     text: str, duration_s: float, hit_token_limit: bool, budget: int
 ) -> LoopSignal | None:
-    """Rules 1-3 over one decoded piece. None means it reads like speech."""
     if hit_token_limit:
         return LoopSignal(
             "token_limit",
@@ -194,7 +98,6 @@ def text_signal(
 
 
 def alignment_signal(items: Sequence[dict[str, Any]]) -> LoopSignal | None:
-    """Rule 4 over one piece's aligned items. None means the text found audio."""
     run = longest = 0
     for item in items:
         if float(item["end"]) - float(item["start"]) <= ZERO_SPAN_SECONDS:
@@ -212,7 +115,6 @@ def alignment_signal(items: Sequence[dict[str, Any]]) -> LoopSignal | None:
 
 
 def next_window(ladder: Sequence[float], level: int) -> float | None:
-    """The window the next rung decodes at, or None when the budget is spent."""
     following = level + 1
     if following < len(ladder):
         return ladder[following]
@@ -220,7 +122,6 @@ def next_window(ladder: Sequence[float], level: int) -> float | None:
 
 
 def clock(seconds: float) -> str:
-    """`h:mm:ss.s`, for naming a piece's place in a stream a person can find."""
     whole = int(seconds)
     tenths = int(round((seconds - whole) * 10))
     if tenths == 10:

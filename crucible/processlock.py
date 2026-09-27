@@ -1,9 +1,10 @@
-"""Kernel-held process locks; PID files are informational, never the mutex."""
 from __future__ import annotations
 
 import hashlib
 import os
 from pathlib import Path
+
+_ERROR_ALREADY_EXISTS = 183
 
 
 class ProcessLock:
@@ -25,7 +26,7 @@ class ProcessLock:
             handle = kernel.CreateMutexW(None, False, name)
             if not handle:
                 raise ctypes.WinError(ctypes.get_last_error())
-            if ctypes.get_last_error() == 183:  # object already held by another process
+            if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
                 kernel.CloseHandle(handle)
                 return False
             self.handle = (kernel, handle)

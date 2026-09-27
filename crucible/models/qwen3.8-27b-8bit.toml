@@ -1,195 +1,27 @@
-# Qwen 3.8 27B at 8 bits — the best translation a 64 GB Mac can actually hold.
-#
-# WHY THIS MANIFEST EXISTS, AND WHAT IT REPLACED
-# ----------------------------------------------
-# It replaces `qwen3.8-27b`, the bf16, which was deleted on 2026-09-17. Owen:
-# *"I don't think the Mac can fit 27b 16 bit. It fits 8 bit at most. We should
-# remove 16 bit and put 8 bit on the Mac. 4 bit for pc."*
-#
-# He is right, and the old manifest's own numbers say so. bf16 estimated
-# 55_518_912_853 against a 64 GiB Studio whose 25% desktop reserve leaves
-# 51_539_607_552 — so it was a candidate that could never win on either of the
-# two machines this catalog is measured on, and `tests/test_capability.py`
-# existed partly to assert that it *loses*. A row whose only job is to be
-# refused is a row that costs a person a scroll and a decision every time they
-# open a model picker.
-#
-# ONE ARM, mlx-darwin, AND THAT IS OWEN'S RULING, NOT AN OMISSION
-# ---------------------------------------------------------------
-# *"put 8 bit on the Mac. 4 bit for pc."* — and, 2026-09-23, reading a
-# cuda-linux row for this model: *"we shouldnt have an 8 bit 27b on here. waste
-# of space, wont fit in the gpu"*.
-#
-#   Mac Studio, 64 GiB, 25% desktop reserve -> 48.0 GiB to give.
-#     this row estimates 38.83 GiB  -> FITS, and beats the 4-bit on quality.
-#     (It read 44.07 GiB until 2026-09-23, when a double-counted KV term came
-#     out of the mlx block's overhead — see that block.)
-#   PC, RTX 3090 Ti, 24 GiB — cuda-linux.
-#     Qwen's FP8 weights ALONE are 28.75 GiB (30_866_866_928 B, the hub's blob
-#     sum at `Qwen/Qwen3.8-27B-FP8` @ 017b9c7a), larger than the whole card.
-#
-# This file used to carry a `cuda-linux` block anyway, on the argument that a
-# catalog should declare every arm honestly and let a bigger card change the
-# answer by itself. That argument cost more than it bought: on the only card
-# the cuda-linux backend runs on, such an arm can only ever be DOWNLOADED —
-# 30.9 GB of disk — and then REFUSED at load. It was a row whose only job was
-# to lose, which is exactly why the bf16 was deleted. So there is no cuda-linux
-# block, and none for llama-windows (no 8-bit 27B a Windows card holds either):
-# the PC's 27B is `qwen3.8-27b-4bit`. If a card that could hold the FP8 ever
-# arrives, the arm comes back WITH a measurement, not before.
-#
-# The MLX arm is the community 8-bit build (`mlx-community/Qwen3.8-27B-8bit`).
-# The FP8 figures above are kept only as the reason; nothing here pins that repo.
-#
-# The vision alias `qwen3.8-27b-8bit-vl` went with the cuda-linux arm: it was
-# served only there (mlx-lm serves text), and an alias with no backend is not a
-# model.
-
 [model]
 id = "qwen3.8-27b-8bit"
 family = "qwen3.8"
 params_b = 27
 context_default = 12288
 
-# What the WEIGHTS support — the same ceiling the bf16 row carried, read from
-# the hub on 2026-09-16 from the ORIGINAL checkpoint
-# (`Qwen/Qwen3.8-27B` @ 1d4bf0f2, `text_config.max_position_embeddings`).
-# Quantizing changes the numbers in the tensors, not the position embeddings,
-# so this is the same wall.
 trained_context = 262144
-# Text, for the reason the 9B's manifest gives at length: the checkpoint has a
-# vision tower and this server does not offer it. A modality is advertised on
-# what was measured, not on what is architecturally possible.
 modalities = ["text"]
 
-# THE PRECISION IS IN THE NAME, on both members of the pair. Owen, 2026-09-17,
-# reading two 27B rows side by side: *"qwen3.8-27b / qwen3.8-27b-4bit — how are
-# these different? it should be explicit. is the first one 8 bit?"* It was not;
-# it was bf16, and only one of the two names said a precision, which is what
-# invited the question.
 display = "Qwen 3.8 · 27B (8-bit)"
 description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. Mac only: its weights alone are 28.75 GiB, more than a 24 GB card, which serves the 4-bit."
 
 [backends.mlx-darwin]
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-8bit"
-# The repo's head on 2026-09-17, read from the HuggingFace API rather than typed:
-#   GET /api/models/mlx-community/Qwen3.8-27B-8bit -> sha
 revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
-#
-# 41_688_522_448 = 29_501_218_479 (weights) + 11_381_997_601 (everything but
-#                  weights and KV) + 805_306_368 (12288 x 65_536 of KV).
-#
-# CORRECTED 2026-09-23: A DOUBLE COUNT CAME OUT. It read
-# 47_320_162_000 = 29_501_218_479 + 17_818_943_521, and the [memory] table
-# below carried the same 17_818_943_521 as `overhead_bytes` and then added
-# kv_bytes_per_token x context on top of it. But that figure is the 4-bit's
-# non-weight term measured under a 98_220-token completion (the next paragraph)
-# — it already CONTAINS that run's KV, 98_220 x 65_536 = 6_436_945_920 B. So
-# every context was charged its KV twice, and the ceiling the capability walk
-# derived from these terms came out near 64k where the machine holds 131072.
-# The non-weight, non-KV residual is
-#   17_818_943_521 - 6_436_945_920 = 11_381_997_601 B (10.60 GiB)
-# and the estimate is the terms at this block's own 12288. What follows is the
-# original reasoning, still true of where the 17.8 GB came from.
-#
-# THE WEIGHTS HALF IS MEASURED, and not by loading anything: it is the sum of
-# the repo's six safetensors blobs as the hub itself reports their sizes
-# (`?blobs=true`), at the revision pinned above. That is the same method the
-# 4-bit and bf16 rows use for their weight terms.
-#
-# THE OTHER HALF IS INHERITED FROM THE 4-BIT'S MEASUREMENT ON THIS MACHINE, and
-# that is the part that is owed. `qwen3.8-27b-4bit`'s mlx block was measured on
-# Owen's Studio (M1 Ultra, 64 GB, mlx-lm 0.31.3 / mlx 0.32.2, 2026-09-12) at a
-# peak of 33_873_484_870 against computed weights of 16_054_541_349 — leaving
-# 17_818_943_521 that is NOT weights: KV at full context plus what mlx-lm's
-# prefill holds at once, which on this model is dominated by one 2048-token
-# step's logits over a 248320 vocabulary.
-#
-# Carrying that term across to the 8-bit is a claim that the non-weight cost
-# does not depend on the quantization. That is true of the KV and the logits —
-# both are shaped by context, vocab and dtype rather than by the weights' width
-# — and it is the honest way to size a model nobody has loaded yet. It is NOT a
-# measurement of this model.
-#
-# It is also the CONSERVATIVE direction: the 4-bit's figure was taken under a
-# 98220-token completion, and `context_default` above is 12288. A real run at
-# the default context will hold less than this says. (It was more than
-# conservative: it was a double count, and the correction at the top of this
-# block takes the 98220-token run's KV out, so the estimate is now the terms at
-# 12288 rather than a 98220-token peak.)
-#
-# OWED: load this on the Studio, run a full-context completion, and write what
-# mlx's allocator reports. Then the memory table's `basis` below becomes
-# "measured" — and note it is THERE and not here: a model's backend block takes
-# no `estimate_basis` (that is a voice manifest's field), which the validator
-# said by name the first time this file was written with one.
 memory_bytes_estimate = 41_688_522_448
-# THE BATCH, STATED -- AND WHY THESE NUMBERS. COMPUTED 2026-09-24, MEASUREMENT OWED.
-# mlx-lm 0.31.3 batches (engines/mlx_lm.py, `chat_concurrency_flag`): one
-# `BatchGenerator` decodes up to `--decode-concurrency` sequences at once and
-# prefills up to `--prompt-concurrency` prompts per forward. The chat door admits
-# `--decode-concurrency + 1`, read off this argv, and that is the pool a client
-# sizes from `/v1/activity`. Crucible states all three flags (house rule: no
-# library defaults; `MlxLmEngine.start` refuses an argv without them).
-#
-# The bound is NOT Crucible's 61 GiB budget but the tighter one mlx-lm wires to:
-# Metal's `max_recommended_working_set_size`, 55_662_788_608 B (51.84 GiB) on the
-# M1 Ultra, read with `mx.device_info()` 2026-09-24 (`server.py` L1893-1895 sets
-# the wired limit to it). Past it the Mac pages. Every term, per sequence at the
-# 8192 tokens that is the widest class default this model serves (clean,
-# generate, decide; translate is 4096):
-#   KV            8192 x kv_bytes_per_token (the [memory] table below)
-#   recurrent     gated-delta state, float32 (`models/gated_delta.py` L279:
-#                 `mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)`), per sequence
-#                 and flat in length: linear layers x v heads x 128 x 128 x 4 B
-#   conv          linear layers x 3 x (2 x 16 x 128 + v heads x 128) x 2 B
-# held by the decode batch AND by each of the `--prompt-cache-size` finished
-# sequences mlx-lm keeps for prefix reuse (worst case: every one a full 8192).
-# Prefill is taken at the measured `overhead_bytes` per prompt in flight, i.e.
-# `--prompt-concurrency - 1` extra copies of it -- the worst case, since only
-# part of that residual is a per-step transient.
-# THIS MODEL, AND WHY IT GETS HALF THE 9B'S WIDTH: 48 gated-delta layers x
-# 48 v heads and 65_536 B of KV per token (config.json read 2026-09-24).
-#   per sequence  536_870_912 KV + 150_994_944 recurrent + 2_949_120 conv
-#               = 690_814_976 B
-#   weights + overhead                        40_883_216_080
-#   + 8 in flight                              5_526_519_808
-#   + 10 cached                                6_908_149_760
-#                                          = 53_317_885_648 B = 49.66 GiB of 51.84
-# 2.18 GiB spare. 16 in flight would be 54.80 GiB -- past the working set, so
-# the Mac would page -- and so would a second prompt prefilling beside the
-# first if the 11.38 GB residual is per prompt (60.26 GiB): hence ONE prompt at
-# a time, which is exactly how that residual was measured (on the 4-bit, one
-# stream). Prefill is compute-bound, so a serial prefill costs little; decode is
-# where the batch pays. At translate's 4096 tokens the same 8 come to 45.2 GiB.
 engine_args = [
     "--decode-concurrency", "8",
     "--prompt-concurrency", "1",
     "--prompt-cache-size", "10",
 ]
-# THE MOST A LOAD MAY ASK FOR HERE. COMPUTED 2026-09-23, LOAD TEST OWED, from
-# the corrected terms below against the Studio's 48.0 GiB (51_539_607_552 B):
-#   29_501_218_479 weights + 11_381_997_601 residual  = 40_883_216_080 (38.08 GiB)
-#   + 131072 x 65_536 of KV (8_589_934_592)           = 49_473_150_672 B
-#                                                     = 49.5 GB = 46.08 GiB of 48.0
-# The memory alone would afford 162_603 tokens at one in flight; 131072 is the
-# cap because a longer prefill is not worth its time, and it is ample. mlx-lm
-# takes no context flag and allocates KV on demand, so on this backend this is
-# ADMISSION — the resident row's `max_model_len` — not an engine-enforced cap.
 max_context = 131072
 
-# ------------------------------------------------- the same number, taken apart
-#
-# `weights_bytes` is the hub's own blob sum, so it is the one term here nobody
-# has to trust. `overhead_bytes` carries the inherited non-weight term rather
-# than a zero, because a zero would be a claim that this row is complete and the
-# bf16 row's comment is explicit that its own zero meant "none was measured".
-# Here something WAS measured — on the sibling — and pretending otherwise would
-# lose the only evidence this estimate has.
-#
-# `overhead_bytes` is the residual with the sibling's KV taken OUT (the
-# correction above): 17_818_943_521 - 98_220 x 65_536 = 11_381_997_601.
 [backends.mlx-darwin.memory]
 weights_bytes = 29_501_218_479
 overhead_bytes = 11_381_997_601

@@ -509,25 +509,12 @@ test('guard: null stays null, and is never softened into a verdict', async () =>
   assert.notDeepEqual(chunk.data.guard, {});
 });
 
-test('a chunk frame with no guard key at all reads it as null — never as "clean"', async () => {
-  // A server that predates the guard has sent no verdict, which is exactly
-  // what null already says (Owen, 2026-09-24). It is still never "clean".
-  const { guard: _guard, ...withoutGuard } = CHUNK_FRAME;
-  streams(
-    frame(1, 'chunk', withoutGuard),
-    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
-  );
-  const [chunk] = await drain('job-tts-1');
-  assert.ok(chunk !== undefined && chunk.event === 'chunk');
-  assert.equal(chunk.data.guard, null);
-});
-
 test('a chunk frame whose guard is not an object is a protocol error', async () => {
   // Present and wrong is a broken server, not an old one.
   streams(frame(1, 'chunk', { ...CHUNK_FRAME, guard: 'clean' }));
   await assert.rejects(drain('job-tts-1'), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /guard is present but is not a JSON object/);
+    assert.match(error.message, /guard is neither a JSON object nor null/);
     return true;
   });
 });
@@ -566,39 +553,13 @@ test('capped: false and capped: true both survive, and are different news', asyn
   assert.equal(runaway.data.tokens, 900);
 });
 
-test('a chunk frame with no capped key at all reads it as null — never as false', async () => {
-  // narrator declining to say and a server that does not state the field are
-  // the same news to a caller: no measurement (Owen, 2026-09-24). Neither
-  // is ever softened into `false`.
-  const { capped: _capped, ...withoutCapped } = CHUNK_FRAME;
-  streams(
-    frame(1, 'chunk', withoutCapped),
-    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
-  );
-  const [chunk] = await drain('job-tts-1');
-  assert.ok(chunk !== undefined && chunk.event === 'chunk');
-  assert.equal(chunk.data.capped, null);
-  assert.notEqual(chunk.data.capped, false);
-});
-
 test('a chunk frame whose capped is neither a boolean nor null is a protocol error', async () => {
   streams(frame(1, 'chunk', { ...CHUNK_FRAME, capped: 'maybe' }));
   await assert.rejects(drain('job-tts-1'), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
-    assert.match(error.message, /capped is present but is not a boolean/);
+    assert.match(error.message, /capped is neither a boolean nor null/);
     return true;
   });
-});
-
-test('a chunk frame missing a measurement reads it as null — never as a zero', async () => {
-  const { chars_per_sec: _rate, ...withoutRate } = CHUNK_FRAME;
-  streams(
-    frame(1, 'chunk', withoutRate),
-    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
-  );
-  const [chunk] = await drain('job-tts-1');
-  assert.ok(chunk !== undefined && chunk.event === 'chunk');
-  assert.equal(chunk.data.charsPerSec, null);
 });
 
 test('a chunk frame without its index is still a protocol error: it names the artifact', async () => {
@@ -715,19 +676,6 @@ test('the render result names the sampling that ran and the weights it ran on', 
   assert.equal(result.voice?.id, 'deathstalker');
   assert.equal(result.voice?.identityBasis, 'verified');
   assert.equal(result.width, 16);
-});
-
-test('a result that does not say what it sampled with still reads, with null there', async () => {
-  // The record of the run, not something a caller acts on: a server that
-  // predates the field has not stated it, and the render's result — which
-  // chunks failed — must not be lost over it (Owen, 2026-09-24).
-  const { sampling: _sampling, voice: _voice, ...withoutRecord } = RENDER_DONE;
-  streams(frame(1, 'done', withoutRecord));
-  const events = await drain('job-tts-1');
-  const result = readRenderResult(events[0]!.data as never);
-  assert.equal(result.sampling, null);
-  assert.equal(result.voice, null);
-  assert.deepEqual(result.failed, [{ index: 42, message: 'No audio generated' }]);
 });
 
 test('readRenderResult refuses a done frame without a failed list, rather than reading it as clean', async () => {
@@ -958,19 +906,6 @@ test('an artifact name that is not a single path member is refused, never joined
       `expected ${name} to be refused`,
     );
   }
-});
-
-test('a sparse sidecar is still written: the bytes on disk are the server\'s own', async () => {
-  // Every provenance field is a record, and a server that states fewer of
-  // them has not made the artifact unusable (Owen, 2026-09-24).
-  artifacts.set('41.flac', flac(41));
-  artifacts.set('41.flac.provenance.json', Buffer.from('{"server": {"name": "x"}}', 'utf8'));
-  streams(
-    frame(1, 'artifact', { name: '41.flac' }),
-    frame(2, 'done', { artifacts: ['41.flac'], rendered: 1, failed: [], take: 0, sample_rate: 24000 }),
-  );
-  await collect('job-tts-1', directory);
-  assert.deepEqual((await readdir(directory)).sort(), ['41.flac', '41.flac.provenance.json']);
 });
 
 test('a sidecar that is not a provenance document is a protocol error, and nothing lands', async () => {

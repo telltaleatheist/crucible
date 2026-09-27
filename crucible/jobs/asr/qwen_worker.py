@@ -1,133 +1,22 @@
-"""The Qwen3-ASR worker: vLLM on cuda-linux; on mlx-darwin Qwen's own `qwen_asr`
-on torch MPS (`qwen3-asr-1.7b`) or the mlx-audio port (`qwen3-asr-1.7b-mlx`,
-the fast one). One wire for all three.
-
-THE THIRD ENGINE, 2026-09-24: on identical pieces, Qwen's own package heard a
-few more fillers than the MLX port (11-13 against 9-10 on a 10-minute window)
-at 2.5x the time, so the Mac's official id runs the package (in the align env,
-which has it) and the port kept an id of its own for speed. `load` takes a `device` key, the torch
-device for `qwen-asr` and null for the other two.
-
-(The paragraphs below were written for the two-engine worker and still hold
-for vLLM and mlx-audio.)
-
-docs/PHASE25-QWEN-ASR.md section 4. Run as `<llm env python> qwen_worker.py`,
-held open for ONE JOB by `crucible/jobs/asr/qwen.py` (a `WorkerSession` the job
-owns and stops in its `finally`), and never resident beyond it.
-
-This module is **standalone**: it imports the standard library, `numpy`, and
-then EITHER `vllm` OR `mlx_audio` — never `crucible`, which the llm env does not
-have. It is one file for both engines, unlike whisper's two workers, because
-here the engines differ in about sixty lines (load and decode) and share
-everything else: the ffmpeg decode, the quiet-point split, the wav files both
-models read, and the wire. Each engine's import happens inside its own branch,
-so the Mac never imports vLLM and the PC never imports MLX.
-
-The wire, in full
------------------
-    stdin   one object per line; the op is required. Nothing has a default.
-
-            {"op": "load", "engine", "model_dir", "dtype", "max_batch",
-             "max_new_tokens", "max_model_len", "kv_cache_memory_bytes",
-             "gpu_memory_utilization", "language", "context",
-             "context_max_tokens"}
-                -> ready {seconds, engine, device, dtype, context_tokens}, done
-            The last three vLLM keys are null on mlx-audio. `language` is the
-            model's English NAME ("English"), mapped by the server. The context
-            is fixed for the session because the session is one job.
-
-            {"op": "split", "ffmpeg", "source", "max_piece_s", "out_dir",
-             "region_s", "overlap_s", "speech"}
-                -> ready {duration_s, pieces, samples, speech_s, kept}
-                   result {offset_s, duration_s, audio_offset_s,
-                           audio_duration_s, wav}          one per piece
-                   done
-            Decode `source` with ffmpeg to 16 kHz mono (once per session: the
-            samples are kept), cut it, or the `region_s` [start, end] stretch
-            of it, into pieces of at most `max_piece_s` at the middle of the
-            quietest point near each boundary, and write each piece to
-            `out_dir` as a 16-bit PCM wav WITH `overlap_s` of real neighbouring
-            audio on both sides. `offset_s`/`duration_s` are the piece's CORE,
-            the stretch it owns; `audio_*` are what the wav holds. All seconds
-            are of `source`. The server calls this on the job's input with
-            `region_s` null, and again with a piece's core as `region_s` when
-            that piece is re-decoded at a smaller window
-            (`loopguard.window_ladder`).
-
-            SPEECH ONLY (2026-09-27). `speech` is null, or the settings object
-            `speechonly.settings` checks. With it, the decoded source goes
-            through Silero VAD on the CPU and every long stretch without
-            speech is taken out; the SHORTENED signal is what is cached, cut
-            and written, so every `*_s` above and `duration_s` are on its
-            timeline, and `region_s` on a re-cut is too. `kept` is the table
-            back (source sample spans) and `samples` the source's length; the
-            server moves every time back. Cuts prefer the joins where a
-            stretch was taken out (`split_points`). Null `speech`: `speech_s`
-            and `kept` are null and `duration_s` is the source's.
-
-            {"op": "transcribe", "pieces": [{"wav", "max_tokens"}]}
-                -> ready {pieces}
-                   result {text, tokens, hit_token_limit}  one per piece
-                   done
-
-    fd 1    `ready` / `progress` / `result` / `failed` / `done`, and nothing
-            else. No index anywhere: results are matched by position.
-
-The prompt, and the one place the two engines differ
-----------------------------------------------------
-On vLLM this worker writes the prompt itself, in the OFFICIAL format — the
-model repo's own `chat_template.json` at the pinned revision, which always
-emits a system turn and puts the context verbatim before `<|im_end|>`, followed
-by `language {Name}<asr_text>` to force the language exactly as `qwen_asr`
-0.0.6's `_build_text_prompt` does. That is the prompt ContentStudio measured.
-(vLLM's own `/v1/audio/transcriptions` omits the system turn when there is no
-context; this does not.)
-
-On mlx-audio the prompt is the library's (`Qwen3ASRModel._build_prompt`), and
-it differs in ONE character: it writes `{context}\\n` before `<|im_end|>`. Not
-patched here — a patch to a library's private prompt builder is a patch that
-breaks silently on its next release — and written down in PHASE25 section 8 as
-a comparison owed on the first live run.
-
-Neither engine applies `qwen_asr`'s `detect_and_fix_repetitions`, which
-silently collapses a run of repeated characters or short patterns in the
-official SDK's `parse_asr_output`. What the model wrote is what comes back; a
-loop is the server's to detect and name (`loopguard.py`), not this worker's to
-tidy away.
-"""
-
 from __future__ import annotations
 
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import workerio  # noqa: E402
+import workerio
 
 sys.path.pop(0)
 
-import json  # noqa: E402
-import time  # noqa: E402
-import wave  # noqa: E402
+import json
+import time
+import wave
 
-from workerio import SAMPLE_RATE, decode, fail, send  # noqa: E402
+from workerio import SAMPLE_RATE, decode, fail, send
 
 
-#: `qwen_asr` 0.0.6's `MIN_ASR_INPUT_SECONDS`: a piece shorter than this is
-#: zero-padded at its tail to this length, because the audio tower has nothing
-#: to encode below it. The padding is silence and the REPORTED duration stays
-#: the real one, so no timestamp moves.
 MIN_PIECE_SECONDS = 0.5
 
-#: The quiet-point search: the last 10 s before each nominal boundary (or half
-#: the piece, whichever is less) is searched for the 100 ms window with the
-#: least energy, and the cut is made at that window's CENTRE (2026-09-26; it was
-#: the window's quietest sample, which in a short pause is often the sample
-#: right against the next word). `qwen_asr` 0.0.6's `split_audio_into_chunks` searches
-#: 5 s EITHER side, so its pieces run up to 5 s past the limit it names; this
-#: searches the same 10 s entirely on the near side, so a piece is never longer
-#: than `max_piece_s` — the figure the aligner's trust, the token budget and
-#: `max_model_len` were all computed from.
 SEARCH_SECONDS = 10.0
 ENERGY_WINDOW_MS = 100.0
 
@@ -141,16 +30,12 @@ _STATE: dict = {
     "context": None,
     "max_batch": None,
     "max_new_tokens": None,
-    # The last source this session decoded, so a loop-guard re-cut of one stretch
-    # reads the same samples (and real neighbours for its overlap) without
-    # decoding a whole book again.
     "decoded_source": None,
     "decoded": None,
 }
 
 
 def require(request: dict, key: str, kind):
-    """One required key of the stated type, or a refusal naming it."""
     return workerio.require(
         request,
         key,
@@ -161,25 +46,7 @@ def require(request: dict, key: str, kind):
     )
 
 
-# ------------------------------------------------------------------ splitting
-
-
 def split_points(wav, max_piece_s: float, joins=()) -> list:
-    """`[(start_sample, end_sample)]` covering `wav` exactly, no gaps, no overlap.
-
-    After `qwen_asr` 0.0.6's `split_audio_into_chunks` (Apache-2.0, Alibaba
-    Qwen team), ported rather than imported because the llm env this runs in
-    does not have `qwen_asr`, with the search moved to the near side of each
-    cut (`SEARCH_SECONDS`): every boundary is the CENTRE of the quietest
-    100 ms window in the search span before the nominal cut, so a cut lands in
-    the middle of a pause rather than against its edge.
-
-    `joins` (samples of `wav`, 2026-09-27) are where `speech_only` took a
-    stretch out: the middle of `2 * pad_s` of audio the detector heard no
-    speech in. When one lies in the search span the cut is made there, at the
-    latest one, rather than at the quietest 100 ms, because a quiet window can
-    be a soft consonant and a join cannot.
-    """
     import numpy
 
     total = int(wav.shape[0])
@@ -214,12 +81,6 @@ def split_points(wav, max_piece_s: float, joins=()) -> list:
 
 
 def write_wav(path: str, samples) -> None:
-    """16-bit PCM mono at 16 kHz, with the standard library's own writer.
-
-    16-bit because it is what the aligner worker has always fed its model
-    (`crucible/jobs/align/worker.py` writes PCM_16 before `model.align`), so
-    the ASR model and the aligner hear the same samples.
-    """
     import numpy
 
     pcm = (numpy.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
@@ -231,7 +92,6 @@ def write_wav(path: str, samples) -> None:
 
 
 def read_wav(path: str):
-    """What `write_wav` wrote, back as float32 in [-1, 1]. Refuses anything else."""
     import numpy
 
     with wave.open(path, "rb") as handle:
@@ -245,19 +105,7 @@ def read_wav(path: str):
     return numpy.frombuffer(frames, dtype="<i2").astype(numpy.float32) / 32768.0
 
 
-# -------------------------------------------------------------------- engines
-
-
 def official_prompt(context: str | None, language: str) -> str:
-    """The model repo's own chat template, rendered, plus the forced language.
-
-    `chat_template.json` at the pinned revision: a system turn ALWAYS (empty
-    when there is no context), the user turn holding the audio placeholder
-    vLLM expands (`Qwen3ASRForConditionalGeneration.get_placeholder_str`), and
-    the generation prompt. `language {Name}<asr_text>` is `qwen_asr` 0.0.6's
-    `_build_text_prompt` forcing the language, which makes the output the
-    transcript alone.
-    """
     return (
         f"<|im_start|>system\n{context or ''}<|im_end|>\n"
         "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n"
@@ -266,7 +114,6 @@ def official_prompt(context: str | None, language: str) -> str:
 
 
 def load_vllm(request: dict) -> tuple:
-    """vLLM, in-process, with every number from the manifest."""
     try:
         from vllm import LLM
     except ImportError as exc:
@@ -280,10 +127,6 @@ def load_vllm(request: dict) -> tuple:
         max_model_len=require(request, "max_model_len", int),
         max_num_seqs=require(request, "max_batch", int),
         kv_cache_memory_bytes=require(request, "kv_cache_memory_bytes", int),
-        # With `kv_cache_memory_bytes` set this is only vLLM's startup gate —
-        # free memory must be at least this share of the card
-        # (`v1/worker/utils.py` `request_memory`) — and the server sets it to
-        # the manifest's estimate over the card, the same figure its guard used.
         gpu_memory_utilization=float(
             require(request, "gpu_memory_utilization", (int, float))
         ),
@@ -295,7 +138,6 @@ def load_vllm(request: dict) -> tuple:
 
 
 def load_mlx(request: dict) -> tuple:
-    """mlx-audio's Qwen3-ASR, reading the official checkpoint and converting it."""
     try:
         import mlx.core as mx
         from mlx.utils import tree_flatten
@@ -313,16 +155,7 @@ def load_mlx(request: dict) -> tuple:
             "mlx-audio is given one piece per call here; a max_batch other than "
             "1 is a server that thinks this is a different engine"
         )
-    # STRICT: every tensor the model has must come from the checkpoint and
-    # every tensor in the checkpoint must land somewhere. The pinned revision
-    # holds `thinker.audio_tower.*` (397), `thinker.model.*` (310) and the tied
-    # `thinker.lm_head.weight` that `sanitize` drops, and nothing else; a
-    # release that renamed a layer must be a refusal, not a model running
-    # with a freshly initialised one.
     model = load(model_dir, lazy=False, strict=True)
-    # FULL PRECISION IS CHECKED, NOT ASSUMED (Owen, 2026-09-24). The weights
-    # are bf16 on disk and mlx-audio keeps a checkpoint's dtype; a library that
-    # quietly cast would be running a different model under the same id.
     wanted = getattr(mx, dtype, None)
     if wanted is None:
         raise RuntimeError(f"mlx has no dtype {dtype!r}")
@@ -341,17 +174,6 @@ def load_mlx(request: dict) -> tuple:
 
 
 def load_qwen_asr(request: dict) -> tuple:
-    """Qwen's own `qwen_asr` package on torch, as ContentStudio ran it.
-
-    The Mac's official engine since 2026-09-24: on identical pieces it heard a
-    few more fillers than the MLX port (asr/qwen3-asr-1.7b.toml has the table).
-    It runs in the ALIGN env, which pins exactly ContentStudio's versions.
-
-    NO FORCED ALIGNER HERE. The package can load one beside the model; Crucible
-    runs the aligner as its own session (`qwen.py`), so this loads the ASR
-    model alone. `max_inference_batch_size=1` is stated rather than left at the
-    package's 32, which aborted an MPS process outright.
-    """
     try:
         import torch
         from qwen_asr import Qwen3ASRModel
@@ -377,7 +199,6 @@ def load_qwen_asr(request: dict) -> tuple:
         max_new_tokens=require(request, "max_new_tokens", int),
         max_inference_batch_size=1,
     )
-    # FULL PRECISION IS CHECKED, NOT ASSUMED (Owen, 2026-09-24).
     found = {
         str(p.dtype) for p in model.model.parameters() if p.dtype.is_floating_point
     }
@@ -412,9 +233,6 @@ def load(request: dict) -> None:
         model, tokenizer, device = load_mlx(request)
     seconds = time.time() - started
 
-    # THE CONTEXT'S LENGTH, in this model's own tokens, before a second of
-    # audio is decoded. `max_model_len` was sized for at most `ceiling`, and a
-    # longer one would end a 180 s piece's decode early with nothing to say so.
     counted = len(tokenizer.encode(context)) if context else 0
     if counted > ceiling:
         raise RuntimeError(
@@ -442,19 +260,7 @@ def load(request: dict) -> None:
     send("done")
 
 
-# ---------------------------------------------------------------------- split
-
-
 def split(request: dict) -> None:
-    """Cut `source` (or one stretch of it) into pieces, each written with overlap.
-
-    `region_s` is `[start, end]` in seconds of the source, or null for all of it;
-    a loop-guard re-cut names the stretch that looped. `overlap_s` is the real
-    audio written on BOTH sides of each piece's core, clamped at the source's
-    ends (Owen, 2026-09-26: the caller sets the piece length and the overlap).
-    A result's `offset_s`/`duration_s` are the CORE, the stretch the piece owns;
-    `audio_offset_s`/`audio_duration_s` are what was written, overlap included.
-    """
     ffmpeg = require(request, "ffmpeg", str)
     source = require(request, "source", str)
     max_piece_s = float(require(request, "max_piece_s", (int, float)))
@@ -470,9 +276,6 @@ def split(request: dict) -> None:
     os.makedirs(out_dir, exist_ok=True)
     progress = workerio.decode_reporter()
 
-    # The cache is keyed by the source AND the speech settings: a re-cut must
-    # read the same (shortened) signal its first cut did, and every time it
-    # reports is on that signal's timeline.
     key = (source, json.dumps(speech, sort_keys=True))
     if _STATE["decoded_source"] == key:
         wav, samples, kept = _STATE["decoded"]
@@ -505,8 +308,6 @@ def split(request: dict) -> None:
     spans = split_points(wav[region_first:region_last], max_piece_s, joins)
     send(
         "ready",
-        # The timeline every offset below is on: the source's, or with
-        # `speech` the shortened one, whose table `kept` is (source samples).
         duration_s=total,
         pieces=len(spans),
         samples=samples,
@@ -541,29 +342,18 @@ def split(request: dict) -> None:
     send("done")
 
 
-# ----------------------------------------------------------------- transcribe
-
-
 def transcribe_vllm(batch: list) -> list:
-    """One `generate` over up to `max_batch` pieces; vLLM batches them."""
     from vllm import SamplingParams
 
     llm = _STATE["model"]
     prompts = [
         {
             "prompt": _STATE["prompt"],
-            # With the rate stated, vLLM's parser resamples nothing
-            # (`AudioResampler.resample` returns the input when the rates
-            # match), which is why the llm env needs none of vllm's [audio]
-            # extras for this.
             "multi_modal_data": {"audio": [(read_wav(piece["wav"]), SAMPLE_RATE)]},
         }
         for piece in batch
     ]
     params = [
-        # Greedy. Temperature 0 is the SDK's own (`qwen_asr`'s vLLM backend
-        # builds `SamplingParams(temperature=0.0, max_tokens=...)`), and it is
-        # what makes a re-decode of the same audio a reproduction.
         SamplingParams(temperature=0.0, max_tokens=int(piece["max_tokens"]))
         for piece in batch
     ]
@@ -582,7 +372,6 @@ def transcribe_vllm(batch: list) -> list:
 
 
 def transcribe_mlx(batch: list) -> list:
-    """One piece per `generate` call, for the loop guard's sake (asrmodels.py)."""
     import mlx.core as mx
 
     model = _STATE["model"]
@@ -596,8 +385,6 @@ def transcribe_mlx(batch: list) -> list:
             temperature=0.0,
             language=_STATE["language"],
             system_prompt=_STATE["context"],
-            # Longer than any piece, so mlx-audio never cuts one again: the
-            # pieces are already cut, at the aligner's limit.
             chunk_duration=1200.0,
             verbose=False,
         )
@@ -609,24 +396,11 @@ def transcribe_mlx(batch: list) -> list:
                 "hit_token_limit": tokens >= budget,
             }
         )
-        # MLX keeps freed buffers for reuse until told otherwise; between
-        # pieces they are memory nothing will ask for again.
         mx.clear_cache()
     return rows
 
 
 def transcribe_qwen_asr(batch: list) -> list:
-    """One piece per `generate`, the way `qwen_asr` 0.0.6 runs its transformers
-    backend (`Qwen3ASRModel._infer_asr_transformers`), minus two things.
-
-    The prompt is the package's own `_build_text_prompt` (the repo's chat
-    template plus `language {Name}<asr_text>`), and the inputs go through its
-    own processor, so the model hears exactly what it heard in ContentStudio's
-    run. What is NOT the package's: the token count, which its public
-    `transcribe` does not return and the loop guard needs, and its
-    `parse_asr_output`, whose `detect_and_fix_repetitions` silently collapses
-    repeats (the module docstring).
-    """
     import torch
 
     asr = _STATE["model"]
@@ -650,8 +424,6 @@ def transcribe_qwen_asr(batch: list) -> list:
         rows.append(
             {"text": text.strip(), "tokens": tokens, "hit_token_limit": tokens >= budget}
         )
-        # torch's MPS caching allocator keeps every freed block; between pieces
-        # they are memory nothing will ask for again.
         if asr.model.device.type == "mps":
             torch.mps.empty_cache()
     return rows
@@ -686,9 +458,6 @@ def transcribe(request: dict) -> None:
     send("done")
 
 
-# ----------------------------------------------------------------------- main
-
-
 OPS = {"load": load, "split": split, "transcribe": transcribe}
 
 
@@ -715,13 +484,8 @@ def main() -> int:
             fail(str(exc.args[0]))
             return 1
         except Exception as exc:
-            # A whole request failed. The session is one job, and the job is
-            # over, so this exits rather than waiting for a line it cannot use.
             fail(f"{type(exc).__name__}: {exc}")
             return 1
-    # EOF: the job stopped the session politely. Exit 0 so `stop()` sees a
-    # worker that went when asked, releasing the card the way its library
-    # expects to.
     return 0
 
 

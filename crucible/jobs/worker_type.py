@@ -1,13 +1,3 @@
-"""The refusals and readiness checks every worker job type makes the same way.
-
-`align`, `asr`, `denoise` and `rvc` each run a manifest's model in a worker
-env, and each answers `check()` and refuses a submit in `llm`'s order: what no
-amount of installing can fix first (`backend_unsupported`, a card too small),
-then what an install or a pull would fix (`env_missing`,
-`model_not_installed`), then the live accelerator. The codes, messages and
-details below are those types' own; each passes the words that differ.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,8 +12,6 @@ from .base import JobTypeStatus
 def env_or_status(
     config: Config, env_type: str, backend_kind: str, *, missing_note: str = ""
 ) -> "jobenv.EnvStatus | JobTypeStatus":
-    """A worker env's status when it is installed, or the not-ready status
-    `check()` returns (`missing_note` appended to the env's own detail)."""
     try:
         env = jobenv.env_status(
             config.home, jobenv.worker_env(env_type, backend_kind), backend_kind
@@ -36,8 +24,6 @@ def env_or_status(
 
 
 def installed_ids(config: Config, manifests: Iterable[Any], backend_kind: str) -> list[str]:
-    """The ids among `manifests` with a block for this backend and its weights
-    pulled."""
     return [
         manifest.id
         for manifest in manifests
@@ -47,10 +33,6 @@ def installed_ids(config: Config, manifests: Iterable[Any], backend_kind: str) -
 
 
 def require_block(manifest: Any, model_id: str, backend_kind: str, noun: str) -> Any:
-    """This backend's block of `manifest`, or `400 backend_unsupported`.
-
-    `noun` names the thing in the sentence: "aligner", "ASR model", ...
-    """
     if not manifest.supports(backend_kind):
         raise ApiError(
             400,
@@ -67,7 +49,6 @@ def require_block(manifest: Any, model_id: str, backend_kind: str, noun: str) ->
 
 
 def refuse_if_larger_than_host(backend: Any, model_id: str, need_bytes: int) -> None:
-    """`accelerator.refuse_if_larger_than_host` against this backend's card."""
     accelerator.refuse_if_larger_than_host(
         model_id=model_id,
         need_bytes=need_bytes,
@@ -79,7 +60,6 @@ def refuse_if_larger_than_host(backend: Any, model_id: str, need_bytes: int) -> 
 def require_worker_python(
     config: Config, env_type: str, backend_kind: str, model_id: str, *, note: str = ""
 ) -> Path:
-    """The worker env's interpreter, or `409 env_missing` by name."""
     try:
         return jobenv.require_env(
             config.home, jobenv.worker_env(env_type, backend_kind), backend_kind
@@ -94,7 +74,6 @@ def require_worker_python(
 
 
 def require_weights(config: Config, manifest: Any, spec: Any, model_id: str) -> Path:
-    """The pulled weights' directory, or `409 model_not_installed` by name."""
     try:
         return weights.require_installed(config, manifest, spec).path
     except weights.WeightsError as exc:

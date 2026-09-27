@@ -1,15 +1,3 @@
-"""What `load-voice`, `unload-voice` and `tts` all have to agree about.
-
-These were in `crucible/jobs/tts/__init__.py` while the lifecycle pair was the
-whole job type. The render door (PHASE3-TTS.md section 6) needs every one of
-them — the same manifest lookup, the same backend spec, the same env and weights
-refusals in the same order — and it needs them from a module the package's
-`__init__` can import, so they moved here rather than being written twice.
-
-Nothing about their behaviour changed in the move, and the refusal names are the
-ones `jobs/tts/__init__.py`'s docstring already lists.
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -39,21 +27,6 @@ __all__ = [
 def require_reference(
     manifest: VoiceManifest, reference: Any
 ) -> VoiceReference | None:
-    """The clip this load may carry, or the first of three refusals by name.
-
-    PHASE3-TTS.md section 5's amendment. A zero-shot voice IS base weights plus
-    a recording, so a load without one has nothing to clone from — the base
-    model's own voice is a DIFFERENT voice and would be rendered under this
-    id — and a load of anything else WITH one is asking the engine to ignore
-    the weights it just named.
-
-        reference_required     kind is `zeroshot` and none was sent
-        reference_not_allowed  any other kind, and one was
-        reference_malformed    not base64, not a WAV, no transcript, too long
-
-    `reference` is the validated `ReferenceInput` (or None) rather than the raw
-    body: shape is pydantic's and content is `voicereference`'s.
-    """
     if manifest.kind == "zeroshot":
         if reference is None:
             raise ApiError(
@@ -103,7 +76,6 @@ def load_voices() -> dict[str, VoiceManifest]:
 def validated_params(
     model: type[BaseModel], params: dict[str, Any], job_type: str
 ) -> Any:
-    """Validate `params` up front, as a named 400 rather than a 500."""
     try:
         return model.model_validate(params)
     except ValidationError as exc:
@@ -120,7 +92,6 @@ def validated_params(
 
 
 def known_voice(voice_id: str) -> VoiceManifest:
-    """The manifest for this id, or `unknown_voice` by name."""
     manifests = load_voices()
     manifest = manifests.get(voice_id)
     if manifest is None:
@@ -134,38 +105,18 @@ def known_voice(voice_id: str) -> VoiceManifest:
 
 
 def describe_voices(config: Config, residency: Residency) -> list[ModelDescriptor]:
-    """The voices as DESIGN.md section 4's row — what the registry reads.
-
-    `/v1/info`'s `tts` capability carries `voice_rows` verbatim instead
-    (PHASE3-TTS.md section 8); this is the row `resolve_model` and `crucible
-    doctor` read through `describe_models()`. It takes the Config rather than
-    the backend kind alone because `installed` is the puller's stamp under
-    `config.home`, and it is the same predicate `voice_rows` and
-    `require_loadable` read — one fact, one reader (ARCHITECTURE.md R1).
-    """
     backend_kind = config.backend_kind
     rows: list[ModelDescriptor] = []
     for manifest in load_voices().values():
         if manifest.supports(backend_kind):
             spec = manifest.spec(backend_kind)
-            # A LOCAL BLOCK HAS NO REVISION AND NO REPO (PHASE18-UNCERTIFIED.md
-            # section 3), so the row carries what it does have: the identity its
-            # registrant asserted, and the directory instead of a repo id. The
-            # `path:` prefix is what keeps `source` one column meaning one
-            # thing — every other row here is a bare `<owner>/<name>`, and an
-            # unprefixed directory beside those would be a reader's problem to
-            # tell apart. (`crucible/catalog.py` prefixes BOTH shapes, `hf:`
-            # included; this row does not, so only the new shape is marked.)
             revision, source, estimate = (
                 spec.weights_identity,
                 spec.hf_repo if spec.hf_repo is not None else f"path:{spec.path}",
                 spec.memory_bytes_estimate,
             )
-            # The same predicate `voice_rows` and `require_loadable` read: the
-            # puller's stamp, at the revision this host's block pins.
             installed = weights.installed(config, manifest, spec) is not None
         else:
-            # A backend this manifest has no block for has nothing to install.
             revision, source, estimate, installed = "", "", 0, False
         rows.append(
             ModelDescriptor(
@@ -184,12 +135,8 @@ def _orphan(
     voice_id: str, source: str | None, residency: Residency,
     *, leases: Any | None, store: Any | None,
 ) -> bool | None:
-    """See `voice_rows`: a local voice nothing holds, or None when not asked."""
     if leases is None or store is None:
         return None
-    # `VoiceBackendSpec.source` is `"pinned"` or `"local"`; a row with no
-    # source is a backend this host does not have, which nothing here holds
-    # and nothing here registered from a path either.
     if source != "local":
         return False
     if residency.is_resident(KIND_TTS, voice_id):
@@ -207,68 +154,6 @@ def voice_rows(
     config: Config, backend: Any, residency: Residency,
     *, leases: Any | None = None, store: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """`GET /v1/voices` — PHASE3-TTS.md section 2.
-
-    **`orphan` (2026-09-21, the ladder's ask).** A voice registered from a
-    `path` — a directory somebody else put there — with nothing holding it:
-    not resident, no lease naming it, no queued or running job naming it. After
-    a restart that is every screening voice whose ladder ended without its
-    DELETE, and the row SAYS so rather than the server deciding for it: nothing
-    here garbage-collects, a person or the ladder sends the DELETE (which is
-    now safe to repeat). A pinned voice is never an orphan — the pin owns it.
-    Decided only when the caller hands over `leases` and `store`, which the two
-    wire doors do; a caller with neither gets `None` on the row, meaning "not
-    asked here", never `False`.
-
-    These same rows are the `tts` capability's rows in `GET /v1/info`: one shape,
-    one producer, the same rule and the same reason as `llm`'s models. One voice,
-    one description; a client never reconciles two.
-
-    `loadable` answers "is everything this host needs in place", which is a fact
-    about the disk. Like `model_rows` it deliberately does **not** run
-    nvidia-smi: the accelerator's state changes between a listing and a request,
-    so the guard runs at load time. A row saying `loadable: true` can still be
-    refused with `accelerator_busy`.
-
-    **`sampling` is deliberately not on the row**, nor are the EOS levers, the
-    token-budget formula or the engine flags. That is engine tuning, it is the
-    server's, and publishing it invites a client to send it back. What a client
-    gets is the shape it must pack to (`pace`, `max_chars`) and the identity it
-    must record (`fingerprint`).
-
-    **`serving` IS ON THE ROW SINCE 2026-09-19, and the rule above is what
-    changed rather than being broken.** It read: `[voice.serving].max_num_seqs`
-    is how wide the server admits, a Crucible-side configuration number, and a
-    client has no decision to make with it. That was true while the width was
-    the manifest's alone. Owen's ruling of 2026-09-19 gave a `tts` job its own
-    `params.width`, under that number and refused above it
-    (`width_over_serving`) — so a client now HAS a decision to make with it, and
-    without the row the only way to find the ceiling is to be refused by it.
-    `mem_fraction` and `context_length` ride with it for the same reason one
-    step removed: they are what a person comparing two servers, or deciding
-    whether this one can hold a screening run, has to be able to read. All of
-    them are `null` when the manifest states none, which means "narrator's own
-    launcher default" and never a number this row invented.
-
-    **`max_num_seqs` IS THE SERVED ARM'S WIDTH AND NOBODY ELSE'S** (Owen's
-    ruling of 2026-09-20). It is `HIGGS_MAX_NUM_SEQS` — stage 0's admission
-    width and the width of narrator's own batch — on a host whose tts env
-    installs a serving stack, which is `cuda-linux` today. On `mlx-darwin`
-    narrator starts no server, reads no `HIGGS_*` variable, and batches at
-    `NARRATOR_HIGGS3_MLX_BATCH` out of `engines/narrator.py:MLX_TIERS`, chosen
-    by that machine's own memory. So this number is what a render's `width` is
-    refused against HERE on the served arm only; on darwin a stated width goes
-    to narrator, which refuses it against the width it actually has. Reading
-    this row as "the width my render will run at" is what cost the Mac a
-    measured 2.3x between 1.0.7 and 2026-09-20 (see `render.py:_require_width`).
-    The row is honest either way — it says what the MANIFEST states — but a
-    client on darwin has no ceiling to compute from it.
-
-    The levers themselves still reach narrator through the engine's environment
-    (`crucible/engines/narrator.py`) and are still never SENT by a client: the
-    row publishes what the server chose, and the only thing a request may say
-    about any of it is a width the engine can actually run.
-    """
     backend_kind = backend.kind
     rows: list[dict[str, Any]] = []
     for manifest in load_voices().values():
@@ -292,13 +177,6 @@ def voice_rows(
             spec = manifest.spec(backend_kind)
             estimate = spec.memory_bytes_estimate
             basis = spec.estimate_basis
-            # THE BLOCK'S IDENTITY AND NOT `spec.revision`, because this row
-            # states `fingerprint == f"{id}@{revision}"` and a local block has
-            # no revision: read off the raw field, a local voice published a
-            # fingerprint naming a checkpoint beside a `revision` of null, and
-            # the two halves of one record disagreed. `weights_identity` is the
-            # one owner of that fact (crucible/voices.py) and `identity_basis`
-            # below is what says how much it is worth.
             revision = spec.weights_identity
             source = spec.source
             identity_basis = spec.identity_basis
@@ -312,8 +190,6 @@ def voice_rows(
                 backend_kind,
             )
             if estimate > backend.gpu.vram_bytes:
-                # Not loadable here at all, so say so instead of asking for an
-                # 8.5 GB download first.
                 reason = (
                     f"needs {estimate / 1024 ** 3:.1f} GiB and "
                     f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
@@ -325,17 +201,11 @@ def voice_rows(
                     f"{env.detail}"
                 )
             elif not is_installed and spec.source == weights.LOCAL:
-                # A LOCAL VOICE IS NOT PULLABLE, so the reason must not tell its
-                # reader to pull it (PHASE18-UNCERTIFIED.md section 3). The
-                # directory belongs to whatever put it there, and a screening
-                # merge being gone is the expected end of its life rather than a
-                # broken install.
                 reason = (
                     f"no weights at {spec.path} — this voice names a directory on "
                     "this server, which Crucible does not fetch and cannot replace"
                 )
             elif not is_installed:
-                # The folder the weights ARE in: an alias's is its base's.
                 directory = weights.subject_dir(config, manifest, backend_kind)
                 reason = (
                     f"no weights at {directory} — run "
@@ -356,93 +226,26 @@ def voice_rows(
                 ),
                 "loadable": reason is None,
                 "reason": reason,
-                # These four live in the backend block this host may not have,
-                # and are null rather than 0 or "" when it does not: a 0 estimate
-                # would read as "needs nothing" and an empty revision as a pin.
                 "revision": revision,
                 "fingerprint": fingerprint,
-                # WHERE THE BYTES COME FROM, and how much `fingerprint` is
-                # worth. `"pinned"` means the sha was fetched and stamped and
-                # the identity is VERIFIED; `"local"` means a directory on this
-                # machine whose identity the registrant ASSERTED and nothing
-                # checked. Both on the row for `estimate_basis`'s reason: a
-                # client comparing two renders must not be able to mistake one
-                # kind of identity for the other.
                 "source": source,
                 "identity_basis": identity_basis,
                 "memory_bytes_estimate": estimate,
-                # Whether somebody watched the card for that number or it came
-                # off the engine's own configured reservation. On the row rather
-                # than only in the manifest, so nothing downstream can mistake
-                # one for the other (crucible/voices.py).
                 "estimate_basis": basis,
-                # THE SERVING TABLE, or null for a voice that declares none —
-                # a shape the next narrator engine will have and no manifest
-                # has today. `max_num_seqs` is the SERVED ARM's width (see the
-                # docstring): the ceiling a job's `width` is refused against on
-                # `cuda-linux`, and a number that describes nothing on darwin,
-                # where narrator batches at its own measured tier width. The
-                # other two are what the server will configure narrator with,
-                # null meaning its launcher's own default.
                 "serving": (
                     None if manifest.serving is None else manifest.serving.to_dict()
                 ),
                 "max_chars": max_chars,
-                # HOW THE CAP AND THE BAND WERE GOT, beside the numbers
-                # themselves (PHASE21 sections 2.1 and 6). `"measured"` is a
-                # sweep on these weights on this arm; `"placeholder"` is a
-                # number somebody wrote down so the arm could be served at all;
-                # `"inherited"` is a pace taken from a predecessor run. NULL
-                # MEANS THIS VOICE'S MANIFEST SCHEMA CANNOT SAY, which is a
-                # third statement and not a fourth word for "measured" — every
-                # `voices/*.toml` reports null, because that schema has no such
-                # key. Both ride on the row for `estimate_basis`'s reason: an
-                # inherited pace is indistinguishable from a measured one at
-                # the point of use, and that is exactly how deathstalker's
-                # 16.64 survived onto weights that measured 15.91.
                 "max_chars_basis": max_chars_basis,
                 "pace_basis": manifest.pace_basis,
-                # WHICH OTHER WEIGHTS AN INHERITED PACE CAME FROM, in the
-                # manifest's own prose, and null unless `pace_basis` is
-                # `"inherited"`. On the row because the word alone cannot be
-                # acted on: inheriting from a sibling checkpoint of the same
-                # corpus is near enough (mistborn 13.29/13.33/13.76 across three
-                # retrains) and inheriting from a different corpus two versions
-                # back is deathstalker's 16.64 onto weights that measured 15.91.
-                # A reader deciding whether to trust a band needs the sentence.
                 "inherited_from": manifest.inherited_from,
-                # WHICH KIND OF FILE THIS ROW'S FACTS CAME OUT OF: `"repo"` is
-                # a `crucible-voice.toml` in the weights' own repo at the
-                # pinned revision, `"override"` a whole manifest on this
-                # machine (`PUT /v1/voices/{id}` or `$CRUCIBLE_VOICES_DIR`),
-                # `"engine"` the narrator engine's own base behaviour
-                # (section 2.6).
                 "manifest": manifest.manifest_source,
                 "sample_rate": manifest.sample_rate,
-                # How many rungs this voice's ladder has, so a client can ask
-                # how many takes exist BEFORE it submits one — `take: N` past
-                # the end is a seed lane at take 0's numbers, never clamped,
-                # and a client spreading N candidates across the ladder (which
-                # is what BookForge's Correct Sentences does) has to know N.
-                # The rungs' NUMBERS are deliberately not here, for the same
-                # reason `sampling` is not: they are engine tuning, they are
-                # the server's, and publishing them invites a client to send
-                # them back.
                 "takes": len(manifest.takes),
-                # Whether a `load-voice` for this row must carry a reference
-                # clip (`params.reference`) — true for a zeroshot voice and
-                # false for every other kind. On the row so a picker can show
-                # the clip field before the load is refused
-                # (`reference_required`), and derived from `kind` rather than
-                # left for a client to derive, because "which kinds need one"
-                # is the server's rule.
                 "needs_reference": manifest.kind == "zeroshot",
                 "pace": manifest.pace.to_dict(),
             }
         )
-    # A PINNED VOICE THIS HOST CANNOT READ is a row that says so, with the pin's
-    # own refusal, rather than a 500 for every voice (`voicerepo.load_pinned`).
-    # Every key a served row has, null where nothing is known.
     from ...voices import unserved_pins
 
     for voice_id, (revision, why) in sorted(unserved_pins().items()):
@@ -466,11 +269,6 @@ def voice_rows(
 def require_loadable(
     config: Config, backend: Any, voice_id: str
 ) -> tuple[VoiceManifest, VoiceBackendSpec, Any]:
-    """Manifest, backend spec, interpreter and weights, or the named refusal.
-
-    The order is `jobs/llm`'s, and deliberately so: what can never be fixed, then
-    what an install or a pull would fix, then what the live accelerator says.
-    """
     backend_kind = backend.kind
     manifest = known_voice(voice_id)
     if not manifest.supports(backend_kind):
@@ -483,10 +281,6 @@ def require_loadable(
              "declared": sorted(manifest.backends)},
         )
     spec = manifest.spec(backend_kind)
-    # "NEVER ON THIS HOST" IS THE LEAST THIS VOICE CAN BE SERVED IN, not its
-    # full width: Owen, 2026-09-26, "we should drop batches to 1 at a time
-    # before we quantize" (`ttsplan`). A card that holds one passage at a time
-    # is a card this voice runs on.
     accelerator.refuse_if_larger_than_host(
         model_id=voice_id,
         need_bytes=voice_load_plan(config, backend, manifest, spec).floor_bytes,
@@ -517,9 +311,6 @@ def require_loadable(
             {
                 "voice": voice_id,
                 "source": spec.source,
-                # Both null on a local block, which is what it has: no repo was
-                # named and no commit was pinned. The directory is in the
-                # message `weights.require_installed` already wrote.
                 "hf_repo": spec.hf_repo,
                 "revision": spec.revision,
                 "path": spec.path,
@@ -529,34 +320,11 @@ def require_loadable(
 
 
 def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] | None:
-    """The `model` block of a tts artifact's provenance sidecar.
-
-    For `tts` the model IS the voice (PHASE3-TTS.md section 6), so the sidecar
-    names it with the same three keys every other type uses rather than inventing
-    a fourth word for the same idea. The revision is this host's backend pin,
-    which is a statement about bytes: a load refuses weights pulled at any other
-    revision, so the pin the manifest names is the checkpoint the engine read —
-    and a finished audiobook that says which voice rendered it should also say
-    which merge of that voice, because two merges of one fine-tune are two
-    narrators.
-
-    ON A LOCAL VOICE THE REVISION IS THE ASSERTED IDENTITY, and `identity_basis`
-    beside it says so (PHASE18-UNCERTIFIED.md section 3.1). Leaving `revision`
-    null there would be the worse of the two available lies: a sidecar whose
-    `fingerprint` names a checkpoint and whose `revision` says nothing reads as
-    a render whose weights were never established, when in fact they were
-    stated — just by a person rather than by a sha. What must never happen is
-    an ASSERTED identity being read as a VERIFIED one, and that is what the
-    basis is for.
-    """
     if voice_id is None:
         return None
     manifest = known_voice(voice_id)
     spec = manifest.backends.get(backend_kind)
     if spec is None:
-        # Unreachable through the API: `preflight` refuses `backend_unsupported`
-        # before a job exists. A sidecar still has to say something true if it is
-        # reached another way, and inventing a revision is not it.
         return {
             "id": voice_id,
             "revision": None,
@@ -574,10 +342,6 @@ def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] 
 def voice_load_plan(
     config: Config, backend: Any, manifest: VoiceManifest, spec: VoiceBackendSpec
 ) -> "ttsplan.LoadPlan":
-    """What loading this voice asks of THIS card, and the width narrator starts
-    at (`ttsplan.load_plan`): the capability walk's own choice, made again from
-    the same budget so the verdict and the load agree. Every guard and every
-    `load_voice` in this job type asks here."""
     return ttsplan.load_plan(
         manifest,
         spec,

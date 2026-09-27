@@ -1,54 +1,3 @@
-"""A voice's facts travel with its weights — `crucible-voice.toml` and the pins.
-
-PHASE21-VOICES-FROM-HF.md sections 2.1 to 2.3. Crucible ships no voices: it
-downloads them, and the safe band, the caps, the sampling and the retake ladder
-come down WITH the bytes, out of a file committed in the SAME commit as the
-weights it describes.
-
-── Why the file is in the repo and not in this package ──────────────────────
-
-Deploying mistborn ckpt-4257 on 2026-09-19 took seven steps, and step seven was
-"the manifest Crucible ships is STILL stale": `crucible/voices/mistborn.toml`
-carried pace 13.33, band 400-700 and revision e5bf8017, every one of them a
-retired number, while the card on the HF repo carried four of the same figures
-written by a second step of the same deploy. A value and its description in two
-places drift, always — that is how deathstalker's 16.64 survived onto weights
-that measured 15.91, and how thirdreich's card still carried `higgs_target_chars`
-ten days after that field was retired. The fix is a schema fix: one file, one
-commit, one writer.
-
-── THREE SCHEMAS, AND THEY ARE DELIBERATELY NOT ONE ─────────────────────────
-
-    crucible-voice.toml   the REPO's, this module's, and it carries no machine
-                          facts at all. `id`, `hf_repo`, `revision`,
-                          `memory_bytes_estimate`, `estimate_basis`,
-                          `estimate_note`, `[voice.serving]` and the word
-                          `backends` are each REFUSED BY NAME here, so a file
-                          converted from a packaged manifest cannot carry one by
-                          accident and cannot make a claim about a box it has
-                          never run on.
-
-    pins.toml             the LOCAL side: one repo and one sha per id, packaged
-                          (what this build may offer) and per-machine (what this
-                          machine has chosen), the machine winning per id.
-
-    voices/<id>.toml      `crucible/voices.py`'s, unchanged, and still the one
-                          the engine reads. This module does not add a second
-                          internal model; it TRANSLATES a repo document into
-                          that one and hands it to the same `_parse` every
-                          packaged manifest goes through. Every pace, sampling,
-                          clips, takes and cap rule therefore applies verbatim,
-                          by being the same code rather than a copy of it.
-
-── The word `arms` ──────────────────────────────────────────────────────────
-
-The repo schema says `[voice.arms.<backend>]` where the internal one says
-`[voice.backends.<kind>]`, and the rename is the point: the two files look
-alike, one carries machine facts and the other must never, and a reader (or a
-`cp`) that confuses them would produce a file that parses as the wrong schema.
-`backends` in a repo manifest is refused by name for exactly that reason.
-"""
-
 from __future__ import annotations
 
 import tomllib
@@ -68,27 +17,12 @@ from .voices import (
     voices_dir,
 )
 
-#: WHAT THE FILE IS CALLED, at the ROOT of the repo. Not the card's
-#: frontmatter: a machine contract is not parsed out of a human README where an
-#: editorial fix breaks a loader. The card is GENERATED from this file
-#: (`crucible voices card`), so there is one writer.
 REPO_MANIFEST_NAME = "crucible-voice.toml"
 
-#: The schema this build reads. A loader refuses a schema it does not read
-#: rather than reading the keys it recognises out of a newer file — half a
-#: manifest is a voice served on somebody else's terms.
 REPO_SCHEMA = 1
 
-#: WHERE A FETCHED MANIFEST IS KEPT, under `<CRUCIBLE_HOME>`. Content-addressed
-#: by (repo, revision), which is what makes caching it honest rather than a
-#: staleness hazard: a sha names one byte-state forever, so a cached file at a
-#: sha cannot go out of date. It exists so `GET /v1/voices` is a directory read
-#: rather than a Hub round trip per row.
 MANIFEST_CACHE_DIRNAME = "voice-manifests"
 
-#: `[voice]`'s scalars in the REPO schema. `id` is not among them, by rule: a
-#: repo may be offered under any id and the PIN names it, so an id in the file
-#: would be a second owner of the one fact the local side actually decides.
 _REPO_VOICE_REQUIRED: dict[str, type] = {
     "display": str,
     "kind": str,
@@ -97,11 +31,6 @@ _REPO_VOICE_REQUIRED: dict[str, type] = {
     "sample_rate": int,
 }
 
-#: KEYS THIS SCHEMA REFUSES BY NAME, each with where it belongs instead. Not a
-#: silent drop and not a generic "unknown key": the whole reason section 2.1
-#: lists them is that a file converted from a packaged manifest would otherwise
-#: carry a claim about a machine it has never run on, and `check_table`'s
-#: "unknown key(s) [...]" would send its reader looking for a typo.
 _REFUSED_IN_REPO: dict[str, str] = {
     "id": (
         "a repo can be offered under any id, and the PIN names it "
@@ -137,17 +66,10 @@ _REFUSED_IN_REPO: dict[str, str] = {
     ),
 }
 
-#: `[voice.pace]`'s two extra keys in the REPO schema. `basis` is required
-#: whenever the table is present; `measured_from` is required when the basis is
-#: `"measured"`.
 _PACE_BASIS = "basis"
 _PACE_MEASURED_FROM = "measured_from"
 _PACE_INHERITED_FROM = "inherited_from"
 
-#: WHICH SENTENCE EACH BASIS OWES, and it owes exactly that one. The shape is
-#: `estimate_basis`'s, where `declared` requires a note and `measured` refuses
-#: one: a reason attached to the wrong basis is a reason a reader will trust the
-#: next time it means something. Ruled 2026-09-19.
 _PACE_BASIS_PROSE: dict[str, str] = {
     "measured": _PACE_MEASURED_FROM,
     "inherited": _PACE_INHERITED_FROM,
@@ -156,17 +78,6 @@ _PACE_BASIS_PROSE: dict[str, str] = {
 _ARM_REQUIRED: dict[str, type] = {
     "sampling": dict,
 }
-#: `max_chars` IS OPTIONAL HERE FOR `[voice.pace]`'S REASON, and it moved on the
-#: same day (2026-09-19, PHASE18-UNCERTIFIED.md section 4). A cap is a result —
-#: the longest chunk a sweep on these weights on this arm came back whole from —
-#: so a repo published before that sweep has none, and the internal schema
-#: (`voices.py:_BACKEND_OPTIONAL`) stopped requiring it in the same commit.
-#: These two schemas describe one voice from two sides and must agree, or a
-#: manifest would be publishable and unloadable, or the reverse.
-#:
-#: A STATED CAP STILL OWES ITS BASIS, and a basis with no cap is refused as the
-#: leftover it is — `_check_arm_cap` below. That pairing is the whole of what
-#: `max_chars_basis` is for.
 _ARM_OPTIONAL: dict[str, type] = {
     "max_chars": int,
     "max_chars_basis": str,
@@ -179,13 +90,9 @@ _PIN_REQUIRED: dict[str, type] = {"hf_repo": str, "revision": str}
 
 @dataclass(frozen=True)
 class Pin:
-    """One row of a `pins.toml`: which repo, at which commit, under which id."""
-
     id: str
     hf_repo: str
     revision: str
-    #: Which `pins.toml` this row came out of, so a refusal can name the file a
-    #: person has to edit.
     path: Path
 
     def to_dict(self) -> dict[str, Any]:
@@ -197,27 +104,15 @@ class Pin:
         }
 
 
-# --------------------------------------------------------------------- pins
-
-
 def packaged_pins_path() -> Path:
-    """`crucible/voices/pins.toml` — the repos this BUILD may offer."""
     return voices_dir() / PINS_FILE
 
 
 def home_pins_path() -> Path:
-    """`<CRUCIBLE_HOME>/voices/pins.toml` — the repos THIS MACHINE has chosen.
-
-    Where `PUT /v1/voices/{id}` with a `pin` body and `crucible voices pin`
-    write, and the only pins file either of them touches: the packaged one is
-    the install, and editing it would make the next upgrade the thing that
-    "restored" a pin somebody deliberately moved.
-    """
     return home_voices_dir() / PINS_FILE
 
 
 def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
-    """One pins file, by id. Every refusal by name, as `VoiceError`."""
     from .voices import _HF_REPO, _REVISION, _VOICE_ID
 
     try:
@@ -262,17 +157,8 @@ def _parse_pins(text: str, path: Path) -> dict[str, Pin]:
 
 
 def load_pins() -> dict[str, Pin]:
-    """Every pin this host offers, by id — packaged first, the machine's winning.
-
-    The packaged list is what this BUILD ships, the home list is what this MACHINE decided,
-    and a deploy repins one machine at a time (section 8.4). Deleting a home row
-    puts the packaged pin back, which is what makes trying a new checkpoint safe.
-    """
     from .voices import voices_dir_is_overridden
 
-    # `CRUCIBLE_VOICES_DIR` REPLACES the set, this machine's own pins included:
-    # `packaged_pins_path()` already follows the override, and reading the home
-    # file beside it would add voices the caller did not put in that directory.
     roots = (
         (packaged_pins_path(),)
         if voices_dir_is_overridden()
@@ -291,13 +177,6 @@ def load_pins() -> dict[str, Pin]:
 
 
 def write_home_pin(voice_id: str, hf_repo: str, revision: str) -> Pin:
-    """Add or replace this machine's pin for `voice_id`. Returns what was written.
-
-    Validated by the SAME `_parse_pins` that reads one, at the path it is about
-    to occupy, and written atomically — a half-written pins file is not a broken
-    pin, it is a broken server, because `load_pins` reads the whole file and one
-    unparseable row raises for every caller of it.
-    """
     import tomli_w
 
     path = home_pins_path()
@@ -314,7 +193,7 @@ def write_home_pin(voice_id: str, hf_repo: str, revision: str) -> Pin:
     document = {key: document[key] for key in sorted(document)}
     text = tomli_w.dumps(document)
     written = _parse_pins(text, path)
-    if voice_id not in written:  # pragma: no cover - `_parse_pins` refuses first
+    if voice_id not in written:
         raise VoiceError(f"{path.name}: writing the pin for {voice_id!r} lost it")
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -329,12 +208,6 @@ def write_home_pin(voice_id: str, hf_repo: str, revision: str) -> Pin:
 
 
 def remove_home_pin(voice_id: str) -> bool:
-    """Delete this machine's pin row for `voice_id`. True if one went.
-
-    The PACKAGED pin is untouched and unreachable from here, exactly as the
-    packaged manifests are: removing a home row that shadowed one brings the
-    packaged pin back.
-    """
     import tomli_w
 
     path = home_pins_path()
@@ -359,7 +232,6 @@ def remove_home_pin(voice_id: str) -> bool:
 
 
 def is_home_pin(voice_id: str) -> bool:
-    """Does this machine's own pins file hold a row for this id?"""
     path = home_pins_path()
     if not path.is_file():
         return False
@@ -369,11 +241,7 @@ def is_home_pin(voice_id: str) -> bool:
         return False
 
 
-# ------------------------------------------------------- the repo manifest
-
-
 def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
-    """Refuse a machine fact in a repo manifest, by its own name and reason."""
     for key in sorted(set(table) & set(_REFUSED_IN_REPO)):
         raise VoiceError(
             f"{where}: carries {key}, which a repo manifest may not state — "
@@ -382,15 +250,6 @@ def _check_no_machine_facts(where: str, table: dict[str, Any]) -> None:
 
 
 def _check_arm_cap(where: str, block: dict[str, Any]) -> str | None:
-    """The arm's `max_chars_basis`, or None because it states no cap.
-
-    The two keys are one statement and travel together (2026-09-19). A cap
-    without a basis ships an unmeasured number as a measured fact — thirdreich's
-    `higgs_max_chars_mlx: 900`, which no sweep ever produced — and a basis
-    without a cap is the leftover of a number somebody deleted, which reads as a
-    cap this loader checked and passed. `_check_pace` refuses its own `edges`
-    the same way and for the same sentence.
-    """
     cap = block.get("max_chars")
     basis = block.get("max_chars_basis")
     if cap is None:
@@ -423,24 +282,6 @@ def _check_arm_cap(where: str, block: dict[str, Any]) -> str | None:
 def _repo_pace(
     where: str, table: dict[str, Any]
 ) -> tuple[dict[str, Any], str, str | None, str | None]:
-    """The internal `[voice.pace]` table, its `basis`, and the basis's prose.
-
-    `basis`, `measured_from` and `inherited_from` are stripped here and do not
-    reach `_parse`: the internal schema has no such keys, they say how the
-    numbers were GOT rather than what they are, and what survives to the wire
-    does so as `pace_basis` and `inherited_from` on the `/v1/voices` row.
-
-    EACH BASIS OWES EXACTLY ITS OWN SENTENCE (`_PACE_BASIS_PROSE`, ruled
-    2026-09-19). A measured pace owes `measured_from` and refuses
-    `inherited_from`; an inherited pace owes `inherited_from` and refuses
-    `measured_from`. The rule is `estimate_basis`'s, and it is worth the four
-    refusals because "inherited" covers two very different situations: a
-    sibling checkpoint of the same corpus (mistborn 13.29 / 13.33 / 13.76
-    across three retrains — near enough) and a different corpus two versions
-    back (deathstalker's 16.64 onto weights that measured 15.91 — 4.4% fast,
-    enough to mis-size the duration guard from the first chunk). The word
-    cannot separate them; the sentence can.
-    """
     basis = table.get(_PACE_BASIS)
     if basis is None:
         raise VoiceError(
@@ -502,42 +343,19 @@ def _repo_pace(
 
 @dataclass(frozen=True)
 class RepoManifest:
-    """A parsed `crucible-voice.toml`, before a pin and a machine are applied.
-
-    Its own type because two of the three things that make a servable voice are
-    NOT in it: which id it is offered under, and what it costs on this box. A
-    function returning a `VoiceManifest` straight out of a repo file would have
-    had to invent both.
-    """
-
     schema: int
     voice: dict[str, Any]
     pace: dict[str, Any] | None
     pace_basis: str | None
-    #: The prose behind a measured pace, kept off the internal table (which has
-    #: no such key) and on this record, because `crucible voices card` prints it
-    #: into the card's `## Measured limits` section verbatim. That is the one
-    #: piece of prose the card no longer has to be typed with per deploy.
     measured_from: str | None
-    #: The prose an INHERITED pace owes — the run and checkpoint its number came
-    #: from, and why these weights have no ladder. Rides on the `/v1/voices` row
-    #: beside `pace_basis`, null when the pace is not inherited.
     inherited_from: str | None
     arms: dict[str, dict[str, Any]]
-    #: `max_chars_basis` per arm, stripped out of the arm tables for the reason
-    #: `_repo_pace` strips `basis`: the internal schema has no such key.
-    #:
-    #: EVERY ARM HAS AN ENTRY, and it is `None` for an arm that states no cap
-    #: (2026-09-19). Keyed for every arm rather than only for the arms that have
-    #: one, so `merge` indexes it directly and a missing key stays what it is —
-    #: a bug — instead of becoming a silent `None` through a `.get`.
     max_chars_basis: dict[str, str | None]
     takes: list[dict[str, Any]] | None
     path: Path
 
 
 def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
-    """Read and check a `crucible-voice.toml`. Raises `VoiceError` by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -638,45 +456,13 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
     )
 
 
-# ------------------------------------------------------------------- merge
-
-
 def merge(repo: RepoManifest, pin: Pin, footprint: Any):
-    """Repo manifest + pin + this box's `[tts.<engine>]` -> one `VoiceManifest`.
-
-    THE TRANSLATION IS INTO THE INTERNAL DOCUMENT, NOT INTO THE INTERNAL MODEL,
-    and that is the whole reason this phase does not double the schema's surface:
-    what comes out of here goes through the SAME `crucible/voices.py::_parse`
-    every packaged manifest goes through, so the pace ordering rule, the band
-    symmetry rule, the `safe_max_chars <= max_chars` rule, the boson-default
-    sampling rule, the clips rules and the takes ladder rules apply to a repo
-    manifest verbatim — by being the same code, rather than by a second copy of
-    them that would agree until the first time one was edited.
-
-    `footprint` is a `config.EngineFootprint`; it is typed loosely here only to
-    keep `crucible/config.py` from having to import this module back.
-    """
     engine = repo.voice["narrator_engine"]
     document: dict[str, Any] = {
         "voice": {
             "id": pin.id,
             **repo.voice,
-            # ABSENT MEANS ABSENT, and it reaches `_parse` as an EMPTY table.
-            # `_check_pace` reads an empty table as "nothing was measured" and
-            # builds a `Pace` of Nones, which is PHASE18 section 4.1's
-            # uncertified voice. Since 2026-09-19 a MISSING table means the same
-            # thing to `_parse` — it stopped refusing one — so this line is no
-            # longer translating between two meanings, only between two
-            # spellings of one.
             "pace": dict(repo.pace) if repo.pace is not None else {},
-            # THE SERVING TABLE IS THE MACHINE'S, ALL OF IT. A repo manifest
-            # states none of these by name (`_REFUSED_IN_REPO`), because what
-            # sizes the server narrator starts is a property of the box and the
-            # engine and a repo published once cannot know which card it will be
-            # served on. The two levers added on 2026-09-19 follow the same
-            # rule and come from the same `[tts.<engine>]` table; absent there
-            # means absent here, which `_check_serving` reads as narrator's own
-            # launcher defaults.
             "serving": {
                 "max_num_seqs": footprint.max_num_seqs,
                 "max_num_seqs_note": footprint.max_num_seqs_note,
@@ -716,10 +502,6 @@ def merge(repo: RepoManifest, pin: Pin, footprint: Any):
     }
     if repo.takes is not None:
         document["voice"]["takes"] = repo.takes
-    # `[voice.serving]` is refused on an engine that reads no HIGGS_* variable
-    # (`_check_serving`), and a second engine will arrive that way. The footprint
-    # is still REQUIRED of it — `memory_bytes_estimate` is — so the table is
-    # dropped here rather than the footprint being made optional.
     if engine != "higgs-v3":
         del document["voice"]["serving"]
 
@@ -737,11 +519,7 @@ def merge(repo: RepoManifest, pin: Pin, footprint: Any):
     )
 
 
-# ---------------------------------------------------------------- fetching
-
-
 def _cache_path(home: Path, pin: Pin) -> Path:
-    """Where a fetched manifest is kept — content-addressed by repo and sha."""
     return (
         home
         / MANIFEST_CACHE_DIRNAME
@@ -752,18 +530,6 @@ def _cache_path(home: Path, pin: Pin) -> Path:
 
 
 def _snapshot_path(home: Path, pin: Pin) -> Path | None:
-    """The manifest inside the PULLED weights, when they are at this pin.
-
-    The pull fetches the whole repo at the pin, so the manifest rides in with
-    the bytes (section 5). Read from there when it is there: it is the copy that
-    is provably beside the weights being served, and no Hub call can disagree
-    with it.
-
-    The STAMP is what says which revision those bytes are, and it is checked —
-    a directory left over from the previous pin holds the previous manifest, and
-    serving new bytes under an old manifest is the substitution this whole phase
-    exists to prevent.
-    """
     import json
 
     root = home / "voices" / pin.id
@@ -782,9 +548,6 @@ def _snapshot_path(home: Path, pin: Pin) -> Path | None:
         found = backend_dir / REPO_MANIFEST_NAME
         if found.is_file():
             return found
-        # THE WEIGHTS ARE HERE AND THE MANIFEST IS NOT, which is a revision that
-        # carries no manifest and is said as such rather than quietly falling
-        # through to the Hub to be told the same thing more slowly.
         raise VoiceError(
             f"voice_manifest_missing: {pin.hf_repo}@{pin.revision[:12]} is pulled "
             f"into {backend_dir} and carries no {REPO_MANIFEST_NAME}. A pinned "
@@ -795,15 +558,6 @@ def _snapshot_path(home: Path, pin: Pin) -> Path | None:
 
 
 def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
-    """The `crucible-voice.toml` at this pin, and where it was read from.
-
-    Three places, in order: the pulled weights, this home's manifest cache, and
-    the Hub. Only the last one costs anything, and only once per (repo, sha).
-
-    `hf_hub_download` FETCHES THE FILE ALONE, which is what lets
-    `GET /v1/voices` list an uninstalled voice with its real facts instead of
-    asking a person to download 8.5 GB before the row can say what the voice is.
-    """
     found = _snapshot_path(home, pin)
     if found is not None:
         return _read(found), found
@@ -819,7 +573,7 @@ def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
             RepositoryNotFoundError,
             RevisionNotFoundError,
         )
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         raise VoiceError(f"huggingface_hub is not importable: {exc}") from exc
 
     from .config import config_path
@@ -856,15 +610,11 @@ def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
             f"$HF_TOKEN or [hf] token in {config_path(home)}): {exc}"
         ) from exc
     except Exception as exc:
-        # NOT `voice_manifest_missing`. "This revision has no manifest" is a fact
-        # about a commit and is permanent; "the Hub did not answer" is a fact
-        # about a minute. Telling a reader the first about the second would send
-        # them to re-commit a manifest that is already there.
         raise VoiceError(
             f"voice_manifest_unreadable: could not fetch {REPO_MANIFEST_NAME} from "
             f"{pin.hf_repo}@{pin.revision[:12]}: {type(exc).__name__}: {exc}"
         ) from exc
-    if not cached.is_file():  # pragma: no cover - the hub just wrote it
+    if not cached.is_file():
         raise VoiceError(
             f"voice_manifest_unreadable: {pin.hf_repo}@{pin.revision[:12]} was "
             f"fetched but there is no {cached}"
@@ -879,20 +629,7 @@ def _read(path: Path) -> str:
         raise VoiceError(f"could not read {path}: {exc}") from exc
 
 
-# ------------------------------------------------------------ the whole set
-
-
 def voice_for_pin(pin: Pin) -> Any:
-    """One pin -> one `VoiceManifest`, or the named refusal that stops it.
-
-    The whole of "a pinned repo whose manifest is missing is NOT served and is
-    NOT read from any other source" lives here, and so does
-    `engine_footprint_unset`. It is a function rather than a loop body because
-    `PUT /v1/voices/{id}` calls it BEFORE it writes a pin: a door that wrote the
-    row first and discovered the refusal on the next listing would leave a
-    server holding a pin nothing can load, and the operator would be told about
-    it by a catalog that had stopped working.
-    """
     from .config import crucible_home, tts_engine_footprints
 
     home = crucible_home()
@@ -913,18 +650,6 @@ def voice_for_pin(pin: Pin) -> Any:
 
 
 def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
-    """Every pin this host has: the ones that load, and the ones refused, by name.
-
-    ONE UNREADABLE PIN IS ONE UNSERVED VOICE, NEVER NO VOICES (2026-09-26).
-    This was a single comprehension, so the first pin `voice_for_pin` refused
-    (a private repo on a machine with no token, no network on the first fetch,
-    a machine with no `[tts.*]` footprint) raised out of `load_all_voices` and
-    `GET /v1/voices` answered `500 voices_unreadable` for every voice, the
-    engine's own included. A pin's refusal is about that voice, so it is kept
-    beside that voice's id with its own message, and every other voice serves.
-    Only `VoiceError`, the refusal by name, is kept; anything else is a defect
-    and is let out.
-    """
     voices: dict[str, Any] = {}
     refused: dict[str, tuple[Pin, str]] = {}
     for voice_id, pin in load_pins().items():
@@ -936,10 +661,4 @@ def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
 
 
 def pinned_voices() -> dict[str, Any]:
-    """Every pinned voice this host can serve, by id, as a `VoiceManifest`.
-
-    `crucible/voices.py::load_all_voices` calls this FIRST, the lowest
-    precedence. A pin that cannot be read is absent here and present in
-    `load_pinned()`'s refusals, which `voices.unserved_pins` reports.
-    """
     return load_pinned()[0]

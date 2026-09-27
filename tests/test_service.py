@@ -701,7 +701,7 @@ def test_launchd_status_reads_the_agent(user_home: Path) -> None:
 def installed_config(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Callable[[], None]:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
 
     def init() -> None:
         assert cli.main(["init", "--enable-echo"]) == 0
@@ -768,7 +768,7 @@ def test_cli_service_on_a_mac_uses_launchd(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     monkeypatch.setattr(service, "subprocess_runner", Runner())
@@ -793,7 +793,7 @@ def test_doctor_names_the_services_path_beside_the_shells(
     /opt/homebrew/bin and the running process had it. Naming one PATH was not
     enough; Crucible wrote the other one and can read it back.
     """
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     assert cli.main(["init"]) == 0
     capsys.readouterr()
@@ -840,7 +840,7 @@ def test_doctor_says_none_recorded_rather_than_nothing(
 ) -> None:
     """"no service is installed" and "the service has no PATH" are different
     facts, and an omitted line would read as either."""
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     cli.main(["doctor", "--json"])
@@ -912,7 +912,7 @@ def test_cli_service_refuses_without_a_config(
     home: Path, user_home: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     assert cli.main(["service", "status"]) == 1
     assert "crucible init" in capsys.readouterr().err
 

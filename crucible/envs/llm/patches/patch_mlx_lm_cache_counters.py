@@ -1,39 +1,3 @@
-"""Evaluate mlx-lm's cache counters on every decode step, so a hybrid model's
-cache cannot grow an unevaluated graph until Metal runs out of buffers.
-
-WHY. mlx-lm 0.31.3's batched caches keep their bookkeeping in mx arrays and
-update it lazily: `ArraysCache.advance` does `self.lengths -= N` and
-`self.left_padding -= N`, and the batched KV caches move `offset`, `_idx` and
-`left_padding` the same way (`mlx_lm/models/cache.py`). Nothing on the decode
-path forces those arrays, so each step adds a node to a graph that holds the
-previous one, and every cache extracted from the batch (mlx-lm's prompt cache
-stores one per finished reply, `server.py` L901) carries that graph with it. For
-Qwen3.5 and Qwen3.8, whose linear-attention layers are `ArraysCache`, it ends in
-`[metal::malloc] Resource limit (499000) exceeded`, the Metal buffer COUNT limit
-(`mx.device_info()['resource_limit']` on the M1 Ultra), and the generation
-thread dies.
-
-MEASURED, 2026-09-26, on the Mac Studio with ContentStudio's real request bytes
-(a Duffy title run, captured at its transport): a fresh
-`qwen3.8-27b-4bit` under a bare `mlx_lm server` with Crucible's exact args, fed
-Crucible's warm-up, title 1 (785 in / 641 out) and title 2 (1,582 in), died on
-title 2's first decode step, exactly as in the live run. Title 2 alone on a
-fresh engine: no crash. The same three with `--prompt-cache-size 0`: no crash.
-The same three with the prompt cache on and these counters evaluated after every
-step: no crash. So the trigger is the lazy counters riding into the prompt cache,
-and forcing them is the fix. (The same chain also kills a single reply at about
-10k tokens; agency-lang's PR 1126 fixed that one the same way.)
-
-WHAT CHANGES. `GenerationBatch._step` already hands the next step to
-`mx.async_eval`; the counters of every cache in the batch are added to that same
-call. They are integer arrays of one element per sequence, so this costs
-nothing measurable, and it stays asynchronous: no extra synchronisation is
-added to the decode loop. What is generated is unchanged.
-
-USAGE: `<env python> patch_mlx_lm_cache_counters.py <env prefix>` (or set
-`CRUCIBLE_LLM_ENV`), the shape of the other `llm` patches: idempotent by marker,
-patched from the live file, version-pinned to 0.31.3, all or nothing.
-"""
 import glob
 import os
 import re
@@ -46,7 +10,6 @@ EXPECTED_VERSION = "0.31.3"
 
 TAG = "# PATCH (crucible 2026-09-26, envs/llm/patches/patch_mlx_lm_cache_counters.py)"
 
-#: The helper goes in before `class GenerationBatch`.
 HELPER_ANCHOR = "\n\nclass GenerationBatch:\n"
 HELPER = (
     "\n\n" + TAG + ":\n"
@@ -85,15 +48,12 @@ EDITS = (
     ),
 )
 
-#: What the doctor greps for. Kept identical to `crucible/envpatches.py`.
 MARKER = "_crucible_cache_counters(self.prompt_cache),"
 
-#: The stock call must be GONE.
 ABSENT_MARKER = "mx.async_eval(self._next_tokens, self._next_logprobs, token_context)"
 
 
 def site_packages_file(prefix: str, rel: str) -> str:
-    """`rel` inside the env, deduped by real path."""
     hits = sorted(
         {
             os.path.realpath(p)

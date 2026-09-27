@@ -1,44 +1,3 @@
-"""The Windows → WSL2 move — PHASE15-HOST.md 4.3 and 4.7.
-
-ONE implementation of the sequence, and this is it. The page's engine switch
-(`POST /v1/tasks {"type": "engine", "target": "wsl"}`) reaches it because the
-Windows server relays to the host's door (`door.py`); `@crucible/bootstrap`'s
-`install()` reaches it directly on a machine that has no server yet. Both get
-the same events, because there is one sequence.
-
-WHAT THE HOST DOES AND WHAT THE GUEST DOES
--------------------------------------------
-Only the host can run `wsl.exe`, raise a UAC prompt and survive a reboot, so
-the WINDOWS half — the 4c states, the import, the LAN door — is here. The
-GUEST half is not: `install.sh` is generated from `sdk/bootstrap/src/steps.ts`
-and is the one owner of "what installing a Crucible on a Linux machine is"
-(PHASE14 4a: an app-driven install and a hand install "cannot differ"). So the
-host RUNS that script inside the distro rather than restating its six steps in
-Python, which would be the third copy of a list that already has two
-spellings.
-
-THE TOKEN, AND WHY THERE ARE TWO `init`s
------------------------------------------
-`install.sh` mints its own token, because on a bare Linux machine there is
-nobody to inherit one from. On this path there IS: the Windows server has been
-answering apps on `:7100` with a token they have already paired with, and 3.5
-says that token survives the move. So after the guest's bare install the host
-runs `crucible init --force --config-from <file>`, which takes exactly
-`auth.token`, `[routes]` and `[upstreams]` out of a 0600 file the host wrote
-and then deletes. Two inits and one token, rather than one init and an app
-that silently stops being paired.
-
-MODEL RETIREMENT FOLLOWS VERIFIED ACTIVATION
--------------------------------------------
-Prepare every guest model while retaining every native original, then stop the
-native process and verify guest ownership/pairing. Retire native model files
-through their catalog owner functions only afterward. A persistent subject-key
-record resumes interrupted cleanup, even if a partial deletion removed its
-installation stamp. The Windows executable is retained; it is not a model or
-a portable Linux engine. Temporary copies during migration preserve recovery;
-successful cleanup leaves only the active backend's model files.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -60,22 +19,11 @@ from .paths import ENGINE_PORT, engine_url
 from .runner import RunResult, Runner
 from .wsl_states import CRUCIBLE_DISTRO
 
-#: The only target this door accepts. 4.7: the reverse move is not in this
-#: phase, and a target nobody implemented is refused rather than ignored.
 ENGINE_TARGET_WSL = "wsl"
 CLEANUP_RECORD = "migration-cleanup.json"
 
-#: THE MARKER IS GONE. `wsl-reboot-pending` used to be written here and read
-#: nowhere else; PHASE19 2.2 replaces it with `wsl-outcome.json`, which records
-#: the reboot as one of five endings instead of being a file whose only meaning
-#: was its own existence. `crucible/host/outcome.py` is its one owner, and
-#: `app._sequence` is what writes it at every terminal point of a move — this
-#: class raises, as it always did, and the code it raises is what chooses the
-#: state (`outcome.classify`).
-
 
 def cleanup_subjects(home: Path) -> set[tuple[str, str]]:
-    """Read only named catalog subjects; never accept filesystem paths."""
     value = json.loads((home / CLEANUP_RECORD).read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("subjects"), list):
         raise HostError("migration_cleanup_record_invalid", "The migration cleanup record is incompatible")
@@ -95,15 +43,9 @@ def record_cleanup(home: Path, subjects: set[tuple[str, str]]) -> None:
     staged.write_text(json.dumps({"schema_version": 1, "subjects": [list(row) for row in sorted(subjects)]}) + "\n", encoding="utf-8")
     staged.replace(record)
 
-#: 4.7's step names, in 4.7's order. The page draws these, the log carries
-#: them, and `tests/test_host_installer.py` asserts the order — a sequence
-#: whose order is only in prose is a sequence that gets reordered.
 STEPS: tuple[str, ...] = (
     "wsl-state",
     "import-distro",
-    # 4c's guest rows, asked once there IS a guest for them to be about. See
-    # `_guest_ready`: the first walk stops before the distro exists, so without
-    # this one nothing ever asks the distro anything.
     "guest-ready",
     "guest-install",
     "migrate-config",
@@ -115,9 +57,6 @@ STEPS: tuple[str, ...] = (
     "migrate-weights",
 )
 
-#: Each step in the words a person at the installer's console reads (#6, #7:
-#: from a console, the console is the app). Keyed by `STEPS`, and every step
-#: has one.
 STEP_WORDS: dict[str, str] = {
     "wsl-state": "checking Windows' Linux support (WSL)",
     "import-distro": "setting up the Linux system (Ubuntu)",
@@ -132,69 +71,26 @@ STEP_WORDS: dict[str, str] = {
     "migrate-weights": "removing the Windows copies of moved models",
 }
 
-#: Long enough for a `wsl --import` of a multi-gigabyte ext4 file, and for a
-#: guest-side install that pips a job type's recipe over somebody's home line.
 IMPORT_TIMEOUT_SECONDS = 30 * 60.0
 
-#: The Ubuntu image download. An hour, which is what the `curl.exe` call it
-#: replaced was given, and 3 tries, which is `CURL_ARGS`' `--retry 3` in
-#: `sdk/bootstrap/src/runtime.ts` — the same number, kept rather than re-chosen.
 IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 3600.0
 IMAGE_DOWNLOAD_ATTEMPTS = 3
 GUEST_INSTALL_TIMEOUT_SECONDS = 120 * 60.0
 QUICK_TIMEOUT_SECONDS = 5 * 60.0
 
-#: How long the migration waits for ONE subject to arrive in the guest. A
-#: narrator voice is a few hundred megabytes and a model is tens of gigabytes
-#: over somebody's home line; the number is generous because the alternative
-#: to waiting is deleting a Windows copy that has no replacement.
 MIGRATE_PULL_TIMEOUT_SECONDS = 6 * 60 * 60.0
 
-#: Between two polls of the guest's catalog, and between two rounds of the
-#: migration when something was held.
 MIGRATE_POLL_SECONDS = 5.0
 
-#: How many rounds a `subject_in_use` may survive before the step fails by
-#: name. BOUNDED on purpose: 3.5 says nothing is skipped, so the only two
-#: honest ends are "it was removed" and "it is still held, and here is who" —
-#: an unbounded wait would be a third, which is a migration that never
-#: finishes and never says why. 60 x 5 s is five minutes of somebody closing
-#: an app.
 MIGRATE_IN_USE_ROUNDS = 60
 
-#: The sentence 4.7 requires for the reboot states, verbatim in one place.
-#:
-#: REWRITTEN BY PHASE19 2.3. It used to say "press Install once more and it will
-#: go on from here", because nothing on the machine resumed by itself: the tray
-#: came back at login and the APP had to ask again. The tray now decides at
-#: every start (2.3) and resumes a `reboot-pending` on its own, so the sentence
-#: no longer asks for a press that nothing is waiting for.
-#:
-#: "UPDATE AND RESTART", BY NAME (#14, Owen's ruling, 2026-09-26): *"we should
-#: also make it clear that the user has to reboot and update, not just reboot.
-#: a lot of people avoid hitting update because its a pain in the ass, but the
-#: update logic is the route through which wsl installs and is necessary."*
-#: Measured on kylies-pc: WSL is committed by Windows' servicing step, and the
-#: first plain Restart after the enable was deferred behind a staged update and
-#: committed nothing. So every sentence that asks for a restart names the
-#: option, says why, says it can take more than one, and says someone must sign
-#: in afterwards (`SIGN_IN_SENTENCE`).
-#:
-#: The three restart sentences, by code:
-#:   wsl_reboot_required    REBOOT_SENTENCE             the first restart
-#:   wsl_reboot_still_owed  REBOOT_STILL_OWED_SENTENCE  one more, within RESTART_BUDGET
-#:   wsl_reboot_again       REBOOT_AGAIN_SENTENCE       the budget is spent
 
-#: How to restart so that WSL is installed, in one spelling for all three.
 UPDATE_AND_RESTART_HOW = (
     'Save your work, open Start, click the power button and choose "Update and '
     'restart" (if there is no such option, choose "Restart"). Do not choose '
     '"Shut down".'
 )
 
-#: #8 IS NOT BUILT (2026-09-26): the tray resumes from the Startup folder, which
-#: runs only when somebody signs in at the PC. So every restart sentence says
-#: so, plainly, until a resume that needs no sign-in exists.
 SIGN_IN_SENTENCE = (
     "After the restart, someone has to sign in to Windows on this PC: Crucible "
     "carries on by itself once somebody is signed in, and not before."
@@ -210,21 +106,11 @@ REBOOT_SENTENCE = (
     + SIGN_IN_SENTENCE
 )
 
-#: Where a person asks for the move again, in the words the console and the
-#: sentences use. ONE spelling, so the tray item (`menu.TRY_AGAIN_LABEL`, which
-#: begins "Try again") and every sentence that sends a person to it change
-#: together (#16). The icon is often in the overflow behind the ^ arrow.
 TRY_AGAIN_HINT = (
     "right-click the Crucible icon by the clock (it may be behind the ^ arrow "
     'there) and choose "Try again"'
 )
 
-#: 2.4's demand, AMENDED by #19: it now fires only once `RESTART_BUDGET`
-#: restarts are spent, and the tray still re-checks at every start
-#: (`outcome.TRANSIENT_CANNOT_CODES`). It used to end "this is a machine
-#: somebody has to look at", which sent the person on kylies-pc looking for
-#: help when the fix was one more restart that ran the updates (#14, #16). It
-#: names that fix now.
 REBOOT_AGAIN_SENTENCE = (
     "Windows has restarted several times and has still not finished installing "
     "its Linux support (WSL). The usual reason is that the restarts skipped or "
@@ -240,10 +126,6 @@ REBOOT_AGAIN_SENTENCE = (
     + ". The Windows engine keeps working meanwhile."
 )
 
-#: `wsl_reboot_still_owed` (#19): a restart Crucible asked for happened, and
-#: Windows still has not finished installing WSL. On kylies-pc this was the
-#: normal case: the first restart after the enable was deferred behind an
-#: update staged minutes earlier, and the second committed both.
 REBOOT_STILL_OWED_SENTENCE = (
     "Windows restarted, but it has not finished installing its Linux support "
     "(WSL) yet. That is normal when Windows had updates waiting: it installs "
@@ -254,23 +136,10 @@ REBOOT_STILL_OWED_SENTENCE = (
     + SIGN_IN_SENTENCE
 )
 
-#: FRESH-INSTALL #19 (kylies-pc, 2026-09-26): how many restarts the move asks
-#: for, each judged by the live probe (`wslstate.probe_live`), before it records
-#: `cannot`. The first restart after an enable can be deferred by servicing
-#: when a Windows update was staged minutes earlier ("Deferring startup
-#: processing ... Reboot mark set" in CBS.log), and the second committed both.
-#: One restart is not evidence that restarting will not help; three is the
-#: plan's ceiling ("allow 2-3 restarts").
 RESTART_BUDGET = 3
 
 
 def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
-    """Per feature: already on, turned on now, or still off (FRESH-INSTALL #11).
-
-    kylies-pc's log could not say whether the enable found the features on
-    (they had been enabled on 2026-09-07) or turned them on itself. This line is
-    that answer, from InstallState before and after the elevated command.
-    """
     words: list[str] = []
     for name in wslstate.WSL_FEATURES:
         was, now = before.features.get(name), after.features.get(name)
@@ -286,21 +155,11 @@ def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
     return "; ".join(words) + f"; then: {after.answer.line()}"
 
 
-#: How long the move waits for the restarted guest to answer. A first boot of
-#: Canonical's image with cloud-init still on took about 40 s on kylies-pc, so
-#: 30 s was a failure by design.
 GUEST_RESTART_BUDGET_SECONDS = 180.0
 
 
 @dataclass
 class Event:
-    """One line of the door's ndjson, shaped like `crucible/tasks.py`'s events.
-
-    Same shape and not a similar one: 4.7 has the Windows server RELAY these
-    under its own task id, and a relay that reshapes is a second owner of the
-    shape.
-    """
-
     event: str
     data: dict[str, object]
 
@@ -308,23 +167,11 @@ class Event:
 Emit = Callable[[Event], None]
 
 
-#: The backend the GUEST is. Linux x86_64, which is what
-#: `sdk/bootstrap`'s `backendFor('linux')` answers — the client compares
-#: against that, so the two must be the same word and this is where it is
-#: stated. It is NOT `llama-windows`: that is the machine being left.
 GUEST_BACKEND = "cuda-linux"
 
 
 @dataclass
 class StepRecord:
-    """One step, as the `done` event reports it.
-
-    `argv` may be empty for a step that ran no command; `status` is `ok`,
-    `running` or `skipped`, which is the vocabulary
-    `sdk/bootstrap/src/install.ts`'s `InstallStep` already has, so the client
-    maps it rather than translating it.
-    """
-
     name: str
     argv: list[str] = field(default_factory=list)
     status: str = "running"
@@ -341,18 +188,6 @@ class StepRecord:
 
 @dataclass
 class InstallOutcome:
-    """What the sequence achieved. The `done` event's data.
-
-    IT CARRIES A RESULT, and `crucible/tasks.py`'s `done` carries `{}`. The
-    difference has a reason rather than being drift: this door has a caller
-    tasks.py does not, `@crucible/bootstrap`'s `install()`, which is a library
-    function that must RETURN an `InstallResult` — and on Windows it cannot go
-    and read the guest's config for itself, because that `wsl.exe` door is one
-    of the things this phase deletes. The page-driven caller (4.7) relays
-    these events under a task id and may drop this payload; nothing on the
-    page reads it.
-    """
-
     steps: list[StepRecord] = field(default_factory=list)
     distro: str = CRUCIBLE_DISTRO
     detail: str = ""
@@ -377,8 +212,6 @@ class InstallOutcome:
 
 
 class EngineInstall:
-    """4.7's sequence, driven. Every machine call goes through `runner`."""
-
     def __init__(
         self,
         runner: Runner,
@@ -406,49 +239,12 @@ class EngineInstall:
         self._release = release
         self._home = Path(home)
         self._install_sh_url = install_sh_url
-        #: WHICH GUEST. The default is the distro Crucible IMPORTS, and it is
-        #: the right one for the walk this class was written for: a first
-        #: install has no consented distro to ask about, because `_import_distro`
-        #: is the step that brings the only one into existence.
-        #:
-        #: It is NOT the right one for a machine that already has an engine in a
-        #: distro a person named in config.toml. Every such caller passes the
-        #: name the watcher holds — `PresenceWatcher.distro`, the one owner of
-        #: that fact — and 1.0.4 is what happens when one of them forgets to
-        #: (`app.carry_guest_to_this_release`, 2026-09-19).
         self._distro = distro
-        #: `False` in a test and in `--install --no-elevate`: the argv is still
-        #: reported, and nothing raises a consent dialog.
         self._elevate = elevate
-        #: THE RESTART BUDGET (FRESH-INSTALL #19, 2026-09-26). `restarts` is how
-        #: many restarts this move has already asked for in a row, read off the
-        #: outcome file. `rebooted` is whether Windows has actually booted since the
-        #: last ask (`app._sequence` compares the boot time with the outcome's
-        #: `at`): a tray restarted by an upgrade, or a Fast Startup "shut down",
-        #: is not the restart that was asked for and spends nothing.
-        #: `self.restarts` is what the caller records if this run stops for
-        #: another restart.
         self.restarts = restarts
         self._rebooted = rebooted
-        #: host.log, for the few lines that must outlive the event ring (#11).
         self._log = log
-        #: Whether this install should open the LAN door (`crucible lan`).
-        #:
-        #: THREE STATES, and `None` is the useful one. `True`/`False` is an
-        #: operator saying so for this install. `None` means *follow what this
-        #: machine already decided* — the `landoor.json` record — so a machine
-        #: whose door was opened once keeps it open across every later
-        #: reinstall and upgrade, and a machine that never opened one is never
-        #: silently exposed by an upgrade.
-        #:
-        #: The RECORD is the preference. A second setting saying the same thing
-        #: is a second thing to disagree with it, which is the shape of defect
-        #: `docs/ARCHITECTURE.md` was written about.
         self._share_lan = share_lan
-        #: The two servers the weights migration talks to (3.5, 3.5a). Both
-        #: `None` on a machine that has no Windows server yet — the very first
-        #: install — and that is a FACT the step states, not a fallback: there
-        #: is nothing on this machine to move.
         self._windows = windows_catalog
         self._guest = guest_catalog
         self._stop_windows_callback = stop_windows_server
@@ -458,19 +254,10 @@ class EngineInstall:
         self._sleep = sleep
         self._index = 0
         self._records: list[StepRecord] = []
-        #: When the last `progress` event went out, for `_bytes`'s throttle.
         self._last_bytes = 0.0
 
-    # ---------------------------------------------------------------- events
 
     def _step(self, name: str) -> StepRecord:
-        """Begin a step. ALWAYS before any `line` of that step.
-
-        The client attributes each `line` to the last `step` it saw and
-        refuses a line that arrives before any step, because a line with a
-        made-up owner is worse than a refusal. So this is the first thing every
-        `_step_name()` below does.
-        """
         self._index += 1
         record = StepRecord(name=name)
         self._records.append(record)
@@ -489,14 +276,6 @@ class EngineInstall:
         raise HostError("wsl_state_unknown", f"no step called {name!r} was begun")
 
     def _line(self, text: str, stream: str = "stdout") -> None:
-        """One line of a step's output — UNLESS it is a progress line.
-
-        PHASE19 2.12: `install.sh` prints `crucible-progress {...}` while it
-        fetches the guest's interpreter, in the wire `crucible/interpreter.py`
-        declares and parses. Lifting it here is what puts the guest's bytes on
-        the SAME `progress` event the image download and `pull` use, instead of
-        showing a person a JSON blob in a log pane.
-        """
         from ..interpreter import parse_progress_line
 
         measured = parse_progress_line(text)
@@ -506,13 +285,6 @@ class EngineInstall:
         self._emit(Event("line", {"text": text, "stream": stream}))
 
     def _bytes(self, done: int, total: int | None, name: str) -> None:
-        """`pull`'s shape, exactly (`crucible/tasks.py`'s `_pull_blocking`).
-
-        Throttled the same way and for the same reason: a megabyte-chunk loop
-        over 340 MB would otherwise put 340 events on a stream a person is
-        watching, and the interval is `tasks.PROGRESS_INTERVAL_SECONDS` rather
-        than a second number invented here.
-        """
         from ..tasks import PROGRESS_INTERVAL_SECONDS
 
         now = self._monotonic()
@@ -540,28 +312,11 @@ class EngineInstall:
         return HostError(code, message)
 
     def _said(self, text: str) -> None:
-        """A line for the stream AND for host.log (FRESH-INSTALL #11).
-
-        `_line` reaches only the event ring, and the tray's own move has no
-        reader on it: "did enabling WSL raise a prompt" was unanswerable from
-        the one file a person could send. The WSL-state lines are few and they
-        are the ones that matter after the fact, so they go to both.
-        """
         self._line(text)
         if self._log is not None:
             self._log(text)
 
     def _restart_owed(self) -> HostError:
-        """Stop for a restart, within the budget (FRESH-INSTALL #19, 2026-09-26).
-
-        `self.restarts` counts the restarts this move has asked for. A restart
-        is spent only when Windows really booted since the last ask
-        (`self._rebooted`); otherwise the same ask stands. Past
-        `RESTART_BUDGET` restarts the move is `cannot` (`wsl_reboot_again`),
-        which the tray still re-probes at every start (`outcome.
-        TRANSIENT_CANNOT_CODES`), so a later restart that commits WSL resumes
-        the move with nobody pressing anything.
-        """
         if self.restarts == 0:
             self.restarts = 1
             code, sentence = "wsl_reboot_required", REBOOT_SENTENCE
@@ -584,13 +339,6 @@ class EngineInstall:
         return self._fail(code, sentence)
 
     def _guest_facts(self) -> tuple[str, str, str]:
-        """The guest's home, its console script, and its server's name.
-
-        Asked of the guest rather than assembled from `/home/crucible`: the
-        rootfs names that user today and `CRUCIBLE_HOME` can move the rest,
-        and a path this side composed would be a second answer to a question
-        the guest can be asked.
-        """
         home = self._runner.run(
             guest_argv(self._distro, ["bash", "-lc", 'printf %s "${CRUCIBLE_HOME:-$HOME/.crucible}"']),
             timeout_s=QUICK_TIMEOUT_SECONDS,
@@ -623,10 +371,8 @@ class EngineInstall:
             )
         return guest_home, crucible, name
 
-    # ------------------------------------------------------------- the walk
 
     def run(self) -> InstallOutcome:
-        """Prepare, activate, then retire; failed preparation preserves native models."""
         self._wsl_state()
         self._import_distro()
         self._guest_ready()
@@ -642,11 +388,6 @@ class EngineInstall:
         self._switch_pairing()
         if self._windows is not None:
             self._windows = self._windows_after_switch()
-        # AFTER the switch: the door publishes this machine's addresses into
-        # the guest engine, which only answers once `_switch_pairing` has
-        # pointed this machine at it. Before `_migrate_weights`, because that
-        # step can run for hours and a consent prompt raised at its far end is
-        # a prompt nobody is sitting in front of.
         self._lan_door()
         self._migrate_weights()
         self._home.joinpath(CLEANUP_RECORD).unlink(missing_ok=True)
@@ -667,51 +408,14 @@ class EngineInstall:
         self._emit(Event("done", outcome.to_dict()))
         return outcome
 
-    # ------------------------------------------------------------ the steps
 
     def _wsl_state(self) -> None:
-        """4c, answered. The rows that need admin run through UAC BY NAME."""
         self._walk("wsl-state", stop=("wsl_ready", "no_crucible_distro"))
 
     def _guest_ready(self) -> None:
-        """4c AGAIN, once there is a distro for its guest rows to be about.
-
-        `_wsl_state` runs before the import and stops the moment it can say
-        "WSL itself is fine", so every row whose probe runs INSIDE the distro —
-        `distro_not_systemd`, `guest_no_network`, `pack_disk`,
-        `guest_root_unreachable` — was skipped on the one path that creates the
-        distro. Measured 2026-09-16 on a fabricated fresh machine: the walk ran
-        `--status`, `-l -v`, `-l -v` and then downloaded the rootfs, and asked
-        the guest nothing.
-
-        `guest_root_unreachable` is the row that now matters most. Since the guest's
-        server became a SYSTEM unit (`crucible/service.py`), the install writes
-        `/etc/systemd/system` and drives the system manager, both through
-        `wsl.exe -u root` — so a distro that will not grant root cannot be
-        installed into at all, and finding that out here costs one `id -u`
-        instead of a failed install.
-
-        `check_network` is passed for the first time by anybody. This is the
-        caller `wsl-states.ts` describes: "the only caller that needs this row
-        is one that is about to download gigabytes." It costs one `curl` in the
-        guest and turns a VPN into a sentence instead of a failed download.
-
-        `required_bytes` is deliberately NOT passed, and `pack_disk` therefore
-        still never fires. SINCE PHASE20 THERE IS NOTHING HERE TO PRICE: what
-        goes into the guest is a ~30 MB interpreter and a 1 MB wheel with its
-        PyPI dependencies, and a disk guard for a hundred megabytes is a
-        sentence nobody needs. The row stays in the table for a caller that
-        knows a bigger number — one about to pull weights, or `crucible install
-        tts`, which is where the gigabytes actually are.
-        """
         self._walk(
             "guest-ready",
             stop=("wsl_ready",),
-            # `_import_distro` has just run and said it succeeded. If the table
-            # still cannot see the distro, importing it AGAIN is not a repair —
-            # it is this step doing the previous step's job on a machine where
-            # that job did not take. Two owners of one import, and the second
-            # one loops.
             never_repair=("no_crucible_distro",),
             check_network=True,
         )
@@ -724,37 +428,17 @@ class EngineInstall:
         never_repair: tuple[str, ...] = (),
         **inputs: object,
     ) -> None:
-        """Detect, repair, detect again — until a state nothing can improve.
-
-        **A REPAIR THAT DID NOT CHANGE THE ANSWER ENDS THE WALK.** Without this
-        the loop runs the same action forever: `distro_not_systemd` answers
-        again, `wsl --terminate crucible` exits 0 again, nothing is different
-        and nothing says so. Measured 2026-09-16 — `pytest tests/test_host.py`
-        sat for forty minutes on exactly that, printing nothing, and a stranger
-        whose distro will not take systemd would have watched an installer hang
-        with no message at all. An action is allowed one attempt: a code that
-        comes back after its own repair ran is a machine this cannot fix, and
-        saying so is the whole point of the table.
-        """
         self._step(step)
         repaired: set[str] = set()
         while True:
-            state = wslstate.detect(self._runner, release=self._release, **inputs)  # type: ignore[arg-type]
+            state = wslstate.detect(self._runner, release=self._release, **inputs)
             self._state(state)
             if state.code in stop:
                 self._finish(step, state.sentence)
                 return
             if state.action_kind == "instruct" or state.action_kind == "link":
-                # Nothing software can do: firmware, a VPN, a disk, a hardened
-                # distro. The sentence is the table's and the host adds none.
                 raise self._fail(state.code, state.sentence + " " + state.action_text)
             if state.action_kind == "run-elevated":
-                # WHAT IS LIVE, BEFORE ANY UAC (FRESH-INSTALL #15, 2026-09-26).
-                # On kylies-pc the features were enabled and waiting for a
-                # restart to commit; the resume read that as "missing", ran
-                # `wsl --install` under UAC again, and the DISM call re-pended
-                # the very transaction the restart was for. A restart that is
-                # still owed is asked for, and nothing is enabled twice.
                 if state.code in repaired:
                     raise self._fail(
                         state.code,
@@ -778,8 +462,6 @@ class EngineInstall:
                         + " This needs administrator and elevation is off for this run: "
                         + " ".join(state.action_argv),
                     )
-                # In words first: this line is what the installer's console
-                # shows while a UAC prompt waits, possibly behind the window.
                 self._line(
                     "Windows is asking for administrator permission to change "
                     "this: click Yes on the prompt (if you cannot see it, look "
@@ -799,32 +481,14 @@ class EngineInstall:
                         f"{state.sentence} The permission prompt was refused or the "
                         f"command failed: {result.said()}",
                     )
-                # Enabling WSL almost always needs a restart, and the live probe
-                # is what says whether it did (#15). The task ends here, the
-                # tray's Startup item brings the
-                # tray back, and PHASE19 2.3 is what brings the INSTALL back:
-                # the tray reads `reboot-pending` out of `wsl-outcome.json` at
-                # its next start and resumes. That used to be the app's job and
-                # the sentence used to ask for a press; 2.3 ruled it the tray's,
-                # because the tray is the process that is already there.
-                #
-                # #11: what the enable did, per feature, in host.log: already
-                # on, turned on now, or still off after the administrator
-                # prompt. Whether a prompt was raised is this branch itself:
-                # `Start-Process -Verb RunAs` is the prompt.
                 after = wslstate.probe_live(self._runner)
                 self._said(
                     "wsl: an administrator prompt was raised to enable WSL and "
                     "accepted; " + _feature_report(before, after)
                 )
                 if after.live:
-                    # The enable took without a restart (a store WSL on a
-                    # machine whose features were already committed). Walk on,
-                    # once: `repaired` stops a second enable in the same run.
                     repaired.add(state.code)
                     continue
-                # 2.4, AMENDED by #19: a second demand is not the end. The
-                # budget decides, and each restart is judged by what is live.
                 raise self._restart_owed()
             if state.code in never_repair:
                 raise self._fail(
@@ -844,11 +508,8 @@ class EngineInstall:
             self._line(f"{' '.join(state.action_argv)}: {'ok' if result.ok else result.said()}")
             if not result.ok:
                 raise self._fail(state.code, f"{state.sentence} {result.said()}")
-            # Re-detect: the table is walked until it answers a state that
-            # nothing further can improve.
 
     def _import_distro(self) -> None:
-        """The rootfs, verified, imported. Idempotent: present is a no-op."""
         self._step("import-distro")
         listed = self._runner.run(["wsl.exe", "-l", "-v"], timeout_s=QUICK_TIMEOUT_SECONDS)
         from .presence import read_wsl_distros
@@ -866,13 +527,6 @@ class EngineInstall:
             self._line(f'"{self._distro}" is already imported')
             self._finish("import-distro", f'"{self._distro}" was already there')
             return
-        # CANONICAL'S IMAGE, AND CANONICAL'S OWN DIGEST (PHASE20 section 2).
-        # It used to be `crucible-rootfs-<version>.tar.zst` off our own release,
-        # rebuilt by a Docker job on every tag for an image whose contents had
-        # not moved in a month. Every constant below is GENERATED from
-        # `sdk/bootstrap/src/distro.ts`, which is the one owner: this side and
-        # `@crucible/bootstrap`'s `ensureDistro()` import the same bytes and
-        # finish the import the same way, or they are two installs again.
         from .wsl_states import (
             FINISH_IMPORT_SCRIPT,
             UBUNTU_WSL_ROOTFS,
@@ -888,12 +542,6 @@ class EngineInstall:
             raise self._fail("distro_import_incomplete", f"{destination} is not empty but no distro is registered. Its files were kept for recovery")
         archive = downloads / asset
         self._line(f"Downloading Ubuntu's own WSL image ({asset})")
-        # THE BYTES REACH THE STREAM (PHASE19 2.12). This was `curl.exe -fL
-        # --retry 3 -o`, blocking for up to an hour, and the event stream
-        # carried nothing at all behind it — 340 MB of silence on the step an
-        # app draws a bar for. `runner.download` reports in `pull`'s own shape
-        # (`tasks.py`: bytes_done / bytes_total / file), which is the shape the
-        # client already reads, and `--retry 3` survives as `attempts=3`.
         fetched = self._runner.download(
             UBUNTU_WSL_ROOTFS_URL,
             archive,
@@ -904,10 +552,6 @@ class EngineInstall:
         digest = self._runner.run(["curl.exe", "-fsSL", "--retry", "3", UBUNTU_WSL_SUMS_URL], timeout_s=300) if fetched.ok else fetched
         if not fetched.ok or not digest.ok:
             raise self._fail("rootfs_download_failed", f"Ubuntu's WSL image or its SHA256SUMS could not be downloaded: {digest.said()}")
-        # THE ROW FOR OUR FILE, by name. The sums file lists every image in
-        # that directory, and `current/` is a moving pointer — so a sums file
-        # that does not name this download is exactly what upstream renaming
-        # the file looks like, and it must refuse rather than compare nothing.
         rows = [line.split() for line in digest.stdout.splitlines() if line.strip()]
         want = next(
             (row[0].lower() for row in rows if len(row) >= 2 and row[1].lstrip("*").strip() == asset),
@@ -919,13 +563,7 @@ class EngineInstall:
             raise self._fail("rootfs_sha_mismatch", f"{UBUNTU_WSL_SUMS_URL} names no sha256 for {asset}; no distro was imported")
         if not hashed.ok or want not in candidates:
             raise self._fail("rootfs_sha_mismatch", "The downloaded image does not match Ubuntu's own checksum; no distro was imported")
-        # #26: the import is about half a minute with nothing to report, and a
-        # console that goes quiet for that long reads as a hang.
         self._line(f"Unpacking Ubuntu into {destination}; this takes about half a minute")
-        # THE REAL VOLUME (#26). Inside the guest, `df` measures the ext4.vhdx,
-        # whose size is a virtual maximum (954 GiB on a C: with 283 GB free,
-        # kylies-pc, 2026-09-26). The Windows drive under `destination` is
-        # where that file grows, so it is the number worth a line.
         try:
             free = shutil.disk_usage(destination).free
             self._line(
@@ -938,11 +576,6 @@ class EngineInstall:
         imported = self._runner.run(["wsl.exe", "--import", self._distro, str(destination), str(archive), "--version", "2"], timeout_s=IMPORT_TIMEOUT_SECONDS)
         if not imported.ok:
             raise self._fail("distro_import_failed", imported.said())
-        # WHAT `build-rootfs.sh` USED TO BAKE, done here instead: the crucible
-        # user, passwordless sudo, and the `/etc/wsl.conf` whose first line is
-        # the marker every later check looks for. Canonical's image has none of
-        # them, and it is ours — just imported under our name into our
-        # directory — so writing them is finishing the import.
         self._line("Preparing the Linux system for Crucible (its user and settings)")
         finished = self._runner.run(
             ["wsl.exe", "-d", self._distro, "-u", "root", "--exec", "bash", "-c", FINISH_IMPORT_SCRIPT],
@@ -955,17 +588,8 @@ class EngineInstall:
             raise self._fail("distro_import_invalid", "The imported image did not contain its ownership marker; it was preserved for inspection")
         self._finish("import-distro", f'Imported {asset} as "{self._distro}"')
 
-    # --------------------------------------------- one release per machine
 
     def guest_release(self) -> str | None:
-        """What `installation.json` inside the distro says the guest is.
-
-        None when there is no record to read. That is not the same as "up to
-        date": `crucible/local.py`'s `publish_installation` writes the file
-        when the RUNTIME STARTS, so an absent one means nothing has run in
-        there — a guest to bring up to this release rather than one to leave at
-        a version nobody can name.
-        """
         read = self._runner.run(
             guest_argv(
                 self._distro,
@@ -983,39 +607,6 @@ class EngineInstall:
         return release if isinstance(release, str) and release else None
 
     def upgrade_guest(self) -> str | None:
-        """Carry the guest to THIS host's release. Returns it, or None.
-
-        ONE RELEASE PER MACHINE, AND THE HOST IS THE DRIVER (Owen, 2026-09-18:
-        *"windows is the driver; the thing moving wsl forward."*).
-
-        THE DEFECT THIS EXISTS FOR, measured rather than remembered.
-        `crucible/host/app.py` handed the install sequence to the door and
-        nowhere else, so the walk ran on `POST /install`; and on a machine the
-        guest already owns, that sequence called `_complete()` — which emits a
-        `done` describing the engine that is already there — instead of
-        installing anything. `_guest_install` below, the ONE place
-        `install.sh --release` runs inside the distro, is reached only from
-        `run()`. So `install.ps1` upgraded the Windows half and the guest sat
-        at whatever release it was installed at, which is why `deploy.sh` had
-        grown a second driver for the same machine.
-
-        THREE ANSWERS, AND ONLY ONE OF THEM DOES ANYTHING:
-
-          * the guest names an OLDER release, or names none → it is carried, by
-            the same `install.sh --release <this host's version>` the move runs.
-            That script is generated from `sdk/bootstrap/src/steps.ts`, so what
-            the guest gets is the pinned interpreter (skipped when its digest is
-            already stamped), this release's wheel, and then the service,
-            capability and readiness steps it already ends with — which is why
-            nothing here repeats them.
-          * the guest names THIS release → nothing. Re-running an install that
-            has nothing to do is a minute of somebody's startup for no change.
-          * the guest names a NEWER one → `guest_ahead_of_host`, by name, and
-            the guest is left exactly as it is. A host that silently took a
-            guest BACKWARDS would be the never-older rule the installers
-            themselves refuse (INSTALL-UNINSTALL.md 6.5.4), broken by the one
-            process that is supposed to enforce it.
-        """
         from ..local import LocalError, release_order
 
         theirs = self.guest_release()
@@ -1045,7 +636,6 @@ class EngineInstall:
         return self._release
 
     def _guest_install(self) -> None:
-        """`install.sh`, inside the distro. The guest half has ONE owner."""
         self._step("guest-install")
         script = (
             'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
@@ -1062,13 +652,6 @@ class EngineInstall:
         self._finish("guest-install", f"install.sh finished inside \"{self._distro}\"", argv=["bash", "-c", script])
 
     def _migrate_config(self) -> None:
-        """The token, the routes and the upstreams cross into the guest.
-
-        The file is written into the GUEST (through `bash -c 'cat > …'` with a
-        `umask 077`), not onto `/mnt/c`: a 0600 file on a DrvFs mount has no
-        0600, because DrvFs synthesises permissions from the Windows ACL, and a
-        token written there would be readable by every process on Windows.
-        """
         self._step("migrate-config")
         config = self._home / "config.toml"
         if not config.is_file():
@@ -1081,16 +664,7 @@ class EngineInstall:
             return
         carried = carried_config(config.read_text(encoding="utf-8"))
         remote = "/tmp/crucible-config-from.toml"
-        # The runner has no stdin door, so the document goes through the
-        # command line — base64 so that no quoting rule, on either side of
-        # wsl.exe, can change a byte of somebody's key. `umask 077` before the
-        # redirect, so the file is never briefly readable.
         payload = base64.b64encode(carried.encode("utf-8")).decode("ascii")
-        # AS THE USER THAT READS IT (`guest_argv`; fresh-install #27,
-        # 2026-09-26). This spelled `wsl.exe -d <distro> --exec` itself, so on a
-        # distro not yet restarted since its import it ran as ROOT and left a
-        # root-owned 0600 file that `init --config-from`, running as
-        # `crucible` two lines down, could not open.
         written = self._runner.run(
             guest_argv(
                 self._distro,
@@ -1128,13 +702,6 @@ class EngineInstall:
         if not restarted.ok:
             raise self._fail("guest_restart_failed", restarted.said())
         if self._guest is not None:
-            # A guest catalog request proves the migrated token is actually live.
-            # A FIRST BOOT'S BUDGET, AND THE ERROR THAT HAPPENED (2026-09-26,
-            # kylies-pc). This was 30 s and one fixed sentence blaming the token
-            # for EVERY failure: a guest still booting (Canonical's image spent
-            # 39 s in cloud-init before `crucible.service` could start), a
-            # catalog this host misread, a refused bearer. The last error is now
-            # what the move reports, by its own code.
             deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS
             while True:
                 try:
@@ -1144,7 +711,7 @@ class EngineInstall:
                     if self._monotonic() >= deadline:
                         code = (
                             "guest_authentication_failed"
-                            if exc.code == "unauthorized"  # the server's 401 (api.py)
+                            if exc.code == "unauthorized"
                             else "guest_not_answering"
                         )
                         raise self._fail(
@@ -1157,14 +724,6 @@ class EngineInstall:
         self._finish("migrate-config", "the Windows token, routes and upstreams are the guest's now")
 
     def _install_job_types(self) -> None:
-        """4.7: the job types the connected apps' modules asked for.
-
-        NOT GUESSED, and not built here: the coordinate records the server
-        keeps from every app are the input, and reading them is the SERVER's
-        (`crucible/modules.py`). Until the Windows server exposes that list the
-        step installs nothing and says so — an install of "everything" would
-        cost somebody thirty gigabytes nobody asked for.
-        """
         self._step("install-job-types")
         self._line(
             "no job types were installed: the list comes from the coordinate "
@@ -1175,7 +734,6 @@ class EngineInstall:
         self._finish("install-job-types", "none: the coordinate records are the server's")
 
     def _prepare_weights(self) -> list[Subject]:
-        """Prepare every destination before stopping or deleting any source."""
         self._step("prepare-weights")
         if self._windows is None or self._guest is None:
             self._finish("prepare-weights", "No Windows model catalog to move")
@@ -1193,32 +751,6 @@ class EngineInstall:
         return source
 
     def _migrate_weights(self, *, allow_pull: bool = True) -> None:
-        """Retire native models after the guest owns the endpoint.
-
-        THE ORDER IS THE WHOLE RULE. For each subject the Windows catalog
-        reports installed: submit the guest's pull, WAIT until the guest's own
-        catalog says it is installed there, and only then
-        the stopped native catalog's removal operation. A machine
-        unplugged at any instant has the subject on one side or on both, never
-        on neither.
-
-        Every round re-reads both catalogs. The persistent cleanup record also
-        names incomplete deletions whose installation stamp disappeared. That
-        lets the stopped native adapter finish removing their remaining files.
-        Background retries refuse missing destinations promptly; only an
-        explicit guided migration may download another destination subject.
-
-        `subject_in_use` (3.5a) is WAITED OUT, never skipped. Something holds
-        the subject — a lease, a resident model, a running task — and 3.5 says
-        nothing is skipped, so the subject is retried on the next round with
-        its holder named in the meantime, for a bounded number of rounds, and
-        then the step fails BY THAT NAME. The two honest ends are "removed"
-        and "still held, and here is who".
-
-        The native adapter calls the same catalog/weights owner functions as
-        the API. It never sends a native deletion to port 7100 after that port
-        has become the guest's endpoint.
-        """
         self._step("migrate-weights")
         if self._windows is None or self._guest is None:
             self._line(
@@ -1248,13 +780,6 @@ class EngineInstall:
                 raise self._fail("migration_cleanup_destination_missing",
                                  "Windows models are kept; the active guest must restore these subjects before cleanup: " + ", ".join(missing))
             held = {}
-            # A BASE AN ALIAS STILL HOLDS (`weights_shared`, PHASE22 section
-            # 2.9) is not a failure and not a hold: `qwen3.5-9b` sorts before
-            # `qwen3.5-9b-vl`, so the base meets its alias's refusal first in
-            # every round and is free the moment the alias has gone. It is
-            # retried on the next round. A round that deferred something and
-            # removed nothing has made no progress, and is refused by that name
-            # rather than spun.
             deferred: list[str] = []
             removed_this_round = 0
             for key in sorted(source):
@@ -1300,9 +825,6 @@ class EngineInstall:
                     "subject; the Windows copies stay until this is answered.",
                 )
             if not held:
-                # Everything this round either moved or was already gone. The
-                # next round re-reads and finds the catalog empty, which is
-                # the one place this loop returns from.
                 continue
             if round_number == MIGRATE_IN_USE_ROUNDS:
                 break
@@ -1319,13 +841,7 @@ class EngineInstall:
         )
 
     def _pull_into_guest(self, subject: Subject) -> None:
-        """Submit the guest's pull and WAIT for the guest's catalog to say so.
-
-        The task's own events are not read: the catalog is the fact
-        (`installed`), a task is a report about it, and the thing that gates a
-        deletion has to be the fact.
-        """
-        assert self._guest is not None  # only called from the step, which checked
+        assert self._guest is not None
         self._line(f"migrate-weights: pulling {subject} in the guest")
         self._guest.pull(subject)
         deadline = self._monotonic() + MIGRATE_PULL_TIMEOUT_SECONDS
@@ -1344,14 +860,6 @@ class EngineInstall:
                 )
 
     def _lan_door(self) -> None:
-        """Installing an engine is not consent to expose it on every interface.
-
-        Unless the operator said so, which `share_lan` is. The work itself is
-        `crucible/lan.py`'s and is not restated here: an install that opened the
-        door by its own second copy of the mechanism would be a door
-        `crucible lan status` did not know about and `crucible lan disable`
-        could not shut.
-        """
         self._step("lan-door")
         from .. import lan as lan_door
 
@@ -1361,8 +869,6 @@ class EngineInstall:
                 if self._share_lan is None else self._share_lan
             )
         except CrucibleError as exc:
-            # A record too broken to read is not a licence to guess which way
-            # the operator wanted this. It names the file and stops.
             raise self._fail(
                 "lan_door_failed",
                 f"this machine's LAN sharing record cannot be read ({exc}), so this "
@@ -1376,10 +882,6 @@ class EngineInstall:
                 "enabled explicitly; installation changes no port forwards or firewall rules.",
             )
             return
-        # Imported inside the method rather than at module scope: `crucible.lan`
-        # reaches back into `crucible.host` for the mechanism, and the host
-        # package is what this file belongs to. A deferred import is how
-        # `cli.py` keeps the same two-way relation from becoming a cycle.
         from ..sharing import Engine
 
         door = landoor.detect(self._runner, ENGINE_PORT)
@@ -1392,8 +894,6 @@ class EngineInstall:
             if not present
         ]
         if missing and not self._elevate:
-            # `--no-elevate` REPORTS the argv and changes nothing. Saying "done"
-            # here would be the one lie this whole step exists to avoid.
             self._finish(
                 "lan-door",
                 "network sharing was requested, but this install may not elevate; "
@@ -1404,12 +904,6 @@ class EngineInstall:
         if missing:
             self._line(landoor.ELEVATION_SENTENCE)
         try:
-            # `adopt=True`: a forward this machine already had is not a reason to
-            # stop an install the operator asked for. It is still VERIFIED and
-            # still recorded, so `lan disable` remains able to shut what it opened.
-            # `say`: FRESH-INSTALL #44 — the prompt is announced as it is raised.
-            # No `ask_private`: nobody is at an install's keyboard to answer, so
-            # a Public network is reported below and never changed silently.
             result = lan_door.enable(
                 self._home, self._runner, Engine(self._home, "lan"),
                 port=ENGINE_PORT, adopt=True, say=self._line,
@@ -1424,12 +918,10 @@ class EngineInstall:
         for url in result["urls"]:
             self._line(f"other devices on this network can reach the engine at {url}")
         if result.get("next"):
-            # #46: a Public network, said plainly, with what to do about it.
             self._line(result["next"])
         self._finish("lan-door", result["detail"])
 
     def _stop_windows_server(self) -> None:
-        """4.7: the Windows engine stops only after the guest is serving."""
         self._step("stop-windows-server")
         if self._stop_windows_callback is None:
             raise self._fail("host_switch_unavailable", "The host did not provide its native-engine shutdown operation")
@@ -1440,7 +932,6 @@ class EngineInstall:
         self._finish("stop-windows-server", "the host stops its child when this returns")
 
     def _switch_pairing(self) -> None:
-        """3.6: the Windows-side pairing file now names the guest's server."""
         self._step("switch-pairing")
         if self._switch_pairing_callback is None:
             raise self._fail("host_switch_unavailable", "The host did not provide its guest activation operation")
@@ -1450,20 +941,8 @@ class EngineInstall:
         )
         self._finish("switch-pairing", "the same line, same token, same host, same port")
 
-    # ------------------------------------------------------------- plumbing
 
     def _stream_guest(self, argv: Sequence[str], timeout_s: float) -> RunResult:
-        """Run inside the distro and put every line on the event stream AS IT ARRIVES.
-
-        `--exec`, always: wsl.exe pre-expands `$var` in its implicit-shell form
-        and `--exec` is the spelling everything else in this system uses.
-
-        IT STREAMS SINCE PHASE19 2.12. It used to `run` and then walk the two
-        collected pipes, so `guest-install` — an `install.sh` that pips for
-        twenty minutes — arrived as one burst at the end, which is `door.py`'s
-        own rule about progress bars broken one layer down. `_line` lifts the
-        `crucible-progress` lines out on the way past.
-        """
         full = guest_argv(self._distro, argv)
         return self._runner.stream(
             full,
@@ -1478,7 +957,6 @@ class EngineInstall:
 
 
 def elevated(argv: Sequence[str]) -> list[str]:
-    """`Start-Process -Verb RunAs` around an argv. One spelling, two callers."""
     program, *rest = argv
     quoted = ",".join("'" + word.replace("'", "''") + "'" for word in rest)
     arguments = "" if quoted == "" else f" -ArgumentList {quoted}"
@@ -1493,21 +971,6 @@ def elevated(argv: Sequence[str]) -> list[str]:
 
 
 def carried_config(config_text: str) -> str:
-    """What `--config-from` takes, and nothing else (4.3).
-
-    `auth.token`, `[routes]`, `[upstreams]` and, since 2026-09-26,
-    `[accelerator]` — the desktop reserve and its basis, because the Windows
-    server and the guest share one card and one desktop, and a reserve
-    somebody stated (or Crucible measured) must survive the move rather than
-    be re-decided in the guest (`cli.carried_from` says why in full). The
-    host, the port, the name, the backend and the job flags belong to the
-    machine being initialised, not to the one being left — a guest that
-    inherited `backend = "llama-windows"` would refuse to serve on its own card.
-
-    Extracted textually rather than parsed and re-emitted, because a key is a
-    secret and a round trip through a writer is a chance to mangle one. The
-    sections are copied verbatim; anything outside them is dropped.
-    """
     kept: list[str] = []
     section = ""
     for raw in config_text.splitlines():

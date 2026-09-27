@@ -32,7 +32,7 @@ test('real HTTP pairing keeps the device secret in the body and returns credenti
     const body = JSON.parse(raw);
     if (request.url === '/v1/pairing/start') {
       assert.deepEqual(body, { client_name: 'BookForge' });
-      response.end(JSON.stringify({ name: 'fixture', id: 'fixture-id', device_code: 'private-device-secret', user_code: 'ABCD-EFGH', expires_in: 300, interval: 2 }));
+      response.end(JSON.stringify({ name: 'fixture', id: 'fixture-id', device_code: 'private-device-secret', user_code: 'ABCD-EFGH', expires_in: 300, interval: 2, approval_required: true }));
       return;
     }
     assert.equal(request.url, '/v1/pairing/poll');
@@ -45,10 +45,6 @@ test('real HTTP pairing keeps the device secret in the body and returns credenti
     const address = server.address() as { port: number };
     const request = await startPairing(`127.0.0.1:${address.port}`, 'BookForge');
     assert.equal(request.userCode, 'ABCD-EFGH');
-    // This fixture sends NO `approval_required`, which is an engine older than
-    // the field — and every one of those asked for approval. Asserted here
-    // rather than left incidental, because it is the safe half: a client that
-    // read `false` from an old engine would skip a step that engine requires.
     assert.equal(request.approvalRequired, true);
     assert.deepEqual(await pollPairing(request), { status: 'pending' });
     approved = true;
@@ -56,18 +52,15 @@ test('real HTTP pairing keeps the device secret in the body and returns credenti
   } finally { server.close(); server.closeAllConnections(); }
 });
 
-test('approval_required crosses the seam, both ways and when absent', async () => {
+test('approval_required crosses the seam, both ways', async () => {
   // THE FIELD THE SERVER SENDS AND NO CLIENT COULD READ. `startPairing` builds
   // its result explicitly, so until 2026-09-18 `approval_required` arrived on
   // the wire and was dropped here — an engine with open pairing looked exactly
   // like one demanding approval, and every app had to word its connect screen
   // for both at once.
-  //
-  // Three cases, because absence is a third answer and not a missing one.
   for (const [sent, expected] of [
     [{ approval_required: false }, false],
     [{ approval_required: true }, true],
-    [{}, true],
   ] as const) {
     const fake = (async (input: unknown) => {
       const url = String(input);
@@ -135,14 +128,14 @@ test('denied and expired requests never manufacture a connection', async () => {
 });
 
 test('trusted apps list and approve pairing through authenticated API calls', async () => {
-  let shape: 'whole' | 'no-expiry' | 'no-code' = 'whole';
+  let shape: 'whole' | 'no-code' = 'whole';
   const server = createServer(async (request, response) => {
     assert.equal(request.headers.authorization, 'Bearer trusted-token');
     assert.equal(request.headers['x-crucible-api'], '1');
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/v1/pairing/requests') {
       assert.equal(request.method, 'GET');
-      response.end(JSON.stringify({ requests: [{ id: 'id', ...(shape === 'no-code' ? {} : { user_code: 'ABCD-EFGH' }), client_name: 'BookForge', address: '192.0.2.1', ...(shape === 'no-expiry' ? {} : { expires_in: 42 }) }] }));
+      response.end(JSON.stringify({ requests: [{ id: 'id', ...(shape === 'no-code' ? {} : { user_code: 'ABCD-EFGH' }), client_name: 'BookForge', address: '192.0.2.1', expires_in: 42 }] }));
       return;
     }
     assert.equal(request.url, '/v1/pairing/decision');
@@ -159,10 +152,6 @@ test('trusted apps list and approve pairing through authenticated API calls', as
     const client = new CrucibleClient({ url: `http://127.0.0.1:${port}`, token: 'trusted-token', clientName: 'Foundry' });
     assert.deepEqual(await client.listPairingRequests(), [{ id: 'id', userCode: 'ABCD-EFGH', clientName: 'BookForge', address: '192.0.2.1', expiresIn: 42 }]);
     assert.deepEqual(await client.decidePairing('id', 'ABCD-EFGH', true), { status: 'approved' });
-    // How long the request has is shown to the person deciding: a server
-    // that does not say reads as null (Owen, 2026-09-24).
-    shape = 'no-expiry';
-    assert.equal((await client.listPairingRequests())[0]?.expiresIn, null);
     // The code IS the approval's subject: a request without one is refused.
     shape = 'no-code';
     await assert.rejects(client.listPairingRequests(), /has no field "user_code"/);

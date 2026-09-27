@@ -1,8 +1,3 @@
-"""Installed local lifecycle contract. Apps never know the runtime's layout.
-
-installation.json records installation facts, not health or credentials. Its
-control command owns platform decisions; clients validate its structured result.
-"""
 from __future__ import annotations
 
 import argparse
@@ -29,26 +24,10 @@ class LocalError(RuntimeError):
     pass
 
 
-#: Three numbers and nothing else. A release that does not match is not
-#: ordered — see `release_order`.
 _RELEASE = __import__("re").compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
 
 def release_order(left: str, right: str) -> int:
-    """-1, 0 or 1, comparing two releases NUMBER BY NUMBER.
-
-    Not a string comparison, which puts `1.0.10` before `1.0.2` — the one
-    question in this area that has to get that right, and the reason
-    `install.sh` spells the same rule in awk and `install.ps1` in `[version]`.
-
-    THIS FILE OWNS IT because this file owns `installation.json`, whose
-    `release` is what anybody asking "is that machine behind" is reading. A
-    comparator beside each caller would be three answers to one question.
-
-    A version this cannot read is REFUSED rather than ordered. "I could not
-    parse it so I will assume it is older" is how a machine gets taken
-    backwards by something that meant to move it forward.
-    """
     numbers = []
     for value in (left, right):
         match = _RELEASE.match(value.strip())
@@ -66,10 +45,7 @@ def release_order(left: str, right: str) -> int:
 
 def publish_installation(home: Path | None = None) -> Path:
     home = (home if home is not None else crucible_home()).resolve()
-    # Preserve venv/bin/python itself: resolving its symlink selects the base
-    # interpreter and loses the installed environment on source-built POSIX.
     executable = Path(sys.executable).absolute()
-    # pythonw cannot return JSON to a pipe. It is only used to launch the UI.
     if executable.name.lower() == "pythonw.exe":
         executable = executable.with_name("python.exe")
     if not executable.is_file():
@@ -82,7 +58,6 @@ def publish_installation(home: Path | None = None) -> Path:
     }
     home.mkdir(parents=True, exist_ok=True)
     path = home / RECORD
-    # Unique staging file: two clients may adopt the same installation at once.
     import tempfile
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=home,
                                      prefix="installation-", suffix=".tmp", delete=False) as f:
@@ -98,14 +73,12 @@ def publish_installation(home: Path | None = None) -> Path:
 
 
 def connection(home: Path) -> tuple[str, str, str]:
-    """The locally installed engine, never an arbitrary saved remote server."""
     if sys.platform == "win32":
         path = home / "pairing"
         try:
             pair = parse_pairing_line(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError) as exc:
             raise LocalError(f"local_pairing_invalid: {path}: {exc}") from exc
-        # The host publishes the engine's pairing; controller is separate.
         return "http://127.0.0.1:7100", pair.name, pair.token
     config = load_config(home)
     host = config.host
@@ -120,16 +93,10 @@ def connection(home: Path) -> tuple[str, str, str]:
 
 def request(url: str, *, token: str | None = None, method: str = "GET",
             timeout: float = 3, headers: dict[str, str] | None = None) -> dict:
-    """One local HTTP call. `timeout` is THREE seconds because most of these
-    are liveness probes, and a tray that blocks is a tray with no menu.
-
-    Callers that ask a heavier question pass their own -- see `INFO_TIMEOUT`.
-    """
     sent = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
     sent.update(headers or {})
     req = urllib.request.Request(url, headers=sent, method=method,
                                  data=b"{}" if method == "POST" else None)
-    # Local service access must not depend on the invoking shell's proxy env.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(req, timeout=timeout) as response:
         value = json.load(response)
@@ -138,13 +105,6 @@ def request(url: str, *, token: str | None = None, method: str = "GET",
     return value
 
 
-#: `/v1/info` is not a liveness probe. It composes a document by enumerating
-#: every model and every voice the engine knows, so on a machine with a full
-#: catalogue it legitimately takes longer than the three seconds a ping gets.
-#: Measured consequence of not having this: a HEALTHY engine reported
-#: `unhealthy`, and the reason shown to a person was the two words "timed
-#: out" (reported by the Foundry session, 2026-09-17). The timeout was the
-#: cause; the unwrapped message below was why it was unreadable.
 INFO_TIMEOUT = 15.0
 
 
@@ -159,7 +119,6 @@ def status(home: Path | None = None) -> dict:
         return dict(result, state="wrong_service" if exc.code == 404 else "unhealthy",
                     detail=f"The endpoint answered ping with HTTP {exc.code}")
     except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-        # A timeout is not proof that a process is stopped.
         result["detail"] = f"Engine did not answer: {exc}"
         if sys.platform == "win32":
             try:
@@ -168,7 +127,7 @@ def status(home: Path | None = None) -> dict:
                     result["state"] = "stopped"
                     result["detail"] = "Stopped by the operator"
             except (OSError, ValueError, LocalError):
-                pass  # Keep the original, explicit unreachable state.
+                pass
         else:
             from . import service
             config = load_config(home)
@@ -177,13 +136,6 @@ def status(home: Path | None = None) -> dict:
             if not observed.installed:
                 result.update(state="broken", detail="The service definition is missing")
             elif observed.running is False:
-                # ASKED AND ANSWERED, not matched out of prose. This used to
-                # read `not observed.running` next to two string tests on
-                # `detail`, because `running` was False both when systemd said
-                # "inactive" and when systemd could not be reached at all, and
-                # the strings were what told those apart. `Status.running` is
-                # tri-state now and says it itself: False is a manager's
-                # answer, None is nobody's.
                 result.update(state="stopped", detail=observed.detail)
         return result
     except (ValueError, LocalError) as exc:
@@ -196,19 +148,11 @@ def status(home: Path | None = None) -> dict:
         return dict(result, state="unauthorized" if exc.code in (401, 403) else "unhealthy",
                     detail=f"Engine info returned HTTP {exc.code}")
     except (OSError, ValueError, LocalError) as exc:
-        # WRAPPED, like the ping branch twenty lines up. `str(TimeoutError())`
-        # is the two words "timed out" -- no subject, no endpoint, nothing a
-        # person can act on -- and this string is shown to one. An exception
-        # message is evidence, never a sentence.
         return dict(result, state="unhealthy",
                     detail=f"The engine answered ping but not /v1/info: {exc}")
     server = info.get("server")
     if not isinstance(server, dict) or server.get("name") != name or server.get("api_version") != 1:
         return dict(result, state="wrong_service", detail="The engine returned incompatible or unexpected identity information")
-    # The engine's own version travels with the observation. It is reported
-    # rather than judged here, because `status` answers for a running server
-    # generally and two versions coexisting is not by itself a fault. The
-    # START path below is where a mismatch IS one.
     machine = info.get("host")
     return dict(result, state="running", version=server.get("version"),
                 backend=(machine.get("backend") if isinstance(machine, dict) else None),
@@ -227,7 +171,6 @@ def _spawn_controller(home: Path) -> None:
 
 
 def controller_ping() -> dict:
-    """An answering HTTP error is an occupied port, never a missing process."""
     try:
         observed = request("http://127.0.0.1:7101/v1/ping")
     except (urllib.error.HTTPError, ValueError) as exc:
@@ -237,14 +180,10 @@ def controller_ping() -> dict:
     return observed
 
 
-#: Sent with an upgrade's `POST /quit` (fresh-install #35): hand the distro
-#: hold over rather than letting it go. `crucible/host/door.py` reads it.
 HANDOVER_HEADER = "X-Crucible-Handover"
 
-#: The controller's door on Windows (PHASE17 3.2).
 CONTROLLER_URL = "http://127.0.0.1:7101"
 
-#: What a person is told when neither token this PC can find opens the door.
 TOKEN_MISMATCH = (
     "engine_token_mismatch: Crucible's controller on this PC would not accept "
     "the engine token this PC holds, nor the one its Linux engine holds, so "
@@ -255,17 +194,6 @@ TOKEN_MISMATCH = (
 
 
 def _guest_tokens(home: Path) -> list[str]:
-    """The token the Linux engine on this PC holds, read from the guest itself.
-
-    Fresh-install #32 (2026-09-26, kylies-pc). After the engine moved from
-    /root to /home/crucible with a NEW token, the Windows copy of the pairing
-    line still held the old one, the controller's door wanted the guest's, and
-    every upgrade failed with 401 before it could stop anything: a machine no
-    later release could reach. The guest is the owner of its token (PHASE15
-    3.6), so when the Windows copy is refused, the guest is asked. Crucible's
-    own distro first, then a distro the orchestrator was given by consent.
-    Read through `guest_pairing_argv`, as the user the engine runs as.
-    """
     from .host.app import consented_distro
     from .host.errors import HostError
     from .host.presence import guest_pairing_argv
@@ -299,14 +227,6 @@ def _guest_tokens(home: Path) -> list[str]:
 
 def door_call(path: str, home: Path, token: str, *, method: str = "GET",
               timeout: float = 3) -> tuple[dict, str]:
-    """One call to the controller's door, and the token that opened it.
-
-    A 401 is not the end of it (fresh-install #32, 2026-09-26): the pairing
-    file is read again, in case a tray that just started has rewritten it, and
-    then the guest is asked for its own token. The token that worked is
-    returned so the calls after it use the same one. When none does, the
-    refusal is `TOKEN_MISMATCH`, in words, and not `HTTP Error 401`.
-    """
     try:
         return request(CONTROLLER_URL + path, token=token, method=method, timeout=timeout), token
     except urllib.error.HTTPError as exc:
@@ -335,8 +255,6 @@ def door_call(path: str, home: Path, token: str, *, method: str = "GET",
 def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
     home = home if home is not None else crucible_home()
     if sys.platform == "win32" and action == "start" and not (home / "pairing").exists():
-        # Fresh Windows install: controller initializes the native engine and
-        # pairing before there is any credential with which to control it.
         try:
             controller_ping()
         except (urllib.error.URLError, TimeoutError, ConnectionError):
@@ -382,52 +300,6 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
         observed = status(home)
         if observed["state"] == ("running" if action == "start" else "stopped"):
             if action == "start":
-                # THE ENGINE ANSWERING MUST BE THE ONE THIS RELEASE INSTALLED.
-                # `systemctl enable --now` does nothing to an already-running
-                # unit, so an upgrade that rewrote ExecStart can leave the OLD
-                # executable serving while every line of the install says it
-                # succeeded (measured 2026-09-16: a guest reported 0.6.0 from
-                # the previous release's path after installing 0.6.3).
-                # `service.install` now restarts a definition that moved; this
-                # is the check that would have caught it either way, and it
-                # catches any other route to the same stale process.
-                #
-                # ABSENT is not MISMATCHED: an engine too old to report its
-                # version is not evidence of staleness, and refusing it would
-                # be inventing a fault out of a missing key.
-                #
-                # AND ONLY FOR AN ENGINE THIS INSTALLATION OWNS. A Windows host
-                # managing a WSL guest is TWO installations that upgrade
-                # separately, and the guest is reached through the same door —
-                # so comparing its version to this one compares two different
-                # products. The first draft of this guard did exactly that and
-                # refused the 0.6.5 Windows install because the guest it had
-                # just started was still 0.6.3 (measured 2026-09-16): a
-                # chicken-and-egg where neither side could go first. Same
-                # distinction as `owner=found` above — an engine this
-                # installation did not install is not its to judge.
-                #
-                # "OURS" IS A FACT, and an unknown own-backend is not a licence
-                # to judge. The draft below read every failure of `load_config`
-                # as `own_backend = None` and then treated None as ours, which
-                # on Owen's PC is the chicken-and-egg this paragraph records
-                # fixing, back again by another door: that machine's Windows
-                # config is an ORCHESTRATOR's — `[orchestrator] distro =
-                # "Ubuntu"`, no `[server]` — so `load_config` raised, `ours`
-                # became True, and the 1.0.3 host compared the guest's 1.0.2
-                # against itself and refused the install (measured on the first
-                # real `ship.sh patch --deploy`, 2026-09-19). An installation
-                # with no `[server]` section runs no engine, so the engine
-                # answering is by definition somebody else's; and a config that
-                # cannot be READ is a refusal by name rather than a verdict,
-                # because "we do not know whose engine that is" and "it is not
-                # ours" are different sentences.
-                #
-                # THE MISMATCH IS ASKED ABOUT FIRST, and the ownership question
-                # only about a mismatch: an engine reporting this release, or
-                # reporting none, is not a verdict waiting to be made, so there
-                # is nothing there for a config to decide and a config that
-                # cannot be read is not yet anybody's problem.
                 running_version = observed.get("version")
                 if isinstance(running_version, str) and running_version != VERSION:
                     try:
@@ -453,18 +325,9 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                 try:
                     observed["sharing"] = reconcile(home)
                 except (OSError, ValueError, RuntimeError, CrucibleError) as exc:
-                    # Optional networking must not turn a healthy local engine
-                    # into a failed start, but its failure must remain visible.
                     observed["sharing"] = {"state": "degraded", "detail": str(exc),
                                            "remote_reachability": "not_tested"}
             return observed
-        # ON WINDOWS, `unauthorized` IS WAITED OUT, not refused on sight
-        # (fresh-install #32, 2026-09-26). `status` re-reads the pairing file
-        # every pass, and the tray that just started rewrites that file from
-        # the guest's own line, and repairs a guest whose token was replaced,
-        # within seconds of coming up. Refusing on the first 401 reported
-        # "unauthorized" to a person at exactly the moment the product was
-        # putting it right; at the deadline it is still a refusal, in words.
         if observed["state"] == "unauthorized" and sys.platform == "win32":
             if time.monotonic() >= deadline:
                 raise LocalError(TOKEN_MISMATCH)
@@ -478,29 +341,11 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
 
 
 def shutdown() -> None:
-    """Quiesce before an upgrade; absence is accepted only after refused connects."""
     from .desktop import close_tray
     close_tray()
     home = crucible_home()
     if sys.platform == "win32":
         def refused(exc: BaseException) -> bool:
-            """Did the endpoint GO AWAY? A refusal and a reset both say yes.
-
-            A server that is asked to quit and does so can end the conversation
-            two ways: the port stops accepting (ECONNREFUSED / WinError 10061)
-            or the socket it was already holding is torn down as the process
-            exits (ECONNRESET / WinError 10054). Only the first was recognised,
-            so an orchestrator that quit PROPERLY — 0.6.3 does have `/quit`, and
-            used it — was reported as `controller_shutdown_unknown: [WinError
-            10054] An existing connection was forcibly closed by the remote
-            host` and the upgrade stopped. Measured 2026-09-16 on the
-            0.6.3 -> 0.6.5 upgrade of owens-pc, and it is the eighth distinct
-            way this path refused a machine with nothing wrong with it.
-
-            The caller pairs this with `_alive(controller_pid)` before treating
-            the controller as gone, so a reset from something still running
-            cannot be mistaken for an exit.
-            """
             import errno
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             if isinstance(reason, (ConnectionRefusedError, ConnectionResetError)):
@@ -523,14 +368,6 @@ def shutdown() -> None:
                 if refused(engine_exc):
                     return
                 raise LocalError(f"engine_shutdown_unknown: {engine_exc}") from engine_exc
-            # AN ENGINE OUTLIVING ITS CONTROLLER IS NORMAL FOR A GUEST. A WSL
-            # unit runs under the distro's own init and is meant to survive the
-            # Windows swap — the loop further down leaves one running for that
-            # exact reason. What would genuinely be unmanaged is a NATIVE engine,
-            # the controller's own child, still answering after its parent went.
-            # So the engine is asked which it is rather than assumed to be the
-            # bad case. Measured 2026-09-16: this refusal stopped an upgrade on a
-            # machine whose engine was a perfectly healthy WSL guest.
             try:
                 _, _, engine_token = connection(home)
                 backend = (request("http://127.0.0.1:7100/v1/info", token=engine_token)
@@ -560,15 +397,6 @@ def shutdown() -> None:
                              f"for {release!r} (lifecycle {lifecycle!r})")
         engine = info.get("engine")
         owner = engine.get("owner") if isinstance(engine, dict) else None
-        # `found` SITS WITH `wsl-unit`, NOT AGAINST IT. Both name an engine this
-        # controller did not start, and the loop below already leaves a
-        # `wsl-unit` engine running for exactly that reason — PHASE17 is explicit
-        # that an orchestrator must not stop what it does not own. Refusing the
-        # upgrade over it was the stricter reading of the same fact, and it made
-        # the DEFAULT state of a stock WSL2 unupgradable: WSLg hides the user bus
-        # (see crucible/service.py `systemd_scope`), the probe fails, and the
-        # owner is `found` on a machine where nothing is wrong with the engine.
-        # Measured 2026-09-16 on the 0.6.0 -> 0.6.3 upgrade of owens-pc.
         if owner not in (None, "child", "wsl-unit", "found"):
             raise LocalError("controller_upgrade_unsupported: the controller does not own the answering engine")
         from .host.app import _alive
@@ -577,18 +405,8 @@ def shutdown() -> None:
         if not raw.isdigit():
             raise LocalError("controller_shutdown_unknown: the controller has no valid process record")
         controller_pid = int(raw)
-        # A GUEST ENGINE IS NOT STOPPED HERE (fresh-install #35, 2026-09-26).
-        # `act("stop")` ran for every owner, and for a `wsl-unit` that is
-        # `systemctl stop` on an engine whose files this upgrade does not
-        # touch: the guest is carried separately, by the new tray, with its
-        # own shutdown. On kylies-pc the 1.0.48 upgrade left nothing on :7100
-        # for about 50 s. Only a `child` engine, whose runtime IS being
-        # replaced, is stopped; the guest keeps serving through the swap.
         if owner not in ("wsl-unit", "found"):
             act("stop")
-        # THE HANDOVER HEADER (#35): the old tray leaves a bounded hold on the
-        # distro behind it, so WSL does not idle the guest away in the seconds
-        # before the new tray takes its own.
         request("http://127.0.0.1:7101/quit", token=token, method="POST",
                 headers={HANDOVER_HEADER: "1"})
         deadline = time.monotonic() + 15
@@ -615,12 +433,6 @@ def shutdown() -> None:
                 raise LocalError("controller_shutdown_failed: controller did not exit")
             time.sleep(0.1)
     else:
-        # NOTHING INSTALLED IS NOTHING TO STOP, and that is a success
-        # (fresh-install #39, 2026-09-26). install.sh used to run this with
-        # `|| true`, so a re-run after an install that died before
-        # `service-install` shrugged off "no config" and "no unit". It now
-        # treats a failed stop as a server still running (the #39 trap), so
-        # this answers the real question: was there a service to stop?
         from . import service
         try:
             config = load_config(home)
@@ -666,17 +478,6 @@ def command(args: argparse.Namespace) -> int:
 
 
 def said(exc: BaseException) -> str:
-    """What the failure SAID, including a refusal's own body.
-
-    `str(HTTPError)` is "HTTP Error 409: Conflict" and nothing else, while the
-    door on the other end had just written
-    `{"error": {"code": "engine_stop_failed", "message": "..."}}` into the
-    response. Every refusal this project makes names itself, and throwing the
-    name away at the last step turned a diagnosable stop failure into a status
-    line: on 2026-09-17 an upgrade printed `HTTP Error 409: Conflict` and the
-    reason - that the guest had become a system unit and was being stopped
-    through the user manager - had to be found by reading source instead.
-    """
     if not isinstance(exc, urllib.error.HTTPError):
         return str(exc)
     try:

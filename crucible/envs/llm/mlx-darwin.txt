@@ -1,71 +1,8 @@
-# crucible `llm` env — mlx-darwin (mlx-lm on Apple Silicon).
-#
 # archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
-#   THE MLX TOTAL, and the only measured mlx number there is: that table prices
-#   the five cuda recipes one by one and the five mlx ones together. So every
-#   mlx recipe carries the total rather than a share of it invented here — it
-#   overstates one env and can never understate it, and a floor may only ever
-#   be wrong in that direction (PHASE19-AUTOMATIC-WSL.md ruling 6: "a floor
-#   that is too low still beats a pip that dies at 4.9 GB"). An ARCHIVE size;
-#   the unpacked env is larger. Replace this line the day one mlx env is
-#   measured on its own — one recipe, one measured number, one owner.
-#
-# Installed by `crucible install llm` into ~/.crucible/envs/llm/ as a venv built
-# from the server's own interpreter. Everything here comes from PyPI.
-#
-# `mlx-lm==0.31.3` is the pin that was CHOSEN. Everything under it is the set
-# pip resolved on Owen's Mac Studio (M1 Ultra, python 3.11.16, 2026-09-12) —
-# recorded exactly, because a later install must not drift. `crucible doctor`
-# calls the env NOT READY if any one of these is absent or at another version.
-#
-# Install time on that host: 14 s.
-# Regenerate after any deliberate bump with:
-#     ~/.crucible/envs/llm/bin/python -m pip freeze
-#
-# MLX-VLM IS HERE, SINCE 2026-09-21 — `mlx-vlm==0.7.1`, THE PAGES ENGINE
-# ------------------------------------------------------------------------
-# `mlx-darwin`'s `pages` engine (crucible/manifests.py) is Crucible's own page
-# server, `crucible/engines/mlx_vlm_serve.py`, which runs dots.ocr through
-# mlx-vlm IN PROCESS out of this env — mlx-vlm's own HTTP server never puts
-# the image into the prompt, which is why this line was missing for a week
-# (the run is in crucible/engines/mlx_vlm.py). It is in THIS env and not a
-# third one because its pins resolve under the set below unchanged.
-#
-# WHY 0.7.1 AND NOT 0.6.10, MEASURED ON THE MAC STUDIO 2026-09-21. 0.6.10 was
-# the version the in-process path was first validated on, and it does not run
-# on this env's `mlx==0.32.2`: `mlx_vlm/models/dots_ocr/vision.py:286` calls
-# `mx.repeat(seq_len, grid_thw[i, 0])` with an ARRAY count, which 0.32.0
-# accepted and 0.32.2 refuses (`TypeError: repeat(): incompatible function
-# arguments`). 0.7.1 casts it (`int(grid_thw[i, 0])`) and keeps the batch
-# surface the reader uses. So the choice was 0.7.1 on the mlx already here,
-# or 0.6.10 with mlx pinned BACK to 0.32.0 under the text engine that was
-# measured on 0.32.2 — and moving the text engine's stack for the page
-# reader's sake would have been the wrong side to bend.
-#
-# THE SET BELOW IS THE RESOLVE OF THE PREVIOUS SET PLUS `mlx-vlm==0.7.1`
-# with every previous line held as a CONSTRAINT (`pip install -c <old>
-# -r <old> mlx-vlm==0.7.1`, python 3.11.16, 2026-09-21), so nothing already
-# here changed version and the 22 names that arrived are exactly mlx-vlm's
-# closure: fastapi, starlette, uvicorn, python-multipart, pydantic and
-# pydantic_core (its server, which Crucible does not run), llguidance,
-# miniaudio, opencv-python, pillow, scipy, cffi, pycparser, annotated-types,
-# typing-inspection, charset-normalizer, requests, urllib3, websockets, and
-# `mlx-audio==0.5.5` with `sounddevice`, which mlx-vlm declares and this env
-# has no use for (the tts env pins its own mlx-audio; that is a second copy
-# at a different version in a second env, known and accepted).
-#
-# VALIDATED AS THIS EXACT SET: a venv built from it read four real 200-dpi
-# book pages through the reader's own path byte-identically to
-# `mlx_vlm.batch_generate` (the numbers are in models/dots-ocr.toml's
-# [backends.mlx-darwin] block).
-#
-# Regenerate after any deliberate bump with:
-#     ~/.crucible/envs/llm/bin/python -m pip freeze
 
 mlx-lm==0.31.3
 mlx-vlm==0.7.1
 
-# --- the set pip resolved under them ---
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1

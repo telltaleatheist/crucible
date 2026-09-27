@@ -138,12 +138,6 @@ test('a pairing line off setup opens a client with no typing', async () => {
   assert.equal(parsed.url, setup.urls[0]);
 });
 
-test('a setup missing a descriptive field reads it as null', async () => {
-  const { config_path: _dropped, ...without } = SETUP;
-  answer(200, without);
-  assert.equal((await client().setup()).configPath, null);
-});
-
 test('a setup missing what another app connects with is a protocol error', async () => {
   // The token and the pairing lines are what a second app is handed.
   const { token: _dropped, ...without } = SETUP;
@@ -206,23 +200,9 @@ test('an alias row says whose weights it shares and which of its own files are m
   assert.deepEqual(row!.missingFiles, ['mmproj-F16.gguf']);
 });
 
-test('a catalog row without shares_weights_of reads it as null: a server that predates aliases', async () => {
-  const { shares_weights_of: _dropped, ...without } = ROW;
-  answer(200, { rows: [without] });
-  assert.equal((await client().catalog())[0]?.sharesWeightsOf, null);
-});
-
 test('a kind outside the five is a protocol error, not a passed-through string', async () => {
   answer(200, { rows: [{ ...ROW, kind: 'sorcery' }] });
   await assert.rejects(() => client().catalog(), CrucibleProtocolError);
-});
-
-test('a row whose installed_bytes is absent reads as null — never as zero', async () => {
-  const { installed_bytes: _dropped, ...without } = ROW;
-  answer(200, { rows: [without] });
-  const [row] = await client().catalog();
-  assert.equal(row?.installedBytes, null);
-  assert.equal(row?.installed, true);
 });
 
 test('a catalog row missing what a pull or a remove decides on is a protocol error', async () => {
@@ -351,6 +331,8 @@ const TASK = {
   created: '2026-09-14T03:00:00+00:00',
   started: '2026-09-14T03:00:00+00:00',
   finished: '2026-09-14T03:04:00+00:00',
+  unmet: [],
+  message: null,
 };
 
 test('task reads the record and keeps the echoed request verbatim', async () => {
@@ -366,10 +348,8 @@ test('task reads the record and keeps the echoed request verbatim', async () => 
     created: '2026-09-14T03:00:00+00:00',
     started: '2026-09-14T03:00:00+00:00',
     finished: '2026-09-14T03:04:00+00:00',
-    // ABSENT reads as EMPTY (PHASE15-HOST.md 5.3a): a server that predates
-    // the field ran a module in which every class resolved, or named none,
-    // because a server that could leave one unmet is one that carries it.
     unmet: [],
+    message: null,
   });
 });
 

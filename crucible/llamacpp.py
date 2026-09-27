@@ -1,38 +1,3 @@
-"""The `engine` subject: llama.cpp's own release, pulled like weights.
-
-PHASE15-HOST.md section 3.10, fact 1. `llama-windows` serves its models with
-`llama-server.exe`, and that binary is not a Python package, not a pack and
-not a model — it is a zip on a GitHub release. So it is a SUBJECT:
-`{kind: "engine", id: "llama-cpp"}`, which means the page's Tasks panel draws
-its download with bytes exactly as it draws a weights pull, `GET /v1/catalog`
-says whether it is installed, and `DELETE /v1/catalog/engine/llama-cpp`
-(3.5a) removes it. No new vocabulary anywhere; one more row.
-
-THE BUILD IS PINNED, NEVER LISTED AT RUNTIME
----------------------------------------------
-Foundry read the release listing and fell back to a pinned tag when the read
-failed, which is two sources of truth for "which llama.cpp is this" and a
-machine that quietly runs a different one on a bad network day. Here there is
-ONE constant (`LLAMA_CPP_RELEASE`) and no listing call at all. Upgrading the
-engine is an edit to this file with new digests beside it, which is what
-pinning is for.
-
-WHICH ASSETS, AND WHY THE CUDA ROW IS TWO OF THEM
----------------------------------------------------
-Windows + NVIDIA takes `llama-<tag>-bin-win-cuda-12.4-x64.zip` **and**
-`cudart-llama-bin-win-cuda-12.4-x64.zip`, unpacked into ONE directory: the
-CUDA build links against the CUDA runtime DLLs and does not start without
-them, and llama.cpp ships them as a separate asset rather than in the build.
-A machine with no NVIDIA card takes the CPU build, one zip, and runs slowly —
-which is allowed, and which the capability row says in words (Owen: *"a
-crucible server will run on absolutely anything"*).
-
-EVERY DIGEST IS CHECKED BEFORE ANYTHING IS PLACED, which is `pull_archive`'s
-rule and `pull_files`' rule, for their reason: a half-placed engine directory
-is one `llama-server` will start from and fail inside, and the failure then
-arrives in the middle of somebody's book instead of here.
-"""
-
 from __future__ import annotations
 
 import json
@@ -57,35 +22,23 @@ from .weights import (
     sha256_of,
 )
 
-#: The subject's kind and id, the two words every door spells.
 ENGINE_KIND = "engine"
 LLAMA_CPP_ID = "llama-cpp"
 
-#: **THE PIN.** `ggml-org/llama.cpp`, published 2026-09-14T20:53:17Z. One
-#: constant, edited deliberately, never read from a listing at run time.
 LLAMA_CPP_RELEASE = "b10970"
 
-#: Where a release's assets are. The tag is interpolated; nothing else is.
 RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/download"
 
-#: The binary the residency spawns, inside the unpacked directory.
 LLAMA_SERVER_EXE = "llama-server.exe"
 
-#: The stamp, beside the unpacked files. Named for the subject, like every
-#: other stamp in `crucible/weights.py`.
 STAMP_NAME = ".crucible-engine.json"
 
-#: How much of a download is read at a time. One megabyte, like `sha256_of`.
 CHUNK_BYTES = 1 << 20
 
-#: Seconds before a stalled connection is given up on. A 254 MB asset on a
-#: slow line is minutes of transfer but never minutes between two packets.
 CONNECT_TIMEOUT_SECONDS = 60.0
 
 
 class EngineSubjectError(CrucibleError):
-    """The engine could not be fetched, verified or unpacked."""
-
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
@@ -94,14 +47,6 @@ class EngineSubjectError(CrucibleError):
 
 @dataclass(frozen=True)
 class Asset:
-    """One zip on the release, with the size and digest the API published.
-
-    The digests are the RELEASE'S OWN: the GitHub releases API publishes a
-    `digest` per asset, read on 2026-09-14, so these are not a local
-    measurement of a local download and a mismatch means the bytes are not
-    the bytes ggml-org published.
-    """
-
     name: str
     bytes: int
     sha256: str
@@ -111,8 +56,6 @@ class Asset:
         return f"{RELEASE_URL}/{LLAMA_CPP_RELEASE}/{self.name}"
 
 
-#: Windows + NVIDIA. TWO assets into one directory — the server does not start
-#: without the cudart DLLs.
 CUDA_ASSETS: tuple[Asset, ...] = (
     Asset(
         name=f"llama-{LLAMA_CPP_RELEASE}-bin-win-cuda-12.4-x64.zip",
@@ -126,8 +69,6 @@ CUDA_ASSETS: tuple[Asset, ...] = (
     ),
 )
 
-#: Windows without an NVIDIA card. Allowed, slow, and the capability row says
-#: so rather than turning the class off.
 CPU_ASSETS: tuple[Asset, ...] = (
     Asset(
         name=f"llama-{LLAMA_CPP_RELEASE}-bin-win-cpu-x64.zip",
@@ -136,22 +77,15 @@ CPU_ASSETS: tuple[Asset, ...] = (
     ),
 )
 
-#: The two words `doctor` and `/v1/info` print for a build.
 CUDA_BUILD = "cuda-12.4"
 CPU_BUILD = "cpu"
 
 
 def build_for(gpu_vendor: str) -> str:
-    """Which build this machine takes: `cuda-12.4` with an NVIDIA card, `cpu`.
-
-    Takes the VENDOR rather than reading it, so the answer is testable off a
-    Windows box — `crucible/backend.py` is the one thing that asks nvidia-smi.
-    """
     return CUDA_BUILD if gpu_vendor == "nvidia" else CPU_BUILD
 
 
 def assets_for(build: str) -> tuple[Asset, ...]:
-    """The assets that build is made of. Refuses a build name it does not have."""
     if build == CUDA_BUILD:
         return CUDA_ASSETS
     if build == CPU_BUILD:
@@ -164,18 +98,10 @@ def assets_for(build: str) -> tuple[Asset, ...]:
 
 
 def expected_bytes(build: str) -> int:
-    """What the whole download weighs, for the catalog row and the page."""
     return sum(asset.bytes for asset in assets_for(build))
 
 
 def engine_dir(config: Config) -> Path:
-    """`<CRUCIBLE_HOME>/engines/llama-cpp/` — one directory, both zips in it.
-
-    Under the home like every other subject, so 3.5's *"on Windows the
-    server's home is `%LOCALAPPDATA%\\Crucible\\` and every subject lives
-    under it"* is true of the engine too, and the host's migration deletes it
-    through the same door.
-    """
     return config.home / "engines" / LLAMA_CPP_ID
 
 
@@ -184,26 +110,10 @@ def stamp_path(config: Config) -> Path:
 
 
 def server_path(config: Config) -> Path:
-    """Where `llama-server.exe` is once the zips are unpacked.
-
-    llama.cpp's Windows zips put every binary at the ROOT of the archive, so
-    this is the directory itself. Found rather than assumed at install time
-    (`_locate_server`), and recorded in the stamp — a release that changes its
-    layout is then a refusal naming the directory, not a spawn of a path that
-    is not there.
-    """
     return engine_dir(config) / LLAMA_SERVER_EXE
 
 
 def installed(config: Config, build: str) -> InstalledWeights | None:
-    """The installed engine for THIS build, or None.
-
-    A stamp naming a different tag or a different build is not installed, for
-    `weights.installed`'s reason: the pin moved, or the machine did (a card
-    was added), and running the old binaries under the new statement would be
-    a silent substitution. `llama-server.exe` must be there too — a stamp
-    beside a directory somebody emptied is a stamp that lies.
-    """
     stamp = stamp_path(config)
     if not stamp.is_file():
         return None
@@ -226,7 +136,6 @@ def installed(config: Config, build: str) -> InstalledWeights | None:
 
 
 def require_installed(config: Config, build: str) -> InstalledWeights:
-    """The engine, or the refusal that names what to run."""
     found = installed(config, build)
     if found is not None:
         return found
@@ -239,19 +148,10 @@ def require_installed(config: Config, build: str) -> InstalledWeights:
     )
 
 
-#: What `pull` uses to fetch one URL. Injected so a test drives a fake release
-#: without a network, exactly as `crucible/weights.py` takes the hub's
-#: `snapshot_download` from `huggingface_hub`.
 Fetch = Callable[[str, Path, "ProgressHook | None"], None]
 
 
 def download(url: str, destination: Path, on_progress: "ProgressHook | None") -> None:
-    """One asset, streamed to disk, reporting bytes and honouring a cancel.
-
-    The hook is the cancel point, as it is for a hub pull: it is called per
-    chunk, and a `PullCancelled` out of it travels through here untouched
-    (`crucible/weights.py`'s `PullCancelled` says why that matters).
-    """
     request = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
     try:
         with urllib.request.urlopen(request, timeout=CONNECT_TIMEOUT_SECONDS) as response:
@@ -278,13 +178,6 @@ def download(url: str, destination: Path, on_progress: "ProgressHook | None") ->
 
 
 def _unzip(archive: Path, target: Path) -> None:
-    """Extract a zip into `target`, refusing any member that escapes it.
-
-    `weights._unpack`'s rule for the other archive format and for its reason:
-    a member whose resolved destination is not under `target` is a refusal
-    naming it, never a skip. Python's `ZipFile.extractall` sanitises absolute
-    paths but not every `..`, so this is written out.
-    """
     root = target.resolve()
     with zipfile.ZipFile(archive) as bundle:
         for member in bundle.namelist():
@@ -300,13 +193,6 @@ def _unzip(archive: Path, target: Path) -> None:
 
 
 def _locate_server(target: Path) -> Path:
-    """`llama-server.exe` inside the unpacked tree, or a refusal.
-
-    Searched rather than assumed. llama.cpp's Windows zips have put the
-    binaries at the archive root for every release this pin has seen, but a
-    layout is the release's to change and a spawn of a path that is not there
-    is a worse sentence than this one.
-    """
     direct = target / LLAMA_SERVER_EXE
     if direct.is_file():
         return direct
@@ -331,14 +217,6 @@ def pull(
     on_progress: "ProgressHook | None" = None,
     fetch: Fetch | None = None,
 ) -> InstalledWeights:
-    """Fetch, verify and unpack llama.cpp's pinned release for this build.
-
-    EVERY DIGEST IS CHECKED BEFORE ANYTHING IS UNPACKED. Both CUDA assets are
-    downloaded to a staging directory and hashed there; only when both pass
-    does anything land in the engine directory. Otherwise a machine could end
-    up with the server binaries and no cudart, which is a directory that looks
-    installed and starts nothing.
-    """
     existing = installed(config, build)
     if existing is not None and not force:
         return existing
@@ -381,9 +259,6 @@ def pull(
 
     server = _locate_server(target)
     if server != server_path(config):
-        # Found somewhere else in the tree. Moved to the one place every other
-        # door looks, rather than recorded as a second path a second reader
-        # would have to know about.
         shutil.move(str(server), str(server_path(config)))
 
     elapsed = time.monotonic() - started
@@ -404,7 +279,7 @@ def pull(
             f"({size / 1e9:.2f} GB in {elapsed:.0f}s)"
         )
     result = installed(config, build)
-    if result is None:  # pragma: no cover - the stamp was just written
+    if result is None:
         raise EngineSubjectError(
             "engine_download_failed",
             f"wrote {stamp_path(config)} but it does not read back as installed",
@@ -413,24 +288,12 @@ def pull(
 
 
 def remove(config: Config) -> Path:
-    """Delete the engine directory. `DELETE /v1/catalog/engine/llama-cpp`.
-
-    Returns the directory that went, so the activity record and the CLI say
-    where. Refuses nothing itself: whether the subject is installed and
-    whether anything is using it are the catalog door's questions (3.5a), and
-    asking them twice would be two answers to one.
-    """
     target = engine_dir(config)
     shutil.rmtree(target)
     return target
 
 
 def doctor_line(config: Config, gpu_vendor: str) -> str:
-    """`crucible doctor`'s engine line on this backend (3.5).
-
-    Reads `backend: llama-windows on windows/x86_64 — llama.cpp <tag>
-    (cuda-12.4 | cpu)` when it is there, and says what to run when it is not.
-    """
     build = build_for(gpu_vendor)
     found = installed(config, build)
     where = f"llama.cpp {LLAMA_CPP_RELEASE} ({build})"

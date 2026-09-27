@@ -1914,7 +1914,7 @@ def test_crucible_host_is_refused_off_win32_by_name(capsys, monkeypatch) -> None
     """
     from crucible import cli
 
-    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.orchestrator.sys, "platform", "linux")
     code = cli.main(["orchestrator"])
     assert code == cli.EXIT_REFUSED
     said = capsys.readouterr().err
@@ -1948,7 +1948,7 @@ def test_there_is_no_platform_gate_left_in_main(monkeypatch, tmp_path: Path) -> 
     assert "win32_ok" not in vars(parser.parse_args(["doctor"]))
     assert "win32_ok" not in vars(parser.parse_args(["orchestrator"]))
 
-    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli.orchestrator.sys, "platform", "win32")
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.setattr(
         cli, "detect_backend", lambda: (_ for _ in ()).throw(

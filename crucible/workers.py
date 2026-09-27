@@ -1,70 +1,3 @@
-"""Running a job's work in an interpreter that is not this one.
-
-PHASE4-AUDIO.md section 0. `llm` never had this problem — vLLM and mlx-lm are
-servers, so Crucible starts one and talks HTTP to it. The phase 4 types are
-libraries in envs of their own, so Crucible **runs** them: `<env python>
-<crucible/jobs/<type>/worker.py>`, parameters handed over on stdin, newline
--delimited JSON coming back on fd 1, everything else on stderr and into a log.
-
-This module is that plumbing, and only that. It knows nothing about audio,
-models or job types; a worker's vocabulary is the job type's business and this
-module carries the envelope. `asr` is the first user, `align` and `rvc` are the
-next two, and the shape below is chosen so that those are a few dozen lines each.
-
-The three rules this enforces are each a bug that has already happened
---------------------------------------------------------------------
-- **fd 1 is results and nothing else.** narrator's aligner learned this on a
-  401-chunk book: a library's logger wrote to stdout and corrupted the result
-  stream. So a line on fd 1 that is not a JSON object of a kind this module knows
-  is a **refusal naming the line**, never something skipped. A worker whose
-  library prints is expected to have dup'd fd 1 away before importing it.
-- **Results are matched to work by position.** A worker never echoes back an
-  index, because an index a worker reports is an index a worker can get wrong.
-  The Nth `result` line is the Nth unit of work, and `require_positional_results`
-  refuses a run whose count does not match what the caller expected.
-- **A worker holding an accelerator is never SIGKILLed.** SIGTERM, wait, and if
-  it will not go, say so — killing a process that holds CUDA wedges WSL2 until
-  Windows reboots. Same rule, same reason, as `crucible/engines/base.py`.
-
-What `align` and `rvc` will need that `asr` does not
-----------------------------------------------------
-Two things, and neither of them is a change to the envelope:
-
-- **Many inputs and many outputs.** `asr` takes one file and produces one
-  document; `rvc` takes 1,400 sentence FLACs and must produce 1,400 back (a
-  missing one is a failed job, not a short answer), and `align` takes one clip
-  per chunk. So those types will hand the worker a *list* of input paths in the
-  request and have it write each output to a path the server named, reporting
-  only the path and the timings on fd 1 — audio does not belong in a JSON line.
-  `require_positional_results` is already the check that every unit came back.
-- **A model that stays resident across a whole book.** `asr` loads, transcribes
-  one file and exits, so one spawn per job is right for it. The Qwen3 aligner is
-  resident across hundreds of chunks and one load, and `rvc` recycles its worker
-  every 96 files as a *memory* bound rather than a throughput choice. Those need
-  a worker that outlives a single job: the same `_Reader` and the same message
-  vocabulary, but held open by a residency object, fed a new request on the same
-  stdin, and stopped by whatever unloads models. That is an addition to this
-  module, not a different one — `run_worker` below is the one-shot case of it,
-  and the split to make is `start`/`send`/`stop` with `run_worker` as the three
-  in a row.
-
-  That split is now here. `WorkerSession` is the worker that outlives a job
-  (`align`'s aligner, held by `crucible/residency.py`), `run_worker` is
-  `start`/`send`/`stop` in a row (`asr`'s and `rvc`'s one-shot workers), and both
-  go through the same `_Conversation` — one exchange is one request in, one
-  `ready`, N results, one `done`. The only difference between the two is what
-  happens to stdin afterwards: a one-shot worker gets it CLOSED, because a
-  process blocked on a read it will never satisfy is a hang with no error, and a
-  session's is left open because the next request goes down it.
-
-  `rvc` does NOT take a session, and that is deliberate rather than an omission.
-  Its 96-file recycle is a memory bound that wants the process to *die* so the OS
-  reclaims everything it leaked (proven on a 64 GB Mac, 2026-07-17); a worker
-  held open across jobs would be the one thing that bound exists to prevent. The
-  recycling happens one level down, inside `jobs/rvc/worker.py`, where each batch
-  is its own urvc process.
-"""
-
 from __future__ import annotations
 
 import json
@@ -82,29 +15,14 @@ from .backend import CUDA_LINUX
 from .errors import CrucibleError, JobCancelled
 from .logtail import tail_of_last_run
 
-#: How long `stop()` waits for SIGTERM to be honoured before it gives up and says
-#: so. It never escalates to SIGKILL. Same number and same reason as
-#: `crucible/engines/base.py`.
 STOP_TIMEOUT_SECONDS = 180.0
 
-#: How long `WorkerSession.stop()` waits for a worker to notice its stdin closed
-#: and exit on its own, before it reaches for SIGTERM. An aligner between chunks
-#: is sitting in `readline` and goes immediately; one that is mid-chunk takes as
-#: long as that chunk has left, which for a 90 s narrator chunk is well under
-#: this. It is not a deadline on anything — missing it only means the polite door
-#: was not taken and the signal is sent instead.
 STOP_ON_EOF_SECONDS = 30.0
 
-#: How often the reading loop wakes to notice a cancel or a missed deadline. It
-#: is not a timeout on anything: a worker that is working silently for an hour is
-#: a worker that is working.
 POLL_SECONDS = 0.5
 
-#: How much of the worker's stderr log a failure quotes.
 LOG_TAIL_LINES = 40
 
-#: The message kinds a worker may put on fd 1. Anything else is a protocol error
-#: rather than something to skip — see the module docstring.
 READY = "ready"
 PROGRESS = "progress"
 RESULT = "result"
@@ -114,19 +32,11 @@ MESSAGE_KINDS = frozenset({READY, PROGRESS, RESULT, FAILED, DONE})
 
 
 class WorkerError(CrucibleError):
-    """A worker would not start, broke the protocol, or died. Names which."""
+    ...
 
 
 @dataclass(frozen=True)
 class WorkerOutcome:
-    """What one worker run produced.
-
-    `ready` is the worker's own description of what it is about to do — for `asr`,
-    the decoded duration and the number of windows it implies. It arrives before
-    any result, so a job type can size its progress against it and refuse early
-    if the worker's plan disagrees with the server's.
-    """
-
     ready: dict[str, Any]
     results: tuple[dict[str, Any], ...] = field(default=())
 
@@ -134,12 +44,6 @@ class WorkerOutcome:
 def require_positional_results(
     outcome: WorkerOutcome, expected: int, unit: str
 ) -> tuple[dict[str, Any], ...]:
-    """The results, or a refusal naming both counts.
-
-    The Nth result is the Nth unit of work and there is no id to check that
-    against, so the count is the whole check — which is why it is a refusal and
-    not a warning.
-    """
     if len(outcome.results) != expected:
         raise WorkerError(
             f"the worker returned {len(outcome.results)} {unit} result(s) for "
@@ -150,17 +54,7 @@ def require_positional_results(
     return outcome.results
 
 
-# --------------------------------------------------------------------- reading
-
-
 class _Reader:
-    """Pumps a worker's fd 1 into a queue on a thread, so the caller can poll.
-
-    Line-by-line `for line in stdout` would block the caller past a cancel and
-    past any deadline; a thread plus a queue lets the run loop wake every
-    `POLL_SECONDS` and decide whether it still wants to be here.
-    """
-
     def __init__(self, stream: Any) -> None:
         self._stream = stream
         self._lines: queue.Queue[str | None] = queue.Queue()
@@ -175,7 +69,6 @@ class _Reader:
             self._lines.put(None)
 
     def lines(self, poll: float) -> Iterator[str | None]:
-        """Yields a line, or None once for end-of-stream, or nothing on a timeout."""
         while True:
             try:
                 item = self._lines.get(timeout=poll)
@@ -187,12 +80,6 @@ class _Reader:
 
 
 def parse_message(line: str, script: Path) -> dict[str, Any]:
-    """One line of fd 1 as a message, or a refusal naming the line.
-
-    Every rejection here quotes the offending line, because the whole class of
-    bug this guards against — a library printing to stdout — is only diagnosable
-    from the text that appeared.
-    """
     text = line.strip()
     try:
         message = json.loads(text)
@@ -216,16 +103,12 @@ def parse_message(line: str, script: Path) -> dict[str, Any]:
     return message
 
 
-# --------------------------------------------------------------------- running
-
-
 def _spawn(
     python: Path,
     script: Path,
     log_handle: Any,
     environment: dict[str, str] | None,
 ) -> subprocess.Popen[str]:
-    """The one place a worker process is created. Refuses by name, never guesses."""
     if not python.is_file():
         raise WorkerError(
             f"no interpreter at {python}; this job type's env is not installed"
@@ -236,9 +119,6 @@ def _spawn(
     merged = dict(os.environ)
     if environment is not None:
         merged.update(environment)
-    # CRUCIBLE'S OWN TOOLS FIRST ON THE WORKER'S PATH (2026-09-26, #25). A
-    # worker's libraries look for ffmpeg by themselves (urvc, audio-separator),
-    # and the pinned build `crucible install` placed is the one they must find.
     merged["PATH"] = hosttools.worker_path(merged.get("PATH", ""))
 
     try:
@@ -247,10 +127,6 @@ def _spawn(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log_handle,
-            # Its own group, so a stop reaches anything the worker forked —
-            # ffmpeg in the `asr` case, a urvc batch in `rvc`'s — and not only
-            # the worker itself. `start_new_session` on POSIX and
-            # `CREATE_NEW_PROCESS_GROUP` on win32 (`crucible/procgroup.py`).
             **procgroup.own_group(),
             env=merged,
             text=True,
@@ -263,14 +139,6 @@ def _spawn(
 
 
 def _open_log(python: Path, script: Path, log_path: Path) -> Any:
-    """Open a worker's log for APPEND, with a header that delimits this run.
-
-    Truncating here was the same defect `SubprocessEngine.start()` had until
-    2026-09-20 and is fixed for the same reason: a worker that hangs is
-    investigated by running it again, and truncating means the second run erases
-    what the first one was doing. One `asr` or `rvc` worker's log is a handful of
-    kilobytes, so runs accumulate and the header below is what separates them.
-    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     existed = log_path.is_file() and log_path.stat().st_size > 0
     handle = log_path.open("ab")
@@ -299,25 +167,6 @@ def run_worker(
     environment: dict[str, str] | None = None,
     on_result: Callable[[dict[str, Any]], None] | None = None,
 ) -> WorkerOutcome:
-    """Run one worker to completion and return what it said.
-
-    `start`/`send`/`stop` in a row, which is what a one-shot worker is: spawn it,
-    hand it its one request, read until `done`, and let end-of-stream and the
-    exit code have the last word.
-
-    `ready_silence_timeout` bounds the wait for the `ready` line, and it is a
-    **silence** timeout rather than a deadline: any message resets it, so a
-    worker that is reporting decode progress for twenty minutes before it can say
-    how much work there is never trips it, while a worker that has said nothing
-    at all since it started does. After `ready` there is no timeout of any kind,
-    because there is no honest one — a worker transcribing an eighteen-hour book
-    is quiet for long stretches, and a clock invented here would kill real work.
-    What ends a long run early is a cancel, checked every `POLL_SECONDS`.
-
-    Raises `JobCancelled` if `cancelled()` goes true, `WorkerError` for anything
-    else. Never returns a partial outcome: a caller that gets a `WorkerOutcome`
-    got a worker that said `done`.
-    """
     script = Path(script)
     python = Path(python)
     log_path = Path(log_path)
@@ -344,8 +193,6 @@ def run_worker(
             on_progress=on_progress,
             cancelled=cancelled,
             keep_open=False,
-            # Each result AS IT LANDS, for a job that publishes per result
-            # (rvc, 2026-09-26: a cancel must keep what already finished).
             on_result=on_result,
         )
     finally:
@@ -353,15 +200,6 @@ def run_worker(
 
 
 class _Conversation:
-    """One worker process, and the exchanges run over its two pipes.
-
-    An **exchange** is one request written to stdin and everything the worker
-    says in reply, up to and including `done`. A one-shot worker has exactly one
-    (`keep_open=False`, which closes stdin and then makes the exit code the last
-    word); a `WorkerSession` has one per request and the process outlives all of
-    them.
-    """
-
     def __init__(
         self, process: subprocess.Popen[str], script: Path, log_path: Path
     ) -> None:
@@ -369,12 +207,8 @@ class _Conversation:
         self.process = process
         self.script = script
         self.log_path = log_path
-        # One reader for the life of the process. A second one per exchange
-        # would race the first for the same pipe and lose lines to whichever
-        # thread got there first.
         self.reader = _Reader(process.stdout)
 
-    # ------------------------------------------------------------- sending
 
     def _write(self, request: dict[str, Any], keep_open: bool) -> None:
         process, script, log_path = self.process, self.script, self.log_path
@@ -383,17 +217,8 @@ class _Conversation:
             process.stdin.write(json.dumps(request) + "\n")
             process.stdin.flush()
             if not keep_open:
-                # The request is the whole conversation for a one-shot worker, so
-                # stdin is closed: a worker blocked on a read it will never
-                # satisfy is a hang with no error, and closing turns it into an
-                # EOF the worker can act on.
                 process.stdin.close()
         except OSError as exc:
-            # Much the commonest reason a request cannot be delivered is that the
-            # worker is already dead: a broken env dies at import time, before it
-            # reads a byte, and the write then fails with EPIPE. Report the death
-            # and its log, which is the thing that explains this, rather than the
-            # pipe error it caused.
             code = process.poll()
             if code is None:
                 try:
@@ -411,7 +236,6 @@ class _Conversation:
                 f"{_log_tail(log_path)}"
             ) from None
 
-    # ------------------------------------------------------------ exchange
 
     def exchange(
         self,
@@ -445,13 +269,9 @@ class _Conversation:
                 try:
                     message = parse_message(line, script)
                 except WorkerError:
-                    # A worker that has broken the protocol is a worker whose
-                    # later lines cannot be trusted either, and it may be holding
-                    # the card. Stop it before reporting.
                     _terminate(process, script, log_path)
                     raise
                 kind = message["type"]
-                # Any message is proof of life, so the silence clock starts again.
                 deadline = time.monotonic() + ready_silence_timeout
 
                 if kind == READY:
@@ -477,9 +297,6 @@ class _Conversation:
                             "many results to expect"
                         )
                     results.append(message)
-                    # AS IT LANDS, for a caller that reports per result (align's
-                    # `cue`, 2026-09-25). Collected either way: the outcome is
-                    # still the whole list, checked by position at the end.
                     if on_result is not None:
                         on_result(message)
                     continue
@@ -492,10 +309,6 @@ class _Conversation:
                         f"{_log_tail(log_path)}"
                     )
 
-                # DONE ends this exchange. A one-shot worker keeps being drained
-                # until end-of-stream so the exit code is the last word; a
-                # session's worker is now waiting for its next request, and the
-                # `while` condition above stops here.
                 if done:
                     _terminate(process, script, log_path)
                     raise WorkerError(f"{script.name} sent two done messages")
@@ -516,10 +329,6 @@ class _Conversation:
             if code != 0:
                 raise WorkerError(f"{script.name} exited {code}. {_log_tail(log_path)}")
         elif ended:
-            # A session's worker reached end-of-stream without finishing this
-            # exchange: it died mid-request. Its exit code and its log are the
-            # only account of why, and they go in the error rather than a pointer
-            # to a file the client may not be able to read (section 6).
             code = process.wait()
             raise WorkerError(
                 f"{script.name} exited {code} in the middle of a request, after "
@@ -539,25 +348,7 @@ class _Conversation:
         return WorkerOutcome(ready=ready, results=tuple(results))
 
 
-# --------------------------------------------------------------- a session
-
-
 class WorkerSession:
-    """A worker held open across more than one request.
-
-    `align`'s reason for existing, and the module docstring's second bullet: the
-    Qwen3 aligner is 1.7 GB of weights and a book is hundreds of chunks, so a
-    worker that loaded and exited per job would spend most of a book loading. The
-    process is started once, fed a request per job on the same stdin, and stopped
-    by whatever unloads models — which is `crucible/residency.py`, the same holder
-    that stops an engine, because a card holds one thing whatever kind it is.
-
-    It is deliberately NOT a pool and not reference-counted. One session, held by
-    the residency, stopped by an explicit unload or by something else taking the
-    card: the same lifecycle an engine has, so there is one story about what is on
-    the accelerator rather than two.
-    """
-
     def __init__(
         self,
         *,
@@ -573,7 +364,6 @@ class WorkerSession:
         self._log_handle: Any | None = None
         self._conversation: _Conversation | None = None
 
-    # -------------------------------------------------------------- reading
 
     @property
     def log_path(self) -> Path:
@@ -581,13 +371,6 @@ class WorkerSession:
 
     @property
     def pids(self) -> frozenset[int]:
-        """Every pid this session owns, for the accelerator guard.
-
-        The worker's own pid and nothing else: it is spawned into its own process
-        group and anything it forks is short-lived, so a pid tree walked here
-        would be stale by the time the guard read it. Same shape and same purpose
-        as `SubprocessEngine.pids`.
-        """
         conversation = self._conversation
         if conversation is None or conversation.process.poll() is not None:
             return frozenset()
@@ -598,7 +381,6 @@ class WorkerSession:
         conversation = self._conversation
         return conversation is not None and conversation.process.poll() is None
 
-    # -------------------------------------------------------------- writing
 
     def start(
         self,
@@ -608,13 +390,6 @@ class WorkerSession:
         on_ready: Callable[[dict[str, Any]], None] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> WorkerOutcome:
-        """Spawn the worker and run the first exchange — usually its load.
-
-        No `cancelled` hook: a load is what the exclusive lane is waiting on and
-        what `/v1/health` reports as `warming`, and a half-loaded model that was
-        interrupted is a process holding VRAM that nothing is tracking. A load
-        that will not finish ends through the silence timeout, by name.
-        """
         if self._conversation is not None:
             raise WorkerError(
                 f"{self._script.name} is already started; a session is one worker, "
@@ -647,9 +422,6 @@ class WorkerSession:
                 cancelled=None,
             )
         except BaseException:
-            # A worker that could not load holds nothing worth keeping and may
-            # hold VRAM. Tidy it up, but report the START failure: a stop failure
-            # on top of it is appended by `stop`, never substituted for it.
             self._discard()
             raise
 
@@ -663,7 +435,6 @@ class WorkerSession:
         cancelled: Callable[[], bool] | None = None,
         on_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> WorkerOutcome:
-        """One more request down the same stdin. Raises if the worker is gone."""
         if self._conversation is None:
             raise WorkerError(
                 f"{self._script.name} has not been started; a session takes a "
@@ -685,10 +456,6 @@ class WorkerSession:
                 on_result=on_result,
             )
         except JobCancelled:
-            # `_terminate` has already stopped the worker — a cancel mid-exchange
-            # cannot leave a process whose stdin is half a request behind. The
-            # session is dead and says so on the next `send` rather than handing
-            # the next job a stream it can no longer parse.
             self._discard()
             raise
 
@@ -714,13 +481,6 @@ class WorkerSession:
         )
 
     def stop(self) -> None:
-        """Close stdin, wait briefly, then SIGTERM. Never SIGKILL.
-
-        Closing stdin first is the polite door: the worker's read loop sees EOF
-        and exits 0 on its own, releasing CUDA the way its own code expects to.
-        SIGTERM is the backstop, and there is no third step — killing a process
-        that may be holding CUDA wedges WSL2 until Windows reboots.
-        """
         conversation = self._conversation
         if conversation is None:
             return
@@ -740,7 +500,6 @@ class WorkerSession:
             self._discard()
 
     def _discard(self) -> None:
-        """Forget the process and close the log. Never signals anything."""
         self._conversation = None
         if self._log_handle is not None:
             self._log_handle.close()
@@ -748,15 +507,6 @@ class WorkerSession:
 
 
 def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> None:
-    """Stop the worker's process group and wait.
-
-    POSIX: SIGTERM, wait, and never SIGKILL — a worker may hold CUDA inside
-    WSL2, where a kill wedges the distro. win32: CTRL_BREAK_EVENT, wait, and
-    then terminate the tree (`crucible/procgroup.py` says why that reason does
-    not exist for a native Windows process). Until 2026-09-23 this called
-    `os.killpg` on every platform, so on win32 a cancel raised `AttributeError`
-    and the worker it was cancelling went on running.
-    """
     if process.poll() is not None:
         return
     win32 = procgroup.platform_kind() == procgroup.WIN32
@@ -764,11 +514,7 @@ def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> 
         delivered = procgroup.ask_to_stop(process)
         if not delivered:
             if not win32:
-                # POSIX: the process or its group is already gone.
                 return
-            # win32 with no console to route the break through: the polite
-            # door does not exist, so the tree is ended now rather than after
-            # a clock nothing was going to stop.
             procgroup.terminate_tree(process, script.name)
             return
     except procgroup.ProcessGroupError as exc:
@@ -793,109 +539,32 @@ def _terminate(process: subprocess.Popen[str], script: Path, log_path: Path) -> 
 
 
 def _log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:
-    """The last lines of the worker's stderr, quoted into the error.
-
-    PHASE4-AUDIO.md section 6: an error body carries what went wrong, not a
-    pointer to a file on a machine the client may not be able to read.
-
-    Scoped to the LATEST run — see `crucible/logtail.py`.
-    """
     if not Path(log_path).is_file():
         return f"Its log is {log_path} (not written)."
-    # THIS RUN's lines, not the file's. Worker logs append since 2026-09-20, so
-    # "the last 40 lines" would otherwise quote the previous run's failure into
-    # this run's error — the most confusing thing a log can do to a reader.
     tail = tail_of_last_run(Path(log_path), lines)
     if not tail:
-        # Two cases that are not worth separating in an error body: the file is
-        # there and empty, or it would not read. Saying which would mean a
-        # second stat and a second open to decorate a message that is already
-        # about something else.
         return f"Its log is {log_path} (empty or unreadable)."
     return f"Last {lines} lines of the latest run in {log_path}:\n{tail}"
 
 
-# ---------------------------------------------------------------------------
-# THE LIBRARIES A WORKER FINDS AT COMPUTE TIME, WHICH ARE NOT THE ONES IT
-# FINDS AT IMPORT TIME
-# ---------------------------------------------------------------------------
-#
-# MEASURED 2026-09-15 on owens-pc, against a `crucible doctor` that reported
-# `asr` as `ready: True` with the weights installed and 0 problems. The first
-# real transcribe answered:
-#
-#     asr_window_failed — window 0 (0s):
-#     RuntimeError: Library libcublas.so.12 is not found or cannot be loaded
-#
-# The library was never missing. `nvidia-cublas-cu12` ships it inside the env at
-# `site-packages/nvidia/cublas/lib/libcublas.so.12`, and it was there the whole
-# time. What was missing is the loader path: pip puts CUDA libraries in
-# per-package directories that the dynamic linker has no reason to search, and
-# ctranslate2 links them with no RPATH pointing at that layout.
-#
-# WHY IT LOOKS LIKE HEALTH, and why the doctor could not have caught it. The
-# model LOADS without these — `WhisperModel(..., device="cuda")` constructs
-# fine, which is what any readiness probe would check. ctranslate2 resolves
-# cuBLAS LAZILY, at the first matrix multiply, so the failure is not at import,
-# not at load, and not at the first request either: it is at the first COMPUTE.
-# Every check short of actually transcribing a second of audio passes.
-#
-# It cost a wrong diagnosis on the way in, which is worth recording: the first
-# A/B ran `WhisperModel(...)` with and without the path, both succeeded, and the
-# hypothesis was discarded as disproved. The experiment was measuring the wrong
-# moment. Reproducing the real failure — transcribe, not load — showed the
-# control failing with the job's exact message and the treatment returning three
-# segments.
-#
-# DERIVED FROM THE ENV, never hardcoded: whatever `nvidia/*/lib` directories that
-# env actually contains, plus the package's own bundled `.libs`. A list written
-# here would go stale the day a recipe pins a different CUDA package set, and the
-# staleness would look exactly like this defect does.
-
-
 def cuda_library_path(env_dir: Path) -> str | None:
-    """`LD_LIBRARY_PATH` additions for an env whose CUDA libs came from pip.
-
-    `None` when there is nothing to add, so a caller can tell "no CUDA packages
-    here" (a CPU env, a Mac) from "an empty path", and pass nothing rather than
-    an empty variable that would shadow the inherited one.
-    """
     site = sorted(env_dir.glob("lib/python*/site-packages"))
     if not site:
         return None
     packages = site[0]
     directories: list[str] = []
-    # Every `nvidia/<package>/lib` this env actually has.
     nvidia = packages / "nvidia"
     if nvidia.is_dir():
         for child in sorted(nvidia.iterdir()):
             lib = child / "lib"
             if lib.is_dir():
                 directories.append(str(lib))
-    # auditwheel-style bundled libraries (`ctranslate2.libs`, and friends).
     for bundled in sorted(packages.glob("*.libs")):
         if bundled.is_dir():
             directories.append(str(bundled))
     return os.pathsep.join(directories) if directories else None
 
 
-#: PLAIN-TORCH WORKERS ON CUDA: THE ALLOCATOR (2026-09-26, Owen via training-pc-1).
-#:
-#: A resident torch worker fed inputs of VARYING length strands blocks in the
-#: CUDA caching allocator. Measured that night on this PC's 3090 Ti by
-#: training-pc-1, on a plain-transformers Qwen3-ASR-1.7B worker outside
-#: Crucible: allocated peaked at 7.4 GB while RESERVED climbed 7.7 -> 10.2 ->
-#: 12.8 GB within 110 clips and past 21 GB by 1,400. The card filled, 3.3 GB
-#: spilled into Windows shared GPU memory, and host commit hit 69.6 of 69.9 GB.
-#: With `expandable_segments:True` and a per-process cap, reserved tracked the
-#: peak and held flat at 5.6-5.9 GB.
-#:
-#: Crucible has two such workers on CUDA: the Qwen3 forced aligner
-#: (`jobs/align/worker.py`: the resident aligner, the one beside vLLM for asr
-#: word times, and align-longform's) and audio-separator (`jobs/denoise/worker.py`),
-#: both held across inputs of different lengths. NOT vLLM, whose own pool
-#: rejects expandable segments; not faster-whisper (CTranslate2, not torch); not
-#: rvc, which spawns a fresh urvc process per render.
 TORCH_ALLOC_CONF_VAR = "PYTORCH_CUDA_ALLOC_CONF"
 TORCH_ALLOC_CONF = "expandable_segments:True"
 
@@ -903,13 +572,6 @@ TORCH_ALLOC_CONF = "expandable_segments:True"
 def torch_allocator_environment(
     backend_kind: str, inherited: dict[str, str] | None = None
 ) -> dict[str, str]:
-    """`PYTORCH_CUDA_ALLOC_CONF` for a plain-torch worker on CUDA, or `{}`.
-
-    Set in the worker's ENVIRONMENT at spawn, so it is there before the worker
-    imports torch, which is the only moment the allocator reads it. `{}` on any
-    other backend (the variable is CUDA's) and when the operator has set the
-    variable for their own reasons: theirs is kept, not overwritten.
-    """
     if backend_kind != CUDA_LINUX:
         return {}
     base = os.environ if inherited is None else inherited
@@ -919,28 +581,12 @@ def torch_allocator_environment(
 
 
 def torch_memory_cap(backend_kind: str, memory_bytes_estimate: int) -> int | None:
-    """The bytes a plain-torch worker may reserve on CUDA, or None elsewhere.
-
-    ITS ADMITTED SHARE: the manifest's `memory_bytes_estimate` for this backend,
-    the number the card's guard admitted it on. The worker hands it to
-    `torch.cuda.set_per_process_memory_fraction`, so past it the allocator frees
-    its cache and retries, and a true overrun is a clean OOM in the job report
-    rather than a card spilling into system memory. It is the share and not the
-    whole card because the aligner can sit beside vLLM (asr word times), whose
-    own share was admitted on its own estimate.
-    """
     if backend_kind != CUDA_LINUX:
         return None
     return memory_bytes_estimate
 
 
 def worker_environment(env_dir: Path, inherited: dict[str, str] | None = None) -> dict[str, str]:
-    """The environment a worker in `env_dir` needs, over what it inherits.
-
-    PREPENDED rather than replacing: an operator who has set `LD_LIBRARY_PATH`
-    for their own reasons keeps it, and the env's own libraries win only over
-    the search order, never over the variable.
-    """
     base = dict(os.environ if inherited is None else inherited)
     addition = cuda_library_path(env_dir)
     if addition is None:

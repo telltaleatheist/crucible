@@ -1,33 +1,3 @@
-"""What `install.ps1` prints after it starts the tray.
-
-FRESH INSTALL ON KYLIES-PC, 2026-09-26, snags #6, #7 and #28. The script used to
-wait ten seconds for `wsl-outcome.json` and print one of two sentences:
-
-* #6: the move reached `wsl_reboot_required` twelve seconds AFTER the script had
-  said "the app you installed from will show its progress" and exited 0. The one
-  place that said "restart" was `host.log`, found by digging.
-* #7: a PowerShell install has no app. From a console, the console IS the app.
-* #28: the 1.0.46 installer's last line was 1.0.45's failure sentence, read back
-  out of the file and printed as if it were this run's.
-
-So on a console this WAITS for the move to reach an ending — done, a restart
-owed, cannot, failed, declined — and prints each step on the way and the ending
-in plain words, the restart included. It reads what the tray already publishes
-(PHASE19 2.6: `GET /install`, `GET /install/events` on the door, and the outcome
-file of 2.2) and decides nothing about the move itself.
-
-An outcome counts as THIS run's only if it was written after the install
-started (`--since`). An older one is printed with its time and release, as
-history, and never as the current state.
-
-When an APP ran the script (`--brief`), the app watches the move itself through
-the same door (PHASE19 2.6), so this keeps 2.7's short ending: a few seconds for
-a verdict, then the general sentence.
-
-Everything printed goes through `log.plain`: ASCII, because the reader is
-Windows PowerShell 5.1 in whatever code page the machine has (#12).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -49,42 +19,23 @@ from .installer import STEP_WORDS, TRY_AGAIN_HINT
 from .log import plain
 from .paths import door_url
 
-#: 2.7's wait when an app is the reader: long enough for a machine that cannot
-#: to say so (`wsl --status` answers at once), short enough that the app is not
-#: kept from attaching to the move.
 BRIEF_SECONDS = 10.0
 
-#: How long a console waits for the tray to DECIDE: its first presence pass
-#: (up to `presence.WATCH_SECONDS`, 15 s), the native engine coming up, then
-#: the decision. Two minutes is several times that. Past it, nothing is running
-#: and nothing new was recorded, so the tray has decided to do nothing and the
-#: console says what the machine last recorded.
 DECISION_SECONDS = 120.0
 
-#: When the door cannot be asked (no pairing yet, a refused token) the console
-#: cannot see a move running, only its ending in the outcome file. It waits this
-#: long for that ending, saying so every `HEARTBEAT_SECONDS`.
 BLIND_SECONDS = 45 * 60.0
 HEARTBEAT_SECONDS = 120.0
 
 POLL_SECONDS = 1.0
 
-#: A stream that has been quiet this long is asked again from the top. The
-#: longest quiet step is the import (about 30 s); this is far past it.
 STREAM_READ_SECONDS = 300.0
 
-#: A line of the move longer than this is cut from the FRONT: the end of a
-#: failing tool's output is where it says why (`RunResult.said`).
 LINE_LIMIT = 300
 
-#: An ending is never cut short: it is the instruction. This bounds only a
-#: sentence that carries a tool's whole output.
 ENDING_LIMIT = 1500
 
-#: Endings are wrapped to this, so a console breaks them between words.
 WIDTH = 78
 
-#: The general sentence of 2.7, for an app reader. Kept word for word.
 APP_SENTENCE = (
     "It is setting up its Linux engine now; the app you installed from will "
     "show its progress."
@@ -129,19 +80,12 @@ TRAY_GONE_SENTENCE = (
     "back in: it starts again at sign-in and carries on by itself."
 )
 
-#: The first line of every ending that needs a person to restart Windows.
 RESTART_BANNER = 'ACTION NEEDED: restart Windows with "Update and restart".'
 
-#: The codes whose ending is a restart the person performs (#14).
 RESTART_CODES = outcome.REBOOT_CODES | {"wsl_reboot_again"}
 
 
 def one_line(text: object, limit: int = LINE_LIMIT) -> str:
-    """A line of the move as a console shows it: ASCII, one line, bounded.
-
-    wsl.exe's own text arrives multi-line, sometimes with a NUL between every
-    character (#10, #17, #26). The console gets one line of it.
-    """
     flat = " ".join(plain(str(text)).split())
     return flat if len(flat) <= limit else "..." + flat[-limit:]
 
@@ -155,13 +99,11 @@ def _parse_time(value: str) -> datetime | None:
 
 
 def _local(value: str) -> str:
-    """`at`, in the reader's own clock, to the minute."""
     parsed = _parse_time(value)
     return value if parsed is None else parsed.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 def recorded(home: Path) -> outcome.Outcome | None:
-    """The outcome file, or None. An unreadable one is not this run's ending."""
     try:
         return outcome.read(home)
     except HostError:
@@ -169,7 +111,6 @@ def recorded(home: Path) -> outcome.Outcome | None:
 
 
 def is_fresh(record: outcome.Outcome | None, since: datetime) -> bool:
-    """Was this written by the install that started at `since` (#28)?"""
     if record is None:
         return False
     at = _parse_time(record.at)
@@ -177,15 +118,12 @@ def is_fresh(record: outcome.Outcome | None, since: datetime) -> bool:
 
 
 def ending(record: outcome.Outcome) -> list[str]:
-    """What an ending means to the person at the console, in order."""
     sentence = one_line(record.sentence, ENDING_LIMIT) if record.sentence else ""
     if record.state == outcome.DONE:
         return [DONE_SENTENCE]
     if record.state == outcome.DECLINED:
         return [DECLINED_SENTENCE]
     if record.state == outcome.REBOOT_PENDING or record.code in RESTART_CODES:
-        # The sentence IS the instruction (`installer.REBOOT_SENTENCE`,
-        # `REBOOT_AGAIN_SENTENCE`); the banner makes it impossible to miss.
         return [RESTART_BANNER, sentence]
     if record.state == outcome.CANNOT:
         return [
@@ -194,7 +132,6 @@ def ending(record: outcome.Outcome) -> list[str]:
             "The Windows engine keeps working meanwhile. Once that is fixed, "
             + TRY_AGAIN_HINT + ".",
         ]
-    # `failed`: retried by the tray at its next start, once (PHASE19 2.2).
     if record.attempts < outcome.FAILED_ATTEMPT_CEILING:
         after = (
             "Crucible tries once more by itself the next time someone signs in to "
@@ -211,12 +148,8 @@ def ending(record: outcome.Outcome) -> list[str]:
 
 
 class Console:
-    """Prints the move's events as a person reads them."""
-
     def __init__(self, out: TextIO) -> None:
         self._out = out
-        #: The last tenth printed per file, so a download is ten lines, not
-        #: three hundred.
         self._tenths: dict[str, int] = {}
 
     def say(self, text: str) -> None:
@@ -240,8 +173,6 @@ class Console:
                 self.say("  " + text)
         elif kind == "progress":
             self._progress(data)
-        # `state`, `failed` and `done` are the ending's to say, from the
-        # outcome file, once: printing them here would say it twice.
 
     def _progress(self, data: dict[str, object]) -> None:
         done, total, name = data.get("bytes_done"), data.get("bytes_total"), str(data.get("file", ""))
@@ -254,7 +185,6 @@ class Console:
         self.say(f"  downloading {name}: {tenth * 10}% of {total / 1024 ** 2:.0f} MB")
 
     def paragraph(self, text: str) -> None:
-        """A sentence a person must read, wrapped between words."""
         if text:
             self.say(textwrap.fill(plain(text), WIDTH, break_on_hyphens=False))
 
@@ -265,7 +195,6 @@ class Console:
 
 
 def _token(home: Path) -> str | None:
-    """The engine's bearer, which is what the door takes (door.py)."""
     from ..local import LocalError, connection
 
     try:
@@ -277,13 +206,11 @@ def _token(home: Path) -> str | None:
 def _open(path: str, token: str | None, timeout: float):
     headers = {} if token is None else {"Authorization": f"Bearer {token}", "X-Crucible-Api": "1"}
     request = urllib.request.Request(door_url(path), headers=headers)
-    # Loopback: never through the caller's proxy (`crucible/local.py`).
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return opener.open(request, timeout=timeout)
 
 
 def door_alive() -> bool:
-    """Does the tray's door answer at all? `/v1/ping` takes no bearer (door.py)."""
     try:
         with _open("/v1/ping", None, 3.0) as response:
             return json.load(response).get("crucible") is True
@@ -292,7 +219,6 @@ def door_alive() -> bool:
 
 
 def door_status(token: str | None) -> dict[str, object] | None:
-    """`GET /install` (PHASE19 2.6), or None when the door cannot be asked."""
     if token is None:
         return None
     try:
@@ -304,7 +230,6 @@ def door_status(token: str | None) -> dict[str, object] | None:
 
 
 def follow(token: str, console: Console, seen: int) -> int:
-    """`GET /install/events` until the move ends. Returns the last id printed."""
     try:
         with _open("/install/events", token, STREAM_READ_SECONDS) as response:
             for raw in response:
@@ -316,14 +241,11 @@ def follow(token: str, console: Console, seen: int) -> int:
                     continue
                 number = envelope.get("id")
                 if isinstance(number, int):
-                    # A re-attach replays the ring; what was printed is skipped.
                     if number <= seen:
                         continue
                     seen = number
                 console.event(envelope)
     except (OSError, socket.timeout, urllib.error.URLError, http.client.HTTPException):
-        # A 404 (the move ended between the two asks), a hang-up, a quiet
-        # stream: the caller asks `GET /install` again.
         pass
     return seen
 
@@ -344,7 +266,6 @@ def watch(
             record = recorded(home)
             if is_fresh(record, since):
                 assert record is not None
-                # The outcome's OWN words for anything but `done` (2.7).
                 console.say(
                     DONE_SENTENCE if record.state == outcome.DONE or not record.sentence
                     else one_line(record.sentence, ENDING_LIMIT)
@@ -361,7 +282,7 @@ def watch(
     while True:
         status = door_status(token)
         if token is None or status is None:
-            token = _token(home)  # the pairing appears once the engine has started
+            token = _token(home)
         if status is not None and status.get("running") is True and token is not None:
             seen = follow(token, console, seen)
             sleep(POLL_SECONDS)
@@ -384,8 +305,6 @@ def watch(
             console.paragraph(TRAY_GONE_SENTENCE)
             return 0
         if status is None and waited < BLIND_SECONDS:
-            # Nothing can say whether a move is running, so only its ending in
-            # the file can end the wait.
             if clock() - heartbeat >= HEARTBEAT_SECONDS:
                 heartbeat = clock()
                 console.say(f"  still working ({waited / 60:.0f} min so far)")
@@ -393,7 +312,6 @@ def watch(
             if record is None:
                 console.paragraph(UNDECIDED_SENTENCE)
                 return 0
-            # #28: history, said as history.
             console.paragraph(
                 f"Nothing new has happened yet. The last time Crucible set up its "
                 f"Linux engine here ({_local(record.at)}, Crucible {record.release}), "
@@ -419,7 +337,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return watch(Path(args.home), since, brief=args.brief)
     except KeyboardInterrupt:
-        # Closing the window is allowed; the tray carries on without it.
         return 0
 
 

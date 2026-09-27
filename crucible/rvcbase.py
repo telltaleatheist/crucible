@@ -1,40 +1,3 @@
-"""ultimate-rvc's shared base assets — `rvcbase/<engine>.toml`.
-
-PHASE4-AUDIO.md section 4.1, and the discharge of PLAN.md's owed ruling 3.
-
-urvc needs a content embedder and a pitch predictor before it can convert a
-single file, and they are **the engine's rather than any model's**: every RVC
-voice in the catalog uses the same ones. Until this module existed, Crucible
-refused a job by name when they were absent and could tell the operator nothing
-except "put a urvc models tree here", because the only source anybody had
-written down was a GitHub release in BookForge — which DESIGN.md section 5
-refuses as a source of weights.
-
-The engine's own downloader names a HuggingFace repo
-----------------------------------------------------
-Read out of the installed fork rather than guessed
-(`ultimate_rvc/rvc/lib/tools/prerequisites_download.py`, 2026-09-13):
-
-    url_base = "https://huggingface.co/JackismyShephard/ultimate-rvc/resolve/main/Resources"
-
-That file *is* the first-run downloader `URVC_SKIP_INIT=1` turns off, so what
-this pulls are exactly the bytes the engine would have fetched for itself, from
-the repo it would have fetched them from — at a pinned revision instead of
-`main`, with a digest per file.
-
-Why this is not a manifest in `rvc/`
-------------------------------------
-`crucible/rvcmodels.py` loads `rvc/*.toml` as voice-conversion MODELS, and these
-are not one: they have no id a client can ask for, no per-backend block (a torch
-checkpoint is the same file on both), and no memory estimate of their own — the
-rvc model's estimate already counts them, which is what its manifest comment
-about "540 MB of base weights" is. Dropping a non-model into that directory
-would make every loader there have to know about the exception.
-
-So it is its own directory with its own loader, exactly as `denoise/` is, and
-`crucible rvc pull-base` is its one door. One set, one command, one owner.
-"""
-
 from __future__ import annotations
 
 import os
@@ -50,13 +13,8 @@ from .errors import CrucibleError
 
 RVC_BASE_DIR_ENV = "CRUCIBLE_RVC_BASE_DIR"
 
-#: The engine whose assets these are. One today, and the id is in the filename
-#: for the reason every other catalog puts it there: a second engine with base
-#: assets of its own gets a second file, not a second key in this one.
 ULTIMATE_RVC = "ultimate-rvc"
 
-#: What `crucible rvc pull-base` fetches them for, and where a refusal sends a
-#: reader. Spelled once so the job's refusal, the doctor line and the CLI agree.
 PULL_COMMAND = "crucible rvc pull-base"
 
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -74,26 +32,16 @@ _FILE_REQUIRED: dict[str, type] = {
     "target": str,
     "sha256": str,
     "bytes": int,
-    # Required, and it is not decoration. These are four files with no obvious
-    # relationship to each other, fetched into a tree nobody looks at until a
-    # conversion fails; "why is fcpe.pt here" is a question somebody will ask,
-    # and the answer belongs beside the pin rather than in a commit message.
     "why": str,
 }
 
 
 class RvcBaseError(CrucibleError):
-    """The base-asset declaration is missing, unreadable, or wrong."""
+    ...
 
 
 @dataclass(frozen=True)
 class BaseFile:
-    """One file: where it comes from, where it goes, and what it must hash to.
-
-    The field names are `crucible.weights.FileSource`'s, so `pull_files` takes
-    these directly and there is one downloader rather than two.
-    """
-
     source: str
     target: str
     sha256: str
@@ -120,15 +68,6 @@ class RvcBaseAssets:
 
     @property
     def targets(self) -> tuple[str, ...]:
-        """Every path this set puts under the base root, in declared order.
-
-        **The one owner of "which files urvc needs"** — `crucible/jobs/rvc`
-        reads this rather than keeping a list of its own, so the set that is
-        pulled and the set that is checked for cannot drift (ARCHITECTURE.md
-        R1). They used to be two lists and the job's was shorter: it checked for
-        the embedder's weights and not for the `config.json` beside them,
-        without which transformers will not load the directory at all.
-        """
         return tuple(entry.target for entry in self.files)
 
     @property
@@ -145,11 +84,7 @@ class RvcBaseAssets:
         }
 
 
-# ------------------------------------------------------------------ locating
-
-
 def rvc_base_declarations_dir() -> Path:
-    """Where `rvcbase/*.toml` live. Refuses by name if absent."""
     override = os.environ.get(RVC_BASE_DIR_ENV)
     if override is not None and override != "":
         path = Path(override).expanduser()
@@ -166,16 +101,7 @@ def rvc_base_declarations_dir() -> Path:
 
 
 def base_root(config: Config) -> Path:
-    """`~/.crucible/rvc-base` — the `URVC_MODELS_DIR` half that is shared.
-
-    The same directory `crucible/jobs/rvc/__init__.py` has always looked in, and
-    it keeps its name: a host that already has the tree does not have to move it
-    because a puller arrived.
-    """
     return config.home / "rvc-base"
-
-
-# ------------------------------------------------------------------ checking
 
 
 def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
@@ -289,11 +215,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> RvcBaseAss
     )
 
 
-# ------------------------------------------------------------------- loading
-
-
 def parse_rvc_base(text: str, path: Path, expected_id: str) -> RvcBaseAssets:
-    """Parse and validate one declaration. Raises RvcBaseError by name."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -304,7 +226,6 @@ def parse_rvc_base(text: str, path: Path, expected_id: str) -> RvcBaseAssets:
 def load_rvc_base(
     engine_id: str = ULTIMATE_RVC, directory: Path | None = None
 ) -> RvcBaseAssets:
-    """Load `rvcbase/<engine_id>.toml`. Raises if it is not there."""
     root = directory if directory is not None else rvc_base_declarations_dir()
     path = root / f"{engine_id}.toml"
     if not path.is_file():
@@ -320,24 +241,12 @@ def load_rvc_base(
     return parse_rvc_base(text, path, engine_id)
 
 
-# ------------------------------------------------------------- on this host
-
-
 def missing(config: Config, assets: RvcBaseAssets) -> list[str]:
-    """Which declared targets are not on this host, in declared order.
-
-    Presence, not digest. A file Crucible placed was verified when it was
-    placed, and re-hashing 600 MB on every `check()` would make `crucible
-    doctor` cost a minute — while a file somebody else put there is one Crucible
-    has nothing to compare against, which is the state `rvc` has been in all
-    along.
-    """
     root = base_root(config)
     return [target for target in assets.targets if not (root / target).is_file()]
 
 
 def installed(config: Config, assets: RvcBaseAssets) -> weights.InstalledWeights | None:
-    """The pulled set at this pin, or None. A stamp at another pin is not this."""
     return weights.files_installed(
         base_root(config), assets.hf_repo, assets.revision
     )
@@ -351,7 +260,6 @@ def pull(
     on_line: Callable[[str], None] | None = None,
     on_progress: weights.ProgressHook | None = None,
 ) -> weights.InstalledWeights:
-    """Fetch and place every declared file, each verified before any is placed."""
     return weights.pull_files(
         config,
         hf_repo=assets.hf_repo,

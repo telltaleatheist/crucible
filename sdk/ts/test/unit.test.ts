@@ -310,34 +310,13 @@ test('an unnamed holder is reported as unnamed, never guessed', async () => {
   );
 });
 
-test('a server_busy body missing a displayed field is still CrucibleBusy, with null there', async () => {
-  // The refusal is the CODE, and it is never downgraded or replaced: a caller
-  // still gets CrucibleBusy, still walks to the next machine on it. What the
-  // body says about the holder is for a person, and a server that states less
-  // of it reads as null there (Owen, 2026-09-24) — the busy line leaves that
-  // part out rather than inventing it.
-  const { progress: _dropped, ...withoutProgress } = BUSY_DETAILS;
-  answer(409, {
-    error: { code: 'server_busy', message: 'busy', details: withoutProgress },
-  });
-  await assert.rejects(
-    client().submit({ type: 'tts', params: {}, inputs: {} }),
-    (error: unknown) => {
-      assert.ok(error instanceof CrucibleBusy, `got ${String(error)}`);
-      assert.equal(error.progress, null);
-      assert.doesNotMatch(error.busyLine, /% done/);
-      return true;
-    },
-  );
-});
-
 test('a server_busy body whose field is present with the wrong type is a protocol error', async () => {
   answer(409, {
     error: { code: 'server_busy', message: 'busy', details: { ...BUSY_DETAILS, progress: 'most' } },
   });
   await assert.rejects(
     client().submit({ type: 'tts', params: {}, inputs: {} }),
-    /progress is present but is not a number/,
+    /progress is not a number/,
   );
 });
 
@@ -457,13 +436,6 @@ test('an idle machine reports both nulls, and the resident key is still required
   assert.equal(seen.resident, null);
   assert.equal(seen.slots.accelerated.acceptsWork, true);
 
-  // A server that predates the claim has none to report, and a bench draws
-  // that as it draws a null (Owen, 2026-09-24). `resident` is different: it is
-  // what a load is decided on, and its key is still required.
-  const { claim: _gone, ...withoutClaim } = ACTIVITY_WITH_SESSION;
-  answer(200, withoutClaim);
-  assert.equal((await client().activity()).claim, null);
-
   const { resident: _noResident, ...withoutResident } = ACTIVITY_WITH_SESSION;
   answer(200, withoutResident);
   await assert.rejects(client().activity(), /activity has no field "resident"/);
@@ -541,17 +513,11 @@ test('health reads what is stopping, pids and all', async () => {
   });
 });
 
-test('activity carries the same object, and a server that predates it reads null', async () => {
+test('activity carries the same object', async () => {
   answer(200, { ...ACTIVITY_WITH_SESSION, stopping: HEALTH_WHILE_STOPPING.stopping });
   const seen = await client().activity();
   assert.equal(seen.stopping?.id, 'deathstalker');
   assert.deepEqual(seen.stopping?.pids, [41288, 41301]);
-
-  // A build that predates the field cannot report a wedged card, and a load
-  // on one is still refused by name at the door. Null is all it can say.
-  const { stopping: _gone, ...withoutStopping } = ACTIVITY_WITH_SESSION;
-  answer(200, withoutStopping);
-  assert.equal((await client().activity()).stopping, null);
 });
 
 test('a pid that is not an integer is refused rather than rounded', async () => {

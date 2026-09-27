@@ -254,26 +254,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
   ]);
 });
 
-// ANY CRUCIBLE THAT ANSWERS WORKS (Owen, 2026-09-24). A voice row's id,
-// residency, loadability, sample rate, clip requirement and pace block are
-// what a caller loads and packs by; the rest describes the voice and reads as
-// null when a server does not state it.
-
-test('a 1.0.23-shaped voice row — no orphan — reads cleanly, with null there', async () => {
-  // The exact failure the ruling was made over: `voices[0] has no field
-  // "orphan"` in every BookForge fake after the 1.0.24 repin.
-  const { orphan: _orphan, ...older } = VOICE_ROW;
-  answers(200, [older]);
-  const [voice] = await client().voices();
-  assert.equal(voice!.orphan, null);
-  assert.equal(voice!.id, 'deathstalker');
-  assert.equal(voice!.sampleRate, 24000);
-});
-
-test('a voice row without reason reads null, and a refusal with no reason still reads', async () => {
-  const { reason: _reason, ...withoutReason } = VOICE_ROW;
-  answers(200, [withoutReason]);
-  assert.equal((await client().voices())[0]!.reason, null);
+test('a refusal with no reason still reads', async () => {
   // `loadable: false` is the fact a caller acts on; the reason is for a person.
   answers(200, [{ ...VOICE_ROW, loadable: false, reason: null }]);
   const [voice] = await client().voices();
@@ -295,15 +276,12 @@ test('an estimate_basis outside today\'s vocabulary is carried as the server\'s 
 
 test('a voice kind that is present but not a string is a protocol error', async () => {
   answers(200, [{ ...VOICE_ROW, kind: 3 }]);
-  await assert.rejects(client().voices(), /voices\[0\]\.kind is present but is not a string/);
+  await assert.rejects(client().voices(), /voices\[0\]\.kind is neither a string nor null/);
 });
 
 test('a pace block missing a rate is a half-stated band, refused by name', async () => {
-  // An absent rate reads as "this voice states none" — and two of three is
-  // still the wire disagreeing with itself, which is refused whatever the
-  // vintage.
-  const { max_chars_per_sec: _rate, ...lamePace } = VOICE_ROW.pace;
-  answers(200, [{ ...VOICE_ROW, pace: lamePace }]);
+  // Two of three is the wire disagreeing with itself.
+  answers(200, [{ ...VOICE_ROW, pace: { ...VOICE_ROW.pace, max_chars_per_sec: null } }]);
   await assert.rejects(client().voices(), (error: unknown) => {
     assert.ok(error instanceof CrucibleProtocolError, `got ${String(error)}`);
     assert.match(error.message, /voices\[0\]\.pace states 2 of its 3 rates/);
@@ -508,11 +486,8 @@ test("info() reads the tts capability's rows with the /voices reader", async () 
 });
 
 test('info() with one malformed voice row still returns, and says which row it could not read', async () => {
-  // Until 2026-09-24 one voice row this build could not read took the whole
-  // probe down — `info()` is where the voice rows ride. Now the row is
-  // carried aside with its raw data and the reason, and everything else in
-  // the document reads (Owen: "if it can make the call to the crucible server
-  // then it should work").
+  // `info()` is where the voice rows ride. The row is carried aside with its
+  // raw data and the reason, and everything else in the document reads.
   const { sample_rate: _rate, ...noRate } = { ...VOICE_ROW, id: 'broken' };
   const wrongType = { ...VOICE_ROW, id: 'banana', max_chars: 'lots' };
   answers(200, {
@@ -543,7 +518,7 @@ test('info() with one malformed voice row still returns, and says which row it c
     tts.unreadableRows[0]!.unreadable,
     /info\.capabilities\[1\]\.models\[1\] has no field "sample_rate"/,
   );
-  assert.match(tts.unreadableRows[1]!.unreadable, /max_chars is present but is not a number/);
+  assert.match(tts.unreadableRows[1]!.unreadable, /max_chars is neither a number nor null/);
   // The rest of the document is intact.
   assert.equal(info.server.name, 'crucible@test');
   assert.deepEqual(info.jobTypes, ['echo', 'load-voice', 'unload-voice']);
@@ -587,13 +562,6 @@ test('health() reports a kind this client has never heard of rather than refusin
   });
   const health = await client().health();
   assert.equal(health.residentKind, 'align');
-});
-
-test('a health body without resident_kind reads it as null', async () => {
-  answers(200, { status: 'ok', queue_depth: 0, resident_models: [] });
-  const health = await client().health();
-  assert.equal(health.residentKind, null);
-  assert.equal(health.status, 'ok');
 });
 
 test('a health status outside today\'s three words is carried, not refused', async () => {
@@ -674,35 +642,12 @@ test('a holder whose bytes the driver would not report stays null, and never bec
   assert.equal(state.holders[1]!.ownedByCrucible, true);
 });
 
-test('a holder with no bytes field at all reads as null — unknown, never 0', async () => {
-  // The driver declining and a server that does not say are the same news to
-  // a caller: not known. Neither is ever zero.
-  answers(200, {
-    ...ACCELERATOR,
-    holders: [{ pid: 6120, name: 'python.exe', owned_by_crucible: false }],
-  });
-  const state = await client().accelerator();
-  assert.equal(state.holders?.[0]?.bytes, null);
-  assert.notEqual(state.holders?.[0]?.bytes, 0);
-});
-
 test('a holder with no pid is a protocol error: it is what an operator acts on', async () => {
   answers(200, {
     ...ACCELERATOR,
     holders: [{ name: 'python.exe', bytes: null, owned_by_crucible: false }],
   });
   await assert.rejects(client().accelerator(), /accelerator\.holders\[0\] has no field "pid"/);
-});
-
-test('a negative unattributed figure is surfaced, not quietly clamped here', async () => {
-  // The server clamps at zero, because "VRAM nothing accounts for, past the
-  // allowance" cannot be less than none. An older server that still publishes a
-  // negative has a bug, and this client shows it where it is instead of hiding
-  // it — correcting it here would put the fix in the wrong repository and make
-  // the real one unfindable.
-  answers(200, { ...ACCELERATOR, unattributed_bytes: -1509949440 });
-  const state = await client().accelerator();
-  assert.equal(state.unattributedBytes, -1509949440);
 });
 
 test('mlx-darwin answers unattributed_bytes: null, and it stays null', async () => {
@@ -1175,22 +1120,6 @@ test('a progress frame with no measurements of its own carries an empty extra', 
   assert.deepEqual(first.event === 'progress' ? first.data.extra : null, {});
 });
 
-test('a progress frame without a fraction reads it as null, and keeps its extras', async () => {
-  // The fraction is drawn, never acted on (Owen, 2026-09-24).
-  handle = (_request, response) => {
-    openSse(response);
-    response.write('id: 1\nevent: progress\ndata: {"message": "half", "cues": 7}\n\n');
-    response.write('id: 2\nevent: done\ndata: {"artifacts": []}\n\n');
-    response.end();
-  };
-  const seen = [];
-  for await (const event of client().events('job-sparse-progress')) seen.push(event);
-  const [progress] = seen;
-  assert.ok(progress !== undefined && progress.event === 'progress');
-  assert.equal(progress.data.fraction, null);
-  assert.deepEqual(progress.data.extra, { cues: 7 });
-});
-
 test('a progress fraction that is present but not a number is a protocol error', async () => {
   handle = (_request, response) => {
     openSse(response);
@@ -1201,5 +1130,5 @@ test('a progress fraction that is present but not a number is a protocol error',
     for await (const _event of client().events('job-bad-progress')) {
       // drain
     }
-  }, /fraction is present but is not a number/);
+  }, /fraction is not a number/);
 });

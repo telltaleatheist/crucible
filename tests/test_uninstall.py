@@ -599,7 +599,7 @@ def test_the_cli_refuses_by_name_when_this_host_cannot_say_where_home_is(
 ) -> None:
     """`crucible_home()`'s refusal reaches the operator, not a traceback."""
     monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
-    monkeypatch.setattr(cli.sys, "platform", "win32")
-    monkeypatch.setattr(cli.os, "environ", {}, raising=False)
+    monkeypatch.setattr(cli.uninstall_cmd.sys, "platform", "win32")
+    monkeypatch.setattr(cli.uninstall_cmd.os, "environ", {}, raising=False)
     assert cli.main(["uninstall", "--dry-run"]) == 1
     assert "LOCALAPPDATA" in capsys.readouterr().err

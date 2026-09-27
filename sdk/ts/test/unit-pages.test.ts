@@ -128,18 +128,6 @@ test('a host that serves no pages still publishes the request, and says which en
   assert.equal(info.pagesEngine!.request.dialect, 'dots-json');
 });
 
-// ---------------------------------------------------------------- the vintage
-
-test('a server whose document predates the block reads as null, not as an empty contract', async () => {
-  // PHASE15 3.3's all-or-nothing rule, the same one `role` gets: an absent
-  // block is a statement about the server's VINTAGE, and `null` is how a
-  // client sees it. Nothing here invents a prompt or a budget — a caller that
-  // needs the contract refuses by name against this null.
-  reply = document(undefined);
-  const info = await client().info();
-  assert.equal(info.pagesEngine, null);
-});
-
 // ----------------------------------------------------------- a half-document
 
 test('a block missing a field the contract promises is refused by name', async () => {
@@ -153,7 +141,6 @@ test('a block missing a field the contract promises is refused by name', async (
     (error: unknown) =>
       error instanceof CrucibleProtocolError
       && /info\.pages_engine\.request has no field "max_pixels"/.test((error as Error).message),
-    'a half-new document is the one thing a vintage rule cannot read',
   );
 });
 

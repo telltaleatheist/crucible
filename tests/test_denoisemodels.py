@@ -407,7 +407,7 @@ def test_a_deleted_file_makes_the_set_not_installed(
 def cli_backend(monkeypatch: pytest.MonkeyPatch):
     from crucible import cli
 
-    monkeypatch.setattr(cli, "detect_backend", lambda: FAKE_BACKEND)
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
     return cli
 
 

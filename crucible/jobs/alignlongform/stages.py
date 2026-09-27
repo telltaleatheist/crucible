@@ -1,45 +1,3 @@
-"""Driving the two existing workers, and slicing the audio between them.
-
-`align-longform` is an ORCHESTRATION, not a new engine. Its four stages are
-
-    transcribe   faster-whisper, the `asr` env's worker      (CPU-bound, most of the clock)
-    coarse-align the DTW in `coarse.py`                      (pure, no card)
-    align        Qwen3-ForcedAligner, the `align` env's worker (the card)
-    write        snap + VTT in `cues.py`                     (pure, no card)
-
-and two of those already exist as job types with their own envs. This module is
-what lets one job reach both.
-
-WHY THE WORKERS AND NOT NESTED JOBS
------------------------------------
-The obvious shape — submit an `asr` job, then an `align` job — DEADLOCKS. A
-Crucible takes one job at a time (`CrucibleBusy`, 409 `server_busy`), so a job
-that waits on another job waits forever on a lane it is itself holding. The
-worker scripts are the reusable unit, not the job types, and `workers.run_worker`
-is the door both already go through.
-
-ONE CARD, ONE THING
--------------------
-faster-whisper and the aligner are not on the card together. The transcribe stage
-uses `run_worker`, which is start/send/stop in one call, so that worker has
-exited before the align stage spawns — true by construction rather than by a
-release somebody has to remember. The align stage needs a SESSION instead
-(`WorkerSession`: load once, then the whole book down one stdin, because the
-aligner is 1.7 GB and a book is hundreds of chunks), and its `stop` is in a
-`finally` so the card comes back whether the book finished or not. The aligner is the only one of the two that Crucible
-otherwise holds RESIDENT, and this job deliberately does not take that path: a
-long-form align is one pass over one book, so the weights are read once either
-way, and borrowing the resident holder would evict whatever a client had loaded.
-
-THE ENVIRONMENT IS NOT OPTIONAL
--------------------------------
-Both workers get `workers.worker_environment(...)`. The `asr` env needs it to
-run at all — pip's CUDA libraries are in per-package directories the loader does
-not search, and ctranslate2 resolves cuBLAS at the first matrix multiply, so
-without it the model loads and the first window dies (measured on owens-pc,
-2026-09-15; `crucible doctor` called the job type ready throughout).
-"""
-
 from __future__ import annotations
 
 import json
@@ -50,26 +8,14 @@ from typing import Any, Callable
 from ... import workers
 from ...alignmodels import AlignBackendSpec
 
-#: The `asr` worker's window, IMPORTED from that job type rather than copied.
-#:
-#: This file first carried 600.0/5.0, invented here. The real values are 900/15
-#: and they are INTS — the worker refuses a float by name ("the asr request's
-#: 'window_s' must be int, got float"), which is how the wrong numbers were
-#: caught on the first real run. Importing is what stops the pair drifting: a
-#: copy agrees on the day it is written and silently stops agreeing later, and
-#: two different ideas of how long a window is would put every word in the
-#: second window at the wrong second.
-from ..align import start_aligner_session  # noqa: E402
-from ..asr import OVERLAP_SECONDS, WINDOW_SECONDS  # noqa: E402
+from ..align import start_aligner_session
+from ..asr import OVERLAP_SECONDS, WINDOW_SECONDS
 
-#: What the rough pass runs at. `float16` on the card, and the device is the
-#: card: this stage is the long one and running it on CPU would dominate the job.
 ROUGH_DEVICE = "cuda"
 ROUGH_COMPUTE_TYPE = "float16"
 
 
 class StageFailed(Exception):
-    """A stage could not finish. Carries a code the job turns into its own."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -77,12 +23,6 @@ class StageFailed(Exception):
 
 
 def probe_duration(ffmpeg: str, audio: Path) -> float:
-    """Seconds of audio, from ffprobe beside the ffmpeg we were given.
-
-    Asked ONCE and threaded through, because three later decisions depend on it
-    — the last chunk's end, the cap check, and the progress denominator — and a
-    number re-derived three times is three chances to disagree.
-    """
     probe = str(Path(ffmpeg).with_name(Path(ffmpeg).name.replace("ffmpeg", "ffprobe")))
     try:
         out = subprocess.run(
@@ -91,7 +31,7 @@ def probe_duration(ffmpeg: str, audio: Path) -> float:
             capture_output=True, text=True, timeout=120, check=True,
         ).stdout.strip()
         return float(out)
-    except Exception as exc:  # noqa: BLE001 - reported by name below
+    except Exception as exc:
         raise StageFailed(
             "audio_unreadable",
             f"could not read the duration of {audio.name} with {probe}: {exc}. The job cannot "
@@ -110,14 +50,6 @@ def transcribe(
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[tuple[str, float]]:
-    """Stage 1 — the rough transcript, as `(word, start)` in book order.
-
-    `word_timestamps` is TRUE and not a parameter: the coarse stage aligns
-    against word positions, so a transcript without them cannot be walked.
-    `vad_filter` is FALSE for the same kind of reason — VAD drops audio it
-    judges non-speech, and a dropped stretch is a hole the DTW would read as
-    the narrator skipping text.
-    """
     request = {
         "model_dir": str(weights_dir),
         "ffmpeg": ffmpeg,
@@ -125,19 +57,11 @@ def transcribe(
         "language": language,
         "vad_filter": False,
         "word_timestamps": True,
-        # The asr worker's wire has no optional keys. No prompt: the coarse
-        # pass wants whisper's plain reading, and the book text it is walked
-        # against is what fixes the spellings, not a primed transcript.
         "initial_prompt": None,
         "device": ROUGH_DEVICE,
         "compute_type": ROUGH_COMPUTE_TYPE,
         "window_s": WINDOW_SECONDS,
         "overlap_s": OVERLAP_SECONDS,
-        # NO SPEECH-ONLY CUT, and it must stay null here (2026-09-27): with it
-        # the worker's windows are cut from a SHORTENED signal and every time
-        # below would need the `kept` table to come back to the book's
-        # timeline, which the `index * WINDOW_SECONDS` shift here does not
-        # apply. The coarse DTW reads wordless stretches for itself.
         "speech": None,
     }
     try:
@@ -154,8 +78,6 @@ def transcribe(
     except workers.WorkerError as exc:
         raise StageFailed("transcribe_failed", str(exc)) from None
     if outcome.ready.get("kept") is not None:
-        # Unreachable while the request above says `speech: None`; if it ever
-        # is reached, every word time below is on the wrong timeline.
         raise StageFailed(
             "transcribe_failed",
             "the rough transcript came back cut to speech only, and this stage "
@@ -165,9 +87,6 @@ def transcribe(
     words: list[tuple[str, float]] = []
     for index, result in enumerate(outcome.results):
         if result.get("error"):
-            # A HOLE IS NOT A TRANSCRIPT. The coarse stage would read a wordless
-            # stretch of real narration as text the narrator skipped, and drop
-            # every sentence in it from the VTT.
             raise StageFailed(
                 "transcribe_window_failed",
                 f"window {index} of the rough transcript failed ({result['error']}). The "
@@ -175,16 +94,6 @@ def transcribe(
                 "reads as text the narrator never spoke, and those sentences would be "
                 "dropped from the VTT rather than placed.",
             )
-        # WINDOW-RELATIVE IN, BOOK-ABSOLUTE OUT, and the expression is the
-        # `asr` job type's own (`jobs/asr/__init__.py`: `offset = index *
-        # float(WINDOW_SECONDS)`) rather than a second derivation of it. Results
-        # carry no index — position in the stream IS the window, which is that
-        # worker's rule — so `enumerate` is the whole of the bookkeeping.
-        #
-        # Written as a carried variable at first, which computed the same numbers
-        # and hid that it did. Only ever exercised on a ONE-WINDOW clip until
-        # `test_align_longform_stages.py`, because a 15-second probe has no
-        # second window to get wrong.
         offset = index * float(WINDOW_SECONDS)
         for segment in result.get("segments") or []:
             for word in segment.get("words") or []:
@@ -193,12 +102,6 @@ def transcribe(
 
 
 def slice_chunk(ffmpeg: str, audio: Path, start: float, end: float, out: Path) -> None:
-    """Cut `[start, end)` out of the audio for one aligner window.
-
-    16 kHz mono, which is what the aligner's feature extractor was trained at —
-    the same decode `align`'s own worker does, done here because this job knows
-    the spans and that worker takes files.
-    """
     result = subprocess.run(
         [ffmpeg, "-nostdin", "-v", "error", "-y", "-ss", f"{start:.3f}",
          "-to", f"{end:.3f}", "-i", str(audio), "-ac", "1", "-ar", "16000", str(out)],
@@ -226,16 +129,6 @@ def align_chunks(
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """Stage 3 — the aligner, one result per chunk, BY POSITION.
-
-    No index travels in either direction, which is the `align` worker's own rule
-    and not a simplification: an index a worker reports is an index a worker can
-    get wrong, and narrator proved that on a 401-chunk book.
-    """
-    # LOAD AND ALIGN ON ONE PROCESS. The aligner is 1.7 GB of weights and a
-    # book is hundreds of chunks, so the worker is started once and fed the
-    # whole book on the same stdin — `align`'s own reason for having a session
-    # rather than a one-shot worker.
     try:
         session = start_aligner_session(
             python, weights_dir, spec, log_path, ready_silence_timeout=900.0
@@ -249,10 +142,6 @@ def align_chunks(
                 "language": language_name,
                 "max_audio_s": max_audio_s,
                 "ffmpeg": ffmpeg,
-                # No index in a chunk and none in a result: position is the whole
-                # identity, which is the align worker's own rule. An index a
-                # worker reports is an index a worker can get wrong, and
-                # narrator proved that on a 401-chunk book.
                 "chunks": [
                     {"audio": str(path), "text": text}
                     for path, text in zip(chunk_files, chunk_texts)
@@ -265,9 +154,6 @@ def align_chunks(
     except workers.WorkerError as exc:
         raise StageFailed("align_failed", str(exc)) from None
     finally:
-        # The card is handed back whether this finished or not. This job does not
-        # use the resident holder (see the module header), so nothing else will
-        # stop this process.
         session.stop()
     return list(outcome.results)
 
