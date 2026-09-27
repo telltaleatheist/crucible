@@ -68,8 +68,10 @@ def fleet(tmp_path: Path, before: str, want: str) -> dict[str, str]:
     _shim(
         shims / "wsl.exe",
         'last="${@: -1}"\n'
+        '[ "$CRUCIBLE_TEST_GUEST_DOWN" = "1" ] && exit 1\n'
         'case "$last" in\n'
         '  *installation.json*) cat "$CRUCIBLE_TEST_STATE/guest.json" 2>/dev/null ;;\n'
+        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY:-idle}" ;;\n'
         '  *) exit 0 ;;\n'
         'esac\n',
     )
@@ -78,6 +80,7 @@ def fleet(tmp_path: Path, before: str, want: str) -> dict[str, str]:
         'last="${@: -1}"\n'
         'case "$last" in\n'
         '  *installation.json*) cat "$CRUCIBLE_TEST_STATE/mac.json" 2>/dev/null ;;\n'
+        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY_MAC:-idle}" ;;\n'
         '  true) exit 0 ;;\n'
         '  *)\n'
         '    echo "mac start" >> "$CRUCIBLE_TEST_STATE/order"\n'
@@ -113,6 +116,10 @@ def fleet(tmp_path: Path, before: str, want: str) -> dict[str, str]:
         CRUCIBLE_TEST_FAIL="",
         CRUCIBLE_TEST_GUEST_DELAY=str(GUEST_SECONDS),
         CRUCIBLE_TEST_GUEST_STUCK="0",
+        CRUCIBLE_TEST_GUEST_DOWN="0",
+        DEPLOY_AWAIT_ATTEMPTS="5",
+        CRUCIBLE_TEST_BUSY="",
+        CRUCIBLE_TEST_BUSY_MAC="",
     )
     return environment
 
@@ -134,6 +141,12 @@ def run_deploy(
     )
 
 
+def _again(tmp_path: Path) -> Path:
+    again = tmp_path / "again"
+    again.mkdir()
+    return again
+
+
 def marks(tmp_path: Path) -> list[str]:
     path = tmp_path / "state/order"
     if not path.exists():
@@ -150,9 +163,13 @@ def test_deploy_never_drives_the_guest_itself() -> None:
     for line in code.splitlines():
         if "wsl.exe" not in line:
             continue
-        assert "installation.json" in line or "exit 0" in line, (
+        reads_only = any(
+            allowed in line
+            for allowed in ("installation.json", "exit 0", "busy_probe", "command -v")
+        )
+        assert reads_only, (
             "deploy.sh reaches into the distro for something other than its "
-            "record: %s" % line.strip()
+            "record or its read-only busy probe: %s" % line.strip()
         )
 
 
@@ -274,12 +291,77 @@ def test_each_machine_reports_what_it_cost(tmp_path: Path) -> None:
     assert sorted(timed) == ["mac", "pc"], done.stdout
 
 
-def test_await_release_polls_every_two_seconds_with_the_same_ceiling() -> None:
+def test_await_release_polls_every_two_seconds_up_to_the_settle_ceiling() -> None:
     text = DEPLOY.read_text(encoding="utf-8")
     start = text.index("await_release()")
-    body = text[start:text.index("# ------", start)]
+    body = text[start:text.index("\n}\n", start)]
     assert "sleep 2" in body, "the poll interval is no longer two seconds"
-    assert "-lt 30" in body, (
-        "thirty attempts two seconds apart is the same sixty-second ceiling "
-        "that twenty attempts three seconds apart was"
+    assert 'DEPLOY_AWAIT_ATTEMPTS:-150' in text, (
+        "150 attempts two seconds apart is the five minutes the host's presence "
+        "settle plus the guest carry need; the tests shorten it through the variable"
     )
+
+
+def test_a_probe_that_cannot_say_whether_the_server_is_busy_refuses_without_interrupt(
+    tmp_path: Path,
+) -> None:
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    environment["CRUCIBLE_TEST_BUSY"] = "unknown(no /home/x/.crucible/config.toml to read the token and port from)"
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "pc(busy state unknown)" in done.stderr, done.stderr
+    assert "no /home/x/.crucible/config.toml" in done.stdout, done.stdout
+    assert "pc start" not in marks(tmp_path), marks(tmp_path)
+    assert "mac: now runs 1.0.3" in done.stdout, done.stdout
+
+    taken = run_deploy(fleet(_again(tmp_path), "1.0.2", "1.0.3"), "1.0.3", "--yes", "--interrupt")
+    assert taken.returncode == 0, taken.stdout + taken.stderr
+    assert "pc: now runs 1.0.3" in taken.stdout, taken.stdout
+
+
+def test_a_probe_the_shim_answers_idle_to_lets_the_deploy_through(tmp_path: Path) -> None:
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    environment["CRUCIBLE_TEST_BUSY"] = "idle(nothing listens on 127.0.0.1:7100)"
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "pc: now runs 1.0.3" in done.stdout, done.stdout
+
+
+def test_a_release_older_than_the_installed_one_is_refused_without_force(tmp_path: Path) -> None:
+    environment = fleet(tmp_path, "1.0.4", "1.0.3")
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "never goes backwards" in done.stderr, done.stderr
+    assert "--force" in done.stderr, done.stderr
+    assert "NEWER than 1.0.3" in done.stdout, done.stdout
+    assert marks(tmp_path) == [], marks(tmp_path)
+
+    forced = run_deploy(fleet(_again(tmp_path), "1.0.4", "1.0.3"), "1.0.3", "--yes", "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert "DOWNGRADE" in forced.stdout, forced.stdout
+    assert "pc: now runs 1.0.3" in forced.stdout, forced.stdout
+
+
+def test_a_pc_whose_guest_cannot_be_asked_is_left_alone_not_installed(tmp_path: Path) -> None:
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    environment["CRUCIBLE_TEST_GUEST_DOWN"] = "1"
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "host:1.0.2 guest:unreachable" in done.stdout, done.stdout
+    assert "CANNOT BE ASKED" in done.stdout, done.stdout
+    assert "pc(unreachable: host:1.0.2 guest:unreachable)" in done.stderr, done.stderr
+    assert "pc start" not in marks(tmp_path), marks(tmp_path)
+    assert "mac: now runs 1.0.3" in done.stdout, done.stdout
+
+
+def test_the_pc_is_refused_up_front_when_this_is_not_the_windows_pc(tmp_path: Path) -> None:
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    del environment["LOCALAPPDATA"]
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "Run this on the PC, or pass --only mac" in done.stderr, done.stderr
+    assert marks(tmp_path) == [], marks(tmp_path)
+
+    mac_only = run_deploy(environment, "1.0.3", "--yes", "--only", "mac")
+    assert mac_only.returncode == 0, mac_only.stdout + mac_only.stderr
+    assert "mac: now runs 1.0.3" in mac_only.stdout, mac_only.stdout

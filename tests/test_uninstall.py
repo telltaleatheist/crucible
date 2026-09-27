@@ -140,14 +140,15 @@ def test_the_plan_is_the_install_list_read_upwards(installed_home: Path) -> None
     assert positions == sorted(positions), names
 
 
-def test_the_guest_is_uninstalled_before_the_tray_that_watches_it(
+def test_the_guest_is_stopped_and_uninstalled_before_the_tray_that_holds_it_open_is_ended(
     installed_home: Path,
 ) -> None:
     runner = Runner({("wsl.exe", "-l"): answer(out=f"Ubuntu\n{uninstall.CRUCIBLE_DISTRO}\n")})
     plan = make(installed_home, platform="win32", runner=runner, wsl_too=True)
     names = [s.name for s in plan.steps]
     assert names.index("stop-engine") < names.index("wsl-guest")
-    assert names.index("wsl-guest") < names.index("remove-service")
+    assert names.index("wsl-guest") < names.index("stop-controller")
+    assert names.index("stop-controller") < names.index("remove-service")
 
 
 def test_a_dry_run_touches_nothing(installed_home: Path) -> None:
@@ -339,22 +340,60 @@ def test_on_windows_the_service_is_the_startup_shortcut(installed_home: Path) ->
     assert "at login" in removal.what
 
 
-def test_the_tray_is_ended_by_pid_from_its_own_lock_and_never_by_image_name(
+def test_the_tray_is_asked_to_stop_its_engine_then_to_quit_and_is_never_force_killed(
+    installed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (installed_home / "host.pid").write_text("4242", encoding="utf-8")
+    python = str(installed_home / "server" / "bin" / "python")
+    runner = Runner({("wsl.exe", "-l"): answer(out=f"Ubuntu\n{uninstall.CRUCIBLE_DISTRO}\n")})
+    monkeypatch.setattr(
+        uninstall, "_alive",
+        lambda pid: pid == 4242 and not runner.ran(python, "-m", "crucible.cli", "local", "shutdown"),
+    )
+    plan = uninstall.run(make(installed_home, platform="win32", runner=runner, wsl_too=True))
+    assert step(plan, "stop-engine").target == "pid 4242"
+    assert step(plan, "stop-engine").done and step(plan, "stop-controller").done
+    stop = runner.calls.index((python, "-m", "crucible.cli", "local", "stop"))
+    guest = next(i for i, call in enumerate(runner.calls) if call[0] == "wsl.exe" and "uninstall" in call[-1])
+    quit_ = runner.calls.index((python, "-m", "crucible.cli", "local", "shutdown"))
+    assert stop < guest < quit_, runner.calls
+    for call in runner.calls:
+        assert "taskkill" not in call[0].lower(), call
+        assert "/F" not in call and "/T" not in call, call
+
+
+def test_a_controller_that_will_not_quit_is_named_with_its_log_and_nothing_is_removed(
     installed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (installed_home / "host.pid").write_text("4242", encoding="utf-8")
     monkeypatch.setattr(uninstall, "_alive", lambda pid: pid == 4242)
-    plan = make(installed_home, platform="win32")
-    stop = step(plan, "stop-engine")
-    assert stop.target == "pid 4242"
-    assert uninstall.taskkill_argv(4242) == [
-        "taskkill.exe",
-        "/PID",
-        "4242",
-        "/T",
-        "/F",
-    ]
-    assert "pythonw" not in " ".join(uninstall.taskkill_argv(4242))
+    plan = uninstall.run(make(installed_home, platform="win32"))
+    refused = step(plan, "stop-controller").refused
+    assert refused is not None and refused.fatal
+    assert refused.code == "stop_failed"
+    assert "pid 4242" in refused.message
+    assert str(installed_home / "host.log") in refused.message
+    assert "Task Manager" in refused.message
+    assert "taskkill" not in refused.message
+    assert (installed_home / "config.toml").exists()
+    assert (installed_home / "envs").exists()
+
+
+def test_a_controller_with_no_engine_has_nothing_to_stop_and_is_still_ended(
+    installed_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (installed_home / "host.pid").write_text("4242", encoding="utf-8")
+    (installed_home / "pairing").unlink()
+    python = str(installed_home / "server" / "bin" / "python")
+    runner = Runner()
+    monkeypatch.setattr(
+        uninstall, "_alive",
+        lambda pid: pid == 4242 and not runner.ran(python, "-m", "crucible.cli", "local", "shutdown"),
+    )
+    plan = uninstall.run(make(installed_home, platform="win32", runner=runner))
+    assert step(plan, "stop-engine").done
+    assert not runner.ran(python, "-m", "crucible.cli", "local", "stop")
+    assert runner.ran(python, "-m", "crucible.cli", "local", "shutdown")
 
 
 def test_a_stale_lock_is_not_a_running_tray(
@@ -363,10 +402,11 @@ def test_a_stale_lock_is_not_a_running_tray(
     (installed_home / "host.pid").write_text("4242", encoding="utf-8")
     monkeypatch.setattr(uninstall, "_alive", lambda pid: False)
     plan = make(installed_home, platform="win32")
-    refused = step(plan, "stop-engine").refused
-    assert refused is not None
-    assert refused.code == "engine_not_running"
-    assert refused.fatal is False
+    for name in ("stop-engine", "stop-controller"):
+        refused = step(plan, name).refused
+        assert refused is not None
+        assert refused.code == "engine_not_running"
+        assert refused.fatal is False
 
 
 def test_wsl_too_refuses_by_name_when_the_crucible_distro_is_not_there(

@@ -444,7 +444,7 @@ def test_with_nothing_answering_and_no_distro_the_host_mode_child_still_starts(
     result = app_module.Host(context).start()
     assert result.owner is Owner.NONE
     assert result.engine is Engine.FAILED
-    assert "Reinstall with install.ps1" in result.detail
+    assert paths.INSTALL_ONE_LINER in result.detail
 
 
 def test_a_guest_engines_pairing_line_is_COPIED_and_never_composed(
@@ -3555,14 +3555,17 @@ def test_a_machine_with_no_outcome_at_all_is_MOVED_without_anybody_choosing(
     assert ran == ["the move ran"]
 
 
-def test_an_unreadable_outcome_stops_the_decision_rather_than_starting_a_move(
+def test_an_unreadable_outcome_is_quarantined_and_the_decision_starts_from_nothing(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "wsl-outcome.json").write_text("{not json", encoding="utf-8")
     context = _native(tmp_path, Scripted())
     host, ran = _decider(context)
-    assert host.decide_engine() == "unreadable"
-    assert ran == []
+    assert host.decide_engine() == outcome.DONE
+    assert ran == ["the move ran"], "a record nobody can read no longer holds the move hostage"
+    aside = list(tmp_path.glob("wsl-outcome.json.bad-*"))
+    assert len(aside) == 1
+    assert str(aside[0]) in context.log.path.read_text(encoding="utf-8")
 
 
 def test_the_carry_thread_is_the_one_that_decides_and_it_waits_for_the_owner(
@@ -3791,3 +3794,249 @@ def test_a_move_that_throws_records_a_terminal_event_for_every_watcher(
     assert [event["event"] for event in backlog] == ["step", "failed"]
     assert backlog[-1]["data"]["code"] == "rootfs_download_failed"
     assert watcher.get_nowait() is None, "a finished move closes the queue it hands out"
+
+
+def test_a_corrupt_outcome_is_quarantined_by_name_and_then_read_as_absent(tmp_path: Path) -> None:
+    (tmp_path / "wsl-outcome.json").write_text("{not json", encoding="utf-8")
+    said: list[str] = []
+    assert outcome.read_or_quarantine(tmp_path, said.append) is None
+    assert not (tmp_path / "wsl-outcome.json").exists()
+    aside = list(tmp_path.glob("wsl-outcome.json.bad-*"))
+    assert len(aside) == 1
+    assert aside[0].read_text(encoding="utf-8") == "{not json"
+    assert said and str(aside[0]) in said[0]
+    assert outcome.read(tmp_path) is None, "the orchestrator decides again from nothing"
+
+
+def test_a_sound_outcome_is_not_quarantined(tmp_path: Path) -> None:
+    written = outcome.write(tmp_path, state=outcome.DONE, release="1.0.5", attempts=0)
+    said: list[str] = []
+    assert outcome.read_or_quarantine(tmp_path, said.append) == written
+    assert said == []
+    assert not list(tmp_path.glob("*.bad-*"))
+
+
+def test_a_corrupt_cleanup_record_is_quarantined_and_the_cleanup_dropped(tmp_path: Path) -> None:
+    record = tmp_path / installer.CLEANUP_RECORD
+    record.write_text("{not json", encoding="utf-8")
+    said: list[str] = []
+    aside = installer.quarantine_bad_cleanup_record(tmp_path, said.append)
+    assert aside is not None and aside.is_file() and ".bad-" in aside.name
+    assert not record.exists()
+    assert said and str(aside) in said[0] and "crucible uninstall --purge-weights" in said[0]
+    installer.record_cleanup(tmp_path, {("model", "a")})
+    assert installer.quarantine_bad_cleanup_record(tmp_path, said.append) is None
+    assert record.is_file(), "a sound record stays where it is"
+
+
+def test_a_cleanup_record_that_is_not_json_is_refused_by_name_not_by_a_traceback(tmp_path: Path) -> None:
+    (tmp_path / installer.CLEANUP_RECORD).write_text("{not json", encoding="utf-8")
+    with pytest.raises(HostError) as caught:
+        installer.cleanup_subjects(tmp_path)
+    assert caught.value.code == installer.CLEANUP_RECORD_INVALID
+    assert str(tmp_path / installer.CLEANUP_RECORD) in caught.value.message
+
+
+def _import_walk(tmp_path: Path, runner: Scripted, events: list[installer.Event]) -> installer.EngineInstall:
+    return installer.EngineInstall(
+        runner, events.append, release="0.6.0", home=tmp_path,
+        install_sh_url="https://example.invalid/install.sh",
+    )
+
+
+def test_a_killed_import_that_left_only_the_vhdx_is_cleared_and_imported_again(tmp_path: Path) -> None:
+    (tmp_path / "wsl").mkdir()
+    (tmp_path / "wsl" / "ext4.vhdx").write_bytes(b"half")
+    events: list[installer.Event] = []
+    runner = Scripted(answers={"--status": ok("Default Version: 2"), "-l -v": ok("  Ubuntu  Running  2\n")})
+    with pytest.raises(HostError) as caught:
+        _import_walk(tmp_path, runner, events).run()
+    assert caught.value.code == "rootfs_sha_mismatch", "the walk got past the import check"
+    assert list((tmp_path / "wsl").iterdir()) == []
+    lines = [e.data["text"] for e in events if e.event == "line"]
+    assert any("interrupted" in line and "ext4.vhdx" in line for line in lines), lines
+
+
+def test_a_wsl_directory_with_foreign_files_is_refused_with_the_directory_and_the_command(tmp_path: Path) -> None:
+    (tmp_path / "wsl").mkdir()
+    (tmp_path / "wsl" / "notes.txt").write_text("mine", encoding="utf-8")
+    events: list[installer.Event] = []
+    runner = Scripted(answers={"--status": ok("Default Version: 2"), "-l -v": ok("  Ubuntu  Running  2\n")})
+    with pytest.raises(HostError) as caught:
+        _import_walk(tmp_path, runner, events).run()
+    assert caught.value.code == "distro_import_incomplete"
+    assert str(tmp_path / "wsl") in caught.value.message
+    assert 'Remove-Item -Recurse -Force "%s"' % (tmp_path / "wsl") in caught.value.message
+    assert installer.TRY_AGAIN_HINT in caught.value.message
+    assert (tmp_path / "wsl" / "notes.txt").exists(), "a file an import never writes is kept"
+
+
+def test_a_distro_crucible_did_not_make_is_named_with_the_unregister_command_and_its_cost(tmp_path: Path) -> None:
+    from crucible.host.wsl_states import WSL_CONF_MARKER
+
+    events: list[installer.Event] = []
+    runner = Scripted(answers={
+        "--status": ok("Default Version: 2"),
+        "-l -v": ok(f"  {CRUCIBLE_DISTRO}  Running  2\n"),
+        "/etc/wsl.conf": ok("[boot]\nsystemd=true\n"),
+    })
+    with pytest.raises(HostError) as caught:
+        _import_walk(tmp_path, runner, events)._import_distro()
+    assert caught.value.code == "distro_unmarked"
+    assert f"wsl --unregister {CRUCIBLE_DISTRO}" in caught.value.message
+    assert WSL_CONF_MARKER in caught.value.message
+    assert "deletes" in caught.value.message
+    assert not any("--unregister" in " ".join(call) for call in runner.calls), "named, never run"
+
+
+def test_an_unreadable_lan_record_is_quarantined_and_sharing_stays_off(tmp_path: Path) -> None:
+    from crucible import lan
+
+    (tmp_path / lan.RECORD).write_text("{not json", encoding="utf-8")
+    events: list[installer.Event] = []
+    walk = _import_walk(tmp_path, Scripted(), events)
+    walk._lan_door()
+    assert not (tmp_path / lan.RECORD).exists()
+    aside = list(tmp_path.glob(f"{lan.RECORD}.bad-*"))
+    assert len(aside) == 1
+    lines = [e.data["text"] for e in events if e.event == "line"]
+    assert any(str(aside[0]) in line and "crucible lan enable" in line for line in lines), lines
+    assert not any(e.event == "failed" for e in events)
+
+
+NETSTAT_SAMPLE = """
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:7101         0.0.0.0:0              LISTENING       4242
+  TCP    127.0.0.1:7101         127.0.0.1:50000        ESTABLISHED     4242
+  TCP    127.0.0.1:50000        127.0.0.1:7101         ESTABLISHED     999
+"""
+
+TASKLIST_SAMPLE = '"other.exe","4242","Console","1","10,000 K"\r\n'
+
+
+def test_the_port_holder_is_read_from_netstat_and_tasklist_and_named_with_its_pid(monkeypatch) -> None:
+    from crucible.host import portholder
+
+    assert portholder.listening_pid(NETSTAT_SAMPLE, 7101) == 4242
+    assert portholder.listening_pid(NETSTAT_SAMPLE, 7100) is None
+    assert portholder.image_name(TASKLIST_SAMPLE) == "other.exe"
+    assert portholder.image_name("INFO: No tasks are running which match the specified criteria.") is None
+
+    monkeypatch.setattr(portholder.sys, "platform", "win32")
+    asked: list[tuple[str, ...]] = []
+
+    def run(argv):
+        asked.append(tuple(argv))
+        return NETSTAT_SAMPLE if argv[0] == "netstat" else TASKLIST_SAMPLE
+
+    assert portholder.held_sentence(7101, run) == (
+        "port 7101 is held by other.exe (pid 4242); stop it or run `crucible local shutdown`"
+    )
+    assert asked == [portholder.NETSTAT_ARGV, portholder.tasklist_argv(4242)]
+    nobody = portholder.held_sentence(7101, lambda argv: "")
+    assert "netstat -ano | findstr :7101" in nobody
+
+
+def _stepping_clock(step: float) -> Callable[[], float]:
+    state = {"now": 0.0}
+
+    def clock() -> float:
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
+def test_installwatch_starts_the_controller_before_it_gives_the_sign_in_advice(tmp_path: Path, monkeypatch) -> None:
+    import io
+    from datetime import datetime, timezone
+    from crucible.host import installwatch
+
+    monkeypatch.setattr(installwatch, "door_status", lambda token: None)
+    started: list[Path] = []
+    out = io.StringIO()
+    code = installwatch.watch(
+        tmp_path, datetime.now(timezone.utc), brief=False, out=out,
+        clock=_stepping_clock(30.0), sleep=lambda seconds: None,
+        alive=lambda: False, start=lambda home: started.append(home) or True,
+    )
+    assert code == 0
+    assert started == [tmp_path], "started once, not on every poll"
+    text = " ".join(out.getvalue().split())
+    assert "this window is starting it" in text
+    assert str(tmp_path / "host.log") in text
+    assert "Sign out of Windows" in text, "the sign-in advice is the fallback, after the start"
+
+
+def test_installwatch_names_the_log_when_the_controller_cannot_be_started(tmp_path: Path, monkeypatch) -> None:
+    import io
+    from datetime import datetime, timezone
+    from crucible.host import installwatch
+
+    monkeypatch.setattr(installwatch, "door_status", lambda token: None)
+    out = io.StringIO()
+    installwatch.watch(
+        tmp_path, datetime.now(timezone.utc), brief=False, out=out,
+        clock=_stepping_clock(30.0), sleep=lambda seconds: None,
+        alive=lambda: False, start=lambda home: False,
+    )
+    assert str(tmp_path / "host.log") in out.getvalue()
+
+
+def test_try_again_names_the_log_when_the_controller_will_not_start(tmp_path: Path, monkeypatch) -> None:
+    from crucible import local
+    from crucible.host import retry
+
+    monkeypatch.setattr(retry, "_controller_up", lambda: False)
+
+    def refuse(home: Path) -> None:
+        raise OSError("no pythonw")
+
+    monkeypatch.setattr(local, "_spawn_controller", refuse)
+    with pytest.raises(HostError) as caught:
+        retry._ensure_controller(tmp_path, lambda text: None)
+    assert caught.value.code == "host_door_unavailable"
+    assert str(tmp_path / "host.log") in caught.value.message
+
+
+def test_there_is_one_alive_and_it_reads_access_denied_as_alive() -> None:
+    from crucible import processlock, uninstall
+
+    assert app_module._alive is processlock.alive
+    assert uninstall._alive is processlock.alive
+    assert processlock.alive(os.getpid()) is True
+    assert processlock.alive(2 ** 22 + 1) is False
+
+
+def test_the_install_one_liner_is_the_one_the_readme_documents() -> None:
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert paths.INSTALL_ONE_LINER in readme
+    assert "install.ps1 | iex" in paths.INSTALL_ONE_LINER
+
+
+def test_a_missing_console_cmd_names_the_install_one_liner_and_a_silent_child_names_the_log(
+    tmp_path: Path, host_log: log.HostLog
+) -> None:
+    from types import SimpleNamespace
+
+    env = dict(WINDOWS_ENV, CRUCIBLE_HOME=str(tmp_path))
+    runner = Scripted(env=env)
+    context = app_module.HostContext(
+        runner=runner, log=host_log, home=tmp_path,
+        watcher=SimpleNamespace(respawn_host_mode=lambda argv, env: None, _wait_for_ping=lambda seconds: False),
+        presence=presence.Presence(Distro.ABSENT, Engine.STARTING, "starting", Owner.NONE),
+    )
+    host = app_module.Host(context)
+    absent = host._start_host_mode(Distro.ABSENT)
+    assert absent.engine is Engine.FAILED
+    assert paths.INSTALL_ONE_LINER in absent.detail
+
+    (tmp_path / "host").mkdir()
+    (tmp_path / "host" / paths.CONSOLE_CMD).write_text("@echo off\n", encoding="utf-8")
+    (tmp_path / "config.toml").write_text("[auth]\ntoken = 't'\n", encoding="utf-8")
+    silent = host._start_host_mode(Distro.ABSENT)
+    assert silent.engine is Engine.FAILED
+    assert str(paths.log_path(env)) in silent.detail

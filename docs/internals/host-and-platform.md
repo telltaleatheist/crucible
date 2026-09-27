@@ -286,15 +286,65 @@ Five states: `done`, `declined` (no code/sentence), `reboot-pending`, `cannot`, 
 (always code and sentence). `failed` is retried once at the next start (attempts counts
 consecutive failures). `restarts` counts consecutive restart asks. `classify` derives
 `cannot` from the generated table's `automatic` partition. The record is written **before**
-the terminal event is emitted. A present but unreadable file is refused by name, never read
-as absent. Uninstall removes it.
+the terminal event is emitted. `outcome.read` refuses a present but unreadable file by name;
+the orchestrator reads through `read_or_quarantine`, which moves such a file to
+`wsl-outcome.json.bad-<utc stamp>` (`host/quarantine.py`), logs where it went, and decides
+again from nothing. Nobody is asked to delete a file. Uninstall removes it.
+
+### Records Crucible repairs by quarantine (`host/quarantine.py`)
+
+A record Crucible owns that will not parse is never a hand step: it is moved aside to
+`<name>.bad-<utc stamp>` next to where it was, the log names the new path, and the code
+carries on as if the record were absent. Three records take this path:
+
+- `wsl-outcome.json` (above).
+- `migration-cleanup.json`: `installer.quarantine_bad_cleanup_record` runs before a resume
+  (`_resume_model_cleanup`) and before an install on a WSL-owned machine. A bad record used to
+  make the cleanup retry every 300 s forever and every later `POST /install` refuse. Now the
+  cleanup it described is dropped: the Windows copies of the moved models stay on disk (cost:
+  disk only; `crucible uninstall --purge-weights` removes them with the rest).
+- `landoor.json`: an unreadable LAN sharing record no longer fails the `lan-door` step; it is
+  quarantined, sharing stays off, and the line names `crucible lan enable`.
+
+### Half-finished imports and distros Crucible did not make
+
+`_import_distro` finds `<home>\wsl` non-empty with no `crucible` distro registered when an
+earlier `wsl --import` was killed. If the directory holds only what an import writes
+(`IMPORT_ARTEFACTS`, i.e. `ext4.vhdx`), it is removed and the import runs again in the same
+walk. Anything else refuses `distro_import_incomplete` naming the directory, what is in it and
+the exact `Remove-Item -Recurse -Force` command. A registered `crucible` distro whose
+`/etc/wsl.conf` lacks `WSL_CONF_MARKER` is refused `distro_unmarked` naming the distro, that
+Crucible did not make it, `wsl --unregister crucible`, and that this deletes the distro's files.
+
+### The controller port (`host/portholder.py`)
+
+When 7101 cannot be bound, or answers as something other than the orchestrator
+(`wrong_controller` in `local.py`), the message names the occupant: `netstat -ano -p tcp`
+gives the listening pid (rows are matched by a `:0` foreign address, never by the localised
+state word) and `tasklist /FI "PID eq N" /FO CSV` its image name. The sentence is "port 7101
+is held by <name> (pid N); stop it or run `crucible local shutdown`"; when the lookup cannot
+name it, the `netstat -ano | findstr :7101` command is given instead.
 
 ### Console after `install.ps1` (`installwatch.py`)
 
 Waits for a real ending (up to 2 min for the tray to decide), prints steps and the ending in
 ASCII wrapped words. An outcome older than the install start (`--since`) is printed as
 history, never as this run's result. With `--brief` (an app ran the script) it keeps the short
-wait.
+wait. When the door is not answering after the decision window, the console starts the
+controller itself (`local._spawn_controller`, the same call `retry.py` and `desktop.py` use)
+and waits `CONTROLLER_START_SECONDS`; only when that spawn fails or the door still does not
+answer does it print the sign-out-and-back-in advice, and then with the host log path on its
+own line. Every "did not start" message in `retry.py` and `local.py` names `<home>\host.log`;
+every "reinstall" names `paths.INSTALL_ONE_LINER`, the same `irm ... install.ps1 | iex` line
+the README documents (a test holds them equal).
+
+### One `alive` (`processlock.alive`)
+
+`OpenProcess` failing with `ERROR_ACCESS_DENIED` means the pid exists and belongs to somebody
+else, so it is alive. `host/app.py` (`_alive`), `uninstall.py` (`_alive`), `desktop.py` and
+`local.py` all read the one implementation in `processlock.py`; the copy in `uninstall.py`
+that read a denied handle as dead is gone (it could have called a live tray stale and planned
+around it).
 
 ## LAN door (`host/landoor.py`, `lan.py`)
 
@@ -427,13 +477,14 @@ raises (`503 interfaces_unreadable`), never an empty list.
 
 ## Uninstall (`uninstall.py`)
 
-- Order is the install order reversed: stop (a unit whose `ExecStart` is gone is restarted every
-  2 s) → guest (`--wsl-too`; before the tray goes, since a live tray would run recovery on a
-  guest whose unit was just removed) → service → envs → pairing file (a copy of config facts,
-  so before the config) → config → working state → weights → packs (named, kept) → strangers
-  (kept) → home if empty. "Empty" is computed from the plan, so a dry run agrees with the run.
-- Stop and sharing withdrawal are prerequisites: failure there aborts before deleting files a
-  live engine uses. Independent file failures continue.
+- Order is the install order reversed: stop the engine (a unit whose `ExecStart` is gone is
+  restarted every 2 s) → guest (`--wsl-too`) → on Windows, end the controller → service → envs
+  → pairing file (a copy of config facts, so before the config) → config → working state →
+  weights → packs (named, kept) → strangers (kept) → home if empty. "Empty" is computed from
+  the plan, so a dry run agrees with the run.
+- Stop, controller end and sharing withdrawal are prerequisites (`FATAL_BEFORE_REMOVAL`):
+  failure there aborts before deleting files a live engine uses. Independent file failures
+  continue.
 - Weights are kept unless `--purge-weights`; the kept size is always reported. The weight
   directories are keyed exactly by `catalog.KINDS`.
 - Deletes only what it can name, contained in `CRUCIBLE_HOME`; unknown entries are reported and
@@ -441,8 +492,17 @@ raises (`503 interfaces_unreadable`), never an empty list.
 - No prompts; `--dry-run` is the same plan never run; `--json` for apps.
 - Supervisor keyed by platform, not backend (the config may already be gone; detecting a
   backend would probe a card).
-- The Windows tray is ended by **pid from `host.pid`** with `taskkill /T /F` (tree: the host-mode
-  server and its llama-server grandchild), never by image name (`pythonw.exe` is not ours).
+- **On Windows nothing is force-killed.** The tray's tree holds the `wsl.exe … sleep infinity`
+  session that keeps the guest's distro up and, on a native PC, the engine and its
+  llama-server grandchild; a `taskkill /T /F` there (what 1.0.51 did, before the guest step)
+  could idle-stop the distro under a running GPU job. The order is now: `stop-engine` runs
+  `crucible local stop` through the live controller (pid from `host.pid`, never an image
+  name), which stops the guest's unit or the Windows child cooperatively and pauses the
+  watcher so it does not restart it; then the guest's own uninstall; then `stop-controller`
+  runs `crucible local shutdown` (the orderly `POST /quit`). A controller that survives that is
+  a fatal refusal naming its pid, `host.log` and the next command; the plan stops before any
+  file is removed. A controller with no `pairing` file owns no engine, so `stop-engine` has
+  nothing to ask and says so.
 
 ## Process groups and locks
 

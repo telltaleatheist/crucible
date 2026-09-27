@@ -23,8 +23,8 @@ Put a release on every machine that runs one, and prove it landed.
   ./scripts/deploy.sh --release 0.6.8              install that release everywhere
   ./scripts/deploy.sh --release 0.6.8 --only pc    only the named machines (pc, mac)
   ./scripts/deploy.sh --release 0.6.8 --yes        do not ask before restarting services
-  ./scripts/deploy.sh --release 0.6.8 --interrupt  restart a BUSY server too
-  ./scripts/deploy.sh --release 0.6.8 --force      install even where the record names it
+  ./scripts/deploy.sh --release 0.6.8 --interrupt  restart a BUSY server, or one whose busy state is unknown
+  ./scripts/deploy.sh --release 0.6.8 --force      install even where the record names it, or names a NEWER release
 USAGE
 }
 
@@ -48,12 +48,6 @@ if [ -n "$release" ]; then
     || fail "--release wants a x.y.z version, got '$release'"
 fi
 
-selected() {
-  [ -z "$only" ] && return 0
-  case ",$only," in *,"$1",*) return 0 ;; esac
-  return 1
-}
-
 for name in $(echo "$only" | tr ',' ' '); do
   case " $FLEET " in *" $name "*) continue ;; esac
   case "$name" in
@@ -62,6 +56,19 @@ for name in $(echo "$only" | tr ',' ' '); do
     *)       fail "--only names '$name', which is not one of: $FLEET" ;;
   esac
 done
+
+selected() {
+  [ -z "$only" ] && return 0
+  case ",$only," in *,"$1",*) return 0 ;; esac
+  return 1
+}
+
+if selected pc; then
+  command -v wsl.exe >/dev/null 2>&1 \
+    || fail "pc is read and installed from the Windows PC itself (it needs Windows' wsl command on PATH), and this host has none. Run this on the PC, or pass --only mac"
+  [ -n "${LOCALAPPDATA:-}" ] \
+    || fail "pc is read and installed from the Windows PC itself (it needs LOCALAPPDATA, where the host keeps installation.json), and this host has none. Run this on the PC, or pass --only mac"
+fi
 
 parse_release() {
   python -c '
@@ -96,6 +103,22 @@ read_pc() {
   guest="$(record_guest)"
   [ "$host" = "$guest" ] && { echo "$host"; return; }
   echo "host:$host guest:$guest"
+}
+
+unreachable() {
+  case "$1" in unreachable|*:unreachable|*:unreachable\ *) return 0 ;; esac
+  return 1
+}
+
+newer_than_release() {
+  local reading="$1" want="$2"
+  python - "$reading" "$want" <<'PY'
+import re, sys
+reading, want = sys.argv[1], sys.argv[2]
+number = lambda text: tuple(int(part) for part in text.split("."))
+seen = [number(found) for found in re.findall(r"\b\d+\.\d+\.\d+\b", reading)]
+raise SystemExit(0 if any(found > number(want) for found in seen) else 1)
+PY
 }
 
 read_mac() {
@@ -133,10 +156,12 @@ install_pc() {
   return "$status"
 }
 
+AWAIT_ATTEMPTS="${DEPLOY_AWAIT_ATTEMPTS:-150}"
+
 await_release() {
   local machine="$1" want="$2" seen=""
   local attempt=0
-  while [ "$attempt" -lt 150 ]; do
+  while [ "$attempt" -lt "$AWAIT_ATTEMPTS" ]; do
     seen="$("read_$machine")"
     [ "$seen" = "$want" ] && { echo "$seen"; return; }
     attempt=$(( attempt + 1 ))
@@ -148,17 +173,23 @@ await_release() {
 echo "deploy: what each machine runs"
 declare -A BEFORE
 any_behind=0
+downgrades=""
 for machine in $FLEET; do
   selected "$machine" || continue
   BEFORE[$machine]="$("read_$machine")"
   note=""
   if [ -n "$release" ]; then
-    case "${BEFORE[$machine]}" in
-      "$release")   if [ "$force" = "1" ]; then note="  (already $release, reinstalling anyway)"; any_behind=1
-                    else note="  (already $release)"; fi ;;
-      unreachable)  note="  (CANNOT BE ASKED — will not be touched)" ;;
-      *)            note="  -> $release"; any_behind=1 ;;
-    esac
+    if [ "${BEFORE[$machine]}" = "$release" ]; then
+      if [ "$force" = "1" ]; then note="  (already $release, reinstalling anyway)"; any_behind=1
+      else note="  (already $release)"; fi
+    elif unreachable "${BEFORE[$machine]}"; then
+      note="  (CANNOT BE ASKED — will not be touched)"
+    elif newer_than_release "${BEFORE[$machine]}" "$release"; then
+      if [ "$force" = "1" ]; then note="  -> $release  (a DOWNGRADE, because --force)"; any_behind=1
+      else note="  (NEWER than $release — refused without --force)"; downgrades="$downgrades $machine"; fi
+    else
+      note="  -> $release"; any_behind=1
+    fi
   fi
   printf '  %-8s %s%s\n' "$machine" "${BEFORE[$machine]}" "$note"
 done
@@ -166,6 +197,10 @@ done
 if [ -z "$release" ]; then
   echo "deploy: pass --release <x.y.z> to install one"
   exit 0
+fi
+
+if [ -n "$downgrades" ]; then
+  fail "$release is older than what runs on:$downgrades. A deploy never goes backwards by accident; re-run with --force to downgrade on purpose"
 fi
 
 if [ "$any_behind" = "0" ]; then
@@ -185,17 +220,32 @@ trap 'rm -rf "$work" 2>/dev/null || echo "deploy: could not remove $work" >&2' E
 
 busy_probe() {
   cat <<'PROBE'
-tok=$(sed -n 's/^token *= *"\(.*\)"/\1/p' "$HOME/.crucible/config.toml" 2>/dev/null | head -1)
-[ -n "$tok" ] || { echo "idle(no token to ask with)"; exit 0; }
+home="${CRUCIBLE_HOME:-$HOME/.crucible}"
+config="$home/config.toml"
+[ -f "$config" ] || { echo "unknown(no $config to read the token and port from)"; exit 0; }
+tok=$(sed -n 's/^token *= *"\(.*\)"/\1/p' "$config" 2>/dev/null | head -1)
+[ -n "$tok" ] || { echo "unknown(no token in $config to ask with)"; exit 0; }
+port=$(sed -n 's/^port *= *\([0-9][0-9]*\).*/\1/p' "$config" 2>/dev/null | head -1)
+[ -n "$port" ] || port=7100
+host=$(sed -n 's/^host *= *"\(.*\)"/\1/p' "$config" 2>/dev/null | head -1)
+case "$host" in ""|0.0.0.0) host=127.0.0.1 ;; "::") host="[::1]" ;; *:*) host="[$host]" ;; esac
+py="$home/server/bin/python"
+[ -x "$py" ] || py="$(command -v python3 || true)"
+[ -n "$py" ] || { echo "unknown(no python at $home/server/bin/python to read the answer with)"; exit 0; }
+status=0
 body=$(curl -sS -m 8 -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" \
-  http://127.0.0.1:7100/v1/activity 2>/dev/null) || { echo "idle(not answering)"; exit 0; }
-[ -n "$body" ] || { echo "idle(not answering)"; exit 0; }
-printf '%s' "$body" | "$HOME/.crucible/server/bin/python" -c '
+  "http://$host:$port/v1/activity" 2>/dev/null) || status=$?
+if [ "$status" = "7" ]; then echo "idle(nothing listens on $host:$port)"; exit 0; fi
+[ "$status" = "0" ] || { echo "unknown(curl exited $status asking $host:$port/v1/activity)"; exit 0; }
+[ -n "$body" ] || { echo "unknown($host:$port/v1/activity answered nothing)"; exit 0; }
+printf '%s' "$body" | "$py" -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
-except Exception:
-    print("idle(activity unreadable)"); raise SystemExit(0)
+except Exception as exc:
+    print("unknown(/v1/activity answered something that is not JSON: %s)" % exc); raise SystemExit(0)
+if not isinstance(d, dict) or "running" not in d:
+    print("unknown(/v1/activity answered without a running list: %s)" % str(d)[:120]); raise SystemExit(0)
 busy = []
 for row in d.get("running") or []:
     busy.append("job %s (%s) %d%% done" % (row.get("job_id"), row.get("type"),
@@ -219,11 +269,17 @@ PROBE
 }
 
 busy_pc() {
-  wsl.exe -d "$DISTRO" --exec bash -c "$(busy_probe)" </dev/null 2>/dev/null     || echo "idle(could not ask)"
+  local said
+  said="$(wsl.exe -d "$DISTRO" --exec bash -c "$(busy_probe)" </dev/null 2>/dev/null)" \
+    || { echo "unknown(the probe would not run inside $DISTRO)"; return; }
+  [ -n "$said" ] && echo "$said" || echo "unknown(the probe in $DISTRO printed nothing)"
 }
 
 busy_mac() {
-  ssh -n -o ConnectTimeout=8 -o BatchMode=yes mac "$(busy_probe)" 2>/dev/null     || echo "idle(could not ask)"
+  local said
+  said="$(ssh -n -o ConnectTimeout=8 -o BatchMode=yes mac "$(busy_probe)" 2>/dev/null)" \
+    || { echo "unknown(ssh mac would not run the probe)"; return; }
+  [ -n "$said" ] && echo "$said" || echo "unknown(the probe on mac printed nothing)"
 }
 
 deploy_one() {
@@ -247,11 +303,12 @@ failed=""
 running=""
 for machine in $FLEET; do
   selected "$machine" || continue
-  case "${BEFORE[$machine]}" in
-    "$release") [ "$force" = "1" ] || continue ;;
-    unreachable)
-      failed="$failed $machine(unreachable)"; continue ;;
-  esac
+  if [ "${BEFORE[$machine]}" = "$release" ] && [ "$force" != "1" ]; then
+    continue
+  fi
+  if unreachable "${BEFORE[$machine]}"; then
+    failed="$failed $machine(unreachable: ${BEFORE[$machine]})"; continue
+  fi
 
   if [ "$interrupt" != "1" ]; then
     state="$("busy_$machine")"
@@ -263,6 +320,16 @@ for machine in $FLEET; do
         echo "deploy:   whatever the job had not yet written to disk."
         echo "deploy:   Wait for it, or re-run with --interrupt to take it anyway."
         failed="$failed $machine(busy)"
+        continue ;;
+      idle|idle\(*)
+        ;;
+      *)
+        echo
+        echo "deploy: $machine was not touched: whether it is working could not be learned: ${state#unknown}"
+        echo "deploy:   a restart of a server that might be mid-job loses whatever"
+        echo "deploy:   the job had not yet written to disk, so not knowing is a refusal."
+        echo "deploy:   Fix what the probe names, or re-run with --interrupt to take it anyway."
+        failed="$failed $machine(busy state unknown)"
         continue ;;
     esac
   fi

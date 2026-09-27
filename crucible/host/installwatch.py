@@ -17,7 +17,7 @@ from . import outcome
 from .errors import HostError
 from .installer import STEP_WORDS, TRY_AGAIN_HINT
 from .log import plain
-from .paths import door_url
+from .paths import LOG_NAME, door_url
 
 BRIEF_SECONDS = 10.0
 
@@ -74,11 +74,29 @@ UNDECIDED_SENTENCE = (
     "is going. There is nothing you need to do now."
 )
 
-TRAY_GONE_SENTENCE = (
+STARTING_TRAY_SENTENCE = (
     "Crucible's background app (the icon by the clock) is not answering, so "
-    "nothing can carry on the setup right now. Sign out of Windows and sign "
-    "back in: it starts again at sign-in and carries on by itself."
+    "this window is starting it."
 )
+
+TRAY_GONE_SENTENCE = (
+    "Crucible's background app (the icon by the clock) is not answering and "
+    "could not be started from here, so nothing can carry on the setup right "
+    "now. Sign out of Windows and sign back in: it starts again at sign-in "
+    "and carries on by itself. Its log is:"
+)
+
+CONTROLLER_START_SECONDS = 90.0
+
+
+def start_controller(home: Path) -> bool:
+    from ..local import _spawn_controller
+
+    try:
+        _spawn_controller(home)
+    except (OSError, AttributeError, ValueError):
+        return False
+    return True
 
 RESTART_BANNER = 'ACTION NEEDED: restart Windows with "Update and restart".'
 
@@ -193,6 +211,10 @@ class Console:
         for text in ending(record):
             self.paragraph(text)
 
+    def tray_gone(self, home: Path) -> None:
+        self.paragraph(TRAY_GONE_SENTENCE)
+        self.say(f"  {Path(home) / LOG_NAME}")
+
 
 def _token(home: Path) -> str | None:
     from ..local import LocalError, connection
@@ -258,9 +280,12 @@ def watch(
     out: TextIO = sys.stdout,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    alive: Callable[[], bool] = door_alive,
+    start: Callable[[Path], bool] = start_controller,
 ) -> int:
     console = Console(out)
     started = clock()
+    started_tray_at: float | None = None
     if brief:
         while clock() - started < BRIEF_SECONDS:
             record = recorded(home)
@@ -301,9 +326,18 @@ def watch(
             console.paragraph(FOUND_SENTENCE)
             return 0
         waited = clock() - started
-        if status is None and waited >= DECISION_SECONDS and not door_alive():
-            console.paragraph(TRAY_GONE_SENTENCE)
-            return 0
+        if status is None and waited >= DECISION_SECONDS and not alive():
+            if started_tray_at is None:
+                started_tray_at = clock()
+                console.paragraph(STARTING_TRAY_SENTENCE)
+                if not start(home):
+                    console.tray_gone(home)
+                    return 0
+            elif clock() - started_tray_at >= CONTROLLER_START_SECONDS:
+                console.tray_gone(home)
+                return 0
+            sleep(POLL_SECONDS)
+            continue
         if status is None and waited < BLIND_SECONDS:
             if clock() - heartbeat >= HEARTBEAT_SECONDS:
                 heartbeat = clock()

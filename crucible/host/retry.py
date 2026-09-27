@@ -9,8 +9,9 @@ from typing import Callable
 
 from . import outcome
 from .errors import HostError
+from .paths import LOG_NAME, door_url
 
-DOOR = "http://127.0.0.1:7101"
+DOOR = door_url()
 INSTALL_URL = DOOR + "/install"
 EVENTS_URL = DOOR + "/install/events"
 
@@ -20,7 +21,12 @@ CONTROLLER_START_SECONDS = 90.0
 
 Say = Callable[[str], None]
 
-_SIGN_OUT = "Sign out of Windows and sign back in, then try again."
+
+def _sign_out(home: Path) -> str:
+    return (
+        f"Its log is {Path(home) / LOG_NAME}. Sign out of Windows and sign back "
+        "in, then try again."
+    )
 
 
 def bearer(home: Path) -> str | None:
@@ -54,15 +60,22 @@ def _ensure_controller(home: Path, say: Say) -> None:
     say("Starting Crucible's controller first.")
     from ..local import _spawn_controller
 
-    _spawn_controller(home)
+    try:
+        _spawn_controller(home)
+    except OSError as exc:
+        raise HostError(
+            "host_door_unavailable",
+            f"Crucible's background app could not be started ({exc}), so nothing "
+            f"could be tried again. {_sign_out(home)} Then Try again works.",
+        ) from exc
     deadline = time.monotonic() + CONTROLLER_START_SECONDS
     while not _controller_up():
         if time.monotonic() >= deadline:
             raise HostError(
                 "host_door_unavailable",
-                "Crucible's background app did not start, so nothing could be "
-                "tried again. Sign out of Windows and sign back in: it starts at "
-                "sign-in, and then Try again works.",
+                "Crucible's background app was started but did not answer within "
+                f"{CONTROLLER_START_SECONDS:.0f} s, so nothing could be tried "
+                f"again. {_sign_out(home)} Then Try again works.",
             )
         time.sleep(0.5)
 
@@ -124,7 +137,7 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
             _follow(response, say)
     except urllib.error.HTTPError as exc:
         if exc.code != 409:
-            raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {exc.code}). {_SIGN_OUT}") from exc
+            raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {exc.code}). {_sign_out(home)}") from exc
         say("Crucible was already setting it up; following that.")
         attach = urllib.request.Request(EVENTS_URL, headers=headers)
         try:
@@ -132,5 +145,5 @@ def try_again(home: Path, say: Say = print) -> outcome.Outcome | None:
                 _follow(response, say)
         except urllib.error.HTTPError as again:
             if again.code != 404:
-                raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {again.code}). {_SIGN_OUT}") from again
+                raise HostError("host_door_unavailable", f"Crucible's background app refused the request (HTTP {again.code}). {_sign_out(home)}") from again
     return outcome.read(home)

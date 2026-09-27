@@ -90,8 +90,7 @@ def read(home: Path) -> Outcome | None:
         raise HostError(
             "wsl_outcome_invalid",
             f"{file} exists and is not the JSON document PHASE19 2.2 describes "
-            f"({exc}). It records what happened to this machine's move; delete "
-            "it to let the orchestrator decide again from nothing.",
+            f"({exc}). It records what happened to this machine's move.",
         ) from exc
     if not isinstance(raw, dict):
         raise HostError(
@@ -141,6 +140,20 @@ def read(home: Path) -> Outcome | None:
         attempts=attempts,
         restarts=restarts,
     )
+
+
+def read_or_quarantine(home: Path, log: Callable[[str], None]) -> Outcome | None:
+    try:
+        return read(home)
+    except HostError as exc:
+        from .quarantine import quarantine
+
+        aside = quarantine(path(home))
+        log(
+            f"outcome: {exc.message} It was moved to {aside} and the orchestrator "
+            "decides again from nothing, as if no move had been recorded."
+        )
+        return None
 
 
 def write(

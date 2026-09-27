@@ -16,6 +16,8 @@ from . import VERSION
 from .config import crucible_home, load_config, own_engine_backend
 from .pairing import parse_pairing_line
 from .errors import ConfigError, CrucibleError
+from .host.paths import DOOR_PORT, INSTALL_ONE_LINER, LOG_NAME, door_url, engine_url
+from .host.wsl_states import CRUCIBLE_DISTRO
 
 RECORD = "installation.json"
 
@@ -79,7 +81,7 @@ def connection(home: Path) -> tuple[str, str, str]:
             pair = parse_pairing_line(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError) as exc:
             raise LocalError(f"local_pairing_invalid: {path}: {exc}") from exc
-        return "http://127.0.0.1:7100", pair.name, pair.token
+        return ENGINE_URL, pair.name, pair.token
     config = load_config(home)
     host = config.host
     if host == "0.0.0.0":
@@ -122,7 +124,7 @@ def status(home: Path | None = None) -> dict:
         result["detail"] = f"Engine did not answer: {exc}"
         if sys.platform == "win32":
             try:
-                observed = request("http://127.0.0.1:7101/local/status", token=token)
+                observed = request(CONTROLLER_URL + "/local/status", token=token)
                 if observed.get("state") == "stopped" and observed.get("intentional") is True:
                     result["state"] = "stopped"
                     result["detail"] = "Stopped by the operator"
@@ -170,27 +172,58 @@ def _spawn_controller(home: Path) -> None:
                      creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
+def wrong_controller(detail: str = "") -> LocalError:
+    from .host.portholder import held_sentence
+
+    said = f" ({detail})" if detail else ""
+    return LocalError(
+        f"wrong_controller: what answers on port {DOOR_PORT} is not Crucible's "
+        f"controller{said}: {held_sentence(DOOR_PORT)}"
+    )
+
+
+def controller_start_failed(home: Path, timeout: float) -> LocalError:
+    return LocalError(
+        f"controller_start_failed: Crucible's controller was started but did not "
+        f"answer on port {DOOR_PORT} within {timeout:.0f} s. Its log is "
+        f"{Path(home) / LOG_NAME}. If it never starts, reinstall from PowerShell "
+        f"with: {INSTALL_ONE_LINER}"
+    )
+
+
 def controller_ping() -> dict:
     try:
-        observed = request("http://127.0.0.1:7101/v1/ping")
+        observed = request(CONTROLLER_URL + "/v1/ping")
     except (urllib.error.HTTPError, ValueError) as exc:
-        raise LocalError(f"wrong_controller: port 7101 returned an incompatible response: {exc}") from exc
+        raise wrong_controller(f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else str(exc)) from exc
     if observed.get("crucible") is not True or observed.get("role") != "orchestrator":
-        raise LocalError("wrong_controller: another service occupies Crucible's control port")
+        raise wrong_controller()
     return observed
 
 
 HANDOVER_HEADER = "X-Crucible-Handover"
 
-CONTROLLER_URL = "http://127.0.0.1:7101"
+CONTROLLER_URL = door_url()
 
-TOKEN_MISMATCH = (
-    "engine_token_mismatch: Crucible's controller on this PC would not accept "
-    "the engine token this PC holds, nor the one its Linux engine holds, so "
-    "nothing was stopped or changed. Quit Crucible from its icon in the "
-    "notification area, then run the install again; Crucible puts the "
-    "engine's token right by itself when it next starts"
-)
+ENGINE_URL = engine_url()
+
+
+def token_mismatch(home: Path) -> LocalError:
+    home = Path(home)
+    return LocalError(
+        "engine_token_mismatch: Crucible's controller on this PC accepts none of "
+        f"the engine tokens this PC holds: not the one in {home / 'pairing'} (the "
+        f"line apps pair with), not [auth].token in {home / 'config.toml'} (the "
+        "Windows engine's own), and not the one the Linux engine publishes in "
+        f'~/.crucible/pairing inside the "{CRUCIBLE_DISTRO}" distro. Nothing was '
+        f"stopped or changed. The controller's log, {home / LOG_NAME}, names the "
+        "token it checks against. Restart the controller so it re-reads them: "
+        "`crucible local shutdown`, then start Crucible from the Start menu (or "
+        "sign out and back in). If that does not settle it, run the install "
+        f"again from PowerShell: {INSTALL_ONE_LINER} — it carries the token into "
+        "the guest with `crucible init --force --config-from` so both sides hold "
+        "one token"
+    )
 
 
 def _guest_tokens(home: Path) -> list[str]:
@@ -225,6 +258,19 @@ def _guest_tokens(home: Path) -> list[str]:
     return tokens
 
 
+def _token_candidates(home: Path):
+    try:
+        yield connection(home)[2]
+    except LocalError:
+        pass
+    from .host.app import read_token
+
+    configured = read_token(home)
+    if configured is not None:
+        yield configured
+    yield from _guest_tokens(home)
+
+
 def door_call(path: str, home: Path, token: str, *, method: str = "GET",
               timeout: float = 3) -> tuple[dict, str]:
     try:
@@ -233,13 +279,7 @@ def door_call(path: str, home: Path, token: str, *, method: str = "GET",
         if exc.code != 401 or sys.platform != "win32":
             raise
     tried = {token}
-    candidates: list[str] = []
-    try:
-        candidates.append(connection(home)[2])
-    except LocalError:
-        pass
-    candidates.extend(_guest_tokens(home))
-    for candidate in candidates:
+    for candidate in _token_candidates(home):
         if candidate in tried:
             continue
         tried.add(candidate)
@@ -249,7 +289,7 @@ def door_call(path: str, home: Path, token: str, *, method: str = "GET",
         except urllib.error.HTTPError as exc:
             if exc.code != 401:
                 raise
-    raise LocalError(TOKEN_MISMATCH)
+    raise token_mismatch(home)
 
 
 def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
@@ -262,7 +302,7 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
         deadline = time.monotonic() + timeout
         while not (home / "pairing").exists():
             if time.monotonic() >= deadline:
-                raise LocalError("controller_start_failed: native engine did not initialize; inspect host.log")
+                raise controller_start_failed(home, timeout)
             time.sleep(0.25)
     url, name, token = connection(home)
     if action in ("open-console", "connect"):
@@ -284,10 +324,10 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
                     break
                 except (urllib.error.URLError, TimeoutError, ConnectionError):
                     if time.monotonic() >= deadline:
-                        raise LocalError("controller_start_failed: inspect host.log")
+                        raise controller_start_failed(home, timeout)
                     time.sleep(0.25)
         if ping.get("crucible") is not True or ping.get("role") != "orchestrator":
-            raise LocalError("wrong_controller: another service occupies Crucible's control port")
+            raise wrong_controller()
         door_call("/local/" + action, home, token, method="POST", timeout=timeout)
     else:
         from . import service
@@ -330,7 +370,7 @@ def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
             return observed
         if observed["state"] == "unauthorized" and sys.platform == "win32":
             if time.monotonic() >= deadline:
-                raise LocalError(TOKEN_MISMATCH)
+                raise token_mismatch(home)
             time.sleep(0.25)
             continue
         if observed["state"] in ("wrong_service", "unauthorized", "broken"):
@@ -354,23 +394,28 @@ def shutdown() -> None:
                 reason.errno in (errno.ECONNREFUSED, errno.ECONNRESET)
                 or getattr(reason, "winerror", None) in (10061, 10054))
         try:
-            ping = request("http://127.0.0.1:7101/v1/ping")
+            ping = request(CONTROLLER_URL + "/v1/ping")
         except (urllib.error.URLError, ConnectionError) as exc:
             if not refused(exc):
                 raise LocalError(f"controller_shutdown_unknown: {exc}") from exc
             from .host.app import _alive
             pid = home / "host.pid"
             if pid.exists() and (raw := pid.read_text().strip()).isdigit() and _alive(int(raw)):
-                raise LocalError("controller_shutdown_unknown: its recorded process is still alive")
+                raise LocalError(
+                    f"controller_shutdown_unknown: the controller (pid {raw}) is alive but "
+                    f"not answering on port {DOOR_PORT}; its log is {home / LOG_NAME}. "
+                    "Wait a minute and run `crucible local shutdown` again; if it never "
+                    f"answers, end pid {raw} alone (not its tree) in Task Manager"
+                )
             try:
-                request("http://127.0.0.1:7100/v1/ping")
+                request(ENGINE_URL + "/v1/ping")
             except (urllib.error.URLError, ConnectionError) as engine_exc:
                 if refused(engine_exc):
                     return
                 raise LocalError(f"engine_shutdown_unknown: {engine_exc}") from engine_exc
             try:
                 _, _, engine_token = connection(home)
-                backend = (request("http://127.0.0.1:7100/v1/info", token=engine_token)
+                backend = (request(ENGINE_URL + "/v1/info", token=engine_token)
                            .get("host", {}).get("backend"))
             except (LocalError, urllib.error.URLError, ConnectionError, ValueError, OSError):
                 backend = None
@@ -384,7 +429,7 @@ def shutdown() -> None:
                 "and could not be asked what it is; it was not stopped"
             )
         if ping.get("crucible") is not True or ping.get("role") != "orchestrator":
-            raise LocalError("wrong_controller: port 7101 is occupied by another service")
+            raise wrong_controller()
         _, _, token = connection(home)
         info, token = door_call("/v1/info", home, token)
         server = info.get("server")
@@ -407,13 +452,13 @@ def shutdown() -> None:
         controller_pid = int(raw)
         if owner not in ("wsl-unit", "found"):
             act("stop")
-        request("http://127.0.0.1:7101/quit", token=token, method="POST",
+        request(CONTROLLER_URL + "/quit", token=token, method="POST",
                 headers={HANDOVER_HEADER: "1"})
         deadline = time.monotonic() + 15
         while True:
             closed = False
             try:
-                request("http://127.0.0.1:7101/v1/ping")
+                request(CONTROLLER_URL + "/v1/ping")
             except (urllib.error.URLError, ConnectionError) as exc:
                 if refused(exc):
                     closed = True
@@ -422,7 +467,7 @@ def shutdown() -> None:
             if closed and not _alive(controller_pid):
                 if owner not in ("wsl-unit", "found"):
                     try:
-                        request("http://127.0.0.1:7100/v1/ping")
+                        request(ENGINE_URL + "/v1/ping")
                     except (urllib.error.URLError, ConnectionError) as exc:
                         if refused(exc):
                             return
@@ -430,7 +475,14 @@ def shutdown() -> None:
                     raise LocalError("engine_shutdown_failed: native engine still answers after its controller exited")
                 return
             if time.monotonic() >= deadline:
-                raise LocalError("controller_shutdown_failed: controller did not exit")
+                raise LocalError(
+                    f"controller_shutdown_failed: the controller (pid {controller_pid}) "
+                    f"was asked to quit and did not exit within 15 s; its log is "
+                    f"{home / LOG_NAME}. Nothing was force-killed: its process tree "
+                    "holds the session that keeps the Linux engine's distro up. Run "
+                    "`crucible local shutdown` again; if it never exits, end pid "
+                    f"{controller_pid} alone (not its tree) in Task Manager"
+                )
             time.sleep(0.1)
     else:
         from . import service
