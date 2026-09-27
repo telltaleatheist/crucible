@@ -64,193 +64,41 @@ from __future__ import annotations
 import os
 import sys
 
-# ---- fd 1 is results, stderr is everything else. Before any other import. ----
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import workerio  # noqa: E402
+
+sys.path.pop(0)
+
 # mlx-whisper prints a tqdm bar and its language-detection notice; both would
 # land in the middle of a JSON line otherwise.
-_RESULTS_FD = os.dup(1)
-os.dup2(2, 1)
-_RESULTS = os.fdopen(_RESULTS_FD, "w", encoding="utf-8", buffering=1)
+workerio.claim_stdout()
 
 import json  # noqa: E402
 import math  # noqa: E402
-import subprocess  # noqa: E402
-import threading  # noqa: E402
 import time  # noqa: E402
 
-#: whisper works at 16 kHz mono, always. Not a parameter. The same constant
-#: `worker.py` declares, because it is the same model family's requirement.
-SAMPLE_RATE = 16_000
+from workerio import SAMPLE_RATE, decode, fail, probe_duration, send  # noqa: E402
+
+speechonly = workerio.load_sibling("speechonly", __file__)
 
 #: The window mlx-whisper's own decoder slides, in mel frames and in seconds.
 #: Used only for the language-detection slice below.
 DETECT_SECONDS = 30
 
-DECODE_REPORT_SECONDS = 1.0
 PROGRESS_FRACTION_STEP = 0.002
 PROGRESS_WALL_SECONDS = 1.5
 
 
-def send(message_type: str, **fields: object) -> None:
-    """One JSON object, one line, flushed, on the real fd 1."""
-    _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
-    _RESULTS.flush()
-
-
-def fail(message: str) -> int:
-    send("failed", message=message)
-    return 1
-
-
 def require(request: dict, key: str, kind: type) -> object:
     """One required key, or a refusal naming it. Nothing here has a default."""
-    if key not in request:
-        raise KeyError(
-            f"the asr request has no {key!r}; every parameter is required because "
-            "every one of them changes the transcript"
-        )
-    value = request[key]
-    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-        raise KeyError(
-            f"the asr request's {key!r} must be {kind.__name__}, got "
-            f"{type(value).__name__}"
-        )
-    return value
-
-
-def _speechonly():
-    """`speechonly.py` from this file's own directory (no `crucible` here)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import speechonly
-
-    return speechonly
-
-
-def require_speech(request: dict) -> "dict | None":
-    """`speech`: required as a KEY; null means transcribe everything."""
-    return _speechonly().from_request(request)
-
-
-def speech_only(waveform, speech: dict, total: float, audio: str) -> tuple:
-    """The shortened waveform and its `kept` table (`worker.py`'s, 2026-09-27)."""
-    last = [0.0]
-
-    def report(seconds: float) -> None:
-        now = time.time()
-        if now - last[0] < DECODE_REPORT_SECONDS:
-            return
-        last[0] = now
-        send(
-            "progress",
-            stage="decoding",
-            processed_s=round(seconds, 1),
-            total_s=round(total, 1),
-            cues=0,
-        )
-
-    return _speechonly().cut_for_worker(waveform, speech, audio, report)
-
-
-# ------------------------------------------------------------------- decoding
-
-
-def probe_duration(ffmpeg: str, audio_path: str) -> float:
-    """Container duration in seconds, via the ffprobe beside ffmpeg.
-
-    `worker.py`'s function, verbatim in behaviour: the denominator for decode
-    progress and nothing else. A container that carries no duration gets 0.0 and
-    a progress line with no percentage, which is still honest.
-    """
-    directory = os.path.dirname(ffmpeg)
-    base = "ffprobe" + (".exe" if ffmpeg.lower().endswith(".exe") else "")
-    ffprobe = os.path.join(directory, base) if directory else base
-    try:
-        completed = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                audio_path,
-            ],
-            capture_output=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"[asr] ffprobe unavailable ({exc}); decode progress has no total")
-        return 0.0
-    if completed.returncode != 0:
-        print(
-            f"[asr] ffprobe exited {completed.returncode}; decode progress has no total"
-        )
-        return 0.0
-    text = completed.stdout.decode("utf-8", "replace").strip()
-    try:
-        return max(0.0, float(text))
-    except ValueError:
-        print(f"[asr] ffprobe said {text!r}, which is not a duration")
-        return 0.0
-
-
-def decode(ffmpeg: str, audio_path: str, on_progress) -> "object":
-    """Decode to a mono float32 waveform at 16 kHz. Raises on any ffmpeg failure.
-
-    The same decode as `worker.py`'s and for the same reason — PyAV silently
-    truncates some assembled m4b files, which ends a transcript hours early with
-    no error — so both engines read the same samples out of the same container.
-    """
-    import numpy
-
-    process = subprocess.Popen(
-        [
-            ffmpeg,
-            "-nostdin",
-            "-v",
-            "error",
-            "-i",
-            audio_path,
-            "-map",
-            "0:a:0",
-            "-ar",
-            str(SAMPLE_RATE),
-            "-ac",
-            "1",
-            "-f",
-            "f32le",
-            "-",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    return workerio.require(
+        request,
+        key,
+        kind,
+        "asr",
+        "every parameter is required because every one of them changes the "
+        "transcript",
     )
-    errors: list[bytes] = []
-
-    def drain() -> None:
-        for chunk in iter(lambda: process.stderr.read(65536), b""):
-            errors.append(chunk)
-
-    pump = threading.Thread(target=drain, daemon=True)
-    pump.start()
-
-    buffer = bytearray()
-    per_second = SAMPLE_RATE * 4
-    while True:
-        chunk = process.stdout.read(1 << 20)
-        if not chunk:
-            break
-        buffer += chunk
-        on_progress(len(buffer) / per_second)
-    process.stdout.close()
-    code = process.wait()
-    pump.join(timeout=5)
-    if code != 0:
-        tail = b"".join(errors).decode("utf-8", "replace").strip()[-500:]
-        raise RuntimeError(f"ffmpeg exited {code}: {tail}")
-    # A view of the buffer, not a copy: the array is gigabytes on a long book.
-    return numpy.frombuffer(buffer, dtype=numpy.float32)
 
 
 # -------------------------------------------------------------- transcription
@@ -408,7 +256,7 @@ def main() -> int:
                 f"{type(language).__name__}"
             )
         initial_prompt = require_prompt(request)
-        speech = require_speech(request)
+        speech = speechonly.from_request(request)
     except KeyError as exc:
         return fail(str(exc.args[0]))
 
@@ -459,24 +307,13 @@ def main() -> int:
         if failure is not None:
             return fail(failure)
 
-    total_container = probe_duration(ffmpeg, audio)
-    last_decode = [0.0]
-
-    def decode_progress(decoded_seconds: float) -> None:
-        now = time.time()
-        if now - last_decode[0] < DECODE_REPORT_SECONDS:
-            return
-        last_decode[0] = now
-        send(
-            "progress",
-            stage="decoding",
-            processed_s=round(decoded_seconds, 1),
-            total_s=round(total_container, 1),
-            cues=0,
-        )
-
+    total_container = probe_duration(ffmpeg, audio, "asr")
     try:
-        waveform = decode(ffmpeg, audio, decode_progress)
+        waveform = decode(
+            ffmpeg,
+            audio,
+            workerio.decode_reporter(total_s=round(total_container, 1), cues=0),
+        )
     except Exception as exc:
         return fail(f"could not decode {audio}: {type(exc).__name__}: {exc}")
 
@@ -490,7 +327,12 @@ def main() -> int:
         # CPU: this is not mlx-whisper's VAD (it has none), it is Crucible's,
         # run before whisper hears anything.
         try:
-            waveform, kept = speech_only(waveform, speech, source_total, audio)
+            waveform, kept = speechonly.cut_for_worker(
+                waveform,
+                speech,
+                audio,
+                workerio.decode_reporter(total_s=round(source_total, 1), cues=0),
+            )
         except Exception as exc:
             return fail(f"speech detection failed: {type(exc).__name__}: {exc}")
     total = len(waveform) / float(SAMPLE_RATE)

@@ -188,10 +188,11 @@ from __future__ import annotations
 import os
 import sys
 
-# ---- fd 1 is results, stderr is everything else. Before any other import. ----
-_RESULTS_FD = os.dup(1)
-os.dup2(2, 1)
-_RESULTS = os.fdopen(_RESULTS_FD, "w", encoding="utf-8", buffering=1)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import workerio  # noqa: E402
+
+sys.path.pop(0)
+workerio.claim_stdout()
 
 import json  # noqa: E402
 import math  # noqa: E402
@@ -200,6 +201,8 @@ import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+
+from workerio import fail, send  # noqa: E402
 
 import numpy  # noqa: E402
 import soundfile  # noqa: E402
@@ -248,35 +251,16 @@ SUBTYPE_BYTES = {
 CUT_REPORT_SECONDS = 5.0
 
 
-def send(message_type: str, **fields: object) -> None:
-    """One JSON object, one line, flushed, on the real fd 1."""
-    _RESULTS.write(json.dumps({"type": message_type, **fields}) + "\n")
-    _RESULTS.flush()
-
-
-def fail(message: str) -> int:
-    send("failed", message=message)
-    return 1
-
-
 def require(request: dict, key: str, kind):
     """One required key, or a refusal naming it."""
-    if key not in request:
-        raise KeyError(
-            f"the rvc request has no {key!r}; every parameter except 'f0_method' "
-            "and 'hop_length' is required, and those two are absent on purpose"
-        )
-    value = request[key]
-    kinds = kind if isinstance(kind, tuple) else (kind,)
-    wrong = not isinstance(value, kinds) or (
-        isinstance(value, bool) and bool not in kinds
+    return workerio.require(
+        request,
+        key,
+        kind,
+        "rvc",
+        "every parameter except 'f0_method' and 'hop_length' is required, and "
+        "those two are absent on purpose",
     )
-    if wrong:
-        raise KeyError(
-            f"the rvc request's {key!r} must be "
-            f"{'/'.join(k.__name__ for k in kinds)}, got {type(value).__name__}"
-        )
-    return value
 
 
 def _convert_args(request: dict, input_dir: str, output_dir: str) -> list[str]:
