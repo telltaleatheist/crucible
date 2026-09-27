@@ -17,7 +17,7 @@ the repair `--check` names when they disagree.
 
 - **Never search-and-replace a version.** Each place has its own anchored pattern that must
   match exactly once; a file that changed shape refuses the bump. Other files name old
-  versions on purpose (e.g. `docs/PHASE14-ENVPACKS.md` records a measurement taken on
+  versions on purpose (e.g. `docs/history/PHASE14-ENVPACKS.md` records a measurement taken on
   v0.6.6 -> v0.6.7), and rewriting them would turn a fact into a lie.
 - **Generated files carry the version too.** `modules/*.module.json` names it as
   `<version>+<content hash>` and `docs/API.md` is built from the app, so `bump.py`
