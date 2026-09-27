@@ -7,14 +7,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from .. import procgroup
 from ..errors import JobCancelled
+from ..narratorengines import HIGGS_V3, VoicesDocumentView
 from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine, find_free_port
-
-if TYPE_CHECKING:
-    from ..narratorvoices import VoicesDocument
 
 MODULE = "narrator.serve"
 
@@ -82,7 +80,6 @@ def env_prefix_variable_for(serving_stack: str) -> str:
         )
     return variable
 
-HIGGS_V3 = "higgs-v3"
 
 MLX_BATCH_VARIABLE = "NARRATOR_HIGGS3_MLX_BATCH"
 MLX_MEM_BUDGET_VARIABLE = "NARRATOR_HIGGS3_MLX_MEM_BUDGET_GB"
@@ -215,7 +212,7 @@ class NarratorEngine(SubprocessEngine):
         max_num_seqs: int | None,
         mem_fraction: float | None,
         context_length: int | None,
-        voices: VoicesDocument | None,
+        voices: VoicesDocumentView | None,
         mlx_total_bytes: int | None,
     ) -> None:
         super().__init__(python=python, log_path=log_path)

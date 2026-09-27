@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -9,6 +8,8 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
+from .manifests import MODELS_PULL_COMMAND
+from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
 ASR_DIR_ENV = "CRUCIBLE_ASR_DIR"
 
@@ -86,10 +87,6 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
 }
 
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
-
 
 class AsrManifestError(CrucibleError):
     ...
@@ -151,6 +148,13 @@ class AsrManifest:
     weights_of: str | None = None
     weights_base: "AsrManifest | None" = field(default=None, compare=False, repr=False)
 
+    @property
+    def pull_command(self) -> str:
+        return f"{MODELS_PULL_COMMAND} {self.id}"
+
+    def aliases(self) -> "tuple[AsrManifest, ...]":
+        return asr_aliases_of(self)
+
     def extra_files(self, backend_kind: str) -> tuple[str, ...]:
         return ()
 
@@ -191,27 +195,6 @@ def asr_manifests_dir() -> Path:
     return path
 
 
-def _check_table(where: str, table: dict[str, Any], required: dict[str, type]) -> None:
-    unknown = sorted(set(table) - set(required))
-    if unknown:
-        raise AsrManifestError(
-            f"{where}: unknown key(s) {unknown}; this table takes exactly "
-            f"{sorted(required)}"
-        )
-    missing = sorted(set(required) - set(table))
-    if missing:
-        raise AsrManifestError(f"{where}: missing required key(s) {missing}")
-    for key, kind in required.items():
-        value = table[key]
-        wrong = not isinstance(value, kind)
-        if kind is int and isinstance(value, bool):
-            wrong = True
-        if wrong:
-            raise AsrManifestError(
-                f"{where}: {key} must be {kind.__name__}, got {type(value).__name__}"
-            )
-
-
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifest:
     unknown = sorted(set(document) - {"model", "backends"})
     if unknown:
@@ -229,12 +212,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
         raise AsrManifestError(f"{path.name}: [model] must be a table")
     model = dict(model)
     weights_of = model.pop("weights_of", None)
-    if weights_of is not None and not (isinstance(weights_of, str) and _MODEL_ID.match(weights_of)):
+    if weights_of is not None and not (isinstance(weights_of, str) and MODEL_ID_PATTERN.match(weights_of)):
         raise AsrManifestError(f"{path.name}: model.weights_of {weights_of!r} is not a model id")
-    _check_table(f"{path.name} [model]", model, _MODEL_REQUIRED)
+    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, error=AsrManifestError)
 
     model_id = model["id"]
-    if not _MODEL_ID.match(model_id):
+    if not MODEL_ID_PATTERN.match(model_id):
         raise AsrManifestError(
             f"{path.name}: model.id {model_id!r} must be lower-case and start with "
             "a letter or digit ([a-z0-9][a-z0-9._-]*)"
@@ -274,7 +257,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             raise AsrManifestError(f"{where}: must be a table")
         engine = block.get("engine")
         if not isinstance(engine, str):
-            _check_table(where, block, _BACKEND_REQUIRED)
+            check_table(where, block, _BACKEND_REQUIRED, error=AsrManifestError)
             raise AsrManifestError(f"{where}: engine must be str")
         if engine not in ASR_BACKEND_ENGINES[kind]:
             raise AsrManifestError(
@@ -290,7 +273,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
             required.update(QWEN_BACKEND_REQUIRED)
         if engine == VLLM_ENGINE:
             required.update(VLLM_BACKEND_REQUIRED)
-        _check_table(where, block, required)
+        check_table(where, block, required, error=AsrManifestError)
         engine_family = ASR_ENGINE_FAMILY[engine]
         if model["family"] != engine_family:
             raise AsrManifestError(
@@ -298,12 +281,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AsrManifes
                 f"and this manifest's [model] family is {model['family']!r}; "
                 "every block of one asr id runs the same model"
             )
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise AsrManifestError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise AsrManifestError(
                 f"{where}: revision {block['revision']!r} must be a full 40-character "
                 "commit sha, so a pull is reproducible; branch names are not pins"
@@ -364,7 +347,7 @@ def _check_qwen_block(where: str, engine: str, block: dict[str, Any]) -> None:
             f"Qwen3-ASR runs in {sorted(QWEN_ASR_DTYPES)} on both machines "
             "(Owen, 2026-09-24: full precision, never the 8-bit build)"
         )
-    if not _MODEL_ID.match(block["aligner"]):
+    if not MODEL_ID_PATTERN.match(block["aligner"]):
         raise AsrManifestError(
             f"{where}: aligner {block['aligner']!r} is not an align model id"
         )

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .enginespec import declared_dtype
+
 MIN_WEIGHT_BITS = 4
 
 _GGUF_FLOAT = re.compile(r"(?:^|[-_.])(BF16|F16|F32)(?:[-_.]|$)", re.IGNORECASE)
@@ -55,14 +57,7 @@ def weight_bits(spec: Any) -> int | None:
         found = repo_bits(hf_repo)
         if found is not None:
             return found
-    dtype = getattr(spec, "dtype", None)
-    if dtype is None:
-        from .engines.vllm import dtype_of
-
-        engine_args = getattr(spec, "engine_args", None)
-        if engine_args:
-            stated = dtype_of(engine_args)
-            dtype = None if stated == "auto" else stated
+    dtype = declared_dtype(spec)
     if dtype is not None:
         return _DTYPE_BITS.get(dtype)
     return None

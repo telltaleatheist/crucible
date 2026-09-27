@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..backend import BF16, CUDA_GRAPHS, VLLM_STARTS, CardFacts
-from .base import EngineError, SubprocessEngine, int_flag, str_flag
+from ..enginespec import (
+    AUTO_DTYPE,
+    BF16_FALLBACK_DTYPE,
+    bf16_fallback,
+    card_args,
+    card_needs,
+    dtype_of,
+    run_dtype,
+    stated_dtype,
+)
+from ..enginespec import VLLM_ENGINE as ENGINE_NAME
+from .base import EngineError, SubprocessEngine, int_flag
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
@@ -28,59 +38,8 @@ ENVIRONMENT: dict[str, str] = {
 }
 
 
-ENGINE_NAME = "vllm"
-
-AUTO_DTYPE = "auto"
-
-
-def dtype_of(engine_args: "tuple[str, ...] | list[str]") -> str:
-    stated = str_flag(engine_args, "--dtype")
-    return AUTO_DTYPE if stated is None else stated
-
-
-def stated_dtype(spec: object) -> str:
-    stated = getattr(spec, "dtype", None)
-    if stated is not None:
-        return stated
-    return dtype_of(getattr(spec, "engine_args", ()))
-
-
-BF16_FALLBACK_DTYPE = "float16"
-
-
-def bf16_fallback(spec: object) -> str | None:
-    if getattr(spec, "engine", None) != ENGINE_NAME:
-        return None
-    return BF16_FALLBACK_DTYPE if stated_dtype(spec) == "bfloat16" else None
-
-
-def run_dtype(spec: object, card: "CardFacts | None") -> str:
-    fallback = bf16_fallback(spec)
-    if fallback is not None and card is not None and card.has(BF16) is False:
-        return fallback
-    return stated_dtype(spec)
-
-
-def card_args(spec: object, card: "CardFacts | None") -> tuple[str, ...]:
-    if getattr(spec, "engine", None) != ENGINE_NAME:
-        return ()
-    args: list[str] = []
-    dtype = run_dtype(spec, card)
-    if dtype != stated_dtype(spec):
-        args += ["--dtype", dtype]
-    if card is not None and card.has(CUDA_GRAPHS) is False:
-        args.append("--enforce-eager")
-    return tuple(args)
-
-
-def card_needs(spec: object) -> tuple[str, ...]:
-    if getattr(spec, "engine", None) != ENGINE_NAME:
-        return ()
-    return (VLLM_STARTS,)
-
-
 class VllmEngine(SubprocessEngine):
-    name = "vllm"
+    name = ENGINE_NAME
 
     decide_logprobs = True
     max_logprobs = MAX_LOGPROBS

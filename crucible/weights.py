@@ -30,10 +30,11 @@ logging.getLogger("huggingface_hub.utils._http").addFilter(_QuietUnauthenticated
 PINNED = "pinned"
 LOCAL = "local"
 
-_FAMILY_WORDS: dict[str, tuple[str, str]] = {
-    "models": ("model", "crucible models pull"),
-    "voices": ("voice", "crucible voices pull"),
-    "rvc": ("RVC model", "crucible rvc pull"),
+FAMILY_NOUNS: dict[str, str] = {
+    "models": "model",
+    "voices": "voice",
+    "rvc": "RVC model",
+    "denoise": "denoise model",
 }
 
 
@@ -43,6 +44,13 @@ class WeightsSubject(Protocol):
     id: str
     path: Path
     weights_family: str
+
+    @property
+    def pull_command(self) -> str:
+        ...
+
+    def aliases(self) -> "tuple[WeightsSubject, ...]":
+        ...
 
 
 @runtime_checkable
@@ -144,22 +152,10 @@ class WeightsShared(WeightsError):
 def aliases_holding(
     config: Config, manifest: WeightsSubject, backend_kind: str
 ) -> tuple[str, ...]:
-    from .asrmodels import AsrManifest, asr_aliases_of
-    from .manifests import ModelManifest, aliases_of
-    from .voices import VoiceManifest, voice_aliases_of
-
     if getattr(manifest, "weights_of", None) is not None:
         return ()
-    if isinstance(manifest, ModelManifest):
-        aliases = aliases_of(manifest)
-    elif isinstance(manifest, AsrManifest):
-        aliases = asr_aliases_of(manifest)
-    elif isinstance(manifest, VoiceManifest):
-        aliases = voice_aliases_of(manifest)
-    else:
-        return ()
     holding: list[str] = []
-    for alias in aliases:
+    for alias in manifest.aliases():
         if not alias.supports(backend_kind):
             continue
         if not alias_record_path(config, alias, backend_kind).is_file():
@@ -256,8 +252,8 @@ def require_installed(
             "them back, or the voice's manifest should be removed"
         )
 
-    family = manifest.weights_family
-    noun, command = _FAMILY_WORDS[family]
+    noun = FAMILY_NOUNS[manifest.weights_family]
+    command = manifest.pull_command
     directory = subject_dir(config, manifest, spec.backend)
     stamp = directory / STAMP_NAME
     base = getattr(manifest, "weights_base", None)
@@ -267,7 +263,7 @@ def require_installed(
             raise WeightsError(
                 f"{noun} {manifest.id!r} shares the weights of {base.id!r}, and "
                 f"{base.id!r} is not installed for {spec.backend} — run "
-                f"`{command} {manifest.id}`, which pulls {base.id!r}'s download"
+                f"`{command}`, which pulls {base.id!r}'s download"
                 + (f" plus {', '.join(extras)}" if extras else "")
                 + " into one folder"
             )
@@ -275,7 +271,7 @@ def require_installed(
         raise WeightsError(
             f"{noun} {manifest.id!r} shares the weights of {base.id!r}, which is "
             f"installed at {directory}, and {len(absent)} of its own file(s) are "
-            f"not there: {', '.join(absent)} — run `{command} {manifest.id}`"
+            f"not there: {', '.join(absent)} — run `{command}`"
         )
     if stamp.is_file():
         record = json.loads(stamp.read_text(encoding="utf-8"))
@@ -288,16 +284,16 @@ def require_installed(
                 f"{directory} is stamped for {spec.hf_repo}@{spec.revision[:12]} "
                 f"but {len(absent)} of the {len(spec.files)} file(s) it names "
                 f"are not there: {', '.join(absent)} — run `{command} "
-                f"{manifest.id} --force`"
+                "--force`"
             )
         raise WeightsError(
             f"{directory} holds {record['hf_repo']}@{record['revision'][:12]}, but "
             f"{manifest.path.name} now pins {spec.hf_repo}@{spec.revision[:12]} — "
-            f"run `{command} {manifest.id}`"
+            f"run `{command}`"
         )
     raise WeightsError(
         f"{noun} {manifest.id!r} is not installed for {spec.backend}; there are no "
-        f"weights at {directory} — run `{command} {manifest.id}`"
+        f"weights at {directory} — run `{command}`"
     )
 
 

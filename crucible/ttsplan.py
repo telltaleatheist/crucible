@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-HIGGS_ENGINE = "higgs-v3"
+from .narratorengines import HIGGS_V3 as HIGGS_ENGINE
 
 BF16_ONE_AT_A_TIME_BYTES = 10_000_000_000
 

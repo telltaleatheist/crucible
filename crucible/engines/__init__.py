@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from ..narratorengines import NARRATOR_ENGINES, VoicesDocumentView
 from .base import (
     STOP_TIMEOUT_SECONDS,
     EngineError,
@@ -18,17 +18,12 @@ from .mlx_vlm import MlxVlmEngine
 from .narrator import EngineWouldNotStop, NarratorEngine
 from .vllm import VllmEngine
 
-if TYPE_CHECKING:
-    from ..narratorvoices import VoicesDocument
-
 ENGINES: dict[str, type[SubprocessEngine]] = {
     VllmEngine.name: VllmEngine,
     MlxLmEngine.name: MlxLmEngine,
     MlxVlmEngine.name: MlxVlmEngine,
     LlamaServerEngine.name: LlamaServerEngine,
 }
-
-NARRATOR_ENGINES: frozenset[str] = frozenset({"higgs-v3"})
 
 
 def engine_log_path(home: Path, model_id: str) -> Path:
@@ -142,7 +137,7 @@ def build_voice_engine(
     max_num_seqs: int | None,
     mem_fraction: float | None,
     context_length: int | None,
-    voices: "VoicesDocument | None",
+    voices: "VoicesDocumentView | None",
     mlx_total_bytes: int | None,
 ) -> NarratorEngine:
     if narrator_engine not in NARRATOR_ENGINES:

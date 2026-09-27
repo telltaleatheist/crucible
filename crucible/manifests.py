@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
+from .classnames import CLASS_NAMES
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits
 from .errors import CrucibleError
+from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
 
+MODELS_PULL_COMMAND = "crucible models pull"
+
 TEXT_FAMILY = "text"
 PAGES_FAMILY = "pages"
-CLASS_FAMILIES: tuple[str, ...] = (TEXT_FAMILY, PAGES_FAMILY)
 
 BACKEND_ENGINES: dict[str, dict[str, str]] = {
     CUDA_LINUX: {TEXT_FAMILY: "vllm", PAGES_FAMILY: "vllm"},
@@ -144,11 +146,6 @@ _LOCAL_KIND_OPTIONAL: dict[str, dict[str, type]] = {
 
 def fingerprint(model_id: str, revision: str) -> str:
     return f"{model_id}@{revision}"
-
-
-_REVISION = re.compile(r"^[0-9a-f]{40}$")
-_MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_HF_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
 
 class ManifestError(CrucibleError):
@@ -321,6 +318,13 @@ class ModelManifest:
     weights_family = "models"
 
     @property
+    def pull_command(self) -> str:
+        return f"{MODELS_PULL_COMMAND} {self.id}"
+
+    def aliases(self) -> "tuple[ModelManifest, ...]":
+        return aliases_of(self)
+
+    @property
     def store_id(self) -> str:
         return self.id if self.weights_of is None else self.weights_of
 
@@ -394,40 +398,6 @@ def manifests_dir() -> Path:
             f"install has lost them, or ${MODELS_DIR_ENV} must point at them"
         )
     return path
-
-
-def check_table(
-    where: str,
-    table: dict[str, Any],
-    required: dict[str, type],
-    optional: dict[str, type],
-    *,
-    error: type[CrucibleError] = ManifestError,
-) -> None:
-    allowed = set(required) | set(optional)
-    unknown = sorted(set(table) - allowed)
-    if unknown:
-        raise error(
-            f"{where}: unknown key(s) {unknown}; this table takes exactly "
-            f"{sorted(allowed)}"
-        )
-    missing = sorted(set(required) - set(table))
-    if missing:
-        raise error(f"{where}: missing required key(s) {missing}")
-    for key, kind in {**required, **optional}.items():
-        if key not in table:
-            continue
-        value = table[key]
-        kinds = kind if isinstance(kind, tuple) else (kind,)
-        wrong = not isinstance(value, kinds)
-        if int in kinds and isinstance(value, bool):
-            wrong = True
-        if wrong:
-            named = " or ".join(k.__name__ for k in kinds)
-            raise error(
-                f"{where}: {key} must be {named}, got "
-                f"{type(value).__name__}"
-            )
 
 
 _DEFAULT_BOUNDS: dict[str, tuple[Any, str]] = {
@@ -534,6 +504,7 @@ def _parse_local(
         table,
         {**_LOCAL_COMMON_REQUIRED, **_LOCAL_KIND_REQUIRED[kind]},
         {**_LOCAL_COMMON_OPTIONAL, **_LOCAL_KIND_OPTIONAL[kind]},
+        error=ManifestError,
     )
 
     download = table["download_bytes"]
@@ -562,18 +533,16 @@ def _parse_local(
             "decision somebody made and then forgot to write down"
         )
     if minimum_for:
-        from .capability import BY_NAME
-
         for index, entry in enumerate(minimum_for):
             if not isinstance(entry, str):
                 raise ManifestError(
                     f"{where}: minimum_for[{index}] must be a string, got "
                     f"{type(entry).__name__}"
                 )
-            if entry not in BY_NAME:
+            if entry not in CLASS_NAMES:
                 raise ManifestError(
                     f"{where}: minimum_for[{index}] is {entry!r}, which is not a "
-                    f"capability class; this build knows {sorted(BY_NAME)}"
+                    f"capability class; this build knows {sorted(CLASS_NAMES)}"
                 )
         if len(set(minimum_for)) != len(minimum_for):
             raise ManifestError(
@@ -598,12 +567,12 @@ def _parse_local(
             )
         return OllamaLocal(**common, tag=tag)
 
-    if not _HF_REPO.match(table["hf_repo"]):
+    if not HF_REPO_PATTERN.match(table["hf_repo"]):
         raise ManifestError(
             f"{where}: hf_repo {table['hf_repo']!r} is not an <owner>/<name> "
             "HuggingFace repo id"
         )
-    if not _REVISION.match(table["revision"]):
+    if not REVISION_PATTERN.match(table["revision"]):
         raise ManifestError(
             f"{where}: revision {table['revision']!r} must be a full 40-character "
             "commit sha, so a pull is reproducible; branch names are not pins"
@@ -692,7 +661,10 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
     model = document["model"]
     if not isinstance(model, dict):
         raise ManifestError(f"{path.name}: [model] must be a table")
-    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL)
+    check_table(
+        f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL,
+        error=ManifestError,
+    )
 
     model_id = model["id"]
     if "/" in model_id:
@@ -702,7 +674,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             "UPSTREAM model id (`<upstream>/<model>`), and the chat door tells "
             "the two apart by that one character"
         )
-    if not _MODEL_ID.match(model_id):
+    if not MODEL_ID_PATTERN.match(model_id):
         raise ManifestError(
             f"{path.name}: model.id {model_id!r} must be lower-case and start with "
             "a letter or digit ([a-z0-9][a-z0-9._-]*)"
@@ -714,7 +686,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         )
     weights_of = model.get("weights_of")
     if weights_of is not None:
-        if not _MODEL_ID.match(weights_of):
+        if not MODEL_ID_PATTERN.match(weights_of):
             raise ManifestError(
                 f"{path.name}: weights_of_unknown — model.weights_of "
                 f"{weights_of!r} is not a model id ([a-z0-9][a-z0-9._-]*)"
@@ -812,7 +784,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             )
         if not isinstance(block, dict):
             raise ManifestError(f"{where}: must be a table")
-        check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL)
+        check_table(
+            where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=ManifestError
+        )
 
         serves_here = _parse_serves(where, block, modalities)
 
@@ -828,12 +802,12 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
                 "widens) and not out of the engine name, so an engine cannot be "
                 "chosen by naming it"
             )
-        if not _HF_REPO.match(block["hf_repo"]):
+        if not HF_REPO_PATTERN.match(block["hf_repo"]):
             raise ManifestError(
                 f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
                 "HuggingFace repo id"
             )
-        if not _REVISION.match(block["revision"]):
+        if not REVISION_PATTERN.match(block["revision"]):
             raise ManifestError(
                 f"{where}: revision {block['revision']!r} must be a full 40-character "
                 "commit sha, so a pull is reproducible; branch names are not pins"
@@ -944,7 +918,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
             memory_where = f"{where}.memory"
             if not isinstance(memory_table, dict):
                 raise ManifestError(f"{memory_where}: must be a table")
-            check_table(memory_where, memory_table, _MEMORY_REQUIRED, {})
+            check_table(
+                memory_where, memory_table, _MEMORY_REQUIRED, error=ManifestError
+            )
             for key in ("weights_bytes", "kv_bytes_per_token"):
                 if memory_table[key] <= 0:
                     raise ManifestError(

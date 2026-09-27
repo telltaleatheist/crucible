@@ -12,8 +12,25 @@ from typing import Any
 
 import tomli_w
 
+from .capabilityrecord import (
+    DESKTOP_BASES,
+    DESKTOP_BASIS_DECLARED,
+    DESKTOP_BASIS_MEASURED,
+    DESKTOP_BASIS_STATED,
+    CapabilityRecord,
+    CapabilityRow,
+    desktop_reserve_words,
+)
+from .classnames import ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .errors import ConfigError
-from .upstreams import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
+from .narratorengines import ESTIMATE_BASES as TTS_ESTIMATE_BASES
+from .narratorengines import (
+    NARRATOR_ENGINE_SAMPLING,
+    EngineFootprint,
+    declared_tts_footprints,
+)
+from .tomltable import check_table
+from .upstreamrecord import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
 
 CRUCIBLE_HOME_ENV = "CRUCIBLE_HOME"
 DEFAULT_HOST = "127.0.0.1"
@@ -29,15 +46,6 @@ TOKEN_BYTES = 32
 
 DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
 
-DESKTOP_BASIS_MEASURED = "measured"
-DESKTOP_BASIS_DECLARED = "declared"
-DESKTOP_BASIS_STATED = "stated"
-DESKTOP_BASES: tuple[str, ...] = (
-    DESKTOP_BASIS_MEASURED,
-    DESKTOP_BASIS_DECLARED,
-    DESKTOP_BASIS_STATED,
-)
-
 MLX_DESKTOP_ALLOWANCE_FRACTION = 0.25
 
 
@@ -45,15 +53,6 @@ def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
     if backend_kind == "mlx-darwin":
         return int(total_bytes * MLX_DESKTOP_ALLOWANCE_FRACTION)
     return DEFAULT_DESKTOP_ALLOWANCE_BYTES
-
-
-def desktop_reserve_words(allowance_bytes: int, basis: str) -> str:
-    said = {
-        DESKTOP_BASIS_MEASURED: "measured",
-        DESKTOP_BASIS_DECLARED: "not measured; Crucible's default",
-        DESKTOP_BASIS_STATED: "as set for this machine",
-    }.get(basis, basis)
-    return f"kept {allowance_bytes / 1024 ** 3:.1f} GiB for this PC's desktop ({said})"
 
 
 WINDOWS_HOME_DIRNAME = "Crucible"
@@ -99,85 +98,6 @@ class LocalModelRecord:
 
     capability: str
     model: str
-
-@dataclass(frozen=True)
-class CapabilityRow:
-
-    capability: str
-    enabled: bool
-    selected: str
-    reason: str
-    shortfall_bytes: int
-    summary: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "capability": self.capability,
-            "enabled": self.enabled,
-            "selected": self.selected,
-            "reason": self.reason,
-            "summary": self.summary,
-            "shortfall_bytes": self.shortfall_bytes,
-        }
-
-
-@dataclass(frozen=True)
-class CapabilityRecord:
-
-    backend_kind: str
-    total_bytes: int
-    desktop_allowance_bytes: int
-    rows: tuple[CapabilityRow, ...]
-
-    def row(self, capability: str) -> CapabilityRow | None:
-        for entry in self.rows:
-            if entry.capability == capability:
-                return entry
-        return None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "backend_kind": self.backend_kind,
-            "total_bytes": self.total_bytes,
-            "desktop_allowance_bytes": self.desktop_allowance_bytes,
-            "classes": [entry.to_dict() for entry in self.rows],
-        }
-
-
-TTS_ESTIMATE_BASES = frozenset({"measured", "declared"})
-
-
-@dataclass(frozen=True)
-class EngineFootprint:
-
-    engine: str
-    memory_bytes_estimate: int
-    estimate_basis: str
-    estimate_note: str | None
-    max_num_seqs: int
-    max_num_seqs_note: str
-    mem_fraction: float | None = None
-    mem_fraction_note: str | None = None
-    context_length: int | None = None
-    context_length_note: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        document: dict[str, Any] = {
-            "memory_bytes_estimate": self.memory_bytes_estimate,
-            "estimate_basis": self.estimate_basis,
-        }
-        if self.estimate_note is not None:
-            document["estimate_note"] = self.estimate_note
-        document["max_num_seqs"] = self.max_num_seqs
-        document["max_num_seqs_note"] = self.max_num_seqs_note
-        for key in (
-            "mem_fraction", "mem_fraction_note",
-            "context_length", "context_length_note",
-        ):
-            value = getattr(self, key)
-            if value is not None:
-                document[key] = value
-        return document
 
 
 @dataclass(frozen=True)
@@ -558,8 +478,6 @@ def _upstream_records(table: dict[str, Any]) -> tuple[UpstreamRecord, ...]:
 def _route_records(
     table: dict[str, Any], upstreams: tuple[UpstreamRecord, ...]
 ) -> tuple[RouteRecord, ...]:
-    from .capability import ROUTABLE_CLASSES
-
     section = table.get("routes")
     if section is None:
         return ()
@@ -602,21 +520,17 @@ def _route_records(
 
 
 def _local_model_records(table: dict[str, Any]) -> tuple[LocalModelRecord, ...]:
-    from .capability import BY_NAME, CLASSES
-
     section = table.get("local_models")
     if section is None:
         return ()
     if not isinstance(section, dict):
         raise ConfigError("config key local_models must be a table")
-    selectable = [entry.name for entry in CLASSES if entry.candidates is not None]
     found: list[LocalModelRecord] = []
     for name in sorted(section):
-        entry = BY_NAME.get(name)
-        if entry is None or entry.candidates is None:
+        if name not in SELECTABLE_CLASSES:
             raise ConfigError(
                 f"config [local_models]: local_model_not_selectable {name!r}; "
-                f"only {selectable} choose a local model"
+                f"only {list(SELECTABLE_CLASSES)} choose a local model"
             )
         model = section[name]
         if not isinstance(model, str):
@@ -668,9 +582,6 @@ def _tts_engine_lever(where: str, block: dict[str, Any], key: str) -> Any:
 
 
 def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
-    from .manifests import check_table
-    from .voices import NARRATOR_ENGINE_SAMPLING
-
     section = table.get("tts")
     if section is None:
         return ()
@@ -767,68 +678,6 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
     return tuple(found)
 
 
-def declared_tts_footprints(backend_kind: str) -> tuple[EngineFootprint, ...]:
-    from .backend import CUDA_LINUX, MLX_DARWIN
-
-    if backend_kind == CUDA_LINUX:
-        return (
-            EngineFootprint(
-                engine="higgs-v3",
-                memory_bytes_estimate=19_000_000_000,
-                estimate_basis="declared",
-                estimate_note=(
-                    "SGLang-Omni's configured reservation on this arm, not a "
-                    "watched card: `--mem-fraction-static 0.60 holds ~19 GB at 16 "
-                    "in flight` (BookForge higgs-models.json "
-                    "serving.sglang._memFractionStaticNote, owens-pc RTX 3090 Ti, "
-                    "2026-09-05). It is the SERVER's footprint rather than any "
-                    "one checkpoint's, which is why every Higgs v3 voice on this "
-                    "arm declared it until 2026-09-19 and why it is stated once "
-                    "here now. Owed: a real reading on this card."
-                ),
-                max_num_seqs=16,
-                max_num_seqs_note=(
-                    "16 is vllm-omni's OWN stage-0 value in "
-                    "higgs_multimodal_qwen3.yaml, and a measured ceiling at the "
-                    "shipped memory fractions: on owens-pc (RTX 3090 Ti, "
-                    "2026-09-05) 16 concurrent at 0.35 + 0.10 ran 11,387-11,584 "
-                    "chars/min over three runs while 32 filled the card and "
-                    "stalled. THE deathstalker CAP CERTIFICATE RAN AT 64, at the "
-                    "older fractions and before that stall was measured, so 16 is "
-                    "not the width its cap was certified at; nothing measured says "
-                    "whether batch width moves the safe chunk length, and if it "
-                    "does, that certificate is bound to 64 and this is the field "
-                    "that would have to change. It is also the width of narrator's "
-                    "own batch (v3_served.serve_concurrency), so raising it raises "
-                    "concurrent POSTs and VRAM pressure together."
-                ),
-            ),
-        )
-    if backend_kind == MLX_DARWIN:
-        return (
-            EngineFootprint(
-                engine="higgs-v3",
-                memory_bytes_estimate=12_133_000_000,
-                estimate_basis="declared",
-                estimate_note=(
-                    "The one recorded MLX figure for Higgs v3 weights of this "
-                    "shape — 11.3 GiB peak at a 900-character chunk, from "
-                    "deathstalker's MLX cap certificate (mlx-audio 0.4.8 / mlx "
-                    "0.32.0 on owens-mac-studio, 2026-09-05). Somebody else's "
-                    "reading carried across, which is exactly what 'declared' "
-                    "means. Owed: watch this machine's own allocator."
-                ),
-                max_num_seqs=16,
-                max_num_seqs_note=(
-                    "16 is vllm-omni's own stage-0 value and the width narrator "
-                    "batches at (v3_served.serve_concurrency), which is the number "
-                    "every packaged voice declared until 2026-09-19. The mlx arm "
-                    "starts no server under narrator, so what this sizes here is "
-                    "narrator's own batch. Owed: a width sweep on this machine."
-                ),
-            ),
-        )
-    return ()
 
 
 def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:

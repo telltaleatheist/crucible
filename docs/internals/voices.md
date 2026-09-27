@@ -8,6 +8,15 @@ configured to serve it. Modules: `voices`, `voicerepo`, `voicecard`,
 Crucible ships no voices. It downloads them, and a voice's facts come down with
 its weights.
 
+- The narrator engine names, their default sampling, which engines read the
+  voices document and the declared per-engine footprints live in
+  `narratorengines`, which imports only `backend`; `"higgs-v3"` is written once,
+  as `narratorengines.HIGGS_V3`.
+- A voice id is `tomltable.VOICE_ID_PATTERN`: lower-case letters, digits, dot,
+  dash and underscore, starting with a letter or digit, at most 64 characters,
+  because it becomes a file name. Voices, pins and home overlays use the same
+  rule.
+
 ## Sources and precedence
 
 `voices.load_all_voices` is the single owner of the order. Lowest precedence first:
