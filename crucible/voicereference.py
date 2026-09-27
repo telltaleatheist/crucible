@@ -64,6 +64,28 @@ def _refuse(message: str) -> ReferenceError:
 
 
 def parse_reference(raw: Any) -> VoiceReference:
+    data, transcript, name = _reference_fields(raw)
+    audio = _decoded(data)
+    seconds = _wav_seconds(audio)
+    if seconds > MAX_REFERENCE_SECONDS:
+        raise _refuse(
+            f"reference.data is {seconds:.1f} s of audio and narrator caps a "
+            f"reference at {MAX_REFERENCE_SECONDS:.0f} s "
+            "(`v3_served.check_reference_budget`; vllm-omni answers HTTP 400 "
+            '"Reference audio too long" above it). Two ~14 s clips joined is '
+            "the practical maximum, and the second clip is worth +0.012 speaker "
+            "cosine — a same-BOOK clip is worth +0.076"
+        )
+    return VoiceReference(
+        audio=audio,
+        transcript=transcript,
+        name=None if name is None else name.strip(),
+        seconds=seconds,
+        sha256=hashlib.sha256(audio).hexdigest(),
+    )
+
+
+def _reference_fields(raw: Any) -> tuple[str, str, str | None]:
     if not isinstance(raw, dict):
         raise _refuse(
             f"reference is {type(raw).__name__}, not an object with `data` (a "
@@ -88,7 +110,10 @@ def parse_reference(raw: Any) -> VoiceReference:
             "short string; an empty one would show on /v1/info as a clip that "
             "has a name and will not say it"
         )
+    return data, transcript, name
 
+
+def _decoded(data: str) -> bytes:
     ceiling = 4 * math.ceil(MAX_REFERENCE_BYTES / 3)
     if len(data) > ceiling:
         raise _refuse(
@@ -109,24 +134,7 @@ def parse_reference(raw: Any) -> VoiceReference:
             f"reference.data decodes to {len(audio)} bytes, over this server's "
             f"{MAX_REFERENCE_BYTES / 1024 ** 2:.0f} MiB ceiling"
         )
-
-    seconds = _wav_seconds(audio)
-    if seconds > MAX_REFERENCE_SECONDS:
-        raise _refuse(
-            f"reference.data is {seconds:.1f} s of audio and narrator caps a "
-            f"reference at {MAX_REFERENCE_SECONDS:.0f} s "
-            "(`v3_served.check_reference_budget`; vllm-omni answers HTTP 400 "
-            '"Reference audio too long" above it). Two ~14 s clips joined is '
-            "the practical maximum, and the second clip is worth +0.012 speaker "
-            "cosine — a same-BOOK clip is worth +0.076"
-        )
-    return VoiceReference(
-        audio=audio,
-        transcript=transcript,
-        name=None if name is None else name.strip(),
-        seconds=seconds,
-        sha256=hashlib.sha256(audio).hexdigest(),
-    )
+    return audio
 
 
 def _wav_seconds(audio: bytes) -> float:

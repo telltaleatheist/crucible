@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field, replace
+from importlib import import_module
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import tomli_w
 
 from .backend import CUDA_LINUX, MLX_DARWIN
+from .config import crucible_home
 from .errors import CrucibleError
 from .narratorengines import ESTIMATE_BASES, HIGGS_V3, NARRATOR_ENGINE_SAMPLING
 from .tomltable import (
@@ -75,6 +77,7 @@ _SERVING_OPTIONAL: dict[str, type] = {
     "context_length": int,
     "context_length_note": str,
 }
+SERVING_KEYS = frozenset({*_SERVING_REQUIRED, *_SERVING_OPTIONAL})
 
 _SOURCE_KEYS: dict[str, type] = {
     "hf_repo": str,
@@ -260,6 +263,9 @@ class VoiceManifest:
     inherited_from: str | None = None
     weights_of: str | None = None
     weights_base: "VoiceManifest | None" = field(default=None, compare=False, repr=False)
+    weights_aliases: "tuple[VoiceManifest, ...]" = field(
+        default=(), compare=False, repr=False
+    )
 
     weights_family = "voices"
 
@@ -268,7 +274,7 @@ class VoiceManifest:
         return f"{VOICES_PULL_COMMAND} {self.id}"
 
     def aliases(self) -> "tuple[VoiceManifest, ...]":
-        return voice_aliases_of(self)
+        return self.weights_aliases
 
     def extra_files(self, backend_kind: str) -> tuple[str, ...]:
         return ()
@@ -320,8 +326,6 @@ class VoiceManifest:
 
 
 def home_voices_dir() -> Path:
-    from .config import crucible_home
-
     return crucible_home() / "voices"
 
 
@@ -378,7 +382,20 @@ def check_pace(where: str, table: dict[str, Any]) -> Pace:
         {**_PACE_RATES, **_PACE_OPTIONAL, _PACE_EDGES: str},
         error=VoiceError,
     )
-    edges = table.get(_PACE_EDGES)
+    edges = _check_edges_word(where, table.get(_PACE_EDGES))
+    rates = _check_rate_band(where, table, edges)
+    target, floor, ceiling = _check_packing(where, table)
+    return Pace(
+        pace_chars_per_sec=rates["pace_chars_per_sec"],
+        max_chars_per_sec=rates["max_chars_per_sec"],
+        min_chars_per_sec=rates["min_chars_per_sec"],
+        target_chars=target,
+        safe_min_chars=floor,
+        safe_max_chars=ceiling,
+    )
+
+
+def _check_edges_word(where: str, edges: Any) -> str | None:
     if edges is not None and edges not in _PACE_EDGES_WORDS:
         raise VoiceError(
             f"{where}: {_PACE_EDGES} {edges!r} is not one of "
@@ -386,6 +403,12 @@ def check_pace(where: str, table: dict[str, Any]) -> Pace:
             "got, and a word this loader does not know would silently read as "
             "'derived from the pace'"
         )
+    return edges
+
+
+def _check_rate_band(
+    where: str, table: dict[str, Any], edges: str | None
+) -> dict[str, float | None]:
     stated = set(_PACE_RATES) & set(table)
     if stated and stated != set(_PACE_RATES):
         raise VoiceError(
@@ -393,46 +416,55 @@ def check_pace(where: str, table: dict[str, Any]) -> Pace:
             f"{sorted(set(_PACE_RATES) - stated)}. The band is a measured pace "
             "and the two edges derived from it; write all three or none"
         )
-    rates: dict[str, float | None] = dict.fromkeys(_PACE_RATES)
-    if stated:
-        rates = {key: _number(where, key, table[key]) for key in _PACE_RATES}
-        for key, value in rates.items():
-            if value <= 0:
-                raise VoiceError(f"{where}: {key} must be positive, got {value}")
-        if not (
-            rates["min_chars_per_sec"]
-            < rates["pace_chars_per_sec"]
-            < rates["max_chars_per_sec"]
-        ):
+    if not stated:
+        if edges is not None:
             raise VoiceError(
-                f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
-                f"pace_chars_per_sec {rates['pace_chars_per_sec']}, "
-                f"max_chars_per_sec {rates['max_chars_per_sec']} are out of order; "
-                "the band is min < pace < max"
+                f"{where}: states {_PACE_EDGES} = {edges!r} but states no rate "
+                "band for it to describe; the key says how max_chars_per_sec and "
+                "min_chars_per_sec were got, and there are none"
             )
-
-        long_side = rates["max_chars_per_sec"] / rates["pace_chars_per_sec"]
-        short_side = rates["pace_chars_per_sec"] / rates["min_chars_per_sec"]
-        rounding = _PACE_HALF_ULP * (1 + long_side) / rates[
-            "pace_chars_per_sec"
-        ] + _PACE_HALF_ULP * (1 + short_side) / rates["min_chars_per_sec"]
-        if edges is None and abs(long_side - short_side) > rounding:
-            raise VoiceError(
-                f"{where}: the band is not symmetric — max_chars_per_sec is "
-                f"{long_side:.3f} x pace_chars_per_sec but pace_chars_per_sec "
-                f"is only {short_side:.3f} x min_chars_per_sec, further apart "
-                f"than two-decimal rounding allows ({rounding:.4f}). The two "
-                "edges are derived from the measured pace, so both ratios are "
-                "the same number; a band whose edges came off a distribution "
-                f'instead says so with {_PACE_EDGES} = "percentile"'
-            )
-    elif edges is not None:
+        return dict.fromkeys(_PACE_RATES)
+    rates = {key: _number(where, key, table[key]) for key in _PACE_RATES}
+    for key, value in rates.items():
+        if value <= 0:
+            raise VoiceError(f"{where}: {key} must be positive, got {value}")
+    if not (
+        rates["min_chars_per_sec"]
+        < rates["pace_chars_per_sec"]
+        < rates["max_chars_per_sec"]
+    ):
         raise VoiceError(
-            f"{where}: states {_PACE_EDGES} = {edges!r} but states no rate "
-            "band for it to describe; the key says how max_chars_per_sec and "
-            "min_chars_per_sec were got, and there are none"
+            f"{where}: min_chars_per_sec {rates['min_chars_per_sec']}, "
+            f"pace_chars_per_sec {rates['pace_chars_per_sec']}, "
+            f"max_chars_per_sec {rates['max_chars_per_sec']} are out of order; "
+            "the band is min < pace < max"
+        )
+    if edges is None:
+        _check_symmetric(where, rates)
+    return dict(rates)
+
+
+def _check_symmetric(where: str, rates: dict[str, float]) -> None:
+    long_side = rates["max_chars_per_sec"] / rates["pace_chars_per_sec"]
+    short_side = rates["pace_chars_per_sec"] / rates["min_chars_per_sec"]
+    rounding = _PACE_HALF_ULP * (1 + long_side) / rates[
+        "pace_chars_per_sec"
+    ] + _PACE_HALF_ULP * (1 + short_side) / rates["min_chars_per_sec"]
+    if abs(long_side - short_side) > rounding:
+        raise VoiceError(
+            f"{where}: the band is not symmetric — max_chars_per_sec is "
+            f"{long_side:.3f} x pace_chars_per_sec but pace_chars_per_sec "
+            f"is only {short_side:.3f} x min_chars_per_sec, further apart "
+            f"than two-decimal rounding allows ({rounding:.4f}). The two "
+            "edges are derived from the measured pace, so both ratios are "
+            "the same number; a band whose edges came off a distribution "
+            f'instead says so with {_PACE_EDGES} = "percentile"'
         )
 
+
+def _check_packing(
+    where: str, table: dict[str, Any]
+) -> tuple[int | None, int | None, int | None]:
     target = table.get("target_chars")
     floor = table.get("safe_min_chars")
     ceiling = table.get("safe_max_chars")
@@ -461,14 +493,7 @@ def check_pace(where: str, table: dict[str, Any]) -> Pace:
             f"{ceiling}; the floor is what lets two short paragraphs merge, and a "
             "floor at the ceiling is how a 400-character chunk ships alone"
         )
-    return Pace(
-        pace_chars_per_sec=rates["pace_chars_per_sec"],
-        max_chars_per_sec=rates["max_chars_per_sec"],
-        min_chars_per_sec=rates["min_chars_per_sec"],
-        target_chars=target,
-        safe_min_chars=floor,
-        safe_max_chars=ceiling,
-    )
+    return target, floor, ceiling
 
 
 @dataclass(frozen=True)
@@ -505,39 +530,43 @@ def _check_source(where: str, block: dict[str, Any]) -> _Source:
             "hf_repo + revision (a pin) or path + identity (a directory on the "
             "machine that serves it); see PHASE18-UNCERTIFIED.md section 3"
         )
+    return _pinned_source(where, block) if pinned else _local_source(where, block)
 
-    if pinned:
-        for key in ("path", "identity"):
-            if not _blank(block.get(key)):
-                raise VoiceError(
-                    f"{where}: is a pinned block and also carries {key}. A pin's "
-                    "identity is its revision, which is VERIFIED — the sha is what "
-                    f"was fetched — so a second {key} beside it would be a fact with "
-                    "two owners"
-                )
-        if not HF_REPO_PATTERN.match(block["hf_repo"]):
+
+def _pinned_source(where: str, block: dict[str, Any]) -> _Source:
+    for key in ("path", "identity"):
+        if not _blank(block.get(key)):
             raise VoiceError(
-                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
-                "HuggingFace repo id"
+                f"{where}: is a pinned block and also carries {key}. A pin's "
+                "identity is its revision, which is VERIFIED — the sha is what "
+                f"was fetched — so a second {key} beside it would be a fact with "
+                "two owners"
             )
-        if _blank(block.get("revision")):
-            raise VoiceError(
-                f"{where}: declares hf_repo {block['hf_repo']!r} and no revision. A "
-                "pin is a repo AND a commit; `PUT /v1/voices/{id}` is the door that "
-                "may omit one, and it resolves it before the manifest is written"
-            )
-        if not REVISION_PATTERN.match(block["revision"]):
-            raise VoiceError(
-                f"{where}: revision {block['revision']!r} must be a full 40-character "
-                "commit sha, so a pull is reproducible; branch names are not pins"
-            )
-        return _Source(
-            hf_repo=block["hf_repo"],
-            revision=block["revision"],
-            path=None,
-            identity=None,
+    if not HF_REPO_PATTERN.match(block["hf_repo"]):
+        raise VoiceError(
+            f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
+            "HuggingFace repo id"
         )
+    if _blank(block.get("revision")):
+        raise VoiceError(
+            f"{where}: declares hf_repo {block['hf_repo']!r} and no revision. A "
+            "pin is a repo AND a commit; `PUT /v1/voices/{id}` is the door that "
+            "may omit one, and it resolves it before the manifest is written"
+        )
+    if not REVISION_PATTERN.match(block["revision"]):
+        raise VoiceError(
+            f"{where}: revision {block['revision']!r} must be a full 40-character "
+            "commit sha, so a pull is reproducible; branch names are not pins"
+        )
+    return _Source(
+        hf_repo=block["hf_repo"],
+        revision=block["revision"],
+        path=None,
+        identity=None,
+    )
 
+
+def _local_source(where: str, block: dict[str, Any]) -> _Source:
     for key in ("hf_repo", "revision"):
         if not _blank(block.get(key)):
             raise VoiceError(
@@ -701,6 +730,17 @@ def _check_serving(
             "shipped width is 16 — so a reader of a /v1/voices row has to be "
             "able to find out where it came from"
         )
+    return Serving(
+        max_num_seqs=block["max_num_seqs"],
+        max_num_seqs_note=block["max_num_seqs_note"],
+        mem_fraction=_check_mem_fraction(where, block),
+        mem_fraction_note=block.get("mem_fraction_note"),
+        context_length=_check_context_length(where, block),
+        context_length_note=block.get("context_length_note"),
+    )
+
+
+def _check_mem_fraction(where: str, block: dict[str, Any]) -> float | None:
     mem_fraction = _check_serving_extra(
         where, block, "mem_fraction",
         "the fraction is preallocated as KV on top of the weights whatever the "
@@ -716,6 +756,10 @@ def _check_serving(
                 "narrator's launcher refuses anything else by name "
                 "(serve_higgs_sgl.sh)"
             )
+    return mem_fraction
+
+
+def _check_context_length(where: str, block: dict[str, Any]) -> int | None:
     context_length = _check_serving_extra(
         where, block, "context_length",
         "4096 is the engine builder's class attribute and holds about 2,000 "
@@ -726,14 +770,7 @@ def _check_serving(
         raise VoiceError(
             f"{where}: context_length must be positive, got {context_length}"
         )
-    return Serving(
-        max_num_seqs=block["max_num_seqs"],
-        max_num_seqs_note=block["max_num_seqs_note"],
-        mem_fraction=mem_fraction,
-        mem_fraction_note=block.get("mem_fraction_note"),
-        context_length=context_length,
-        context_length_note=block.get("context_length_note"),
-    )
+    return context_length
 
 
 def _check_serving_extra(
@@ -805,7 +842,39 @@ def _check_takes(
     return tuple(takes)
 
 
-def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManifest:
+def parse_document(
+    document: dict[str, Any], path: Path, expected_id: str
+) -> VoiceManifest:
+    voice = _voice_table(document, path)
+    weights_of = _check_weights_of(path, voice)
+    _check_scalars(path, voice, expected_id)
+    narrator_engine = voice["narrator_engine"]
+    if "pace" in voice and not isinstance(voice["pace"], dict):
+        raise VoiceError(f"{path.name}: [voice.pace] must be a table")
+    pace = check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
+    serving = _check_serving(path, voice, narrator_engine)
+    backends = _check_backends(path, voice, pace)
+    takes = _check_takes(path, voice, narrator_engine)
+    return VoiceManifest(
+        id=voice["id"],
+        display=voice["display"],
+        kind=voice["kind"],
+        narrator_engine=narrator_engine,
+        language=voice["language"],
+        sample_rate=voice["sample_rate"],
+        pace=pace,
+        serving=serving,
+        backends=backends,
+        takes=takes,
+        path=path,
+        weights_of=weights_of,
+    )
+
+
+_parse = parse_document
+
+
+def _voice_table(document: dict[str, Any], path: Path) -> dict[str, Any]:
     unknown = sorted(set(document) - {"voice"})
     if unknown:
         raise VoiceError(
@@ -817,30 +886,25 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
     voice = document["voice"]
     if not isinstance(voice, dict):
         raise VoiceError(f"{path.name}: [voice] must be a table")
+    return voice
 
-    scalars = {
-        key: value for key, value in voice.items()
-        if key not in ("pace", "serving", "backends", "takes", "weights_of")
-    }
+
+def _check_weights_of(path: Path, voice: dict[str, Any]) -> str | None:
     weights_of = voice.get("weights_of")
     if weights_of is not None and not (
         isinstance(weights_of, str) and VOICE_ID_PATTERN.match(weights_of)
     ):
         raise VoiceError(f"{path.name}: voice.weights_of {weights_of!r} is not a voice id")
-    check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
+    return weights_of
 
-    voice_id = voice["id"]
-    if not VOICE_ID_PATTERN.match(voice_id):
-        raise VoiceError(
-            f"{path.name}: voice.id {voice_id!r} must be lower-case, start with "
-            "a letter or digit and be at most 64 characters "
-            "([a-z0-9][a-z0-9._-]{0,63})"
-        )
-    if voice_id != expected_id:
-        raise VoiceError(
-            f"{path.name}: voice.id is {voice_id!r} but the file is named "
-            f"{expected_id!r}; the id and the filename are the same thing"
-        )
+
+def _check_scalars(path: Path, voice: dict[str, Any], expected_id: str) -> None:
+    scalars = {
+        key: value for key, value in voice.items()
+        if key not in ("pace", "serving", "backends", "takes", "weights_of")
+    }
+    check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
+    _check_voice_id(path, voice["id"], expected_id)
     if voice["kind"] not in VOICE_KINDS:
         raise VoiceError(
             f"{path.name}: voice.kind {voice['kind']!r} is not a voice kind; the "
@@ -860,11 +924,24 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
             f"{voice['sample_rate']}"
         )
 
-    if "pace" in voice and not isinstance(voice["pace"], dict):
-        raise VoiceError(f"{path.name}: [voice.pace] must be a table")
-    pace = check_pace(f"{path.name} [voice.pace]", voice.get("pace", {}))
-    serving = _check_serving(path, voice, narrator_engine)
 
+def _check_voice_id(path: Path, voice_id: str, expected_id: str) -> None:
+    if not VOICE_ID_PATTERN.match(voice_id):
+        raise VoiceError(
+            f"{path.name}: voice.id {voice_id!r} must be lower-case, start with "
+            "a letter or digit and be at most 64 characters "
+            "([a-z0-9][a-z0-9._-]{0,63})"
+        )
+    if voice_id != expected_id:
+        raise VoiceError(
+            f"{path.name}: voice.id is {voice_id!r} but the file is named "
+            f"{expected_id!r}; the id and the filename are the same thing"
+        )
+
+
+def _check_backends(
+    path: Path, voice: dict[str, Any], pace: Pace
+) -> dict[str, VoiceBackendSpec]:
     if "backends" not in voice:
         raise VoiceError(f"{path.name}: missing every [voice.backends.<kind>] table")
     backends_table = voice["backends"]
@@ -876,104 +953,102 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> VoiceManif
         raise VoiceError(
             f"{path.name}: no backend blocks; a voice nothing can serve is not a voice"
         )
-
-    backends: dict[str, VoiceBackendSpec] = {}
-    for kind, block in backends_table.items():
-        where = f"{path.name} [voice.backends.{kind}]"
-        if kind not in VOICE_BACKENDS:
-            raise VoiceError(
-                f"{where}: {kind!r} is not a Crucible backend; the backends are "
-                f"{sorted(VOICE_BACKENDS)}"
-            )
-        if not isinstance(block, dict):
-            raise VoiceError(f"{where}: must be a table")
-        check_table(
-            where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VoiceError
+    return {
+        kind: _check_backend(
+            f"{path.name} [voice.backends.{kind}]", kind, block, voice, pace
         )
+        for kind, block in backends_table.items()
+    }
 
-        source = _check_source(where, block)
-        if block["memory_bytes_estimate"] <= 0:
-            raise VoiceError(
-                f"{where}: memory_bytes_estimate must be positive, got "
-                f"{block['memory_bytes_estimate']}"
-            )
-        basis = block["estimate_basis"]
-        if basis not in ESTIMATE_BASES:
-            raise VoiceError(
-                f"{where}: estimate_basis {basis!r} is not one of "
-                f"{sorted(ESTIMATE_BASES)}"
-            )
-        note = block.get("estimate_note")
-        if basis == "declared" and (note is None or note.strip() == ""):
-            raise VoiceError(
-                f"{where}: estimate_basis is 'declared' and there is no "
-                "estimate_note. A declared number came from somewhere — an engine's "
-                "configured reservation, a sibling voice's measurement — and the "
-                "reader of a `/v1/voices` row has to be able to find out where"
-            )
-        if basis == "measured" and note is not None:
-            raise VoiceError(
-                f"{where}: estimate_basis is 'measured' and it also carries an "
-                "estimate_note. Put the measurement in a comment beside the number, "
-                "the way the model manifests do; estimate_note is what a DECLARED "
-                "number owes, and a row carrying one for a measured number would "
-                "read as an excuse"
-            )
-        max_chars = block.get("max_chars")
-        if max_chars is not None:
-            if max_chars <= 0:
-                raise VoiceError(
-                    f"{where}: max_chars must be positive, got {max_chars}"
-                )
-            if pace.safe_max_chars is not None and pace.safe_max_chars > max_chars:
-                raise VoiceError(
-                    f"{where}: this backend caps the voice at {max_chars} "
-                    f"characters, but [voice.pace] packs up to safe_max_chars "
-                    f"{pace.safe_max_chars}. The band may never exceed the arm's "
-                    "cap — the same rule BookForge and narrator both refuse on"
-                )
-            if pace.target_chars is not None and pace.target_chars > max_chars:
-                raise VoiceError(
-                    f"{where}: this backend caps the voice at {max_chars} "
-                    f"characters, but [voice.pace] packs to target_chars "
-                    f"{pace.target_chars}"
-                )
-        if not isinstance(block["sampling"], dict):
-            raise VoiceError(f"{where}: sampling must be a table")
-        sampling, reason = _check_sampling(where, block, narrator_engine)
-        clips = _check_clips(where, block, voice["kind"])
 
-        backends[kind] = VoiceBackendSpec(
-            backend=kind,
-            hf_repo=source.hf_repo,
-            revision=source.revision,
-            path=source.path,
-            identity=source.identity,
-            memory_bytes_estimate=block["memory_bytes_estimate"],
-            estimate_basis=basis,
-            estimate_note=note,
-            max_chars=max_chars,
-            sampling=sampling,
-            sampling_reason=reason,
-            clips=clips,
+def _check_backend(
+    where: str, kind: str, block: Any, voice: dict[str, Any], pace: Pace
+) -> VoiceBackendSpec:
+    if kind not in VOICE_BACKENDS:
+        raise VoiceError(
+            f"{where}: {kind!r} is not a Crucible backend; the backends are "
+            f"{sorted(VOICE_BACKENDS)}"
         )
-
-    takes = _check_takes(path, voice, narrator_engine)
-
-    return VoiceManifest(
-        id=voice_id,
-        display=voice["display"],
-        kind=voice["kind"],
-        narrator_engine=narrator_engine,
-        language=voice["language"],
-        sample_rate=voice["sample_rate"],
-        pace=pace,
-        serving=serving,
-        backends=backends,
-        takes=takes,
-        path=path,
-        weights_of=weights_of,
+    if not isinstance(block, dict):
+        raise VoiceError(f"{where}: must be a table")
+    check_table(
+        where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VoiceError
     )
+    source = _check_source(where, block)
+    basis, note = _check_estimate(where, block)
+    max_chars = _check_max_chars(where, block, pace)
+    if not isinstance(block["sampling"], dict):
+        raise VoiceError(f"{where}: sampling must be a table")
+    sampling, reason = _check_sampling(where, block, voice["narrator_engine"])
+    return VoiceBackendSpec(
+        backend=kind,
+        hf_repo=source.hf_repo,
+        revision=source.revision,
+        path=source.path,
+        identity=source.identity,
+        memory_bytes_estimate=block["memory_bytes_estimate"],
+        estimate_basis=basis,
+        estimate_note=note,
+        max_chars=max_chars,
+        sampling=sampling,
+        sampling_reason=reason,
+        clips=_check_clips(where, block, voice["kind"]),
+    )
+
+
+def _check_estimate(where: str, block: dict[str, Any]) -> tuple[str, str | None]:
+    if block["memory_bytes_estimate"] <= 0:
+        raise VoiceError(
+            f"{where}: memory_bytes_estimate must be positive, got "
+            f"{block['memory_bytes_estimate']}"
+        )
+    basis = block["estimate_basis"]
+    if basis not in ESTIMATE_BASES:
+        raise VoiceError(
+            f"{where}: estimate_basis {basis!r} is not one of "
+            f"{sorted(ESTIMATE_BASES)}"
+        )
+    note = block.get("estimate_note")
+    if basis == "declared" and (note is None or note.strip() == ""):
+        raise VoiceError(
+            f"{where}: estimate_basis is 'declared' and there is no "
+            "estimate_note. A declared number came from somewhere — an engine's "
+            "configured reservation, a sibling voice's measurement — and the "
+            "reader of a `/v1/voices` row has to be able to find out where"
+        )
+    if basis == "measured" and note is not None:
+        raise VoiceError(
+            f"{where}: estimate_basis is 'measured' and it also carries an "
+            "estimate_note. Put the measurement in a comment beside the number, "
+            "the way the model manifests do; estimate_note is what a DECLARED "
+            "number owes, and a row carrying one for a measured number would "
+            "read as an excuse"
+        )
+    return basis, note
+
+
+def _check_max_chars(where: str, block: dict[str, Any], pace: Pace) -> int | None:
+    max_chars = block.get("max_chars")
+    if max_chars is None:
+        return None
+    if max_chars <= 0:
+        raise VoiceError(
+            f"{where}: max_chars must be positive, got {max_chars}"
+        )
+    if pace.safe_max_chars is not None and pace.safe_max_chars > max_chars:
+        raise VoiceError(
+            f"{where}: this backend caps the voice at {max_chars} "
+            f"characters, but [voice.pace] packs up to safe_max_chars "
+            f"{pace.safe_max_chars}. The band may never exceed the arm's "
+            "cap — the same rule BookForge and narrator both refuse on"
+        )
+    if pace.target_chars is not None and pace.target_chars > max_chars:
+        raise VoiceError(
+            f"{where}: this backend caps the voice at {max_chars} "
+            f"characters, but [voice.pace] packs to target_chars "
+            f"{pace.target_chars}"
+        )
+    return max_chars
 
 
 def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
@@ -999,42 +1074,48 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
             if value is not None
         }
 
-    backends: dict[str, Any] = {}
-    for kind, spec in manifest.backends.items():
-        block: dict[str, Any] = {}
-        if spec.hf_repo is not None:
-            block["hf_repo"] = spec.hf_repo
-            block["revision"] = spec.revision
-        else:
-            block["path"] = spec.path
-            block["identity"] = spec.identity
-        block["memory_bytes_estimate"] = spec.memory_bytes_estimate
-        block["estimate_basis"] = spec.estimate_basis
-        if spec.estimate_note is not None:
-            block["estimate_note"] = spec.estimate_note
-        if spec.max_chars is not None:
-            block["max_chars"] = spec.max_chars
-        block["sampling"] = dict(spec.sampling)
-        if spec.sampling_reason is not None:
-            block["sampling_reason"] = spec.sampling_reason
-        if spec.clips is not None:
-            block["clips"] = (
-                spec.clips
-                if isinstance(spec.clips, str)
-                else [clip.to_dict() for clip in spec.clips]
-            )
-        backends[kind] = block
-    voice["backends"] = backends
-
+    voice["backends"] = {
+        kind: _backend_document(spec) for kind, spec in manifest.backends.items()
+    }
     if manifest.takes != (Take(index=0, overrides={}, reason=None),):
-        rungs = []
-        for take in manifest.takes:
-            rung: dict[str, Any] = dict(take.overrides)
-            if take.reason is not None:
-                rung["reason"] = take.reason
-            rungs.append(rung)
-        voice["takes"] = rungs
+        voice["takes"] = [_take_document(take) for take in manifest.takes]
+    return {"voice": voice}, _not_carried(manifest)
 
+
+def _backend_document(spec: VoiceBackendSpec) -> dict[str, Any]:
+    block: dict[str, Any] = {}
+    if spec.hf_repo is not None:
+        block["hf_repo"] = spec.hf_repo
+        block["revision"] = spec.revision
+    else:
+        block["path"] = spec.path
+        block["identity"] = spec.identity
+    block["memory_bytes_estimate"] = spec.memory_bytes_estimate
+    block["estimate_basis"] = spec.estimate_basis
+    if spec.estimate_note is not None:
+        block["estimate_note"] = spec.estimate_note
+    if spec.max_chars is not None:
+        block["max_chars"] = spec.max_chars
+    block["sampling"] = dict(spec.sampling)
+    if spec.sampling_reason is not None:
+        block["sampling_reason"] = spec.sampling_reason
+    if spec.clips is not None:
+        block["clips"] = (
+            spec.clips
+            if isinstance(spec.clips, str)
+            else [clip.to_dict() for clip in spec.clips]
+        )
+    return block
+
+
+def _take_document(take: Take) -> dict[str, Any]:
+    rung: dict[str, Any] = dict(take.overrides)
+    if take.reason is not None:
+        rung["reason"] = take.reason
+    return rung
+
+
+def _not_carried(manifest: VoiceManifest) -> list[str]:
     not_carried: list[str] = []
     if manifest.pace_basis is not None:
         not_carried.append(f"pace_basis = {manifest.pace_basis!r}")
@@ -1043,46 +1124,7 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
     for kind, spec in manifest.backends.items():
         if spec.max_chars_basis is not None:
             not_carried.append(f"backends.{kind}.max_chars_basis = {spec.max_chars_basis!r}")
-    return {"voice": voice}, not_carried
-
-
-def _resolve_weights_of(voices: dict[str, VoiceManifest]) -> dict[str, VoiceManifest]:
-    resolved: dict[str, VoiceManifest] = {}
-    for voice_id, voice in voices.items():
-        if voice.weights_of is None:
-            resolved[voice_id] = voice
-            continue
-        where = voice.path.name
-        base = voices.get(voice.weights_of)
-        if base is None:
-            raise VoiceError(
-                f"{where}: weights_of_unknown: voice {voice_id!r} shares "
-                f"{voice.weights_of!r}, which this host does not serve"
-            )
-        if base.weights_of is not None:
-            raise VoiceError(
-                f"{where}: weights_of_chain: {base.id!r} itself shares {base.weights_of!r}"
-            )
-        for kind, spec in sorted(voice.backends.items()):
-            base_spec = base.backends.get(kind)
-            if base_spec is None:
-                raise VoiceError(
-                    f"{where}: weights_of_backend_missing: {base.id!r} has no {kind} block"
-                )
-            if (spec.hf_repo, spec.revision) != (base_spec.hf_repo, base_spec.revision):
-                raise VoiceError(
-                    f"{where}: weights_of_pin_mismatch on {kind}: "
-                    f"{spec.hf_repo}@{spec.revision} here, "
-                    f"{base_spec.hf_repo}@{base_spec.revision} in {base.id!r}"
-                )
-        resolved[voice_id] = replace(voice, weights_base=base)
-    return resolved
-
-
-def voice_aliases_of(base: VoiceManifest) -> tuple[VoiceManifest, ...]:
-    if base.weights_of is not None:
-        return ()
-    return tuple(v for v in load_all_voices().values() if v.weights_of == base.id)
+    return not_carried
 
 
 def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
@@ -1090,108 +1132,40 @@ def parse_voice(text: str, path: Path, expected_id: str) -> VoiceManifest:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise VoiceError(f"{path.name}: not valid TOML: {exc}") from exc
-    return _parse(document, path, expected_id)
+    return parse_document(document, path, expected_id)
 
 
-def unserved_pins() -> dict[str, tuple[str, str]]:
-    from . import voicerepo
-
-    _, refused = voicerepo.load_pinned()
-    served = load_all_voices()
-    return {
-        voice_id: (pin.revision, why)
-        for voice_id, (pin, why) in refused.items()
-        if voice_id not in served
-    }
-
-
-def load_voice(voice_id: str, directory: Path | None = None) -> VoiceManifest:
-    if directory is not None:
-        found = _load_voice_file(directory / f"{voice_id}.toml", voice_id)
-        if found.weights_of is None:
-            return found
-        return load_all_voices(directory)[voice_id]
-    served = load_all_voices()
-    found = served.get(voice_id)
-    if found is None:
-        unserved = unserved_pins().get(voice_id)
-        if unserved is not None:
-            raise VoiceError(unserved[1])
-        where = ", ".join(str(r) for r in voice_dirs()) or str(home_voices_dir())
-        raise VoiceError(
-            f"no manifest for voice {voice_id!r} in {where}; this host serves "
-            f"{sorted(served)}"
-        )
-    return found
-
-
-def _load_voice_file(path: Path, voice_id: str) -> VoiceManifest:
-    if not path.is_file():
-        known = (
-            sorted(p.stem for p in path.parent.glob("*.toml"))
-            if path.parent.is_dir()
-            else []
-        )
-        raise VoiceError(
-            f"no manifest for voice {voice_id!r} at {path}; that directory holds "
-            f"{known}"
-        )
+def parse_engine_base(text: str, path: Path, engine: str) -> dict[str, VoiceManifest]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise VoiceError(f"could not read {path}: {exc}") from exc
-    return parse_voice(text, path, voice_id)
-
-
-def load_all_voices(directory: Path | None = None) -> dict[str, VoiceManifest]:
-    if directory is not None:
-        return _resolve_weights_of(dict(sorted(_voices_in(directory).items())))
-    from . import voicerepo
-
-    voices: dict[str, VoiceManifest] = {}
-    voices.update(voicerepo.pinned_voices())
-    if not voices_dir_is_overridden():
-        voices.update(_engine_voices())
-    for root in voice_dirs():
-        voices.update(_voices_in(root))
-    return _resolve_weights_of({vid: voices[vid] for vid in sorted(voices)})
-
-
-def _engine_voices() -> dict[str, VoiceManifest]:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise VoiceError(f"{path}: not valid TOML: {exc}") from exc
+    unknown = sorted(set(document) - {"voices"})
+    if unknown:
+        raise VoiceError(
+            f"{path.name}: unknown top-level table(s) {unknown}; an engine's "
+            "base rows are exactly [voices.<id>], one table per row"
+        )
+    table = document.get("voices")
+    if not isinstance(table, dict) or not table:
+        raise VoiceError(
+            f"{path.name}: declares no [voices.<id>] table. A base file with "
+            "no rows in it is a file nothing reads; delete it instead"
+        )
     found: dict[str, VoiceManifest] = {}
-    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
-        path = engine_voices_path(engine)
-        if not path.is_file():
-            continue
-        try:
-            document = tomllib.loads(path.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise VoiceError(f"{path}: not valid TOML: {exc}") from exc
-        unknown = sorted(set(document) - {"voices"})
-        if unknown:
+    for voice_id in sorted(table):
+        block = table[voice_id]
+        if not isinstance(block, dict):
+            raise VoiceError(f"{path.name}: [voices.{voice_id}] must be a table")
+        manifest = parse_document({"voice": block}, path, voice_id)
+        if manifest.narrator_engine != engine:
             raise VoiceError(
-                f"{path.name}: unknown top-level table(s) {unknown}; an engine's "
-                "base rows are exactly [voices.<id>], one table per row"
+                f"{path.name}: [voices.{voice_id}] names narrator_engine "
+                f"{manifest.narrator_engine!r} but sits under {engine!r}. A "
+                "base row is the engine's own behaviour, so the directory it "
+                "is in and the engine it names are one fact"
             )
-        table = document.get("voices")
-        if not isinstance(table, dict) or not table:
-            raise VoiceError(
-                f"{path.name}: declares no [voices.<id>] table. A base file with "
-                "no rows in it is a file nothing reads; delete it instead"
-            )
-        for voice_id in sorted(table):
-            block = table[voice_id]
-            if not isinstance(block, dict):
-                raise VoiceError(f"{path.name}: [voices.{voice_id}] must be a table")
-            manifest = _parse({"voice": block}, path, voice_id)
-            if manifest.narrator_engine != engine:
-                raise VoiceError(
-                    f"{path.name}: [voices.{voice_id}] names narrator_engine "
-                    f"{manifest.narrator_engine!r} but sits under {engine!r}. A "
-                    "base row is the engine's own behaviour, so the directory it "
-                    "is in and the engine it names are one fact"
-                )
-            found[voice_id] = replace(manifest, manifest_source=MANIFEST_ENGINE)
+        found[voice_id] = replace(manifest, manifest_source=MANIFEST_ENGINE)
     return found
 
 
@@ -1214,7 +1188,7 @@ def home_voice_path(voice_id: str) -> Path:
 
 def write_home_voice(voice_id: str, document: dict[str, Any]) -> VoiceManifest:
     path = home_voice_path(voice_id)
-    manifest = _parse(document, path, voice_id)
+    manifest = parse_document(document, path, voice_id)
 
     try:
         text = tomli_w.dumps(document)
@@ -1253,12 +1227,20 @@ def remove_home_voice(voice_id: str) -> bool:
     return True
 
 
-def _voices_in(root: Path) -> dict[str, VoiceManifest]:
-    voices: dict[str, VoiceManifest] = {}
-    for path in sorted(root.glob("*.toml"), key=lambda p: p.stem):
-        if path.name == PINS_FILE:
-            continue
-        voices[path.stem] = replace(
-            _load_voice_file(path, path.stem), manifest_source=MANIFEST_OVERRIDE
-        )
-    return voices
+_MOVED_TO_VOICECATALOG: dict[str, str] = {
+    "load_all_voices": "load_all_voices",
+    "load_voice": "load_voice",
+    "unserved_pins": "unserved_pins",
+    "voice_aliases_of": "voice_aliases_of",
+    "_resolve_weights_of": "resolve_weights_of",
+    "_engine_voices": "engine_voices",
+    "_voices_in": "voices_in",
+    "_load_voice_file": "load_voice_file",
+}
+
+
+def __getattr__(name: str) -> Any:
+    moved = _MOVED_TO_VOICECATALOG.get(name)
+    if moved is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(import_module(f"{__package__}.voicecatalog"), moved)

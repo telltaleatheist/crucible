@@ -1,8 +1,8 @@
 # Voices
 
 How a voice is described, where its description comes from, and how narrator is
-configured to serve it. Modules: `voices`, `voicerepo`, `voicecard`,
-`voicereference`, `narratorvoices`, `engines/narrator`, `engines/higgs-v3/base.toml`,
+configured to serve it. Modules: `voices`, `voicerepo`, `voicecatalog`,
+`voicecard`, `voicereference`, `narratorvoices`, `engines/narrator`, `engines/higgs-v3/base.toml`,
 `voices/pins.toml`.
 
 Crucible ships no voices. It downloads them, and a voice's facts come down with
@@ -17,9 +17,28 @@ its weights.
   because it becomes a file name. Voices, pins and home overlays use the same
   rule.
 
+## Layers
+
+- `voices` parses: the manifest schema, `parse_document`, `parse_voice`,
+  `parse_engine_base`, overlay writes and the directory paths. It imports
+  neither `voicerepo` nor `voicecatalog`.
+- `voicerepo` reads and writes pins, fetches a pin's `crucible-voice.toml`
+  and merges it with this machine's footprint (`merge`, `voice_for_pin`,
+  `load_pinned`). It imports `voices` and nothing above it.
+- `voicecatalog` sits above both and owns "which voices exist": the load
+  order below, `load_voice`, `unserved_pins`, `resolve_weights_of`, and the
+  build's **declared** voices for the module generator
+  (`declared_voice_ids`, `declared_voice_backends`). `catalog` calls only
+  these public functions.
+- `voices.load_all_voices`, `load_voice`, `unserved_pins` and
+  `voice_aliases_of` still resolve for one release through a module
+  `__getattr__` that imports `voicecatalog` on first use, so the import graph
+  has no `voices` ↔ `voicecatalog` edge. New code imports them from
+  `voicecatalog`; the re-exports go next tier.
+
 ## Sources and precedence
 
-`voices.load_all_voices` is the single owner of the order. Lowest precedence first:
+`voicecatalog.load_all_voices` is the single owner of the order. Lowest precedence first:
 
 1. **Pins**: `crucible/voices/pins.toml` (what this build offers) plus
    `<home>/voices/pins.toml` (what this machine chose). The home file wins per
@@ -27,7 +46,7 @@ its weights.
    the pinned revision.
 2. **Engine base rows**: `crucible/engines/<engine>/base.toml`
    `[voices.<id>]` tables (`higgs-default`, `zeroshot`), each parsed by the same
-   `_parse` as any voice.
+   `parse_document` as any voice.
 3. **Overlay**: `<home>/voices/*.toml`, which `PUT /v1/voices/{id}` with a
    `voice` body writes.
 
@@ -41,6 +60,13 @@ its weights.
 - `pins.toml` is a reserved name in the voices directory.
 - Voices are listed in id order by file **stem**, not by path, because `-` sorts
   before `.`: `zeroshot` and `zeroshot-deathstalker` would otherwise swap.
+- `resolve_weights_of` checks every `weights_of` against the loaded set and
+  hands each base the aliases it resolved (`VoiceManifest.weights_aliases`),
+  so `aliases()` answers from the same load instead of loading again.
+- **Declared voices** are what this build ships, whatever the machine chose:
+  the packaged pins, the engine base rows and the packaged voices directory.
+  A packaged pin's backends are its repo manifest's arms, read through the
+  same fetch order and `<home>/voice-manifests` cache as a served pin.
 - `higgs-default` and `zeroshot` are never pinned. They sit on Boson's
   `bosonai/higgs-tts-3-4b`, which cannot carry a manifest, and they are the
   engine's own base behaviour rather than trained voices.
@@ -61,7 +87,7 @@ revision = "<40-hex sha>"
   undo a deliberate repin.
 - The door calls `voice_for_pin` **before** writing, so a pin that cannot load
   is never stored.
-- Writes are validated by the same `_parse_pins` and made atomically. A
+- Writes are validated by the same `parse_pins` and made atomically. A
   half-written pins file breaks every voice.
 - Removing a home row restores the packaged pin, which is why trying a new
   checkpoint is safe.
@@ -77,12 +103,16 @@ parsed.
   `memory_bytes_estimate`, `estimate_basis`, `estimate_note`,
   `[voice.serving]` and `backends` are each refused by name. The pin supplies
   the id, and the machine's `config.toml` `[tts.<engine>]` supplies the
-  footprint and serving levers (`voicerepo.merge`).
+  footprint and serving levers (`voicerepo.merge`). `merge` takes them from
+  `EngineFootprint.to_dict()`: the `voices.SERVING_KEYS` go to
+  `[voice.serving]` (Higgs v3 only), the rest to every arm.
+- `RepoManifest.voice` is a `VoiceDocument`: exactly `display`, `kind`,
+  `narrator_engine`, `language` and `sample_rate`.
 - The repo schema says `[voice.arms.<backend>]` where the internal schema says
   `[voice.backends.<kind>]`. The name difference is deliberate, so neither
   file can be mistaken for the other.
 - `merge` translates into the internal **document** and runs the same
-  `voices._parse`, so every pace, sampling, clips, takes and cap rule
+  `voices.parse_document`, so every pace, sampling, clips, takes and cap rule
   applies unchanged.
 - An unknown `schema` version is refused. Crucible never reads only the keys
   it recognises.
@@ -190,9 +220,9 @@ A job sends `take: N`. The server decides what take N means.
 
 ### Overlay writes
 
-`write_home_voice` parses the document with `_parse` at its target path,
+`write_home_voice` parses the document with `parse_document` at its target path,
 round-trips it through `tomli_w`, and writes it atomically. `voice_document` is
-`_parse`'s inverse and names what an override cannot carry (`pace_basis`,
+`parse_document`'s inverse and names what an override cannot carry (`pace_basis`,
 `inherited_from`, per-arm `max_chars_basis`). Voice ids must match
 `^[a-z0-9][a-z0-9._-]{0,63}$`, so a request id can never become a path.
 
@@ -264,6 +294,10 @@ round-trips it through `tomli_w`, and writes it atomically. `voice_document` is
   2026-09-15: take 0 and take 1 were byte-identical).
 
 ## The narrator voices document (`narratorvoices`)
+
+Its refusals are `NarratorVoicesError`, an `errors.EngineError`, so the tts
+job reports them as `engine_failed` without `narratorvoices` importing the
+engines package. `engines.base` re-exports `EngineError` for its callers.
 
 A Higgs v3 voice is a **name** in the JSON file `NARRATOR_HIGGS_VOICES`
 points to, never a directory on the `load` message. The document is written

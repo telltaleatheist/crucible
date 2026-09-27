@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import procgroup
-from ..errors import JobCancelled
+from ..errors import EngineError, JobCancelled
 from ..narratorengines import HIGGS_V3, VoicesDocumentView
-from .base import LOG_TAIL_LINES, EngineError, SubprocessEngine, find_free_port
+from .base import LOG_TAIL_LINES, SubprocessEngine, find_free_port
 
 MODULE = "narrator.serve"
 
