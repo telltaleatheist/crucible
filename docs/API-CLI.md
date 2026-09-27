@@ -218,7 +218,7 @@ crucible api decide --model qwen3.5-9b --state @ticket.txt --yesno refund "The c
 crucible api decide --model <image-capable id> --image page.png --choice kind "What kind of page is this?" chapter="A chapter opening" body="Running prose"
 ```
 
-`POST /v1/decide` (PHASE22-DECIDE.md, 2026-09-23): a probability distribution over
+`POST /v1/decide` (history/PHASE22-DECIDE.md, 2026-09-23): a probability distribution over
 each question's fixed answers, read off one forward pass of the resident model. The
 grammar is **snap's own** (`snap decide`), so a person moving from snap types the
 same thing against a different address. `--choice`, `--score` and `--yesno` repeat
@@ -246,7 +246,7 @@ crucible api align --model qwen3-aligner --language en \
   --window 1 @window-001.txt window-001.flac --follow --out alignment.json
 ```
 
-The `align` job (PHASE4-AUDIO.md section 2) behind a verb of its own (Owen,
+The `align` job (history/PHASE4-AUDIO.md section 2) behind a verb of its own (Owen,
 2026-09-24): transcription's sibling, where the caller supplies the words. Every
 `--window` is uploaded and named `<index>.<ext>` and they all go in ONE job, so the
 aligner loads once and a window that fails is reported alone. A window is at most

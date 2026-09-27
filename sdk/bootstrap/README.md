@@ -2,7 +2,7 @@
 
 The app-side installer and ensurer for a **local** [Crucible](https://github.com/telltaleatheist/crucible).
 A local Crucible is a *service* on the machine and no app owns it (Owen, 2026-09-13,
-`docs/PHASE5-APPS.md` section 6.0); an app's whole job is to make sure this machine has
+`docs/history/PHASE5-APPS.md` section 6.0); an app's whole job is to make sure this machine has
 one and make sure it is running. That is this package's whole surface:
 
 ```ts
@@ -30,7 +30,7 @@ endpoint and never learns what a Crucible is.
 ## Where the server lives
 
 Windows is never a backend. On win32 every verb reaches into a WSL2 distro through
-`wsl.exe -d <distro> --exec …`, and **which distro has one rule** (`docs/PHASE14-ENVPACKS.md`
+`wsl.exe -d <distro> --exec …`, and **which distro has one rule** (`docs/history/PHASE14-ENVPACKS.md`
 4b): the distro Crucible owns — `crucible`, imported by `ensureDistro()` — when there is
 one, else the distro the app names, else `no_wsl_distro`. There is still no "the default
 distro": that is whatever `wsl --set-default` last said, and a server read from the wrong
@@ -137,7 +137,7 @@ written. A missing file is `no_local_config`, a state the app shows, not an empt
 
 ## The Windows/WSL facts, each with a test
 
-From Foundry's deleted launcher (`docs/FROM-FOUNDRY-WSL-VLLM.md` section 2), carried
+From Foundry's deleted launcher (`docs/history/FROM-FOUNDRY-WSL-VLLM.md` section 2), carried
 verbatim:
 
 - always `wsl.exe -d <distro> --exec …`, never the implicit shell (it pre-expands `$var`);
@@ -157,7 +157,7 @@ verbatim:
 
 ## The standalone installer
 
-The same sequence, without an app (`docs/PHASE14-ENVPACKS.md` 4a):
+The same sequence, without an app (`docs/history/PHASE14-ENVPACKS.md` 4a):
 
 ```bash
 curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh

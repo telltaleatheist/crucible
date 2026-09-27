@@ -10,7 +10,7 @@ DOCS = ROOT / "docs"
 
 SCANNED = ("crucible", "scripts", "sdk", "docs/internals")
 BARE_NAMES_SCANNED = ("crucible", "scripts", "docs/internals")
-SKIPPED_PARTS = {"__pycache__", "node_modules", "dist", ".git"}
+SKIPPED_PARTS = {"__pycache__", "node_modules", "dist", "build", ".git"}
 TEXT_SUFFIXES = {
     ".py", ".sh", ".ps1", ".md", ".txt", ".toml", ".js", ".ts", ".html", ".css", ".json",
 }

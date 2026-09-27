@@ -6,7 +6,7 @@ in `crucible/asr/*.toml` and `crucible/align/*.toml`.
 
 The Qwen3-ASR plan was [history/PHASE25-QWEN-ASR.md](../history/PHASE25-QWEN-ASR.md) (not maintained); the journal and
 `resume` are [RESUMABLE-JOBS.md](../RESUMABLE-JOBS.md). The original design is
-[PHASE4-AUDIO.md](../PHASE4-AUDIO.md) sections 2 and 3. This file holds what the code alone
+[history/PHASE4-AUDIO.md](../history/PHASE4-AUDIO.md) sections 2 and 3. This file holds what the code alone
 does not say.
 
 ## Standing principles

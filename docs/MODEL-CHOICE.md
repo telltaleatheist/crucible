@@ -79,7 +79,7 @@ So a model choice is per APP, not per machine, and the weights store holds
 whatever any app chose. This is already the shape `/v1/settings`'s
 `local_models` has — a chosen model id per capability — and the settings document
 is per client. What it needs is that **choosing does not evict**: today's
-"a subject is never stored twice on one machine" rule (PHASE15-HOST.md 3.5) is
+"a subject is never stored twice on one machine" rule (history/PHASE15-HOST.md 3.5) is
 about not duplicating ONE subject, and it does not say a machine holds one model
 per class. Nothing has to change for two models to coexist; what has to change is
 that nothing may delete one because another was chosen.
@@ -132,7 +132,7 @@ This exists. `CapabilityClass.routable` is true for exactly the five chat-shaped
 2026-09-23) `generate` — and a routed class
 keeps its local answer whole underneath (`LOCAL_ANSWER_PREFIX`: *"the local
 answer would be: …"*), so routing back loses nothing. Keys live IN the engine and
-apps write them through `/v1/settings` (PHASE15-HOST.md; the apps store no key).
+apps write them through `/v1/settings` (history/PHASE15-HOST.md; the apps store no key).
 
 What is missing is not the machinery, it is the OFFER: a disabled class today
 says "the smallest of 2 qwen3.8 variants is … and there is only … — short by …"
@@ -184,7 +184,7 @@ Two honest things can still be done about the size on that machine:
 `DELETE /v1/catalog/{kind}/{subject_id}` exists, is authenticated, and refuses by
 name in the job door's order (what is wrong with the REQUEST first, then what is
 wrong with this server's STATE, so a misspelled id is not answered with "it is in
-use"). It was built for PHASE15-HOST.md 3.5a, so that the host never reaches into
+use"). It was built for history/PHASE15-HOST.md 3.5a, so that the host never reaches into
 `crucible/weights.py`'s layout from outside.
 
 So Owen's *"they should have a way to delete models from crucible, too. probably
@@ -244,7 +244,7 @@ source (`CatalogCandidates.min_params_b`) against each manifest's `[model] param
 to `capability.NINE_B_FLOOR` (9) on `clean`, `translate`, `simplify` and `analysis`. Their
 candidate lists did not move; `tests/test_decide_lineup.py` asserts them exactly, per
 backend. The new `decide` class has **no floor** — a decision is the one text act a 0.8B
-does well enough to offer (PHASE22-DECIDE.md sections 8a and 2.9) — so it lists every tier.
+does well enough to offer (history/PHASE22-DECIDE.md sections 8a and 2.9) — so it lists every tier.
 
 ## Addendum, 2026-09-26: the precision floor, and width before precision
 

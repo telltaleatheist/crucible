@@ -1,5 +1,5 @@
 /**
- * The Windows/WSL plumbing facts, one test each (docs/FROM-FOUNDRY-WSL-VLLM.md section 2).
+ * The Windows/WSL plumbing facts, one test each (docs/history/FROM-FOUNDRY-WSL-VLLM.md section 2).
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';

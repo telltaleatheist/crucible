@@ -370,7 +370,7 @@ not reported as one. Deltas already yielded before the abort stay yielded.
 ### `decide()`
 
 A probability distribution over each question's fixed answer set, read off one forward
-pass of the resident model (`docs/PHASE22-DECIDE.md`, 2026-09-23 — snap's decision model,
+pass of the resident model (`docs/history/PHASE22-DECIDE.md`, 2026-09-23 — snap's decision model,
 moved into Crucible as a door). You send the ORDER — the state and the questions; the
 prompt that makes an instruct model report a distribution is Crucible's:
 
@@ -515,7 +515,7 @@ for await (const event of crucible.events(jobId)) {
 ```
 
 **The model judges, the server forwards, the client orders** (Owen's ruling of 2026-09-13,
-`docs/PHASE6-REMOTE-RENDER.md`, amending PHASE3-TTS.md). The server measures `seconds`,
+`docs/history/PHASE6-REMOTE-RENDER.md`, amending PHASE3-TTS.md). The server measures `seconds`,
 `chars` and `charsPerSec` and still decides nothing — it never retakes and never re-splits —
 but the judging is not yours either. A chunk that arrives has already been through the
 engine's own retake ladder and been accepted; `guard` is the verdict it reached, forwarded

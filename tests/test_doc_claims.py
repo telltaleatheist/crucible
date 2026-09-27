@@ -7,10 +7,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 CLIENT_TS = ROOT / "sdk" / "ts" / "src" / "client.ts"
-PHASE15 = ROOT / "docs" / "PHASE15-HOST.md"
+PHASE15 = ROOT / "docs" / "history" / "PHASE15-HOST.md"
 MODEL_CHOICE = ROOT / "docs" / "MODEL-CHOICE.md"
 CAPABILITY = ROOT / "crucible" / "capability.py"
-ENVPACKS_DOC = ROOT / "docs" / "PHASE14-ENVPACKS.md"
+ENVPACKS_DOC = ROOT / "docs" / "history" / "PHASE14-ENVPACKS.md"
 
 
 def text(path: Path) -> str:

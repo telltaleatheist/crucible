@@ -56,7 +56,7 @@ UnloadDenoiserParams = UnloadParams
 
 NO_PARAMS = (
     "denoise takes no params — every separation knob is an engine default this "
-    "server does not put on the wire (PHASE4-AUDIO.md section 4.2)"
+    "server does not put on the wire (docs/internals/asr-and-align.md)"
 )
 
 OUTPUT_FORMAT = "WAV"

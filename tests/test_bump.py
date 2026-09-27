@@ -118,7 +118,7 @@ def test_a_version_never_goes_backwards_or_sideways(wanted):
 
 
 def test_a_measurement_is_not_a_version_place():
-    prose = ['docs/PHASE14-ENVPACKS.md']
+    prose = ['docs/history/PHASE14-ENVPACKS.md']
     bumped = {relative for relative, _, _ in bump.PLACES}
     for relative in prose:
         assert relative not in bumped
