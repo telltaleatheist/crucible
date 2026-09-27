@@ -5,15 +5,14 @@ from typing import Any
 
 from fastapi import Request, Response
 
+from ...admission import refuse_lease_on_an_upstream
 from ...errors import ApiError
 from ...inflight import require_act_name
-from ...leases import Leases, require_ttl
+from ...leases import require_ttl
 from ...residency import KIND_NOUNS
-from ...settle import Settlement
 from ..caller import client_agent
 from ..context import AppContext, Routers
 from ..schemas import LeaseOpen
-from ..upstream import _refuse_lease_on_an_upstream
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -27,8 +26,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """Hold whatever is resident (model, voice or aligner) on the card for a run;
         jobs that would move it are refused `409 leased`. A lease never loads anything.
         """
-        leases: Leases = request.app.state.leases
-        _refuse_lease_on_an_upstream(subject_id)
+        refuse_lease_on_an_upstream(subject_id)
         ttl_seconds = require_ttl(body.ttl_seconds)
         act = require_act_name(body.act.strip(), "a lease's `act`")
         async with residency.settled_for(f"a lease on {subject_id!r}"):
@@ -56,34 +54,32 @@ def register(routers: Routers, ctx: AppContext) -> None:
                         ),
                     },
                 )
-            lease = leases.open(
+            lease = ctx.leases.open(
                 kind=resident.kind,
                 subject=subject_id,
                 act=act,
                 client=client_agent(request),
                 ttl_seconds=ttl_seconds,
             )
-        request.app.state.settlement.arm_for_lease_expiry()
+        ctx.settlement.arm_for_lease_expiry()
         return lease.receipt()
 
     @private.post("/leases/{lease_id}/heartbeat")
-    async def heartbeat_lease(request: Request, lease_id: str) -> dict[str, Any]:
+    async def heartbeat_lease(lease_id: str) -> dict[str, Any]:
         """Push the lease's deadline out by its own ttl. A 404 means the lease was
         released or expired and the run is no longer protected.
         """
-        leases: Leases = request.app.state.leases
-        extended = leases.heartbeat(lease_id)
-        request.app.state.settlement.arm_for_lease_expiry()
+        extended = ctx.leases.heartbeat(lease_id)
+        ctx.settlement.arm_for_lease_expiry()
         return {"expires_at": extended.expires_at.isoformat()}
 
     @private.delete("/leases/{lease_id}", status_code=204)
-    async def release_lease(request: Request, lease_id: str) -> Response:
+    async def release_lease(lease_id: str) -> Response:
         """Release the lease; if nothing else holds the card, it is cleared before this
         answers.
         """
-        leases: Leases = request.app.state.leases
-        settlement: Settlement = request.app.state.settlement
-        leases.release(lease_id)
+        settlement = ctx.settlement
+        ctx.leases.release(lease_id)
         settlement.arm_for_lease_expiry()
         await asyncio.to_thread(settlement.settle_quietly, "the lease was released")
         return Response(status_code=204)

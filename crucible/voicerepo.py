@@ -4,8 +4,9 @@ import logging
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from .errors import ApiError
 from .narratorengines import HIGGS_V3, declared_tts_footprints
 from .tomltable import (
     HF_REPO_PATTERN,
@@ -23,6 +24,7 @@ from .voices import (
     home_voices_dir,
     voices_dir,
 )
+from .weights import WeightsError, resolve_revision
 
 REPO_MANIFEST_NAME = "crucible-voice.toml"
 
@@ -708,3 +710,74 @@ def load_pinned() -> tuple[dict[str, Any], dict[str, tuple[Pin, str]]]:
 
 def pinned_voices() -> dict[str, Any]:
     return load_pinned()[0]
+
+
+RevisionResolver = Callable[[Any, str], str]
+
+
+def pinned_backends(
+    config: Any, block: dict[str, Any], *, resolve: RevisionResolver = resolve_revision
+) -> dict[str, Any]:
+    backends = block.get("backends")
+    if not isinstance(backends, dict):
+        return block
+    pinned: dict[str, Any] = {}
+    for name, spec in backends.items():
+        if not isinstance(spec, dict):
+            pinned[name] = spec
+            continue
+        repo = spec.get("hf_repo")
+        if spec.get("revision") is None and isinstance(repo, str) and repo != "":
+            pinned[name] = {**spec, "revision": resolve(config, repo)}
+            continue
+        pinned[name] = {k: v for k, v in spec.items()
+                        if not (k == "revision" and v is None)}
+    return {**block, "backends": pinned}
+
+
+def _pin_request(body: Any) -> tuple[str, str | None]:
+    if not isinstance(body, dict):
+        raise ApiError(
+            400,
+            "voice_invalid",
+            "`pin` must be a table of hf_repo and revision, got "
+            f"{type(body).__name__}",
+        )
+    unknown = sorted(set(body) - {"hf_repo", "revision"})
+    if unknown:
+        raise ApiError(
+            400,
+            "voice_invalid",
+            f"`pin` carries unknown key(s) {unknown}; a pin is exactly "
+            "hf_repo and revision. Everything else about a voice lives in "
+            "its own repo's crucible-voice.toml at that revision",
+        )
+    repo = body.get("hf_repo")
+    if not isinstance(repo, str) or repo.strip() == "":
+        raise ApiError(400, "voice_invalid", "`pin` names no hf_repo")
+    revision = body.get("revision")
+    if revision is not None and not isinstance(revision, str):
+        raise ApiError(
+            400,
+            "voice_invalid",
+            "`pin.revision` must be a 40-character commit sha, or null to "
+            f"resolve this repo's head, got {type(revision).__name__}",
+        )
+    return repo, revision
+
+
+def repin(
+    config: Any, voice_id: str, body: Any, *, resolve: RevisionResolver = resolve_revision
+) -> Pin:
+    repo, revision = _pin_request(body)
+    if revision is None or revision.strip() == "":
+        try:
+            revision = resolve(config, repo)
+        except WeightsError as exc:
+            raise ApiError(400, "revision_unresolved", str(exc)) from exc
+    candidate = Pin(id=voice_id, hf_repo=repo, revision=revision, path=home_pins_path())
+    try:
+        voice_for_pin(candidate)
+        return write_home_pin(voice_id, repo, revision)
+    except VoiceError as exc:
+        raise ApiError(400, "voice_invalid", str(exc)) from exc

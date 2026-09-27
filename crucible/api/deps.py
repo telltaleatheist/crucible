@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import secrets
-from typing import Callable
+from typing import Any, Callable
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .. import API_HEADER, API_VERSION
 from .. import peer as peer_module
 from ..config import Config
 from ..errors import ApiError
+from ..jobs import disabled_error
+from ..protocol import API_HEADER, API_VERSION
 
 
 class BeforeEveryRequest:
@@ -24,8 +25,16 @@ class BeforeEveryRequest:
         await self.app(scope, receive, send)
 
 
-def _error_response(error: ApiError) -> JSONResponse:
-    return JSONResponse(status_code=error.status_code, content=error.body())
+def error_response(error: ApiError, headers: dict[str, str] | None = None) -> JSONResponse:
+    return JSONResponse(status_code=error.status_code, headers=headers, content=error.body())
+
+
+def tts_enabled(config: Config) -> Any:
+    def refuse_unless_tts_is_on() -> None:
+        if not config.enable_tts:
+            raise disabled_error("tts", config)
+
+    return Depends(refuse_unless_tts_is_on)
 
 
 def _bearer_problem(request: Request) -> str | None:

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Callable
 
 from fastapi import Request
+from fastapi.responses import StreamingResponse
 
 from ..errors import ApiError
 from ..jobs.base import Job
@@ -13,10 +15,12 @@ from ..tasks import Task, TaskStore
 from ..ttsstream import StreamSession
 
 TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
+SESSION_END = frozenset({"closed"})
 KEEPALIVE_SECONDS = 15.0
+SSE_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
 
 
-def _last_event_id(request: Request) -> int:
+def last_event_id(request: Request) -> int:
     raw = request.headers.get("last-event-id")
     if raw is None:
         return 0
@@ -35,7 +39,7 @@ def _last_event_id(request: Request) -> int:
     return value
 
 
-def _format_event(event: dict[str, Any]) -> str:
+def format_event(event: dict[str, Any]) -> str:
     return (
         f"id: {event['id']}\n"
         f"event: {event['event']}\n"
@@ -43,56 +47,94 @@ def _format_event(event: dict[str, Any]) -> str:
     )
 
 
-async def _session_event_stream(
-    request: Request, session: StreamSession, last_event_id: int
+@dataclass(frozen=True)
+class Feed:
+    after: Callable[[int], list[tuple[int, dict[str, Any]]]]
+    waiter: asyncio.Event
+    ends: frozenset[str]
+    moved: Callable[[int], None]
+    close: Callable[[], None]
+
+
+async def events_after(
+    request: Request, open_feed: Callable[[], Feed], cursor: int
 ) -> AsyncIterator[str]:
-    reader = session.attach(last_event_id)
+    feed = open_feed()
     try:
         while True:
-            for event in session.frames_after(reader.delivered):
-                reader.delivered = event.id
-                yield _format_event(
-                    {"id": event.id, "event": event.event, "data": event.data}
-                )
-                if event.event == "closed":
+            for position, event in feed.after(cursor):
+                cursor = position
+                feed.moved(cursor)
+                yield format_event(event)
+                if event["event"] in feed.ends:
                     return
-            reader.waiter.clear()
-            if session.frames_after(reader.delivered):
+            feed.waiter.clear()
+            if feed.after(cursor):
                 continue
             try:
-                await asyncio.wait_for(reader.waiter.wait(), timeout=KEEPALIVE_SECONDS)
+                await asyncio.wait_for(feed.waiter.wait(), timeout=KEEPALIVE_SECONDS)
             except asyncio.TimeoutError:
                 if await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
     finally:
-        session.detach(reader)
+        feed.close()
 
 
-async def _event_stream(
-    request: Request,
-    store: JobStore | TaskStore,
-    job: Job | Task,
-    last_event_id: int,
-) -> AsyncIterator[str]:
+def _job_feed(store: JobStore | TaskStore, job: Job | Task) -> Feed:
     waiter = store.subscribe(job)
-    index = last_event_id
-    try:
-        while True:
-            while index < len(job.events):
-                event = job.events[index]
-                index += 1
-                yield _format_event(event)
-                if event["event"] in TERMINAL_EVENTS:
-                    return
-            waiter.clear()
-            if index < len(job.events):
-                continue
-            try:
-                await asyncio.wait_for(waiter.wait(), timeout=KEEPALIVE_SECONDS)
-            except asyncio.TimeoutError:
-                if await request.is_disconnected():
-                    return
-                yield ": keepalive\n\n"
-    finally:
-        store.unsubscribe(job, waiter)
+
+    def after(index: int) -> list[tuple[int, dict[str, Any]]]:
+        return [
+            (position, event)
+            for position, event in enumerate(job.events[index:], start=index + 1)
+        ]
+
+    return Feed(
+        after=after,
+        waiter=waiter,
+        ends=TERMINAL_EVENTS,
+        moved=lambda _: None,
+        close=lambda: store.unsubscribe(job, waiter),
+    )
+
+
+def _session_feed(session: StreamSession, delivered: int) -> Feed:
+    reader = session.attach(delivered)
+
+    def after(cursor: int) -> list[tuple[int, dict[str, Any]]]:
+        return [
+            (frame.id, {"id": frame.id, "event": frame.event, "data": frame.data})
+            for frame in session.frames_after(cursor)
+        ]
+
+    def moved(cursor: int) -> None:
+        reader.delivered = cursor
+
+    return Feed(
+        after=after,
+        waiter=reader.waiter,
+        ends=SESSION_END,
+        moved=moved,
+        close=lambda: session.detach(reader),
+    )
+
+
+def event_response(stream: AsyncIterator[str]) -> StreamingResponse:
+    return StreamingResponse(stream, media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+def job_events(
+    request: Request, store: JobStore | TaskStore, job: Job | Task, delivered: int
+) -> StreamingResponse:
+    return event_response(
+        events_after(request, lambda: _job_feed(store, job), delivered)
+    )
+
+
+def session_events(
+    request: Request, session: StreamSession, delivered: int
+) -> StreamingResponse:
+    return event_response(
+        events_after(request, lambda: _session_feed(session, delivered), delivered)
+    )

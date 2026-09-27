@@ -6,7 +6,6 @@ from typing import Any
 from fastapi import Request, Response
 
 from ... import catalog, weights
-from ...config import Config
 from ...errors import ApiError, CrucibleError
 from ...inflight import read_act
 from ...jobs import disabled_error, model_rows
@@ -36,10 +35,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
     config, backend, residency = ctx.config, ctx.backend, ctx.residency
 
     @private.get("/catalog")
-    async def catalog_route(request: Request) -> dict[str, Any]:
+    async def catalog_route() -> dict[str, Any]:
         """Every subject this backend can hold, installed or not."""
-        live: Config = request.app.state.config
-        return {"rows": catalog.rows(live, backend, residency),
+        return {"rows": catalog.rows(config, backend, residency),
                 "backend_kind": backend.kind}
 
     @private.delete("/catalog/{kind}/{subject_id}", status_code=204)
@@ -49,7 +47,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """Delete an installed subject's files. Refused while the subject is resident,
         leased or named by a running task.
         """
-        live: Config = request.app.state.config
         if kind not in catalog.KINDS:
             raise ApiError(
                 404,
@@ -57,7 +54,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 f"{kind!r} is not a subject kind; they are {list(catalog.KINDS)}",
                 {"kind": kind, "id": subject_id},
             )
-        subject = catalog.find(live, backend, kind, subject_id)
+        subject = catalog.find(config, backend, kind, subject_id)
         if subject is None:
             raise ApiError(
                 404,
@@ -77,7 +74,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "would believe a migration had deleted something",
                 {"kind": kind, "id": subject_id},
             )
-        who = _subject_holder(request, subject)
+        who = _subject_holder(subject)
         if who is not None:
             raise ApiError(
                 409,
@@ -116,7 +113,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 f"{type(exc).__name__}: {exc}",
                 {"kind": kind, "id": subject_id, "path": str(found.path)},
             ) from None
-        request.app.state.removals.record(
+        ctx.removals.record(
             kind=kind,
             subject_id=subject_id,
             bytes_freed=found.bytes,
@@ -130,7 +127,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         )
         return Response(status_code=204)
 
-    def _subject_holder(request: Request, subject: catalog.Subject) -> dict | None:
+    def _subject_holder(subject: catalog.Subject) -> dict | None:
         readers = catalog.ids_reading(subject)
 
         def through(holder_id: str) -> str:
@@ -151,7 +148,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 ),
                 "fact": "resident",
             }
-        lease = request.app.state.leases.current()
+        lease = ctx.leases.current()
         if lease is not None and lease.subject in readers:
             return {
                 "kind": subject.kind,
@@ -164,7 +161,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "fact": "lease",
                 **lease.receipt(),
             }
-        running = request.app.state.tasks.running
+        running = ctx.tasks.running
         if running is not None and any(
             _task_names(running, subject.kind, reader) for reader in readers
         ):
@@ -178,7 +175,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         return None
 
     @private.get("/models")
-    async def models(request: Request) -> list[dict[str, Any]]:
+    async def models() -> list[dict[str, Any]]:
         """Every model this build has a manifest for, and where it stands here."""
         if not config.enable_llm:
             raise disabled_error("load-model", config)

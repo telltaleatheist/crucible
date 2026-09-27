@@ -4,18 +4,14 @@ import asyncio
 import time
 from typing import Any
 
-from fastapi import Request
-
-from ... import API_VERSION, VERSION, accelerator
+from ... import VERSION, accelerator
 from ...backend import CUDA_LINUX
 from ...errors import ApiError
-from ...inflight import InFlight
 from ...jobs.queue import JobStore
-from ...leases import Leases
-from ...settle import Settlement
-from ...ttsstream import StreamManager
+from ...protocol import API_VERSION
 from ..context import AppContext, Routers
-from ..proxy import _chat_limit_of
+from ..proxy import chat_limit_of
+from ..responses import Activity
 
 
 def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
@@ -38,7 +34,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
     config, backend, residency = ctx.config, ctx.backend, ctx.residency
 
     @private.get("/accelerator")
-    async def accelerator_state(request: Request) -> dict[str, Any]:
+    async def accelerator_state() -> dict[str, Any]:
         """What is on the card right now and which holders are Crucible's own processes.
         Reports only; it never evicts anything.
         """
@@ -92,23 +88,21 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "detail": state.detail,
         }
 
-    @private.get("/activity")
-    async def activity(request: Request, accelerator_probe: bool = False) -> dict[str, Any]:
+    @private.get("/activity", response_model=Activity, response_model_exclude_unset=True)
+    async def activity(accelerator_probe: bool = False) -> dict[str, Any]:
         """What this server is doing and how far along, in one read with no job id. A
         display and a preflight, never admission; `?accelerator_probe=true` adds a live
         card probe.
         """
-        store: JobStore = request.app.state.store
-        streams: StreamManager = request.app.state.streams
-        inflight: InFlight = request.app.state.inflight
-        leases: Leases = request.app.state.leases
+        store = ctx.store
+        inflight = ctx.inflight
         running = store.running
         queued = store.queued()
         resident = residency.resident
-        session = streams.session
-        lease = leases.current()
-        chat_limit, chat_limit_basis = _chat_limit_of(residency)
-        settlement: Settlement = request.app.state.settlement
+        session = ctx.streams.session
+        lease = ctx.leases.current()
+        chat_limit, chat_limit_basis = chat_limit_of(residency)
+        settlement = ctx.settlement
         held = settlement.held_by()
         unclaimed = settlement.unheld_since()
 
@@ -118,7 +112,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "version": VERSION,
                 "api_version": API_VERSION,
                 "backend": backend.kind,
-                "uptime_s": round(time.monotonic() - request.app.state.started_at, 3),
+                "uptime_s": round(time.monotonic() - ctx.started_at, 3),
             },
             "resident": (
                 None
@@ -165,8 +159,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "max_in_flight_basis": chat_limit_basis,
                 "rows": inflight.rows(),
             },
-            "settings": {"writes": request.app.state.settings_history.rows()},
-            "catalog": {"removals": request.app.state.removals.rows()},
+            "settings": {"writes": ctx.settings_history.rows()},
+            "catalog": {"removals": ctx.removals.rows()},
             "lease": None if lease is None else lease.to_dict(),
             "slots": {
                 "accelerated": {

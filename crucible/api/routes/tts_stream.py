@@ -6,13 +6,13 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
-from ...jobs import disabled_error
 from ...jobs.tts.common import known_voice
-from ...ttsstream import StreamManager, require_sayable, require_streamable
+from ...ttsstream import require_sayable, require_streamable
+from .. import sse
 from ..caller import client_agent
 from ..context import AppContext, Routers
+from ..deps import tts_enabled
 from ..schemas import StreamOp, StreamOpen
-from ..sse import _last_event_id, _session_event_stream
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -20,16 +20,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
     config, residency = ctx.config, ctx.residency
 
     def _streaming_voice(voice: str) -> Any:
-        if not config.enable_tts:
-            raise disabled_error("tts", config)
         manifest = known_voice(voice)
         require_streamable(manifest, config.backend_kind)
         return manifest
 
-    @private.post("/tts/stream", status_code=201)
+    @private.post("/tts/stream", status_code=201, dependencies=[tts_enabled(config)])
     async def open_stream(request: Request, body: StreamOpen) -> dict[str, Any]:
         """Open the one streaming session this server will hold at a time."""
-        streams: StreamManager = request.app.state.streams
+        streams = ctx.streams
         manifest = _streaming_voice(body.voice)
         async with residency.settled_for(f"streaming {body.voice!r}"):
             session = streams.open(
@@ -52,24 +50,17 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """The session's SSE stream, audio included. Reattach with `Last-Event-ID`
         within the grace window to replay what was missed.
         """
-        streams: StreamManager = request.app.state.streams
-        session = streams.get(session_id)
-        delivered = _last_event_id(request)
+        session = ctx.streams.get(session_id)
+        delivered = sse.last_event_id(request)
         session.check_replayable(delivered)
-        return StreamingResponse(
-            _session_event_stream(request, session, delivered),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
+        return sse.session_events(request, session, delivered)
 
     @private.post("/tts/stream/{session_id}", status_code=202)
-    async def stream_op(
-        request: Request, session_id: str, body: StreamOp
-    ) -> dict[str, Any]:
+    async def stream_op(session_id: str, body: StreamOp) -> dict[str, Any]:
         """One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row
         id; the audio arrives on the stream.
         """
-        streams: StreamManager = request.app.state.streams
+        streams = ctx.streams
         session = streams.get(session_id)
         if body.op == "say":
             manifest = known_voice(session.voice)
@@ -85,9 +76,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
         return {"session_id": session.id, "closed": closed}
 
     @private.delete("/tts/stream/{session_id}")
-    async def close_stream(request: Request, session_id: str) -> dict[str, Any]:
+    async def close_stream(session_id: str) -> dict[str, Any]:
         """The same as `{"op": "close"}`, for a client that only has verbs."""
-        streams: StreamManager = request.app.state.streams
+        streams = ctx.streams
         session = streams.get(session_id)
         closed = await asyncio.to_thread(
             streams.close, session, "the client closed the session"

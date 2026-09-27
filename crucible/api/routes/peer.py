@@ -31,18 +31,13 @@ async def _peer_body(request: Request) -> dict[str, Any]:
     return parsed
 
 
-def _uptime_s(request: Request) -> float:
-    return time.monotonic() - request.app.state.started_at
-
-
 def register(routers: Routers, ctx: AppContext) -> None:
     peer_router = routers.peer
 
     @peer_router.get("")
-    async def read_peer(request: Request) -> dict[str, Any]:
+    async def read_peer() -> dict[str, Any]:
         """Who manages this engine, and this process's uptime."""
-        state: peer_module.PeerState = request.app.state.peer
-        return state.document(_uptime_s(request))
+        return ctx.peer.document(time.monotonic() - ctx.started_at)
 
     @peer_router.post("/claim")
     async def claim_peer(request: Request) -> dict[str, Any]:
@@ -50,7 +45,6 @@ def register(routers: Routers, ctx: AppContext) -> None:
         another orchestrator.
         """
         body = await _peer_body(request)
-        state: peer_module.PeerState = request.app.state.peer
         orchestrator = peer_module.Orchestrator.from_body(body.get("orchestrator"))
         force = body.get("force")
         if force is not None and not isinstance(force, bool):
@@ -61,7 +55,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "orchestrator and is a person's act through the page, never "
                 "an orchestrator's own (PHASE17-ORCHESTRATOR.md 2.1)",
             )
-        claim = state.claim(orchestrator, force=bool(force))
+        claim = ctx.peer.claim(orchestrator, force=bool(force))
         return {
             "role": peer_module.ROLE_ENGINE,
             "managed_by": claim.managed_by(),
@@ -74,8 +68,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         succeeds.
         """
         body = await _peer_body(request)
-        state: peer_module.PeerState = request.app.state.peer
         raw = body.get("orchestrator")
         who = None if raw is None else peer_module.Orchestrator.from_body(raw)
-        state.release(who, force=bool(body.get("force")))
+        ctx.peer.release(who, force=bool(body.get("force")))
         return {"role": peer_module.ROLE_ENGINE, "managed_by": None}
