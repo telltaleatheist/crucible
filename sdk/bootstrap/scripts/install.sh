@@ -220,16 +220,20 @@ if [ "$BACKEND" = cuda-linux ]; then
   card="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
   say "prerequisites: $card, driver $driver, compute capability $cap"
 fi
-case " $JOB_TYPES " in
-  *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)
-    command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and there is no ffmpeg on PATH. Install it first; crucible would otherwise install cleanly and refuse its first job" ;;
-  *)
-    if command -v ffmpeg >/dev/null 2>&1; then
-      say "prerequisites: ffmpeg present"
-    else
-      say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; tts, asr, align, rvc and denoise will refuse until it is there"
-    fi ;;
-esac
+if [ "$BACKEND" = cuda-linux ]; then
+  say "prerequisites: ffmpeg is Crucible's own; the first job type that decodes audio places it in $CRUCIBLE_HOME/tools/bin"
+else
+  case " $JOB_TYPES " in
+    *" tts"*|*" asr"*|*" rvc"*|*" align"*|*" denoise"*)
+      command -v ffmpeg >/dev/null 2>&1 || die "no_ffmpeg: --install named a job type that decodes audio and this Mac has no ffmpeg on PATH. Install Homebrew's first (brew install ffmpeg); crucible would otherwise install cleanly and refuse its first job" ;;
+    *)
+      if command -v ffmpeg >/dev/null 2>&1; then
+        say "prerequisites: ffmpeg present"
+      else
+        say "prerequisites: NO ffmpeg on PATH. Nothing asked for today needs it; on this Mac tts, asr, align, rvc and denoise will refuse until Homebrew's is installed (brew install ffmpeg)"
+      fi ;;
+  esac
+fi
 if [ -n "$MIN_FREE_GIB" ]; then
   have_gib=$(( free_kib / 1048576 ))
   [ "$have_gib" -ge "$MIN_FREE_GIB" ] || die "disk_too_small: $CRUCIBLE_HOME has ${have_gib} GiB free and --min-free-gib asked for $MIN_FREE_GIB"
