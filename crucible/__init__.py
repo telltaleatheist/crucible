@@ -1,4 +1,4 @@
-VERSION = "1.0.50"
+VERSION = "1.0.51"
 API_VERSION = 1
 API_HEADER = "X-Crucible-Api"
 CLIENT_NAME_HEADER = "X-Crucible-Client"
