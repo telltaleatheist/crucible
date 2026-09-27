@@ -236,6 +236,48 @@ fits" and "the machine still works".
 > already runs. `test_the_mac_reserve_selects_the_4bit_27b_owen_already_runs` in
 > `tests/test_accelerator.py` is that check, kept.
 
+> **AMENDED, 2026-09-26: on an NVIDIA card the reserve is MEASURED at init.** 3 GiB was
+> chosen for owens-pc — a 24 GB 3090 Ti that also streams and runs a heavy desktop. On
+> kylies-pc (GTX 1660 SUPER, 6 GB) it held back half the card, so capability gave a job 3 GiB
+> and refused things that fit. Owen: *"WE use 3 gb for desktop. kylies pc doesnt use that much.
+> i dont think it uses almost any gpu regularly. it only has 1 monitor connected and its low
+> resolution"*. And the standing rule: Crucible is idiot proof, so nobody has to know to set it.
+>
+> - **`crucible init` measures** (`ladder.measure_desktop_reserve`) on `cuda-linux`, and on
+>   `llama-windows` with an NVIDIA card (its config is what the Windows-to-WSL move carries):
+>   `memory.used` once a second for five seconds — the ladder's card rung and init share ONE
+>   sampler, `ladder.sample_desktop` — and only when nothing of Crucible's is on the card (a
+>   server that holds something, or answers without saying, or a `llama-server` or any compute
+>   app ≥ 1 GiB, refuses the measurement by name; init then falls back to the declared 3 GiB and
+>   says why).
+> - **The rule** (`ladder.desktop_allowance_from`): `min(peak + max(peak, 1 GiB), 3 GiB)`. The
+>   headroom is there because a desktop grows when somebody opens a browser or plays a video. The
+>   1 GiB floor is the guard's own ruled line between "desktop" and "somebody's job"
+>   (`FOREIGN_PROCESS_FLOOR_BYTES`, *"a compositor or a video decoder"*): room for one more such
+>   process than was open. Above 1 GiB the headroom is the peak itself, because what a new window
+>   costs scales with the screens the desktop already drives. **3 GiB stays the ceiling** — no
+>   desktop Crucible has met needs more, and it bounds what a busy sample (or, under WSL2, a
+>   Windows-side job the guest cannot attribute) can do: at worst, the old reserve.
+>   A 1660 SUPER whose desktop holds 0.3 GiB keeps 1.3 GiB and gives a job 4.7 GiB, not 3.0.
+> - **Under WSL2** the guest's nvidia-smi reports device-wide `memory.used`, Windows desktop
+>   included: measured 2026-09-18 (MEASUREMENTS.md Finding 1, *"Windows' own nvidia-smi agrees
+>   with WSL's nvidia-smi (3_286 vs 3_319 MiB used)"*), and `accelerator.unattributed_bytes`
+>   already relies on it. What the guest cannot do is list whose memory it is (the shim's
+>   compute-app list is empty), which is what the ceiling covers.
+> - **The basis is recorded**: `[accelerator] desktop_allowance_basis` = `measured` | `declared`
+>   | `stated`, with `desktop_allowance_note` saying what was seen and when. A config with no
+>   basis (every one before this) reads as **stated and is never changed on its own** — owens-pc
+>   keeps its 3 GiB for streaming; a measurement taken while he was not streaming must not lower
+>   it. `init --force` keeps a stated reserve; `--desktop-allowance-bytes` and the Settings page
+>   write `stated`; `init --config-from` carries the value and basis unchanged.
+> - **The deliberate re-measure** is `crucible capability --measure-desktop`: it refuses while
+>   anything of Crucible's is on the card, prints old and new, and writes `measured` with the
+>   capability record decided on it. `crucible doctor` notes when the ladder saw a desktop that
+>   would keep less than a stated reserve. `capability`, `doctor`, `init` and the install modal
+>   all say it the same way (`config.desktop_reserve_words`): *"kept 1.3 GiB for this PC's
+>   desktop (measured)"*.
+> - `mlx-darwin` is untouched: 25% of unified memory, basis `declared`.
+
 This is worth stating plainly because of how it was found: the rule was written, then checked
 against a decision Owen had already made, and it disagreed with him. **The disagreement was the
 rule's, not his.** A selection rule that is never run against a known-good answer is a rule

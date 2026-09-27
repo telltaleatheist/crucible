@@ -70,7 +70,44 @@ TOKEN_BYTES = 32
 #:
 #: **This is the `cuda-linux` number and only that one.** See
 #: `default_desktop_allowance_bytes` below for why the Mac cannot share it.
+#:
+#: SINCE 2026-09-26 IT IS A CEILING AND A FALLBACK, NOT WHAT EVERY CARD GETS.
+#: 3 GiB was chosen for owens-pc — a 24 GB 3090 Ti that also streams and runs a
+#: heavy desktop — and on kylies-pc (GTX 1660 SUPER, 6 GB) it held back half the
+#: card. Owen, 2026-09-26: *"WE use 3 gb for desktop. kylies pc doesnt use that
+#: much. i dont think it uses almost any gpu regularly. it only has 1 monitor
+#: connected and its low resolution"*. So `crucible init` on an NVIDIA card now
+#: MEASURES the desktop (`ladder.measure_desktop_reserve`) and keeps what it saw
+#: plus headroom, never more than this; this figure is what a card gets when it
+#: cannot be measured. The operator never has to know the key exists.
 DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
+
+#: `[accelerator] desktop_allowance_basis` — WHERE THE RESERVE CAME FROM, in the
+#: same three words the rest of Crucible uses for a number's provenance:
+#:
+#:   "measured"  Crucible sampled this card's desktop (`crucible init`, or
+#:               `crucible capability --measure-desktop`) and the note says what
+#:               it saw and when.
+#:   "declared"  Crucible's own rule for this backend, with nothing measured:
+#:               3 GiB on an NVIDIA card it could not sample, 25% of unified
+#:               memory on a Mac (`default_desktop_allowance_bytes`).
+#:   "stated"    A person said so — `--desktop-allowance-bytes`, the Settings
+#:               page — or the config predates this key.
+#:
+#: ABSENT READS AS "stated", AND NOTHING EVER CHANGES A STATED RESERVE ON ITS
+#: OWN (Owen, 2026-09-26). Every config written before this key has no basis,
+#: and one of them is owens-pc's, which keeps 3 GiB deliberately because it
+#: streams: a measurement that happened to run while he was not streaming must
+#: not lower it. Only the deliberate verb (`crucible capability
+#: --measure-desktop`) replaces a stated reserve, and it says old and new.
+DESKTOP_BASIS_MEASURED = "measured"
+DESKTOP_BASIS_DECLARED = "declared"
+DESKTOP_BASIS_STATED = "stated"
+DESKTOP_BASES: tuple[str, ...] = (
+    DESKTOP_BASIS_MEASURED,
+    DESKTOP_BASIS_DECLARED,
+    DESKTOP_BASIS_STATED,
+)
 
 #: The share of unified memory `mlx-darwin` reserves for the machine itself.
 #:
@@ -104,10 +141,31 @@ def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
     which backend was found and how big its pool is — an argparse default cannot
     know either. An explicit `--desktop-allowance-bytes` still wins over it: this
     is the default for an operator who does not state one, not a ceiling.
+
+    This is the DECLARED reserve (basis "declared"). On an NVIDIA card `crucible
+    init` measures instead where it can (2026-09-26,
+    `ladder.measure_desktop_reserve`), and this answer is what it falls back to.
     """
     if backend_kind == "mlx-darwin":
         return int(total_bytes * MLX_DESKTOP_ALLOWANCE_FRACTION)
     return DEFAULT_DESKTOP_ALLOWANCE_BYTES
+
+
+def desktop_reserve_words(allowance_bytes: int, basis: str) -> str:
+    """The reserve in plain words: `kept 0.6 GiB for this PC's desktop (measured)`.
+
+    ONE SENTENCE FOR ONE FACT (ARCHITECTURE.md R1): `crucible capability`,
+    `crucible doctor`, `crucible init` and the install modal
+    (`capability.install_plan`) all print this, so a person reads the same
+    words wherever they look. The basis is said because "0.6 GiB" and "3.0 GiB"
+    mean different things when one was seen and the other assumed.
+    """
+    said = {
+        DESKTOP_BASIS_MEASURED: "measured",
+        DESKTOP_BASIS_DECLARED: "not measured; Crucible's default",
+        DESKTOP_BASIS_STATED: "as set for this machine",
+    }.get(basis, basis)
+    return f"kept {allowance_bytes / 1024 ** 3:.1f} GiB for this PC's desktop ({said})"
 
 
 #: Where a Windows server keeps everything, under `%LOCALAPPDATA%`.
@@ -405,6 +463,13 @@ class Config:
     #: reads it. Defaulted for `_capability_flag`'s reason: every config in
     #: existence was written before this key, and absent means the ruled seven.
     retention_days: int = DEFAULT_RETENTION_DAYS
+    #: `[accelerator] desktop_allowance_basis` and `_note` — where
+    #: `desktop_allowance_bytes` came from (`DESKTOP_BASES`) and, for a measured
+    #: one, what was seen and when. Defaulted for `retention_days`'s reason:
+    #: every config in existence predates them, and absent reads as "stated",
+    #: which nothing changes on its own (2026-09-26).
+    desktop_allowance_basis: str = DESKTOP_BASIS_STATED
+    desktop_allowance_note: str = ""
     flags_absent: tuple[str, ...] = ()
     #: What `crucible capability` decided on this host, or None when nothing has
     #: decided anything here yet — a config written by `crucible init` alone, or
@@ -641,6 +706,34 @@ def _retention_days(table: dict[str, Any]) -> int:
             "artifacts before the client that asked for them could fetch them"
         )
     return value
+
+
+def _desktop_basis(table: dict[str, Any]) -> str:
+    """`[accelerator] desktop_allowance_basis`, "stated" when absent.
+
+    Absent is "stated" by ruling (Owen, 2026-09-26; `DESKTOP_BASES`): a config
+    written before the key holds a reserve somebody lived with, and treating it
+    as a guess to be re-measured is how owens-pc would lose the 3 GiB it keeps
+    for streaming. A value outside the three words is refused by name.
+    """
+    section = table.get("accelerator") or {}
+    if "desktop_allowance_basis" not in section:
+        return DESKTOP_BASIS_STATED
+    value = _require(table, "accelerator", "desktop_allowance_basis", str)
+    if value not in DESKTOP_BASES:
+        raise ConfigError(
+            f"config [accelerator] desktop_allowance_basis: {value!r} is not one of "
+            f"{list(DESKTOP_BASES)}"
+        )
+    return value
+
+
+def _desktop_note(table: dict[str, Any]) -> str:
+    """`[accelerator] desktop_allowance_note`, empty when absent."""
+    section = table.get("accelerator") or {}
+    if "desktop_allowance_note" not in section:
+        return ""
+    return _require(table, "accelerator", "desktop_allowance_note", str)
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
@@ -1435,6 +1528,8 @@ def load_config(home: Path | None = None) -> Config:
         desktop_allowance_bytes=_require(
             table, "accelerator", "desktop_allowance_bytes", int
         ),
+        desktop_allowance_basis=_desktop_basis(table),
+        desktop_allowance_note=_desktop_note(table),
         capability=_capability_record(table),
         routes=_route_records(table, upstreams),
         local_models=_local_model_records(table),
@@ -1471,6 +1566,14 @@ def write_config(
     #: rewrite silently puts an operator's retention window back to seven.
     #: `cli._write_capability` and `settings.apply` both do.
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    #: Where `desktop_allowance_bytes` came from, and what was seen
+    #: (`DESKTOP_BASES`). Defaulted to "stated" — the reading an absent key
+    #: gets, and the one nothing changes on its own — with `retention_days`'s
+    #: hazard: **a caller that REWRITES an existing config must pass the loaded
+    #: values**, or a measured reserve silently becomes a stated one.
+    #: `cli._write_capability` and `settings.apply` both do.
+    desktop_allowance_basis: str = DESKTOP_BASIS_STATED,
+    desktop_allowance_note: str = "",
     capability: CapabilityRecord | None = None,
     #: `[routes]` and `[upstreams.*]`. Defaulted to empty for the same reason
     #: `enable_denoise` is defaulted: a caller written before this phase states
@@ -1540,8 +1643,20 @@ def write_config(
             # key already in the file rather than have to know it exists.
             "retention_days": retention_days,
         },
-        "accelerator": {"desktop_allowance_bytes": desktop_allowance_bytes},
+        "accelerator": {
+            "desktop_allowance_bytes": desktop_allowance_bytes,
+            # Written always, like `retention_days`: every reserve has a basis,
+            # and a reader of the file should find it beside the number.
+            "desktop_allowance_basis": desktop_allowance_basis,
+        },
     }
+    if desktop_allowance_basis not in DESKTOP_BASES:
+        raise ConfigError(
+            f"desktop_allowance_basis {desktop_allowance_basis!r} is not one of "
+            f"{list(DESKTOP_BASES)}"
+        )
+    if desktop_allowance_note:
+        document["accelerator"]["desktop_allowance_note"] = desktop_allowance_note
     if capability is not None:
         document["capability"] = capability.to_dict()
     if advertise:

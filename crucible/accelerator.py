@@ -58,7 +58,8 @@ second one protects Owen's work.
 
 `unattributed_bytes` closes that hole without guessing: VRAM in use that no
 compute app in the list accounts for, beyond `desktop_allowance_bytes` (the host
-desktop's own graphics memory, a declared host fact in config.toml, not a fudge
+desktop's own graphics memory, a host fact in config.toml — measured by `crucible
+init` on an NVIDIA card since 2026-09-26, with its basis beside it — not a fudge
 factor), is refused as `accelerator_busy` naming the amount. On a headless Linux
 box the allowance is 0 and the sum is exact.
 

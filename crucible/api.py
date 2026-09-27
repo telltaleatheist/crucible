@@ -985,7 +985,13 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         pool = capability_classes.pool_name(backend.kind, backend.gpu.vendor)
         if job_type is not None:
             return capability_classes.install_plan(
-                job_type, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool
+                job_type,
+                decisions,
+                card=card,
+                total_bytes=backend.gpu.vram_bytes,
+                pool=pool,
+                desktop_allowance_bytes=live.desktop_allowance_bytes,
+                desktop_basis=live.desktop_allowance_basis,
             )
         return capability_classes.subject_plan(
             subject, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool

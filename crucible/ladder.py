@@ -81,6 +81,7 @@ from .backend import (
     declared_card,
     nvidia_smi_path,
 )
+from .config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from .errors import ApiError, CrucibleError
 
 LADDER_SCHEMA = 1
@@ -372,6 +373,247 @@ def _query(fields: str) -> list[str]:
     return [part.strip() for part in lines[0].split(",")]
 
 
+@dataclass(frozen=True)
+class DesktopSample:
+    """`memory.used` over `DESKTOP_SAMPLES` seconds: what the desktop held.
+
+    Device-wide, on purpose. `memory.used` is the whole card's, so it counts
+    the desktop's graphics memory whether or not the driver lists the processes
+    holding it. That matters twice: on Windows the desktop's processes show as
+    compute apps with no memory figure (`[N/A]`, accelerator.py's module
+    docstring), and under WSL2 the guest's driver shim lists no compute apps at
+    all. What the code already assumes of WSL2 — `unattributed_bytes` subtracts
+    the allowance from the guest's `memory.used`, and accelerator.py says
+    *"`memory.free` under WSL2 is accurate for the whole card"* — was measured
+    on 2026-09-18 (MEASUREMENTS.md, Finding 1): *"Windows' own nvidia-smi agrees
+    with WSL's nvidia-smi (3_286 vs 3_319 MiB used)"*. So a sample taken inside
+    the guest sees the Windows desktop. What it cannot see is WHOSE the memory
+    is: a Windows-side job running at that moment is counted as desktop, which
+    `desktop_allowance_from`'s ceiling bounds.
+    """
+
+    least_bytes: int
+    peak_bytes: int
+    total_bytes: int
+    samples: int
+    #: The UTC date the samples were taken, for the config's note.
+    on: str
+
+
+def sample_desktop() -> DesktopSample:
+    """Sample the card's used memory once a second for `DESKTOP_SAMPLES` seconds.
+
+    THE ONE PLACE THE DESKTOP IS SAMPLED (ARCHITECTURE.md R1): the card rung
+    reports it, and `measure_desktop_reserve` sizes the reserve from it, so the
+    two can never disagree about how the desktop was seen. Raises
+    `accelerator.ProbeError` (or `ValueError` on an unparseable answer) rather
+    than returning a number nobody read.
+    """
+    total = int(_query("memory.total")[0]) * 1024 * 1024
+    used: list[int] = []
+    for sample in range(DESKTOP_SAMPLES):
+        used.append(int(_query("memory.used")[0]) * 1024 * 1024)
+        if sample + 1 < DESKTOP_SAMPLES:
+            time.sleep(1.0)
+    return DesktopSample(
+        least_bytes=min(used),
+        peak_bytes=max(used),
+        total_bytes=total,
+        samples=len(used),
+        on=datetime.now(timezone.utc).date().isoformat(),
+    )
+
+
+def desktop_allowance_from(peak_bytes: int) -> int:
+    """The reserve a measured desktop gets: its peak, doubled, and at least one
+    desktop-scale process more — never above `DEFAULT_DESKTOP_ALLOWANCE_BYTES`.
+
+        allowance = min(peak + max(peak, FOREIGN_PROCESS_FLOOR_BYTES), 3 GiB)
+
+    WHY HEADROOM AT ALL. The sample is five seconds of a desktop as it was
+    then. A desktop grows when somebody opens a browser or plays a video, and
+    the reserve has to cover the desktop somebody is USING, not the one that
+    sat idle while `crucible init` ran — a job sized to the idle figure would
+    be refused, or would squeeze Kylie's browser, the first time she watched
+    something.
+
+    WHY `FOREIGN_PROCESS_FLOOR_BYTES` (1 GiB) AS THE FLOOR. That constant is
+    already Crucible's ruled boundary between "the desktop" and "somebody's job"
+    (PHASE2-LLM.md section 4: *"a compositor or a video decoder, not somebody's
+    job"*). A browser playing a video is exactly one such process, so the
+    reserve leaves room for one more of them than was open when it was sampled
+    — the same line the guard draws, not a second number for the same idea.
+
+    WHY DOUBLE THE PEAK when it is larger than that floor. What a new window
+    costs scales with what the desktop is already drawing: its framebuffers
+    are per monitor and per pixel, and a desktop sampled at 1.5 GiB is driving
+    more or bigger screens than one at 0.3 GiB, so its next browser costs more
+    too. Doubling lets the desktop grow by its own size again.
+
+    WHY THE CEILING. 3 GiB is what owens-pc — a streaming, multi-monitor
+    desktop on a 24 GB card — has lived with since phase 2; no desktop Crucible
+    has met needs more. It also bounds what a sample can get wrong: a busy
+    moment, or (under WSL2, where the guest cannot see whose memory it is) a
+    Windows-side job, can at worst give a card the reserve it had before this
+    rule existed.
+
+    A GTX 1660 SUPER whose single low-resolution monitor holds 0.3 GiB gets
+    0.3 + 1.0 = 1.3 GiB, and a job gets 4.7 GiB of its 6 GiB instead of 3.0.
+    """
+    headroom = max(peak_bytes, accelerator.FOREIGN_PROCESS_FLOOR_BYTES)
+    return min(peak_bytes + headroom, DEFAULT_DESKTOP_ALLOWANCE_BYTES)
+
+
+@dataclass(frozen=True)
+class DesktopReserve:
+    """A measured reserve: the allowance, and the note the config keeps with it."""
+
+    allowance_bytes: int
+    sample: DesktopSample
+
+    @property
+    def note(self) -> str:
+        gib = 1024 ** 3
+        return (
+            f"desktop held {self.sample.least_bytes / gib:.2f}-"
+            f"{self.sample.peak_bytes / gib:.2f} GiB of "
+            f"{self.sample.total_bytes / gib:.1f} GiB over {self.sample.samples}s on "
+            f"{self.sample.on}; kept peak + max(peak, "
+            f"{accelerator.FOREIGN_PROCESS_FLOOR_BYTES / gib:.0f} GiB), at most "
+            f"{DEFAULT_DESKTOP_ALLOWANCE_BYTES / gib:.0f} GiB"
+        )
+
+
+def _server_blocker(url: str, token: str | None) -> str | None:
+    """What a Crucible server at `url` holds that rules a sample out, or None.
+
+    With a token, `GET /v1/accelerator` is asked and its `resident` and
+    Crucible-owned holders are the answer. Without one (a fresh init, which
+    has no token for a server another config started), `GET /v1/ping`
+    answering at all is the answer: something of Crucible's is running here
+    and cannot be asked what it holds. A refused connection is the one "no
+    server"; a slow or odd answer is not read as nothing.
+    """
+    from . import local
+
+    path = "/v1/accelerator" if token is not None else "/v1/ping"
+    try:
+        state = local.request(f"{url}{path}", token=token, timeout=10)
+    except urllib.error.HTTPError as exc:
+        return (
+            f"a Crucible server at {url} answered HTTP {exc.code} when asked "
+            "what it holds, so it cannot be ruled out"
+        )
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, ConnectionRefusedError):
+            return None  # nothing listening: nothing loaded by it
+        return (
+            f"a Crucible server at {url} did not answer what it holds "
+            f"({reason}), so it cannot be ruled out"
+        )
+    except (local.LocalError, ValueError) as exc:
+        return f"could not ask the Crucible server at {url} what it holds: {exc}"
+    if token is None:
+        return (
+            f"a Crucible server is already answering at {url}, and this init has "
+            "no token to ask it what it holds; stop it, or measure later with "
+            "`crucible capability --measure-desktop`"
+        )
+    resident = state.get("resident")
+    if resident:
+        return (
+            f"this machine's Crucible server has {resident.get('kind')} "
+            f"{resident.get('id')} loaded; unload it (or stop the server) and "
+            "measure again"
+        )
+    owned = [h for h in state.get("holders") or [] if h.get("owned_by_crucible")]
+    if owned:
+        return "this machine's Crucible server has processes on the card: " + ", ".join(
+            str(h.get("name")) for h in owned
+        )
+    return None
+
+
+def desktop_blocker(
+    config: Any | None, backend: Backend, *, port: int | None = None
+) -> str | None:
+    """Why the desktop cannot be measured right now, or None when it can.
+
+    A sample is only the desktop when nothing else is on the card, so this
+    refuses — by name, never silently — when:
+
+    * the Crucible server this config describes (or, with no config, whatever
+      answers on `port` of this machine) is up and holds something, or cannot
+      be asked (`_server_blocker`);
+    * the driver names a `llama-server` (an engine of ours, maybe a crashed
+      run's orphan: accelerator.py finds those by image), or any compute app
+      holding `FOREIGN_PROCESS_FLOOR_BYTES` or more — somebody's job, which a
+      sample would count as desktop.
+
+    Under WSL2 the compute-app list is empty by the driver shim's design, so
+    the second check is blind there; the server check and
+    `desktop_allowance_from`'s ceiling are what remain.
+    """
+    if config is not None:
+        # The server THIS config describes, on loopback, with its own token —
+        # read off the config rather than `local.connection`, which on win32
+        # answers for the host's fixed door and not for the config in hand.
+        host = config.host
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+        if ":" in host:
+            host = f"[{host}]"
+        blocked = _server_blocker(f"http://{host}:{config.port}", config.token)
+        if blocked is not None:
+            return blocked
+    elif port is not None:
+        blocked = _server_blocker(f"http://127.0.0.1:{port}", None)
+        if blocked is not None:
+            return blocked
+    if os.path.exists(WSL_NVIDIA_SMI):
+        return None
+    try:
+        apps = accelerator.probe_compute_apps()
+    except accelerator.ProbeError as exc:
+        return f"could not list what is on the card: {exc}"
+    for app in apps:
+        if accelerator.is_llama_server(app.name):
+            return f"a llama-server (pid {app.pid}) is on the card"
+        if app.used_bytes is not None and app.used_bytes >= accelerator.FOREIGN_PROCESS_FLOOR_BYTES:
+            return (
+                f"{app.name} (pid {app.pid}) holds "
+                f"{app.used_bytes / 1024 ** 3:.1f} GiB; that is somebody's job, "
+                "not the desktop"
+            )
+    return None
+
+
+def measure_desktop_reserve(
+    config: Any | None, backend: Backend, *, port: int | None = None
+) -> tuple[DesktopReserve | None, str]:
+    """Measure this card's desktop and size its reserve: (reserve, "") or
+    (None, why not).
+
+    NVIDIA cards only — `cuda-linux`, and `llama-windows` on a card nvidia-smi
+    answers for (its config is what the Windows-to-WSL move carries into the
+    guest). A Mac's reserve is a share of unified memory, not a desktop on a
+    card, and is untouched (`config.default_desktop_allowance_bytes`).
+    """
+    if backend.kind == MLX_DARWIN or backend.gpu.vendor != "nvidia":
+        return None, f"{backend.kind} on {backend.gpu.name} has no card desktop to sample"
+    if nvidia_smi_path() is None:
+        return None, "there is no nvidia-smi to sample the card with"
+    blocked = desktop_blocker(config, backend, port=port)
+    if blocked is not None:
+        return None, blocked
+    try:
+        sample = sample_desktop()
+    except (accelerator.ProbeError, ValueError) as exc:
+        return None, f"nvidia-smi: {exc}"
+    return DesktopReserve(desktop_allowance_from(sample.peak_bytes), sample), ""
+
+
 def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
     """Rung 0: the card, the desktop on it, and the disk. nvidia-smi only.
 
@@ -405,11 +647,9 @@ def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Run
         name, driver, uuid, total, free, cap = _query(
             "name,driver_version,uuid,memory.total,memory.free,compute_cap"
         )
-        used: list[int] = []
-        for sample in range(DESKTOP_SAMPLES):
-            used.append(int(_query("memory.used")[0]) * 1024 * 1024)
-            if sample + 1 < DESKTOP_SAMPLES:
-                time.sleep(1.0)
+        # The same sampler `measure_desktop_reserve` sizes the reserve from.
+        desktop = sample_desktop()
+        used = [desktop.least_bytes, desktop.peak_bytes]
     except (accelerator.ProbeError, ValueError) as exc:
         return RungResult(CARD, FAILED, started, facts, detail=f"nvidia-smi: {exc}")
     facts.update(
@@ -849,6 +1089,12 @@ __all__ = [
     "GRAPHS",
     "RUNGS",
     "VLLM",
+    "DesktopReserve",
+    "DesktopSample",
+    "desktop_allowance_from",
+    "desktop_blocker",
+    "measure_desktop_reserve",
+    "sample_desktop",
     "LadderError",
     "RungResult",
     "Watch",
