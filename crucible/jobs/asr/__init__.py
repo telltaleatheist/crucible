@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from ... import accelerator, hosttools, jobenv, ladder, weights, workers
+from ... import accelerator, hosttools, jobenv, weights, workers
 from ...asrmodels import (
     QWEN_ASR_ENGINES,
     QWEN_CONTEXT_MAX_TOKENS,
@@ -24,6 +24,7 @@ from ...asrmodels import (
     AsrManifestError,
     load_all_asr_manifests,
 )
+from ...cardfacts import card_for
 from ...config import Config
 from ...errors import ApiError, JobError
 from ...manifests import fingerprint
@@ -517,7 +518,7 @@ class AsrJobType:
         accelerator.refuse_if_card_lacks(
             model_id=model_id,
             spec=spec,
-            card=ladder.card_for(self._config.home, self._backend.gpu),
+            card=card_for(self._config.home, self._backend.gpu),
         )
         python = _python_for(self._config, spec.engine, backend_kind, model_id)
         weights_dir = worker_type.require_weights(self._config, manifest, spec, model_id)

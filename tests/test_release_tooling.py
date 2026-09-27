@@ -1,6 +1,8 @@
-from pathlib import Path
+import os
 import re
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -37,16 +39,14 @@ def test_ship_only_names_scripts_that_exist():
         assert (REPO / relative).is_file(), f'ship.sh names {relative}, which does not exist'
 
 
-def test_ship_runs_the_steps_in_the_order_it_documents():
+def test_ship_runs_its_steps_in_the_order_its_help_names_them():
     text = SHIP.read_text(encoding='utf-8')
-    header = text[:text.index('set -euo pipefail')]
-    order = re.findall(r'^#\s+\d+\.\s.*?\((scripts/[A-Za-z0-9_.-]+)', header, re.MULTILINE)
-    assert order, 'the header no longer numbers its steps with the script each runs'
-    positions = []
-    for name in order:
-        positions.append(text.rindex(name))
-    assert positions == sorted(positions), (
-        f'ship.sh calls its steps out of order: {list(zip(order, positions))}')
+    steps = ['python scripts/bump.py "$level"', './scripts/release.sh\n',
+             './scripts/deploy.sh --release "$version" --yes',
+             'promote_release.py --tag "v$version" --print-command']
+    positions = [text.index(step) for step in steps]
+    assert positions == sorted(positions), list(zip(steps, positions))
+    assert 'Steps: clean tree, bump, commit and push, the cut, the machines (--deploy),' in text
 
 
 def test_ship_never_passes_the_install_attestation_itself():
@@ -105,8 +105,11 @@ def test_the_release_uploads_our_code_and_nothing_that_is_published_elsewhere():
     text = RELEASE.read_text(encoding='utf-8')
     upload = text[text.index('gh release create'):]
     upload = upload[:upload.index('\n\n')]
-    assert '"$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT"' in upload, upload
-    assert '"$INSTALL_SH" "$INSTALL_PS1"' in upload, upload
+    assert '"${ASSETS[@]}" "$ASSET_LIST"' in upload, upload
+    assets = re.search(r'^ASSETS=\((.*)\)$', text, re.MULTILINE)
+    assert assets, 'release.sh no longer names what it uploads in one ASSETS array'
+    assert assets.group(1) == ('"$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" '
+                               '"$INSTALL_SH" "$INSTALL_PS1"'), assets.group(1)
     for gone in ('envpacks', 'rootfs', 'part0', '.tar.zst'):
         assert gone not in upload, f'the release still uploads {gone!r}'
 
@@ -313,3 +316,71 @@ def test_ci_builds_the_client_before_installing_the_bootstrap():
     bootstrap = text.index('working-directory: sdk/bootstrap')
     assert build_client < bootstrap, (
         'ci.yml installs sdk/bootstrap before sdk/ts has been built')
+
+
+CHECK_GENERATED = REPO / 'scripts/check-generated.sh'
+
+
+def test_one_script_checks_every_generated_file():
+    text = CHECK_GENERATED.read_text(encoding='utf-8')
+    for generator in ('gen-api-docs.py', 'gen-modules.py', 'gen-foundry-lineup.py'):
+        assert generator in text, f'check-generated.sh does not run {generator}'
+    assert '--check' in text and '--fix' in text
+
+
+@pytest.mark.parametrize('caller', ['scripts/release.sh', '.github/workflows/ci.yml'])
+def test_release_and_ci_check_generated_files_through_that_one_script(caller):
+    text = (REPO / caller).read_text(encoding='utf-8')
+    assert './scripts/check-generated.sh' in text, f'{caller} does not run check-generated.sh'
+    for generator in ('gen-api-docs.py', 'gen-modules.py', 'gen-foundry-lineup.py'):
+        assert f'{generator} --check' not in text, f'{caller} runs {generator} --check itself'
+
+
+def test_check_generated_is_executable():
+    listed = subprocess.check_output(['git', 'ls-files', '-s', '--', 'scripts/check-generated.sh'],
+                                     cwd=REPO, text=True).strip()
+    assert listed.split()[0] == '100755', listed
+
+
+def test_ci_lints_scripts_blocking_and_the_rest_reported():
+    text = CI.read_text(encoding='utf-8')
+    assert 'run: ruff check scripts\n' in text
+    assert 'run: shellcheck --severity=warning scripts/*.sh' in text
+    reported = text.index('run: ruff check crucible tests')
+    assert 'continue-on-error: true' in text[text.rindex('- name:', 0, reported):reported]
+    pyproject = (REPO / 'pyproject.toml').read_text(encoding='utf-8')
+    assert 'select = ["F", "I"]' in pyproject
+
+
+DELETED = ['scripts/testrun-phase15.sh', 'scripts/read_one_page.py',
+           'scripts/one_cleanup_chunk.py', 'scripts/task_field.py', 'tools/decide_probe.py']
+
+
+@pytest.mark.parametrize('deleted', DELETED)
+def test_the_phase15_one_offs_are_gone_and_nothing_live_names_them(deleted):
+    assert not (REPO / deleted).exists(), deleted
+    name = Path(deleted).name
+    live = [*sorted(path for path in (REPO / 'scripts').glob('*.*') if path.suffix in ('.sh', '.py')),
+            REPO / 'README.md', CI,
+            REPO / 'docs/internals/scripts.md']
+    for path in live:
+        assert name not in path.read_text(encoding='utf-8'), f'{path.name} still names {name}'
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='runs tests.sh with bash; the suite runs in WSL')
+def test_tests_sh_all_passes_what_follows_the_double_dash_to_pytest():
+    environment = {**os.environ, 'CRUCIBLE_PYTEST_PYTHON': 'echo'}
+    done = subprocess.run(['bash', str(TESTS), '--all', '--', '--ignore=tests/test_x.py', '-k', 'a b'],
+                          capture_output=True, text=True, timeout=60, cwd=REPO, env=environment)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert '-m pytest -q --ignore=tests/test_x.py -k a b' in done.stdout, done.stdout
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='runs tests.sh with bash; the suite runs in WSL')
+@pytest.mark.parametrize('argv', [['--all', 'extra'], ['--changed', '--', '-x'], ['--list', 'x']])
+def test_tests_sh_refuses_extra_arguments_anywhere_but_after_all_double_dash(argv):
+    environment = {**os.environ, 'CRUCIBLE_PYTEST_PYTHON': 'echo'}
+    done = subprocess.run(['bash', str(TESTS), *argv], capture_output=True, text=True,
+                          timeout=60, cwd=REPO, env=environment)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert './scripts/tests.sh --all -- --ignore=tests/test_x.py' in done.stderr, done.stderr

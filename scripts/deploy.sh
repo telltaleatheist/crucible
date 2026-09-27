@@ -361,4 +361,4 @@ if [ -n "$failed" ]; then
 fi
 echo "deploy: $release is on every selected machine"
 echo "deploy: the candidate is installed, so it can now be promoted:"
-echo "  python scripts/promote_release.py --tag v$release --publish --confirmed-install-smoke"
+echo "  $(python "$(dirname "${BASH_SOURCE[0]}")/promote_release.py" --tag "v$release" --print-command)"

@@ -40,11 +40,8 @@ jobs:
       - name: pytest
         run: python -m pytest -q -rs
 
-      - name: the lineup Foundry vendors is current
-        run: python scripts/gen-foundry-lineup.py --check
-
-      - name: every app's module file is current
-        run: python scripts/gen-modules.py --check
+      - name: every generated file is current (API.md, modules, the Foundry lineup)
+        run: ./scripts/check-generated.sh
 
   sdk:
     name: sdk
@@ -97,12 +94,28 @@ jobs:
       - name: build
         run: python -m pip install --upgrade pip build && python -m build
 
-      - name: the four version sources agree
-        run: |
-          set -euo pipefail
-          py=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)
-          toml=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
-          sdk=$(node -p "require('./sdk/ts/package.json').version")
-          ua=$(sed -n "s/^export const SDK_VERSION = '\(.*\)';$/\1/p" sdk/ts/src/version.ts)
-          echo "crucible/__init__.py=$py pyproject.toml=$toml package.json=$sdk version.ts=$ua"
-          test "$py" = "$toml" && test "$py" = "$sdk" && test "$py" = "$ua"
+      - name: the seven version places agree
+        run: python scripts/bump.py --check
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install ruff and shellcheck
+        run: python -m pip install --upgrade pip "ruff==0.16.9" "shellcheck-py==0.11.0.1"
+
+      - name: ruff (scripts, blocking)
+        run: ruff check scripts
+
+      - name: ruff (crucible and tests, reported until their owners fix them)
+        continue-on-error: true
+        run: ruff check crucible tests
+
+      - name: shellcheck (scripts, blocking)
+        run: shellcheck --severity=warning scripts/*.sh

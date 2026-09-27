@@ -977,7 +977,7 @@ also usable alone, which is what to reach for when one of them is what went wron
 | 1 | `scripts/bump.py patch` | writes the version to all seven places and regenerates the modules and the API reference |
 | 2 | `scripts/release.sh` | builds the assets, cuts `v<ver>` as a prerelease |
 | 3 | `scripts/deploy.sh --release <ver>` | installs it on every machine and proves each one took it |
-| 4 | `scripts/promote_release.py` | validates the candidate, and on `--publish` makes it `latest` |
+| 4 | `scripts/promote_release.py` | validates the candidate and that every machine runs it, and on `--publish` makes it `latest` |
 
 **There is no CI to wait for.** `scripts/tests.sh` is still how a branch is
 tested, on the branch, before it is merged; a deploy runs none, because by then
@@ -1005,13 +1005,17 @@ A job environment is touched only when its own recipe moved, and then by
 `pip install -r` into the venv that is already there.
 
 Server, client and bootstrap version declarations and the bootstrap client peer pin
-must agree. A dirty tree, an unpushed HEAD, and an existing tag are refused.
+must agree (`python scripts/bump.py --check`), and every generated file must be
+current (`./scripts/check-generated.sh`). A dirty tree, an unpushed HEAD, and an
+existing tag are refused.
 
 **Cutting and promoting are two jobs.** Every release is created
 `--prerelease --latest=false` on purpose: it is a candidate until somebody has
 installed it. `promote_release.py --publish` requires `--confirmed-install-smoke`,
 which attests that a fresh install passed — metadata cannot prove that, so no
-script here passes the flag on its own. Between 0.6.1 and 0.6.6 the second job was
+script here passes the flag on its own. It also refuses unless every machine
+`deploy.sh` can ask already runs the tag; a machine that cannot be asked blocks it
+too, unless named with `--allow-unreachable <machine>`. Between 0.6.1 and 0.6.6 the second job was
 simply forgotten six times, and `releases/latest/download/install.sh` went on
 serving the 0.6.0 script. Installers no longer bake a version (they ask GitHub for
 the newest release at run time), and `deploy.sh` installs from the tag rather than
@@ -1027,10 +1031,12 @@ pytest                       # in-process, FastAPI TestClient, temp CRUCIBLE_HOM
 ./scripts/keeper-llm-live.sh # a real server, a real engine, a real model
 ```
 
-`tests.sh --changed` maps each changed file to the test files that name it, and
-widens to the whole suite for anything it does not understand — an unrecognised
-file is a reason to run MORE, never fewer. `--list` shows what it would run and
-why, without running it.
+`tests.sh --changed` maps each changed file to the test files that name it and
+runs only those. A changed file that no test names is reported by name and runs
+nothing; `--all` is the proof when that is a surprise (`--all -- <pytest args>`
+passes arguments on, e.g. `--all -- --ignore=tests/test_x.py`). It widens to the
+whole suite only when it cannot fetch the tags that say what "changed" means.
+`--list` shows what it would run and why, without running it.
 
 Both exit non-zero on any failure — trust the exit code, not the log. The pytest suite
 never touches a real `~/.crucible`: every test gets a `CRUCIBLE_HOME` under pytest's

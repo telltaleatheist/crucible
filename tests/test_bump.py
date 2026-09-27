@@ -1,6 +1,6 @@
 import importlib.util
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +23,81 @@ def test_the_seven_agree_and_are_this_checkout():
     assert bump.read_current() == VERSION
 
 
-def test_the_places_are_the_ones_release_sh_refuses_over():
-    text = (REPO / 'scripts/release.sh').read_text(encoding='utf-8')
-    for relative, _, _ in bump.PLACES:
-        assert relative in text, f'{relative} is bumped but release.sh never checks it'
+@pytest.mark.parametrize('caller', ['scripts/release.sh', 'scripts/ship.sh',
+                                    '.github/workflows/ci.yml'])
+def test_every_version_check_is_bump_check_and_none_is_a_copy(caller):
+    text = (REPO / caller).read_text(encoding='utf-8')
+    assert 'scripts/bump.py --check' in text, f'{caller} does not ask bump.py --check'
+    for copy in ('SDK_VERSION', 'BOOTSTRAP_VERSION', "package.json').version",
+                 's/^VERSION = '):
+        assert copy not in text, f'{caller} reads a version place itself: {copy!r}'
     assert len(bump.PLACES) == 7
+
+
+def places_in(tmp_path: Path, monkeypatch, version: str = "1.2.3", capture=None) -> Path:
+    for relative, _, _ in bump.PLACES:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text((REPO / relative).read_text(encoding='utf-8'), encoding='utf-8')
+    monkeypatch.setattr(bump, 'REPO', tmp_path)
+    bump.write_places(version)
+    if capture is not None:
+        capture.readouterr()
+    return tmp_path
+
+
+def run_main(monkeypatch, *argv: str) -> int:
+    monkeypatch.setattr('sys.argv', ['bump.py', *argv])
+    try:
+        return bump.main()
+    except SystemExit as exc:
+        return exc.code
+
+
+def test_check_prints_the_one_version(tmp_path, monkeypatch, capsys):
+    places_in(tmp_path, monkeypatch, capture=capsys)
+    assert run_main(monkeypatch, '--check') == 0
+    assert capsys.readouterr().out.strip() == '1.2.3'
+
+
+def test_check_names_every_place_when_they_disagree(tmp_path, monkeypatch, capsys):
+    root = places_in(tmp_path, monkeypatch, capture=capsys)
+    version_ts = root / 'sdk/ts/src/version.ts'
+    version_ts.write_text(version_ts.read_text(encoding='utf-8').replace('1.2.3', '1.2.2'),
+                          encoding='utf-8')
+    assert run_main(monkeypatch, '--check') == 1
+    said = capsys.readouterr()
+    assert said.out == ''
+    for relative, _, _ in bump.PLACES:
+        assert relative in said.err, said.err
+    assert '1.2.2  sdk/ts/src/version.ts' in said.err, said.err
+    assert 'python scripts/bump.py --align' in said.err, said.err
+
+
+def test_align_sets_every_place_to_the_canonical_one(tmp_path, monkeypatch, capsys):
+    root = places_in(tmp_path, monkeypatch)
+    pyproject = root / 'pyproject.toml'
+    pyproject.write_text(pyproject.read_text(encoding='utf-8').replace('"1.2.3"', '"0.0.1"'),
+                         encoding='utf-8')
+    monkeypatch.setattr(bump, 'GENERATORS', [])
+    monkeypatch.setattr(bump.subprocess, 'check_output', lambda *a, **k: '')
+    assert run_main(monkeypatch, '--align') == 0
+    assert bump.read_current() == '1.2.3'
+
+
+def test_check_changes_nothing_and_takes_no_version(tmp_path, monkeypatch):
+    root = places_in(tmp_path, monkeypatch)
+    before = {relative: (root / relative).read_bytes() for relative, _, _ in bump.PLACES}
+    assert run_main(monkeypatch, '--check', 'patch') == 2
+    assert run_main(monkeypatch, '--check') == 0
+    assert before == {relative: (root / relative).read_bytes() for relative, _, _ in bump.PLACES}
+
+
+def test_a_bump_writes_lf_on_every_platform(tmp_path, monkeypatch):
+    root = places_in(tmp_path, monkeypatch)
+    for relative, _, _ in bump.PLACES:
+        assert b"\r\n" not in (root / relative).read_bytes(), relative
 
 
 @pytest.mark.parametrize('current,wanted,expected', [

@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .. import VERSION
+from ..clock import now as _now
+from ..clock import utcnow
 from ..errors import ApiError, JobCancelled, JobError
 from ..journal import Journals
 from .base import (
@@ -28,7 +30,6 @@ from .base import (
     Job,
     JobContext,
     JobType,
-    utcnow,
 )
 
 REAP_INTERVAL_SECONDS = 60.0
@@ -55,10 +56,6 @@ def _params_sha256(params: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 @dataclass(frozen=True)
 class Reaped:
     job_id: str
@@ -68,17 +65,7 @@ class Reaped:
 
 
 def busy_details(job: Job) -> dict[str, Any]:
-    return {
-        "door": "job",
-        "holder": job.client,
-        "job_id": job.id,
-        "type": job.type,
-        "model": job.model,
-        "status": job.status,
-        "since": job.started if job.started is not None else job.created,
-        "progress": job.progress,
-        "message": job.message,
-    }
+    return job.busy_details()
 
 
 class JobStore:

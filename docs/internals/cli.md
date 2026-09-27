@@ -16,7 +16,7 @@ usage (argparse's own).
 | `__main__` | `python -m crucible.cli` |
 | `common` | exit codes, `_fail`, `Refusal`, `here`, `server_here`, `_backend_mismatch`, `backend_changed_fix`, `no_viable_backend`, `_env_spec`; the one place `detect_backend` and `load_config` are reached from |
 | `init` | `init`, `--config-from` carrying, the desktop-reserve decision |
-| `install` | `install`, `INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT` |
+| `install` | `install`; re-exports `INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`, which live in `crucible/jobenv.py` |
 | `capability` | `capability`, `ladder`, and the measure and capability steps `install` runs |
 | `weights` | `remove`, `models`, `rvc`, `denoise` |
 | `voices` | `voices list/pull/pin/check/card/export` |
@@ -148,13 +148,14 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 
 ## Capability, the ladder, and `install`
 
-- **`_decide_here`** sizes on `backend.gpu.vram_bytes`, never on free VRAM. Capability is
+- **`capabilitystore.decide_for`** (in `crucible/capabilitystore.py`, shared with the server)
+  sizes on `backend.gpu.vram_bytes`, never on free VRAM. Capability is
   a fact about the host. Free VRAM is a fact about this second, and a browser open during
   an install must not permanently disable TTS. The runtime guard answers the free-memory
   question at load time (`insufficient_memory`). It also passes `gpu_vendor` (which pool
   this is on `llama-windows`), the config's `local_models` selections, and
-  `ladder.card_for` (card generation and measured facts: same bytes, different precision).
-- **`_write_capability` rewrites the whole `config.toml`** through `write_config`. So it
+  `cardfacts.card_for` (card generation and measured facts: same bytes, different precision).
+- **`capabilitystore.write_capability` rewrites the whole `config.toml`** through `write_config`. So it
   must carry forward everything it is not changing: token, reserve with basis and note,
   `retention_days`, `tts_engines`, `routes`, `upstreams`, and the advertise lists. Each
   omission silently resets something (an unrouted server, a 7-day retention, every repo
@@ -170,7 +171,8 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 - **`install` order**: build the env from its recipe (the only path; there are no packs)
   → `_smoke_import` → `_ensure_tools` → `_measure_step` → `_capability_step`.
   - `SMOKE_IMPORT` holds import names, not distribution names (`mlx-lm` → `mlx_lm`,
-    `faster-whisper` → `faster_whisper`, …). `asr` differs by backend (`faster_whisper`
+    `faster-whisper` → `faster_whisper`, …), derived from the headline packages in
+    `jobenv` so a new worker env cannot be added without one. `asr` differs by backend (`faster_whisper`
     vs `mlx_whisper`). The tts key is the env directory's name, which carries the engine
     on cuda-linux (`tts-higgs-v3`). An env that cannot import its library is not
     installed, whatever pip said.
@@ -189,7 +191,9 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
     reason survives (R6). One env can serve several types (`rvc` also serves `denoise`),
     and each gets its own verdict. It prints the same `capability.install_plan` lines the
     operator page shows.
-- **`INSTALLER_FOR`** maps a job type to the `install` verb that builds its env: `denoise`
+- **`INSTALLER_FOR`** (`crucible/jobenv.py`, with `INSTALLABLE_JOB_TYPES`, `SMOKE_IMPORT` and
+  `no_installer`, the one "no installer for this type" sentence `install` and
+  `POST /v1/tasks` both use) maps a job type to the `install` verb that builds its env: `denoise`
   → `rvc` (shared env), `pages` → `llm` (`pages` is a capability class served by the llm
   proxy, not a job type). `doctor`'s "could enable" notes read it, which keeps `echo`
   (no installer) out and points `denoise` at `install rvc`.

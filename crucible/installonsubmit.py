@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from . import capability as capability_classes
-from . import catalog, jobenv, ladder
+from . import catalog, jobenv
 from .backend import Backend
+from .capabilitystore import decide_for
+from .cardfacts import card_for
 from .config import Config
 from .errors import ApiError
+from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 from .jobs import ALL_JOB_TYPES
 from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
 from .voices import NARRATOR_ENGINE_SAMPLING, load_all_voices
@@ -86,8 +89,6 @@ class InstallOnSubmit:
 
     @staticmethod
     def installable(job_type: str) -> bool:
-        from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
-
         capability = ALL_JOB_TYPES.get(job_type)
         if capability is None or job_type.startswith("unload-"):
             return False
@@ -480,15 +481,8 @@ class InstallOnSubmit:
 
 
 def live_decisions(config: Config, backend: Backend) -> tuple[Any, Any, str]:
-    card = ladder.card_for(config.home, backend.gpu)
-    decisions = capability_classes.decide_all(
-        backend.kind,
-        total_bytes=backend.gpu.vram_bytes,
-        desktop_allowance_bytes=config.desktop_allowance_bytes,
-        gpu_vendor=backend.gpu.vendor,
-        chosen={entry.capability: entry.model for entry in config.local_models},
-        card=card,
-    )
+    card = card_for(config.home, backend.gpu)
+    decisions = decide_for(config, backend, card=card)
     return decisions, card, capability_classes.pool_name(backend.kind, backend.gpu.vendor)
 
 
@@ -525,8 +519,6 @@ def _pull_of(subject: catalog.Subject) -> Pull:
 
 
 def _installer_of(job_type: str, env: Any) -> str:
-    from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
-
     name = Path(str(env)).name if isinstance(env, str) and env else ""
     if name in INSTALLABLE_JOB_TYPES:
         return name

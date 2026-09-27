@@ -6,6 +6,8 @@ from typing import Any, Mapping
 from . import capability as capability_classes
 from . import upstreams as upstream_module
 from .backend import CardFacts
+from .capabilitystore import decide_on, record_of
+from .clock import utcnow
 from .config import (
     DESKTOP_BASIS_STATED,
     CapabilityRecord,
@@ -18,7 +20,6 @@ from .config import (
     desktop_reserve_words,
 )
 from .errors import ApiError, ConfigError
-from .jobs.base import utcnow
 from .upstreams import UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
@@ -453,7 +454,7 @@ def recomputed_capability(
     record = config.capability
     if record is None:
         return None
-    decisions = capability_classes.decide_all(
+    decisions = decide_on(
         record.backend_kind,
         total_bytes=record.total_bytes,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
@@ -461,12 +462,12 @@ def recomputed_capability(
         card=card,
         chosen=resolved.local_models,
     )
-    return capability_classes.record(
+    return record_of(
         record.backend_kind,
         total_bytes=record.total_bytes,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
         decisions=decisions,
-        routes=dict(resolved.routes),
+        routes=resolved.routes,
     )
 
 

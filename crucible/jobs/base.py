@@ -4,11 +4,16 @@ import asyncio
 import json
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
+from ..clock import utcnow
 from ..errors import JobCancelled
+
+if TYPE_CHECKING:
+    from ..backend import Backend
+    from ..journal import Identity
+    from .queue import JobStore
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -17,10 +22,6 @@ FAILED = "failed"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
 TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED, INTERRUPTED})
-
-
-def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,22 @@ class Job:
             for name in self.artifacts
         )
 
+    def busy_details(self) -> dict[str, Any]:
+        return {
+            "door": "job",
+            "holder": self.client,
+            "job_id": self.id,
+            "type": self.type,
+            "model": self.model,
+            "status": self.status,
+            "since": self.started if self.started is not None else self.created,
+            "progress": self.progress,
+            "message": self.message,
+        }
+
+
+OPTIONAL_JOB_TYPE_MEMBERS: frozenset[str] = frozenset({"journal_identity"})
+
 
 @runtime_checkable
 class JobType(Protocol):
@@ -116,7 +133,9 @@ class JobType(Protocol):
     def model_provenance(self, model: str | None) -> dict[str, Any] | None:
         ...
 
-    def check(self, backend: Any) -> JobTypeStatus:
+    journal_identity: "Callable[[str | None, dict[str, Any]], Identity | None] | None" = None
+
+    def check(self, backend: "Backend") -> JobTypeStatus:
         ...
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
@@ -127,7 +146,7 @@ class JobType(Protocol):
 
 
 class JobContext:
-    def __init__(self, store: Any, job: Job, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, store: "JobStore", job: Job, loop: asyncio.AbstractEventLoop) -> None:
         self._store = store
         self._job = job
         self._loop = loop
