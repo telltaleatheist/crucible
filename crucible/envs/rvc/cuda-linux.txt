@@ -18,9 +18,9 @@
 #
 # Both call themselves version 0.5.11, which is exactly why this is pinned to a
 # COMMIT and not a branch: `pip list` would report `0.5.11` for either, so the
-# version is not an identity here. `crucible doctor` checks this line's commit
-# against the one pip recorded in the package's `direct_url.json`
-# (crucible/jobenv.py, `installed_direct_references`).
+# version is not an identity here. `crucible doctor` checks this line against
+# `pip freeze`, which writes a git install back out in this same form
+# (crucible/workerenv.py, `recipe_direct_refs`).
 #
 # The commit is the one installed in Owen's working `bookforge-urvc` env, read
 # from its `direct_url.json` on 2026-09-13.
