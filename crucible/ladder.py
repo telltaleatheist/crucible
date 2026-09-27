@@ -595,14 +595,29 @@ def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
     return found
 
 
+def installed_torch_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
+    from . import jobenv
+
+    found: dict[str, Path] = {}
+    for name, python in installed_env_pythons(home, backend_kind).items():
+        spec = (
+            jobenv.llm_env(backend_kind)
+            if name == "llm"
+            else jobenv.worker_env(name, backend_kind)
+        )
+        if "torch" in jobenv.recipe_pins(jobenv.recipe_for(spec)):
+            found[name] = python
+    return found
+
+
 def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
     started = _now()
     waiting = _preflight(backend, desktop_allowance_bytes, SMOKE_NEED_BYTES)
     if waiting is not None:
         return RungResult(ENV, waiting[0], started, detail=waiting[1])
-    envs = installed_env_pythons(home, backend.kind)
+    envs = installed_torch_env_pythons(home, backend.kind)
     if not envs:
-        return RungResult(ENV, SKIPPED, started, detail="no env is installed yet")
+        return RungResult(ENV, SKIPPED, started, detail="no env that ships torch is installed yet")
     facts: dict[str, Any] = {}
     failures: list[str] = []
     contention: dict[str, Any] = {}
