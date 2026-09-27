@@ -773,7 +773,7 @@ def env_status(home: Path, spec: EnvSpec, backend_kind: str) -> EnvStatus:
             python_version=None,
             packages={},
         )
-    environment_sha256 = record["environment_sha256"]
+    environment_sha256 = environment_digest(record["recipe_text"])
     direct_references = record["direct_references"]
     recipe_text = record["recipe_text"]
     if record["backend"] != backend_kind:
@@ -984,7 +984,7 @@ def plan_env(
 
     here_environment = environment_sha256(recipe)
     here_references = recipe_direct_references(recipe)
-    stamped_environment = record["environment_sha256"]
+    stamped_environment = environment_digest(record["recipe_text"])
     stamped_references = record["direct_references"]
     if stamped_environment != here_environment:
         return EnvPlan(
@@ -1282,26 +1282,17 @@ def recipe_sha256(path: Path) -> str:
 
 
 def environment_sha256(path: Path) -> str:
-    """THE ENVIRONMENT HALF of a recipe: every line but its direct references.
+    return environment_digest(recipe_text(path))
 
-    The two halves of a recipe move for different reasons and cost different
-    amounts (PHASE20 section 4). `narrator @ git+…@<sha>` moves whenever
-    BookForge's python package is edited — several times a day — and moving it
-    changes nothing about the 13 GB of torch, SGLang and CUDA wheels pinned
-    above it. A single digest over the whole file cannot say which happened, so
-    an env answered from one is an env rebuilt for a one-line edit.
 
-    The references are not ignored, they are stamped SEPARATELY, by name and
-    commit (`recipe_direct_references`), and checked against what pip recorded
-    in PEP 610's `direct_url.json`. Two facts, two owners, both compared.
-
-    Hashed over `recipe_sha256`'s normalisation, and through the same function,
-    so the CRLF rule has exactly one implementation here as everywhere else.
-    """
-    kept = [
-        line for line in recipe_text(path).splitlines()
-        if _DIRECT_REFERENCE.match(line.strip()) is None
-    ]
+def environment_digest(text: str) -> str:
+    kept = []
+    for line in text.splitlines():
+        content = line.split(" #", 1)[0].strip()
+        if not content or content.startswith("#"):
+            continue
+        if _DIRECT_REFERENCE.match(content) is None:
+            kept.append(content)
     body = "".join(line + "\n" for line in kept)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
