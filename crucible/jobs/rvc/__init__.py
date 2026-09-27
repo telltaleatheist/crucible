@@ -9,7 +9,8 @@ What is the client's and what is the server's
 The client says which model and the four numbers that change the sound:
 `index_rate`, `protect_rate`, `n_semitones`, and optionally `f0_method` and
 `hop_length` — and, optionally, how long inputs are cut and joined (`piece_s`,
-`overlap_s`, `crossfade_s`), which move the seams and never the voice.
+`overlap_s`, `crossfade_s`), which move the seams and never the voice, and
+what shape the output takes (`output_rate`, `output_channels`).
 Everything else is the server's: the batch size, the staging, the environment
 hardening, and the fact that urvc is spawned rather than imported.
 
@@ -48,9 +49,13 @@ whole and name its inputs without extensions. The worker cuts every input at
 quiet points into pieces of at most `piece_s` (asr's rule), converts them with
 `overlap_s` of real audio each side, and stitches them back with a
 `crossfade_s` fade, so memory is bounded by a piece and never by the input.
-**The output is the input's container, sample format, sample rate and exact
-frame count, in one channel** — the rvc row of docs/API-CLI.md says so to the
-caller, and `worker.py` says why each of the three numbers defaults as it does.
+**The output is the input's container and sample format, exactly the input's
+duration, at `max(input rate, the model's rate)` and in the input's channel
+count** (Owen's rulings, 2026-09-26; `output_rate: "input"` and
+`output_channels: "mono"` are the caller's overrides). A stereo input gets the
+ONE converted voice in both channels, not a per-channel conversion. The rvc
+row of docs/API-CLI.md says so to the caller, and `worker.py` ("The output
+format, stated") says why each defaults as it does.
 The format is read from each input's BYTES, so the input's name is only a name
 and the artifact comes back under it unchanged.
 
@@ -79,7 +84,7 @@ will not load the directory at all.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import (
     BaseModel,
@@ -298,6 +303,20 @@ class RvcParams(BaseModel):
     piece_s: float | None = None
     overlap_s: float | None = None
     crossfade_s: float | None = None
+
+    #: The output's sample rate (Owen, 2026-09-26: "i would like to keep 48 khz
+    #: but if we cant then we cant"). `native`, the default: never below the
+    #: rate urvc wrote, which is read from its output (48 kHz for the published
+    #: models), so a 24 kHz input keeps the model's band above 12 kHz. `input`:
+    #: the input's own rate. Either way the output lasts exactly as long as the
+    #: input (`worker.py`, `out_frame`).
+    output_rate: Literal["native", "input"] = "native"
+
+    #: The output's channels (Owen, 2026-09-26: "i only ever use mono but others
+    #: might need stereo"). `input`, the default: the input's count, with the
+    #: ONE converted voice written to every channel — not a per-channel
+    #: conversion. `mono`: one channel.
+    output_channels: Literal["input", "mono"] = "input"
 
     @field_validator("piece_s")
     @classmethod
@@ -740,6 +759,12 @@ class RvcJobType:
             "piece_s": params.piece_seconds(),
             "overlap_s": params.overlap_seconds(),
             "crossfade_s": params.crossfade_seconds(),
+            "output_rate": params.output_rate,
+            "output_channels": params.output_channels,
+            # Pieces are staged inside the job's own directory, so what a
+            # cancelled or killed worker leaves is the retention collector's
+            # (`JobStore.reap`), not the system temp's forever.
+            "staging_dir": str(ctx.scratch / "staging"),
             # The exact programs checked above, put first on urvc's PATH by the
             # worker, so the engine runs what the refusal vouched for.
             "ffmpeg": tools["ffmpeg"],
@@ -866,7 +891,7 @@ class RvcJobType:
             outputs={
                 name: {
                     key: result[key]
-                    for key in ("frames", "sample_rate", "format", "subtype")
+                    for key in ("frames", "sample_rate", "channels", "format", "subtype")
                     if key in result
                 }
                 for name, result in zip(names, results)

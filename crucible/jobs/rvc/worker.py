@@ -51,7 +51,11 @@ four steps, and a sentence is simply an input that is one piece:
 2. **Cut (`read_pieces`).** A second streaming read writes each piece with
    `overlap_s` of the REAL neighbouring audio on both sides, as a float WAV at
    the input's own rate and channels, into the batch's staging directory.
-   Pieces are written per batch, so the disk holds one batch of them.
+   Pieces are written per batch, so the disk holds one batch of them. The
+   staging directory is inside the JOB's directory (`staging_dir`), never the
+   system temp: a cancel stops this worker with a signal that skips its
+   `finally`, and what it leaves there is then the retention collector's
+   (`JobStore.reap`), like everything else the job wrote (2026-09-26).
 3. **Convert.** urvc's `convert-dir`, one process per batch. A batch closes at
    `batch_size` pieces or at a seconds bound derived from this host's memory,
    and a process whose own memory passes the budget is stopped after the piece
@@ -59,10 +63,11 @@ four steps, and a sentence is simply an input that is one piece:
    never input files: 96 ten-minute files in one process is the leak this
    module exists to prevent.
 4. **Stitch (`Stitcher`).** Each converted piece is resampled from urvc's rate
-   to the input's, then trimmed or zero-padded to exactly the frames it was
-   given, its overlap is dropped, and neighbours are joined with a
-   `crossfade_s` raised-cosine fade centred on the seam. The output has the
-   input's exact frame count; the writer checks it and fails if it does not.
+   to the OUTPUT rate (below), then trimmed or zero-padded to exactly the
+   frames its span maps to, its overlap is dropped, and neighbours are joined
+   with a `crossfade_s` raised-cosine fade centred on the seam. The output
+   lasts exactly as long as the input (`out_frame`); the writer checks the
+   count and fails if it is wrong.
    Each input's result is sent the moment its last piece is stitched, and the
    server publishes it then, so a cancel or a later failure leaves every input
    already finished as a readable artifact (2026-09-26: a cancel at 26 of 35
@@ -82,7 +87,10 @@ Why an overlap AND a crossfade, and why the crossfade is short
   (the last piece's shortfall, ~20 ms per minute of it, if urvc's loss is at
   the end) are zero-padded silence; an input almost always ends in silence
   anyway, and padding the file's end would add `overlap_s` of conversion to
-  every one-piece sentence to save it. Cost: `2 * overlap_s`
+  every one-piece sentence to save it. **Owen accepted this end padding as it
+  is, 2026-09-26** (up to ~20 ms per minute of the last piece, at the very end
+  of an input only): not a defect to fix, and nobody should add an end pad
+  to "fix" it. Cost: `2 * overlap_s`
   more audio through the model per piece, 1.7% at the defaults.
 - **The crossfade is click removal, not blending.** Two pieces converted
   separately do not meet at the same waveform value, and a hard join at a
@@ -110,12 +118,34 @@ extension or not.
 
 The output format, stated
 -------------------------
-Same container and sample format as the input (a 24-bit FLAC comes back a
-24-bit FLAC; RF64 instead of WAV past WAV's 4 GiB), same sample rate, same
-frame count, and ONE channel: RVC converts a mono mix, as it always has. The
-converted signal's own resolution is urvc's 16-bit (`convert-dir` writes
-16-bit WAV at the model's rate, often 48 kHz); a 24-bit container holds that
-signal after resampling, and adds no detail the engine did not produce.
+**Container and sample format**: the input's (a 24-bit FLAC comes back a
+24-bit FLAC; RF64 instead of WAV past WAV's 4 GiB). The converted signal's
+own resolution is urvc's 16-bit (`convert-dir` writes 16-bit WAV at the
+model's rate); a 24-bit container holds that signal and adds no detail the
+engine did not produce.
+
+**Sample rate** (Owen's ruling, 2026-09-26: "i would like to keep 48 khz but
+if we cant then we cant"): by default (`output_rate: "native"`) the output
+rate is `max(input rate, the rate urvc wrote)`, so it is never below the
+model's own. The rate urvc wrote is READ from its first converted piece of
+each input, not assumed; for the published models it is 48 kHz. Until this
+ruling the output came back at the input's rate, and a 24 kHz input threw away the
+model's whole band above 12 kHz. `output_rate: "input"` keeps the input's
+rate, the old behaviour, for a caller that must have it. The length is exact
+in TIME, not in frames: `out_frames = round(in_frames * out_rate / in_rate)`,
+rounded half up in integers (`out_frame`), so it is the same number on every
+host. Each piece's span maps through the same function, so the pieces still
+tile the output with no gap and no overlap.
+
+**Channels** (Owen, 2026-09-26: "i only ever use mono but others might need
+stereo"): by default (`output_channels: "input"`) the output has the input's
+channel count. **It is NOT a per-channel conversion.** RVC converts a mono
+mix and produces one voice, and for a stereo input that one converted
+signal is written to every channel, identical in each. `output_channels:
+"mono"` writes one channel. A true per-channel conversion is not offered:
+it would double the conversion for speech that is the same voice in both
+channels, and two independently converted channels differ in phase (see the
+crossfade note above), which smears the voice across the stereo image.
 
 The wire, in full
 -----------------
@@ -124,6 +154,8 @@ The wire, in full
                          memory_fraction, leak_bytes_per_audio_s,
                          max_batch_audio_s, fallback_budget_bytes,
                          piece_s, overlap_s, crossfade_s,
+                         output_rate ("native"|"input"),
+                         output_channels ("input"|"mono"), staging_dir,
                          ffmpeg, ffprobe, f0_method?, hop_length?}
             `f0_method` and `hop_length` are THE ONLY optional keys in any phase
             4 worker's request, and their absence is meaningful rather than a
@@ -135,8 +167,8 @@ The wire, in full
              "batch_audio_s", "memory_budget_bytes", "memory_basis", "model"}
             {"type": "progress", "stage": "converting", "processed", "total",
              "batch", "batches"}                  processed/total are PIECES
-            {"type": "result", "bytes", "frames", "sample_rate", "format",
-             "subtype"}                           one per input, BY POSITION,
+            {"type": "result", "bytes", "frames", "sample_rate", "channels",
+             "format", "subtype"}                 one per input, BY POSITION,
                                                   sent as each input finishes
             {"type": "failed", "message"}         the whole run
             {"type": "done"}
@@ -427,18 +459,46 @@ def read_pieces(path: str, spans: list, total: int, pad: int):
 # ------------------------------------------------------------------ stitch
 
 
-def _output_format(info, frames: int) -> tuple[str, str]:
+#: The two output choices a caller has (`jobs/rvc/__init__.py`, `RvcParams`).
+OUTPUT_RATES = ("native", "input")
+OUTPUT_CHANNELS = ("input", "mono")
+
+
+def out_frame(frame: int, in_rate: int, out_rate: int) -> int:
+    """Input frame `frame` as an output frame: `round(frame * out / in)`, half up.
+
+    Integers only, so the answer is the same on every host. Monotonic, and
+    `out_frame(total)` is the output's length, so spans that tile the input
+    map to spans that tile the output. For a gap of `g` input frames the
+    mapped gap is at least `g * out_rate // in_rate`, which is what the seam
+    fades are clamped to (`Stitcher`).
+    """
+    return (2 * frame * out_rate + in_rate) // (2 * in_rate)
+
+
+def output_rate(choice: str, in_rate: int, converted_rate: int) -> int:
+    """The output's sample rate: never below the model's, unless asked.
+
+    Owen, 2026-09-26: "i would like to keep 48 khz but if we cant then we
+    cant". `native` is `max(input, what urvc wrote)`; `input` is the input's.
+    """
+    if choice == "input":
+        return int(in_rate)
+    return max(int(in_rate), int(converted_rate))
+
+
+def _output_format(info, frames: int, channels: int = 1) -> tuple[str, str]:
     """The input's container and sample format, RF64 where WAV cannot hold it."""
     container, subtype = info.format, info.subtype
     if container == "WAV":
-        size = frames * SUBTYPE_BYTES.get(subtype, 8)  # one channel out
+        size = frames * channels * SUBTYPE_BYTES.get(subtype, 8)
         if size > WAV_DATA_LIMIT_BYTES:
             container = "RF64"
     return container, subtype
 
 
 def fit_piece(converted, converted_rate: int, rate: int, frames: int, where: str):
-    """urvc's output for one piece, at the input's rate and exactly `frames` long.
+    """urvc's output for one piece, at the output `rate` and exactly `frames` long.
 
     Resampled with a rational polyphase filter (exact ratio, no drift), then
     trimmed or zero-padded AT THE END to the frames the piece was given. The pad
@@ -472,6 +532,8 @@ def seam_fades(spans: list, pad: int, crossfade: int) -> list[int]:
 
     A fade needs converted audio from both neighbours on both sides of the seam,
     so it is clamped to twice the overlap and to either neighbour's own length.
+    All three are in OUTPUT frames, and `pad` is the least the input's overlap
+    maps to (`out_frame`), so the clamp never reaches past what was converted.
     """
     fades = [0]
     for (first_a, last_a), (first_b, last_b) in zip(spans, spans[1:]):
@@ -484,20 +546,54 @@ def seam_fades(spans: list, pad: int, crossfade: int) -> list[int]:
 class Stitcher:
     """One input's output file, written piece by piece, frame-exact.
 
-    Piece `i` owns `[first, last)` of the input. Around each seam `s` a fade of
-    `F` frames runs over `[s - F//2, s + F - F//2)`, a raised cosine whose two
+    Everything here is in OUTPUT frames at `rate`: the input's spans, total and
+    overlap are mapped through `out_frame` when the stitcher is made. Piece `i`
+    owns `[first, last)` of the output. Around each seam `s` a fade of `F`
+    frames runs over `[s - F//2, s + F - F//2)`, a raised cosine whose two
     weights sum to one; outside the fades each frame is its own piece's. So the
-    frames written are exactly the input's, and `close` refuses to finish a file
-    for which that is not true.
+    frames written are exactly `out_frame(total)`, and `close` refuses to finish
+    a file for which that is not true.
+
+    The converted signal is one voice. With `channels` above 1 it is written,
+    identical, to every channel: not a per-channel conversion.
+
+    When the rates are not a whole multiple (44.1 kHz in, 48 kHz out) a piece's
+    start maps to a fraction of an output frame and is rounded, so each piece
+    sits up to HALF an output frame (10.4 us at 48 kHz) from where a single
+    whole-file resample would put it. Checked with an identity fake urvc,
+    2026-09-26: no lag of a whole frame anywhere, and a residual on a 3.1 kHz
+    tone of the size that offset predicts. It is far below what two separate
+    RVC conversions already differ by at a seam (the module docstring's
+    crossfade note).
     """
 
-    def __init__(self, path: str, info, spans: list, total: int, pad: int, crossfade: int):
+    def __init__(
+        self,
+        path: str,
+        info,
+        spans: list,
+        total: int,
+        pad: int,
+        crossfade_s: float,
+        rate: int,
+        channels: int,
+    ):
+        in_rate = int(info.samplerate)
         self.path = path
-        self.spans = spans
-        self.total = total
-        self.fades = seam_fades(spans, pad, crossfade)
-        self.rate = int(info.samplerate)
-        self.format, self.subtype = _output_format(info, total)
+        self.in_rate = in_rate
+        self.rate = int(rate)
+        self.channels = int(channels)
+        self.spans = [
+            (out_frame(first, in_rate, self.rate), out_frame(last, in_rate, self.rate))
+            for first, last in spans
+        ]
+        self.total = out_frame(total, in_rate, self.rate)
+        self.fades = seam_fades(
+            self.spans,
+            pad * self.rate // in_rate,
+            int(round(crossfade_s * self.rate)),
+        )
+        self.format, self.subtype = _output_format(info, self.total, self.channels)
         self.written = 0
         self.next_piece = 0
         self.tail = None
@@ -505,19 +601,30 @@ class Stitcher:
             path,
             "w",
             samplerate=self.rate,
-            channels=1,
+            channels=self.channels,
             format=self.format,
             subtype=self.subtype,
         )
 
+    def out(self, frame: int) -> int:
+        """An input frame of this input, as a frame of this output."""
+        return out_frame(frame, self.in_rate, self.rate)
+
     def _write(self, samples) -> None:
         # libsndfile does not clip float to PCM by default; a resampler's ripple
         # past full scale would wrap round instead of clipping.
-        self.sink.write(numpy.clip(samples, -1.0, 1.0))
+        samples = numpy.clip(samples, -1.0, 1.0)
+        if self.channels > 1:
+            # One voice, the same in every channel (see the class docstring).
+            samples = numpy.repeat(samples[:, None], self.channels, axis=1)
+        self.sink.write(samples)
         self.written += samples.shape[0]
 
     def add(self, piece: int, audio_first: int, fitted) -> None:
-        """Piece `piece`'s converted audio, covering `[audio_first, ...)`."""
+        """Piece `piece`'s converted audio, covering `[audio_first, ...)`.
+
+        `audio_first` is an OUTPUT frame (`out`), as `fitted` is output audio.
+        """
         if piece != self.next_piece:
             raise RuntimeError(
                 f"{self.path}: piece {piece} arrived where piece "
@@ -862,6 +969,9 @@ def main() -> int:
         piece_s = float(require(request, "piece_s", (int, float)))
         overlap_s = float(require(request, "overlap_s", (int, float)))
         crossfade_s = float(require(request, "crossfade_s", (int, float)))
+        rate_choice = require(request, "output_rate", str)
+        channel_choice = require(request, "output_channels", str)
+        staging_root = require(request, "staging_dir", str)
         tool_dirs = [
             os.path.dirname(require(request, tool, str)) for tool in ("ffmpeg", "ffprobe")
         ]
@@ -875,6 +985,11 @@ def main() -> int:
         return fail("the rvc request lists no inputs")
     if batch_size < 1:
         return fail(f"batch_size must be at least 1, got {batch_size}")
+    if rate_choice not in OUTPUT_RATES or channel_choice not in OUTPUT_CHANNELS:
+        return fail(
+            f"output_rate {rate_choice!r}, output_channels {channel_choice!r}: "
+            "the server validates these, so this is a server bug"
+        )
     if piece_s < 4 * MIN_TAIL_SECONDS or overlap_s < 0 or crossfade_s < 0:
         return fail(
             f"piece_s {piece_s}, overlap_s {overlap_s}, crossfade_s {crossfade_s}: "
@@ -960,7 +1075,9 @@ def main() -> int:
             readers[plan_number] = read_pieces(path, spans, total, pad)
         return readers[plan_number]
 
-    def stitcher_for(plan_number: int) -> Stitcher:
+    def stitcher_for(plan_number: int, converted_rate: int) -> Stitcher:
+        # Made when the input's FIRST piece comes back, because the output rate
+        # is read from what urvc wrote (the module docstring's sample rate).
         if plan_number not in stitchers:
             name, path, info, spans, total = plans[plan_number]
             rate = int(info.samplerate)
@@ -970,14 +1087,21 @@ def main() -> int:
                 spans,
                 total,
                 int(round(overlap_s * rate)),
-                int(round(crossfade_s * rate)),
+                crossfade_s,
+                output_rate(rate_choice, rate, converted_rate),
+                1 if channel_choice == "mono" else int(info.channels),
             )
         return stitchers[plan_number]
 
     # Pieces are staged into `holding`, and a piece a stopped process did not
     # reach waits there (`carried`) for the next one: its audio has already
     # been read, and the reader only goes forward.
-    holding = tempfile.mkdtemp(prefix="crucible-rvc-")
+    # Under the JOB's directory, not the system temp: a cancel's signal skips
+    # the `finally` below, and the retention collector reaps job directories
+    # and nothing else (2026-09-26, Owen: "we're supposed to have a garbage
+    # collector that cleans up files older than 7 days").
+    os.makedirs(staging_root, exist_ok=True)
+    holding = tempfile.mkdtemp(prefix="crucible-rvc-", dir=staging_root)
     carried: list[tuple[int, str]] = []
     next_new = 0
     done_count = 0
@@ -1082,12 +1206,12 @@ def main() -> int:
                     return fail(f"urvc wrote no output for {where}")
                 converted, converted_rate = soundfile.read(produced, dtype="float32")
                 os.remove(produced)
+                stitcher = stitcher_for(plan_number, int(converted_rate))
                 fitted = fit_piece(
-                    converted, int(converted_rate), rate,
-                    audio_last - audio_first, where,
+                    converted, int(converted_rate), stitcher.rate,
+                    stitcher.out(audio_last) - stitcher.out(audio_first), where,
                 )
-                stitcher = stitcher_for(plan_number)
-                stitcher.add(piece_number, audio_first, fitted)
+                stitcher.add(piece_number, stitcher.out(audio_first), fitted)
                 if piece_number == len(spans) - 1:
                     stitcher.close()
                     del stitchers[plan_number]
@@ -1101,6 +1225,7 @@ def main() -> int:
                         bytes=os.path.getsize(stitcher.path),
                         frames=stitcher.written,
                         sample_rate=stitcher.rate,
+                        channels=stitcher.channels,
                         format=stitcher.format,
                         subtype=stitcher.subtype,
                     )

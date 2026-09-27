@@ -48,6 +48,13 @@ max_new_tokens = 4096
 max_model_len = 8192
 # 114,688 B/token (identical to the 1.7B) x 4,096 tokens x 8 pieces.
 kv_cache_memory_bytes = 3758096384
+# The KV one token holds: 2 (K and V) x 28 layers x 8 KV heads x 128 head_dim
+# x 2 B, READ from config.json at the pinned sha (above). DECLARED here
+# 2026-09-26 for crucible/asrplan.py: a card that cannot hold 8 pieces at once
+# runs fewer at full precision before a smaller model is taken (Owen: "yes,
+# fewer at once before quantizing for asr too"), and vLLM will not start with
+# a pool smaller than one max_model_len sequence (8,192 x this = 896 MiB).
+kv_bytes_per_token = 114688
 # 8,184,324,920 B = 7.62 GiB, COMPUTED (never run on the card; it was busy):
 #   1,876,091,704  model.safetensors, exactly
 # + 1,476,395,008  non-KV overhead: the 9B's measured figure, carried as an

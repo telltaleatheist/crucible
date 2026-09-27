@@ -872,8 +872,11 @@ Three things worth knowing before you send params:
 
 - **Any length in, the same length out.** A 12-hour master can go in whole: the job cuts it
   at quiet points (`piece_s`, `overlap_s`, `crossfade_s` — optional, defaults 60 / 0.5 / 0.02)
-  and stitches the conversion back to the input's exact frame count, sample rate and format,
-  in one channel. Input names need no extension; the format is read from the bytes.
+  and stitches the conversion back to the input's exact duration and format. The rate is
+  never below the model's (`max(input, urvc's)`, 48 kHz for the published models;
+  `output_rate: "input"` keeps the input's), and the channel count is the input's, with the ONE
+  converted voice in every channel — not a per-channel conversion (`output_channels: "mono"`
+  for one). Input names need no extension; the format is read from the bytes.
 
 Batching — a recycled urvc process per 96 pieces, or sooner when the audio it has converted or
 the memory it holds reaches a budget taken from the host's RAM — is the server's and never

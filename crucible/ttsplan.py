@@ -104,14 +104,23 @@ class ServingVariant:
     #: False for a variant whose weights do not exist yet (`PENDING_NOTE`).
     available: bool
     basis: str
+    #: What one unit of width is: a Higgs `passage`, or a Qwen3-ASR `piece`
+    #: (`asrplan`, 2026-09-26: the same order, "fewer at once before
+    #: quantizing for asr too"). Not in `to_dict`, whose shape is the wire's.
+    unit: str = "passage"
 
     @property
     def full_precision(self) -> bool:
         return self.bits >= 16
 
     def label(self) -> str:
-        precision = "full quality (bf16)" if self.full_precision else f"{self.bits}-bit"
-        pace = "one passage at a time" if self.width == 1 else f"{self.width} passages at a time"
+        if self.full_precision:
+            # A transcriber's bf16 becomes fp16 on a card without bf16, and
+            # that is not quantizing; "full precision" is true of both.
+            precision = "full quality (bf16)" if self.unit == "passage" else "full precision"
+        else:
+            precision = f"{self.bits}-bit"
+        pace = f"one {self.unit} at a time" if self.width == 1 else f"{self.width} {self.unit}s at a time"
         return f"{precision}, {pace}"
 
     def to_dict(self) -> dict[str, Any]:

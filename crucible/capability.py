@@ -130,7 +130,7 @@ from .errors import ApiError
 from .manifests import BACKEND_ENGINES, MemoryTerms, load_all_manifests
 from .pages import PAGE_CONCURRENCY
 from .precision import below_floor, weight_bits
-from . import ttsplan
+from . import asrplan, ttsplan
 from .ttsplan import ServingVariant
 from .precision import label as precision_label
 from .rvcmodels import load_all_rvc_manifests
@@ -293,9 +293,12 @@ class Candidate:
     #: at its declared width, then narrower down to one passage at a time, then
     #: 8-bit and 4-bit one at a time. Owen, 2026-09-26: *"no less than 4
     #: covers higgs as well"* and *"we should drop batches to 1 at a time
-    #: before we quantize. id rather it go slow than sound worse"*. None for
-    #: every candidate that is not a Higgs voice on cuda-linux, which keeps
-    #: its single estimate.
+    #: before we quantize. id rather it go slow than sound worse"*. And the
+    #: same order for a Qwen3-ASR model on cuda-linux (`asrplan.ladder_for`:
+    #: its declared `max_batch` pieces at once, then fewer, down to one, at
+    #: full precision; Owen, 2026-09-26, "yes, fewer at once before quantizing
+    #: for asr too"), after which the walk moves on to a smaller candidate.
+    #: None for every other candidate, which keeps its single estimate.
     serving: "tuple[ServingVariant, ...] | None" = None
 
     @classmethod
@@ -335,8 +338,11 @@ class Candidate:
             bits=weight_bits(manifest.spec(backend_kind)),
             dtype=_stated_dtype(manifest.spec(backend_kind)),
             bf16_fallback=bf16_fallback(manifest.spec(backend_kind)),
-            serving=ttsplan.ladder_for(
-                manifest, manifest.spec(backend_kind), backend_kind
+            serving=(
+                ttsplan.ladder_for(manifest, manifest.spec(backend_kind), backend_kind)
+                or asrplan.ladder_for(
+                    manifest, manifest.spec(backend_kind), backend_kind
+                )
             ),
         )
 
@@ -1410,7 +1416,7 @@ def _spell_floor(candidate: Candidate, work: "WorkingContext | None") -> str:
     if candidate.serving is None:
         return spell_out(candidate, work)
     floor = min(
-        (v for v in candidate.serving if v.available), key=lambda v: v.need_bytes
+        (v for v in candidate.serving if v.available), key=lambda v: (v.need_bytes, v.width)
     )
     return f"{_gib(floor.need_bytes)} for {floor.label()} (declared)"
 
@@ -1439,10 +1445,52 @@ def _serving_note(candidate: Candidate, budget: int) -> str:
     chosen = candidate.serving_on(budget)
     if chosen is None or chosen == candidate.serving[0]:
         return ""
+    if asrplan.is_ladder(candidate.serving):
+        # The asr order (Owen, 2026-09-26: "yes, fewer at once before
+        # quantizing for asr too"): the same rule, its own words.
+        return (
+            f" {candidate.id} {asrplan.explain(candidate.serving, chosen, budget)}. "
+            f"{asrplan.LOAD_TEST_NOTE}"
+        )
     return (
         f" {candidate.id} {ttsplan.explain(candidate.serving, chosen, budget)}. "
         "SGLang-Omni's memory fraction is not rescaled for a narrower width, so "
         "this card's first load is the load test."
+    )
+
+
+def _explain(candidate: Candidate, chosen: ServingVariant, budget: int) -> str:
+    """The ladder's own sentence for `chosen`: Higgs's or a transcriber's."""
+    plan = asrplan if asrplan.is_ladder(candidate.serving) else ttsplan
+    return plan.explain(candidate.serving, chosen, budget)
+
+
+def _skipped_ladder_note(
+    usable: tuple[Candidate, ...], best: Candidate, budget: int
+) -> str:
+    """Said when a better transcriber was passed over for a smaller one.
+
+    Owen, 2026-09-26: *"yes, fewer at once before quantizing for asr too"*. A
+    smaller or quantized model is only taken once the better one does not fit
+    even one piece at a time at full precision, and the verdict says that is
+    what happened, rather than leaving a reader to guess why the best was not
+    picked.
+    """
+    skipped = []
+    for candidate in usable:
+        if candidate.id == best.id:
+            break
+        if asrplan.is_ladder(candidate.serving):
+            skipped.append(
+                f"{candidate.id} ({_gib(candidate.serving[-1].need_bytes)}, declared)"
+            )
+    if not skipped:
+        return ""
+    return (
+        f" {' and '.join(skipped)} "
+        f"{'does' if len(skipped) == 1 else 'do'} not fit even one piece at a "
+        f"time at full precision, so {best.id} is taken: fewer pieces at once "
+        "is tried before a smaller or quantized model."
     )
 
 
@@ -1454,14 +1502,18 @@ def _serving_summary(candidate: Candidate, budget: int) -> str:
     chosen = candidate.serving_on(budget)
     if chosen is None or chosen == candidate.serving[0]:
         return ""
-    return " — " + ttsplan.explain(candidate.serving, chosen, budget)
+    return " — " + _explain(candidate, chosen, budget)
 
 
 def _serving_refusal_summary(
     entry: CapabilityClass, candidate: Candidate, budget: int
 ) -> str:
-    """The person's half of `_serving_refusal_note`, or `""` for a non-voice."""
-    if candidate.serving is None:
+    """The person's half of `_serving_refusal_note`, or `""` for a non-voice.
+
+    `""` for a transcriber too: its ladder has no pending quantized rows, so
+    past one piece at a time the walk has already moved to a smaller model.
+    """
+    if candidate.serving is None or asrplan.is_ladder(candidate.serving):
         return ""
     would = ttsplan.first_fitting(candidate.serving, budget)
     if would is not None and not would.available:
@@ -1478,7 +1530,7 @@ def _serving_refusal_summary(
 
 def _serving_refusal_note(candidate: Candidate, budget: int) -> str:
     """For a refused voice: what WOULD fit, and why it cannot be had, or `""`."""
-    if candidate.serving is None:
+    if candidate.serving is None or asrplan.is_ladder(candidate.serving):
         return ""
     would = ttsplan.first_fitting(candidate.serving, budget)
     if would is not None and not would.available:
@@ -1817,6 +1869,7 @@ def decide(
                 f"there is {arithmetic}; {len(fitting)} of {len(found)} "
                 f"{entry.noun} fit{cpu_note}",
                 barred_note,
+                _skipped_ladder_note(usable, best, budget),
                 _precision_note(best, card),
                 _serving_note(best, budget),
             ),
@@ -2471,10 +2524,19 @@ def _why_not_best(
     if missing:
         return f" The best, {best.id}, cannot start here: it needs {_needs_phrase(missing, card)}."
     if not best.holds(work, decision.available_bytes):
+        # A transcriber is only passed over once even one piece at a time at
+        # full precision does not fit (Owen, 2026-09-26: "yes, fewer at once
+        # before quantizing for asr too"), and the line says so.
+        fewer = (
+            " Fewer pieces at once was tried first; a smaller model is taken "
+            "only when even one at a time does not fit."
+            if asrplan.is_ladder(best.serving)
+            else ""
+        )
         return (
             f" The best, {best.id}{_shown_precision(best, card) or ''}, needs "
             f"{_spell_floor(best, work)} and this card gives a job "
-            f"{_gib(decision.available_bytes)}."
+            f"{_gib(decision.available_bytes)}.{fewer}"
         )
     return f" {decision.selected} is the one chosen in Settings; {best.id} would also fit."
 
