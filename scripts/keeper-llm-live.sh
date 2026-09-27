@@ -240,7 +240,7 @@ else
 fi
 
 if [ "$REMOTE" = "0" ]; then
-  read -r USED_LOADED FREE_LOADED _ <<<"$(accelerator_used)"
+  read -r USED_LOADED _ _ <<<"$(accelerator_used)"
   log "accelerator loaded: $((USED_LOADED / 1024 / 1024)) MiB used (+$(( (USED_LOADED - USED_BEFORE) / 1024 / 1024 )) MiB)"
 fi
 
@@ -379,7 +379,7 @@ if [ "$REMOTE" = "1" ]; then
 else
   SETTLED=0
   for _ in $(seq 1 60); do
-    read -r USED_AFTER FREE_AFTER _ <<<"$(accelerator_used)"
+    read -r USED_AFTER _ _ <<<"$(accelerator_used)"
     if [ "$USED_AFTER" -le $((USED_BEFORE + 1073741824)) ]; then SETTLED=1; break; fi
     sleep 2
   done

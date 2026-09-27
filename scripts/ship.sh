@@ -99,13 +99,14 @@ git fetch --quiet origin main
 echo "ship: main is clean and matches origin at $(git rev-parse --short HEAD)"
 
 if [ "$no_bump" = "1" ]; then
-  version="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
+  version="$(python scripts/bump.py --check)" \
+    || fail "the version places are not one version (bump.py said why, above); run 'python scripts/bump.py --align', commit, and ship again"
   step "the version bump: none, $version unchanged (--no-bump)"
 else
   step "the version bump"
   python scripts/bump.py "$level"
-  version="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' crucible/__init__.py)"
-  [ -n "$version" ] || fail "could not read the new version back from crucible/__init__.py"
+  version="$(python scripts/bump.py --check)" \
+    || fail "the bump left the version places disagreeing (bump.py said why, above); 'git checkout .' undoes it"
 fi
 
 if [ "$dry_run" = "1" ]; then
@@ -150,6 +151,6 @@ if [ "$do_deploy" != "1" ]; then
 fi
 echo "ship: then promote it — this is the step that makes releases/latest serve $version,"
 echo "ship: and the flag attests that you installed it, so only you can pass it:"
-echo "  python scripts/promote_release.py --tag v$version --publish --confirmed-install-smoke"
+echo "  $(python scripts/promote_release.py --tag "v$version" --print-command)"
 echo "ship: and repin the apps:"
 echo "  node tools/adopt-crucible-release.mjs $version     # in bookforge, and in foundry"

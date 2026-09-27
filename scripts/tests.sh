@@ -2,7 +2,9 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO"
+cd "$REPO" || exit 1
+
+TEST_FILES=(tests/test_*.py)
 
 fail() { echo "tests: $*" >&2; exit 1; }
 
@@ -22,7 +24,7 @@ else
             echo 'tests: a fine-tune is running in $DISTRO — it owns the card and the RAM. Refusing.' >&2
             exit 2
           fi
-          exec flock -w 1800 /tmp/crucible-pytest.lock '$WSL_ENV/bin/python' -m pytest -q $*"
+          exec flock -w 1800 /tmp/crucible-pytest.lock '$WSL_ENV/bin/python' -m pytest -q ${*:+$(printf '%q ' "$@")}"
       }
       WHERE="$DISTRO:$WSL_ENV"
       ;;
@@ -47,6 +49,7 @@ Run the tests that name what changed.
   ./scripts/tests.sh              same as --changed
   ./scripts/tests.sh --changed    only the tests that name the change
   ./scripts/tests.sh --all        everything
+  ./scripts/tests.sh --all -- ARGS  everything, with ARGS passed on to pytest
   ./scripts/tests.sh --list       what --changed WOULD run, and why
 USAGE
 }
@@ -59,11 +62,20 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
   *) fail "unknown argument $1 (try --changed, --all or --list)" ;;
 esac
+[ $# -gt 0 ] && shift
+
+extra=()
+if [ $# -gt 0 ]; then
+  [ "$mode" = "--all" ] && [ "$1" = "--" ] \
+    || fail "unexpected argument $1: only --all passes arguments on to pytest, after --, as in ./scripts/tests.sh --all -- --ignore=tests/test_x.py"
+  shift
+  extra=("$@")
+fi
 
 run_all() {
   [ "$mode" = "--list" ] && { echo "tests: would run the whole suite"; exit 0; }
-  echo "tests: the whole suite ($WHERE)"
-  pytest_cmd
+  echo "tests: the whole suite ($WHERE)${extra[*]:+ with pytest arguments: ${extra[*]}}"
+  pytest_cmd ${extra[@]+"${extra[@]}"}
   exit $?
 }
 
@@ -110,7 +122,7 @@ for path in $changed; do
 
   version_line_only "$path" && continue
 
-  total="$(ls tests/test_*.py | wc -l)"
+  total="${#TEST_FILES[@]}"
   base_name="$(basename "$path")"
   stem="${base_name%.*}"
   candidates="$path"
@@ -136,7 +148,7 @@ for path in $changed; do
 done
 
 echo "tests: since $base, these files changed:"
-echo "$changed" | sed 's/^/  /'
+while IFS= read -r line; do echo "  $line"; done <<<"$changed"
 [ -n "$unnamed" ] && echo "tests: no test in tests/ names:$unnamed"
 
 if [ -z "$(echo "$selected" | tr -d ' ')" ]; then
@@ -156,8 +168,9 @@ if [ "$mode" = "--list" ]; then
   exit 0
 fi
 
-echo "tests: $(echo $selected | wc -w) file(s) of the $(ls tests/test_*.py | wc -l) in tests/ ($WHERE)"
-pytest_cmd $selected
+read -ra selected_files <<<"$selected"
+echo "tests: ${#selected_files[@]} file(s) of the ${#TEST_FILES[@]} in tests/ ($WHERE)"
+pytest_cmd "${selected_files[@]}"
 status=$?
 if [ "$status" != "0" ]; then
   echo "tests: FAILED. Run ./scripts/tests.sh --all before deciding this is unrelated." >&2

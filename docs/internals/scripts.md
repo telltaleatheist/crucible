@@ -6,10 +6,14 @@ What the repo's operator scripts depend on that their code does not say by itsel
 
 ### The seven version places (`bump.py`, `release.sh`)
 
-The version is stated in seven places and `release.sh` refuses a cut unless all agree:
+The version is stated in seven places:
 `crucible/__init__.py`, `pyproject.toml`, `sdk/ts/package.json`, `sdk/ts/src/version.ts`
 (the SDK's User-Agent), `sdk/bootstrap/package.json`, its `@crucible/client` peer pin, and
-`sdk/bootstrap/src/version.ts`. `bump.py` owns the list (`PLACES`).
+`sdk/bootstrap/src/version.ts`. `bump.py` owns the list (`PLACES`) and is the only reader:
+`python scripts/bump.py --check` prints the one version or names every place and exits 1, and
+`release.sh`, `ship.sh` and CI all call it rather than reading a file themselves.
+`python scripts/bump.py --align` sets every place to what `crucible/__init__.py` says, which is
+the repair `--check` names when they disagree.
 
 - **Never search-and-replace a version.** Each place has its own anchored pattern that must
   match exactly once; a file that changed shape refuses the bump. Other files name old
@@ -17,8 +21,11 @@ The version is stated in seven places and `release.sh` refuses a cut unless all 
   v0.6.6 -> v0.6.7), and rewriting them would turn a fact into a lie.
 - **Generated files carry the version too.** `modules/*.module.json` names it as
   `<version>+<content hash>` and `docs/API.md` is built from the app, so `bump.py`
-  regenerates both (`GENERATORS`) and `release.sh` checks each with `--check`. v0.6.3 shipped
-  stale module files because nothing compared them.
+  regenerates both (`GENERATORS`). v0.6.3 shipped stale module files because nothing
+  compared them.
+- **`check-generated.sh` is the one generated-files check**: `docs/API.md`,
+  `modules/*.module.json` and `foundry-lineup.json`, each generator's own `--check`. CI and
+  `release.sh` both run it, so neither can check a subset. `--fix` regenerates all three.
 - The standalone installers contain no version: they resolve the release at run time.
 - The proof a bump worked is `release.sh --dry-run`, the same gate the cut uses.
 
@@ -50,10 +57,22 @@ Read-only by default. `--publish` moves `releases/latest` and also requires
 `--confirmed-install-smoke`, an attestation that a person installed the candidate; release
 metadata cannot prove that, so nothing automates it (`ship.sh` only prints the command).
 
-- **Asset names are read from `release.sh`**, from its `gh release create` invocation, never
-  listed here: gh's contract is `create <tag> [files...]`, so the first positional is the tag
-  and a `"$VAR"` after a `--flag` is that flag's value. `NAME="value"` assignments are expanded
+- **Asset names travel with the release.** `release.sh` names its uploads once (`ASSETS`),
+  has `promote_release.py --write-asset-list` write them to `assets.json`, and uploads that
+  file beside them; promotion reads `assets.json` back from the release. A release cut before
+  `assets.json` existed has none, and only then are the names parsed out of the `gh release
+  create` line of the `release.sh` at that tag (`git show v<ver>:scripts/release.sh`). That
+  parser knows gh's contract, `create <tag> [files...]`: the first positional is the tag and
+  a `"$VAR"` after a `--flag` is that flag's value; `NAME="value"` assignments are expanded
   (bounded, so a cycle fails instead of hanging).
+- **Promotion checks the fleet.** It runs `deploy.sh` with no arguments (read-only) and
+  refuses `--publish` unless every machine in `deploy.sh`'s `FLEET` reports the tag. A
+  machine behind is named with the `deploy.sh --release <ver> --only <machine>` that fixes it.
+  A machine that cannot be asked blocks too, unless named with `--allow-unreachable
+  <machine>`; if `deploy.sh` cannot run at all with that machine selected (the `pc` off the
+  PC), the rest are asked with `--only`.
+- **The promote command has one spelling**, `promote_command()`; `release.sh`, `ship.sh` and
+  `deploy.sh` print it through `promote_release.py --tag v<ver> --print-command`.
 - Every asset must carry this version; a leftover from another release is refused, because
   promotion would make installers fetch bytes that are not this candidate's.
 
@@ -150,6 +169,9 @@ time we changed anything."*
   runs the test files that name it, trying its repo path, then its module stem
   (`crucible/*.py`), then its basename; anything else selects nothing. Every uncertainty
   resolves to FEWER tests; `--all` is the proof. A file no test names is reported, not widened.
+- `--all -- <args>` passes everything after `--` to pytest (`--all -- --ignore=tests/test_x.py`).
+  Any other extra argument is refused. On Windows the arguments are `printf %q`-quoted into the
+  guest's command line.
 - A name that matches nearly every test file (e.g. the stem `tests`) is discarded and the next
   name tried.
 - A file whose only change is its version literal (`crucible/__init__.py`, `pyproject.toml`
@@ -163,44 +185,6 @@ time we changed anything."*
 - On Windows pytest runs inside WSL2 (the CLI refuses Windows), reusing `CRUCIBLE_WSL_DISTRO`
   and `CRUCIBLE_WSL_ENV`. It refuses while `train_lora.py` is running (13 GB guest, one card),
   and `flock` serialises concurrent runs.
-
-## The PHASE15 button (`testrun-phase15.sh`)
-
-Owen, 2026-09-14: *"get everything ready so we can just hit a button and have the tests run."*
-Stages run in order, stop at the first failure, and write
-`C:\tmp\phase15-testrun\<timestamp>\report.md` as they go. It never asks a question: anything
-optional (API key, page, BookForge checkout) is looked for by name and reported SKIPPED.
-
-- Every command goes through `run`, so `--dry-run` has no second code path.
-- The trainer guard greps for `[t]rain_lora.py` so the pattern does not match itself.
-- The Anthropic key goes into a 0600 file inside the guest and is deleted in the same
-  command; it never reaches argv, a log, or the report. The config is restored before the
-  assertion.
-- Only T6/T7 need the card. T9 (the Mac) and staging are deliberately not in this script.
-- T10 probes the host door with a GET, never a POST (a POST starts a real WSL install); the
-  staged server uses 7102 because the door is on 7101. A POST with `CRUCIBLE_HOST_DOOR` set is
-  a 202 with a task id; failures are read from the task, not the POST body.
-
-## Page and chunk probes (`read_one_page.py`, `one_cleanup_chunk.py`)
-
-- **The caller owns residency.** Crucible never loads a model to answer a chat
-  (`model_not_resident`), so these submit `load-model`, ask, then `unload-model`; a
-  llama-server left holding the card breaks the next stage.
-- **The measurement is recorded before the unload.** A `finally` around the read let the
-  unload's refusal replace a page that had been read. An unload refused `model_not_resident`
-  is success: the card is already clear of the model.
-- Error codes are read from `error.code`, never matched in prose.
-- `thinking: false` is sent as `chat_template_kwargs`, as BookForge does; otherwise Qwen3.5
-  spends the budget on reasoning and returns no content.
-- `read_one_page.py` builds its request from `crucible/pages.py` (prompt, dpi, pixel budget).
-  It writes `answer.json` and `shape.json`; T7 compares the shape (block keys and categories in
-  order), never the text, since two engines may disagree about a character but not the dialect.
-  Rasterising is the app's work; a PDF needs `pypdfium2`, and without it the script exits 2
-  ("could not try", pytest's collection-error code) so a caller can tell SKIP from FAIL.
-- The cleanup chunk is invented text with the two defects the pass fixes, so no test run
-  carries a copyrighted page.
-- `task_field.py` prints nothing (exit 0) for a document that does not parse or lacks the
-  path, because its caller polls and makes its own assertion.
 
 ## Generators
 
@@ -229,6 +213,11 @@ client packs to it, so a wrong band silently damages someone else's audio. It is
 not a test because Crucible must run where BookForge does not exist. The overlay is sparse:
 a voice it does not mention is fine, and non-band keys (`_README`) are skipped.
 
+- The BookForge checkout is `--bookforge`, else `$CRUCIBLE_BOOKFORGE`, else `bookforge`
+  beside this checkout. The manifests are `--voices` (default `./voices`); a directory with no
+  voice manifest refuses, where it used to print "0 voice band(s) agree". Voice manifests left
+  the repo with PHASE21 (they travel with their weights), so pass the directory that holds them.
+
 ## Live keepers and measurement
 
 - **Never SIGKILL in WSL2.** Servers are stopped with SIGTERM; the server's shutdown stops its
@@ -254,6 +243,14 @@ a voice it does not mention is fine, and non-band keys (`_README`) are skipped.
   nvidia-smi is sampled at 1 Hz because `total_consumed` is a whole-card delta. The engine env
   comes from Crucible (without `VLLM_WSL2_ENABLE_PIN_MEMORY` the load dies with
   `UVA is not available`).
+
+## Lint
+
+`ruff` runs pyflakes and isort only (`[tool.ruff.lint]` in `pyproject.toml`; no style rules),
+and `shellcheck --severity=warning` runs on `scripts/*.sh`. Both block CI for `scripts/`.
+`ruff check crucible tests` runs non-blocking (`continue-on-error`) until the owning packages
+clear it. Below warning, shellcheck's notes include intended single-quoted remote payloads
+(SC2016 in `deploy.sh`, `wsl-serve.sh`) and trap-only cleanup functions (SC2329).
 
 ## End to end
 
