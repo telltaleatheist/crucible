@@ -37,8 +37,8 @@ The wire, in full
             is fixed for the session because the session is one job.
 
             {"op": "split", "ffmpeg", "source", "max_piece_s", "out_dir",
-             "region_s", "overlap_s"}
-                -> ready {duration_s, pieces}
+             "region_s", "overlap_s", "speech"}
+                -> ready {duration_s, pieces, samples, speech_s, kept}
                    result {offset_s, duration_s, audio_offset_s,
                            audio_duration_s, wav}          one per piece
                    done
@@ -53,6 +53,17 @@ The wire, in full
             `region_s` null, and again with a piece's core as `region_s` when
             that piece is re-decoded at a smaller window
             (`loopguard.window_ladder`).
+
+            SPEECH ONLY (2026-09-27). `speech` is null, or the settings object
+            `speechonly.settings` checks. With it, the decoded source goes
+            through Silero VAD on the CPU and every long stretch without
+            speech is taken out; the SHORTENED signal is what is cached, cut
+            and written, so every `*_s` above and `duration_s` are on its
+            timeline, and `region_s` on a re-cut is too. `kept` is the table
+            back (source sample spans) and `samples` the source's length; the
+            server moves every time back. Cuts prefer the joins where a
+            stretch was taken out (`split_points`). Null `speech`: `speech_s`
+            and `kept` are null and `duration_s` is the source's.
 
             {"op": "transcribe", "pieces": [{"wav", "max_tokens"}]}
                 -> ready {pieces}
@@ -232,7 +243,7 @@ def decode(ffmpeg: str, source: str, on_progress):
     return numpy.frombuffer(buffer, dtype=numpy.float32)
 
 
-def split_points(wav, max_piece_s: float) -> list:
+def split_points(wav, max_piece_s: float, joins=()) -> list:
     """`[(start_sample, end_sample)]` covering `wav` exactly, no gaps, no overlap.
 
     After `qwen_asr` 0.0.6's `split_audio_into_chunks` (Apache-2.0, Alibaba
@@ -241,6 +252,12 @@ def split_points(wav, max_piece_s: float) -> list:
     cut (`SEARCH_SECONDS`): every boundary is the CENTRE of the quietest
     100 ms window in the search span before the nominal cut, so a cut lands in
     the middle of a pause rather than against its edge.
+
+    `joins` (samples of `wav`, 2026-09-27) are where `speech_only` took a
+    stretch out: the middle of `2 * pad_s` of audio the detector heard no
+    speech in. When one lies in the search span the cut is made there, at the
+    latest one, rather than at the quietest 100 ms, because a quiet window can
+    be a soft consonant and a join cannot.
     """
     import numpy
 
@@ -256,7 +273,10 @@ def split_points(wav, max_piece_s: float) -> list:
         cut = start + max_len
         left = max(start, cut - search)
         right = cut
-        if right - left <= window:
+        inside = [point for point in joins if left < point <= right]
+        if inside:
+            boundary = max(inside)
+        elif right - left <= window:
             boundary = cut
         else:
             magnitude = numpy.abs(wav[left:right])
@@ -504,6 +524,21 @@ def load(request: dict) -> None:
 # ---------------------------------------------------------------------- split
 
 
+def _speechonly():
+    """`speechonly.py` from this file's own directory (no `crucible` here).
+
+    Imported when a `split` asks for it, never at module load, so a test that
+    imports this file for its pure parts does not need this directory on its
+    path.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import speechonly
+
+    return speechonly
+
+
 def split(request: dict) -> None:
     """Cut `source` (or one stretch of it) into pieces, each written with overlap.
 
@@ -524,6 +559,7 @@ def split(request: dict) -> None:
     overlap_s = float(require(request, "overlap_s", (int, float)))
     if overlap_s < 0:
         raise ValueError(f"overlap_s is {overlap_s}; it is seconds of real audio, at least 0")
+    speech = _speechonly().from_request(request)
     os.makedirs(out_dir, exist_ok=True)
 
     last = [0.0]
@@ -535,15 +571,22 @@ def split(request: dict) -> None:
         last[0] = now
         send("progress", stage="decoding", processed_s=round(decoded_s, 1))
 
-    if _STATE["decoded_source"] == source:
-        wav = _STATE["decoded"]
+    # The cache is keyed by the source AND the speech settings: a re-cut must
+    # read the same (shortened) signal its first cut did, and every time it
+    # reports is on that signal's timeline.
+    key = (source, json.dumps(speech, sort_keys=True))
+    if _STATE["decoded_source"] == key:
+        wav, samples, kept = _STATE["decoded"]
     else:
         wav = decode(ffmpeg, source, progress)
-        _STATE["decoded_source"], _STATE["decoded"] = source, wav
+        samples, kept = int(wav.shape[0]), None
+        if samples <= 0:
+            raise RuntimeError(f"{source} decoded to zero length")
+        if speech is not None:
+            wav, kept = _speechonly().cut_for_worker(wav, speech, source, progress)
+        _STATE["decoded_source"], _STATE["decoded"] = key, (wav, samples, kept)
     total_samples = int(wav.shape[0])
     total = total_samples / float(SAMPLE_RATE)
-    if total <= 0:
-        raise RuntimeError(f"{source} decoded to zero length")
     if region is None:
         region_first, region_last = 0, total_samples
     else:
@@ -551,8 +594,26 @@ def split(request: dict) -> None:
         region_last = min(total_samples, int(round(float(region[1]) * SAMPLE_RATE)))
         if region_last <= region_first:
             raise ValueError(f"region_s {region} holds no audio in {total:.1f}s of {source}")
-    spans = split_points(wav[region_first:region_last], max_piece_s)
-    send("ready", duration_s=total, pieces=len(spans))
+    joins = (
+        []
+        if kept is None
+        else [
+            point - region_first
+            for point in _speechonly().joins(kept)
+            if region_first < point < region_last
+        ]
+    )
+    spans = split_points(wav[region_first:region_last], max_piece_s, joins)
+    send(
+        "ready",
+        # The timeline every offset below is on: the source's, or with
+        # `speech` the shortened one, whose table `kept` is (source samples).
+        duration_s=total,
+        pieces=len(spans),
+        samples=samples,
+        speech_s=None if kept is None else total,
+        kept=kept,
+    )
 
     import numpy
 

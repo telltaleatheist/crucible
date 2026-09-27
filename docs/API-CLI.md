@@ -355,7 +355,7 @@ BookForge's `crucible` provider follows).
 | `load-voice` | voice id | `{"timeout_s": …}`, plus `reference` for a `zeroshot` voice | none |
 | `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` | id | `{}` | none |
 | `load-model` | model id | `{"timeout_s": …, "context": …, "lease": {"act": …, "ttl_seconds": …}}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
-| `asr` | whisper id | `{"language","vad_filter","word_timestamps"[, "initial_prompt"]}` | exactly one audio file; `"auto"` is a language; `initial_prompt` is a string or null |
+| `asr` | asr id | `{"language","vad_filter","word_timestamps"[, "initial_prompt","context","piece_s","overlap_s","speech_only","speech_threshold","speech_pad_s","speech_min_gap_s"]}` | exactly one audio file; `"auto"` is a language (whisper only); `initial_prompt` is whisper's, `context`/`piece_s`/`overlap_s` Qwen3-ASR's; `speech_only` (default false, 2026-09-27) takes stretches without speech out first and lists them in the transcript's `removed`; its three knobs default to 0.3 / 0.3 s / 2 s and are refused without it |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |

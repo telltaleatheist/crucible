@@ -2467,6 +2467,39 @@ export interface AsrOptions {
    * docs/PHASE25-QWEN-ASR.md for the transcript's shape.
    */
   readonly context?: string | null;
+  /**
+   * Take the long stretches without speech out before the model hears them
+   * (2026-09-27; every model). Silence sent through an ASR model comes back
+   * as invented text; with this the server runs a speech detector (Silero
+   * VAD, on its CPU) over the audio first. Every time in `transcript.json` is
+   * still on the ORIGINAL audio's timeline, and the transcript lists what
+   * was taken out in `removed` (`[{start, end}]`, seconds), so a missing line
+   * can be looked for there.
+   *
+   * **Off by default for now**: sent as `speech_only` only when stated. The
+   * server's default flips to on once it has been measured to lose no
+   * sentence openings. Not with `vadFilter: true` (two detectors; send one).
+   */
+  readonly speechOnly?: boolean;
+  /**
+   * With {@link speechOnly}: the detector score, 0.1 to 0.7, at which a 32 ms
+   * frame counts as speech. Lower keeps more. Left out (or `null`), the
+   * server's default, 0.3. Sent as `speech_threshold`; refused without
+   * `speechOnly: true`.
+   */
+  readonly speechThreshold?: number | null;
+  /**
+   * With {@link speechOnly}: seconds of audio kept either side of every
+   * stretch of speech, 0.1 to 2. Left out (or `null`), 0.3. Sent as
+   * `speech_pad_s`.
+   */
+  readonly speechPadS?: number | null;
+  /**
+   * With {@link speechOnly}: the shortest stretch without speech that is ever
+   * taken out, 1 to 60 seconds; anything shorter stays in as context. Left
+   * out (or `null`), 2. Sent as `speech_min_gap_s`.
+   */
+  readonly speechMinGapS?: number | null;
 }
 
 // ---------------------------------------------------------------------------

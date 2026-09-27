@@ -12,7 +12,9 @@ newline-delimited JSON out, same `ready` / `progress` / `result` / `failed` /
 point: `crucible/jobs/asr/__init__.py` assembles `transcript.json` from these
 messages with no branch in it for the engine, so BookForge's align and transcript
 readers see one artifact shape whichever machine ran the job. Anything this
-engine cannot do is a REFUSAL, never a quietly different field.
+engine cannot do is a REFUSAL, never a quietly different field. That includes
+`speech` (2026-09-27): the same `speechonly.py`, numpy on the CPU, the same
+`samples` / `speech_s` / `kept` in `ready` (see `worker.py`).
 
 This module is **standalone**, for `worker.py`'s reason: the env it runs in has
 no `crucible` installed and never will.
@@ -113,6 +115,41 @@ def require(request: dict, key: str, kind: type) -> object:
             f"{type(value).__name__}"
         )
     return value
+
+
+def _speechonly():
+    """`speechonly.py` from this file's own directory (no `crucible` here)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import speechonly
+
+    return speechonly
+
+
+def require_speech(request: dict) -> "dict | None":
+    """`speech`: required as a KEY; null means transcribe everything."""
+    return _speechonly().from_request(request)
+
+
+def speech_only(waveform, speech: dict, total: float, audio: str) -> tuple:
+    """The shortened waveform and its `kept` table (`worker.py`'s, 2026-09-27)."""
+    last = [0.0]
+
+    def report(seconds: float) -> None:
+        now = time.time()
+        if now - last[0] < DECODE_REPORT_SECONDS:
+            return
+        last[0] = now
+        send(
+            "progress",
+            stage="decoding",
+            processed_s=round(seconds, 1),
+            total_s=round(total, 1),
+            cues=0,
+        )
+
+    return _speechonly().cut_for_worker(waveform, speech, audio, report)
 
 
 # ------------------------------------------------------------------- decoding
@@ -371,6 +408,7 @@ def main() -> int:
                 f"{type(language).__name__}"
             )
         initial_prompt = require_prompt(request)
+        speech = require_speech(request)
     except KeyError as exc:
         return fail(str(exc.args[0]))
 
@@ -442,17 +480,31 @@ def main() -> int:
     except Exception as exc:
         return fail(f"could not decode {audio}: {type(exc).__name__}: {exc}")
 
-    total = len(waveform) / float(SAMPLE_RATE)
-    if total <= 0:
+    samples = len(waveform)
+    source_total = samples / float(SAMPLE_RATE)
+    if source_total <= 0:
         return fail(f"{audio} decoded to zero length")
+    kept = None
+    if speech is not None:
+        # `worker.py`'s speech only, the same file and the same numpy on the
+        # CPU: this is not mlx-whisper's VAD (it has none), it is Crucible's,
+        # run before whisper hears anything.
+        try:
+            waveform, kept = speech_only(waveform, speech, source_total, audio)
+        except Exception as exc:
+            return fail(f"speech detection failed: {type(exc).__name__}: {exc}")
+    total = len(waveform) / float(SAMPLE_RATE)
 
     windows = int(math.ceil(total / window_s))
     send(
         "ready",
-        duration_s=total,
+        duration_s=source_total,
         windows=windows,
         device=device,
         compute_type=compute_type,
+        samples=samples,
+        speech_s=None if kept is None else total,
+        kept=kept,
     )
 
     emitted = 0

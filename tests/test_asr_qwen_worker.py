@@ -115,10 +115,20 @@ def test_split_writes_every_piece_and_reports_offsets_in_order(
             "source": str(tmp_path / "stream.m4a"),
             "max_piece_s": 60,
             "out_dir": str(tmp_path / "pieces"),
+            "region_s": None,
+            "overlap_s": 0,
+            "speech": None,
         }
     )
     sent = messages(wire)
-    assert sent[0] == {"type": "ready", "duration_s": 130.0, "pieces": 3}
+    assert sent[0] == {
+        "type": "ready",
+        "duration_s": 130.0,
+        "pieces": 3,
+        "samples": 130 * RATE,
+        "speech_s": None,
+        "kept": None,
+    }
     results = [m for m in sent if m["type"] == "result"]
     assert [round(r["offset_s"], 1) for r in results][0] == 0.0
     assert 55.0 <= results[1]["offset_s"] <= 55.3

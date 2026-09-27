@@ -140,6 +140,48 @@ FFMPEG_BUILDS: dict[str, ToolBuild] = {
     ),
 }
 
+
+@dataclass(frozen=True)
+class ToolFile:
+    """One pinned file, the same on every platform, placed as it is."""
+
+    version: str
+    url: str
+    sha256: str
+    bytes: int
+    #: Where it is placed, under `<home>/tools/`.
+    directory: str
+    provenance: str
+    licence: str
+
+
+#: THE PINNED SPEECH DETECTOR for `asr`'s `speech_only` (Owen, 2026-09-27:
+#: *"We can use the speech detector, that's fine"*). Silero VAD 6.2.1's own
+#: ONNX export `silero_vad_op18_ifless.onnx`, from the PyPI wheel
+#: `silero_vad-6.2.1-py3-none-any.whl` (`silero_vad/data/`), re-hosted byte
+#: for byte on our `tools` release. MIT (Silero Team). Not run as ONNX: its
+#: weights are read out of it and the network runs in numpy inside the ASR
+#: worker, on the CPU (`crucible/jobs/asr/speechonly.py` says why and how it
+#: was checked). One file for every platform, placed by `crucible install`
+#: beside ffmpeg, and fetched by the first `speech_only` job on a server that
+#: has not been re-installed since (`ensure_silero_vad`): 2.8 MB, and a caller
+#: who asked for speech only should not be told to go and run an installer.
+SILERO_VAD = ToolFile(
+    version="6.2.1",
+    url=(
+        "https://github.com/telltaleatheist/crucible/releases/download/"
+        "tools/silero_vad_op18_ifless-6.2.1.onnx"
+    ),
+    sha256="7671cd04b004e9076da0d4a7b1a5aec36adf161c39230c1cb94a4fd5db6bbd28",
+    bytes=2_845_718,
+    directory="silero-vad",
+    provenance=(
+        "silero-vad 6.2.1 from PyPI (silero_vad-6.2.1-py3-none-any.whl), "
+        "silero_vad/data/silero_vad_op18_ifless.onnx, re-hosted unchanged"
+    ),
+    licence="MIT (Copyright (c) 2020-present Silero Team)",
+)
+
 #: How much of a download is read at a time.
 _CHUNK_BYTES = 1 << 20
 
@@ -405,3 +447,57 @@ def ensure_ffmpeg(
         encoding="utf-8",
     )
     return f"ffmpeg: {build.version} placed in {bin_dir} (sha256 {build.sha256[:12]}...)"
+
+
+# ------------------------------------------------------ pinned speech detector
+
+
+def silero_vad_path(home: Path) -> Path:
+    """Where the pinned speech detector is placed: `<home>/tools/silero-vad/<file>`."""
+    return (
+        home / TOOLS_DIR_NAME / SILERO_VAD.directory / SILERO_VAD.url.rsplit("/", 1)[-1]
+    )
+
+
+def silero_vad_placed(home: Path) -> bool:
+    """Is exactly the pinned file there? Hashed, not trusted: it is 2.8 MB."""
+    path = silero_vad_path(home)
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == SILERO_VAD.sha256
+    except OSError:
+        return False
+
+
+def ensure_silero_vad(
+    home: Path,
+    *,
+    fetch: Callable[[str, Path], str] | None = None,
+) -> str:
+    """Place the pinned speech detector. Returns one line; refuses by name.
+
+    `ensure_ffmpeg`'s rules: the digest is checked before the file is at its
+    path, a mismatch places nothing, and a placed file is never fetched again.
+    Called by `crucible install` for every job type, and by an `asr` job that
+    asked for `speech_only` on a server installed before the detector existed.
+    """
+    path = silero_vad_path(home)
+    if silero_vad_placed(home):
+        return f"speech detector: silero-vad {SILERO_VAD.version} already at {path}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(f".{path.name}.partial")
+    try:
+        measured = (_download if fetch is None else fetch)(SILERO_VAD.url, partial)
+        if measured != SILERO_VAD.sha256:
+            raise HostToolError(
+                "tool_sha_mismatch",
+                f"{path.name} hashed {measured}, and Crucible pins "
+                f"{SILERO_VAD.sha256}. Nothing is placed: these are not the bytes "
+                "on Crucible's tools release",
+            )
+        os.replace(partial, path)
+    finally:
+        partial.unlink(missing_ok=True)
+    return (
+        f"speech detector: silero-vad {SILERO_VAD.version} placed at {path} "
+        f"(sha256 {SILERO_VAD.sha256[:12]}...)"
+    )
