@@ -105,14 +105,11 @@ def _plan(directory: Path, recipe: Path, *, installed: bool = True) -> jobenv.En
     )
 
 
-def test_a_stamp_without_the_recipe_text_is_refused_by_name(tmp_path: Path) -> None:
-    """The bytes behind the recorded stamp are gone, so nothing can be proven —
-    and `pip install -r` is exactly the thing that would look like it had."""
+def test_a_stamp_without_the_recipe_text_is_built_again(tmp_path: Path) -> None:
     directory, recipe = _env(tmp_path, None, environment=None)
-    with pytest.raises(jobenv.EnvError) as caught:
-        _plan(directory, recipe)
-    assert "stamped before the recipe's text was recorded" in str(caught.value)
-    assert "--force" in str(caught.value)
+    plan = _plan(directory, recipe)
+    assert plan.action == jobenv.PLAN_BUILD
+    assert "older Crucible" in plan.detail
 
 
 def test_an_index_url_change_refuses_rather_than_pipping(tmp_path: Path) -> None:

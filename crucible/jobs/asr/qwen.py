@@ -79,7 +79,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from ... import asrplan, weights, workerenv, workers
+from ... import asrplan, jobenv, weights, workers
 from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError
 from ...alignmodels import load_align_manifest
 from ...asrmodels import (
@@ -266,14 +266,14 @@ def plan_aligner(config: Config, asr: AsrBackendSpec, backend_kind: str) -> Alig
     """The aligner's env and weights, or the same refusals `align` makes."""
     manifest, spec = aligner_spec(asr, backend_kind)
     try:
-        python = workerenv.require_env(config.home, "align", backend_kind)
-    except workerenv.WorkerEnvError as exc:
+        python = jobenv.require_env(config.home, jobenv.worker_env("align", backend_kind), backend_kind)
+    except jobenv.EnvError as exc:
         raise ApiError(
             409,
             "env_missing",
             f"word timestamps on {asr.hf_repo} need the aligner {manifest.id!r}, "
             f"and {exc}",
-            {"model": manifest.id, "env": str(workerenv.worker_env_dir(config.home, "align"))},
+            {"model": manifest.id, "env": str(config.home / "envs" / "align")},
         ) from None
     try:
         installed = weights.require_installed(config, manifest, spec)
@@ -725,8 +725,8 @@ class QwenAsrRun:
             script=ALIGN_WORKER_SCRIPT,
             log_path=self._config.logs_dir / f"asr-{self._job.id}-aligner.log",
             # Beside vLLM on the PC, so capped at its OWN admitted share, not the
-            # card (`workerenv.torch_memory_cap`).
-            environment=workerenv.torch_allocator_environment(
+            # card (`workers.torch_memory_cap`).
+            environment=workers.torch_allocator_environment(
                 self._config.backend_kind
             ),
         )
@@ -741,7 +741,7 @@ class QwenAsrRun:
                     "model_dir": str(plan.weights_dir),
                     "device": device,
                     "dtype": plan.spec.dtype,
-                    "memory_cap_bytes": workerenv.torch_memory_cap(
+                    "memory_cap_bytes": workers.torch_memory_cap(
                         self._config.backend_kind, plan.spec.memory_bytes_estimate
                     ),
                 },

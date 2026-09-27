@@ -31,7 +31,7 @@ the CPU, never on the card (it is busy):
     mlx-audio        llm env, mlx-darwin    neither
 
 No runtime is in all five, and adding one to a recipe makes every installed
-env of it read as not installed until it is rebuilt (`workerenv.env_status`
+env of it read as not installed until it is rebuilt (`jobenv.env_status`
 compares every pin) — a vLLM reinstall on the PC to add a 1.2 MB detector that
 is off by default. numpy is in all five. Silero publishes the network written
 out in plain tensor operations (`silero_vad/tinygrad_model.py` in the wheel);

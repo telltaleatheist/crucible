@@ -38,7 +38,7 @@ type = "align"
 
 # `rvc` and nothing after it: `denoise` has no installer of its own, because
 # audio-separator lives in the rvc env and `crucible install rvc` writes both
-# flags (`workerenv.JOB_TYPES_SERVED_BY_ENV`). Naming it here would be refused
+# flags (`jobenv.JOB_TYPES_SERVED_BY_ENV`). Naming it here would be refused
 # by name, and the refusal would say exactly this.
 [[job_types]]
 type = "rvc"

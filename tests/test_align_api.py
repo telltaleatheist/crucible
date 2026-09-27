@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, procgroup, workerenv, workers
+from crucible import accelerator, procgroup, jobenv, workers
 from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
@@ -65,7 +65,7 @@ def align_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     A symlink and not a stub script: the worker is spawned with it for real, so
     it has to be able to run a Python file.
     """
-    directory = workerenv.worker_env_dir(home, "align")
+    directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -80,9 +80,9 @@ def align_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = workerenv.recipe_pins(workerenv.recipe_for("align", FAKE_BACKEND.kind))
+    pins = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("align", FAKE_BACKEND.kind)))
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     return directory
 
@@ -121,7 +121,7 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     test builds its own client (it passes `backend=FAKE_MAC_BACKEND`), so it
     needs this after the home exists and before the client starts.
     """
-    directory = workerenv.worker_env_dir(home, "align")
+    directory = home / "envs" / "align"
     (directory / "bin").mkdir(parents=True)
     (directory / "bin" / "python").symlink_to(sys.executable)
     (directory / "crucible-env.json").write_text(
@@ -136,11 +136,11 @@ def _mac_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ),
         encoding="utf-8",
     )
-    pins = workerenv.recipe_pins(
-        workerenv.recipe_for("align", FAKE_MAC_BACKEND.kind)
+    pins = jobenv.recipe_pins(
+        jobenv.recipe_for(jobenv.worker_env("align", FAKE_MAC_BACKEND.kind))
     )
     monkeypatch.setattr(
-        workerenv, "installed_packages", lambda _home, _type: dict(pins)
+        jobenv, "installed_packages", lambda _home, _type: dict(pins)
     )
     return directory
 

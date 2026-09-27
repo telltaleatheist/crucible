@@ -187,7 +187,7 @@ def require(request: dict, key: str, kind):
 
 # --------------------------------------------------------- the torch allocator
 #
-# Crucible's `workerenv` note has the measurement. On CUDA the server spawns this
+# Crucible's `workers` note has the measurement. On CUDA the server spawns this
 # worker with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and sends its
 # admitted share as `memory_cap_bytes`. This worker is held across inputs of
 # different lengths, which is how a caching allocator strands blocks until the

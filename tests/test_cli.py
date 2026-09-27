@@ -10,7 +10,7 @@ import pytest
 
 from urllib.parse import quote
 
-from crucible import cli, jobenv, pairing, workerenv
+from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 from crucible.interfaces import InterfaceError
@@ -582,10 +582,10 @@ def test_every_installable_name_has_a_smoke_import() -> None:
     """
     for backend_kind in ("cuda-linux", "mlx-darwin"):
         for job_type in cli.INSTALLABLE_JOB_TYPES:
-            if job_type in workerenv.WORKER_JOB_TYPES:
+            if job_type in jobenv.WORKER_JOB_TYPES:
                 try:
-                    workerenv.recipe_for(job_type, backend_kind)
-                except workerenv.WorkerEnvError:
+                    jobenv.recipe_for(jobenv.worker_env(job_type, backend_kind))
+                except jobenv.EnvError:
                     continue
                 keys = [job_type]
             elif job_type == "llm":
