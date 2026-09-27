@@ -71,6 +71,7 @@ import base64
 import io
 import json
 import mimetypes
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -85,6 +86,10 @@ from . import API_HEADER, API_VERSION, VERSION
 from .config import crucible_home
 from .errors import ConfigError, CrucibleError
 from .pairing import parse_pairing_line
+
+#: The pairing line from the environment: the one source a process listing does
+#: not show (argv does). See `resolve`.
+PAIRING_ENV = "CRUCIBLE_PAIRING"
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
@@ -136,6 +141,12 @@ def resolve(args: argparse.Namespace) -> Connection:
       --pairing <line>  a `crucible://name@host:port/#token` line, which is what
                         `crucible token --url` prints and what an app's connect
                         door takes. One string carries all three facts.
+      --pairing-file <path>, or $CRUCIBLE_PAIRING
+                        the same line, from a file or the environment, so it is
+                        never in argv (2026-09-26: a runner's `ps` printed the
+                        Mac's token in full, because `--pairing "$(cat f)"`
+                        puts the file's contents on the command line). Exactly
+                        one pairing source; two are refused, not ranked.
       (nothing)         THIS machine's installed engine, through
                         `crucible/local.py:connection`, which is already the one
                         owner of "where is the local engine and what is its
@@ -150,6 +161,46 @@ def resolve(args: argparse.Namespace) -> Connection:
     given_url = getattr(args, "url", None)
     given_token = getattr(args, "token", None)
     given_pairing = getattr(args, "pairing", None)
+    pairing_file = getattr(args, "pairing_file", None)
+    pairing_env = os.environ.get(PAIRING_ENV) or None
+
+    sources = [
+        name
+        for name, value in (
+            ("--pairing", given_pairing),
+            ("--pairing-file", pairing_file),
+            (f"${PAIRING_ENV}", pairing_env),
+            ("--url/--token", given_url or given_token),
+        )
+        if value is not None
+    ]
+    if len(sources) > 1:
+        raise ClientRefusal(
+            f"connection_overspecified: {', '.join(sources)} each name a server; "
+            "pass exactly one. (An environment variable counts: unset "
+            f"{PAIRING_ENV} to use a flag.)"
+        )
+    if pairing_file is not None:
+        try:
+            lines = [
+                line.strip()
+                for line in Path(pairing_file).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except OSError as exc:
+            raise ClientRefusal(f"pairing_file_unreadable: {pairing_file}: {exc}") from None
+        if len(lines) != 1:
+            raise ClientRefusal(
+                f"pairing_file_invalid: {pairing_file} holds {len(lines)} non-empty "
+                "lines; it must hold exactly one pairing line"
+            )
+        given_pairing = lines[0]
+        source = f"--pairing-file {pairing_file}"
+    elif pairing_env is not None:
+        given_pairing = pairing_env.strip()
+        source = f"${PAIRING_ENV}"
+    else:
+        source = "--pairing"
 
     if given_pairing is not None and (given_url is not None or given_token is not None):
         raise ClientRefusal(
@@ -164,7 +215,7 @@ def resolve(args: argparse.Namespace) -> Connection:
             raise ClientRefusal(f"pairing_line_invalid: {exc}") from None
         return Connection(
             url=pair.url.rstrip("/"), token=pair.token, name=pair.name,
-            source="--pairing",
+            source=source,
         )
     if given_url is not None and given_token is None:
         raise ClientRefusal(
@@ -1270,7 +1321,16 @@ def _connection_flags(parser: argparse.ArgumentParser) -> None:
         "--pairing",
         default=None,
         help="a `crucible://name@host:port/#token` line, as `crucible token "
-             "--url` prints it. Carries the address and the token together",
+             "--url` prints it. Carries the address and the token together. It "
+             "is visible in any process listing: a runner should use "
+             f"--pairing-file or ${PAIRING_ENV}",
+    )
+    group.add_argument(
+        "--pairing-file",
+        default=None,
+        metavar="PATH",
+        help="read the pairing line from this file (exactly one line), so the "
+             "token never appears in argv",
     )
 
 
