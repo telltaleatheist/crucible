@@ -15,15 +15,6 @@ from .token import PAIRING_NOT_PRINTED, _pairing_permission, _write_pairing_file
 
 
 def _service_context() -> tuple[Config, Backend, str] | int:
-    """Config, backend and this host's service mechanism, or a printed refusal.
-
-    The backend is DETECTED and compared against the config, exactly as
-    `install` and `capability` do, rather than read off the config alone. A
-    service is a promise that `crucible serve` will keep running on this host,
-    and `serve` itself refuses when the detected backend and the recorded one
-    disagree — so installing a unit in that state would install a unit that
-    cannot start.
-    """
     try:
         config = common.load_config()
     except ConfigError as exc:
@@ -45,14 +36,6 @@ def _service_context() -> tuple[Config, Backend, str] | int:
 
 
 def cmd_service_install(args: argparse.Namespace) -> int:
-    """`crucible service install` — PHASE5-APPS.md 6.0, PHASE11-SERVICE.md.
-
-    Host and port come from `config.toml` AT INSTALL TIME and are baked into the
-    unit's `ExecStart`, which means a config edited afterwards is not what the
-    service serves until this is re-run. That is stated in the phase doc and
-    printed here, because the alternative — a unit that re-reads the config —
-    is a unit whose behaviour changes without anybody installing anything.
-    """
     resolved = _service_context()
     if isinstance(resolved, int):
         return resolved
@@ -78,10 +61,6 @@ def cmd_service_install(args: argparse.Namespace) -> int:
         f"{config.path} now and written into the definition. Change either and "
         "re-run `crucible service install`."
     )
-    # Section 3.6 again: a server installed as a service is the one an app is
-    # most likely to meet without a person present, so the file it reads is
-    # written here too — with the SAME token, so nothing that had paired is
-    # unpaired by installing a unit.
     paired = _write_pairing_file(
         config.home, name=config.name, port=config.port, token=config.token
     )
@@ -141,13 +120,6 @@ def cmd_service_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_service_status(args: argparse.Namespace) -> int:
-    """Running or not, with the pid and the definition's path.
-
-    **Exit 0 only when it is running**, so a script can gate on it the way it
-    gates on `crucible doctor`. A service that is installed and stopped is a
-    server nothing can reach, and reporting that as success would make this verb
-    useless to the only thing that would automate it.
-    """
     resolved = _service_context()
     if isinstance(resolved, int):
         return resolved
@@ -166,8 +138,6 @@ def cmd_service_status(args: argparse.Namespace) -> int:
         f"definition: {state.definition} "
         f"({'present' if state.installed else 'NOT THERE'})"
     )
-    # Three answers, because there are three. `None` is "no manager could be
-    # asked", and reporting that as NO would be this command inventing a fact.
     if state.running is True:
         runs = "yes"
     elif state.running is False:
@@ -178,8 +148,6 @@ def cmd_service_status(args: argparse.Namespace) -> int:
     print(f"pid:        {state.pid if state.pid is not None else '-'}")
     print(f"detail:     {state.detail}")
     if state.mechanism == service.SYSTEMD:
-        # REPORTED, never assumed: `loginctl enable-linger` is the operator's,
-        # and without it this server dies with the session that installed it.
         if state.linger is True:
             linger = "on — this server survives a logout and starts at boot"
         elif state.linger is False:

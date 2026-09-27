@@ -34,26 +34,6 @@ from .token import PAIRING_NOT_PRINTED, _pairing_permission, _write_pairing_file
 
 
 def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
-    """`--config-from`: the token, the routes and the upstreams, and NOTHING else.
-
-    PHASE15-HOST.md 4.3. The host writes this file at 0600 when it moves a
-    Windows Crucible into the WSL guest and deletes it afterwards; the point
-    of the flag is that the TOKEN survives, so every app that paired with this
-    machine stays paired.
-
-    Three tables here, and the desktop reserve beside them (`carried_reserve`).
-    The host, the port, the name, the backend and the job flags belong to the
-    machine being INITIALISED, not to the one being left — a guest that
-    inherited `backend = "llama-windows"` would refuse to serve on its own card.
-
-    THE RESERVE IS CARRIED SINCE 2026-09-26, reversing what this said before.
-    The Windows server and the WSL guest share one card and one desktop, and a
-    reserve is now a measured or stated fact about that desktop with its basis
-    beside it: re-deciding it in the guest would re-measure a reserve somebody
-    stated (Owen's 3 GiB, kept for streaming) or lower it on a quiet minute.
-    The iGPU worry that kept it out is gone with the basis: a Windows server on
-    no NVIDIA card writes a "declared" reserve, never a measured one.
-    """
     import tomllib
 
     try:
@@ -79,7 +59,6 @@ def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
 
 
 def carried_reserve(path: Path) -> tuple[int, str, str]:
-    """`--config-from`'s desktop reserve: (bytes, basis, note)."""
     import tomllib
 
     try:
@@ -106,14 +85,6 @@ def carried_reserve(path: Path) -> tuple[int, str, str]:
 
 
 def _existing_stated_reserve(path: Path) -> tuple[int, str] | None:
-    """A STATED reserve in the config `init --force` is about to replace.
-
-    Owen, 2026-09-26: an existing reserve is never changed automatically. A
-    re-init mints a new token; it is not a request to lower owens-pc's 3 GiB
-    because nothing was streaming that minute. So a stated reserve survives the
-    re-init;
-    `crucible capability --measure-desktop` is the deliberate way to replace it.
-    """
     if not path.exists():
         return None
     try:
@@ -128,21 +99,6 @@ def _existing_stated_reserve(path: Path) -> tuple[int, str] | None:
 def _decide_reserve(
     args: argparse.Namespace, backend: Backend, home: Path
 ) -> tuple[int, str, str, str]:
-    """`crucible init`'s desktop reserve: (bytes, basis, note, how it was reached).
-
-    In order, first answer wins:
-
-    1. `--desktop-allowance-bytes` — stated, and it always wins.
-    2. `--config-from` carrying a reserve — its value and basis, unchanged.
-    3. `--force` over a config whose reserve is stated — kept
-       (`_existing_stated_reserve`).
-    4. An NVIDIA card nvidia-smi answers for, with nothing of Crucible's on
-       it — MEASURED (`ladder.measure_desktop_reserve`, 2026-09-26).
-    5. Otherwise the backend's declared rule
-       (`config.default_desktop_allowance_bytes`), with the reason it was not
-       measured in the note. A Mac always lands here: its reserve is a share of
-       unified memory, not a desktop on a card.
-    """
     today = datetime.now(timezone.utc).date().isoformat()
     if args.desktop_allowance_bytes is not None:
         return (
@@ -204,20 +160,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     except NoViableBackend as exc:
         return _fail(f"no viable backend: {exc.reason}")
 
-    # `--backend` STATES what the caller expects this host to be, and is
-    # checked against what it is. Section 2: *"`crucible init --backend
-    # llama-windows` is legal only on win32 … `cuda-linux`/`mlx-darwin` on
-    # win32 are refused the same way"*. `crucible orchestrator` passes it (4.3) so a
-    # host that somehow ran on the wrong machine says so here instead of
-    # writing a config the server would refuse to start from.
     if args.backend is not None and args.backend != backend.kind:
         return _fail(_backend_mismatch(args.backend, backend))
 
-    # The host reserve is resolved HERE rather than by argparse, because it
-    # depends on the backend that was just detected, the size of its pool and,
-    # on an NVIDIA card since 2026-09-26, what its desktop actually holds
-    # (`_decide_reserve` gives the order). BEFORE the config is written, so a
-    # measurement never sees a half-written home.
     try:
         (
             desktop_allowance_bytes,
@@ -228,12 +173,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         return _fail(str(exc))
 
-    # The token is minted HERE unless the caller brought one. `--token` exists
-    # for `@crucible/bootstrap` (PHASE12-BOOTSTRAP.md): the app that installs a
-    # local server mints the token on its own side and hands it over, so it
-    # already holds what it would otherwise have to read back out of the file.
-    # A blank one is refused — a config with an empty token is a server nothing
-    # can reach, and `load_config` would refuse it anyway.
     carried: dict[str, Any] = {}
     if args.config_from is not None:
         if args.token is not None:
@@ -269,15 +208,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
         desktop_allowance_note=desktop_note,
-        # THIS BOX'S SERVING FOOTPRINT PER NARRATOR ENGINE (PHASE21 section
-        # 2.3). Written here because a voice that comes out of its own repo
-        # carries no machine facts at all, and a server that has never been told
-        # what Higgs costs on it refuses such a voice by name rather than
-        # guessing. The numbers are the ones every packaged manifest declared on
-        # 2026-09-19, with their citations; `declared_tts_footprints` is the one
-        # function that states them, so section 9's ruling 2 — leave it unset
-        # until `crucible capability` measures one — is a deleted argument
-        # rather than an unpicked writer.
         tts_engines=declared_tts_footprints(backend.kind),
         carried_tables=carried or None,
     )
@@ -320,9 +250,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         + "print it with `crucible token --show`"
     )
-    # THE PAIRING FILE (PHASE15-HOST.md section 3.6). Written here, at 0600,
-    # beside the config, so an app on this machine connects without anybody
-    # typing a token — and rewritten by `--force`, which mints a new one.
     paired = _write_pairing_file(
         home,
         name=args.name if args.name is not None else default_server_name(),
@@ -415,8 +342,6 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "an NVIDIA card with nothing of Crucible's on it, init MEASURES the "
             "desktop (peak + max(peak, 1 GiB), at most 3 GiB); else defaults PER "
             f"BACKEND: cuda {DEFAULT_DESKTOP_ALLOWANCE_BYTES} = 3 GiB flat, "
-            # `%%`: argparse formats help with `%`, and a bare "25% of" is
-            # read as a `% o` directive and crashes `init --help`.
             f"mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION * 100:.0f}%% of unified memory "
             "because the model and the whole OS share one pool. Use 0 on a "
             "headless box"

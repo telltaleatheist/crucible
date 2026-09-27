@@ -12,13 +12,6 @@ from .common import EXIT_OK, _fail, _models_config
 
 
 def cmd_voices_list(args: argparse.Namespace) -> int:
-    """Every voice manifest this build ships and where it stands on this host.
-
-    The same shape as `crucible models list`, and deliberately not the
-    `/v1/voices` row: this command answers "what is on this disk", which a person
-    runs before a load, while the row answers "what can this server be asked for",
-    which a client reads.
-    """
     resolved = _models_config()
     if isinstance(resolved, int):
         return resolved
@@ -61,12 +54,6 @@ def cmd_voices_list(args: argparse.Namespace) -> int:
                 "pace_basis": manifest.pace_basis,
                 "inherited_from": manifest.inherited_from,
                 "manifest": manifest.manifest_source,
-                # A LOCAL VOICE IS NOT PULLABLE, so its line must not offer a
-                # pull (PHASE18-UNCERTIFIED.md section 3): `crucible voices
-                # pull` on one is refused by name, and a screening merge that
-                # is gone is the expected end of its life rather than a broken
-                # install. The `/v1/voices` row's `reason` says the same thing
-                # for a client; this is the same question asked at a terminal.
                 "detail": (
                     f"{found.bytes / 1e9:.2f} GB at {found.path}"
                     if found is not None
@@ -104,11 +91,6 @@ def cmd_voices_pull(args: argparse.Namespace) -> int:
             f"{manifest.path.name} declares {sorted(manifest.backends)}"
         )
     spec = manifest.spec(backend.kind)
-    # WHAT THE BLOCK NAMES, in whichever of its two shapes (PHASE18-
-    # UNCERTIFIED.md section 3). `spec.revision[:12]` subscripted None on a
-    # local block, so this line raised a TypeError BEFORE `weights.pull` could
-    # refuse it by name — the operator got a traceback where there is a
-    # sentence saying the bytes are somebody else's.
     if spec.source == weights.LOCAL:
         print(f"{manifest.id}: {spec.path} for {backend.kind}")
     else:
@@ -125,7 +107,6 @@ def cmd_voices_pull(args: argparse.Namespace) -> int:
 
 
 def _repo_at(reference: str) -> tuple[str, str] | None:
-    """`<owner>/<name>@<sha>` split, or None because this is not one."""
     repo, sep, revision = reference.partition("@")
     if not sep or "/" not in repo:
         return None
@@ -133,11 +114,6 @@ def _repo_at(reference: str) -> tuple[str, str] | None:
 
 
 def _repo_manifest_for(reference: str):
-    """A `RepoManifest` from `<repo>@<sha>` or from a local file.
-
-    One reader for both `check` and `card`, because "what does this manifest
-    say" must not have two answers depending on which command asked.
-    """
     from ..voicerepo import Pin, fetch_repo_manifest, parse_repo_manifest
 
     named = _repo_at(reference)
@@ -156,13 +132,6 @@ def _repo_manifest_for(reference: str):
 
 
 def cmd_voices_pin(args: argparse.Namespace) -> int:
-    """`crucible voices pin <id> <repo>@<sha>` — what a deploy does per machine.
-
-    THE PIN IS LOADED BEFORE IT IS WRITTEN, exactly as `PUT /v1/voices/{id}`
-    loads it: a revision that carries no `crucible-voice.toml`, a schema this
-    build cannot read, and a machine with no `[tts.<engine>]` table are each
-    refused here with nothing written.
-    """
     from ..voicerepo import Pin, home_pins_path, voice_for_pin, write_home_pin
 
     named = _repo_at(args.reference)
@@ -188,13 +157,6 @@ def cmd_voices_pin(args: argparse.Namespace) -> int:
 
 
 def cmd_voices_check(args: argparse.Namespace) -> int:
-    """Parse a manifest exactly as the loader would, and print it or the refusal.
-
-    What the training side runs before it pushes. It merges with THIS machine's
-    `[tts.<engine>]` table rather than with an invented one, because the
-    question the command answers is "would a server load this", and a server
-    that has not been told what the engine costs would not.
-    """
     from ..config import tts_engine_footprints
     from ..voicerepo import Pin, merge
 
@@ -212,10 +174,6 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
             "server here would refuse the voice. Run `crucible init`, or add the "
             "table to config.toml"
         )
-    # A LOCAL FILE HAS NO PIN, and the merge needs one to fill `hf_repo` and
-    # `revision` in. A stand-in is used and SAID: what this command answers is
-    # whether the manifest's own numbers survive the loader, and the repo and
-    # sha play no part in that.
     identity = (
         Pin(id=args.id, hf_repo=pin.hf_repo, revision=pin.revision, path=pin.path)
         if pin is not None
@@ -251,10 +209,6 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
         print(f"packs:    {pace.target_chars} chars")
     for arm in sorted(voice.backends):
         spec = voice.backends[arm]
-        # "not measured" rather than a blank or a zero: a voice may state no
-        # cap since 2026-09-19 (PHASE18-UNCERTIFIED.md section 4), and an
-        # operator reading `cap None` would not know whether the number is
-        # missing or the field is broken.
         cap = (
             "not measured"
             if spec.max_chars is None
@@ -269,7 +223,6 @@ def cmd_voices_check(args: argparse.Namespace) -> int:
 
 
 def cmd_voices_card(args: argparse.Namespace) -> int:
-    """Render the repo's README from its manifest, and with --upload commit it."""
     from .. import voicecard
     from ..voicerepo import REPO_MANIFEST_NAME
     from ..weights import hf_token_at
@@ -284,10 +237,6 @@ def cmd_voices_card(args: argparse.Namespace) -> int:
                 "--upload needs an <owner>/<name>@<sha> reference: a local file "
                 "names no repo to commit to"
             )
-        # A LOCAL FILE HAS NO CARD TO MERGE INTO, so what is printed is the two
-        # blocks this command owns. That is what the training side wants before
-        # it pushes: see the frontmatter and the limits section that the repo's
-        # README will get, without a repo yet existing.
         print("---")
         print(voicecard.render_frontmatter(repo, ""))
         print("---")
@@ -297,7 +246,7 @@ def cmd_voices_card(args: argparse.Namespace) -> int:
 
     try:
         from huggingface_hub import HfApi, hf_hub_download
-    except ImportError as exc:  # pragma: no cover - a dependency, not a condition
+    except ImportError as exc:
         return _fail(f"huggingface_hub is not importable: {exc}")
     token = hf_token_at(config_path(crucible_home()))
     try:
@@ -355,7 +304,6 @@ def cmd_voices_card(args: argparse.Namespace) -> int:
 
 
 def cmd_voices_export(args: argparse.Namespace) -> int:
-    """A packaged manifest as a `crucible-voice.toml`, plus the rows it drops."""
     from .. import voicecard
     from ..voices import MANIFEST_REPO
 
@@ -385,9 +333,6 @@ def cmd_voices_export(args: argparse.Namespace) -> int:
         print(f"{args.voice}: wrote {args.out}")
     else:
         print(text, end="")
-    # PRINTED, NEVER DROPPED SILENTLY (section 4). Every line is a machine fact
-    # that moved rather than vanished, and the person converting the file is the
-    # one who has to put it where it now lives.
     print(f"\n# {len(dropped)} row(s) this file does NOT carry:", file=sys.stderr)
     for line in dropped:
         print(f"#   {line}", file=sys.stderr)

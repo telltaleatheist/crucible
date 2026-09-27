@@ -8,12 +8,6 @@ from .common import EXIT_OK, EXIT_REFUSED, _fail
 
 
 def _orchestrator_try_again() -> int:
-    """`crucible orchestrator --try-again` (FRESH-INSTALL #16, 2026-09-26).
-
-    The door's `POST /install`, made by the product for a person who has no
-    app: the same move and the same claim as an app's Try again. It prints one
-    line per step and ends with the outcome's own sentence.
-    """
     from ..config import crucible_home
     from ..host import outcome as host_outcome
     from ..host.errors import HostError
@@ -35,29 +29,12 @@ def _orchestrator_try_again() -> int:
 
 
 def cmd_guest(args: argparse.Namespace) -> int:
-    """`crucible guest <words…>`: `crucible/host/guestcli.py` (fresh-install #29)."""
     from ..host import guestcli
 
     return guestcli.run(args.guest_words)
 
 
 def cmd_orchestrator(args: argparse.Namespace) -> int:
-    """`crucible orchestrator` — PHASE15 section 4, PHASE17. Windows only.
-
-    The verb is refused `host_windows_only` everywhere else, and that is not a
-    platform check standing in for a feature check: on Linux and macOS the
-    server runs ON the machine and its own service manager supervises it
-    (4.4, "no host on the Mac"). There is nothing for a tray to own.
-
-    Three shapes, and the two that are not the tray exit without starting one:
-
-      --install-startup   write the Startup item and print its path
-      --remove-startup    delete it, and say whether there was one
-      --try-again         PHASE19 2.5's Try again, for a machine with no app
-                          (FRESH-INSTALL #16): run the Linux-engine move once
-                          more, follow it, and say how it ended
-      (bare)              the tray
-    """
     from ..host import startup as host_startup
     from ..host.errors import HostError
     from ..host.runner import ProcessRunner
@@ -131,8 +108,6 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     host_parser.set_defaults(func=cmd_orchestrator)
     host_parser.add_argument("--headless", action="store_true", help="Run the controller independently of the tray")
 
-    # FRESH-INSTALL #29 (2026-09-26): the Linux engine's own CLI, from Windows,
-    # as the user the engine runs as. Nobody spells a guest path.
     guest_parser = subparsers.add_parser(
         "guest",
         help="win32 only: run a crucible command inside this PC's Linux engine",

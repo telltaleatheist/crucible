@@ -35,6 +35,10 @@ from .common import EXIT_OK, EXIT_REFUSED, _backend_mismatch, _env_spec, _fail
 from .install import INSTALLER_FOR
 
 
+def _no_python_env_dir(home: Path) -> Path:
+    return home / "envs" / "none"
+
+
 def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
     registry = build_registry(config, backend)
     reports: list[dict[str, Any]] = []
@@ -69,14 +73,6 @@ def _job_type_reports(config: Config, backend: Backend) -> list[dict[str, Any]]:
 def _llama_engine_report(
     report: dict[str, Any], config: Config, backend: Backend
 ) -> dict[str, Any]:
-    """`llama-windows`'s llm engine row: llama.cpp at the pinned tag.
-
-    Shaped like `_env_report`'s answer — `installed` and `detail`, and a
-    problem appended when it is not ready — so the printer below and every
-    JSON reader treat the two backends' engines the same way. What it is NOT
-    is an env: no recipe, no packages, no `pack_sha256`, and the provenance
-    that matters is the tag and which build this machine takes.
-    """
     build = llamacpp.build_for(backend.gpu.vendor)
     found = llamacpp.installed(config, build)
     entry: dict[str, Any] = {
@@ -99,7 +95,6 @@ def _env_report(
     report: dict[str, Any], label: str, home: Path, spec: jobenv.EnvSpec,
     backend_kind: str,
 ) -> dict[str, Any]:
-    """One env's status, appending a problem to the report when it is not ready."""
     try:
         status = jobenv.env_status(home, spec, backend_kind)
         recipe = jobenv.recipe_for(spec)
@@ -120,13 +115,6 @@ def _env_report(
 
 
 def _plan_or_refusal(call: Any) -> "jobenv.EnvPlan | str":
-    """The plan, or the sentence the planner refused with.
-
-    `crucible doctor` reports what an install WOULD do, so a planner refusal is
-    a doctor problem rather than a doctor crash — and it is the same sentence
-    the operator gets when they run the install, because it comes from the same
-    function (ARCHITECTURE.md R1).
-    """
     try:
         return call()
     except jobenv.EnvError as exc:
@@ -140,18 +128,6 @@ def _provenance(
     recipe: Path,
     plan: "jobenv.EnvPlan | str",
 ) -> dict[str, Any]:
-    """What this env was installed from, and what an install would do to it now.
-
-    TWO DRIFTS, NAMED APART (PHASE20 section 4). `env_recipe_drift` is the
-    environment half — torch, SGLang, the wheels — and costs a `pip install -r`
-    into the venv that is there. `narrator_sha_drift` is one git sha in one
-    line and costs one `pip install --no-deps`. A single `pack_recipe_drift`
-    could not tell them apart, and told every reader the same wrong thing about
-    both: that an env had to be rebuilt.
-
-    The verdict is `jobenv.plan_install`'s rather than this function's, because
-    the doctor's sentence and the installer's remedy must be one sentence.
-    """
     entry: dict[str, Any] = {
         "recipe": recipe.name,
         "environment_sha256": status.environment_sha256,
@@ -176,7 +152,6 @@ def _provenance(
 
 
 def _provenance_line(entry: dict[str, Any]) -> str:
-    """The one-line form `crucible doctor` prints after an env's detail."""
     if entry["environment_sha256"] is None:
         recipe = f"{entry['recipe']} not stamped"
     elif entry["environment_sha256"] != entry["environment_sha256_now"]:
@@ -199,21 +174,6 @@ def _provenance_line(entry: dict[str, Any]) -> str:
 def _capability_report(
     report: dict[str, Any], config: Config, backend: Backend
 ) -> None:
-    """What was decided here, whether it is still true, and whether it agrees.
-
-    Three checks, and only ONE of them is a problem, which is the point:
-
-    * **The record is stale.** It names a different backend or a different pool
-      size than this host now has. A swapped card is the case this catches, and it
-      is caught by comparing NUMBERS rather than by writing down a date — the date
-      a decision was made says nothing about whether it is still right.
-    * **A flag is on that the numbers refuse.** `enable_tts = true` with every tts
-      class recorded disabled. This is the dangerous direction and the only
-      PROBLEM: the server is advertising a job type whose first request is an OOM.
-    * **A flag is off that the numbers allow.** Printed as a NOTE, never a
-      problem. It is the ordinary state of a host whose env for that type has not
-      been built yet, and `crucible install <type>` is the thing that changes it.
-    """
     record = config.capability
     if record is None:
         report["capability"] = None
@@ -252,13 +212,6 @@ def _capability_report(
                 "nothing behind it fits this host — "
                 + "; ".join(f"{row.capability}: {row.reason}" for row in known)
             )
-        # `echo` is deliberately not here: it fits every card (it never touches
-        # one) and there is no `crucible install echo`, so suggesting one would
-        # be a note whose action does not exist. `INSTALLER_FOR` is the owner of
-        # "which command installs this", so it is the thing asked — and it is
-        # what keeps the note for `denoise` pointing at `crucible install rvc`,
-        # the env it actually shares, rather than at a command that does not
-        # exist.
         if fits and not flagged and name in INSTALLER_FOR:
             entry["could_enable"].append(name)
     report["capability"] = entry
@@ -281,31 +234,9 @@ def _doctor_report() -> dict[str, Any]:
         "cuda_toolkit_links": [],
         "llm_patches": [],
         "capability": None,
-        # THE TWO PATHS, because the Mac audit of 2026-09-14 found the same
-        # message twice and only one of the two readings was a defect. A
-        # `crucible doctor` over a non-login `ssh mac '<cmd>'` reported
-        # `job tts: NOT READY — there is no ffmpeg on PATH` while the service
-        # was healthy: ffmpeg was at /opt/homebrew/bin, the plist carried that
-        # directory, and `launchctl print` confirmed the running process had
-        # it. The doctor was right about the shell it was in and silent about
-        # the one that matters.
-        #
-        # Crucible WROTE the service's PATH, so it can read it back
-        # (`service.read_recorded_path`) and put the two side by side. `agree`
-        # is computed rather than left to the reader, and `null` when there is
-        # nothing to compare — three states, not a boolean that would make "no
-        # service" read as "they differ".
         "path": None,
-        # WEIGHTS NO MANIFEST OWNS (`catalog.stranded_weights`). Reported and
-        # never counted as a problem: bytes on a disk are not an unhealthy
-        # server, and deleting them is the operator's decision. Null when no
-        # config was readable, because there is then no home to look in.
         "stranded_weights": None,
-        # WHICH ffmpeg the job types will run (2026-09-26, fresh-install #25):
-        # Crucible's pinned build in `<home>/tools/bin`, one off PATH, or none.
         "ffmpeg": None,
-        # Enabled job types that are waiting only for weights to be pulled
-        # (#40). Notes, not problems: see where they are filled.
         "notes": [],
         "problems": [],
     }
@@ -313,14 +244,7 @@ def _doctor_report() -> dict[str, Any]:
     try:
         backend = common.detect_backend()
         report["backend"] = backend.to_dict()
-        # THE CARD'S FACTS, beside its size (fresh-install #48): what
-        # generation it is and what that lets it run. A report, never a
-        # problem: an old card is not an unhealthy server, and the classes it
-        # cannot start already say so on their own capability rows.
         report["card"] = _card_facts(home, backend)
-        # WHAT THE LADDER MEASURED, and whether it still describes this card.
-        # Reported, never a problem: an unmeasured card refuses nothing, and a
-        # stale record is read as no record until `crucible ladder` runs.
         report["ladder"] = ladder.summary(home, backend.gpu)
     except NoViableBackend as exc:
         report["problems"].append(f"no_viable_backend: {exc.reason}")
@@ -338,8 +262,6 @@ def _doctor_report() -> dict[str, Any]:
         try:
             mechanism = service.mechanism_for(backend.kind)
         except service.ServiceError:
-            # A backend with no supervisor is not a defect here; `crucible
-            # service` is the door that refuses it by name.
             mechanism = None
         if mechanism is not None:
             recorded = service.read_recorded_path(mechanism, service.user_home())
@@ -381,13 +303,6 @@ def _doctor_report() -> dict[str, Any]:
             ),
             "backend_kind": config.backend_kind,
         }
-        # NOT ON WIN32. A Windows file has no POSIX mode: `os.chmod` there
-        # sets one read-only bit and `stat` reports 0o666 whatever the ACL
-        # says, so this check reads a number the OS does not enforce and
-        # reports a problem on every healthy Windows server. What restricts a
-        # file there is its ACL (`crucible/pairing.py`'s `icacls_argv`), and a
-        # doctor line about it is owed — recorded as owed rather than faked
-        # with a number that means nothing.
         if sys.platform != "win32" and mode != "0o600":
             report["problems"].append(
                 f"config_permissions: {config.path} is mode {mode}; the token should "
@@ -406,14 +321,6 @@ def _doctor_report() -> dict[str, Any]:
     if config is not None and backend is not None:
         _capability_report(report, config, backend)
         if config.enable_llm:
-            # TWO SHAPES OF ENGINE, and `doctor` names each in its own terms
-            # (PHASE15-HOST.md 3.5, 7.4 item 5). On `cuda-linux` and
-            # `mlx-darwin` the llm engine is a Python env with a recipe and a
-            # provenance; on `llama-windows` it is llama.cpp's own release at
-            # a pinned tag, which has no recipe and no packages and whose
-            # provenance is the tag and the digests. Asking `jobenv` for an
-            # env that cannot exist was how this crashed the first time it ran
-            # on a real Windows box.
             if backend.kind == LLAMA_WINDOWS:
                 report["llm_env"] = _llama_engine_report(report, config, backend)
             else:
@@ -440,10 +347,6 @@ def _doctor_report() -> dict[str, Any]:
             )
             report["worker_envs"].append({"job_type": job_type, **entry})
         if config.enable_tts:
-            # One row per narrator engine, because on cuda-linux each is its
-            # own venv and a voice load picks by its manifest's
-            # `narrator_engine`. On mlx-darwin every name resolves to the same
-            # env, and the rows say so by carrying the same path.
             report["tts_envs"] = {
                 engine: _env_report(
                     report,
@@ -454,17 +357,6 @@ def _doctor_report() -> dict[str, Any]:
                 )
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING)
             }
-            # THE TWO CUDA SYMLINKS, on cuda-linux, WHEN THERE IS AN ENV TO
-            # ASK ABOUT. Reported SEPARATELY from the env row, because an env
-            # whose pins all match is otherwise reported ready.
-            #
-            # GATED ON THE ENV EXISTING, and that gate is the point rather than
-            # an optimisation. With no `tts` env installed the links cannot be
-            # there, and saying so would raise TWO problems — "lib64 is missing"
-            # and "lib/libcudart.so is missing" — for one cause the env row
-            # already states in full ("no venv at ... run `crucible install
-            # tts`"). Three sentences about one fact is how a reader ends up
-            # chasing the wrong one.
             if backend.kind == "cuda-linux":
                 for engine in sorted(NARRATOR_ENGINE_SAMPLING):
                     engine_env = jobenv.env_dir(
@@ -483,22 +375,14 @@ def _doctor_report() -> dict[str, Any]:
                         f"{entry['status']} — {entry['detail']}. {entry['why']}"
                     )
         if config.enable_llm:
-            # THE `llm` ENV's PATCHES (`crucible/envpatches.py`): mlx-lm's
-            # `top_logprobs` 11 -> 40, which `MlxLmEngine` states as its cap
-            # and refuses to start without. Selected by the recipe's pins, so
-            # cuda-linux (vLLM) reads `not_applicable`; llama-windows has no
-            # llm recipe at all and is asked with none, which answers the same.
             if backend.kind == LLAMA_WINDOWS:
-                llm_env_dir, llm_pins = config.home / "envs" / "none", {}
+                llm_env_dir, llm_pins = _no_python_env_dir(config.home), {}
             else:
                 llm_spec = jobenv.llm_env(backend.kind)
                 llm_env_dir = jobenv.env_dir(config.home, llm_spec)
                 llm_pins = jobenv.recipe_pins(jobenv.recipe_for(llm_spec))
             report["llm_patches"] = envpatches.check("llm", llm_env_dir, llm_pins)
             for entry in report["llm_patches"]:
-                # `no_env` is the llm env row's fact, stated there in full with
-                # the command that fixes it; a second problem for the same
-                # cause is how a reader ends up chasing the wrong sentence.
                 if entry["status"] not in envpatches.SOUND_STATUSES and (
                     entry["status"] != envpatches.NO_ENV
                 ):
@@ -510,13 +394,6 @@ def _doctor_report() -> dict[str, Any]:
         report["job_types"] = _job_type_reports(config, backend)
         for entry in report["job_types"]:
             if entry["enabled"] and not entry["ready"]:
-                # A TYPE WAITING ONLY FOR WEIGHTS IS A NOTE (2026-09-26,
-                # fresh-install #40). `install rvc` turns on `denoise` too,
-                # because the rvc env serves both, and pulls no separator. The
-                # doctor then called a correct rvc install unhealthy. The env is
-                # there and nothing is broken; a job type that says it is
-                # waiting for a pull (`JobTypeStatus.awaiting_weights`) is
-                # reported as such and does not make the host unhealthy.
                 if entry.get("awaiting_weights"):
                     report["notes"].append(
                         f"job_type_awaiting_weights: {entry['name']}: {entry['detail']}"
@@ -526,10 +403,6 @@ def _doctor_report() -> dict[str, Any]:
                     f"job_type_not_ready: {entry['name']}: {entry['detail']}"
                 )
 
-    # A RESERVE THE LADDER SAW THE DESKTOP UNDER (2026-09-26). A note, never a
-    # problem, and never an automatic change: a stated reserve is kept until a
-    # person re-measures (owens-pc keeps 3 GiB for streaming). This is how
-    # kylies-pc's 3 GiB, set before init measured, gets noticed at all.
     if (
         config is not None
         and backend is not None
@@ -589,9 +462,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if path_entry is not None:
             print(f"PATH (this shell):   {path_entry['shell'] or '(empty)'}")
             if path_entry["service"] is None:
-                # Named, not omitted. "No service is installed" and "the
-                # service has no PATH" are different facts and a missing line
-                # would read as either.
                 where = path_entry["definition"]
                 print(
                     "PATH (the service):  none recorded — no "
@@ -602,11 +472,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 print(f"PATH (the service):  {path_entry['service']}")
                 if path_entry["agree"] is False:
-                    # Not a PROBLEM: they differ on every correctly installed
-                    # host, because a login shell has more than a launchd
-                    # agent's recorded PATH needs. It is said out loud because
-                    # every line below this one was measured in the FIRST of
-                    # the two.
                     print(
                         "note:    the two differ, which is normal. Every line "
                         "below is what THIS shell can see; the service sees "
@@ -624,9 +489,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         env = report["llm_env"]
         if env is not None:
             mark = "ready" if env["installed"] else "NOT READY"
-            # 3.5's line: `backend: llama-windows on windows/x86_64 —
-            # llama.cpp <tag> (cuda-12.4 | cpu)`. Printed from the ROW rather
-            # than composed here, so the JSON and the text cannot disagree.
             label = "engine " if env.get("engine") == "llama-server" else "llm env"
             print(f"{label}: {mark} — {env['detail']}")
             if "provenance" in env:
@@ -725,17 +587,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_env_patch(args: argparse.Namespace) -> int:
-    """Apply and CHECK one env type's site-packages patches, in place.
-
-    The installer's `env-patch-llm` step (`sdk/bootstrap/src/steps.ts`, PHASE22-DECIDE.md
-    section 2.6.1): an upgrade installs a new wheel and restarts, and never runs
-    `crucible install`, so `install_env`'s patch step never runs on an env whose
-    recipe has not moved. This is that step without the pip. Exit 0 only when
-    every row is `applied` or `not_applicable`; anything else is refused by name.
-
-    No env installed is NOT a failure: there is nothing to patch, and
-    `crucible install <type>` applies the patches before it stamps the env.
-    """
     try:
         config = common.load_config()
     except ConfigError as exc:
@@ -755,8 +606,7 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
             f"types that do are {list(envpatches.patched_job_types())}"
         )
     if args.job_type == "llm" and backend.kind == LLAMA_WINDOWS:
-        # No Python env at all: the engine is llama.cpp's own release.
-        rows = envpatches.check("llm", config.home / "envs" / "none", {})
+        rows = envpatches.check("llm", _no_python_env_dir(config.home), {})
     else:
         try:
             spec = _env_spec(args.job_type, None, backend.kind)

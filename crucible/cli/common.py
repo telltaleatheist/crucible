@@ -18,7 +18,6 @@ from ..voices import NARRATOR_ENGINE_SAMPLING
 
 EXIT_OK = 0
 EXIT_REFUSED = 1
-EXIT_USAGE = 2
 
 
 def _fail(message: str) -> int:
@@ -27,19 +26,6 @@ def _fail(message: str) -> int:
 
 
 def _backend_mismatch(recorded: str, backend: Backend) -> str:
-    """The ONE sentence a recorded backend gets when it is not this host's.
-
-    PHASE15-HOST.md section 3.5: *"a backend runs where its engine runs and
-    nowhere else"* — `llama-windows` off win32 is as wrong as `cuda-linux` on
-    it, and both are `backend_not_here`. `crucible init --backend`,
-    `crucible serve` and `crucible service install` all print this, so there
-    is one wording for one fact.
-
-    `WINDOWS_REFUSAL` is appended for the ONE mismatch it still describes: a
-    `cuda-linux` config found on a Windows host. That config is not wrong
-    about wanting vLLM — it is wrong about where vLLM runs, which is inside
-    the WSL2 guest — and that is worth saying once, here, where it is true.
-    """
     sentence = backend_not_here(recorded, backend.kind, backend.platform)
     if recorded == CUDA_LINUX and backend.kind == LLAMA_WINDOWS:
         sentence = f"{sentence}. {WINDOWS_REFUSAL}"
@@ -49,12 +35,6 @@ def _backend_mismatch(recorded: str, backend: Backend) -> str:
 def _env_spec(
     job_type: str, narrator_engine: str | None, backend_kind: str
 ) -> jobenv.EnvSpec:
-    """The env `crucible install <job type>` builds on this host.
-
-    `tts` needs a second word on `cuda-linux` — the env there is named per
-    narrator engine — so the flag is required for it and refused for `llm`,
-    rather than quietly ignored on the type that has only one env.
-    """
     if job_type in jobenv.WORKER_JOB_TYPES:
         return jobenv.worker_env(job_type, backend_kind)
     if job_type == "llm":

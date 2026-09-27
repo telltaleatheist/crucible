@@ -14,21 +14,6 @@ from .common import EXIT_OK, _backend_mismatch, _fail, _models_config
 
 
 def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]:
-    """Every model this build ships, from all three manifest directories, by id.
-
-    `models/`, `asr/` and `align/` are three directories with three loaders
-    (crucible/asrmodels.py explains why they are not one yet), but from the
-    command line there is a single namespace of model ids, because `crucible
-    models pull <id>` is a single question. A collision between any two would
-    make that question ambiguous, so it is refused rather than settled by which
-    directory was read first.
-
-    `rvc/` is deliberately NOT in here. Its weights are a single archive fetched
-    by name and unpacked rather than a repo snapshot, so `crucible models pull`
-    could not serve one; they live under their own `crucible rvc` command and
-    their own subtree of `~/.crucible`, which is also what keeps an RVC model
-    named `sigma` from colliding with a narrator voice of the same name.
-    """
     merged: dict[str, "ModelManifest | AsrManifest | AlignManifest"] = dict(
         load_all_manifests()
     )
@@ -44,17 +29,6 @@ def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]
 
 
 def cmd_remove(args: argparse.Namespace) -> int:
-    """`crucible remove <kind> <id>` — PHASE15-HOST.md 3.5a, from a terminal.
-
-    REFUSES IDENTICALLY TO THE DOOR, and it does so by asking the same
-    questions in the same order: an unknown kind or id first (true whatever
-    this server is doing), then not-installed, then in-use. What it CANNOT
-    ask is whether a running server holds the subject — that is a fact about
-    a process this command is not inside, and the names it would need
-    (`Residency`, `Leases`, the task store) live in one. So it asks the two
-    it can and says so: on a machine with a server running, the door is the
-    one to use, and `DELETE /v1/catalog/{kind}/{id}` is what the host calls.
-    """
     try:
         config = common.load_config()
     except ConfigError as exc:
@@ -84,8 +58,6 @@ def cmd_remove(args: argparse.Namespace) -> int:
     try:
         gone = subject.remove()
     except weights.WeightsShared as exc:
-        # The door's code verbatim (PHASE22 section 2.9); the message already
-        # begins with it and names every alias holding the folder.
         return _fail(str(exc))
     except weights.RemoveFailed as exc:
         return _fail(f"subject_remove_failed: {exc}")
@@ -140,9 +112,6 @@ def cmd_models_list(args: argparse.Namespace) -> int:
                 "hf_repo": spec.hf_repo,
                 "revision": spec.revision,
                 "memory_bytes_estimate": spec.memory_bytes_estimate,
-                # An ASR manifest carries no context. Whisper's window is 30
-                # seconds of audio and is not a number anybody sets, so null
-                # here means "this model has no such knob", not "unknown".
                 "context_default": (
                     manifest.context_for(backend.kind)
                     if isinstance(manifest, ModelManifest)
@@ -200,14 +169,6 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_rvc_list(args: argparse.Namespace) -> int:
-    """Every RVC manifest this build ships and where it stands on this host.
-
-    Its own command rather than a row in `crucible models list`, for the reason
-    `_all_manifests` gives: an RVC model's weights are one archive fetched by
-    name, not a repo snapshot, so `models pull` could not fetch one — and the ids
-    are a separate namespace, which is what stops an RVC model called `sigma`
-    from colliding with the narrator voice of the same name.
-    """
     resolved = _models_config()
     if isinstance(resolved, int):
         return resolved
@@ -293,14 +254,6 @@ def cmd_rvc_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
-    """`crucible rvc pull-base` — the engine's shared assets, at a pinned sha.
-
-    Its own verb rather than a step inside `crucible install rvc`, for the
-    reason every other weights pull is its own verb: installing an env and
-    fetching 600 MB of weights are different acts with different failure modes,
-    and `crucible install llm` does not pull a 19 GB model either. One set, one
-    command, one owner (PHASE4-AUDIO.md section 4.1).
-    """
     resolved = _models_config()
     if isinstance(resolved, int):
         return resolved
@@ -323,9 +276,6 @@ def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
         return _fail(str(exc))
     absent = rvcbase.missing(config, assets)
     if absent:
-        # Unreachable unless something removed a file between the place and
-        # this read; said out loud rather than reported as success, because the
-        # next thing to look at this tree is a job that will fail inside urvc.
         return _fail(
             f"the pull finished but {sorted(absent)} are not under "
             f"{rvcbase.base_root(config)}"
@@ -334,17 +284,7 @@ def cmd_rvc_pull_base(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-# ------------------------------------------------------------------ denoise
-
-
 def cmd_denoise_list(args: argparse.Namespace) -> int:
-    """Every denoise manifest this build ships and where it stands here.
-
-    Its own command rather than a row in `crucible models list`, for `crucible
-    rvc list`'s reason one job type along: a separator's weights are two named
-    files placed under names an engine resolves by, not a repo snapshot, so
-    `models pull` could not fetch one — and the ids are their own namespace.
-    """
     resolved = _models_config()
     if isinstance(resolved, int):
         return resolved
@@ -370,10 +310,6 @@ def cmd_denoise_list(args: argparse.Namespace) -> int:
         spec = manifest.spec(backend.kind)
         found = denoisemodels.installed(config.home, manifest, spec)
         absent = denoisemodels.missing(config.home, manifest)
-        # Stamped and present are different facts and this prints both. A
-        # stamp with a file missing beside it is not installed; two files
-        # somebody placed by hand are usable and unstamped, which is the state
-        # every host was in before this command existed.
         if found is not None:
             detail = f"{found.bytes / 1e9:.2f} GB at {found.path}"
         elif not absent:
@@ -419,13 +355,6 @@ def cmd_denoise_list(args: argparse.Namespace) -> int:
 
 
 def cmd_denoise_pull(args: argparse.Namespace) -> int:
-    """`crucible denoise pull <id>` — the checkpoint and its config, at the pin.
-
-    Both files, both digests, one revision, into the flat directory
-    audio-separator reads by name. The layout is `crucible/denoisemodels.py`'s
-    and the job reads the same function, so what this places is what a job
-    looks for (ARCHITECTURE.md R1).
-    """
     resolved = _models_config()
     if isinstance(resolved, int):
         return resolved
@@ -458,10 +387,6 @@ def cmd_denoise_pull(args: argparse.Namespace) -> int:
         return _fail(str(exc))
     absent = denoisemodels.missing(config.home, manifest)
     if absent:
-        # Unreachable unless something removed a file between the place and
-        # this read; said out loud rather than reported as success, because the
-        # next thing to look at this tree is a job that will fail inside
-        # audio-separator. `rvc pull-base`'s rule, and its reason.
         return _fail(
             f"the pull finished but {sorted(absent)} are not under "
             f"{denoisemodels.denoise_models_root(config.home)}"

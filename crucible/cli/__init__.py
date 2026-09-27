@@ -1,29 +1,3 @@
-"""The `crucible` command line.
-
-    crucible init       mint the token, write the config, record the backend
-    crucible install    build a job type's env from its recipe, then decide whether the card fits it
-    crucible capability what this host can hold, and why; --write records it
-    crucible serve      run the API in the foreground
-    crucible service    install/start/stop the machine service that runs `serve`
-    crucible orchestrator  win32 only: the tray that manages this machine's engine
-    crucible models     list and pull model weights
-    crucible voices     list and pull voice weights
-    crucible doctor     probe the host and every job type; exit 0 only when healthy
-    crucible token      print the bearer token (--show) or the pairing line (--url)
-    crucible uninstall  install, run backwards; weights kept unless --purge-weights
-
-    crucible api        THE CLIENT HALF: submit jobs, stream tts, chat, read
-                        state — over HTTP, against a server that may be this
-                        machine's, the one in WSL, or one across the network.
-                        Every verb above acts on THIS machine's installation and
-                        takes no address; these take --url and --token. See
-                        crucible/apiclient.py and docs/API-CLI.md.
-    crucible pair       connect to another computer's Crucible by its address
-                        and keep its pairing line; then `api --server <name>`
-
-Exit codes: 0 success, 1 refused (named reason on stderr), 2 usage.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -45,8 +19,8 @@ from . import (
     weights,
 )
 from .capability import _capability_step, _decide_here, _write_capability
-from .common import EXIT_OK, EXIT_REFUSED, EXIT_USAGE, _backend_mismatch
-from .init import carried_from, carried_reserve
+from .common import EXIT_REFUSED, _backend_mismatch
+from .init import carried_from
 from .install import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT, _smoke_import
 from .serve import cmd_serve
 from .token import (
@@ -59,9 +33,7 @@ from .uninstall_cmd import cmd_uninstall
 from .weights import cmd_remove
 
 __all__ = [
-    "EXIT_OK",
     "EXIT_REFUSED",
-    "EXIT_USAGE",
     "INSTALLABLE_JOB_TYPES",
     "INSTALLER_FOR",
     "PAIRING_NOT_PRINTED",
@@ -76,7 +48,6 @@ __all__ = [
     "_write_pairing_file",
     "build_parser",
     "carried_from",
-    "carried_reserve",
     "cmd_remove",
     "cmd_serve",
     "cmd_uninstall",

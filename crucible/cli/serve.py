@@ -27,37 +27,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host if args.host is not None else config.host
     port = args.port if args.port is not None else config.port
 
-    # THE PAIRING FILE IS WRITTEN AT STARTUP TOO (PHASE15-HOST.md 3.6, amended
-    # 2026-09-14). `init` and `service install` wrote it and nothing else did,
-    # so a server that EXISTED before this phase had none and an app on its own
-    # machine was told there was no engine there — measured on the Mac after
-    # its upgrade. The line is written when it is absent OR when it does not
-    # match what this config says, because a rotated token, a renamed server
-    # or a moved port each leave a file that is worse than no file: it points
-    # an app at a door with the wrong key.
-    #
-    # The line is the CONFIG's, not this run's `--host`/`--port` overrides:
-    # 3.6's file answers "an app on THIS machine wants in", and a developer
-    # running `crucible serve --port 7999` for an afternoon must not repoint
-    # every app on the box at a server that is about to stop.
     try:
         token._sync_pairing_file(config)
     except pairing.PairingFileError as exc:
-        # NOT fatal, and NOT silent. The server is the thing being started and
-        # it works without this file; what the file changes is whether an app
-        # has to be told a token by hand. Refusing to serve over it would be
-        # the tail wagging the dog, and swallowing it would be a machine where
-        # connect quietly stopped working.
         print(f"crucible: pairing file NOT written: {exc}", file=sys.stderr)
 
-    from ..api import create_app  # imported here so `init`/`token` stay light
+    from ..api import create_app
 
     app = create_app(config, backend)
-    # WHERE IT IS REALLY LISTENING, not where the file says. `--host` and
-    # `--port` override the config for this run, and `GET /v1/setup` builds its
-    # pairing lines from the bind address — so a server started
-    # `crucible serve --host 0.0.0.0` on a config that says `127.0.0.1` must
-    # hand out its interface addresses, not a loopback nobody else can dial.
     app.state.bind_host = host
     app.state.bind_port = port
 
@@ -78,13 +55,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from ..host.child_lifecycle import run_owned_server
         run_owned_server(app, host=host, port=port, log_level=args.log_level)
     else:
-        # `timeout_keep_alive` IS STATED, and the default is what broke.
-        # uvicorn holds an idle connection 5 s; Node's undici keeps a pooled
-        # one about 4 s, so a client's next request lands on a socket this
-        # server is closing and reads ECONNRESET while the server is fine.
-        # Four times: align's first `GET /v1/info` after a render's last
-        # artifact fetch, Sep 18 and Sep 19 against the PC and 2026-09-20 00:57
-        # against the Mac on 127.0.0.1. See `KEEP_ALIVE_SECONDS`.
         uvicorn.run(
             app,
             host=host,

@@ -12,26 +12,6 @@ from .common import EXIT_OK, EXIT_REFUSED, _fail
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    """`crucible uninstall` — `crucible/uninstall.py` is where the whole of it is.
-
-    This function does three things and no fourth: build the plan, run it
-    unless `--dry-run`, and print it. Every decision — the order, what is
-    kept, what is refused by name — belongs to the module, because the module
-    is what the tests exercise and what `install.sh --uninstall` reaches
-    through this verb.
-
-    **The home is `crucible_home()` and never a flag.** `CRUCIBLE_HOME` is the
-    one owner of where a server's state is, on every platform
-    (`crucible/config.py`), and a `--home` here would be a second way to name
-    it — which on a command that deletes directories is the difference between
-    one answer and two.
-
-    **The backend is READ, not detected.** `common.detect_backend()` probes a card,
-    and an uninstall must run on a machine whose driver has already gone, whose
-    config has already been half-removed by an interrupted run, or which simply
-    has no GPU free tonight. What the plan reports is `[backend] kind` out of
-    the config when there is a config, and `null` when there is not.
-    """
     try:
         home = crucible_home()
         built = uninstall.plan(

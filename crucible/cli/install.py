@@ -15,22 +15,8 @@ from .capability import _capability_step, _measure_step
 from .common import _backend_mismatch, _env_spec, _fail
 
 
-#: Every job type `crucible install` can build an env for: the engine SERVERS
-#: (llm, tts) and the types whose work is a library in its own venv
-#: (`jobenv.WORKER_JOB_TYPES`).
 INSTALLABLE_JOB_TYPES = ("llm", "tts", *jobenv.WORKER_JOB_TYPES)
 
-#: Which `crucible install <type>` builds the env a job type needs. Almost
-#: always itself; `denoise` is the exception, because it shares the `rvc` env
-#: (`jobenv.JOB_TYPES_SERVED_BY_ENV` is the owner of that fact). `crucible
-#: doctor` reads this so the command it suggests is one that exists.
-#:
-#: `SMOKE_IMPORT` below is its partner and they are now in ONE file. The table
-#: used to live in `crucible/envpack.py` — which could not import this module
-#: without a cycle — and a pytest tied the two together instead. The packs are
-#: gone (PHASE20 section 6) and with them the reason for the separation, so the
-#: two halves of "what `crucible install <type>` produces" sit beside each
-#: other and cannot drift at all (ARCHITECTURE.md R1).
 INSTALLER_FOR: dict[str, str] = {
     **{name: name for name in INSTALLABLE_JOB_TYPES},
     **{
@@ -38,51 +24,20 @@ INSTALLER_FOR: dict[str, str] = {
         for env, served in jobenv.JOB_TYPES_SERVED_BY_ENV.items()
         for job_type in served
     },
-    # `pages` is a CAPABILITY CLASS and not a job type — PHASE3-VLM.md section
-    # 1: *"there is no `vlm-pages` job type"*, dots.ocr is served through the
-    # same `llm` proxy as every text model, on every backend. So it has no
-    # installer of its own and never will, and naming it here is what turns
-    # `crucible install pages` (which PHASE15-HOST.md 3.5 writes out) from
-    # "there is no installer for 'pages'" into a sentence that says `llm`.
     "pages": "llm",
 }
 
-#: What an env must be able to IMPORT before `crucible install` calls it done,
-#: keyed by env directory and then by backend.
-#:
-#: A pack build used to run this before an archive became a release asset. There
-#: is no build and no asset now — the env is assembled on the machine that will
-#: use it — so the check moved to the end of the install, where it answers the
-#: same question about the same bytes: pip returning 0 says the wheels resolved,
-#: and says nothing about whether the thing they are for loads.
-#:
-#: The module name is not the distribution name and the difference is not
-#: cosmetic: `mlx-lm` imports as `mlx_lm`, `faster-whisper` as `faster_whisper`,
-#: `qwen-asr` as `qwen_asr`, `ultimate-rvc` as `ultimate_rvc`. A table written
-#: from `HEADLINE_PACKAGE` would fail on four of six envs.
 SMOKE_IMPORT: dict[str, dict[str, str]] = {
     "llm": {CUDA_LINUX: "vllm", MLX_DARWIN: "mlx_lm"},
-    # `asr` is TWO ENGINES, so the smoke import differs by backend: a Mac env
-    # that imported `faster_whisper` would fail every install, and one that
-    # imported nothing would be called ready without being opened.
     "asr": {CUDA_LINUX: "faster_whisper", MLX_DARWIN: "mlx_whisper"},
     "align": {CUDA_LINUX: "qwen_asr", MLX_DARWIN: "qwen_asr"},
     "rvc": {CUDA_LINUX: "ultimate_rvc", MLX_DARWIN: "ultimate_rvc"},
-    # The tts env's KEY is the env directory's name, and it differs by backend
-    # for the reason `jobenv.tts_env` gives: on cuda-linux two narrator engines
-    # cannot share a venv, so the engine is in the name.
     "tts-higgs-v3": {CUDA_LINUX: "narrator"},
     "tts": {MLX_DARWIN: "narrator"},
 }
 
 
 def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
-    """Import this env's headline module in it. The refusal, or None.
-
-    Not a fallback and not advisory: an env that cannot import the library it
-    exists for is not installed, whatever pip said, and the operator finds out
-    here rather than at chunk 900 of somebody's book.
-    """
     module = SMOKE_IMPORT.get(key, {}).get(backend_kind)
     if module is None:
         return (
@@ -134,12 +89,6 @@ def cmd_install(args: argparse.Namespace) -> int:
         )
     if backend.kind == LLAMA_WINDOWS:
         return _install_llama_windows(config, backend, args)
-    # ONE PATH, AND IT IS THE RECIPE (PHASE20 section 3, item 4). `crucible
-    # install` used to default to downloading an environment PACK from the
-    # release and reach the recipe only under `--build`; the packs are gone, so
-    # the developer's path became everybody's and the flag it hid behind went
-    # with them. What the recipe path does to an env that is already there is
-    # `jobenv.plan_install`'s answer, not this function's.
     try:
         spec = _env_spec(args.job_type, None, backend.kind)
         recipe = jobenv.recipe_for(spec)
@@ -178,10 +127,6 @@ def cmd_install(args: argparse.Namespace) -> int:
     if refusal is not None:
         return _fail(refusal)
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
-    # One env can serve more than one job type — `rvc`'s also carries
-    # audio-separator, which is `denoise` — and the flag for each of them is
-    # decided here, because this is the door that has just built the thing they
-    # share.
     return _capability_step(
         config,
         backend,
@@ -190,15 +135,6 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
-    """Place Crucible's pinned ffmpeg (`hosttools.ensure_ffmpeg`). The refusal, or None.
-
-    2026-09-26, Owen's ruling on fresh-install #25: ffmpeg comes from
-    Crucible's own `tools` release, pinned by sha256, and `crucible install`
-    is what places it, for every job type. It runs after the env is proved and
-    before the capability step, so a flag is never turned on for a type whose
-    ffmpeg failed to arrive. Re-running the install finds the env already
-    there and retries only this.
-    """
     try:
         print(
             hosttools.ensure_ffmpeg(
@@ -211,10 +147,6 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
             f"the env is installed, but Crucible's ffmpeg is not: {exc}. "
             "Installing again retries only the ffmpeg"
         )
-    # The speech detector `asr`'s `speech_only` runs (2026-09-27). Placed for
-    # every type, like ffmpeg, because one file for every host is simpler
-    # than a rule about which types need it. Not a refusal when it fails: it
-    # is off by default, and a `speech_only` job fetches it itself.
     try:
         print(hosttools.ensure_silero_vad(config.home))
     except hosttools.HostToolError as exc:
@@ -228,17 +160,6 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
 def _install_llama_windows(
     config: Config, backend: Backend, args: argparse.Namespace
 ) -> int:
-    """`crucible install` on `llama-windows`. PHASE15-HOST.md 3.5 and 7.4 item 4.
-
-    THERE IS NO ENV ON THIS BACKEND. `llm` (and therefore `pages`, which
-    shares it) is served by `llama-server.exe` from the pinned llama.cpp
-    release — the `engine` subject — so `install llm` fetches that and
-    nothing else. The five Python job types are refused `needs_wsl` with
-    `capability.NEEDS_WSL_REASON`, which is already the sentence their
-    capability rows carry, so an operator reads one sentence and not two
-    spellings of it.
-
-    """
     if args.job_type in capability.WSL_ONLY_JOB_TYPES:
         return _fail(
             f"needs_wsl: {args.job_type} — {capability.NEEDS_WSL_REASON}. "
