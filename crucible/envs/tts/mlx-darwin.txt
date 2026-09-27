@@ -1,6 +1,6 @@
 # archive-bytes: 900000000  PHASE20-CODE-NOT-ENVIRONMENTS.md section 0's "~0.9 GB mlx", measured 2026-09-18
 
-narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@5280787390ee1f1ec4cfd1e0a297529db99febfb#subdirectory=python
+narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@331235265cfa1255d98e1937cb35617722f905c1#subdirectory=python
 
 mlx-lm==0.31.3
 mlx-audio==0.4.8
