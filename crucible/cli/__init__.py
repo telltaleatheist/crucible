@@ -5,12 +5,14 @@ import argparse
 from .. import VERSION
 from ..config import CRUCIBLE_HOME_ENV
 from . import (
+    api_cmd,
     capability,
     common,
     doctor,
     init,
     install,
     orchestrator,
+    pair,
     serve,
     service_cmd,
     token,
@@ -87,9 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     from ..lan import add_parser as add_lan_parser
     add_lan_parser(subparsers)
 
-    from ..apiclient import add_pair_parser, add_parser as add_api_parser
-    add_api_parser(subparsers)
-    add_pair_parser(subparsers)
+    api_cmd.add_parser(subparsers)
+    pair.add_pair_parser(subparsers)
     return parser
 
 

@@ -443,6 +443,23 @@ model, decide the card automatically if it was never decided, and do not hold th
   weights are present costs nothing extra.
 - `[jobs] install_on_submit = false` restores the plain refusal.
 
+### Operator tasks (`crucible/tasks/`)
+
+`POST /v1/tasks` runs one operator task at a time: `pull`, `install`, `module`, `engine`,
+`engine-restart`. The package is split by what each part owns:
+
+| module | owns |
+|---|---|
+| `states` | `Task`, `TASK_TYPES`, `HISTORY`, the terminal set. The state words are `jobs/base.py`'s; a task is never `interrupted`, so its terminal set is the job one without it |
+| `validate` | one validator per task type (`VALIDATORS`, checked before the task exists) and one per module table (`job_type_entry`, `need_entry`, `subject_entry`); `validate_module` walks `MODULE_TABLES` and reports every problem, in table order, in one 400 |
+| `hostdoor` | finding the orchestrator's door (`$CRUCIBLE_HOST_DOOR`, owned by `platform/paths.py`) and relaying its NDJSON stream line by line into the task's events |
+| `runner` | the `crucible install … --verbose` child: argv, environment, the `crucible: ` reason line, throttled byte progress |
+| `store` | `TaskStore`: history, subscribers, the busy and card-held refusals, and one `_run_*` per type, with a module's steps split into `_need_step`, `_install_entry_step` and `_subject_step` |
+
+Tests patch `tasks.install_command`, `tasks.env_installed`, `tasks.which` and
+`tasks.searched_note` on the package, so the submodules look those names up
+through `crucible.tasks` at call time rather than binding their own copies.
+
 ## 9. Per-type notes: llm and echo
 
 - **llm** (`load-model`, `unload-model`). Chat never touches the lane (it is proxied). The lane

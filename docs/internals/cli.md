@@ -1,9 +1,9 @@
 # The `crucible` command line (`crucible/cli/`)
 
 Every verb in this package acts on **this machine's** installation and takes no address.
-The client half (`crucible api …`, `crucible pair`) lives in `crucible/apiclient.py` and
-speaks HTTP to a server that may be local, in WSL, or across the network (see
-`docs/API-CLI.md`).
+The client half (`crucible api …`, `crucible pair`) is `cli/api_cmd.py` and `cli/pair.py`
+over the `crucible/client/` package, and speaks HTTP to a server that may be local, in WSL,
+or across the network (see `docs/API-CLI.md`).
 
 Exit codes: `0` success, `1` refused (a named reason on stderr, via `common._fail`), `2`
 usage (argparse's own).
@@ -26,12 +26,40 @@ usage (argparse's own).
 | `doctor` | `doctor`, `env patch` |
 | `uninstall_cmd` | `uninstall` |
 | `token` | `token`, and the pairing-file helpers `init`, `serve` and `service install` share |
+| `api_cmd` | `api` and every verb under it: argument and output helpers, the handlers, the verb table |
+| `pair` | `pair` |
 
 Each module exposes `add_parser(subparsers)` (`weights` has `add_model_parsers` and
 `add_rvc_denoise_parsers`, because `voices` sits between them). `build_parser` calls them
-in the order `--help` lists the verbs. `local`, `sharing`, `lan` and `apiclient` are
-imported inside `build_parser` rather than at module scope, because a CLI's import time is
-its `--help` time. For the same reason `serve` imports `crucible.api` only when it runs.
+in the order `--help` lists the verbs (`api_cmd` has `add_parser`, `pair` has
+`add_pair_parser`). `local`, `sharing` and `lan` are imported inside `build_parser`
+rather than at module scope, because a CLI's import time is its `--help` time. For the
+same reason `serve` imports `crucible.api` only when it runs.
+
+## The client (`crucible/client/`, `cli/api_cmd.py`, `cli/pair.py`)
+
+`crucible/client/` is the Python equivalent of the TypeScript SDK's core and neither
+parses arguments nor prints (`test_client_split.py` reads its source to hold that):
+
+| module | owns |
+|---|---|
+| `connection` | `Connection`, `resolve(url=, token=, pairing=, pairing_file=, server=)` and the order it tries them, the saved pairings under `servers/` |
+| `transport` | the one urllib opener, the headers (the User-Agent is `protocol.user_agent("cli")`, built once), `call`, `follow` (SSE), `chat_frames`, `download` into a sink the caller opens, `upload` |
+| `errors` | `ClientRefusal`, the server's error body (`error_in`), and the next-step sentences for `unauthorized`, `api_version_*` and an address nothing answers on |
+| `pair` | the device-code handshake; `pair_call` goes through `transport.open_url` like every other request |
+
+`cli/api_cmd.py` turns flags into those calls and JSON into stdout. Its verbs are one
+table, `API_VERBS`: a `Verb(name, help, run, args, verbs)` row per verb, with `Arg` rows
+for the flags and `OneOf` for a required either/or. `add_parser` is a loop over it, so a
+new verb is a row and a handler. `--help` for every screen is byte-identical to the
+hand-written parser it replaced.
+
+`crucible/apiclient.py` is a forwarding module kept for one release: every read,
+write and delete of an attribute on it lands on `cli/api_cmd.py`, so
+`monkeypatch.setattr(apiclient, "call", ...)` still reaches the verbs, and a module
+that imported `apiclient` while `crucible.cli` was still loading gets the same answers.
+`cli/voices.py`, `cli/weights.py` and `cli/common.py` still import it; they move to
+`crucible.client` when it goes.
 
 ### Constraints on the layout
 
@@ -243,7 +271,16 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 
 ## `doctor`
 
-- Every problem ends in the command that fixes it (`_with_fix`, `_install_command`,
+- `doctor` is a registry. `CHECKS` is a list of functions, each taking the surveyed
+  `Host` (home, backend or the refusal to detect one, config or the refusal to read it,
+  the ladder summary) and returning a `Section(name, facts, findings, notes)`. `facts`
+  fill top-level keys of the report, and `assemble` refuses a key the report does not
+  declare in `REPORT_DEFAULTS`, which is also the JSON's key order. A `Finding(code,
+  message, fix)` cannot be built without a fix; `Finding.run` appends ``Run `fix` `` when
+  the message does not already name it. The order of `CHECKS` is the order of
+  `problems`. `render_text` walks `TEXT_SECTIONS`, one line-maker per block of the text
+  screen, over the same report `--json` prints, so the two cannot disagree.
+- Every problem ends in the command that fixes it (`Finding.fix`, `_install_command`,
   `backend_changed_fix`); a problem with no command is a bug, and
   `test_every_doctor_problem_names_a_command_to_run` checks a fresh install's report.
   `doctor` loads the config with `tolerate_stale_record=True` and reports a disagreeing

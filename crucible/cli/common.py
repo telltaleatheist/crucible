@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .. import API_HEADER, API_VERSION, VERSION, jobenv
+from .. import API_HEADER, API_VERSION, jobenv
 from ..backend import (
     Backend,
     CUDA_LINUX,
@@ -17,6 +17,7 @@ from ..backend import (
 )
 from ..config import Config, load_config
 from ..errors import ConfigError, CrucibleError, NoViableBackend
+from ..protocol import user_agent
 from ..voices import NARRATOR_ENGINE_SAMPLING
 
 
@@ -129,7 +130,7 @@ def server_here(config: Config, backend: Backend):
         headers={
             "Authorization": f"Bearer {config.token}",
             API_HEADER: str(API_VERSION),
-            "User-Agent": f"crucible-cli/{VERSION}",
+            "User-Agent": user_agent("cli"),
         },
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
