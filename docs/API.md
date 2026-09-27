@@ -130,6 +130,14 @@ What this server can hold, per capability class, and why not. The read a client 
 
 *Answers:* `200`
 
+### `GET /v1/capability/plan`
+
+What an install or a pull will give THIS card, before it happens. Owen, 2026-09-26: *"that can be in a modal or something that pops up when the user tries to install a pakcage from the crucible ui"*. The operator page asks this before its Install and Pull buttons act and shows `confirm` in a confirmation the person accepts or cancels; it renders the words and writes none of them. `?job_type=<type>` for an install, `?subject=<id>` for a pull. Decided LIVE, exactly as `crucible install` will decide it: this card's size and generation (`backend`, `ladder.card_for`), this config's allowance and choices — so the modal and the record install then writes are the same walk. Nothing is written.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
 ## Settings
 
 The one door apps configure Crucible through. Crucible is set-and-forget; everything an app wants changed is written here.

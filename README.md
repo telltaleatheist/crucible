@@ -159,6 +159,8 @@ crucible install tts --narrator-engine higgs-v3   # ...and a tts env, one per en
 crucible install llm --force    # ...or delete a broken one and build it again
 crucible capability             # what this host's card can hold, and why (dry run)
 crucible capability --write     # record that verdict in config.toml
+crucible ladder                 # measure what this card can do (install runs it too);
+                                #   --no-gpu for the nvidia-smi rung alone
 crucible models list            # model manifests and their standing here
 crucible models pull <id>       # fetch a model's weights at its pinned revision
 crucible voices list            # voice manifests and their standing here
@@ -511,7 +513,7 @@ for being a 27B on a 24 GB card rather than for needing a 55 GB download first:
 | `unknown_model` (400) | no manifest with that id |
 | `backend_unsupported` (400) | the manifest has no block for this host |
 | `insufficient_memory` (409) | the estimate exceeds the accelerator's **total** — never loadable here |
-| `card_lacks_feature` (409) | the card's generation cannot start this model's engine at all, whatever its memory — e.g. a vLLM block that runs bfloat16 on a card below compute capability 8.0 (a GTX 16xx/RTX 20xx is 7.5). Names the feature, its floor and the card's own number |
+| `card_lacks_feature` (409) | this card cannot start the model's engine at ANY precision, whatever its memory — today, the measurement ladder (`crucible ladder`) found vLLM does not start on it. Quotes that run. A card merely without bf16 is NOT refused: a bf16 block runs in fp16 there (Owen, 2026-09-26: *"we can quantize if we need to. no less than 4"*) |
 | `env_missing` (409) | `~/.crucible/envs/llm` is not installed |
 | `model_not_installed` (409) | no weights at the manifest's pinned revision |
 | `accelerator_busy` (409) | a process that is not Crucible's holds more than 1 GiB — named, with its pid. On `llama-windows` only a stray `llama-server` counts: a Windows desktop shares its card with the compositor and the shell by design, so there the guard asks for room and not for solitude |

@@ -55,6 +55,7 @@ from ...residency import (
 )
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .common import (
+    voice_load_plan,
     describe_voices,
     known_voice,
     require_loadable,
@@ -205,7 +206,9 @@ class LoadVoiceJobType:
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
-            need_bytes=spec.memory_bytes_estimate,
+            need_bytes=voice_load_plan(
+                self._config, self._backend, manifest, spec
+            ).need_bytes,
             owned_pids=self._residency.owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
@@ -253,10 +256,11 @@ class LoadVoiceJobType:
         try:
             # The card can change between the queue and the lane, so the guard
             # runs again here, against the same rules.
+            plan = voice_load_plan(self._config, self._backend, manifest, spec)
             state = accelerator.guard(
                 self._config.backend_kind,
                 model_id=model,
-                need_bytes=spec.memory_bytes_estimate,
+                need_bytes=plan.need_bytes,
                 owned_pids=self._residency.owned_pids(),
                 desktop_allowance_bytes=self._config.desktop_allowance_bytes,
                 reclaimable_bytes=self._residency.reclaimable_bytes(excluding=model),
@@ -280,6 +284,7 @@ class LoadVoiceJobType:
                 reference=reference,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
+                serving_width=plan.width,
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None

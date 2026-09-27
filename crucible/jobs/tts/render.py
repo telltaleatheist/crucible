@@ -184,6 +184,7 @@ from ...voices import VoiceManifest
 from .. import asr
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from .common import (
+    voice_load_plan,
     describe_voices,
     known_voice,
     require_loadable,
@@ -908,7 +909,7 @@ class TtsJobType:
         self._residency.refuse_if_claimed("a tts render")
         _require_ffmpeg()
         resident = self._residency.is_resident(KIND_TTS, model)
-        _, spec, _, _, _ = _require_renderable(
+        manifest, spec, _, _, _ = _require_renderable(
             self._config, self._backend, model, checked, resident
         )
         if resident:
@@ -935,7 +936,9 @@ class TtsJobType:
         accelerator.guard(
             self._config.backend_kind,
             model_id=model,
-            need_bytes=spec.memory_bytes_estimate,
+            need_bytes=voice_load_plan(
+                self._config, self._backend, manifest, spec
+            ).need_bytes,
             owned_pids=self._residency.owned_pids(),
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             # A render job MAY unload the current resident to load its own voice
@@ -1033,10 +1036,11 @@ class TtsJobType:
         try:
             # The card can change between the queue and the lane, so the guard
             # runs again here against the same rules.
+            plan = voice_load_plan(self._config, self._backend, manifest, spec)
             state = accelerator.guard(
                 self._config.backend_kind,
                 model_id=manifest.id,
-                need_bytes=spec.memory_bytes_estimate,
+                need_bytes=plan.need_bytes,
                 owned_pids=self._residency.owned_pids(),
                 desktop_allowance_bytes=self._config.desktop_allowance_bytes,
                 reclaimable_bytes=self._residency.reclaimable_bytes(
@@ -1049,7 +1053,12 @@ class TtsJobType:
 
         try:
             self._residency.load_voice(
-                manifest, spec, weights_dir, python, on_progress=ctx.warming
+                manifest,
+                spec,
+                weights_dir,
+                python,
+                on_progress=ctx.warming,
+                serving_width=plan.width,
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None

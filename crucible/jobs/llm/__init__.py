@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ... import accelerator, jobenv, llamacpp, vram, weights
+from ... import accelerator, jobenv, ladder, llamacpp, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...capability import (
     MIN_LOAD_CONTEXT,
@@ -36,6 +36,7 @@ from ...capability import (
 from ... import ollamastore
 from ...config import Config
 from ...engines import EngineError
+from ...engines import vllm as vllm_engine
 from ...errors import ApiError, JobError
 from ...inflight import require_act_name
 from ...leases import require_ttl
@@ -610,9 +611,12 @@ def _require_loadable(
         host_total_bytes=backend.gpu.vram_bytes,
         host_name=backend.gpu.name,
     )
-    # And what no amount of room fixes either: a card too old for the block's
-    # dtype (fresh-install #48; a bf16 block on sm_75 dies at vLLM's first line).
-    accelerator.refuse_if_card_lacks(model_id=model_id, spec=spec, gpu=backend.gpu)
+    # And what no amount of room fixes either: an engine the ladder measured
+    # not starting on this card (fresh-install #48). A card merely without
+    # bf16 is not refused: the load runs it in fp16 (`engines.vllm.card_args`).
+    accelerator.refuse_if_card_lacks(
+        model_id=model_id, spec=spec, card=ladder.card_for(config.home, backend.gpu)
+    )
     if backend_kind == LLAMA_WINDOWS:
         # NO ENV. The engine is `llama-server.exe` from the pinned llama.cpp
         # release, and `env_missing` is still the right NAME for "this host
@@ -884,6 +888,13 @@ class LoadModelJobType:
                 context=context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
+                # WHAT THIS CARD NEEDS ON THE ARGV (fresh-install #48, Owen
+                # 2026-09-26: "we can quantize if we need to. no less than
+                # 4"): fp16 for a stated bf16 on a card without bf16, and
+                # --enforce-eager where the ladder measured no CUDA graphs.
+                card_args=vllm_engine.card_args(
+                    spec, ladder.card_for(self._config.home, self._backend.gpu)
+                ),
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None

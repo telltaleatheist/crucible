@@ -1137,6 +1137,7 @@ class Residency:
         context: int,
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
+        card_args: tuple[str, ...] = (),
     ) -> ResidentModel:
         """Make this model the resident one, unloading whatever was there.
 
@@ -1158,6 +1159,13 @@ class Residency:
         omission is start an engine with an unsized pool on a shared card — that
         is the 2026-09-17 failure. A caller with nothing to size (a block with no
         memory terms, an engine that is not vLLM) passes None and says so.
+
+        `card_args` is what THIS card needs on the argv (`engines.vllm.
+        card_args`: `--dtype float16` for a stated bf16 on a card without bf16,
+        `--enforce-eager` where the ladder measured no CUDA graphs). Owen,
+        2026-09-26: *"we can quantize if we need to. no less than 4."* The
+        `load-model` job passes it; empty is a card that needs nothing, which
+        is every card Crucible ran on before #48.
         """
         self._refuse_mutation_if_claimed(f"load {manifest.id}")
         self.refuse_if_stopping(f"load {manifest.id}")
@@ -1184,7 +1192,9 @@ class Residency:
             f"starting {spec.engine} for {manifest.id} on 127.0.0.1:{port} "
             f"(context {context}); log {log_path}"
         )
-        args = self._engine_args(manifest, spec, weights_dir, plan, context=context)
+        args = self._engine_args(
+            manifest, spec, weights_dir, plan, context=context, card_args=card_args
+        )
         try:
             self._start(
                 engine,
@@ -1227,6 +1237,7 @@ class Residency:
         reference: VoiceReference | None = None,
         timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
         on_progress: Callable[[str], None] | None = None,
+        serving_width: int | None = None,
     ) -> ResidentVoice:
         """Make this voice the resident one, unloading whatever was there.
 
@@ -1276,9 +1287,17 @@ class Residency:
             python,
             log_path,
             serving_stack=env_spec.serving_stack,
+            # NARROWER ON A CARD THAT CANNOT HOLD THE FULL WIDTH (`serving_width`,
+            # `ttsplan.load_plan`). Owen, 2026-09-26: "we should drop batches
+            # to 1 at a time before we quantize. id rather it go slow than
+            # sound worse". Never wider than the voice states.
             max_num_seqs=(
                 None if manifest.serving is None
-                else manifest.serving.max_num_seqs
+                else (
+                    manifest.serving.max_num_seqs
+                    if serving_width is None
+                    else min(serving_width, manifest.serving.max_num_seqs)
+                )
             ),
             # THE TWO LEVERS ADDED ON 2026-09-19, and they go to BOTH arms.
             # `max_num_seqs` above is emitted only on the served arm, because
@@ -1679,8 +1698,13 @@ class Residency:
         plan: "KvPlan | None",
         *,
         context: int,
+        card_args: tuple[str, ...] = (),
     ) -> list[str]:
         """The manifest's args plus what Crucible always sets.
+
+        `card_args` go after the manifest's own, so argparse's last spelling
+        wins: a stated `--dtype bfloat16` becomes the `--dtype float16` this
+        card can run (`engines.vllm.card_args`).
 
         `context` is the one the load decided (`Residency.load`): vLLM's
         `--max-model-len` and llama-server's `-c` are both composed HERE from
@@ -1717,6 +1741,7 @@ class Residency:
             # reader clamps to is the same constant (`VllmEngine.max_logprobs`),
             # so the flag and the reader cannot disagree.
             args += list(VLLM_DECIDE_ARGS)
+            args += list(card_args)
         if spec.engine == "llama-server":
             if spec.file is None:  # pragma: no cover - the loader requires it
                 raise EngineError(

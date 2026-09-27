@@ -253,6 +253,16 @@ def retired_asr_id_note(model_id: str) -> str | None:
 #: Qwen3-ASR-1.7B on the PC and on the Mac; "do not use the 8-bit MLX build".
 #: A table of one so a manifest that says `float16` or `int8` is refused by
 #: name rather than handed to a worker that would honour it.
+#:
+#: WHAT A CARD WITHOUT bf16 GETS (fresh-install #48). Owen, 2026-09-26: *"we
+#: can quantize if we need to. no less than 4."* The manifest still states
+#: bfloat16 — full precision is what every card that can run it gets — and on a
+#: card below compute capability 8.0 (a GTX 16xx / RTX 20xx is 7.5), where vLLM
+#: refuses bfloat16 outright, the engine is started in float16 instead
+#: (`engines.vllm.run_dtype`): the same two bytes a parameter, so every memory
+#: figure in the manifest holds. The job's result records the dtype it ran in.
+#: A quantized Qwen3-ASR would come next, if one existed and were needed; none
+#: is pinned, so none is offered.
 QWEN_ASR_DTYPES: frozenset[str] = frozenset({"bfloat16"})
 
 #: What every Qwen block states beyond whisper's four keys.

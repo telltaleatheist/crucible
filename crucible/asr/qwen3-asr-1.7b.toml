@@ -64,6 +64,10 @@ parameters_m = 1700
 engine = "vllm"
 hf_repo = "Qwen/Qwen3-ASR-1.7B"
 revision = "7278e1e70fe206f11671096ffdd38061171dd6e5"
+# bf16 on every card that has it. On a card below compute capability 8.0 vLLM
+# refuses bfloat16, and Crucible starts this block in float16 instead: Owen,
+# 2026-09-26, "we can quantize if we need to. no less than 4" (fresh-install
+# #48, crucible/asrmodels.py QWEN_ASR_DTYPES). Same bytes, same estimate.
 dtype = "bfloat16"
 aligner = "qwen3-aligner"
 # vLLM's `max_num_seqs`: how many pieces decode at once. 8 pieces of 180 s is

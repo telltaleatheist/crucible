@@ -45,6 +45,7 @@ from . import (
     VERSION,
     accelerator,
     catalog,
+    ladder,
     pages as pages_module,
     pairing,
     upstreams,
@@ -947,6 +948,49 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
 
     # ------------------------------------------------------------ capability
 
+    @private.get("/capability/plan")
+    async def capability_plan(request: Request) -> dict[str, Any]:
+        """What an install or a pull will give THIS card, before it happens.
+
+        Owen, 2026-09-26: *"that can be in a modal or something that pops up
+        when the user tries to install a pakcage from the crucible ui"*. The
+        operator page asks this before its Install and Pull buttons act and
+        shows `confirm` in a confirmation the person accepts or cancels; it
+        renders the words and writes none of them.
+
+        `?job_type=<type>` for an install, `?subject=<id>` for a pull. Decided
+        LIVE, exactly as `crucible install` will decide it: this card's size
+        and generation (`backend`, `ladder.card_for`), this config's allowance
+        and choices — so the modal and the record install then writes are the
+        same walk. Nothing is written.
+        """
+        live: Config = request.app.state.config
+        query = request.query_params
+        job_type, subject = query.get("job_type"), query.get("subject")
+        if (job_type is None) == (subject is None):
+            raise ApiError(
+                400,
+                "invalid_request",
+                "name exactly one of ?job_type= (an install) or ?subject= (a pull)",
+            )
+        card = ladder.card_for(live.home, backend.gpu)
+        decisions = capability_classes.decide_all(
+            backend.kind,
+            total_bytes=backend.gpu.vram_bytes,
+            desktop_allowance_bytes=live.desktop_allowance_bytes,
+            gpu_vendor=backend.gpu.vendor,
+            chosen={entry.capability: entry.model for entry in live.local_models},
+            card=card,
+        )
+        pool = capability_classes.pool_name(backend.kind, backend.gpu.vendor)
+        if job_type is not None:
+            return capability_classes.install_plan(
+                job_type, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool
+            )
+        return capability_classes.subject_plan(
+            subject, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool
+        )
+
     @private.get("/capability")
     async def capability(request: Request) -> dict[str, Any]:
         """What this server can hold, per capability class, and why not.
@@ -1043,7 +1087,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
             capability_class=query.get("class"),
             context_tokens=query.get(capability_classes.CONTEXT_TOKENS_PARAM),
             concurrency=query.get(capability_classes.CONCURRENCY_PARAM),
-            compute_capability=backend.gpu.compute_capability,
+            card=ladder.card_for(config.home, backend.gpu),
         )
         for row in document["classes"]:
             row["route"] = (
@@ -1119,7 +1163,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
                 live,
                 resolved,
                 gpu_vendor=backend.gpu.vendor,
-                compute_capability=backend.gpu.compute_capability,
+                card=ladder.card_for(config.home, backend.gpu),
             )
         )
         if resolved.changed:

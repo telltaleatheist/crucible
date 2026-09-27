@@ -108,6 +108,10 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 # names are one repo.
 hf_repo = "bosonai/higgs-tts-3-4b"
 revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
+# THE FULL WIDTH ONLY (16 in flight). A card that cannot hold it is served
+# narrower, down to one passage at a time, before any quantized Higgs is
+# considered: Owen, 2026-09-26, "no less than 4 covers higgs as well" and "we
+# should drop batches to 1 at a time before we quantize" (crucible/ttsplan.py).
 memory_bytes_estimate = 19_000_000_000
 estimate_basis = "declared"
 estimate_note = """SGLang-Omni's configured reservation, not a watched card: \
@@ -243,6 +247,10 @@ max_num_seqs_note = """16 is vllm-omni's OWN stage-0 value in higgs_multimodal_q
 # before acting on a remedy written for a fact that may have moved.
 hf_repo = "bosonai/higgs-tts-3-4b"
 revision = "239f63fb7b02b1aa085f98d9efae5e35cc5523e8"
+# THE FULL WIDTH ONLY (16 in flight). A card that cannot hold it is served
+# narrower, down to one passage at a time, before any quantized Higgs is
+# considered: Owen, 2026-09-26, "no less than 4 covers higgs as well" and "we
+# should drop batches to 1 at a time before we quantize" (crucible/ttsplan.py).
 memory_bytes_estimate = 19_000_000_000
 estimate_basis = "declared"
 estimate_note = """SGLang-Omni's configured reservation, not a watched card: \

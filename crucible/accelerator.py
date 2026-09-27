@@ -97,11 +97,8 @@ from .backend import (
     CUDA_LINUX,
     LLAMA_WINDOWS,
     MLX_DARWIN,
-    card_features,
-    feature_floor,
     nvidia_smi_path,
     physical_memory_figures,
-    sm_name,
 )
 from .capability import available_bytes
 from .engines.vllm import card_needs
@@ -528,46 +525,42 @@ def refuse_if_larger_than_host(
     )
 
 
-def refuse_if_card_lacks(
-    *, model_id: str, spec: Any, gpu: Any
-) -> None:
-    """Refuse a model this card's generation can never start, whatever its room.
+def refuse_if_card_lacks(*, model_id: str, spec: Any, card: Any) -> None:
+    """Refuse a model this card can never start at ANY precision.
 
     The sibling of `refuse_if_larger_than_host`, run beside it and for its
     reason: no install, pull or free memory fixes it, so it is said before
-    anybody is sent to fetch weights. Fresh-install #48, 2026-09-26: a bf16
-    block on a Turing card is otherwise a vLLM process that starts, prints
-    *"Bfloat16 is only supported on GPUs with compute capability of at least
-    8.0"* and dies — a job failing, which is the one way Owen's rule says a
-    person must never find out.
+    anybody is sent to fetch weights (fresh-install #48).
 
-    What the block needs is `engines.vllm.card_needs`'s answer and what the
-    card has is `backend.card_features`'s, so the capability walk and this
-    guard cannot disagree about a model. A card whose generation is unknown is
-    NOT refused here, for `capability.Candidate.lacks`' reason.
+    A card WITHOUT bf16 is not refused here any more. Owen, 2026-09-26: *"we
+    can quantize if we need to. no less than 4."* A stated bf16 runs in fp16
+    on such a card (`engines.vllm.card_args`), so what is left to refuse is a
+    need with no lower precision behind it: today, the ladder MEASURING that
+    vLLM does not start on this card (`backend.VLLM_STARTS`). The message
+    quotes that run. `card` is `ladder.card_for`'s, so this guard and the
+    capability walk read the same facts; unknown refuses nothing.
     """
     needs = card_needs(spec)
-    features = card_features(gpu.compute_capability)
-    if not needs or features is None:
-        return
-    missing = [need for need in needs if not features.get(need, False)]
+    missing = [need for need in needs if card.has(need) is False]
     if not missing:
         return
-    floors = " and ".join(
-        f"{need} (compute capability {feature_floor(need)} or newer)"
+    reasons = "; ".join(
+        f"{need}: {card.measured_detail.get(need) or 'measured as unavailable'}"
         for need in missing
     )
     raise ApiError(
         409,
         "card_lacks_feature",
-        f"cannot load {model_id!r} on this card, ever: its engine needs "
-        f"{floors}, and {gpu.name} is {sm_name(gpu.compute_capability)} "
-        f"({gpu.compute_capability})",
+        f"cannot load {model_id!r} on this card: Crucible measured "
+        f"{card.name} on {card.measured_at or 'an earlier run'} and what this "
+        f"model's engine needs did not work there ({reasons}). "
+        "`crucible ladder` measures it again",
         {
             "model": model_id,
             "needs": missing,
-            "compute_capability": gpu.compute_capability,
-            "card": gpu.name,
+            "compute_capability": card.compute_capability,
+            "card": card.name,
+            "measured_at": card.measured_at,
         },
     )
 

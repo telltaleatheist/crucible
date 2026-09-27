@@ -79,6 +79,8 @@ from ...asrmodels import (
 )
 from ...config import Config
 from ...engines.vllm import ENVIRONMENT as VLLM_ENVIRONMENT
+from ...engines.vllm import run_dtype
+from ...ladder import card_for
 from ...errors import ApiError, JobError
 from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
 from ..align import WORKER_SCRIPT as ALIGN_WORKER_SCRIPT
@@ -515,6 +517,18 @@ class QwenAsrRun:
 
     # ------------------------------------------------------------- sessions
 
+    def _run_dtype(self) -> str:
+        """The dtype the ASR engine is STARTED in on this card, and the one the
+        result records. The manifest's `bfloat16` (Owen's full-precision ruling
+        of 2026-09-24), except under vLLM on a card without bf16, which runs it
+        in float16: Owen, 2026-09-26, *"we can quantize if we need to. no less
+        than 4"* (`engines.vllm.run_dtype`, fresh-install #48). Same two bytes a
+        parameter, so the manifest's memory figures hold."""
+        stated = self._spec.require("dtype")
+        if self._spec.engine != VLLM_ENGINE:
+            return stated
+        return run_dtype(self._spec, card_for(self._config.home, self._backend.gpu))
+
     def _start_asr(self) -> None:
         engine = self._spec.engine
         vllm = engine == VLLM_ENGINE
@@ -522,7 +536,7 @@ class QwenAsrRun:
             "op": "load",
             "engine": engine,
             "model_dir": str(self._weights_dir),
-            "dtype": self._spec.require("dtype"),
+            "dtype": self._run_dtype(),
             "max_batch": self._spec.require("max_batch"),
             "max_new_tokens": self._spec.require("max_new_tokens"),
             # vLLM's three; null on mlx-audio, which has no such knobs. Sent
@@ -808,7 +822,7 @@ class QwenAsrRun:
             "revision": self._spec.revision,
             "hf_repo": self._spec.hf_repo,
             "engine": self._spec.engine,
-            "dtype": self._spec.require("dtype"),
+            "dtype": self._run_dtype(),
             "aligner": (
                 {
                     "model": aligner.manifest.id,
