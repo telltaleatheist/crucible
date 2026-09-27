@@ -4,12 +4,12 @@ import asyncio
 import sys
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
+from .clock import now
 from .errors import JobError
 from .jobs.base import DONE
-from .jobs.queue import busy_details
 
 if TYPE_CHECKING:
     from .inflight import InFlight
@@ -91,7 +91,7 @@ class Settlement:
             return
         seconds = max(
             0.0,
-            (lease.expires_at - datetime.now(timezone.utc)).total_seconds(),
+            (lease.expires_at - now()).total_seconds(),
         )
         self._deadline = loop.call_later(seconds, self._deadline_passed)
 
@@ -116,7 +116,7 @@ class Settlement:
         job = self._store.occupied_by_anything_but(excluding_job)
         if job is not None:
             return Held(
-                "a job", f"{job.type} {job.id} ({job.status})", busy_details(job)
+                "a job", f"{job.type} {job.id} ({job.status})", job.busy_details()
             )
         lease = self._leases.current()
         if lease is not None:
@@ -198,7 +198,7 @@ class Settlement:
 
     def settle_for_job(self, job: Any, outcome: str) -> Settled | None:
         if job.type in LEAVES_IT_RESIDENT and outcome == DONE:
-            self._unheld_since = datetime.now(timezone.utc)
+            self._unheld_since = now()
             return None
         return self.settle(
             f"job {job.id} ({job.type}) finished", excluding_job=job.id

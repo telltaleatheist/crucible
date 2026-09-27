@@ -18,7 +18,7 @@ from . import (
     voices,
     weights,
 )
-from .capability import _capability_step, _decide_here, _write_capability
+from .capability import _capability_step, write_capability as _write_capability
 from .common import EXIT_REFUSED, _backend_mismatch
 from .init import carried_from
 from .install import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT, _smoke_import
@@ -40,7 +40,6 @@ __all__ = [
     "SMOKE_IMPORT",
     "_backend_mismatch",
     "_capability_step",
-    "_decide_here",
     "_pairing_lines",
     "_smoke_import",
     "_sync_pairing_file",

@@ -18,6 +18,7 @@ from .. import VERSION, catalog, upstreams
 from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
+from ..capabilitystore import decide_for, write_capability
 from ..config import Config, load_config
 from ..connect import PairingRequests
 from ..errors import ApiError, ConfigError
@@ -211,10 +212,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     )
 
     def decide_here(job_type: str) -> ApiError:
-        from .. import cli
-
         try:
-            cli._write_capability(config, backend, cli._decide_here(config, backend), {})
+            write_capability(config, backend, decide_for(config, backend), {})
             config.adopt(load_config(config.home))
             print(
                 "crucible: no capability record; decided this card and recorded it",

@@ -6,34 +6,13 @@ import time
 from pathlib import Path
 
 from .. import capability, hosttools, interpreter, jobenv, llamacpp
-from ..backend import Backend, CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
+from ..backend import Backend, LLAMA_WINDOWS
 from ..config import Config
+from ..jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT
 from ..voices import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step
 from .common import _env_spec, _fail
-
-
-INSTALLABLE_JOB_TYPES = ("llm", "tts", *jobenv.WORKER_JOB_TYPES)
-
-INSTALLER_FOR: dict[str, str] = {
-    **{name: name for name in INSTALLABLE_JOB_TYPES},
-    **{
-        job_type: env
-        for env, served in jobenv.JOB_TYPES_SERVED_BY_ENV.items()
-        for job_type in served
-    },
-    "pages": "llm",
-}
-
-SMOKE_IMPORT: dict[str, dict[str, str]] = {
-    "llm": {CUDA_LINUX: "vllm", MLX_DARWIN: "mlx_lm"},
-    "asr": {CUDA_LINUX: "faster_whisper", MLX_DARWIN: "mlx_whisper"},
-    "align": {CUDA_LINUX: "qwen_asr", MLX_DARWIN: "qwen_asr"},
-    "rvc": {CUDA_LINUX: "ultimate_rvc", MLX_DARWIN: "ultimate_rvc"},
-    "tts-higgs-v3": {CUDA_LINUX: "narrator"},
-    "tts": {MLX_DARWIN: "narrator"},
-}
 
 
 def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
@@ -41,7 +20,7 @@ def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
     if module is None:
         return (
             f"there is no smoke import recorded for the {key!r} env on "
-            f"{backend_kind}; crucible/cli/install.py's SMOKE_IMPORT is the owner of "
+            f"{backend_kind}; crucible/jobenv.py's SMOKE_IMPORT is the owner of "
             "that fact and an env nothing proved can be imported is not one "
             "this command will call installed"
         )
@@ -61,18 +40,11 @@ def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    if args.job_type not in INSTALLABLE_JOB_TYPES:
-        shared = INSTALLER_FOR.get(args.job_type)
-        if shared is not None:
-            return _fail(
-                f"job type {args.job_type!r} has no installer of its own: it "
-                f"shares {shared!r}'s engine, so installing {shared!r} is what "
-                f"builds it. Run `crucible install {shared}`"
-            )
-        return _fail(
-            f"there is no installer for job type {args.job_type!r}; this build "
-            f"installs {sorted(INSTALLABLE_JOB_TYPES)}"
-        )
+    missing = jobenv.no_installer(args.job_type)
+    if missing is not None:
+        if missing.shared_with is not None:
+            return _fail(f"{missing.words}. Run `crucible install {missing.shared_with}`")
+        return _fail(missing.words)
     config, backend = common.here()
     if backend.kind == LLAMA_WINDOWS:
         return _install_llama_windows(config, backend, args)

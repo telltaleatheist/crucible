@@ -52,6 +52,63 @@ JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
     "rvc": ("rvc", "denoise"),
 }
 
+INSTALLABLE_JOB_TYPES: tuple[str, ...] = ("llm", "tts", *WORKER_JOB_TYPES)
+
+INSTALLER_FOR: dict[str, str] = {
+    **{name: name for name in INSTALLABLE_JOB_TYPES},
+    **{
+        job_type: env
+        for env, served in JOB_TYPES_SERVED_BY_ENV.items()
+        for job_type in served
+    },
+    "pages": "llm",
+}
+
+
+def _module_of(package: str) -> str:
+    return package.replace("-", "_")
+
+
+SMOKE_IMPORT: dict[str, dict[str, str]] = {
+    "llm": {
+        backend_kind: _module_of(package)
+        for backend_kind, package in BACKEND_HEADLINE_PACKAGE.items()
+    },
+    **{
+        job_type: {
+            backend_kind: _module_of(package)
+            for (worker, backend_kind), package in WORKER_HEADLINE_PACKAGE.items()
+            if worker == job_type
+        }
+        for job_type in WORKER_JOB_TYPES
+    },
+    "tts-higgs-v3": {CUDA_LINUX: NARRATOR_PACKAGE},
+    "tts": {MLX_DARWIN: NARRATOR_PACKAGE},
+}
+
+
+@dataclass(frozen=True)
+class NoInstaller:
+    words: str
+    shared_with: str | None
+
+
+def no_installer(job_type: str) -> NoInstaller | None:
+    if job_type in INSTALLABLE_JOB_TYPES:
+        return None
+    shared = INSTALLER_FOR.get(job_type)
+    if shared is not None:
+        return NoInstaller(
+            f"job type {job_type!r} has no installer of its own: it shares "
+            f"{shared!r}'s env, so installing {shared!r} is what builds it",
+            shared,
+        )
+    return NoInstaller(
+        f"there is no installer for job type {job_type!r}; this build "
+        f"installs {sorted(INSTALLABLE_JOB_TYPES)}",
+        None,
+    )
+
 
 class EnvError(CrucibleError):
     ...

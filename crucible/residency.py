@@ -25,6 +25,8 @@ from .accelerator import (
 from .alignmodels import AlignBackendSpec, AlignManifest
 from .denoisemodels import DenoiseBackendSpec, DenoiseManifest
 from .backend import MLX_DARWIN
+from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
+from .clock import utcnow as _now
 from .config import Config
 from .engines import (
     STOP_TIMEOUT_SECONDS,
@@ -53,11 +55,6 @@ from .voices import VoiceBackendSpec, VoiceManifest
 from .vram import KvPlan
 from .workers import WorkerError, WorkerSession
 from .workers import torch_allocator_environment, torch_memory_cap
-
-KIND_LLM = "llm"
-KIND_TTS = "tts"
-KIND_ALIGN = "align"
-KIND_DENOISE = "denoise"
 
 DEFAULT_READY_TIMEOUT_SECONDS = 900.0
 
@@ -245,18 +242,6 @@ class DyingResident:
             "since": self.since,
             "pids": sorted(self.pids),
         }
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-KIND_NOUNS: dict[str, str] = {
-    KIND_LLM: "model",
-    KIND_TTS: "voice",
-    KIND_ALIGN: "aligner",
-    KIND_DENOISE: "separator",
-}
 
 
 def describe_resident(residency: "Residency", kind: str, absent: str) -> str:

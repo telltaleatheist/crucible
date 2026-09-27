@@ -13,10 +13,10 @@ from typing import Any, Callable, Iterable
 
 from . import capability, catalog, interpreter, jobenv
 from .backend import LLAMA_WINDOWS, Backend
+from .clock import utcnow
 from .config import Config
 from .errors import ApiError, CrucibleError
 from .hosttools import searched_note, which
-from .jobs.base import utcnow
 from .jobs.llm import llm_engine_status
 from .settle import Held
 from .voices import NARRATOR_ENGINE_SAMPLING
@@ -119,26 +119,18 @@ class Task:
 
 
 def require_installable(job_type: str) -> None:
-    from .cli import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
-
-    if job_type in INSTALLABLE_JOB_TYPES:
+    missing = jobenv.no_installer(job_type)
+    if missing is None:
         return
-    installer = INSTALLER_FOR.get(job_type)
+    installer = missing.shared_with
     if installer is not None:
         raise ApiError(
             400,
             "unknown_job_type",
-            f"job type {job_type!r} has no installer of its own: it shares "
-            f"{installer!r}'s env, so installing {installer!r} is what builds "
-            f"it. Name {installer!r} instead",
+            f"{missing.words}. Name {installer!r} instead",
             {"job_type": job_type, "installed_by": installer},
         )
-    raise ApiError(
-        400,
-        "unknown_job_type",
-        f"there is no installer for job type {job_type!r}; this build "
-        f"installs {sorted(INSTALLABLE_JOB_TYPES)}",
-    )
+    raise ApiError(400, "unknown_job_type", missing.words)
 
 
 def require_narrator_engine(job_type: str, narrator_engine: str | None) -> None:

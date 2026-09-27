@@ -10,10 +10,11 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from .clock import now as utcnow
 from .errors import ApiError
 
 JOURNAL_FORMAT = 1
@@ -28,10 +29,6 @@ _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
 _RESUME_ID = re.compile(r"^[0-9a-f]{32}$")
 
 LIVE_STATES = frozenset({"queued", "running"})
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def canonical(value: Any) -> str:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..capability import CLASSES, classes_for_job_type
 from ..errors import ApiError
+from ..jobenv import INSTALLER_FOR
 from ..residency import Residency
 from .base import (
+    OPTIONAL_JOB_TYPE_MEMBERS,
     Job,
     JobContext,
     JobType,
@@ -22,6 +24,11 @@ from .echo import EchoJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
 from .rvc import RvcJobType
 from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
+
+if TYPE_CHECKING:
+    from ..backend import Backend
+    from ..config import Config
+    from ..leases import Leases
 
 ALL_JOB_TYPES: dict[str, str] = {
     AlignJobType.name: "align",
@@ -41,10 +48,10 @@ ALL_JOB_TYPES: dict[str, str] = {
 
 
 def build_registry(
-    config: Any,
-    backend: Any,
+    config: "Config",
+    backend: "Backend",
     residency: Residency | None = None,
-    leases: Any | None = None,
+    leases: "Leases | None" = None,
 ) -> dict[str, JobType]:
     registry: dict[str, JobType] = {}
     holder = residency if residency is not None else Residency(config)
@@ -85,7 +92,9 @@ _JOB_TYPE_MEMBERS: tuple[str, ...] = tuple(
         {
             name
             for name in list(vars(JobType)) + list(getattr(JobType, "__annotations__", {}))
-            if not name.startswith("_") and name != "name"
+            if not name.startswith("_")
+            and name != "name"
+            and name not in OPTIONAL_JOB_TYPE_MEMBERS
         }
     )
 )
@@ -163,8 +172,6 @@ def disabled_error(name: str, config: Any) -> ApiError:
 
     fitting = [row for row in known if row.enabled]
     if fitting:
-        from ..cli import INSTALLER_FOR
-
         installer = INSTALLER_FOR.get(capability, capability)
         install = {"type": "install", "job_type": installer}
         needs_engine = (
