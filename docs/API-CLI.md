@@ -358,7 +358,7 @@ BookForge's `crucible` provider follows).
 | `asr` | whisper id | `{"language","vad_filter","word_timestamps"[, "initial_prompt"]}` | exactly one audio file; `"auto"` is a language; `initial_prompt` is a string or null |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
-| `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s"]}` | many, of any length and format; names need no extension |
+| `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
 | `denoise` | separator id | `{}` — and that is the contract | exactly one audio file |
 
 **`denoise` returns WAV, always.** Every stem is a `.wav`, fixed by this server for every separator
@@ -373,15 +373,29 @@ and frame count.
 protection off. The tuned deathstalker→Sigma recipe is `index_rate 0.3`,
 `protect_rate 0.1`, `n_semitones -2`, `f0_method rmvpe`.
 
-**`rvc` returns each input's own format, length and rate, in one channel.** Send a 12-hour
+**`rvc` returns each input's own format and duration, at no less than the model's rate, in
+the input's channels.** Send a 12-hour
 master whole: the job cuts it at quiet points into pieces of at most `piece_s` (default 60,
 10 to 600), converts each with `overlap_s` of real audio on both sides (default 0.5, 0 to 5,
 under half a piece), and joins them with a `crossfade_s` fade at each seam (default 0.02,
 0 to 1, at most twice `overlap_s`), so memory is bounded by a piece. The artifact has the
 input's container and sample format (24-bit FLAC in, 24-bit FLAC out; a WAV past 4 GiB comes
-back RF64), its sample rate, and **exactly its frame count**; urvc's own output (16-bit at the
-model's rate, about 20 ms short per minute) is resampled and trimmed or padded per piece to
-make it so. The converted signal's resolution is urvc's 16 bits whatever the container says.
+back RF64) and **exactly its duration**; urvc's own output (16-bit at the model's rate, about
+20 ms short per minute) is resampled and trimmed or padded per piece to make it so. The
+converted signal's resolution is urvc's 16 bits whatever the container says.
+
+- **Sample rate** (Owen, 2026-09-26): `output_rate: "native"`, the default, is
+  `max(input rate, the rate urvc writes)`, read from urvc's output (48 kHz for the published
+  models), so a 24 kHz input comes back at 48 kHz with the model's band above 12 kHz kept.
+  `"input"` keeps the input's rate. Frames: `out_frames = round(in_frames × out_rate / in_rate)`,
+  half up, in integers — the same on every host. `done`'s `outputs` gives each artifact's
+  `frames`, `sample_rate` and `channels`.
+- **Channels** (Owen, 2026-09-26): `output_channels: "input"`, the default, gives the input's
+  channel count. **It is not a per-channel conversion**: RVC converts a mono mix and makes one
+  voice, and a stereo input gets that one voice, identical, in both channels. `"mono"` writes
+  one channel.
+- The last ~20 ms per minute of an input's final piece may be zero-padded silence (urvc's
+  shortfall where there is no overlap to absorb it). Owen accepted this, 2026-09-26.
 The format is read from the bytes, so `c000` and `c000.flac` are the same input to this job;
 an input that is not WAV, FLAC, OGG, MP3 or AIFF is refused before anything is converted.
 
