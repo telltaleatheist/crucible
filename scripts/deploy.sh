@@ -232,11 +232,11 @@ case "$host" in ""|0.0.0.0) host=127.0.0.1 ;; "::") host="[::1]" ;; *:*) host="[
 py="$home/server/bin/python"
 [ -x "$py" ] || py="$(command -v python3 || true)"
 [ -n "$py" ] || { echo "unknown(no python at $home/server/bin/python to read the answer with)"; exit 0; }
-status=0
+probe_rc=0
 body=$(curl -sS -m 8 -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" \
-  "http://$host:$port/v1/activity" 2>/dev/null) || status=$?
-if [ "$status" = "7" ]; then echo "idle(nothing listens on $host:$port)"; exit 0; fi
-[ "$status" = "0" ] || { echo "unknown(curl exited $status asking $host:$port/v1/activity)"; exit 0; }
+  "http://$host:$port/v1/activity" 2>/dev/null) || probe_rc=$?
+if [ "$probe_rc" = "7" ]; then echo "idle(nothing listens on $host:$port)"; exit 0; fi
+[ "$probe_rc" = "0" ] || { echo "unknown(curl exited $probe_rc asking $host:$port/v1/activity)"; exit 0; }
 [ -n "$body" ] || { echo "unknown($host:$port/v1/activity answered nothing)"; exit 0; }
 printf '%s' "$body" | "$py" -c '
 import json, sys
