@@ -355,6 +355,7 @@ def cmd_voices_export(args: argparse.Namespace) -> int:
             inherited_from=args.inherited_from,
             max_chars_basis=args.max_chars_basis,
             uncertified=args.uncertified,
+            edges=args.edges,
         )
     except VoiceError as exc:
         return _fail(str(exc))
@@ -455,5 +456,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "--uncertified",
         action="store_true",
         help="say on purpose that this voice has no measured pace",
+    )
+    voices_export.add_argument(
+        "--edges",
+        choices=("percentile",),
+        help="the band's two edges came off a distribution, not off the pace",
     )
     voices_export.set_defaults(func=cmd_voices_export)

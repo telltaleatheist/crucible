@@ -263,6 +263,42 @@ class Activity(_Open):
     accelerator: dict[str, Any] | None = None
 
 
+class TerminalStates(_Open):
+    """The states after which a job or a task never changes again."""
+
+    jobs: list[str]
+    tasks: list[str]
+
+
+class VoiceSourceLabel(_Open):
+    """How to name a voice row's `manifest` source to a person, and the tone to show it in."""
+
+    label: str
+    tone: Literal["ok", "warn", "floor"]
+
+
+class ServiceCommand(_Open):
+    """A command, typed on the server itself, that runs it as a machine service."""
+
+    command: str
+    does: str
+
+
+class Info(_Open):
+    """`GET /v1/info`: who this server is, what it runs on and what it serves."""
+
+    server: dict[str, Any]
+    role: str
+    managed_by: dict[str, str] | None
+    host: dict[str, Any]
+    job_types: list[str]
+    capabilities: list[dict[str, Any]]
+    pages_engine: dict[str, Any]
+    terminal_states: TerminalStates
+    voice_sources: dict[str, VoiceSourceLabel]
+    service_commands: list[ServiceCommand]
+
+
 NOT_FOUND: dict[int | str, dict[str, Any]] = {
     404: {"model": ErrorEnvelope, "description": "Refused by name: nothing has that id."},
 }

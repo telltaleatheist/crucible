@@ -226,8 +226,13 @@ def type_words(schema: dict[str, Any], components: dict[str, Any]) -> str:
     kind = schema.get("type")
     if kind == "array":
         return "array of " + type_words(schema.get("items", {}), components)
-    if kind == "object" and schema.get("title"):
+    if kind == "object" and schema.get("title") and "properties" in schema:
         return str(schema["title"])
+    if kind == "object":
+        values = schema.get("additionalProperties")
+        if isinstance(values, dict) and values:
+            return "object of " + type_words(values, components)
+        return "object"
     if kind is None:
         return str(schema.get("title") or "any")
     return str(kind)
@@ -283,6 +288,59 @@ def render_fields(
 _NO_DEFAULT = object()
 
 
+def answer_schema(response: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    for media, entry in response.get("content", {}).items():
+        if entry.get("schema"):
+            return media, entry["schema"]
+    return None
+
+
+def model_name(schema: dict[str, Any]) -> str | None:
+    ref = schema.get("$ref")
+    return None if ref is None else ref.rsplit("/", 1)[-1]
+
+
+def answer_label(code: str, response: dict[str, Any]) -> str:
+    found = answer_schema(response)
+    label = "`" + code + "`"
+    if found is None:
+        return label
+    schema = found[1]
+    name = model_name(schema) or model_name(schema.get("items", {}))
+    if name is None:
+        return label
+    return label + " " + ("array of " if schema.get("type") == "array" else "") + name
+
+
+def answer_fields(
+    code: str, response: dict[str, Any], components: dict[str, Any]
+) -> list[str]:
+    found = answer_schema(response)
+    if found is None:
+        return []
+    media, schema = found
+    each = schema.get("type") == "array"
+    fields = render_fields(schema.get("items", {}) if each else schema, components)
+    if not fields:
+        return []
+    shape = "an array; each item" if each else "the body"
+    return ["**Answer `" + code + "`** (`" + media + "`), " + shape + ":", "", *fields, ""]
+
+
+def render_answers(responses: dict[str, Any], components: dict[str, Any]) -> list[str]:
+    codes = sorted(responses)
+    if not codes:
+        return []
+    out = [
+        "*Answers:* " + ", ".join(answer_label(code, responses[code]) for code in codes),
+        "",
+    ]
+    for code in codes:
+        if code.startswith("2"):
+            out += answer_fields(code, responses[code], components)
+    return out
+
+
 def group_for(path: str) -> int:
     stripped = path[len("/v1") :] if path.startswith("/v1") else path
     best = len(GROUPS) - 1
@@ -306,7 +364,7 @@ def render(app: Any) -> str:
         "",
         "**GENERATED — do not edit.** `python scripts/gen-api-docs.py` writes this file",
         "from the FastAPI app the server actually runs, and `scripts/release.sh` refuses a",
-        "cut when it is stale. Change a request model and regenerate; never edit here.",
+        "cut when it is stale. Change a request or answer model and regenerate; never edit here.",
         "",
         "Every route is under `/v1` unless it says otherwise. Protected routes need",
         "`Authorization: Bearer <token>` **and** `X-Crucible-Api: 1`, checked in that order.",
@@ -393,14 +451,13 @@ def render(app: Any) -> str:
                 else:
                     out += ["**Body**: `" + media + "`", ""]
 
-            codes = sorted(operation.get("responses", {}))
-            if codes:
-                out += ["*Answers:* " + ", ".join("`" + code + "`" for code in codes), ""]
+            out += render_answers(operation.get("responses", {}), components)
 
     out += [
-        "## Request models in full",
+        "## Models in full",
         "",
-        "Every schema the routes above refer to, for a reader following a nested field.",
+        "Every request and answer schema the routes above refer to, for a reader following "
+        "a nested field.",
         "",
     ]
     for name in sorted(components):

@@ -149,12 +149,10 @@ test('a document missing its routes is a protocol error: where work runs is neve
   await assert.rejects(client().settings(), /settings has no field "routes"/);
 });
 
-test('an upstream the server does not list reads as null, for the page to leave out', async () => {
-  const { ollama: _dropped, ...older } = DOCUMENT.upstreams;
-  answer(200, { ...DOCUMENT, upstreams: older });
-  const settings = await client().settings();
-  assert.equal(settings.upstreams.ollama, null);
-  assert.equal(settings.upstreams.anthropic?.configured, true);
+test('a document missing one of the three upstreams is a protocol error naming it', async () => {
+  const { ollama: _dropped, ...partial } = DOCUMENT.upstreams;
+  answer(200, { ...DOCUMENT, upstreams: partial });
+  await assert.rejects(client().settings(), /settings\.upstreams has no field "ollama"/);
 });
 
 test('putSettings sends a PARTIAL patch in the wire spelling', async () => {

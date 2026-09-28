@@ -300,8 +300,10 @@ def ensure_cuda_toolkit_links(env_dir: Path, on_line: Any = None) -> None:
                 continue
             raise PatchError(
                 f"{link} is a symlink to {current!r}, not {target!r}. Crucible did "
-                "not put it there and will not replace it — remove it by hand if "
-                "it is wrong, so that whatever created it is not hidden."
+                "not put it there and will not replace it, so that whatever "
+                f"created it is not hidden. If it is wrong, run `rm {link}` and "
+                "then `crucible install tts --narrator-engine "
+                f"{env_dir.name.removeprefix('tts-')}`."
             )
         if link.exists():
             raise PatchError(

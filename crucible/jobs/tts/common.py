@@ -141,118 +141,133 @@ def _orphan(
     return not any(job.model == voice_id for job in store.queued())
 
 
+VOICE_ROW_FIELDS: dict[str, Any] = {
+    "id": None, "display": None, "kind": None, "language": None,
+    "narrator_engine": None, "backend_supported": False, "installed": False,
+    "resident": False, "orphan": None, "loadable": False, "reason": None,
+    "revision": None, "fingerprint": None, "source": None, "identity_basis": None,
+    "memory_bytes_estimate": None, "estimate_basis": None, "serving": None,
+    "max_chars": None, "max_chars_basis": None, "pace_basis": None,
+    "inherited_from": None, "manifest": None, "sample_rate": None, "takes": 0,
+    "needs_reference": False, "pace": None,
+}
+
+
+def voice_row(**fields: Any) -> dict[str, Any]:
+    stray = sorted(set(fields) - set(VOICE_ROW_FIELDS))
+    if stray:
+        raise KeyError(f"a /v1/voices row has no field(s) {stray}")
+    return {**VOICE_ROW_FIELDS, **fields}
+
+
+def _unloadable_reason(
+    config: Config, backend: Any, manifest: VoiceManifest, spec: VoiceBackendSpec,
+    is_installed: bool,
+) -> str | None:
+    env = jobenv.env_status(
+        config.home,
+        jobenv.tts_env(manifest.narrator_engine, backend.kind),
+        backend.kind,
+    )
+    estimate = spec.memory_bytes_estimate
+    if estimate > backend.gpu.vram_bytes:
+        return (
+            f"needs {estimate / 1024 ** 3:.1f} GiB and "
+            f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
+            " GiB in total"
+        )
+    if not env.installed:
+        return (
+            f"the tts env for {manifest.narrator_engine} is not ready: "
+            f"{env.detail}"
+        )
+    if not is_installed and spec.source == weights.LOCAL:
+        return (
+            f"no weights at {spec.path} — this voice names a directory on "
+            "this server, which Crucible does not fetch and cannot replace"
+        )
+    if not is_installed:
+        directory = weights.subject_dir(config, manifest, backend.kind)
+        return f"no weights at {directory} — run `crucible voices pull {manifest.id}`"
+    return None
+
+
+def _backend_fields(
+    config: Config, backend: Any, manifest: VoiceManifest
+) -> dict[str, Any]:
+    if not manifest.supports(backend.kind):
+        return {
+            "backend_supported": False,
+            "reason": (
+                f"{manifest.path.name} has no {backend.kind} block; it declares "
+                f"{sorted(manifest.backends)}"
+            ),
+        }
+    spec = manifest.spec(backend.kind)
+    is_installed = weights.installed(config, manifest, spec) is not None
+    reason = _unloadable_reason(config, backend, manifest, spec, is_installed)
+    return {
+        "backend_supported": True,
+        "installed": is_installed,
+        "loadable": reason is None,
+        "reason": reason,
+        "revision": spec.weights_identity,
+        "fingerprint": manifest.fingerprint(backend.kind),
+        "source": spec.source,
+        "identity_basis": spec.identity_basis,
+        "memory_bytes_estimate": spec.memory_bytes_estimate,
+        "estimate_basis": spec.estimate_basis,
+        "max_chars": spec.max_chars,
+        "max_chars_basis": spec.max_chars_basis,
+    }
+
+
+def _served_voice_row(
+    config: Config, backend: Any, residency: Residency, manifest: VoiceManifest,
+    *, leases: Any | None, store: Any | None,
+) -> dict[str, Any]:
+    on_backend = _backend_fields(config, backend, manifest)
+    return voice_row(
+        id=manifest.id,
+        display=manifest.display,
+        kind=manifest.kind,
+        language=manifest.language,
+        narrator_engine=manifest.narrator_engine,
+        resident=residency.is_resident(KIND_TTS, manifest.id),
+        orphan=_orphan(
+            manifest.id, on_backend.get("source"), residency, leases=leases, store=store
+        ),
+        serving=None if manifest.serving is None else manifest.serving.to_dict(),
+        pace_basis=manifest.pace_basis,
+        inherited_from=manifest.inherited_from,
+        manifest=manifest.manifest_source,
+        sample_rate=manifest.sample_rate,
+        takes=len(manifest.takes),
+        needs_reference=manifest.kind == "zeroshot",
+        pace=manifest.pace.to_dict(),
+        **on_backend,
+    )
+
+
 def voice_rows(
     config: Config, backend: Any, residency: Residency,
     *, leases: Any | None = None, store: Any | None = None,
 ) -> list[dict[str, Any]]:
-    backend_kind = backend.kind
     rows: list[dict[str, Any]] = []
     for manifest in load_voices().values():
-        supported = manifest.supports(backend_kind)
-        estimate: int | None = None
-        basis: str | None = None
-        revision: str | None = None
-        source: str | None = None
-        identity_basis: str | None = None
-        fingerprint: str | None = None
-        max_chars: int | None = None
-        max_chars_basis: str | None = None
-        is_installed = False
-        reason: str | None = None
-        if not supported:
-            reason = (
-                f"{manifest.path.name} has no {backend_kind} block; it declares "
-                f"{sorted(manifest.backends)}"
-            )
-        else:
-            spec = manifest.spec(backend_kind)
-            estimate = spec.memory_bytes_estimate
-            basis = spec.estimate_basis
-            revision = spec.weights_identity
-            source = spec.source
-            identity_basis = spec.identity_basis
-            fingerprint = manifest.fingerprint(backend_kind)
-            max_chars = spec.max_chars
-            max_chars_basis = spec.max_chars_basis
-            is_installed = weights.installed(config, manifest, spec) is not None
-            env = jobenv.env_status(
-                config.home,
-                jobenv.tts_env(manifest.narrator_engine, backend_kind),
-                backend_kind,
-            )
-            if estimate > backend.gpu.vram_bytes:
-                reason = (
-                    f"needs {estimate / 1024 ** 3:.1f} GiB and "
-                    f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
-                    " GiB in total"
-                )
-            elif not env.installed:
-                reason = (
-                    f"the tts env for {manifest.narrator_engine} is not ready: "
-                    f"{env.detail}"
-                )
-            elif not is_installed and spec.source == weights.LOCAL:
-                reason = (
-                    f"no weights at {spec.path} — this voice names a directory on "
-                    "this server, which Crucible does not fetch and cannot replace"
-                )
-            elif not is_installed:
-                directory = weights.subject_dir(config, manifest, backend_kind)
-                reason = (
-                    f"no weights at {directory} — run "
-                    f"`crucible voices pull {manifest.id}`"
-                )
         rows.append(
-            {
-                "id": manifest.id,
-                "display": manifest.display,
-                "kind": manifest.kind,
-                "language": manifest.language,
-                "narrator_engine": manifest.narrator_engine,
-                "backend_supported": supported,
-                "installed": is_installed,
-                "resident": residency.is_resident(KIND_TTS, manifest.id),
-                "orphan": _orphan(
-                    manifest.id, source, residency, leases=leases, store=store
-                ),
-                "loadable": reason is None,
-                "reason": reason,
-                "revision": revision,
-                "fingerprint": fingerprint,
-                "source": source,
-                "identity_basis": identity_basis,
-                "memory_bytes_estimate": estimate,
-                "estimate_basis": basis,
-                "serving": (
-                    None if manifest.serving is None else manifest.serving.to_dict()
-                ),
-                "max_chars": max_chars,
-                "max_chars_basis": max_chars_basis,
-                "pace_basis": manifest.pace_basis,
-                "inherited_from": manifest.inherited_from,
-                "manifest": manifest.manifest_source,
-                "sample_rate": manifest.sample_rate,
-                "takes": len(manifest.takes),
-                "needs_reference": manifest.kind == "zeroshot",
-                "pace": manifest.pace.to_dict(),
-            }
+            _served_voice_row(
+                config, backend, residency, manifest, leases=leases, store=store
+            )
         )
     from ...voices import unserved_pins
 
     for voice_id, (revision, why) in sorted(unserved_pins().items()):
         rows.append(
-            {
-                "id": voice_id, "display": voice_id, "kind": None, "language": None,
-                "narrator_engine": None, "backend_supported": False,
-                "installed": False, "resident": False, "orphan": False,
-                "loadable": False, "reason": why, "revision": revision,
-                "fingerprint": None, "source": "pinned", "identity_basis": None,
-                "memory_bytes_estimate": None, "estimate_basis": None,
-                "serving": None, "max_chars": None, "max_chars_basis": None,
-                "pace_basis": None, "inherited_from": None, "manifest": "repo",
-                "sample_rate": None, "takes": 0, "needs_reference": False,
-                "pace": None,
-            }
+            voice_row(
+                id=voice_id, display=voice_id, orphan=False, reason=why,
+                revision=revision, source="pinned", manifest="repo",
+            )
         )
     return rows
 

@@ -299,7 +299,7 @@ const ACTIVITY = {
     kind: 'llm',
     id: 'qwen3.8-27b-4bit',
     since: '2026-09-14T02:40:00+00:00',
-    memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null,
+    memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null, engine_exit_code: null,
   },
   stopping: null,
   warming: null,

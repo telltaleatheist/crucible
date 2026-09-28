@@ -27,6 +27,7 @@ import { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
 
 import { CrucibleClient, CrucibleProtocolError, type JobEvent } from '../src/index.js';
+import { UNCLAIMED_ENGINE } from './engine-info.js';
 
 const TOKEN = 'test-token';
 
@@ -141,6 +142,7 @@ test('a capability whose rows are unreadable is carried, not thrown', async () =
       platform: 'linux', arch: 'x86_64', backend: 'cuda-linux',
       gpu: { vendor: 'nvidia', name: 'card', vram_bytes: 1 },
     },
+    ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'aurora'],
     capabilities: [
       { job_type: 'echo', models: [] },

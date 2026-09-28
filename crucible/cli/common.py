@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .. import API_HEADER, API_VERSION, jobenv
+from .. import API_HEADER, API_VERSION, VERSION, jobenv
 from ..backend import (
     Backend,
     CUDA_LINUX,
@@ -130,7 +130,7 @@ def server_here(config: Config, backend: Backend):
         headers={
             "Authorization": f"Bearer {config.token}",
             API_HEADER: str(API_VERSION),
-            "User-Agent": user_agent("cli"),
+            "User-Agent": user_agent("cli", VERSION),
         },
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

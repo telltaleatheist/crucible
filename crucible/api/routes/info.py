@@ -8,17 +8,40 @@ from ... import peer as peer_module
 from ...errors import ApiError
 from ...interfaces import InterfaceError
 from ...jobs import ALL_JOB_TYPES, model_rows, voice_rows
+from ...jobs.base import TERMINAL_STATES as JOB_TERMINAL_STATES
 from ...manifests import ManifestError, load_manifest
 from ...protocol import API_VERSION
+from ...tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
+from ...voices import MANIFEST_ENGINE, MANIFEST_OVERRIDE, MANIFEST_REPO
 from ..context import AppContext, Routers
+from ..responses import Info, ServiceCommand, TerminalStates, VoiceSourceLabel
+
+TERMINAL = TerminalStates(
+    jobs=sorted(JOB_TERMINAL_STATES), tasks=sorted(TASK_TERMINAL_STATES)
+)
+VOICE_SOURCES = {
+    MANIFEST_REPO: VoiceSourceLabel(label="from its repo", tone="ok"),
+    MANIFEST_OVERRIDE: VoiceSourceLabel(label="set on this machine", tone="warn"),
+    MANIFEST_ENGINE: VoiceSourceLabel(label="the engine's own", tone="floor"),
+}
+SERVICE_COMMANDS = [
+    ServiceCommand(command="crucible service status", does="is it installed, and is it up"),
+    ServiceCommand(command="crucible service start", does="start it now"),
+    ServiceCommand(command="crucible service stop", does="stop it"),
+    ServiceCommand(command="crucible service install", does="have the machine run it at boot"),
+    ServiceCommand(command="crucible service uninstall", does="stop having it do that"),
+    ServiceCommand(command="crucible token --url", does="print the pairing lines again"),
+]
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
     config, backend, residency = ctx.config, ctx.backend, ctx.residency
 
-    @private.get("/info")
+    @private.get("/info", response_model=Info, response_model_exclude_unset=True)
     async def info() -> dict[str, Any]:
+        """Who this server is, what it runs on, what it serves, and the few fixed
+        tables (terminal states, voice sources, service commands) a console shows."""
         store = ctx.store
         rows_for: dict[str, list[dict[str, Any]]] = {}
         for name, plugin in sorted(store.registry.items()):
@@ -58,6 +81,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "job_types": sorted(store.registry),
             "capabilities": capabilities,
             "pages_engine": _pages_engine(),
+            "terminal_states": TERMINAL,
+            "voice_sources": VOICE_SOURCES,
+            "service_commands": SERVICE_COMMANDS,
         }
 
     def _pages_engine() -> dict[str, Any]:

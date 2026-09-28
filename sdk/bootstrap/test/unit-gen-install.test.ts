@@ -123,9 +123,13 @@ test('install.sh --from-source is a ROUTE and never a fallback for a failed down
   assert.match(sh, /"\$dest\/bin\/python3" -m pip install --upgrade --no-input "\$src"/);
   // The wheel route still refuses its own failures by their own names — the
   // source install is reached by an argument, never by a download that failed.
-  const fromSource = sh.indexOf('--from-source $FROM_SOURCE, installing from a checkout');
-  const wheelFail = sh.lastIndexOf('runtime_download_failed');
-  assert.ok(fromSource > 0 && fromSource < wheelFail, 'the branch is chosen before the wheel is fetched');
+  const wheelGate = sh.indexOf('if [ -z "$FROM_SOURCE" ]; then');
+  const wheelFetch = sh.indexOf('-o "$downloads/$wheel"');
+  const wheelGateEnd = sh.indexOf('\nfi\n', wheelGate);
+  assert.ok(
+    wheelGate > 0 && wheelGate < wheelFetch && wheelFetch < wheelGateEnd,
+    'the wheel is fetched only when --from-source was not given',
+  );
   assert.equal(/runtime_download_failed[\s\S]{0,200}FROM_SOURCE/.test(sh), false, 'no failure leads into the source install');
 });
 
@@ -274,7 +278,7 @@ test('install.ps1 installs the HOST and stops — it no longer walks 4c itself (
   // refused a machine whose System32 bsdtar reads zstd perfectly well. The
   // probe and the unpack both go through the one named binary now, and these
   // three rows had been red since.
-  const order = ['$Tar = Join-Path', '$PyUrl =', 'Get-FileHash', 'Move-Item $staged $HostDir', 'pip install --upgrade --no-input', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
+  const order = ['$Tar = Join-Path', '$PyUrl =', 'Get-FileHash', 'Move-Item $staged $HostDir', '--no-warn-script-location --upgrade --no-input $WheelPath', '& $Cmd local $action', 'Start-Process -WindowStyle Hidden'];
   let at = -1;
   for (const marker of order) {
     const found = ps1.indexOf(marker);
@@ -294,7 +298,7 @@ test('install.ps1 needs no admin, and starts the tray with pythonw rather than t
   const code = ps1.split('\n').filter((line) => !line.trimStart().startsWith('#')).join('\n');
   assert.equal(code.includes('-Verb RunAs'), false, 'install.ps1 never elevates');
   assert.match(ps1, /\$Pythonw = Join-Path \$HostDir "pythonw\.exe"/);
-  assert.match(ps1, /Start-Process -WindowStyle Hidden -FilePath \$Pythonw -ArgumentList "-m","crucible\.cli","host"/);
+  assert.match(ps1, /Start-Process -WindowStyle Hidden -FilePath \$Pythonw -ArgumentList "-m","crucible\.cli","orchestrator"/);
   // The Startup item has ONE owner and this script asks for it by verb.
   assert.match(ps1, /& \$Cmd local \$action/);
   assert.equal(/New-Object -ComObject WScript\.Shell/.test(ps1), false, 'it does not write a .lnk of its own');
@@ -362,7 +366,7 @@ test('install.ps1 unpacks BESIDE, then moves, and pips ONLY into the final path'
   assert.match(ps1, /& \(Join-Path \$staged "python\.exe"\) --version/);
   assert.match(ps1, /Move-Item \$staged \$HostDir/);
   assert.ok(
-    ps1.indexOf('Move-Item $staged $HostDir') < ps1.indexOf('pip install --upgrade --no-input'),
+    ps1.indexOf('Move-Item $staged $HostDir') < ps1.indexOf('--no-warn-script-location --upgrade --no-input $WheelPath'),
     'the tree is at its FINAL path before pip writes a launcher into it',
   );
   // And the .cmd, which every other part of Crucible spells (host/paths.py).

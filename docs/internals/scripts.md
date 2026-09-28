@@ -194,7 +194,10 @@ time we changed anything."*
   carrying router-level dependencies down. Routes are keyed by `path_format`, the spelling the
   OpenAPI document uses (`{subject_id:path}` vs `{subject_id}`). A path the walk did not reach
   is an error, never defaulted to "open". Union types are joined with ` or ` because a bare `|`
-  ends a table cell.
+  ends a table cell. Each route lists its answer codes with the model each carries, and a 2xx
+  answer with a declared model (`response_model=`, `api/responses.py`) gets its field table
+  under the route; an answer typed only `dict[str, Any]` shows as a bare code until it gets a
+  model. A dict field reads `object of <value type>`, never the field's auto-title.
 - **`gen-foundry-lineup.py`** and **`gen-modules.py`** put this checkout first on `sys.path`
   and verify it won: manifests are found relative to the package, and importing another
   checkout's package would write its catalog into this one. Output is LF on every platform,
@@ -214,9 +217,15 @@ not a test because Crucible must run where BookForge does not exist. The overlay
 a voice it does not mention is fine, and non-band keys (`_README`) are skipped.
 
 - The BookForge checkout is `--bookforge`, else `$CRUCIBLE_BOOKFORGE`, else `bookforge`
-  beside this checkout. The manifests are `--voices` (default `./voices`); a directory with no
-  voice manifest refuses, where it used to print "0 voice band(s) agree". Voice manifests left
-  the repo (they travel with their weights), so pass the directory that holds them.
+  beside this checkout.
+- By default the manifests are the pinned ones: for every pin `crucible.voicerepo.load_pins`
+  returns (the packaged `crucible/voices/pins.toml` plus the home pins), the pinned revision's
+  `crucible-voice.toml` from its pulled weights (`<CRUCIBLE_HOME>/voices/<id>/`), else from
+  `<CRUCIBLE_HOME>/voice-manifests/<owner>--<name>/<sha>/`, else from this checkout's `tests/fixtures/voice-manifests/` (same layout). A pin with neither is
+  listed with the command that fetches it (`crucible voices check <owner>/<name>@<sha>`) and
+  skipped; no manifest at all refuses.
+- `--voices <dir>` compares a flat directory of `<voice id>.toml` files instead; a directory
+  with no voice manifest refuses, never "0 voice band(s) agree".
 
 ## Live keepers and measurement
 

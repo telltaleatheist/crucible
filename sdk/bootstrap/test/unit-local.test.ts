@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { readLocalInstallation, localStatus, startLocal, localUninstallCommand } from '../src/local.js';
 import { processRunner, type Runner } from '../src/runner.js';
 
-test('missing, malformed and orphaned installations are distinct', async () => {
+test('missing and malformed installations are distinct, and an unregistered home is absent', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crucible-local-'));
   try {
     assert.equal(readLocalInstallation({ home }), null);
     assert.equal((await localStatus({ home })).state, 'absent');
     writeFileSync(join(home, 'pairing'), 'old installation');
-    assert.equal((await localStatus({ home })).state, 'broken');
+    assert.equal((await localStatus({ home })).state, 'absent');
     writeFileSync(join(home, 'installation.json'), '{');
     assert.throws(() => readLocalInstallation({ home }), /not JSON/);
     assert.equal((await localStatus({ home })).state, 'broken');

@@ -2,7 +2,7 @@
 
 **GENERATED — do not edit.** `python scripts/gen-api-docs.py` writes this file
 from the FastAPI app the server actually runs, and `scripts/release.sh` refuses a
-cut when it is stale. Change a request model and regenerate; never edit here.
+cut when it is stale. Change a request or answer model and regenerate; never edit here.
 
 Every route is under `/v1` unless it says otherwise. Protected routes need
 `Authorization: Bearer <token>` **and** `X-Crucible-Api: 1`, checked in that order.
@@ -23,7 +23,16 @@ Unauthenticated. Lets a client tell "wrong token" from "not a Crucible".
 
 *Door:* open
 
-*Answers:* `200`
+*Answers:* `200` Ping
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `crucible` | `True` | yes | — |  |
+| `name` | string | yes | — |  |
+| `api_version` | integer | yes | — |  |
+| `pairing_version` | integer | yes | — |  |
 
 ## Pairing
 
@@ -43,7 +52,7 @@ Decide Pairing
 | `user_code` | string | yes | — |  |
 | `allow` | boolean | yes | — |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/pairing/poll`
 
@@ -58,7 +67,7 @@ Poll Pairing
 | `id` | string | yes | — |  |
 | `device_code` | string | yes | — |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `GET /v1/pairing/requests`
 
@@ -80,7 +89,7 @@ Start Pairing
 | --- | --- | --- | --- | --- |
 | `client_name` | string | yes | — |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Setup
 
@@ -100,11 +109,26 @@ Identity, backend, and every model this build ships with — including the ones 
 
 ### `GET /v1/info`
 
-Info
+Who this server is, what it runs on, what it serves, and the few fixed tables (terminal states, voice sources, service commands) a console shows.
 
 *Door:* token + `X-Crucible-Api: 1`
 
-*Answers:* `200`
+*Answers:* `200` Info
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `server` | object | yes | — |  |
+| `role` | string | yes | — |  |
+| `managed_by` | object of string or null | yes | — |  |
+| `host` | object | yes | — |  |
+| `job_types` | array of string | yes | — |  |
+| `capabilities` | array of object | yes | — |  |
+| `pages_engine` | object | yes | — |  |
+| `terminal_states` | TerminalStates | yes | — | The states after which a job or a task never changes again. |
+| `voice_sources` | object of VoiceSourceLabel | yes | — |  |
+| `service_commands` | array of ServiceCommand | yes | — |  |
 
 ## The card
 
@@ -168,7 +192,7 @@ List what an upstream serves, using the body's `key` or `url` when given, else t
 | --- | --- | --- | --- | --- |
 | `name` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Models
 
@@ -199,7 +223,7 @@ Hold whatever is resident (model, voice or aligner) on the card for a run; jobs 
 | `act` | string | yes | — |  |
 | `ttl_seconds` | integer | yes | — |  |
 
-*Answers:* `201`, `422`
+*Answers:* `201`, `422` HTTPValidationError
 
 ## Jobs
 
@@ -217,12 +241,12 @@ Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missin
 | --- | --- | --- | --- | --- |
 | `type` | string | yes | — |  |
 | `model` | string or null | no | — |  |
-| `params` | Params | no | — |  |
-| `inputs` | Inputs | no | — |  |
+| `params` | object | no | — |  |
+| `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
-*Answers:* `202`, `409`, `422`
+*Answers:* `202`, `409` ServerBusy, `422` HTTPValidationError
 
 ### `GET /v1/jobs/{job_id}`
 
@@ -234,7 +258,34 @@ Get Job
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `200`, `404`, `422`
+*Answers:* `200` JobStatus, `404` ErrorEnvelope, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `type` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `status` | string | yes | — |  |
+| `progress` | integer or number | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `error` | JobFailure or null | yes | — |  |
+| `artifacts` | array of string | yes | — |  |
+| `created` | string | yes | — |  |
+| `started` | string or null | yes | — |  |
+| `finished` | string or null | yes | — |  |
+| `client_ref` | string or null | yes | — |  |
+| `interrupted_at` | string or null | yes | — |  |
+| `held_by` | string or null | yes | — |  |
+| `held_since` | string or null | yes | — |  |
+| `chunks_done` | array of integer | yes | — |  |
+| `chunks_total` | integer or null | yes | — |  |
+| `chunk_at` | string or null | yes | — |  |
+| `resume_id` | string or null | yes | — |  |
+| `resumed` | boolean | yes | — |  |
+| `lease_id` | string or null | no | — |  |
+| `sampling` | object or null | no | — |  |
 
 ### `DELETE /v1/jobs/{job_id}`
 
@@ -246,7 +297,7 @@ Cancel Job
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `GET /v1/jobs/{job_id}/artifacts/{name}`
 
@@ -259,7 +310,7 @@ Job Artifact
 | `job_id` | path | yes | string |  |
 | `name` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `GET /v1/jobs/{job_id}/events`
 
@@ -271,7 +322,7 @@ Job Events
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/jobs/{job_id}/hold`
 
@@ -283,7 +334,7 @@ Keep this job's artifacts for a later job's `{"artifact": {job_id, name}}` input
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `DELETE /v1/jobs/{job_id}/hold`
 
@@ -295,7 +346,7 @@ The chain is complete: release the hold and remove the job now.
 | --- | --- | --- | --- | --- |
 | `job_id` | path | yes | string |  |
 
-*Answers:* `204`, `422`
+*Answers:* `204`, `422` HTTPValidationError
 
 ## Resumable jobs
 
@@ -319,7 +370,7 @@ One journal, as `GET /v1/resumable` lists it.
 | --- | --- | --- | --- | --- |
 | `resume_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `DELETE /v1/resumable/{resume_id}`
 
@@ -331,7 +382,7 @@ Discard a journal now; refused `resume_in_use` while a job writes it.
 | --- | --- | --- | --- | --- |
 | `resume_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Tasks
 
@@ -363,7 +414,7 @@ Admit one operator task (pull, install, module, engine or engine-restart), or re
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
 
-*Answers:* `202`, `409`, `422`
+*Answers:* `202`, `409` ServerBusy, `422` HTTPValidationError
 
 ### `GET /v1/tasks/{task_id}`
 
@@ -375,7 +426,7 @@ Get Task
 | --- | --- | --- | --- | --- |
 | `task_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `DELETE /v1/tasks/{task_id}`
 
@@ -387,7 +438,7 @@ Cancel a task. Answers `cancelling`; the stream's `cancelled` event says when it
 | --- | --- | --- | --- | --- |
 | `task_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `GET /v1/tasks/{task_id}/events`
 
@@ -399,7 +450,7 @@ Task Events
 | --- | --- | --- | --- | --- |
 | `task_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Activity
 
@@ -415,7 +466,26 @@ What this server is doing and how far along, in one read with no job id. A displ
 | --- | --- | --- | --- | --- |
 | `accelerator_probe` | query | no | boolean |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200` Activity, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `server` | ActivityServer | yes | — | Who answered `GET /v1/activity`. |
+| `resident` | ActivityResident or null | yes | — |  |
+| `stopping` | object or null | yes | — |  |
+| `warming` | string or null | yes | — |  |
+| `claim` | object or null | yes | — |  |
+| `streaming` | object or null | yes | — |  |
+| `chat` | ActivityChat | yes | — | Chat completions in flight and the engine's admission limit. |
+| `settings` | ActivitySettings | yes | — | Recent writes through `PUT /v1/settings`. |
+| `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
+| `lease` | ActivityLease or null | yes | — |  |
+| `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
+| `running` | array of ActivityJob | yes | — |  |
+| `queued` | array of ActivityJob | yes | — |  |
+| `accelerator` | object or null | no | — |  |
 
 ## Health
 
@@ -452,7 +522,7 @@ Delete an installed subject's files. Refused while the subject is resident, leas
 | `kind` | path | yes | string |  |
 | `subject_id` | path | yes | string |  |
 
-*Answers:* `204`, `422`
+*Answers:* `204`, `422` HTTPValidationError
 
 ## Voices
 
@@ -464,7 +534,39 @@ Every voice this build has a manifest for, and where it stands here.
 
 *Door:* token + `X-Crucible-Api: 1`
 
-*Answers:* `200`
+*Answers:* `200` array of VoiceInfo
+
+**Answer `200`** (`application/json`), an array; each item:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — |  |
+| `display` | string | yes | — |  |
+| `kind` | string or null | yes | — |  |
+| `language` | string or null | yes | — |  |
+| `narrator_engine` | string or null | yes | — |  |
+| `backend_supported` | boolean | yes | — |  |
+| `installed` | boolean | yes | — |  |
+| `resident` | boolean | yes | — |  |
+| `orphan` | boolean or null | yes | — |  |
+| `loadable` | boolean | yes | — |  |
+| `reason` | string or null | yes | — |  |
+| `revision` | string or null | yes | — |  |
+| `fingerprint` | string or null | yes | — |  |
+| `source` | string or null | yes | — |  |
+| `identity_basis` | string or null | yes | — |  |
+| `memory_bytes_estimate` | integer or number or null | yes | — |  |
+| `estimate_basis` | string or null | yes | — |  |
+| `serving` | object or null | yes | — |  |
+| `max_chars` | integer or null | yes | — |  |
+| `max_chars_basis` | string or null | yes | — |  |
+| `pace_basis` | string or null | yes | — |  |
+| `inherited_from` | string or null | yes | — |  |
+| `manifest` | string or null | yes | — |  |
+| `sample_rate` | integer or null | yes | — |  |
+| `takes` | integer | yes | — |  |
+| `needs_reference` | boolean | yes | — |  |
+| `pace` | object or null | yes | — |  |
 
 ### `PUT /v1/voices/{voice_id}`
 
@@ -476,7 +578,7 @@ Pin a voice to a repo revision (`{"pin": ...}`) or write a local manifest overri
 | --- | --- | --- | --- | --- |
 | `voice_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `DELETE /v1/voices/{voice_id}`
 
@@ -488,7 +590,7 @@ Remove this machine's pin or override for a voice; a shipped voice reverts to it
 | --- | --- | --- | --- | --- |
 | `voice_id` | path | yes | string |  |
 
-*Answers:* `204`, `422`
+*Answers:* `204`, `422` HTTPValidationError
 
 ### `GET /v1/voices/{voice_id}/manifest`
 
@@ -500,7 +602,7 @@ One voice's settings as a whole local manifest document, ready to edit and send 
 | --- | --- | --- | --- | --- |
 | `voice_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Streaming narration
 
@@ -519,7 +621,7 @@ Open the one streaming session this server will hold at a time.
 | `voice` | string | yes | — |  |
 | `language` | string | yes | — |  |
 
-*Answers:* `201`, `422`
+*Answers:* `201`, `422` HTTPValidationError
 
 ### `POST /v1/tts/stream/{session_id}`
 
@@ -540,7 +642,7 @@ One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row id;
 | `text` | string or null | no | — |  |
 | `take` | integer or null | no | — |  |
 
-*Answers:* `202`, `422`
+*Answers:* `202`, `422` HTTPValidationError
 
 ### `DELETE /v1/tts/stream/{session_id}`
 
@@ -552,7 +654,7 @@ The same as `{"op": "close"}`, for a client that only has verbs.
 | --- | --- | --- | --- | --- |
 | `session_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `GET /v1/tts/stream/{session_id}/events`
 
@@ -564,7 +666,7 @@ The session's SSE stream, audio included. Reattach with `Last-Event-ID` within t
 | --- | --- | --- | --- | --- |
 | `session_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Uploads
 
@@ -582,7 +684,7 @@ Upload
 | --- | --- | --- | --- | --- |
 | `file` | string | yes | — |  |
 
-*Answers:* `201`, `422`
+*Answers:* `201`, `422` HTTPValidationError
 
 ## Leases
 
@@ -598,7 +700,7 @@ Release the lease; if nothing else holds the card, it is cleared before this ans
 | --- | --- | --- | --- | --- |
 | `lease_id` | path | yes | string |  |
 
-*Answers:* `204`, `422`
+*Answers:* `204`, `422` HTTPValidationError
 
 ### `POST /v1/leases/{lease_id}/heartbeat`
 
@@ -610,7 +712,7 @@ Push the lease's deadline out by its own ttl. A 404 means the lease was released
 | --- | --- | --- | --- | --- |
 | `lease_id` | path | yes | string |  |
 
-*Answers:* `200`, `422`
+*Answers:* `200`, `422` HTTPValidationError
 
 ## OpenAI-compatible
 
@@ -690,15 +792,25 @@ One answer distribution per question, read off the resident model's next-token l
 | --- | --- | --- | --- | --- |
 | `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
-*Answers:* `200`, `422`
+*Answers:* `200` DecideResponse, `422` HTTPValidationError
 
-## Request models in full
+**Answer `200`** (`application/json`), the body:
 
-Every schema the routes above refer to, for a reader following a nested field.
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars"). |
+| `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
+| `answers` | object of ChoiceAnswer or ScoreAnswer or YesNoAnswer | yes | — | Question name to answer, in the request's question order. |
+| `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |
+| `tokens` | DecideTokens | yes | — | Prompt sizes. |
+
+## Models in full
+
+Every request and answer schema the routes above refer to, for a reader following a nested field.
 
 ### `Activity`
 
@@ -760,7 +872,7 @@ What keeps the resident subject on the card.
 | --- | --- | --- | --- | --- |
 | `fact` | string | yes | — |  |
 | `who` | string | yes | — |  |
-| `details` | Details | yes | — |  |
+| `details` | object | yes | — |  |
 
 ### `ActivityJob`
 
@@ -879,8 +991,8 @@ A choice question's distribution.
 | --- | --- | --- | --- | --- |
 | `type` | `'choice'` | no | `'choice'` | `choice`. |
 | `choice` | string | yes | — | The most probable option (of those returned, in report mode). |
-| `probabilities` | Probabilities | yes | — | Option name to probability, in option order, renormalised over the letters so they sum to 1 (a softmax over the label logits). Null only for an option reported missing. |
-| `logprobs` | Logprobs | yes | — | Option name to ln of its `probabilities` entry, in option order; add ln `label_mass` (multiply the probability by `label_mass`) for the un-renormalised mass. NOT calibrated: one forward pass's reading, not a measured frequency. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
+| `probabilities` | object of number or null | yes | — | Option name to probability, in option order, renormalised over the letters so they sum to 1 (a softmax over the label logits). Null only for an option reported missing. |
+| `logprobs` | object of number or null | yes | — | Option name to ln of its `probabilities` entry, in option order; add ln `label_mass` (multiply the probability by `label_mass`) for the un-renormalised mass. NOT calibrated: one forward pass's reading, not a measured frequency. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
 | `confidence` | number | yes | — | The largest renormalised probability. |
 | `label_mass` | number | yes | — | The raw probability the option letters held together before renormalising (over the letters RETURNED, in report mode). Low means the model wanted to say something that is not an option. A renormalised probability times it is the un-renormalised mass. |
 | `missing_labels` | array of string or null | no | — | Present only when the request said `missing: "report"` — absent, not null, otherwise: the options whose letter was not among the top tokens the engine returned, in option order, `[]` when none was. Nothing is invented for them; their `probabilities` and `logprobs` are null. |
@@ -893,7 +1005,7 @@ Pick one of named options. Labelled A, B, C… in the order given.
 | --- | --- | --- | --- | --- |
 | `type` | `'choice'` | yes | — | `choice`. |
 | `instructions` | string | yes | — | The question, as a person would ask it: "Which team should handle this?". |
-| `options` | Options | yes | — | Option name to a one-line description, in the order the letters are assigned: the first option is `A`. At least 2; more than 26 is refused as `too_many_options`, because past `Z` there is no one-token label to read. |
+| `options` | object of string | yes | — | Option name to a one-line description, in the order the letters are assigned: the first option is `A`. At least 2; more than 26 is refused as `too_many_options`, because past `Z` there is no one-token label to read. |
 
 ### `DecidePairing`
 
@@ -911,7 +1023,7 @@ Pick one of named options. Labelled A, B, C… in the order given.
 | --- | --- | --- | --- | --- |
 | `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | Questions | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
@@ -923,7 +1035,7 @@ A decision: one distribution per question.
 | --- | --- | --- | --- | --- |
 | `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars"). |
 | `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
-| `answers` | Answers | yes | — | Question name to answer, in the request's question order. |
+| `answers` | object of ChoiceAnswer or ScoreAnswer or YesNoAnswer | yes | — | Question name to answer, in the request's question order. |
 | `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |
 | `tokens` | DecideTokens | yes | — | Prompt sizes. |
 
@@ -934,7 +1046,7 @@ Where the time went.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
-| `per_question` | Per Question | yes | — | Each question's own request. |
+| `per_question` | object of ForwardTiming | yes | — | Each question's own request. |
 | `prime` | ForwardTiming or null | yes | — | The shared prefix sent alone first — present when the decision had more than one question, null when it had one. |
 
 ### `DecideTokens`
@@ -943,7 +1055,7 @@ How big the prompts were.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `per_question` | Per Question | yes | — | `usage.prompt_tokens` for each question's prompt. |
+| `per_question` | object of integer | yes | — | `usage.prompt_tokens` for each question's prompt. |
 | `images` | integer | yes | — | How many images every prompt of this decision carried. |
 
 ### `ErrorBody`
@@ -980,6 +1092,23 @@ One request to the engine, timed by Crucible.
 | --- | --- | --- | --- | --- |
 | `detail` | array of ValidationError | no | — |  |
 
+### `Info`
+
+`GET /v1/info`: who this server is, what it runs on and what it serves.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `server` | object | yes | — |  |
+| `role` | string | yes | — |  |
+| `managed_by` | object of string or null | yes | — |  |
+| `host` | object | yes | — |  |
+| `job_types` | array of string | yes | — |  |
+| `capabilities` | array of object | yes | — |  |
+| `pages_engine` | object | yes | — |  |
+| `terminal_states` | TerminalStates | yes | — | The states after which a job or a task never changes again. |
+| `voice_sources` | object of VoiceSourceLabel | yes | — |  |
+| `service_commands` | array of ServiceCommand | yes | — |  |
+
 ### `JobBusyDetails`
 
 `server_busy` from the job door: the job that holds the lane.
@@ -1002,8 +1131,8 @@ One request to the engine, timed by Crucible.
 | --- | --- | --- | --- | --- |
 | `type` | string | yes | — |  |
 | `model` | string or null | no | — |  |
-| `params` | Params | no | — |  |
-| `inputs` | Inputs | no | — |  |
+| `params` | object | no | — |  |
+| `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
 
@@ -1101,8 +1230,8 @@ A score question's distribution and its expected level.
 | `type` | `'score'` | no | `'score'` | `score`. |
 | `score` | number | yes | — | Σ (1-based level index × p) over the levels returned: 1.0 is certainly the lowest level. |
 | `level` | string | yes | — | The most probable level (of those returned, in report mode). |
-| `probabilities` | Probabilities | yes | — | Level to renormalised probability, lowest level first. Null only for a level reported missing. |
-| `logprobs` | Logprobs | yes | — | Level to ln of its `probabilities` entry, lowest first; add ln `label_mass` for the un-renormalised mass. NOT calibrated. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
+| `probabilities` | object of number or null | yes | — | Level to renormalised probability, lowest level first. Null only for a level reported missing. |
+| `logprobs` | object of number or null | yes | — | Level to ln of its `probabilities` entry, lowest first; add ln `label_mass` for the un-renormalised mass. NOT calibrated. Null where the probability is null, or exactly 0 (`-Infinity` is not JSON). |
 | `confidence` | number | yes | — | The largest renormalised probability. |
 | `label_mass` | number | yes | — | The raw probability the level letters held together before renormalising (over the letters RETURNED, in report mode). Low means the model wanted to say something that is not an option. A renormalised probability times it is the un-renormalised mass. |
 | `missing_labels` | array of string or null | no | — | Present only when the request said `missing: "report"` — absent, not null, otherwise: the levels whose letter was not among the top tokens the engine returned, in level order, `[]` when none was. Nothing is invented for them; their `probabilities` and `logprobs` are null. |
@@ -1134,6 +1263,15 @@ A `409 server_busy` refusal; `details.door` says which door refused.
 | `code` | `'server_busy'` | yes | — |  |
 | `message` | string | yes | — |  |
 | `details` | JobBusyDetails or CardHeldDetails | yes | — |  |
+
+### `ServiceCommand`
+
+A command, typed on the server itself, that runs it as a machine service.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `command` | string | yes | — |  |
+| `does` | string | yes | — |  |
 
 ### `StartPairing`
 
@@ -1174,6 +1312,15 @@ A `409 server_busy` refusal; `details.door` says which door refused.
 | `narrator_engine` | string or null | no | — |  |
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
+
+### `TerminalStates`
+
+The states after which a job or a task never changes again.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `jobs` | array of string | yes | — |  |
+| `tasks` | array of string | yes | — |  |
 
 ### `ValidationError`
 
@@ -1216,6 +1363,15 @@ One row of `GET /v1/voices`: a voice and where it stands on this server.
 | `takes` | integer | yes | — |  |
 | `needs_reference` | boolean | yes | — |  |
 | `pace` | object or null | yes | — |  |
+
+### `VoiceSourceLabel`
+
+How to name a voice row's `manifest` source to a person, and the tone to show it in.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `label` | string | yes | — |  |
+| `tone` | `'ok'` or `'warn'` or `'floor'` | yes | — |  |
 
 ### `YesNoAnswer`
 

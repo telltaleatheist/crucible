@@ -225,7 +225,16 @@ a field the SDK deliberately leaves unread is named there with the reason.
 ## Voices, streams, catalog
 
 - `/v1/info`'s `tts` capability rows are `/v1/voices`' rows verbatim, both built by
-  `jobs.voice_rows`: one voice, one description.
+  `jobs.voice_rows`: one voice, one description. Every row, including a pin this build
+  cannot serve, comes out of `jobs.tts.common.voice_row`, which starts from
+  `VOICE_ROW_FIELDS` (every `responses.VoiceInfo` field with its unknown value) and refuses a
+  key VoiceInfo does not have; `tests/test_leftovers.py` holds the two field sets equal.
+- `/v1/info` also carries the fixed tables a console would otherwise copy:
+  `terminal_states` (`jobs`: `jobs.base.TERMINAL_STATES`; `tasks`:
+  `tasks.states.TERMINAL_STATES`), `voice_sources` (a label and tone per `manifest` value of
+  a voice row) and `service_commands` (the commands, typed on the server, that run it as a
+  machine service). They are built in `api/routes/info.py`; the test checks each service
+  command parses with the real CLI.
 - Every voice door and `POST /v1/tts/stream` share one `tts_enabled`
   dependency, so a server with tts off refuses them identically.
 - `PUT /v1/voices/{id}` takes either `{"pin": …}` or `{"voice": …}`, never both
