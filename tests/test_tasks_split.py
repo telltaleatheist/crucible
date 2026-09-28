@@ -15,7 +15,7 @@ from crucible.tasks import hostdoor, runner, states, validate
 from .conftest import FAKE_BACKEND
 
 PUBLIC_NAMES = {
-    "PROGRESS_INTERVAL_SECONDS", "TASK_TYPES", "Task", "TaskStore", "env_installed",
+    "TASK_TYPES", "Task", "TaskStore", "env_installed",
     "install_command", "searched_note", "which",
 }
 
