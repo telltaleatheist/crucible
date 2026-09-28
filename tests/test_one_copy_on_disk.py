@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from crucible import weights
-from crucible.voices import VoiceError, load_all_voices
+from crucible.voicecatalog import load_all_voices
+from crucible.voices import VoiceError
 
 
 def test_zeroshot_stores_in_higgs_defaults_folder(tmp_path: Path) -> None:

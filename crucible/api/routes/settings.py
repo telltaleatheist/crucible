@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import catalog, ladder, upstreams
+from ... import catalog, ladder, upstreamrecord, upstreams
 from ... import settings as settings_module
 from ...errors import ApiError
 from ...inflight import read_act
@@ -62,7 +62,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """List what an upstream serves, using the body's `key` or `url` when given,
         else the stored record. Never cached.
         """
-        upstreams.require_name(name, "the path")
+        upstreamrecord.require_name(name, "the path")
         raw = await request.body()
         if raw.strip() == b"":
             probe = None
@@ -80,16 +80,16 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     400,
                     "upstream_unconfigured",
                     f"{name} is not configured on this server and the request "
-                    f"carried no {upstreams.UPSTREAM_FIELD[name]!r} to test "
+                    f"carried no {upstreamrecord.UPSTREAM_FIELD[name]!r} to test "
                     "with. Send one to check it before saving it",
                     {
                         "field": f"upstreams.{name}."
-                        f"{upstreams.UPSTREAM_FIELD[name]}",
+                        f"{upstreamrecord.UPSTREAM_FIELD[name]}",
                         "upstream": name,
                     },
                 )
         else:
-            record = upstreams.record_from_patch(
+            record = upstreamrecord.record_from_patch(
                 name, probe, f"the test body for {name}"
             )
         return {"models": await upstreams.list_models(ctx.http, record)}

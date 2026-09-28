@@ -9,7 +9,8 @@ from pathlib import Path
 from .. import apiclient, weights
 from ..config import config_path, crucible_home
 from ..errors import ConfigError
-from ..voices import VoiceError, load_all_voices, load_voice
+from ..voicecatalog import load_all_voices, load_voice
+from ..voices import VoiceError
 from . import common
 from .common import EXIT_OK, _fail
 

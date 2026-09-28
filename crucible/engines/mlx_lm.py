@@ -9,7 +9,8 @@ from typing import Callable
 
 from .. import envpatches
 from ..envpatches import PatchError
-from .base import SubprocessEngine, EngineError, int_flag, weights_subject_id
+from ..errors import EngineError
+from .base import SubprocessEngine, int_flag, weights_subject_id
 
 MODULE = "mlx_lm"
 SUBCOMMAND = "server"

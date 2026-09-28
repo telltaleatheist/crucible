@@ -3,25 +3,14 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Mapping
 
-from . import capability as capability_classes
-from . import upstreams as upstream_module
+from . import capabilityclasses, classnames, memorybudget, upstreamrecord
 from .backend import CardFacts
 from .capabilitystore import decide_on, record_of
 from .clock import utcnow
-from .config import (
-    DESKTOP_BASIS_STATED,
-    CapabilityRecord,
-    Config,
-    LocalModelRecord,
-    RouteRecord,
-    load_config,
-    write_config,
-    _advertised,
-    desktop_reserve_words,
-)
+from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
+from .config import Config, LocalModelRecord, RouteRecord, _advertised, load_config, write_config
 from .errors import ApiError, ConfigError
-from .upstreamrecord import UPSTREAM_DISPLAY
-from .upstreams import UPSTREAM_NAMES, UpstreamRecord
+from .upstreamrecord import UPSTREAM_DISPLAY, UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
 
@@ -77,12 +66,12 @@ def _choices(
     record = config.capability
     if record is None:
         return {}
-    budget = capability_classes.available_bytes(
+    budget = memorybudget.available_bytes(
         record.total_bytes, config.desktop_allowance_bytes
     )
     found: dict[str, list[dict[str, Any]]] = {}
-    for name in capability_classes.SELECTABLE_CLASSES:
-        entry = capability_classes.BY_NAME[name]
+    for name in classnames.SELECTABLE_CLASSES:
+        entry = capabilityclasses.BY_NAME[name]
         assert entry.candidates is not None
         rows: list[dict[str, Any]] = []
         for candidate in entry.candidates(record.backend_kind):
@@ -109,7 +98,7 @@ def _choices(
 
 def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]:
     routes: dict[str, Any] = {}
-    for name in capability_classes.ROUTABLE_CLASSES:
+    for name in classnames.ROUTABLE_CLASSES:
         model = config.route_model(name)
         if model is None:
             routes[name] = {"route": "local", "model": local_selection(config, name)}
@@ -119,14 +108,14 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
     for name in UPSTREAM_NAMES:
         record = config.upstream(name)
         upstreams[name] = (
-            upstream_module.blank(name)
+            upstreamrecord.blank(name)
             if record is None
-            else upstream_module.settings_entry(record)
+            else upstreamrecord.settings_entry(record)
         )
     return {
         "local_models": {
             name: config.local_model(name)
-            for name in capability_classes.SELECTABLE_CLASSES
+            for name in classnames.SELECTABLE_CLASSES
         },
         "local_model_choices": _choices(config, installed),
         "routes": routes,
@@ -173,7 +162,7 @@ class Resolved:
     ]:
         routes = tuple(
             RouteRecord(capability=name, model=self.routes[name])
-            for name in capability_classes.ROUTABLE_CLASSES
+            for name in classnames.ROUTABLE_CLASSES
             if name in self.routes
         )
         upstreams = tuple(
@@ -181,7 +170,7 @@ class Resolved:
         )
         local_models = tuple(
             LocalModelRecord(capability=name, model=self.local_models[name])
-            for name in capability_classes.SELECTABLE_CLASSES
+            for name in classnames.SELECTABLE_CLASSES
             if name in self.local_models
         )
         return routes, upstreams, local_models
@@ -217,7 +206,7 @@ def _resolve_upstreams(config: Config, resolved: Resolved, value: Any) -> None:
     table = _require_object(value, "upstreams")
     for name in sorted(table):
         field = f"upstreams.{name}"
-        upstream_module.require_name(name, field)
+        upstreamrecord.require_name(name, field)
         _resolve_upstream(resolved, name, table[name], field)
 
 
@@ -228,7 +217,7 @@ def _resolve_upstream(resolved: Resolved, name: str, value: Any, field: str) -> 
             resolved.removed.add(name)
             resolved.changed.append(f"{field} removed")
         return
-    resolved.upstreams[name] = upstream_module.record_from_patch(name, value, field)
+    resolved.upstreams[name] = upstreamrecord.record_from_patch(name, value, field)
     resolved.changed.append(f"{field} set")
 
 
@@ -240,20 +229,20 @@ def _resolve_routes(config: Config, resolved: Resolved, value: Any) -> None:
 
 
 def _require_routable(name: str, field: str) -> None:
-    if name in capability_classes.ROUTABLE_CLASSES:
+    if name in classnames.ROUTABLE_CLASSES:
         return
     raise ApiError(
         400,
         "route_not_routable",
         f"{name!r} cannot run anywhere but this server's card. The "
         f"classes a route may name are "
-        f"{list(capability_classes.ROUTABLE_CLASSES)}; every other "
+        f"{list(classnames.ROUTABLE_CLASSES)}; every other "
         "class is local and there is no upstream that does its kind "
         "of work",
         {
             "field": field,
             "capability": name,
-            "routable": list(capability_classes.ROUTABLE_CLASSES),
+            "routable": list(classnames.ROUTABLE_CLASSES),
         },
     )
 
@@ -322,18 +311,18 @@ def _resolve_local_models(config: Config, resolved: Resolved, value: Any) -> Non
 
 
 def _require_selectable(name: str, field: str) -> None:
-    if name in capability_classes.SELECTABLE_CLASSES:
+    if name in classnames.SELECTABLE_CLASSES:
         return
     raise ApiError(
         400,
         "local_model_not_selectable",
         f"{name!r} has no local models to choose between. The classes "
         f"that do are "
-        f"{list(capability_classes.SELECTABLE_CLASSES)}",
+        f"{list(classnames.SELECTABLE_CLASSES)}",
         {
             "field": field,
             "capability": name,
-            "selectable": list(capability_classes.SELECTABLE_CLASSES),
+            "selectable": list(classnames.SELECTABLE_CLASSES),
         },
     )
 
@@ -356,7 +345,7 @@ def _require_decided(
 def _offered_candidate(
     record: CapabilityRecord, name: str, value: str, field: str
 ) -> Any:
-    entry = capability_classes.BY_NAME[name]
+    entry = capabilityclasses.BY_NAME[name]
     assert entry.candidates is not None
     offered = entry.candidates(record.backend_kind)
     picked = next((c for c in offered if c.id == value), None)
@@ -380,7 +369,7 @@ def _require_fits(
     record: CapabilityRecord, resolved: Resolved, picked: Any, name: str, field: str
 ) -> None:
     value = picked.id
-    budget = capability_classes.available_bytes(
+    budget = memorybudget.available_bytes(
         record.total_bytes, resolved.desktop_allowance_bytes
     )
     if picked.memory_bytes_estimate <= budget:
@@ -474,7 +463,7 @@ def resolve(config: Config, patch: Any) -> Resolved:
 
 
 def _validate(resolved: Resolved) -> None:
-    for name in capability_classes.ROUTABLE_CLASSES:
+    for name in classnames.ROUTABLE_CLASSES:
         model = resolved.routes.get(name)
         if model is None:
             continue

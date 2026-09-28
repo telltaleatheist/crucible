@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .capability import classes_for_model
+from .capabilityclasses import classes_for_model
 from .errors import CrucibleError
 from .manifests import (
     GgufLocal,
@@ -71,7 +71,7 @@ def model_row(manifest: ModelManifest, classes: tuple[str, ...]) -> dict[str, An
     if not classes:
         raise LineupError(
             f"{manifest.id} carries a [local] table but no capability class in "
-            f"crucible/capability.py names its family {manifest.family!r}. A "
+            f"crucible/capabilityclasses.py names its family {manifest.family!r}. A "
             "lineup row lights a tile, and this one would light none; either the "
             "class table is missing a class or this model has no business in "
             "the lineup"

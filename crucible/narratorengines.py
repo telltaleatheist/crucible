@@ -8,6 +8,8 @@ from .backend import CUDA_LINUX, MLX_DARWIN
 
 HIGGS_V3 = "higgs-v3"
 
+VOICES_PULL_COMMAND = "crucible voices pull"
+
 NARRATOR_ENGINE_SAMPLING: dict[str, dict[str, float]] = {
     HIGGS_V3: {"temperature": 0.8, "top_p": 0.95, "top_k": 50},
 }

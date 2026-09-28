@@ -25,6 +25,8 @@ from .weights import (
 ENGINE_KIND = "engine"
 LLAMA_CPP_ID = "llama-cpp"
 
+INSTALL_COMMAND = "crucible install llm"
+
 LLAMA_CPP_RELEASE = "b10970"
 
 RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/download"
@@ -143,7 +145,7 @@ def require_installed(config: Config, build: str) -> InstalledWeights:
         "engine_not_installed",
         f"there is no llama.cpp {LLAMA_CPP_RELEASE} ({build}) at "
         f"{engine_dir(config)}. It is what serves every model on this "
-        "backend — run `crucible install llm` (or `install pages`), which "
+        f"backend — run `{INSTALL_COMMAND}` (or `install pages`), which "
         "fetches the engine and nothing else",
     )
 
@@ -337,7 +339,7 @@ def doctor_line(config: Config, gpu_vendor: str) -> str:
     found = installed(config, build)
     where = f"llama.cpp {LLAMA_CPP_RELEASE} ({build})"
     if found is None:
-        return f"{where}: NOT INSTALLED — run `crucible install llm`"
+        return f"{where}: NOT INSTALLED — run `{INSTALL_COMMAND}`"
     return f"{where}: {found.path} ({found.bytes / 1e9:.2f} GB, pulled {found.pulled})"
 
 

@@ -13,7 +13,7 @@ from crucible.asrmodels import load_all_asr_manifests
 from crucible.errors import CrucibleError
 from crucible.manifests import load_all_manifests
 from crucible.rvcmodels import load_all_rvc_manifests
-from crucible.voices import load_all_voices
+from crucible.voicecatalog import load_all_voices
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 

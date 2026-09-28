@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field, replace
-from importlib import import_module
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -12,7 +11,12 @@ import tomli_w
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .config import crucible_home
 from .errors import CrucibleError
-from .narratorengines import ESTIMATE_BASES, HIGGS_V3, NARRATOR_ENGINE_SAMPLING
+from .narratorengines import (
+    ESTIMATE_BASES,
+    HIGGS_V3,
+    NARRATOR_ENGINE_SAMPLING,
+    VOICES_PULL_COMMAND,
+)
 from .tomltable import (
     HF_REPO_PATTERN,
     REVISION_PATTERN,
@@ -22,8 +26,6 @@ from .tomltable import (
 from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
-
-VOICES_PULL_COMMAND = "crucible voices pull"
 
 VOICE_KINDS = frozenset({"checkpoint", "zeroshot", "token"})
 
@@ -873,7 +875,6 @@ def parse_document(
     )
 
 
-_parse = parse_document
 
 
 def _voice_table(document: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -1229,22 +1230,3 @@ def remove_home_voice(voice_id: str) -> bool:
     except OSError as exc:
         raise VoiceError(f"could not remove {path}: {exc}") from exc
     return True
-
-
-_MOVED_TO_VOICECATALOG: dict[str, str] = {
-    "load_all_voices": "load_all_voices",
-    "load_voice": "load_voice",
-    "unserved_pins": "unserved_pins",
-    "voice_aliases_of": "voice_aliases_of",
-    "_resolve_weights_of": "resolve_weights_of",
-    "_engine_voices": "engine_voices",
-    "_voices_in": "voices_in",
-    "_load_voice_file": "load_voice_file",
-}
-
-
-def __getattr__(name: str) -> Any:
-    moved = _MOVED_TO_VOICECATALOG.get(name)
-    if moved is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(import_module(f"{__package__}.voicecatalog"), moved)

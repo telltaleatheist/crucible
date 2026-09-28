@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import capability as capability_classes
-from . import catalog, jobenv
+from . import capabilitywords, catalog, installplan, jobenv, verdict
 from .backend import Backend
 from .capabilitystore import decide_for
 from .cardfacts import card_for
@@ -15,8 +14,9 @@ from .errors import ApiError
 from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 from .jobs import ALL_JOB_TYPES
 from .jobtypes import FAMILIES, spec_of
+from .narratorengines import NARRATOR_ENGINE_SAMPLING
 from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
-from .voices import NARRATOR_ENGINE_SAMPLING, load_all_voices
+from .voicecatalog import load_all_voices
 
 INSTALLING = "installing"
 
@@ -150,7 +150,7 @@ class InstallOnSubmit:
 
         decisions, card, pool = live_decisions(self._config, self._backend)
         total = self._backend.gpu.vram_bytes
-        plan = capability_classes.install_plan(
+        plan = installplan.install_plan(
             capability,
             decisions,
             card=card,
@@ -222,7 +222,7 @@ class InstallOnSubmit:
             ]
             if not pulls:
                 return None
-        card_words = capability_classes.describe_card(
+        card_words = capabilitywords.describe_card(
             card, self._backend.gpu.vram_bytes, pool
         )
         return Need(
@@ -483,7 +483,7 @@ class InstallOnSubmit:
 def live_decisions(config: Config, backend: Backend) -> tuple[Any, Any, str]:
     card = card_for(config.home, backend.gpu)
     decisions = decide_for(config, backend, card=card)
-    return decisions, card, capability_classes.pool_name(backend.kind, backend.gpu.vendor)
+    return decisions, card, verdict.pool_name(backend.kind, backend.gpu.vendor)
 
 
 def _offered(subjects: list[catalog.Subject], capability: str) -> list[str]:
@@ -496,7 +496,7 @@ def _subject_runs(
     subject_id: str, decisions: Any, card: Any, total: int, pool: str
 ) -> dict[str, Any] | None:
     try:
-        return capability_classes.subject_plan(
+        return installplan.subject_plan(
             subject_id, decisions, card=card, total_bytes=total, pool=pool
         )
     except ApiError:

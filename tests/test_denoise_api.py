@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, tasks, workers
-from crucible.accelerator import GIB
+from crucible.memorybudget import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 

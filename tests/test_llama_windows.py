@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import capability
+from crucible import capabilitywords
 from crucible.backend import (
     BACKEND_KINDS,
     CUDA_LINUX,
@@ -15,9 +15,10 @@ from crucible.backend import (
     Gpu,
     backend_not_here,
 )
-from crucible.capability import BY_NAME, decide, decide_all
+from crucible.capabilityclasses import BY_NAME
 from crucible.config import WINDOWS_HOME_DIRNAME, crucible_home
 from crucible.manifests import BACKEND_ENGINES, load_all_manifests, load_manifest
+from crucible.verdict import CPU_POOL_NAME, decide, decide_all, pool_name
 
 GIB = 1024 ** 3
 
@@ -228,8 +229,8 @@ def test_the_five_python_job_types_answer_one_sentence(
         assert verdict.selected == "", name
         assert verdict.shortfall_bytes == 0, name
         reasons.add(verdict.reason)
-    assert reasons == {capability.NEEDS_WSL_REASON}
-    assert "WSL2" in capability.NEEDS_WSL_REASON
+    assert reasons == {capabilitywords.NEEDS_WSL_REASON}
+    assert "WSL2" in capabilitywords.NEEDS_WSL_REASON
 
 
 def test_the_llm_classes_and_pages_answer_from_the_gguf_table() -> None:
@@ -250,8 +251,8 @@ def test_a_windows_box_with_no_card_still_serves_and_says_it_is_slow() -> None:
     verdict = _decide("clean", LAPTOP_RAM, WINDOWS_RESERVE, "cpu")
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.5-9b"
-    assert capability.CPU_BUILD_REASON in verdict.reason
-    assert capability.CPU_POOL_NAME in verdict.reason
+    assert capabilitywords.CPU_BUILD_REASON in verdict.reason
+    assert CPU_POOL_NAME in verdict.reason
     assert "card" not in verdict.reason
 
 
@@ -273,7 +274,7 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
     assert by_name["clean"].enabled is True
     assert by_name["pages"].enabled is True
     assert by_name["tts"].enabled is False
-    assert by_name["tts"].reason == capability.NEEDS_WSL_REASON
+    assert by_name["tts"].reason == capabilitywords.NEEDS_WSL_REASON
 
 
 def test_a_small_card_turns_the_27b_off_with_the_number(
@@ -285,8 +286,8 @@ def test_a_small_card_turns_the_27b_off_with_the_number(
 
 
 def test_the_pool_is_named_for_what_it_actually_is() -> None:
-    assert capability.pool_name(LLAMA_WINDOWS, "nvidia") == "card"
-    assert capability.pool_name(LLAMA_WINDOWS, "cpu") == capability.CPU_POOL_NAME
-    assert capability.pool_name(MLX_DARWIN, "apple") == "unified memory"
+    assert pool_name(LLAMA_WINDOWS, "nvidia") == "card"
+    assert pool_name(LLAMA_WINDOWS, "cpu") == CPU_POOL_NAME
+    assert pool_name(MLX_DARWIN, "apple") == "unified memory"
     with pytest.raises(ValueError, match="not a Crucible backend"):
-        capability.pool_name("cuda-windows", "nvidia")
+        pool_name("cuda-windows", "nvidia")

@@ -7,7 +7,7 @@ import httpx
 from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
-from .. import upstreams
+from .. import upstreamrecord, upstreams
 from ..admission import refuse_lease_on_an_upstream
 from ..admission import refuse_lease_on_an_upstream as _refuse_lease_on_an_upstream
 from ..config import Config
@@ -38,7 +38,7 @@ def routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
     for entry in config.routes:
         routed_for.setdefault(entry.model, []).append(entry.capability)
     rows: list[dict[str, Any]] = []
-    for name in upstreams.UPSTREAM_NAMES:
+    for name in upstreamrecord.UPSTREAM_NAMES:
         for model, classes in routed_for.items():
             if model.partition("/")[0] != name:
                 continue
@@ -115,14 +115,14 @@ async def forward_to_upstream(
     *,
     client_agent: str | None,
 ) -> Response:
-    name, model_id = upstreams.require_upstream_model(requested)
+    name, model_id = upstreamrecord.require_upstream_model(requested)
     record = ctx.config.upstream(name)
     if record is None:
         raise ApiError(
             409,
             "upstream_unconfigured",
             f"{requested!r} names the {name} upstream and this server has no "
-            f"{upstreams.UPSTREAM_FIELD[name]} for it. Configure it with "
+            f"{upstreamrecord.UPSTREAM_FIELD[name]} for it. Configure it with "
             f"`PUT /v1/settings` — nothing here falls back to a local model, "
             "because a route is a decision somebody made and not a guess this "
             "server gets to improvise",
@@ -225,7 +225,7 @@ def _close_inflight(inflight: InFlight, entry: Entry) -> Callable[[], Awaitable[
 
 async def _stream_from_upstream(
     client: httpx.AsyncClient,
-    record: upstreams.UpstreamRecord,
+    record: upstreamrecord.UpstreamRecord,
     url: str,
     headers: dict[str, str],
     forwarded: upstreams.Forwarded,

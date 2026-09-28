@@ -27,13 +27,13 @@ constraints, the measured numbers and the owner's rulings behind them.
 ## Leaf modules
 
 `config.py` sits under nearly everything, so it imports only modules that import
-nothing heavier than `backend` and `errors`. Each fact below has one owner, and the
-older import location re-exports it for one release:
+nothing heavier than `backend` and `errors`. Each fact below has one owner, and every
+caller imports it from there (the older locations no longer answer; `tests/test_leaf_modules.py` holds them to it):
 
-| leaf | owns | re-exported from |
+| leaf | owns | used to be imported from |
 |---|---|---|
 | `capabilityrecord` | `CapabilityRow`, `CapabilityRecord`, `desktop_reserve_words`, the `DESKTOP_BASIS_*` names | `config` |
-| `classnames` | `CLASS_NAMES`, `ROUTABLE_CLASSES`, `SELECTABLE_CLASSES` | `capability` (which refuses to import if its `CLASSES` disagree) |
+| `classnames` | `CLASS_NAMES`, `ROUTABLE_CLASSES`, `SELECTABLE_CLASSES` | `capability` (gone; `capabilityclasses` refuses to import if its `CLASSES` disagree) |
 | `narratorengines` | `HIGGS_V3`, `NARRATOR_ENGINE_SAMPLING`, `NARRATOR_ENGINES`, `DOCUMENT_READERS`, `ESTIMATE_BASES`, `EngineFootprint`, `declared_tts_footprints`, `VoicesDocumentView` | `config`, `voices`, `engines`, `narratorvoices`, `ttsplan` |
 | `enginespec` | `dtype_of`, `declared_dtype`, `stated_dtype`, `run_dtype`, `dtype_on`, `bf16_fallback`, `card_needs`, `card_args`, `UNSTATED_ENGINE_CONCURRENCY` | `engines.vllm`, `decide` |
 | `tomltable` | `check_table` and the `REVISION_PATTERN`, `MODEL_ID_PATTERN`, `HF_REPO_PATTERN`, `VOICE_ID_PATTERN`, `SHA256_PATTERN` rules | `manifests` |

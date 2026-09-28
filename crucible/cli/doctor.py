@@ -10,7 +10,7 @@ from typing import Any, Callable, Iterable, Iterator
 from .. import (
     API_VERSION,
     VERSION,
-    capability,
+    capabilityclasses,
     catalog,
     envpatches,
     hosttools,
@@ -18,30 +18,24 @@ from .. import (
     ladder,
     llamacpp,
     service,
+    verdict,
 )
 from ..backend import LLAMA_WINDOWS, MLX_DARWIN, Backend
-from ..config import (
-    DESKTOP_BASIS_MEASURED,
-    Config,
-    config_mode,
-    crucible_home,
-    desktop_reserve_words,
-)
+from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
+from ..config import Config, config_mode, crucible_home
 from ..errors import ConfigError, NoViableBackend
 from ..jobs import ALL_JOB_TYPES, build_registry
-from ..voices import NARRATOR_ENGINE_SAMPLING
+from ..memorybudget import gib_text
+from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _card_facts, _card_line
 from .common import EXIT_OK, EXIT_REFUSED, _env_spec, _fail
 from .install import INSTALLER_FOR
 
-GIB = 1024 ** 3
-
 CAPABILITY_WRITE = "crucible capability --write"
 DOCTOR_JSON = "crucible doctor --json"
 RERUN_DOCTOR = "crucible doctor"
 PATCH_LLM = "crucible env patch llm"
-INSTALL_LLM = "crucible install llm"
 
 
 @dataclass(frozen=True)
@@ -247,10 +241,6 @@ def check_files(host: Host) -> Section:
     })
 
 
-def _gib(value: int) -> str:
-    return f"{value / GIB:.1f} GiB"
-
-
 def _stale_findings(config: Config, backend: Backend) -> list[Finding]:
     record = config.capability
     assert record is not None
@@ -262,14 +252,14 @@ def _stale_findings(config: Config, backend: Backend) -> list[Finding]:
         )
     if record.total_bytes != backend.gpu.vram_bytes:
         stale.append(
-            f"the record was decided against {_gib(record.total_bytes)} and this "
-            f"host has {_gib(backend.gpu.vram_bytes)}; re-run `{CAPABILITY_WRITE}`"
+            f"the record was decided against {gib_text(record.total_bytes)} and this "
+            f"host has {gib_text(backend.gpu.vram_bytes)}; re-run `{CAPABILITY_WRITE}`"
         )
     if record.desktop_allowance_bytes != config.desktop_allowance_bytes:
         stale.append(
-            f"the record was decided with a {_gib(record.desktop_allowance_bytes)} "
+            f"the record was decided with a {gib_text(record.desktop_allowance_bytes)} "
             f"desktop reserve and [accelerator] now says "
-            f"{_gib(config.desktop_allowance_bytes)}; re-run `{CAPABILITY_WRITE}`"
+            f"{gib_text(config.desktop_allowance_bytes)}; re-run `{CAPABILITY_WRITE}`"
         )
     return [Finding("capability_stale", message, CAPABILITY_WRITE) for message in stale]
 
@@ -283,8 +273,8 @@ def check_capability(host: Host) -> Section:
         return Section("capability", {"capability": None})
     findings = _stale_findings(config, backend)
     could_enable: list[str] = []
-    for name in sorted({cls.job_type for cls in capability.CLASSES}):
-        rows = [record.row(cls.name) for cls in capability.classes_for_job_type(name)]
+    for name in sorted({cls.job_type for cls in capabilityclasses.CLASSES}):
+        rows = [record.row(cls.name) for cls in capabilityclasses.classes_for_job_type(name)]
         known = [row for row in rows if row is not None]
         if not known:
             continue
@@ -378,7 +368,7 @@ def _llama_engine_report(config: Config, backend: Backend) -> tuple[dict[str, An
         "detail": llamacpp.doctor_line(config, backend.gpu.vendor),
     }
     if found is None:
-        return entry, [Finding("llm_env", entry["detail"], INSTALL_LLM)]
+        return entry, [Finding("llm_env", entry["detail"], llamacpp.INSTALL_COMMAND)]
     entry["bytes"] = found.bytes
     entry["pulled"] = found.pulled
     return entry, []
@@ -392,7 +382,11 @@ def check_llm_env(host: Host) -> Section:
         entry, findings = _llama_engine_report(config, backend)
     else:
         entry, findings = _env_report(
-            "llm_env", config.home, jobenv.llm_env(backend.kind), backend.kind, INSTALL_LLM
+            "llm_env",
+            config.home,
+            jobenv.llm_env(backend.kind),
+            backend.kind,
+            llamacpp.INSTALL_COMMAND,
         )
     return Section("llm_env", {"llm_env": entry}, tuple(findings))
 
@@ -561,10 +555,10 @@ def check_desktop_reserve(host: Host) -> Section:
         return Section("desktop_reserve", {})
     return Section("desktop_reserve", {}, notes=(
         f"desktop_reserve_unmeasured: the reserve is "
-        f"{_gib(config.desktop_allowance_bytes)} "
+        f"{gib_text(config.desktop_allowance_bytes)} "
         f"({config.desktop_allowance_basis}); the ladder saw this "
-        f"desktop at up to {_gib(seen)}, which would keep "
-        f"{_gib(would)}. `crucible capability "
+        f"desktop at up to {gib_text(seen)}, which would keep "
+        f"{gib_text(would)}. `crucible capability "
         "--measure-desktop` re-measures it",
     ))
 
@@ -652,12 +646,12 @@ def lines_backend(report: dict[str, Any]) -> Iterator[str]:
     yield f"backend: {backend['kind']} on {backend['platform']}/{backend['arch']}"
     yield (
         f"gpu:     {gpu['vendor']} {gpu['name']} "
-        f"({gpu['vram_bytes'] / GIB:.1f} GiB) — {backend['detail']}"
+        f"({gib_text(gpu['vram_bytes'])}) — {backend['detail']}"
     )
     if (
         report["card"] is not None
         and backend["kind"] != MLX_DARWIN
-        and gpu["vendor"] != capability.CPU_VENDOR
+        and gpu["vendor"] != verdict.CPU_VENDOR
     ):
         yield f"card:    {_card_line(report['card'])}"
     measured = report.get("ladder")

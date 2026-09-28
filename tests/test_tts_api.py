@@ -12,12 +12,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, residency as residency_module, tasks, weights
-from crucible.accelerator import GIB, ComputeApp
+from crucible.accelerator import ComputeApp
+from crucible.memorybudget import GIB
 from crucible.jobs import ALL_JOB_TYPES
 from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
 from crucible.voicerepo import REPO_MANIFEST_NAME
-from crucible.voices import NARRATOR_ENGINE_SAMPLING, load_voice
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
+from crucible.voicecatalog import load_voice
 
 from .conftest import (
     FAKE_BACKEND,
@@ -648,7 +650,8 @@ def test_unload_voice_will_not_take_a_model_off_the_card(
 def test_a_resident_voice_is_what_a_model_load_would_reclaim(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from crucible.config import declared_tts_footprints, load_config, write_config
+    from crucible.config import load_config, write_config
+    from crucible.narratorengines import declared_tts_footprints
 
     write_config(
         home,

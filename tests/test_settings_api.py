@@ -8,7 +8,14 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capability, ladder, upstreams
+from crucible import (
+    capabilitywords,
+    classnames,
+    ladder,
+    upstreamrecord,
+    upstreams,
+    verdict,
+)
 from crucible.config import config_path, crucible_home, load_config
 
 from .conftest import FAKE_BACKEND, configure_box
@@ -22,11 +29,11 @@ def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
     home = crucible_home()
     if not config_path(home).is_file():
         configure_box(home)
-    return capability.record(
+    return verdict.record(
         "cuda-linux",
         total_bytes=total,
         desktop_allowance_bytes=allowance,
-        decisions=capability.decide_all(
+        decisions=verdict.decide_all(
             "cuda-linux",
             total_bytes=total,
             desktop_allowance_bytes=allowance,
@@ -84,14 +91,14 @@ def test_the_document_names_every_class_and_every_upstream_configured_or_not(
     settings_client, auth
 ) -> None:
     body = settings_client.get("/v1/settings", headers=auth).json()
-    assert set(body["routes"]) == set(capability.ROUTABLE_CLASSES)
+    assert set(body["routes"]) == set(classnames.ROUTABLE_CLASSES)
     assert set(body["routes"]) == {
         "clean", "translate", "simplify", "analysis", "generate"
     }
     for row in body["routes"].values():
         assert row["route"] == "local"
     assert body["routes"]["clean"]["model"] == "qwen3.5-9b"
-    assert set(body["upstreams"]) == set(upstreams.UPSTREAM_NAMES)
+    assert set(body["upstreams"]) == set(upstreamrecord.UPSTREAM_NAMES)
     assert body["upstreams"] == {
         "anthropic": {"configured": False, "key_hint": None},
         "openai": {"configured": False, "key_hint": None},
@@ -106,7 +113,7 @@ def test_pages_is_not_routable_because_it_is_not_one_of_the_four(
 ) -> None:
     body = settings_client.get("/v1/settings", headers=auth).json()
     assert "pages" not in body["routes"]
-    assert "pages" not in capability.ROUTABLE_CLASSES
+    assert "pages" not in classnames.ROUTABLE_CLASSES
 
 
 def test_an_upstream_and_a_route_land_in_one_request(settings_client, auth) -> None:
@@ -365,7 +372,7 @@ def test_capability_says_the_route_and_keeps_the_local_answer(
     assert row["enabled"] is True
     assert row["selected"] == "anthropic/claude-sonnet-5"
     assert row["reason"].startswith("routed to anthropic; ")
-    assert capability.LOCAL_ANSWER_PREFIX + local_reason in row["reason"]
+    assert capabilitywords.LOCAL_ANSWER_PREFIX + local_reason in row["reason"]
     assert after["clean"]["route"] == "local"
     assert after["clean"]["reason"] == before["clean"]["reason"]
     assert after["tts"]["route"] == "local"
@@ -407,7 +414,7 @@ def test_the_operators_routes_survive_a_capability_rewrite(
         },
     )
     config = load_config(home)
-    decisions = capability.decide_all(
+    decisions = verdict.decide_all(
         "cuda-linux",
         total_bytes=FAKE_BACKEND.gpu.vram_bytes,
         desktop_allowance_bytes=config.desktop_allowance_bytes,

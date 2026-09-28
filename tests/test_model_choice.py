@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from crucible.capability import (
-    CLASSES,
-    ROUTABLE_CLASSES,
-    UPSTREAM_OFFER,
-    decide,
-    decide_all,
-)
+from crucible.capabilityclasses import CLASSES
+from crucible.capabilitywords import UPSTREAM_OFFER
+from crucible.classnames import ROUTABLE_CLASSES
+from crucible.verdict import decide, decide_all
 
 THREE_NINETY_TI = 25_757_220_864
 TWELVE_GIG = 12 * 1024 ** 3

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import accelerator
+from crucible import accelerator, memorybudget
 from crucible import residency as residency_module
 from crucible.config import load_config, write_config
 from crucible.engines import EngineError
@@ -381,7 +381,7 @@ def test_a_survivor_is_named_by_the_guard_with_the_command_to_stop_it(
 
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     monkeypatch.setattr(
-        accelerator, "probe_vram", lambda: (4 * accelerator.GIB, 24 * accelerator.GIB)
+        accelerator, "probe_vram", lambda: (4 * memorybudget.GIB, 24 * memorybudget.GIB)
     )
     with pytest.raises(ApiError) as refusal:
         accelerator.guard("cuda-linux", model_id="m", need_bytes=1)

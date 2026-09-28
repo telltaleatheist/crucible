@@ -65,8 +65,8 @@ def test_bookforge_asks_for_what_its_install_door_used_to_print() -> None:
 
 def test_generated_job_types_follow_the_core_backend_support_policy() -> None:
     from crucible.backend import LLAMA_WINDOWS
-    from crucible.capability import WSL_ONLY_JOB_TYPES
     from crucible.manifests import BACKEND_ENGINES
+    from crucible.verdict import WSL_ONLY_JOB_TYPES
 
     document = modules.build(modules.read_declaration(MODULES_DIR / "bookforge.toml"), "bookforge")
     for job in document["job_types"]:

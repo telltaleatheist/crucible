@@ -5,11 +5,11 @@ import subprocess
 import time
 from pathlib import Path
 
-from .. import capability, hosttools, interpreter, jobenv, llamacpp
+from .. import capabilitywords, hosttools, interpreter, jobenv, llamacpp, verdict
 from ..backend import Backend, LLAMA_WINDOWS
 from ..config import Config
 from ..jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT
-from ..voices import NARRATOR_ENGINE_SAMPLING
+from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step
 from .common import _env_spec, _fail
@@ -119,9 +119,9 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
 def _install_llama_windows(
     config: Config, backend: Backend, args: argparse.Namespace
 ) -> int:
-    if args.job_type in capability.WSL_ONLY_JOB_TYPES:
+    if args.job_type in verdict.WSL_ONLY_JOB_TYPES:
         return _fail(
-            f"needs_wsl: {args.job_type} — {capability.NEEDS_WSL_REASON}. "
+            f"needs_wsl: {args.job_type} — {capabilitywords.NEEDS_WSL_REASON}. "
             f"The {LLAMA_WINDOWS} backend serves the llm classes and pages "
             "from llama.cpp; tts, asr, align, rvc and denoise are Python "
             "engines and run in the WSL2 guest"

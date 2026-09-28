@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from crucible import weights
 from crucible.backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN, Backend, Gpu
-from crucible.capability import BY_NAME, classes_for_model
+from crucible.capabilityclasses import BY_NAME, classes_for_model
 from crucible.config import Config
 from crucible.manifests import (
     ManifestError,

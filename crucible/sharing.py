@@ -14,7 +14,7 @@ from .config import crucible_home
 from .errors import CrucibleError
 from .pairing import parse_pairing_line, read_pairing_file
 from .platform.runner import ProcessRunner, Runner
-from .protocol import DEFAULT_PORT, api_headers, user_agent
+from .protocol import DEFAULT_PORT, USER_AGENT_HEADER, api_headers, user_agent
 
 RECORD = "sharing.json"
 TIMEOUT = 15.0
@@ -94,7 +94,7 @@ class PairedEngine:
             self.pairing.url + "/v1/" + path,
             data=None if body is None else json.dumps(body).encode(), method=method,
             headers={**api_headers(self.pairing.token),
-                     "Content-Type": "application/json", "User-Agent": user_agent("sharing")},
+                     "Content-Type": "application/json", USER_AGENT_HEADER: user_agent("sharing")},
         )
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

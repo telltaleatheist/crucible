@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .. import capability, catalog, jobenv, tasks
+from .. import capabilityclasses, catalog, jobenv, tasks
 from ..backend import Backend
 from ..config import Config
 from ..errors import ApiError
 from ..jobs.llm import llm_engine_status
-from ..voices import NARRATOR_ENGINE_SAMPLING
+from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import hostdoor
 from .states import TASK_TYPES
 
@@ -217,10 +217,10 @@ def need_entry(config: Config, backend: Backend, where: str, raw: Any) -> EntryO
     capability_class = raw.get("class")
     if not isinstance(capability_class, str):
         return f"{where}: `class` must be a string"
-    if capability_class not in capability.BY_NAME:
+    if capability_class not in capabilityclasses.BY_NAME:
         return (
             f"{where}: {capability_class!r} is not a capability class; they "
-            f"are {sorted(capability.BY_NAME)}"
+            f"are {sorted(capabilityclasses.BY_NAME)}"
         )
     return ModuleEntry(name=f"resolve {capability_class}", capability_class=capability_class)
 

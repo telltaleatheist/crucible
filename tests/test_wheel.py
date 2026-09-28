@@ -122,7 +122,7 @@ def test_every_recipe_an_install_can_be_asked_for_travels(
     wheel_names: list[str],
 ) -> None:
     from crucible import jobenv
-    from crucible.voices import NARRATOR_ENGINE_SAMPLING
+    from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 
     wanted: set[str] = set()
     for backend_kind in ("cuda-linux", "mlx-darwin"):
@@ -174,7 +174,7 @@ def test_an_INSTALLED_wheel_reads_its_own_catalog(
         )
     probe = (
         "from crucible.manifests import load_all_manifests;"
-        "from crucible.voices import load_all_voices;"
+        "from crucible.voicecatalog import load_all_voices;"
         "from crucible.denoisemodels import load_all_denoise_manifests;"
         "from crucible.rvcmodels import load_all_rvc_manifests;"
         "from crucible.rvcbase import load_rvc_base;"

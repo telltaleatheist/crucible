@@ -48,10 +48,11 @@ from .cardfacts import (
 from .clock import utcnow_to_the_second as _now
 from .config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from .errors import ApiError, CrucibleError
+from .memorybudget import GIB, gib_text
 
 DESKTOP_SAMPLES = 5
 
-SMOKE_NEED_BYTES = 1024 ** 3
+SMOKE_NEED_BYTES = GIB
 
 SMOKE_TIMEOUT_SECONDS = 300.0
 
@@ -188,14 +189,13 @@ class DesktopReserve:
 
     @property
     def note(self) -> str:
-        gib = 1024 ** 3
         return (
-            f"desktop held {self.sample.least_bytes / gib:.2f}-"
-            f"{self.sample.peak_bytes / gib:.2f} GiB of "
-            f"{self.sample.total_bytes / gib:.1f} GiB over {self.sample.samples}s on "
+            f"desktop held {self.sample.least_bytes / GIB:.2f}-"
+            f"{gib_text(self.sample.peak_bytes, 2)} of "
+            f"{gib_text(self.sample.total_bytes)} over {self.sample.samples}s on "
             f"{self.sample.on}; kept peak + max(peak, "
-            f"{accelerator.FOREIGN_PROCESS_FLOOR_BYTES / gib:.0f} GiB), at most "
-            f"{DEFAULT_DESKTOP_ALLOWANCE_BYTES / gib:.0f} GiB"
+            f"{gib_text(accelerator.FOREIGN_PROCESS_FLOOR_BYTES, 0)}), at most "
+            f"{gib_text(DEFAULT_DESKTOP_ALLOWANCE_BYTES, 0)}"
         )
 
 
@@ -269,7 +269,7 @@ def desktop_blocker(
         if app.used_bytes is not None and app.used_bytes >= accelerator.FOREIGN_PROCESS_FLOOR_BYTES:
             return (
                 f"{app.name} (pid {app.pid}) holds "
-                f"{app.used_bytes / 1024 ** 3:.1f} GiB; that is somebody's job, "
+                f"{gib_text(app.used_bytes)}; that is somebody's job, "
                 "not the desktop"
             )
     return None
@@ -310,7 +310,7 @@ def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Run
             started,
             facts,
             detail=(
-                f"{backend.gpu.name}: {backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB "
+                f"{backend.gpu.name}: {gib_text(backend.gpu.vram_bytes)} "
                 "pool; no NVIDIA card, so no compute capability or desktop sample"
             ),
         )
@@ -339,12 +339,12 @@ def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Run
     detail = (
         f"{name}, driver {driver}, compute capability {cap}: "
         f"{int(total) / 1024:.1f} GiB, {int(free) / 1024:.1f} GiB free; the "
-        f"desktop held {min(used) / 1024 ** 3:.1f}-{max(used) / 1024 ** 3:.1f} GiB"
+        f"desktop held {min(used) / GIB:.1f}-{gib_text(max(used))}"
     )
     if over > 0:
         detail += (
-            f", {over / 1024 ** 3:.1f} GiB more than the "
-            f"{desktop_allowance_bytes / 1024 ** 3:.1f} GiB desktop allowance"
+            f", {gib_text(over)} more than the "
+            f"{gib_text(desktop_allowance_bytes)} desktop allowance"
         )
     return RungResult(CARD, PASSED, started, facts, detail=detail)
 
@@ -608,9 +608,9 @@ def rung_vllm(
     config: Any, backend: Backend, card: CardFacts
 ) -> RungResult:
     from . import vram
-    from .capability import MIN_LOAD_CONTEXT
+    from .contextceiling import MIN_LOAD_CONTEXT
     from .engines import EngineError, build_engine, engine_model_name, find_free_port, logs_dir
-    from .engines.vllm import card_args
+    from .enginespec import card_args
     from .residency import DEFAULT_READY_TIMEOUT_SECONDS, Residency
 
     started = _now()

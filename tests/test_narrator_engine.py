@@ -9,12 +9,8 @@ from typing import Iterator
 import pytest
 
 from crucible import procgroup
-from crucible.engines import (
-    NARRATOR_ENGINES,
-    EngineError,
-    NarratorEngine,
-    build_voice_engine,
-)
+from crucible.engines import EngineError, NarratorEngine, build_voice_engine
+from crucible.narratorengines import NARRATOR_ENGINES
 from crucible.engines import base as engine_base
 from crucible.engines.base import SubprocessEngine as BaseEngine
 from crucible.engines.mlx_lm import MlxLmEngine
@@ -45,7 +41,8 @@ from crucible.narratorvoices import (
     VoicesDocument,
     write_document,
 )
-from crucible.voices import NARRATOR_ENGINE_SAMPLING, parse_voice
+from crucible.voices import parse_voice
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 
 from .conftest import end_process_tree
 from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine

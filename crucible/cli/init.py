@@ -6,28 +6,31 @@ from pathlib import Path
 from typing import Any
 
 from .. import ladder
-from ..backend import BACKEND_KINDS, Backend, MLX_DARWIN
-from ..config import (
-    Config,
-    DEFAULT_DESKTOP_ALLOWANCE_BYTES,
-    DEFAULT_HOST,
-    DEFAULT_PORT,
-    DEFAULT_RETENTION_DAYS,
+from ..backend import BACKEND_KINDS, MLX_DARWIN, Backend
+from ..capabilityrecord import (
     DESKTOP_BASES,
     DESKTOP_BASIS_DECLARED,
     DESKTOP_BASIS_MEASURED,
     DESKTOP_BASIS_STATED,
+)
+from ..config import (
+    DEFAULT_DESKTOP_ALLOWANCE_BYTES,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_RETENTION_DAYS,
     MLX_DESKTOP_ALLOWANCE_FRACTION,
+    Config,
     config_mode,
     config_path,
     crucible_home,
-    declared_tts_footprints,
     default_desktop_allowance_bytes,
     default_server_name,
     mint_token,
     write_config,
 )
 from ..errors import ConfigError, NoViableBackend
+from ..memorybudget import gib_text
+from ..narratorengines import declared_tts_footprints
 from . import common
 from .common import EXIT_OK, _backend_mismatch, _fail
 from .token import PAIRING_NOT_PRINTED, _pairing_permission, _write_pairing_file
@@ -224,14 +227,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     for footprint in declared_tts_footprints(backend.kind):
         print(
             f"tts {footprint.engine}: "
-            f"{footprint.memory_bytes_estimate / 1024 ** 3:.1f} GiB per resident "
+            f"{gib_text(footprint.memory_bytes_estimate)} per resident "
             f"voice ({footprint.estimate_basis}), {footprint.max_num_seqs} in "
             f"flight — this box's figure, rewritable in config.toml "
             f"[tts.{footprint.engine}]"
         )
     print(
-        f"desktop:  {desktop_allowance_bytes / 1024 ** 3:.1f} GiB of "
-        f"{backend.gpu.vram_bytes / 1024 ** 3:.1f} GiB treated as this host's own "
+        f"desktop:  {gib_text(desktop_allowance_bytes)} of "
+        f"{gib_text(backend.gpu.vram_bytes)} treated as this host's own "
         f"desktop, not somebody's job ({desktop_source})"
     )
     if desktop_basis == DESKTOP_BASIS_MEASURED:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -8,25 +9,22 @@ from types import SimpleNamespace
 import pytest
 
 from crucible import (
-    capability,
-    capabilityrecord,
+    capabilityclasses,
+    capabilitywords,
     classnames,
     config,
-    decide,
     enginespec,
     manifests,
     modules,
     narratorengines,
     tomltable,
     upstreamrecord,
-    upstreams,
     voices,
     weights,
 )
 from crucible.alignmodels import load_all_align_manifests
 from crucible.asrmodels import load_all_asr_manifests
 from crucible.denoisemodels import load_all_denoise_manifests
-from crucible.engines import vllm
 from crucible.errors import CrucibleError
 from crucible.rvcmodels import load_all_rvc_manifests
 
@@ -53,7 +51,7 @@ def test_config_imports_only_leaves() -> None:
     loaded = _loaded_after("crucible.config")
     for heavy in (
         "crucible.voices",
-        "crucible.capability",
+        "crucible.verdict",
         "crucible.manifests",
         "crucible.upstreams",
         "crucible.engines",
@@ -62,8 +60,11 @@ def test_config_imports_only_leaves() -> None:
         assert heavy not in loaded, heavy
 
 
-def test_capability_loads_no_engine_adapter_and_no_decide_door() -> None:
-    loaded = _loaded_after("crucible.capability")
+@pytest.mark.parametrize(
+    "module", ["crucible.verdict", "crucible.installplan", "crucible.capabilityquery"]
+)
+def test_capability_loads_no_engine_adapter_and_no_decide_door(module: str) -> None:
+    loaded = _loaded_after(module)
     assert "crucible.engines" not in loaded
     assert "crucible.decide" not in loaded
     assert "pydantic" not in loaded
@@ -75,24 +76,28 @@ def test_weights_reaches_no_manifest_module() -> None:
     assert "crucible.manifests" not in loaded
 
 
-def test_the_old_import_spots_hand_back_the_leaf_s_own_objects() -> None:
-    assert config.CapabilityRecord is capabilityrecord.CapabilityRecord
-    assert config.CapabilityRow is capabilityrecord.CapabilityRow
-    assert config.desktop_reserve_words is capabilityrecord.desktop_reserve_words
-    assert config.EngineFootprint is narratorengines.EngineFootprint
-    assert config.declared_tts_footprints is narratorengines.declared_tts_footprints
-    assert config.TTS_ESTIMATE_BASES is narratorengines.ESTIMATE_BASES
-    assert voices.ESTIMATE_BASES is narratorengines.ESTIMATE_BASES
-    assert voices.NARRATOR_ENGINE_SAMPLING is narratorengines.NARRATOR_ENGINE_SAMPLING
-    assert capability.ROUTABLE_CLASSES is classnames.ROUTABLE_CLASSES
-    assert capability.SELECTABLE_CLASSES is classnames.SELECTABLE_CLASSES
-    assert decide.UNSTATED_ENGINE_CONCURRENCY == enginespec.UNSTATED_ENGINE_CONCURRENCY
-    assert vllm.bf16_fallback is enginespec.bf16_fallback
-    assert vllm.card_args is enginespec.card_args
-    assert vllm.dtype_of is enginespec.dtype_of
-    assert manifests.check_table is tomltable.check_table
-    assert upstreams.UpstreamRecord is upstreamrecord.UpstreamRecord
-    assert upstreams.UPSTREAM_NAMES is upstreamrecord.UPSTREAM_NAMES
+REMOVED_RE_EXPORTS = {
+    "crucible.config": (
+        "desktop_reserve_words",
+        "declared_tts_footprints",
+        "TTS_ESTIMATE_BASES",
+        "DESKTOP_BASIS_MEASURED",
+    ),
+    "crucible.voices": ("_parse", "load_all_voices", "load_voice", "unserved_pins"),
+    "crucible.voicerepo": ("_parse_pins",),
+    "crucible.decide": ("UNSTATED_ENGINE_CONCURRENCY",),
+    "crucible.engines.base": ("str_flag",),
+    "crucible.engines.vllm": ("bf16_fallback", "card_args", "dtype_of", "ENGINE_NAME"),
+    "crucible.ttsplan": ("HIGGS_ENGINE",),
+    "crucible.upstreams": ("UPSTREAM_NAMES", "blank", "split_model", "settings_entry"),
+}
+
+
+@pytest.mark.parametrize("module", sorted(REMOVED_RE_EXPORTS))
+def test_the_old_import_spots_no_longer_answer(module: str) -> None:
+    loaded = importlib.import_module(module)
+    for name in REMOVED_RE_EXPORTS[module]:
+        assert not hasattr(loaded, name), f"{module}.{name} is back"
 
 
 def test_higgs_v3_is_written_once() -> None:
@@ -108,11 +113,11 @@ def test_higgs_v3_is_written_once() -> None:
         if path.name != "narratorengines.py"
         and '"higgs-v3"' in path.read_text(encoding="utf-8")
     ]
-    assert offenders in ([], ["crucible/jobenv.py"]), offenders
+    assert offenders == [], offenders
 
 
 def test_classnames_agree_with_the_class_catalogue() -> None:
-    assert classnames.CLASS_NAMES == tuple(entry.name for entry in capability.CLASSES)
+    assert classnames.CLASS_NAMES == tuple(entry.name for entry in capabilityclasses.CLASSES)
     assert set(classnames.ROUTABLE_CLASSES) <= set(classnames.SELECTABLE_CLASSES)
 
 
@@ -188,17 +193,17 @@ def test_a_voice_id_is_at_most_64_characters_everywhere() -> None:
     assert not tomltable.VOICE_ID_PATTERN.match("a" * 65)
     with pytest.raises(voices.VoiceError, match="at most 64"):
         voices.home_voice_path("a" * 65)
-    from crucible.voicerepo import _parse_pins
+    from crucible.voicerepo import parse_pins
 
     text = f'["{"a" * 65}"]\nhf_repo = "o/n"\nrevision = "{"0" * 40}"\n'
     with pytest.raises(voices.VoiceError, match="at most 64"):
-        _parse_pins(text, Path("pins.toml"))
+        parse_pins(text, Path("pins.toml"))
 
 
 def test_the_upstream_offer_names_every_upstream() -> None:
     for name in upstreamrecord.UPSTREAM_NAMES:
-        assert upstreamrecord.UPSTREAM_DISPLAY[name] in capability.UPSTREAM_OFFER
-    assert "add an API key" in capability.UPSTREAM_OFFER
+        assert upstreamrecord.UPSTREAM_DISPLAY[name] in capabilitywords.UPSTREAM_OFFER
+    assert "add an API key" in capabilitywords.UPSTREAM_OFFER
 
 
 def test_every_weights_subject_names_its_pull_command_and_its_aliases() -> None:
@@ -233,10 +238,10 @@ def test_a_denoise_model_not_installed_names_its_own_pull_command(
 
 
 def test_a_class_is_checked_once_and_resolved_from_the_same_table() -> None:
-    served = capability.models_by_class()
+    served = capabilityclasses.models_by_class()
     assert modules.check_class("clean") == served["clean"]
     for model_id in sorted(set().union(*served.values())):
-        assert set(capability.classes_for_model(model_id)) == {
+        assert set(capabilityclasses.classes_for_model(model_id)) == {
             name for name, ids in served.items() if model_id in ids
         }
     with pytest.raises(modules.ModuleError, match=r"\[\[subjects\]\]"):

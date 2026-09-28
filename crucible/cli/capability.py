@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .. import capability, ladder
+from .. import installplan, ladder, memorybudget, verdict
 from ..backend import Backend, MLX_DARWIN
 from ..capabilitystore import decide_for, write_capability
-from ..config import Config, DESKTOP_BASIS_MEASURED, desktop_reserve_words
+from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
+from ..config import Config
+from ..memorybudget import GIB, gib_text
 from . import common
 from .common import EXIT_OK, _fail
 
@@ -45,18 +47,17 @@ def _card_line(facts: dict[str, Any]) -> str:
 
 
 def _print_decisions(
-    config: Config, backend: Backend, decisions: tuple[capability.Decision, ...]
+    config: Config, backend: Backend, decisions: tuple[verdict.Decision, ...]
 ) -> None:
-    budget = capability.available_bytes(
+    budget = memorybudget.available_bytes(
         backend.gpu.vram_bytes, config.desktop_allowance_bytes
     )
-    gib = 1024 ** 3
     print(f"backend:  {backend.kind} ({backend.gpu.name})")
-    if backend.kind != MLX_DARWIN and backend.gpu.vendor != capability.CPU_VENDOR:
+    if backend.kind != MLX_DARWIN and backend.gpu.vendor != verdict.CPU_VENDOR:
         print(f"card:     {_card_line(_card_facts(config.home, backend))}")
     print(
-        f"pool:     {backend.gpu.vram_bytes / gib:.1f} GiB "
-        f"{capability.POOL_NAME[backend.kind]}"
+        f"pool:     {gib_text(backend.gpu.vram_bytes)} "
+        f"{verdict.POOL_NAME[backend.kind]}"
     )
     print(
         "reserve:  "
@@ -66,7 +67,7 @@ def _print_decisions(
     )
     if config.desktop_allowance_note:
         print(f"          {config.desktop_allowance_note}")
-    print(f"budget:   {budget / gib:.1f} GiB available to a job")
+    print(f"budget:   {gib_text(budget)} available to a job")
     for decision in decisions:
         mark = "yes" if decision.enabled else "NO"
         print(f"{decision.capability:<10} {mark:<4} {decision.reason}")
@@ -82,7 +83,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
         if reserve is None:
             return _fail(
                 f"desktop_not_measured: {why_not}. Nothing was written; the "
-                f"reserve stays {config.desktop_allowance_bytes / 1024 ** 3:.1f} GiB "
+                f"reserve stays {gib_text(config.desktop_allowance_bytes)} "
                 f"({config.desktop_allowance_basis})"
             )
         before = config
@@ -98,7 +99,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
         f"enable_{name}": False
         for name in sorted({d.job_type for d in decisions})
         if getattr(config, f"enable_{name}")
-        and not capability.job_type_enabled(name, decisions)
+        and not verdict.job_type_enabled(name, decisions)
     }
 
     if args.json:
@@ -125,12 +126,12 @@ def cmd_capability(args: argparse.Namespace) -> int:
                             "desktop_peak_bytes": reserve.sample.peak_bytes,
                         }
                     ),
-                    "available_bytes": capability.available_bytes(
+                    "available_bytes": memorybudget.available_bytes(
                         backend.gpu.vram_bytes, config.desktop_allowance_bytes
                     ),
                     "classes": [d.to_dict() for d in decisions],
                     "job_types": {
-                        name: capability.job_type_enabled(name, decisions)
+                        name: verdict.job_type_enabled(name, decisions)
                         for name in sorted({d.job_type for d in decisions})
                     },
                     "written": bool(args.write or args.measure_desktop),
@@ -141,13 +142,12 @@ def cmd_capability(args: argparse.Namespace) -> int:
         )
     else:
         if before is not None and reserve is not None:
-            gib = 1024 ** 3
             print(
-                f"desktop:  was {before.desktop_allowance_bytes / gib:.1f} GiB "
+                f"desktop:  was {gib_text(before.desktop_allowance_bytes)} "
                 f"({before.desktop_allowance_basis}), now "
-                f"{reserve.allowance_bytes / gib:.1f} GiB (measured); budget "
-                f"{capability.available_bytes(backend.gpu.vram_bytes, before.desktop_allowance_bytes) / gib:.1f}"
-                f" -> {capability.available_bytes(backend.gpu.vram_bytes, reserve.allowance_bytes) / gib:.1f} GiB"
+                f"{gib_text(reserve.allowance_bytes)} (measured); budget "
+                f"{memorybudget.available_bytes(backend.gpu.vram_bytes, before.desktop_allowance_bytes) / GIB:.1f}"
+                f" -> {gib_text(memorybudget.available_bytes(backend.gpu.vram_bytes, reserve.allowance_bytes))}"
             )
         _print_decisions(config, backend, decisions)
 
@@ -215,7 +215,7 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
     disabled: list[str] = []
     print("capability:")
     for job_type in job_types:
-        enabled = capability.job_type_enabled(job_type, decisions)
+        enabled = verdict.job_type_enabled(job_type, decisions)
         flags[f"enable_{job_type}"] = enabled
         mine = [d for d in decisions if d.job_type == job_type]
         for decision in mine:
@@ -229,9 +229,9 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
     written = write_capability(config, backend, decisions, flags)
     print(f"recorded in {written}")
     card = ladder.card_for(config.home, backend.gpu)
-    pool = capability.pool_name(backend.kind, backend.gpu.vendor)
+    pool = verdict.pool_name(backend.kind, backend.gpu.vendor)
     for job_type in job_types:
-        plan = capability.install_plan(
+        plan = installplan.install_plan(
             job_type,
             decisions,
             card=card,

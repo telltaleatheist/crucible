@@ -20,7 +20,6 @@ from pydantic import (
     model_validator,
 )
 
-from .enginespec import UNSTATED_ENGINE_CONCURRENCY
 from .errors import ApiError
 
 LETTERS: tuple[str, ...] = tuple(string.ascii_uppercase)
@@ -844,7 +843,6 @@ __all__ = [
     "SYSTEM_PROMPT",
     "ScoreAnswer",
     "ScoreQuestion",
-    "UNSTATED_ENGINE_CONCURRENCY",
     "YESNO_OPTIONS",
     "YesNoAnswer",
     "YesNoQuestion",

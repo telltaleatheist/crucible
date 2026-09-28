@@ -13,7 +13,7 @@ from .fit import Candidate, CatalogCandidates, WorkingContext, cached_catalog
 from .manifests import BACKEND_ENGINES, load_all_manifests, manifests_dir
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests, rvc_manifests_dir
-from .voices import load_all_voices
+from .voicecatalog import load_all_voices
 
 CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_all_manifests: manifests_dir,

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import EngineError, SubprocessEngine, weights_subject_id
+from ..errors import EngineError
+from .base import SubprocessEngine, weights_subject_id
 
 SERVE_SCRIPT = Path(__file__).resolve().with_name("mlx_vlm_serve.py")
 

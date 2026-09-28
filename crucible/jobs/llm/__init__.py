@@ -6,21 +6,16 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ... import accelerator, jobenv, llamacpp, ollamastore, vram, weights
+from ... import accelerator, enginespec, jobenv, llamacpp, ollamastore, vram, weights
 from ... import residency as residency_module
 from ...backend import LLAMA_WINDOWS
-from ...capability import (
-    MIN_LOAD_CONTEXT,
-    Candidate,
-    available_bytes,
-    check_load_context,
-)
 from ...cardfacts import card_for
 from ...clock import utcnow
 from ...config import Config
+from ...contextceiling import MIN_LOAD_CONTEXT, check_load_context
 from ...engines import EngineError, engine_load_args, find_free_port, start_engine
-from ...engines import vllm as vllm_engine
 from ...errors import ApiError, JobError
+from ...fit import Candidate
 from ...jobtypes import LOAD_MODEL, UNLOAD_MODEL
 from ...manifests import (
     BackendSpec,
@@ -29,6 +24,7 @@ from ...manifests import (
     fingerprint,
     load_all_manifests,
 )
+from ...memorybudget import available_bytes
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_LLM,
@@ -454,7 +450,7 @@ class LoadModelJobType:
                 context=needs.context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
-                card_args=vllm_engine.card_args(
+                card_args=enginespec.card_args(
                     needs.spec, card_for(self._config.home, self._backend.gpu)
                 ),
             )

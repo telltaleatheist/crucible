@@ -5,7 +5,7 @@ from typing import Any
 
 from .backend import CUDA_LINUX
 from .memorybudget import available_bytes
-from .narratorengines import HIGGS_V3 as HIGGS_ENGINE
+from .narratorengines import HIGGS_V3
 from .servingplan import ServingVariant
 
 BF16_ONE_AT_A_TIME_BYTES = 10_000_000_000
@@ -58,7 +58,7 @@ def variants(declared_width: int, declared_need_bytes: int) -> tuple[ServingVari
 def ladder_for(manifest: Any, spec: Any, backend_kind: str) -> tuple[ServingVariant, ...] | None:
     if backend_kind != CUDA_LINUX:
         return None
-    if getattr(manifest, "narrator_engine", None) != HIGGS_ENGINE:
+    if getattr(manifest, "narrator_engine", None) != HIGGS_V3:
         return None
     serving = getattr(manifest, "serving", None)
     if serving is None:
@@ -133,9 +133,7 @@ __all__ = [
     "LoadPlan",
     "load_plan",
     "BF16_ONE_AT_A_TIME_BYTES",
-    "HIGGS_ENGINE",
     "PENDING_NOTE",
-    "ServingVariant",
     "bf16_need",
     "choose",
     "explain",

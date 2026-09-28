@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator
 
-from .capability import CLASSES
+from .capabilityclasses import CLASSES
 from .clock import utcnow
 from .errors import ApiError
 from .protocol import ACT_HEADER

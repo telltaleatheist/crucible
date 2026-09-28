@@ -8,7 +8,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CLIENT_TS = ROOT / "sdk" / "ts" / "src" / "client.ts"
 PHASE15 = ROOT / "docs" / "history" / "PHASE15-HOST.md"
 MODEL_CHOICE = ROOT / "docs" / "MODEL-CHOICE.md"
-CAPABILITY = ROOT / "crucible" / "capability.py"
+CAPABILITY_PROSE = tuple(
+    ROOT / "crucible" / f"{name}.py"
+    for name in ("capabilityclasses", "capabilitywords", "verdict", "installplan")
+)
 CAPABILITY_CLASSES = ROOT / "crucible" / "capabilityclasses.py"
 ENVPACKS_DOC = ROOT / "docs" / "history" / "PHASE14-ENVPACKS.md"
 
@@ -54,12 +57,13 @@ def test_the_phase_doc_records_the_supersession_rather_than_being_edited_away() 
 
 
 def test_no_live_prose_still_says_translation_needs_a_27b() -> None:
-    source = text(CAPABILITY)
-    for phrase in (
-        "it needs a 27B and the smallest",
-        "so this host cannot translate",
-    ):
-        assert phrase not in source, f"capability.py still asserts: {phrase!r}"
+    for path in CAPABILITY_PROSE:
+        source = text(path)
+        for phrase in (
+            "it needs a 27B and the smallest",
+            "so this host cannot translate",
+        ):
+            assert phrase not in source, f"{path.name} still asserts: {phrase!r}"
 
 
 def test_the_reversal_is_written_down_where_a_reader_will_look() -> None:
@@ -68,7 +72,8 @@ def test_the_reversal_is_written_down_where_a_reader_will_look() -> None:
 
 
 def test_spell_out_names_the_total_and_each_of_its_three_terms() -> None:
-    from crucible.capability import Candidate, WorkingContext, spell_out
+    from crucible.fit import Candidate, WorkingContext
+    from crucible.capabilitywords import spell_out
     from crucible.manifests import MemoryTerms
 
     gib = 1024 ** 3

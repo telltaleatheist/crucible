@@ -132,7 +132,7 @@ def test_an_rvc_id_and_a_voice_id_may_be_the_same_word(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from crucible.rvcmodels import load_rvc_manifest
-    from crucible.voices import load_voice
+    from crucible.voicecatalog import load_voice
 
     configure_box(home)
     assert load_rvc_manifest("sigma").weights_family == "rvc"

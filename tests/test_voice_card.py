@@ -12,8 +12,9 @@ from crucible.voicecard import (
     render_card,
     render_limits,
 )
+from crucible.voicecatalog import load_voice
 from crucible.voicerepo import REPO_MANIFEST_NAME, parse_repo_manifest
-from crucible.voices import VoiceError, load_voice
+from crucible.voices import VoiceError
 
 from .conftest import configure_box
 

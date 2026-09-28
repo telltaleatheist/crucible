@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from crucible import lineup
-from crucible.capability import classes_for_model
+from crucible.capabilityclasses import classes_for_model
 from crucible.lineup import LineupError
 from crucible.manifests import load_manifest, manifests_dir
 
@@ -273,7 +273,7 @@ def test_a_local_model_no_class_names_is_refused(
     _catalog(monkeypatch, tmp_path, id="demo-1b", family="demo")
     with pytest.raises(LineupError) as caught:
         lineup.build()
-    assert "no capability class in crucible/capability.py names its family 'demo'" in (
+    assert "no capability class in crucible/capabilityclasses.py names its family 'demo'" in (
         str(caught.value)
     )
 

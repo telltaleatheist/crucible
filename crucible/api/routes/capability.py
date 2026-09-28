@@ -4,19 +4,18 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import capability as capability_classes
-from ... import ladder
+from ... import capabilityclasses, capabilityquery, installplan, ladder
 from ...errors import ApiError
 from ...installonsubmit import live_decisions
 from ...jobenv import INSTALLER_FOR
-from ...voices import NARRATOR_ENGINE_SAMPLING
+from ...narratorengines import NARRATOR_ENGINE_SAMPLING
 from ..context import AppContext, Routers
 
 
 def installable_job_type_rows() -> list[dict[str, Any]]:
     ordered: list[str] = []
     classes_of: dict[str, list[str]] = {}
-    for entry in capability_classes.CLASSES:
+    for entry in capabilityclasses.CLASSES:
         if entry.job_type not in classes_of:
             ordered.append(entry.job_type)
             classes_of[entry.job_type] = []
@@ -53,7 +52,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             )
         decisions, card, pool = live_decisions(config, backend)
         if job_type is not None:
-            return capability_classes.install_plan(
+            return installplan.install_plan(
                 job_type,
                 decisions,
                 card=card,
@@ -62,7 +61,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 desktop_allowance_bytes=config.desktop_allowance_bytes,
                 desktop_basis=config.desktop_allowance_basis,
             )
-        return capability_classes.subject_plan(
+        return installplan.subject_plan(
             subject, decisions, card=card, total_bytes=backend.gpu.vram_bytes, pool=pool
         )
 
@@ -83,14 +82,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
             )
         query = request.query_params
         document = record.to_dict()
-        document["classes"] = capability_classes.served_rows(
+        document["classes"] = capabilityquery.served_rows(
             record,
             gpu_vendor=backend.gpu.vendor,
             chosen={entry.capability: entry.model for entry in config.local_models},
             routes={entry.capability: entry.model for entry in config.routes},
             capability_class=query.get("class"),
-            context_tokens=query.get(capability_classes.CONTEXT_TOKENS_PARAM),
-            concurrency=query.get(capability_classes.CONCURRENCY_PARAM),
+            context_tokens=query.get(capabilityquery.CONTEXT_TOKENS_PARAM),
+            concurrency=query.get(capabilityquery.CONCURRENCY_PARAM),
             card=ladder.card_for(config.home, backend.gpu),
         )
         for row in document["classes"]:

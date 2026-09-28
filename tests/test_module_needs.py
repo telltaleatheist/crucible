@@ -8,7 +8,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible.config import CapabilityRecord, CapabilityRow
+from crucible.capabilityrecord import CapabilityRecord, CapabilityRow
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 

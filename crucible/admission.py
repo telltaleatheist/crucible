@@ -19,7 +19,7 @@ from .jobs.queue import JobStore
 from .journal import InputDigest
 from .leases import CARD_EFFECTS, Leases
 from .residency import Residency
-from .upstreams import split_model
+from .upstreamrecord import split_model
 
 
 @dataclass(frozen=True)

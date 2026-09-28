@@ -6,24 +6,20 @@ from typing import Any
 
 import pytest
 
-from crucible import capability, cli, voices
-from crucible.capability import (
-    CLASSES,
-    BY_NAME,
-    available_bytes,
-    classes_for_job_type,
-    decide,
-    decide_all,
-    job_type_enabled,
+from crucible import (
+    capabilityclasses,
+    classnames,
+    cli,
+    contextceiling,
+    fit,
+    narratorengines,
+    verdict,
 )
-from crucible.config import (
-    CapabilityRecord,
-    CapabilityRow,
-    config_path,
-    default_desktop_allowance_bytes,
-    load_config,
-    write_config,
-)
+from crucible.capabilityclasses import BY_NAME, CLASSES, classes_for_job_type
+from crucible.memorybudget import available_bytes
+from crucible.verdict import decide, decide_all, job_type_enabled
+from crucible.config import config_path, default_desktop_allowance_bytes, load_config, write_config
+from crucible.capabilityrecord import CapabilityRecord, CapabilityRow
 from crucible.errors import ApiError, ConfigError
 from crucible.jobs import disabled_error
 
@@ -182,14 +178,14 @@ def test_asr_and_align_are_both_enabled_on_the_studio() -> None:
 def _pages_with_no_block_on_any_backend() -> Any:
     import dataclasses
 
-    from crucible.capability import CLASSES
+    from crucible.capabilityclasses import CLASSES
 
     pages = next(entry for entry in CLASSES if entry.name == "pages")
     return dataclasses.replace(pages, candidates=lambda backend_kind: ())
 
 
 def test_a_class_with_nothing_on_this_backend_still_says_which_it_is() -> None:
-    from crucible.capability import decide
+    from crucible.verdict import decide
 
     verdict = decide(
         _pages_with_no_block_on_any_backend(), "mlx-darwin",
@@ -264,7 +260,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
         gpu_vendor="nvidia",
         chosen={},
     )
-    written = capability.record(
+    written = verdict.record(
         "cuda-linux",
         total_bytes=THREE_NINETY,
         desktop_allowance_bytes=CUDA_RESERVE,
@@ -542,11 +538,11 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     make_client, auth
 ) -> None:
     total, allowance = 26 * 1024 ** 3, 3 * 1024 ** 3
-    decided = capability.record(
+    decided = verdict.record(
         "cuda-linux",
         total_bytes=total,
         desktop_allowance_bytes=allowance,
-        decisions=capability.decide_all(
+        decisions=verdict.decide_all(
             "cuda-linux",
             total_bytes=total,
             desktop_allowance_bytes=allowance,
@@ -579,11 +575,11 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
     make_client, auth
 ) -> None:
     total, allowance = 26 * 1024 ** 3, 3 * 1024 ** 3
-    decided = capability.record(
+    decided = verdict.record(
         "cuda-linux",
         total_bytes=total,
         desktop_allowance_bytes=allowance,
-        decisions=capability.decide_all(
+        decisions=verdict.decide_all(
             "cuda-linux",
             total_bytes=total,
             desktop_allowance_bytes=allowance,
@@ -607,7 +603,7 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
     assert rows["denoise"]["installer"] == "rvc"
     assert rows["echo"]["installer"] is None
 
-    assert rows["tts"]["narrator_engines"] == sorted(voices.NARRATOR_ENGINE_SAMPLING)
+    assert rows["tts"]["narrator_engines"] == sorted(narratorengines.NARRATOR_ENGINE_SAMPLING)
     assert all(
         row["narrator_engines"] == []
         for name, row in rows.items()
@@ -626,7 +622,8 @@ def test_a_server_that_has_decided_nothing_says_so_rather_than_answering_empty(
 
 
 def test_every_decision_carries_a_summary_a_person_can_read() -> None:
-    from crucible.capability import CLASSES, decide
+    from crucible.capabilityclasses import CLASSES
+    from crucible.verdict import decide
 
     internals = ("disabled:", "backend", "block", "the VLM door", "_")
     for entry in CLASSES:
@@ -650,7 +647,7 @@ def test_every_decision_carries_a_summary_a_person_can_read() -> None:
 
 
 def test_the_reported_pages_case_reads_both_ways() -> None:
-    from crucible.capability import decide
+    from crucible.verdict import decide
 
     pages = _pages_with_no_block_on_any_backend()
     verdict = decide(
@@ -666,7 +663,7 @@ def test_the_reported_pages_case_reads_both_ways() -> None:
 
 
 def test_the_summary_reaches_the_wire_and_not_only_the_decision() -> None:
-    from crucible.capability import decide
+    from crucible.verdict import decide
 
     pages = _pages_with_no_block_on_any_backend()
     verdict = decide(
@@ -680,7 +677,8 @@ def test_the_summary_reaches_the_wire_and_not_only_the_decision() -> None:
 
 
 def test_a_routed_class_summarises_where_the_work_goes() -> None:
-    from crucible.capability import CLASSES, decide, routed_row
+    from crucible.capabilityclasses import CLASSES
+    from crucible.verdict import decide, routed_row
 
     entry = next(c for c in CLASSES if c.name == "translate")
     verdict = decide(
@@ -698,17 +696,17 @@ def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
     assert entry.job_type == "llm"
     assert entry.routable is True
     assert entry.client_sized is True
-    assert entry.min_params_b == capability.NINE_B_FLOOR == 9
+    assert entry.min_params_b == capabilityclasses.NINE_B_FLOOR == 9
     assert entry.work is not None
     assert (entry.work.tokens, entry.work.concurrency) == (8192, 1)
-    assert entry.work.tokens == capability.GENERATE_DEFAULT_TOKENS
+    assert entry.work.tokens == capabilityclasses.GENERATE_DEFAULT_TOKENS
     assert "40960" in entry.work.source
     assert "ContentStudio" not in entry.purpose + entry.plainly
     names = [c.name for c in CLASSES]
     assert names.index("analysis") + 1 == names.index("generate")
     assert names.index("generate") + 1 == names.index("decide")
     assert [c.name for c in CLASSES if c.client_sized] == ["generate"]
-    assert "generate" in capability.ROUTABLE_CLASSES
+    assert "generate" in classnames.ROUTABLE_CLASSES
     for kind in ("cuda-linux", "mlx-darwin", "llama-windows"):
         ids = {c.id for c in entry.candidates(kind)}
         assert ids and not ids & {"qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"}, (kind, ids)
@@ -718,7 +716,7 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
     budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
     one = {
         c.model: c
-        for c in capability.context_ceilings(
+        for c in contextceiling.context_ceilings(
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
         )
     }
@@ -731,7 +729,7 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
 
     two = {
         c.model: c
-        for c in capability.context_ceilings(
+        for c in contextceiling.context_ceilings(
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=2
         )
     }
@@ -741,11 +739,11 @@ def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() ->
 
 
 def _generate_record(backend_kind: str, total: int, allowance: int, vendor: str):
-    return capability.record(
+    return verdict.record(
         backend_kind,
         total_bytes=total,
         desktop_allowance_bytes=allowance,
-        decisions=capability.decide_all(
+        decisions=verdict.decide_all(
             backend_kind,
             total_bytes=total,
             desktop_allowance_bytes=allowance,
@@ -843,12 +841,12 @@ def test_a_mac_serves_what_the_card_cannot(make_client, auth) -> None:
 def test_a_chosen_model_is_the_one_whose_ceiling_governs() -> None:
     entry = BY_NAME["generate"]
     budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
-    work = capability.WorkingContext(tokens=40960, concurrency=1, source="test")
-    capability.check_ceiling(
+    work = fit.WorkingContext(tokens=40960, concurrency=1, source="test")
+    contextceiling.check_ceiling(
         entry, "cuda-linux", available_bytes=budget, work=work, chosen=None
     )
     with pytest.raises(ApiError) as caught:
-        capability.check_ceiling(
+        contextceiling.check_ceiling(
             entry,
             "cuda-linux",
             available_bytes=budget,
@@ -861,8 +859,8 @@ def test_a_chosen_model_is_the_one_whose_ceiling_governs() -> None:
 
 
 def test_a_host_that_cannot_hold_the_weights_is_not_a_length_refusal() -> None:
-    work = capability.WorkingContext(tokens=4096, concurrency=1, source="test")
-    capability.check_ceiling(
+    work = fit.WorkingContext(tokens=4096, concurrency=1, source="test")
+    contextceiling.check_ceiling(
         BY_NAME["generate"],
         "cuda-linux",
         available_bytes=available_bytes(SIX_GIG, CUDA_RESERVE),
@@ -915,7 +913,7 @@ def test_the_8bit_mac_ceiling_is_131072_now_that_kv_is_counted_once() -> None:
     budget = available_bytes(STUDIO, MAC_RESERVE)
     ceilings = {
         c.model: c
-        for c in capability.context_ceilings(
+        for c in contextceiling.context_ceilings(
             BY_NAME["generate"], "mlx-darwin", available_bytes=budget, concurrency=1
         )
     }
@@ -930,7 +928,7 @@ def test_the_pc_ceilings_are_the_computed_maxima() -> None:
     budget = available_bytes(THREE_NINETY, CUDA_RESERVE)
     ceilings = {
         c.model: c.tokens
-        for c in capability.context_ceilings(
+        for c in contextceiling.context_ceilings(
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
         )
     }
@@ -946,21 +944,21 @@ def test_a_load_is_held_to_the_same_ceiling_capability_publishes() -> None:
     big = load_manifest("qwen3.8-27b-4bit")
     published = {
         c.model: c
-        for c in capability.context_ceilings(
+        for c in contextceiling.context_ceilings(
             BY_NAME["generate"], "cuda-linux", available_bytes=budget, concurrency=1
         )
     }["qwen3.8-27b-4bit"]
-    held = capability.check_load_context(
+    held = contextceiling.check_load_context(
         big, "cuda-linux", available_bytes=budget, context=32768
     )
     assert held == published
     with pytest.raises(ApiError) as caught:
-        capability.check_load_context(
+        contextceiling.check_load_context(
             big, "cuda-linux", available_bytes=budget, context=32769
         )
     assert caught.value.code == "context_over_limit"
     assert caught.value.details["ceiling"] == published.to_dict()
-    capability.check_load_context(
+    contextceiling.check_load_context(
         big, "cuda-linux", available_bytes=available_bytes(SIX_GIG, CUDA_RESERVE),
         context=32769,
     )

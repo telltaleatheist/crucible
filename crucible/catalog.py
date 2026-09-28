@@ -177,7 +177,7 @@ def _engine_subjects(config: Config, backend: Backend) -> list[Subject]:
             job_type="llm",
             expected_bytes=llamacpp.expected_bytes(build),
             source=f"github:ggml-org/llama.cpp@{llamacpp.LLAMA_CPP_RELEASE}",
-            pull_command="crucible install llm",
+            pull_command=llamacpp.INSTALL_COMMAND,
             installed=_installed_engine(config, build),
             pull=_pull_engine(config, build),
             remove=lambda: llamacpp.remove(config),

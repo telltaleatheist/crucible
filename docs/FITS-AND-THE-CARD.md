@@ -35,7 +35,7 @@ predict, and section 4 below is written as though they were unknown:
   `crucible/vram.py` is where that lives.
 
 **And one correction to section 5 as written below.** "Decide against measured
-free" is right for the ENGINE and wrong for CAPABILITY, and `capability.py`'s
+free" is right for the ENGINE and wrong for CAPABILITY, and `verdict.py`'s
 ruling 2 already said so: *"The bar is TOTAL memory, not free memory. A
 capability is a fact about the host; free VRAM is a fact about this second."* A
 browser open during `crucible install` must not permanently disable TTS. So

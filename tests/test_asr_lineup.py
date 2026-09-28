@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import pytest
 
-from crucible import capability, catalog, weights
+from crucible import capabilityclasses, catalog, weights
 from crucible.asrmodels import ASR_LINEUP, load_asr_manifest
 from crucible.config import Config, load_config
 from crucible.jobs import asr as asr_job
@@ -58,7 +58,7 @@ def _stamp(
 
 @pytest.mark.parametrize("backend", ["cuda-linux", "mlx-darwin"])
 def test_the_asr_class_offers_exactly_the_lineup_best_first(backend: str) -> None:
-    candidates = capability.BY_NAME["asr"].candidates(backend)
+    candidates = capabilityclasses.BY_NAME["asr"].candidates(backend)
     assert [c.id for c in candidates] == BEST_FIRST_FOR[backend]
     assert set(BEST_FIRST_FOR["mlx-darwin"]) == ASR_LINEUP
 

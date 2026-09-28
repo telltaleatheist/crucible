@@ -3,14 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import (
-    BIND_FAILURE_LINES,
-    PORT_IN_USE,
-    EngineError,
-    SubprocessEngine,
-    plan_flags,
-    port_in_use_error,
-)
+from ..errors import EngineError
+from .base import BIND_FAILURE_LINES, PORT_IN_USE, SubprocessEngine, plan_flags, port_in_use_error
 
 ENGINE_NAME = "llama-server"
 

@@ -15,13 +15,8 @@ from crucible.voicerepo import (
     remove_home_pin,
     write_home_pin,
 )
-from crucible.voices import (
-    VOICES_DIR_ENV,
-    VoiceError,
-    load_all_voices,
-    load_voice,
-    voice_document,
-)
+from crucible.voices import VOICES_DIR_ENV, VoiceError, voice_document
+from crucible.voicecatalog import load_all_voices, load_voice
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
@@ -749,11 +744,8 @@ def test_an_unknown_key_in_the_machine_table_is_refused(tmp_path: Path) -> None:
 
 
 def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:
-    from crucible.config import (
-        declared_tts_footprints,
-        load_config,
-        write_config,
-    )
+    from crucible.config import load_config, write_config
+    from crucible.narratorengines import declared_tts_footprints
 
     for backend_kind, estimate in (
         ("cuda-linux", 19_000_000_000),
@@ -790,7 +782,7 @@ def test_init_writes_this_box_s_declared_numbers(tmp_path: Path) -> None:
 
 
 def test_a_backend_that_serves_no_narrator_engine_writes_no_table() -> None:
-    from crucible.config import declared_tts_footprints
+    from crucible.narratorengines import declared_tts_footprints
 
     assert declared_tts_footprints("llama-windows") == ()
 

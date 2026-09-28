@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from crucible import accelerator
-from crucible.accelerator import GIB, ComputeApp, ProbeError, guard, read_state
+from crucible.accelerator import ComputeApp, ProbeError, guard, read_state
 from crucible.errors import ApiError
+from crucible.memorybudget import GIB
 
 GIB_MIB = 1024
 
@@ -367,7 +368,7 @@ def test_unified_memory_still_refuses_what_the_pool_cannot_hold(
 def test_the_guard_and_the_walk_answer_the_mac_the_same_way(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from crucible.capability import available_bytes
+    from crucible.memorybudget import available_bytes
 
     total, allowance = 64 * GIB, 16 * GIB
     fake_mac(monkeypatch, available=1 * GIB, total=total)

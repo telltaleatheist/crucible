@@ -1,8 +1,8 @@
 # Engines, capability and the card
 
 How Crucible decides what a host can run, what it puts on the card, and how each
-engine is started and stopped. Modules: `backend`, `capability` (and the
-modules it re-exports, listed under "Where each part lives"), `memorybudget`,
+engine is started and stopped. Modules: `backend`, the capability modules
+listed under "Where each part lives", `memorybudget`,
 `precision`, `servingplan`, `ttsplan`, `asrplan`, `accelerator`, `vram`,
 `ladder`, `residency`, `engines/*`, `decide`,
 `sampling`, `pages`, `llamacpp`, `ollamastore`, `interpreter`, `lineup`.
@@ -201,7 +201,7 @@ Figures in capability messages are GiB so they match the guard's refusals.
 
 ### Where each part lives
 
-`capability` is a re-export shim; each concern has one module.
+There is no `capability` module; each concern has one module and callers import from it.
 
 | module | owns |
 |---|---|
@@ -209,7 +209,7 @@ Figures in capability messages are GiB so they match the guard's refusals.
 | `fit` | `WorkingContext`, `Candidate`, `ContextCeiling`, `CatalogCandidates` and the manifest cache |
 | `capabilityclasses` | the class table `CLASSES`, `BY_NAME`, and which models a class serves |
 | `capabilitywords` | the phrases a verdict is written in (needs, too old, serving width, card description) |
-| `verdict` | `Decision`, `decide_capabilities`, `decide_all`, `record`, `pool_name`. `decide_capabilities` is one small function per outcome, and every `Decision` is built by `_decision`. `capability.decide` is an alias, kept apart in name from the decision door (`crucible/decide.py`). |
+| `verdict` | `Decision`, `decide_capabilities`, `decide_all`, `record`, `pool_name`. `decide_capabilities` is one small function per outcome, and every `Decision` is built by `_decision`. `verdict.decide` is an alias, kept apart in name from the decision door (`crucible/decide.py`). |
 | `contextceiling` | `context_ceilings`, `check_ceiling`, `check_load_context` and the `context_over_limit` refusal |
 | `capabilityquery` | the `GET /v1/capability` query: `?class=`, `?context_tokens=`, `?concurrency=` and their 400/503 refusals |
 | `installplan` | the install and download confirmation text (`/v1/capability/plan`) |
