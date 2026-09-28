@@ -11,10 +11,8 @@ DEFAULT_PORT = 7100
 DOOR_PORT = 7101
 
 
-def user_agent(role: str) -> str:
-    from . import VERSION
-
-    return f"crucible-{role}/{VERSION}"
+def user_agent(role: str, version: str) -> str:
+    return f"crucible-{role}/{version}"
 
 
 def api_headers(token: str | None = None) -> dict[str, str]:

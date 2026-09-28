@@ -206,6 +206,7 @@ def export_manifest(
     inherited_from: str | None,
     max_chars_basis: str | None,
     uncertified: bool,
+    edges: str | None = None,
 ) -> tuple[str, list[str]]:
     pace = manifest.pace
     has_band = pace.pace_chars_per_sec is not None
@@ -220,10 +221,12 @@ def export_manifest(
         _check_pace_basis(manifest.id, pace_basis, measured_from, inherited_from)
     _check_cap_basis(manifest, max_chars_basis)
     if has_band or packs:
-        _check_exported_pace(manifest)
+        _check_exported_pace(manifest, edges)
     lines = _header_lines(manifest)
     if has_band or packs:
-        lines += _exported_pace_lines(pace, pace_basis, measured_from, inherited_from)
+        lines += _exported_pace_lines(
+            pace, pace_basis, measured_from, inherited_from, edges
+        )
     elif uncertified:
         lines += _UNCERTIFIED_LINES
     for arm in sorted(manifest.backends):
@@ -301,19 +304,24 @@ def _check_cap_basis(manifest: VoiceManifest, max_chars_basis: str | None) -> No
         )
 
 
-def _check_exported_pace(manifest: VoiceManifest) -> None:
+def _check_exported_pace(manifest: VoiceManifest, edges: str | None) -> None:
     table = {
         key: value for key, value in manifest.pace.to_dict().items() if value is not None
     }
+    if edges is not None:
+        table["edges"] = edges
     try:
         check_pace(f"{manifest.id} [voice.pace]", table)
     except VoiceError as exc:
+        if edges is not None:
+            raise CardError(
+                f"the file this would write is one the loader refuses: {exc}"
+            ) from exc
         raise CardError(
             f"the file this would write is one the loader refuses: {exc}. If "
-            "that band's edges really came off a distribution, add "
-            'edges = "percentile" to the exported [voice.pace] by hand — '
-            "`Pace` does not carry that statement, so this command cannot "
-            "carry it across"
+            "that band's edges really came off a distribution, run "
+            f"`crucible voices export {manifest.id} --edges percentile` with "
+            "the same flags as this run, and the exported [voice.pace] says so"
         ) from exc
 
 
@@ -343,6 +351,7 @@ def _exported_pace_lines(
     pace_basis: str | None,
     measured_from: str | None,
     inherited_from: str | None,
+    edges: str | None,
 ) -> list[str]:
     lines = ["", "[voice.pace]"]
     if pace.pace_chars_per_sec is not None:
@@ -354,6 +363,8 @@ def _exported_pace_lines(
             lines.append(f"measured_from      = {_toml_string(measured_from)}")
         else:
             lines.append(f"inherited_from     = {_toml_string(inherited_from)}")
+        if edges is not None:
+            lines.append(f"edges              = {_toml_string(edges)}")
     for key in ("target_chars", "safe_min_chars", "safe_max_chars"):
         value = getattr(pace, key)
         if value is not None:

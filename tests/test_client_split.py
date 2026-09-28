@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from crucible import apiclient, protocol
+from crucible import VERSION, apiclient, protocol
 from crucible.cli import api_cmd, common
 from crucible.client import connection, errors, pair, transport
 
@@ -34,7 +34,7 @@ def test_the_client_core_neither_parses_arguments_nor_prints(module: Any) -> Non
 
 
 def test_the_user_agent_is_built_once_from_the_protocol() -> None:
-    assert transport.USER_AGENT == protocol.user_agent("cli")
+    assert transport.USER_AGENT == protocol.user_agent("cli", VERSION)
     assert transport.request_headers("t")["User-Agent"] == transport.USER_AGENT
     assert "Authorization" not in transport.request_headers(None)
 
@@ -78,7 +78,7 @@ def test_the_servers_probe_sends_the_protocol_user_agent(
     monkeypatch.setattr(common.urllib.request, "build_opener", lambda *handlers: Opener())
     config = argparse.Namespace(host="127.0.0.1", port=1, token="t", name="n")
     assert common.server_here(config, None) is None
-    assert sent[0].get_header("User-agent") == protocol.user_agent("cli")
+    assert sent[0].get_header("User-agent") == protocol.user_agent("cli", VERSION)
 
 
 def test_resolve_takes_keywords_and_no_namespace(tmp_path: Path) -> None:

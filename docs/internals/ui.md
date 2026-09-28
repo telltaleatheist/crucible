@@ -34,7 +34,11 @@ is sometimes blank. The original design is `docs/history/PHASE13-OPERATOR.md` se
 - **No second copy of a server-side table.** Job types, narrator engines, subject
   kinds, catalog order, what installs what and the upstreams (their names, order,
   which field each takes, and `upstream_labels` for display) all arrive on the wire;
-  the page has no list of them and must never grow one. An upstream's field is
+  the page has no list of them and must never grow one. The same goes for the task
+  stream's terminal events (`info.terminal_states.tasks`), the label and tone of a voice's
+  `manifest` source (`info.voice_sources`) and the service commands shown in Service
+  (`info.service_commands`): all three come from `/v1/info`, and until it is read the
+  page shows the info refusal or "reading…" instead of a guess. An upstream's field is
   whichever of `url` or `key_hint` its settings entry carries. Catalog rows are grouped by kind in
   the order the route gives.
 - **Which read says a capability is served.** `setup.job_types` and

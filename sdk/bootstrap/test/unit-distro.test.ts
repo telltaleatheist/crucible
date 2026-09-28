@@ -17,7 +17,7 @@ const ROOTFS = `${DOWNLOAD_DIR}\\${UBUNTU_WSL_ROOTFS}`;
 /** Canonical's sums file names every image in the directory; ours is one row. */
 const SUMS = `${'a'.repeat(64)} *ubuntu-noble-server-cloudimg-amd64-root.tar.xz\n${'f'.repeat(64)} *${UBUNTU_WSL_ROOTFS}\n`;
 /** The one root script that does what `build-rootfs.sh` used to bake in. */
-const FINISH = ['wsl.exe', '-d', 'crucible', '-u', 'root', '--exec', 'bash', '-c', finishImportScript()];
+const FINISH = ['wsl.exe', '-d', 'crucible', '-u', 'root', '--exec', 'bash', '-c', finishImportScript().replace(/\\/g, '\\\\')];
 
 test('the argv this file builds: import at version 2, terminate ONE distro, unregister ours', () => {
   assert.deepEqual(importArgv(INSTALL_DIR, ROOTFS), ['wsl.exe', '--import', 'crucible', INSTALL_DIR, ROOTFS, '--version', '2']);

@@ -55,6 +55,7 @@ import {
   isTtsCapability,
   readPairingFile,
 } from '../src/index.js';
+import { UNCLAIMED_ENGINE } from './engine-info.js';
 
 // ------------------------------------------------------------------ fixture
 
@@ -588,7 +589,7 @@ const PRE_FIELD_VOICE = {
   kind: 'checkpoint',
   language: 'en',
   narrator_engine: 'higgs-v3',
-  orphan: null, backend_supported: true,
+  orphan: false, backend_supported: true,
   installed: true,
   resident: false,
   loadable: true,
@@ -637,6 +638,7 @@ function preFieldInfo(rows: Record<string, unknown>[]): Record<string, unknown> 
       backend: 'cuda-linux',
       gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 24 * GIB },
     },
+    ...UNCLAIMED_ENGINE,
     job_types: ['tts', 'load-voice', 'unload-voice'],
     capabilities: [
       { job_type: 'echo', models: [] },

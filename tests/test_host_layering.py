@@ -56,7 +56,7 @@ def test_the_package_reexports_the_protocol_constants() -> None:
     assert crucible.API_VERSION == protocol.API_VERSION
     assert crucible.CLIENT_NAME_HEADER is protocol.CLIENT_HEADER
     assert inflight.ACT_HEADER is protocol.ACT_HEADER
-    assert protocol.user_agent("cli") == f"crucible-cli/{crucible.VERSION}"
+    assert protocol.user_agent("cli", crucible.VERSION) == f"crucible-cli/{crucible.VERSION}"
 
 
 @pytest.mark.parametrize("spelling", [wsl.GUEST_HOME, "$HOME/.crucible", f'"{wsl.WSL_EXE}"'])

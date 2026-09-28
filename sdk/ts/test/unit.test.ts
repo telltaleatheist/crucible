@@ -410,7 +410,7 @@ test('only refusals about a SERVER travel to the next one', () => {
 /** A `/v1/activity` body with a session open and the lane free. */
 const ACTIVITY_WITH_SESSION = {
   server: { name: 'crucible@mac', version: '0.4.0', api_version: 1, backend: 'mlx-darwin', uptime_s: 12.5 },
-  resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null },
+  resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null, engine_exit_code: null },
   // Nothing was told to go: present and null, like `claim` and `lease` below.
   stopping: null,
   warming: null,

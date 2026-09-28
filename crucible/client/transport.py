@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
+from .. import VERSION
 from ..protocol import API_HEADER, API_VERSION, user_agent
 from .connection import Connection
 from .errors import ClientRefusal
@@ -21,7 +22,7 @@ JSON = "application/json"
 
 EVENT_STREAM = "text/event-stream"
 
-USER_AGENT = user_agent("cli")
+USER_AGENT = user_agent("cli", VERSION)
 
 
 def request_headers(token: str | None) -> dict[str, str]:

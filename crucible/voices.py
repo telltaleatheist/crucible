@@ -1154,7 +1154,7 @@ def parse_engine_base(text: str, path: Path, engine: str) -> dict[str, VoiceMani
     if not isinstance(table, dict) or not table:
         raise VoiceError(
             f"{path.name}: declares no [voices.<id>] table. A base file with "
-            "no rows in it is a file nothing reads; delete it instead"
+            f"no rows in it is a file nothing reads; remove it with `rm {path}`"
         )
     found: dict[str, VoiceManifest] = {}
     for voice_id in sorted(table):

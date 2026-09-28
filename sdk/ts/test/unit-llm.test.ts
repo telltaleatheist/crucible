@@ -25,6 +25,7 @@ import {
   isLlmCapability,
   type JobEvent,
 } from '../src/index.js';
+import { UNCLAIMED_ENGINE } from './engine-info.js';
 
 // ------------------------------------------------------------------ fixture
 
@@ -289,6 +290,7 @@ const INFO = {
   },
   // What to POST, which is not the capability list: `llm` is a capability and
   // `load-model` / `unload-model` are the job types that operate it.
+  ...UNCLAIMED_ENGINE,
   job_types: ['asr', 'echo', 'load-model', 'unload-model'],
   capabilities: [
     {
@@ -410,12 +412,12 @@ test('an llm row info() cannot read is carried aside, and the rest of info() sti
   assert.deepEqual(unreadable!.raw, phaseOneRow);
   assert.match(
     unreadable!.unreadable,
-    /info\.capabilities\[0\]\.models\[1\] has no field "(modalities|loadable)"/,
+    /info\.capabilities\[0\]\.models\[1\] has no field "family"/,
   );
 
   // The direct read is still strict about the same row.
   handle = (_request, response) => json(response, 200, [phaseOneRow]);
-  await assert.rejects(client().models(), /models\[0\] has no field "(modalities|loadable)"/);
+  await assert.rejects(client().models(), /models\[0\] has no field "family"/);
 });
 
 // -------------------------------------------------------- load and unload

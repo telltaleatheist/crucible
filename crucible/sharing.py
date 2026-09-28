@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import VERSION
 from .atomicjson import write_json
 from .config import crucible_home
 from .errors import CrucibleError
@@ -94,7 +95,7 @@ class PairedEngine:
             self.pairing.url + "/v1/" + path,
             data=None if body is None else json.dumps(body).encode(), method=method,
             headers={**api_headers(self.pairing.token),
-                     "Content-Type": "application/json", "User-Agent": user_agent("sharing")},
+                     "Content-Type": "application/json", "User-Agent": user_agent("sharing", VERSION)},
         )
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

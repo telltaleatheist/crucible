@@ -46,8 +46,7 @@ after(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-/** A pre-Phase-17 `/v1/info`: no `role`, no `managed_by`, no `engine`. */
-function oldDocument(): Record<string, unknown> {
+function engineDocument(): Record<string, unknown> {
   return {
     server: { name: 'crucible@owens-pc-wsl', version: '0.5.0', api_version: 1 },
     host: {
@@ -58,13 +57,29 @@ function oldDocument(): Record<string, unknown> {
     },
     job_types: ['llm', 'tts'],
     capabilities: [],
+    pages_engine: {
+      engine: null,
+      installed: false,
+      detail: 'dots-ocr has no cuda-linux block',
+      request: {
+        model: 'dots-ocr',
+        dpi: 200,
+        max_pixels: 11289600,
+        max_tokens: 8192,
+        temperature: 0.0,
+        prompt: 'Please output the layout information from the PDF image.',
+        dialect: 'dots-json',
+        concurrency: 12,
+        truncated_finish_reason: 'length',
+      },
+    },
   };
 }
 
 // ---------------------------------------------------------------- an engine
 
 test('an unclaimed engine says so, and null is a complete answer', async () => {
-  reply = { ...oldDocument(), role: 'engine', managed_by: null };
+  reply = { ...engineDocument(), role: 'engine', managed_by: null };
   const info = await client().info();
   assert.equal(info.role, 'engine');
   assert.equal(info.managedBy, null);
@@ -73,7 +88,7 @@ test('an unclaimed engine says so, and null is a complete answer', async () => {
 
 test('a claimed engine names who manages it, and not their version', async () => {
   reply = {
-    ...oldDocument(),
+    ...engineDocument(),
     role: 'engine',
     managed_by: { name: 'crucible-orchestrator@owens-pc', url: 'http://127.0.0.1:7101' },
   };
@@ -170,7 +185,7 @@ test('an owner word this build has not heard of is carried, not refused', async 
 });
 
 test('a role that is neither word is refused by name', async () => {
-  reply = { ...oldDocument(), role: 'conductor' };
+  reply = { ...engineDocument(), role: 'conductor' };
   await assert.rejects(client().info(), CrucibleProtocolError);
 });
 

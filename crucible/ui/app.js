@@ -7,7 +7,6 @@
   var ACTIVITY_MS = 4000;
   var STATUS_THROTTLE_MS = 1500;
   var INSTALL_LINES_KEPT = 400;
-  var TERMINAL = ['done', 'failed', 'cancelled'];
 
   var state = {
     token: null,
@@ -556,7 +555,7 @@
     }
     applyEvent(name, payload === null ? {} : payload);
     render();
-    if (TERMINAL.indexOf(name) === -1) {
+    if (!isTerminalTaskEvent(name)) {
       touchStatus();
     }
   }
@@ -581,9 +580,14 @@
       }
     } else if (name === 'skipped') {
       live.skipped.push(data.reason);
-    } else if (TERMINAL.indexOf(name) !== -1) {
+    } else if (isTerminalTaskEvent(name)) {
       live.ended = { event: name, data: data };
     }
+  }
+
+  function isTerminalTaskEvent(name) {
+    var terminal = state.info && state.info.terminal_states;
+    return Boolean(terminal) && terminal.tasks.indexOf(name) !== -1;
   }
 
   function touchStatus() {
@@ -1636,12 +1640,6 @@
     }
   }
 
-  var VOICE_SOURCE = {
-    repo: ['from its repo', 'ok'],
-    override: ['set on this machine', 'warn'],
-    engine: ["the engine's own", 'floor']
-  };
-
   async function beginVoiceEdit(id) {
     try {
       var found = await call(voiceManifestPath(id));
@@ -1864,8 +1862,9 @@
     );
 
     var chips = el('span', { class: 'chips' });
-    var source = VOICE_SOURCE[row.manifest] || [row.manifest, 'floor'];
-    chips.appendChild(chip(source[0], source[1]));
+    var sources = state.info && state.info.voice_sources ? state.info.voice_sources : {};
+    var source = sources[row.manifest] || { label: row.manifest, tone: 'floor' };
+    chips.appendChild(chip(source.label, source.tone));
     if (row.revision) {
       chips.appendChild(chip('@' + row.revision.slice(0, 7), 'floor'));
     }
@@ -2400,15 +2399,6 @@
     return block;
   }
 
-  var SERVICE_COMMANDS = [
-    ['crucible service status', 'is it installed, and is it up'],
-    ['crucible service start', 'start it now'],
-    ['crucible service stop', 'stop it'],
-    ['crucible service install', 'have the machine run it at boot'],
-    ['crucible service uninstall', 'stop having it do that'],
-    ['crucible token --url', 'print the pairing lines again']
-  ];
-
   function renderService() {
     var body = document.getElementById('service-body');
     body.textContent = '';
@@ -2436,16 +2426,22 @@
             'stop a server it is served by.'
         ])
       );
-      var commands = el('pre', { class: 'commands' });
-      for (var index = 0; index < SERVICE_COMMANDS.length; index += 1) {
-        commands.appendChild(
-          el('span', null, [
-            el('b', { text: SERVICE_COMMANDS[index][0] }),
-            '   # ' + SERVICE_COMMANDS[index][1] + '\n'
-          ])
-        );
+      var listed = state.info && state.info.service_commands ? state.info.service_commands : null;
+      if (listed === null) {
+        var infoRefusal = refusalBox(state.refusals.info);
+        body.appendChild(infoRefusal ? infoRefusal : el('p', { class: 'empty', text: 'reading…' }));
+      } else {
+        var commands = el('pre', { class: 'commands' });
+        for (var index = 0; index < listed.length; index += 1) {
+          commands.appendChild(
+            el('span', null, [
+              el('b', { text: listed[index].command }),
+              '   # ' + listed[index].does + '\n'
+            ])
+          );
+        }
+        body.appendChild(commands);
       }
-      body.appendChild(commands);
     }
 
     body.appendChild(

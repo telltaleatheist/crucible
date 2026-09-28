@@ -34,6 +34,7 @@ import {
   readAlignment,
   type JobEvent,
 } from '../src/index.js';
+import { UNCLAIMED_ENGINE } from './engine-info.js';
 
 // ------------------------------------------------------------------ fixture
 
@@ -106,7 +107,7 @@ const VOICE_ROW = {
   kind: 'checkpoint',
   language: 'en',
   narrator_engine: 'higgs-v3',
-  orphan: null, backend_supported: true,
+  orphan: false, backend_supported: true,
   installed: true,
   resident: false,
   loadable: true,
@@ -143,7 +144,7 @@ const UNSUPPORTED_VOICE_ROW = {
   id: 'mac-only-voice',
   kind: 'zeroshot',
   needs_reference: true,
-  orphan: null, backend_supported: false,
+  orphan: false, backend_supported: false,
   installed: false,
   loadable: false,
   reason: 'mac-only-voice.toml has no cuda-linux block; it declares [mlx-darwin]',
@@ -199,7 +200,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
         contextLengthNote: null,
       },
       needsReference: false,
-      orphan: null,
+      orphan: false,
       pace: {
         paceCharsPerSec: 16.64,
         maxCharsPerSec: 21.63,
@@ -241,7 +242,7 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
       // A zero-shot row says a load must carry a clip, whatever this host can
       // serve: it is a fact about the KIND, not about the backend block.
       needsReference: true,
-      orphan: null,
+      orphan: false,
       pace: {
         paceCharsPerSec: 15.0,
         maxCharsPerSec: 20.0,
@@ -468,6 +469,7 @@ test("info() reads the tts capability's rows with the /voices reader", async () 
       backend: 'cuda-linux',
       gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 25757220864 },
     },
+    ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'load-voice', 'unload-voice'],
     capabilities: [
       { job_type: 'echo', models: [] },
@@ -498,6 +500,7 @@ test('info() with one malformed voice row still returns, and says which row it c
       backend: 'cuda-linux',
       gpu: { vendor: 'nvidia', name: 'NVIDIA GeForce RTX 3090 Ti', vram_bytes: 25757220864 },
     },
+    ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'load-voice', 'unload-voice'],
     capabilities: [
       { job_type: 'echo', models: [] },
