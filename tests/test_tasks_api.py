@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import jobenv, tasks, weights
-from crucible.tasks import ReloadRefused
+from crucible.tasks.states import ReloadRefused
 
 from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
 from .fake_hub import CHUNK, FakeHub

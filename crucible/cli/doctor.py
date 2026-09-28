@@ -11,6 +11,7 @@ from .. import (
     API_VERSION,
     VERSION,
     capability,
+    cardfacts,
     catalog,
     envpatches,
     hosttools,
@@ -28,12 +29,12 @@ from ..config import (
     desktop_reserve_words,
 )
 from ..errors import ConfigError, NoViableBackend
+from ..jobenv import INSTALLER_FOR
 from ..jobs import ALL_JOB_TYPES, build_registry
 from ..voices import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _card_facts, _card_line
 from .common import EXIT_OK, EXIT_REFUSED, _env_spec, _fail
-from .install import INSTALLER_FOR
 
 GIB = 1024 ** 3
 
@@ -552,7 +553,7 @@ def check_desktop_reserve(host: Host) -> Section:
         return Section("desktop_reserve", {})
     if config.desktop_allowance_basis == DESKTOP_BASIS_MEASURED:
         return Section("desktop_reserve", {})
-    card_rung = ((host.ladder or {}).get("rungs") or {}).get(ladder.CARD)
+    card_rung = ((host.ladder or {}).get("rungs") or {}).get(cardfacts.CARD)
     seen = ((card_rung or {}).get("facts") or {}).get("desktop_bytes_max")
     if not isinstance(seen, int):
         return Section("desktop_reserve", {})

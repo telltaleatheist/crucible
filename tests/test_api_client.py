@@ -9,8 +9,8 @@ import pytest
 from fastapi import FastAPI
 
 from crucible import cli
-from crucible import apiclient
-from crucible.apiclient import ClientRefusal
+from crucible.cli import api_cmd
+from crucible.client import PAIRING_ENV, ClientRefusal, Connection
 
 from .conftest import TOKEN
 from .live_server import serve
@@ -38,18 +38,18 @@ def _namespace(**overrides: Any) -> argparse.Namespace:
 
 def test_a_url_without_a_token_is_refused_and_never_borrows_the_local_one() -> None:
     with pytest.raises(ClientRefusal) as refusal:
-        apiclient.resolve(_namespace(url="http://192.168.68.20:7100"))
+        api_cmd.resolve(_namespace(url="http://192.168.68.20:7100"))
     assert "token_required" in str(refusal.value)
 
 
 def test_a_token_without_a_url_is_refused_by_name() -> None:
     with pytest.raises(ClientRefusal) as refusal:
-        apiclient.resolve(_namespace(token="abc"))
+        api_cmd.resolve(_namespace(token="abc"))
     assert "url_required" in str(refusal.value)
 
 
 def test_a_pairing_line_carries_the_address_the_name_and_the_token() -> None:
-    resolved = apiclient.resolve(
+    resolved = api_cmd.resolve(
         _namespace(pairing="crucible://crucible%40mac-studio@192.168.68.20:7100/#abc123")
     )
     assert resolved.url == "http://192.168.68.20:7100"
@@ -60,7 +60,7 @@ def test_a_pairing_line_carries_the_address_the_name_and_the_token() -> None:
 
 def test_a_pairing_line_cannot_be_combined_with_url_or_token() -> None:
     with pytest.raises(ClientRefusal) as refusal:
-        apiclient.resolve(
+        api_cmd.resolve(
             _namespace(pairing="crucible://a@h:1/#t", url="http://elsewhere:7100")
         )
     assert "connection_overspecified" in str(refusal.value)
@@ -68,7 +68,7 @@ def test_a_pairing_line_cannot_be_combined_with_url_or_token() -> None:
 
 def test_a_line_that_is_not_a_pairing_line_is_refused_by_name() -> None:
     with pytest.raises(ClientRefusal) as refusal:
-        apiclient.resolve(_namespace(pairing="http://192.168.68.20:7100"))
+        api_cmd.resolve(_namespace(pairing="http://192.168.68.20:7100"))
     assert "pairing_line_invalid" in str(refusal.value)
 
 
@@ -118,16 +118,16 @@ def test_an_api_version_refusal_says_which_side_is_older(
             io.BytesIO(body),
         )
 
-    remote = apiclient.Connection(
+    remote = Connection(
         url="http://kylies-pc:7100", token="t", name="kylies-pc",
         source="--server kylies-pc",
     )
-    assert apiclient.report_http_error(refusal(server=1, client=2), remote) == 1
+    assert api_cmd.report_http_error(refusal(server=1, client=2), remote) == 1
     older_there = capsys.readouterr().err
     assert "kylies-pc is older" in older_there
     assert "Update Crucible on kylies-pc" in older_there
 
-    assert apiclient.report_http_error(refusal(server=3, client=1), remote) == 1
+    assert api_cmd.report_http_error(refusal(server=3, client=1), remote) == 1
     older_here = capsys.readouterr().err
     assert "this computer is older" in older_here
     assert "Update Crucible here" in older_here
@@ -162,7 +162,7 @@ def test_follow_streams_the_events_then_the_final_state(
     assert [row["id"] for row in events] == sorted(row["id"] for row in events)
 
     state = printed[-2]
-    assert state["status"] == apiclient.SUCCEEDED
+    assert state["status"] == api_cmd.SUCCEEDED
     assert state["artifacts"] == ["page.txt"]
     assert printed[-1]["artifacts_saved"][0]["name"] == "page.txt"
     assert (out / "page.txt").read_text(encoding="utf-8") == source.read_text(
@@ -306,7 +306,7 @@ def test_upload_returns_a_blob_the_next_job_can_name(
 
     assert run(base, "job", "submit", "--type", "echo", "--params", '{"delay_ms": 0}',
                "--input-blob", f"clip.wav={blob['blob_id']}", "--follow") == 0
-    assert lines(capsys.readouterr().out)[-1]["status"] == apiclient.SUCCEEDED
+    assert lines(capsys.readouterr().out)[-1]["status"] == api_cmd.SUCCEEDED
 
 
 def test_uploading_a_file_that_is_not_there_is_refused_before_any_request(
@@ -341,7 +341,7 @@ def _frames(*rows: dict[str, Any]) -> Callable[..., Iterator[dict[str, Any]]]:
 def test_until_stops_at_that_rows_done_and_not_at_anothers(
     base: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(apiclient, "follow", _frames(
+    monkeypatch.setattr(api_cmd, "follow", _frames(
         {"event": "ready", "data": {"voice": "sigma", "sample_rate": 24000}},
         {"event": "done", "data": {"id": "r1", "seconds": 1.0}},
         {"event": "done", "data": {"id": "r2", "seconds": 1.0}},
@@ -355,7 +355,7 @@ def test_until_stops_at_that_rows_done_and_not_at_anothers(
 def test_an_error_frame_for_the_awaited_row_exits_nonzero(
     base: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(apiclient, "follow", _frames(
+    monkeypatch.setattr(api_cmd, "follow", _frames(
         {"event": "ready", "data": {"voice": "sigma", "sample_rate": 24000}},
         {"event": "error", "data": {"id": "r1", "code": "engine_failed", "message": "no"}},
     ))
@@ -371,7 +371,7 @@ def test_the_wav_is_written_at_the_rate_the_session_reported(
     import wave
 
     pcm = b"\x00\x01" * 1200
-    monkeypatch.setattr(apiclient, "follow", _frames(
+    monkeypatch.setattr(api_cmd, "follow", _frames(
         {"event": "ready", "data": {"voice": "sigma", "sample_rate": 16000}},
         {"event": "audio", "data": {"id": "r1", "seq": 0,
                                     "pcm_base64": base64.b64encode(pcm).decode()}},
@@ -424,12 +424,12 @@ def test_an_unreachable_pairing_names_the_machine_it_dialled(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv(
-        apiclient.PAIRING_ENV, "crucible://kylies-pc@127.0.0.1:1/#not-a-real-token"
+        PAIRING_ENV, "crucible://kylies-pc@127.0.0.1:1/#not-a-real-token"
     )
     assert cli.main(["api", "ping"]) == 1
     err = capsys.readouterr().err
     assert "server_unreachable: kylies-pc at http://127.0.0.1:1" in err
-    assert f"from ${apiclient.PAIRING_ENV}" in err
+    assert f"from ${PAIRING_ENV}" in err
     assert "On kylies-pc, run `crucible doctor`" in err
 
 
@@ -439,7 +439,7 @@ def test_a_closed_pipe_is_success_and_not_an_unreachable_server(
     def closed(value: Any) -> None:
         raise BrokenPipeError(32, "Broken pipe")
 
-    monkeypatch.setattr(apiclient, "emit", closed)
+    monkeypatch.setattr(api_cmd, "emit", closed)
     assert run(base, "info") == 0
 
 
@@ -554,7 +554,7 @@ def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         calls.append({"method": method, "path": path, **kwargs})
         return {}
 
-    monkeypatch.setattr(apiclient, "call", record)
+    monkeypatch.setattr(api_cmd, "call", record)
     return calls
 
 

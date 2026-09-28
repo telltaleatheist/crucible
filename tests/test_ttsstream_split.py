@@ -7,25 +7,24 @@ import pytest
 
 from crucible import ttsstream
 from crucible.errors import ApiError
-from crucible.ttsstream import decode, log
+from crucible.ttsstream import decode, log, validate
 
-OLD_PUBLIC_NAMES = (
-    "GRACE_SECONDS", "STREAM_BATCH_WIDTH", "StreamManager", "StreamSession",
-    "batch_width_for", "require_sayable", "require_streamable", "BATCH_COALESCE_SECONDS",
-    "WATCHDOG_POLL_SECONDS", "CLOSE_JOIN_SECONDS", "STREAM_SILENCE_TIMEOUT_SECONDS",
-    "DURATION_TOLERANCE_SECONDS",
-)
+PUBLIC_NAMES = {
+    "BATCH_COALESCE_SECONDS", "GRACE_SECONDS", "STREAM_BATCH_WIDTH", "StreamManager",
+    "StreamSession",
+}
 
 
-def test_the_package_still_answers_every_name_the_module_had() -> None:
-    assert [name for name in OLD_PUBLIC_NAMES if not hasattr(ttsstream, name)] == []
+def test_the_package_answers_its_public_surface_and_no_more() -> None:
+    assert set(ttsstream.__all__) == PUBLIC_NAMES
+    assert all(hasattr(ttsstream, name) for name in PUBLIC_NAMES)
 
 
 def test_the_batch_width_is_read_through_the_package(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ttsstream, "STREAM_BATCH_WIDTH", {"only-this": 4})
-    assert ttsstream.batch_width_for("only-this") == 4
+    assert validate.batch_width_for("only-this") == 4
     with pytest.raises(ApiError) as refused:
-        ttsstream.batch_width_for("higgs-v3")
+        validate.batch_width_for("higgs-v3")
     assert refused.value.code == "unknown_narrator_engine"
 
 

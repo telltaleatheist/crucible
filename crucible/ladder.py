@@ -42,10 +42,10 @@ from .cardfacts import (
     card_key,
     load_record,
     record_path,
-    results_from as _results_from,
+    results_from,
     stale_reason,
 )
-from .clock import utcnow_to_the_second as _now
+from .clock import utcnow_to_the_second
 from .config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from .errors import ApiError, CrucibleError
 
@@ -73,7 +73,7 @@ def _write_record(home: Path, gpu: Gpu, results: dict[str, RungResult]) -> Path:
     document = {
         "schema": LADDER_SCHEMA,
         "key": card_key(gpu),
-        "written_at": _now(),
+        "written_at": utcnow_to_the_second(),
         "rungs": {name: results[name].to_dict() for name in RUNGS if name in results},
     }
     temporary = path.with_suffix(".json.tmp")
@@ -90,7 +90,7 @@ def summary(home: Path, gpu: Gpu) -> dict[str, Any]:
         "stale": stale_reason(home, gpu),
         "rungs": {
             name: result.to_dict()
-            for name, result in _results_from(document).items()
+            for name, result in results_from(document).items()
         },
     }
 
@@ -293,7 +293,7 @@ def measure_desktop_reserve(
 
 
 def rung_card(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    started = _now()
+    started = utcnow_to_the_second()
     facts: dict[str, Any] = {}
     try:
         facts["disk_free_bytes"] = shutil.disk_usage(home if home.exists() else home.parent).free
@@ -517,7 +517,7 @@ def installed_torch_env_pythons(home: Path, backend_kind: str) -> dict[str, Path
 
 
 def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    started = _now()
+    started = utcnow_to_the_second()
     waiting = _preflight(backend, desktop_allowance_bytes, SMOKE_NEED_BYTES)
     if waiting is not None:
         return RungResult(ENV, waiting[0], started, detail=waiting[1])
@@ -552,7 +552,7 @@ def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> Rung
 
 
 def rung_graphs(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:
-    started = _now()
+    started = utcnow_to_the_second()
     waiting = _preflight(backend, desktop_allowance_bytes, SMOKE_NEED_BYTES)
     if waiting is not None:
         return RungResult(GRAPHS, waiting[0], started, detail=waiting[1])
@@ -609,11 +609,18 @@ def rung_vllm(
 ) -> RungResult:
     from . import vram
     from .capability import MIN_LOAD_CONTEXT
-    from .engines import EngineError, build_engine, engine_model_name, find_free_port, logs_dir
+    from .engines import (
+        EngineError,
+        build_engine,
+        engine_load_args,
+        engine_model_name,
+        find_free_port,
+        logs_dir,
+    )
     from .engines.vllm import card_args
-    from .residency import DEFAULT_READY_TIMEOUT_SECONDS, Residency
+    from .residency import DEFAULT_READY_TIMEOUT_SECONDS
 
-    started = _now()
+    started = utcnow_to_the_second()
     python = installed_env_pythons(config.home, backend.kind).get("llm")
     if backend.kind != CUDA_LINUX:
         return RungResult(VLLM, SKIPPED, started, detail=f"vLLM is not this backend's ({backend.kind})")
@@ -646,7 +653,7 @@ def rung_vllm(
     if plan is not None and not plan.fits:
         return RungResult(VLLM, WAITING, started, detail=plan.sentence())
     extra = card_args(spec, card)
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, spec, installed.path, plan, context=MIN_LOAD_CONTEXT, card_args=extra
     )
     engine = build_engine(spec.engine, python, logs_dir(config.home) / "ladder-vllm.log")
@@ -705,7 +712,7 @@ def run(
     say = on_line or (lambda line: None)
     home = config.home
     previous = None if stale_reason(home, backend.gpu) else load_record(home)
-    results = _results_from(previous)
+    results = results_from(previous)
     for name in RUNGS:
         if name not in rungs:
             continue
@@ -715,7 +722,7 @@ def run(
             env = results.get(ENV)
             if env is not None and env.outcome == FAILED:
                 results[name] = RungResult(
-                    name, SKIPPED, _now(), detail=f"the env rung failed: {env.detail}"
+                    name, SKIPPED, utcnow_to_the_second(), detail=f"the env rung failed: {env.detail}"
                 )
                 _write_record(home, backend.gpu, results)
                 say(f"{name}: skipped — the env rung failed")
@@ -736,12 +743,6 @@ def run(
 
 
 __all__ = [
-    "CARD",
-    "ENV",
-    "GPU_RUNGS",
-    "GRAPHS",
-    "RUNGS",
-    "VLLM",
     "DesktopReserve",
     "DesktopSample",
     "desktop_allowance_from",
@@ -749,13 +750,7 @@ __all__ = [
     "measure_desktop_reserve",
     "sample_desktop",
     "LadderError",
-    "RungResult",
     "Watch",
-    "card_for",
-    "card_key",
-    "load_record",
-    "record_path",
     "run",
-    "stale_reason",
     "summary",
 ]

@@ -75,13 +75,11 @@ def test_a_job_type_with_no_installer_names_the_one_that_builds_it() -> None:
 
 def test_a_job_names_itself_as_what_holds_the_card(tmp_path: Path) -> None:
     from crucible.jobs.base import Job
-    from crucible.jobs.queue import busy_details
 
     job = Job(
         id="j1", type="asr", model="m", params={}, dir=tmp_path, created="t0", client="app"
     )
     assert job.busy_details()["since"] == "t0"
-    assert busy_details(job) == job.busy_details()
 
 
 def test_journal_identity_is_an_optional_member_of_the_protocol() -> None:

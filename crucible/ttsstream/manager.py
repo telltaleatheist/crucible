@@ -7,9 +7,10 @@ import uuid
 from typing import Any, Callable
 
 from .. import ttsstream
+from ..cardkinds import KIND_TTS
 from ..engines import NarratorEngine
 from ..errors import ApiError, JobError
-from ..residency import KIND_TTS, Residency, describe_resident
+from ..residency import Residency, describe_resident
 from ..voices import VoiceManifest
 from .session import WATCHDOG_POLL_SECONDS, StreamSession
 

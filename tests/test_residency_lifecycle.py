@@ -23,10 +23,8 @@ from crucible.engines import (
 from crucible.engines.vllm import DECIDE_ARGS
 from crucible.errors import JobError
 from crucible.manifests import NO_DEFAULTS
+from crucible.cardkinds import KIND_ALIGN, KIND_LLM, KIND_TTS
 from crucible.residency import (
-    KIND_ALIGN,
-    KIND_LLM,
-    KIND_TTS,
     DyingResident,
     Occupant,
     Residency,
@@ -233,14 +231,8 @@ def test_residency_knows_no_engine_and_no_job() -> None:
     }
     assert not [name for name in imported if name.lstrip(".").startswith("jobs")]
     assert not imported & forbidden
-    for name in ("load", "load_aligner", "load_separator"):
+    for name in ("load", "load_aligner", "load_separator", "load_voice", "_engine_args", "_start"):
         assert not hasattr(Residency, name)
-
-
-def test_the_voice_delegate_is_the_tts_package_body() -> None:
-    from crucible.jobs.tts.common import occupy_voice
-
-    assert Residency.load_voice is occupy_voice
 
 
 def test_every_engine_is_reached_through_the_table() -> None:
@@ -283,7 +275,7 @@ def test_each_engine_builds_its_own_argv() -> None:
         ) == ["--a", "--plan"]
     with pytest.raises(EngineError, match="m.toml's b block names no `file`"):
         engine_load_args(manifest, _spec("llama-server"), here, None, context=8)
-    assert Residency._engine_args(
+    assert engine_load_args(
         manifest, _spec("vllm"), here, None, context=8
     ) == VllmEngine.load_args(_spec("vllm"), here, 8, None)
     assert LlamaServerEngine.served_name(here, "m") == "m"

@@ -1519,7 +1519,7 @@ def test_crucible_host_is_refused_off_win32_by_name(capsys, monkeypatch) -> None
 
     monkeypatch.setattr(cli.orchestrator.sys, "platform", "linux")
     code = cli.main(["orchestrator"])
-    assert code == cli.EXIT_REFUSED
+    assert code == cli.common.EXIT_REFUSED
     said = capsys.readouterr().err
     assert "host_windows_only" in said
     assert "systemd" in said
@@ -1545,7 +1545,7 @@ def test_there_is_no_platform_gate_left_in_main(monkeypatch, tmp_path: Path) -> 
             ConfigError("no config here")
         )
     )
-    assert cli.main(["doctor"]) == cli.EXIT_REFUSED
+    assert cli.main(["doctor"]) == cli.common.EXIT_REFUSED
 
 
 def test_a_cuda_linux_config_on_a_windows_host_is_backend_not_here(capsys) -> None:
@@ -1559,7 +1559,7 @@ def test_a_cuda_linux_config_on_a_windows_host_is_backend_not_here(capsys) -> No
         gpu=Gpu(vendor="nvidia", name="RTX 4090", vram_bytes=24 * 1024**3),
         detail="llama.cpp cuda build",
     )
-    said = cli._backend_mismatch("cuda-linux", windows)
+    said = cli.common._backend_mismatch("cuda-linux", windows)
     assert said.startswith("backend_not_here: ")
     assert "cuda-linux" in said and "llama-windows" in said
     assert "WSL2" in said
@@ -1571,13 +1571,13 @@ def test_a_cuda_linux_config_on_a_windows_host_is_backend_not_here(capsys) -> No
         gpu=Gpu(vendor="apple", name="M1 Ultra", vram_bytes=64 * 1024**3),
         detail="mlx",
     )
-    other = cli._backend_mismatch("llama-windows", mac)
+    other = cli.common._backend_mismatch("llama-windows", mac)
     assert other.startswith("backend_not_here: ")
     assert "do not run on win32" not in other
 
 
 def test_config_from_takes_the_token_the_routes_and_the_upstreams(tmp_path: Path) -> None:
-    from crucible.cli import carried_from
+    from crucible.cli.init import carried_from
 
     path = tmp_path / "config.toml"
     path.write_text(
@@ -1596,7 +1596,7 @@ def test_config_from_takes_the_token_the_routes_and_the_upstreams(tmp_path: Path
 
 
 def test_config_from_without_a_token_is_refused_by_name(tmp_path: Path) -> None:
-    from crucible.cli import carried_from
+    from crucible.cli.init import carried_from
     from crucible.errors import ConfigError
 
     path = tmp_path / "config.toml"
@@ -1607,7 +1607,7 @@ def test_config_from_without_a_token_is_refused_by_name(tmp_path: Path) -> None:
 
 
 def test_config_from_that_is_not_toml_is_refused_by_name(tmp_path: Path) -> None:
-    from crucible.cli import carried_from
+    from crucible.cli.init import carried_from
     from crucible.errors import ConfigError
 
     path = tmp_path / "config.toml"

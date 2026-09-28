@@ -14,6 +14,7 @@ from ...alignmodels import (
     load_all_align_manifests,
 )
 from ...backend import CUDA_LINUX, MLX_DARWIN
+from ...cardkinds import KIND_ALIGN
 from ...clock import utcnow
 from ...config import Config
 from ...errors import ApiError, JobCancelled, JobError
@@ -21,7 +22,6 @@ from ...jobtypes import ALIGN_JOB, UNLOAD_ALIGNER
 from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
-    KIND_ALIGN,
     Occupant,
     Residency,
     ResidentAligner,
@@ -38,7 +38,7 @@ from ..template import (
     require_model,
     run_model,
 )
-from ..unload import UnloadJobType, UnloadParams
+from ..unload import UnloadJobType
 
 __all__ = [
     "JOB_TYPES",
@@ -49,8 +49,6 @@ __all__ = [
 ]
 
 JOB_TYPE = ALIGN_JOB.name
-
-UnloadAlignerParams = UnloadParams
 
 FFMPEG_WHY = (
     "decodes every chunk through it to 16 kHz mono float32 — the rate the "

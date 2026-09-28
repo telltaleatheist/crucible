@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from crucible.config import DEFAULT_RETENTION_DAYS, load_config, write_config
 from crucible.errors import ConfigError
-from crucible.jobs import queue as queue_module
+from crucible import clock
 from crucible.jobs.base import Job
 
 from .conftest import FAKE_BACKEND, TOKEN
@@ -232,7 +232,7 @@ def test_a_job_nobody_came_back_for_is_reaped_when_it_ages_out(
     assert directory.is_dir()
 
     later = datetime.now(timezone.utc) + timedelta(days=8)
-    monkeypatch.setattr(queue_module, "_now", lambda: later)
+    monkeypatch.setattr(clock, "now", lambda: later)
     (reaped,) = store.reap()
     assert reaped.job_id == job_id
     assert reaped.why == "aged"
@@ -249,7 +249,7 @@ def test_the_window_is_the_configured_one_and_not_a_constant(
     wait_for(client, auth, job_id, ("done",))
     store = client.app.state.store
     monkeypatch.setattr(
-        queue_module, "_now", lambda: datetime.now(timezone.utc) + timedelta(days=6)
+        clock, "now", lambda: datetime.now(timezone.utc) + timedelta(days=6)
     )
     assert store.reap() == []
 
@@ -268,7 +268,7 @@ def test_a_running_job_is_never_reaped_however_old_it_looks(
     directory = store.get(job_id).dir
 
     monkeypatch.setattr(
-        queue_module, "_now", lambda: datetime.now(timezone.utc) + timedelta(days=400)
+        clock, "now", lambda: datetime.now(timezone.utc) + timedelta(days=400)
     )
     assert store.reap() == []
     assert directory.is_dir()
@@ -310,7 +310,7 @@ def test_an_orphan_directory_from_a_dead_process_is_reaped_by_age_alone(
     assert orphan.is_dir()
 
     monkeypatch.setattr(
-        queue_module, "_now", lambda: datetime.now(timezone.utc) + timedelta(days=9)
+        clock, "now", lambda: datetime.now(timezone.utc) + timedelta(days=9)
     )
     (reaped,) = client.app.state.store.reap()
     assert reaped.job_id == "a-server-that-exited"
@@ -416,7 +416,7 @@ def test_a_hold_survives_a_restart_and_the_seven_day_collector_still_takes_it(
     assert store.reap() == [] and directory.is_dir()
 
     later = datetime.now(timezone.utc) + timedelta(days=8)
-    monkeypatch.setattr(queue_module, "_now", lambda: later)
+    monkeypatch.setattr(clock, "now", lambda: later)
     (reaped,) = store.reap()
     assert reaped.job_id == job_id and not directory.exists()
 

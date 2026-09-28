@@ -8,8 +8,6 @@ from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from .. import upstreams
-from ..admission import refuse_lease_on_an_upstream
-from ..admission import refuse_lease_on_an_upstream as _refuse_lease_on_an_upstream
 from ..config import Config
 from ..errors import ApiError
 from ..inflight import Entry, InFlight, read_act
@@ -26,9 +24,7 @@ from .proxy import (
 )
 
 __all__ = [
-    "_refuse_lease_on_an_upstream",
     "forward_to_upstream",
-    "refuse_lease_on_an_upstream",
     "routed_upstream_rows",
 ]
 

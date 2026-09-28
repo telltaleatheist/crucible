@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .. import capability, ladder
+from .. import capability, cardfacts, ladder
 from ..backend import Backend, MLX_DARWIN
 from ..capabilitystore import decide_for, write_capability
 from ..config import Config, DESKTOP_BASIS_MEASURED, desktop_reserve_words
@@ -15,7 +15,7 @@ from .common import EXIT_OK, _fail
 
 
 def _card_facts(home: Path, backend: Backend) -> dict[str, Any]:
-    return ladder.card_for(home, backend.gpu).to_dict()
+    return cardfacts.card_for(home, backend.gpu).to_dict()
 
 
 def _card_line(facts: dict[str, Any]) -> str:
@@ -187,7 +187,7 @@ def _measure_step(config: Config, backend: Backend, *, gpu: bool) -> None:
 
 def cmd_ladder(args: argparse.Namespace) -> int:
     config, backend = common.here(tolerate_stale_record=True)
-    rungs = tuple(args.rung) if args.rung else ladder.RUNGS
+    rungs = tuple(args.rung) if args.rung else cardfacts.RUNGS
     say = None if args.json else (lambda line: print(line))
     try:
         ladder.run(config, backend, rungs, gpu=not args.no_gpu, on_line=say)
@@ -205,7 +205,7 @@ def cmd_ladder(args: argparse.Namespace) -> int:
         )
     else:
         print(f"card: {_card_line(_card_facts(config.home, backend))}")
-        print(f"recorded in {ladder.record_path(config.home)}")
+        print(f"recorded in {cardfacts.record_path(config.home)}")
     return EXIT_OK
 
 
@@ -228,7 +228,7 @@ def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
             )
     written = write_capability(config, backend, decisions, flags)
     print(f"recorded in {written}")
-    card = ladder.card_for(config.home, backend.gpu)
+    card = cardfacts.card_for(config.home, backend.gpu)
     pool = capability.pool_name(backend.kind, backend.gpu.vendor)
     for job_type in job_types:
         plan = capability.install_plan(
@@ -263,7 +263,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     ladder_parser.add_argument(
         "--rung",
         action="append",
-        choices=list(ladder.RUNGS),
+        choices=list(cardfacts.RUNGS),
         default=None,
         help="run only this rung (repeatable); every rung by default",
     )

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv
 from crucible.accelerator import GIB, ComputeApp, ProbeError
-from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.manifests import load_manifest
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
@@ -64,12 +64,12 @@ def llm_weights(home: Path) -> Path:
 @pytest.fixture
 def owned_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "build_engine",
         lambda engine_name, python, log_path: OwnedEngine(python, log_path),
     )
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: model_id,
     )

@@ -8,7 +8,7 @@ from pathlib import Path
 from .. import capability, hosttools, interpreter, jobenv, llamacpp
 from ..backend import Backend, LLAMA_WINDOWS
 from ..config import Config
-from ..jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT
+from ..jobenv import INSTALLABLE_JOB_TYPES, SMOKE_IMPORT
 from ..voices import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step

@@ -6,8 +6,7 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ... import accelerator, jobenv, llamacpp, ollamastore, vram, weights
-from ... import residency as residency_module
+from ... import accelerator, engines, jobenv, llamacpp, ollamastore, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...capability import (
     MIN_LOAD_CONTEXT,
@@ -16,6 +15,7 @@ from ...capability import (
     check_load_context,
 )
 from ...cardfacts import card_for
+from ...cardkinds import KIND_LLM
 from ...clock import utcnow
 from ...config import Config
 from ...engines import EngineError, engine_load_args, find_free_port, start_engine
@@ -31,7 +31,6 @@ from ...manifests import (
 )
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
-    KIND_LLM,
     Occupant,
     Residency,
     ResidentModel,
@@ -49,17 +48,15 @@ from ..template import (
     require_model,
     run_model,
 )
-from ..unload import UnloadJobType, UnloadParams
+from ..unload import UnloadJobType
 
 __all__ = [
     "JOB_TYPES",
-    "LeaseOnLoad",
     "LlmEngineStatus",
     "LoadModelJobType",
     "LoadParams",
     "Residency",
     "UnloadModelJobType",
-    "UnloadParams",
     "llm_engine_status",
     "model_rows",
     "occupy_model",
@@ -475,9 +472,6 @@ class LoadModelJobType:
         ctx.done_extra(**extra)
 
 
-_open_lease_for_load = open_lease_for_load
-
-
 def occupy_model(
     residency: Residency,
     manifest: ModelManifest,
@@ -495,8 +489,8 @@ def occupy_model(
 
     def start() -> Occupant:
         log_path = residency.log_path_for(manifest.id)
-        engine = residency_module.build_engine(spec.engine, python, log_path)
-        served = residency_module.engine_model_name(
+        engine = engines.build_engine(spec.engine, python, log_path)
+        served = engines.engine_model_name(
             spec.engine, weights_dir, manifest.id
         )
         port = find_free_port()

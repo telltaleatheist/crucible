@@ -6,11 +6,14 @@ import sys
 import urllib.error
 from pathlib import Path
 
-from .. import apiclient, weights
+from .. import weights
+from ..client import transport
+from ..client.connection import Connection
 from ..config import config_path, crucible_home
 from ..errors import ConfigError
 from ..voices import VoiceError, load_all_voices, load_voice
 from . import common
+from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
 
@@ -129,17 +132,17 @@ def _repo_manifest_for(reference: str):
 
 
 def _pin_through_the_server(
-    server: apiclient.Connection, voice_id: str, repo: str, revision: str
+    server: Connection, voice_id: str, repo: str, revision: str
 ) -> Path | int:
     try:
-        answer = apiclient.call(
+        answer = transport.call(
             server,
             "PUT",
             f"/v1/voices/{voice_id}",
             json_body={"pin": {"hf_repo": repo, "revision": revision}},
         )
     except urllib.error.HTTPError as exc:
-        return apiclient.report_http_error(exc, server)
+        return report_http_error(exc, server)
     except (urllib.error.URLError, OSError) as exc:
         return _fail(
             f"server_unreachable: the server at {server.url} answered a moment "

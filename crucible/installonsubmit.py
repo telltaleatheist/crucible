@@ -15,7 +15,8 @@ from .errors import ApiError
 from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 from .jobs import ALL_JOB_TYPES
 from .jobtypes import FAMILIES, spec_of
-from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
+from .tasks import Task, TaskStore, env_installed
+from .tasks.states import CANCELLED, FAILED, TERMINAL_STATES
 from .voices import NARRATOR_ENGINE_SAMPLING, load_all_voices
 
 INSTALLING = "installing"

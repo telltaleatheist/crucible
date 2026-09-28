@@ -10,7 +10,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.decide import (
     LABEL_MARGIN,
     PRIME_USER_TEXT,
@@ -244,7 +244,7 @@ def test_the_engine_is_sent_its_own_name_for_the_model(
 ) -> None:
     built = engine_factory(probs_for=example_probs)
     monkeypatch.setattr(
-        residency_module, "engine_model_name",
+        engines_module, "engine_model_name",
         lambda engine_name, model_dir, model_id: f"/weights/{model_id}",
     )
     fake_weights(MODEL)

@@ -6,8 +6,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from .clock import utcnow
 from .errors import ApiError
-from .jobs.base import utcnow
 
 ROLE_ENGINE = "engine"
 ROLE_ORCHESTRATOR = "orchestrator"

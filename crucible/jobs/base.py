@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
-from ..clock import utcnow
 from ..errors import JobCancelled
 
 if TYPE_CHECKING:

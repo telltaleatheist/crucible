@@ -220,7 +220,7 @@ def _days_later(days: float) -> Any:
 def test_an_interrupted_job_is_stamped_finished_so_the_reaper_can_age_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from crucible.jobs import queue
+    from crucible import clock
 
     _record(tmp_path / "rst111", status=RUNNING)
     store = _store(tmp_path)
@@ -229,7 +229,7 @@ def test_an_interrupted_job_is_stamped_finished_so_the_reaper_can_age_it(
     assert job.finished == job.interrupted_at
 
     assert store.reap() == []
-    monkeypatch.setattr(queue, "_now", _days_later(8))
+    monkeypatch.setattr(clock, "now", _days_later(8))
     reaped = store.reap()
     assert [record.job_id for record in reaped] == ["rst111"]
     assert reaped[0].why == "aged"
@@ -255,13 +255,13 @@ def test_one_bad_record_does_not_stop_the_reaper_for_the_rest(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from crucible.jobs import queue
+    from crucible import clock
 
     _record(tmp_path / "bad333", status=DONE, finished="not a timestamp")
     _record(tmp_path / "old444", status=DONE, finished="2026-09-20T18:30:00+00:00")
     store = _store(tmp_path)
     store.restore()
-    monkeypatch.setattr(queue, "_now", _days_later(30))
+    monkeypatch.setattr(clock, "now", _days_later(30))
 
     reaped = store.reap()
     assert [record.job_id for record in reaped] == ["old444"]

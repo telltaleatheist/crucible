@@ -425,13 +425,13 @@ def test_the_lane_reports_a_queued_job_as_a_holder_too(
     store = resident.app.state.store
     job = store.create("echo", None, {})
     try:
-        store._pending.append(job.id)
+        store.admitted.admit(job.id)
         held = settlement_of(resident).holder()
         assert held is not None and held.fact == "a job"
         assert job.id in held.who
         assert settlement_of(resident).settle("a test asked") is None
     finally:
-        store._pending.remove(job.id)
+        store.admitted.release(job.id)
         store.discard(job)
 
     assert store.occupied_by_anything_but(None) is None

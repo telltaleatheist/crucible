@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from crucible.accelerator import AcceleratorState
+from crucible.engines import engine_load_args
 from crucible.manifests import BackendSpec, MemoryTerms, load_manifest
 from crucible.vram import (
     KvPlan,
@@ -210,8 +211,6 @@ def test_both_flags_go_on_and_the_pool_is_stated_in_bytes():
 
 
 def test_the_plan_flags_come_after_the_manifest_so_they_win():
-    from crucible.residency import Residency
-
     manifest = load_manifest("qwen3.5-9b")
     block = manifest.backends["cuda-linux"]
     plan = plan_vllm_memory(
@@ -223,7 +222,7 @@ def test_the_plan_flags_come_after_the_manifest_so_they_win():
         reclaimable_bytes=0,
     )
     assert plan is not None
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, block, __import__("pathlib").Path("/w"), plan, context=16384
     )
     assert "--kv-cache-memory-bytes" in args
@@ -238,11 +237,9 @@ def test_the_plan_flags_come_after_the_manifest_so_they_win():
 def test_none_leaves_the_manifest_line_untouched():
     from pathlib import Path
 
-    from crucible.residency import Residency
-
     manifest = load_manifest("qwen3.5-9b")
     block = manifest.backends["cuda-linux"]
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, block, Path("/w"), None, context=manifest.context_for("cuda-linux")
     )
     assert "--kv-cache-memory-bytes" not in args

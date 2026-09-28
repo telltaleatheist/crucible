@@ -15,6 +15,7 @@ from ..errors import ApiError, JobCancelled, JobError
 from ..residency import Residency
 from . import decode
 from .log import EventLog, Frame, Reader
+from .validate import batch_width_for
 
 WATCHDOG_POLL_SECONDS = 0.25
 
@@ -79,7 +80,7 @@ class StreamSession:
         self.sample_rate = sample_rate
         self.backend = backend
         self.narrator_engine = narrator_engine
-        self.batch_width = ttsstream.batch_width_for(narrator_engine)
+        self.batch_width = batch_width_for(narrator_engine)
 
         self._engine = engine
         self._residency = residency

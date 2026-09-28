@@ -9,12 +9,13 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, residency as residency_module
+from crucible import accelerator, jobenv
+from crucible import engines as engines_module
 from crucible.accelerator import GIB
 from crucible.errors import ApiError
 from crucible.jobs import asr as asr_jobs
 from crucible.jobs.tts import render as render_jobs
-from crucible.residency import KIND_TTS
+from crucible.cardkinds import KIND_TTS
 from crucible.voicerepo import REPO_MANIFEST_NAME
 from crucible.voices import load_voice
 
@@ -1224,6 +1225,6 @@ def test_cancelling_an_unknown_job_is_refused_by_name(
 
 
 def test_nothing_in_this_module_touched_a_real_engine_module() -> None:
-    assert residency_module.build_voice_engine.__module__ == (
+    assert engines_module.build_voice_engine.__module__ == (
         "tests.fake_narrator_engine"
     )

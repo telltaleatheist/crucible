@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from ... import accelerator, jobenv, ttsplan, weights
-from ... import residency as residency_module
+from ... import accelerator, engines, jobenv, ttsplan, weights
 from ...backend import MLX_DARWIN
+from ...cardkinds import KIND_TTS
 from ...clock import utcnow
 from ...config import Config
 from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
@@ -13,7 +13,6 @@ from ...errors import ApiError
 from ...narratorvoices import DOCUMENT_READERS, write_document
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
-    KIND_TTS,
     Occupant,
     Residency,
     ResidentVoice,
@@ -22,7 +21,7 @@ from ...residency import (
 from ...voicereference import ReferenceError, VoiceReference, parse_reference
 from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest, load_all_voices
 from ..base import ModelDescriptor
-from ..template import ManifestCatalog, parse_params
+from ..template import ManifestCatalog
 
 __all__ = [
     "describe_voices",
@@ -31,7 +30,6 @@ __all__ = [
     "occupy_voice",
     "require_loadable",
     "require_reference",
-    "validated_params",
     "voice_provenance",
     "voice_rows",
 ]
@@ -83,8 +81,6 @@ VOICES: ManifestCatalog[VoiceManifest] = ManifestCatalog(
     unknown="manifest for voice",
     unknown_code="unknown_voice",
 )
-
-validated_params = parse_params
 
 
 def load_voices() -> dict[str, VoiceManifest]:
@@ -366,7 +362,7 @@ def _build_narrator(
         else None
     )
     serving = manifest.serving
-    return residency_module.build_voice_engine(
+    return engines.build_voice_engine(
         manifest.narrator_engine,
         python,
         log_path,
@@ -474,5 +470,3 @@ def occupy_voice(
 
     return cast(ResidentVoice, residency.occupy(KIND_TTS, manifest.id, start, say=say))
 
-
-Residency.load_voice = occupy_voice

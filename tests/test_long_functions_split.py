@@ -36,6 +36,8 @@ WHOLE_FILES = (
 NAMED_FUNCTIONS = (
     ("jobenv.py", "env_status"),
     ("jobenv.py", "install_env"),
+    ("jobenv.py", "plan_env"),
+    ("jobenv.py", "recipe_index_urls"),
     ("service.py", "status"),
     ("service.py", "install"),
     ("lan.py", "enable"),

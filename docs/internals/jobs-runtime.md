@@ -99,7 +99,7 @@ which imports `residency` and every job package. A table there could be read by 
   session when its process is alive, forget a dead one, guard, load, and name the job module
   as the bug if its occupant carried no session.
 - `leaseonload.LeaseOnLoad` and `open_lease_for_load` are the `params.lease` of `load-model`
-  and `load-voice` (were `jobs.llm.LeaseOnLoad` / `_open_lease_for_load`, still re-exported).
+  and `load-voice`; the job packages import them from there.
 - `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
   The kind comes from `spec.unloads`, the noun from `cardkinds.KIND_NOUNS`, and the codes stay
   `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`). The four copies had drifted;
@@ -146,7 +146,7 @@ which imports `residency` and every job package. A table there could be read by 
   hung forever.
   - `OPTIONAL_JOB_TYPE_MEMBERS` (`journal_identity`) are declared on the Protocol with a
     default of `None` and left out of that check. `journal_identity` is `None` on every type
-    that keeps no resume journal and a method on the one that does (`asr`). `api/inputs.py`
+    that keeps no resume journal and a method on the one that does (`asr`). `crucible/inputs.py`
     reads it with `getattr(..., None)`, so a type without it refuses `resume` with
     `resume_unsupported`.
 - Every job type must map to a capability class, or a refusal would have nothing to name.
@@ -163,14 +163,13 @@ leases, the journal and the job types can use them without pulling in residency,
 ladder or the CLI:
 
 - `crucible/clock.py`: `now()` (an aware UTC `datetime`), `utcnow()` (its ISO string) and
-  `utcnow_to_the_second()` (the ladder's record stamps). The old names (`jobs.base.utcnow`,
-  `jobs.queue._now`, `journal.utcnow`, `leases._utcnow`, `ladder._now`, `residency._now`)
-  are aliases of these, kept so tests can still patch them per module.
+  `utcnow_to_the_second()` (the ladder's record stamps). The lane, the journal and the leases
+  call `clock.now()` through the module, so a test that moves time patches `clock.now`.
 - `crucible/cardkinds.py`: the four resident kinds (`KIND_*`) and `KIND_NOUNS`. `leases`
-  reads them from here; `residency` re-exports them.
+  and `residency` read them from here, and so does every caller that names a kind.
 - `crucible/cardfacts.py`: the ladder record reader (`record_path`, `load_record`,
   `stale_reason`, `card_for`, the rung and outcome names, `RungResult`). The job types read
-  `card_for` from here; `ladder` re-exports it and keeps the measuring.
+  `card_for` from here, as do the CLI and the routes; `ladder` keeps the measuring.
 - `crucible/capabilitystore.py`: `decide_for(config, backend)` (decisions on the card's
   total bytes, the config's reserve and local models, and `card_for`),
   `decide_on(...)` for callers deciding on recorded numbers (`settings`), `record_of(...)`
@@ -184,8 +183,8 @@ ladder or the CLI:
 - The lane is a single slot, not a queue: `LaneSlot` (`JobStore._admitted`) holds at most the
   one admitted job id, and `admit` refuses a second. `queue_depth` is 0 or 1, `position()` is
   0 (running), 1 (admitted) or null, and `queued()` is empty or that one job; the names and the
-  `queued` event's `position` field stay because clients read them. `JobStore._pending` is the
-  same slot under its old name (with `append`/`remove`), kept only for tests.
+  `queued` event's `position` field stay because clients read them. `JobStore.admitted` is
+  that slot, for code and tests that must see or hold it.
 - `refuse_if_busy` answers "is there room now" and nothing else. It reads the admitted slot as
   well as `_running_id`. `enqueue` admits and wakes the lane, but the lane task cannot run until
   the current handler yields. A check of `_running_id` alone would therefore admit a second job
@@ -194,8 +193,8 @@ ladder or the CLI:
 - The refusal is `409 server_busy` with facts (`busy_details`): holder, job, state, `since`
   (`started` for a running job, `created` for an admitted one) and the latest progress line.
   A bare "busy" makes clients poll, and polling rewards luck rather than who asked first.
-  `Job.busy()` builds them as a `BusyHolder` and `Job.busy_details()` is its `to_dict()`
-  (`jobs.queue.busy_details` delegates to it); it is also what
+  `Job.busy()` builds them as a `BusyHolder` and `Job.busy_details()` is its `to_dict()`;
+  it is also what
   `POST /v1/tasks` reads through `Settlement.holder()`, which is why `settle` needs no import of
   the queue.
 - `position`, `queue_depth` and cancel are unchanged. Under the admission rule they only take
@@ -439,8 +438,8 @@ intention, and the fix is a lease on the client side, never an exception here.
 - Each job package loads through `Residency.occupy`, which owns the shared preamble (refuse,
   evict, warming) and publishes what the package's `start()` returns. `residency.py` imports no
   job package and no engine module, so `residency -> jobs -> residency` is not a cycle.
-  `Residency.load_voice` is `jobs.tts.common.occupy_voice`, set by that module for
-  `jobs/tts/render.py` until render calls `occupy_voice` itself.
+  `jobs/tts/render.py` loads a voice with `occupy_voice(residency, ...)` from
+  `jobs/tts/common.py`; `Residency` has no per-kind load method.
 
 - `unload` records the stopping engine as `DyingResident` before it asks it to stop. If the stop
   raises (SIGTERM deadline passed), the record stays and every load or claim goes through
@@ -580,9 +579,11 @@ model, decide the card automatically if it was never decided, and do not hold th
 | `runner` | the `crucible install … --verbose` child: argv, environment, the `crucible: ` reason line, throttled byte progress |
 | `store` | `TaskStore`: history, subscribers, the busy and card-held refusals, and one `_run_*` per type, with a module's steps split into `_need_step`, `_install_entry_step` and `_subject_step` |
 
-Tests patch `tasks.install_command`, `tasks.env_installed`, `tasks.which` and
-`tasks.searched_note` on the package, so the submodules look those names up
-through `crucible.tasks` at call time rather than binding their own copies.
+The package answers `TaskStore`, `Task`, `TASK_TYPES`, `PROGRESS_INTERVAL_SECONDS` and the
+four patch points; everything else is imported from its submodule. Tests patch
+`tasks.install_command`, `tasks.env_installed`, `tasks.which` and `tasks.searched_note`
+on the package, so the submodules look those names up through `crucible.tasks` at call
+time rather than binding their own copies.
 
 ## 9. Per-type notes: llm and echo
 

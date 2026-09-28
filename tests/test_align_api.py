@@ -15,7 +15,8 @@ from crucible.accelerator import GIB, ComputeApp
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
 from crucible.jobs import align as align_job
-from crucible.residency import KIND_ALIGN, Residency
+from crucible.cardkinds import KIND_ALIGN
+from crucible.residency import Residency
 
 from .conftest import (
     FAKE_BACKEND,

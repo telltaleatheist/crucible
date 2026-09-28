@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, ClassVar, Iterator
+from typing import Any, AsyncIterator, Callable, Iterator
 
 from .accelerator import (
     ProcessIdentity,
@@ -22,19 +22,14 @@ from .accelerator import (
     process_identity,
 )
 from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
-from .clock import utcnow as _now
+from .clock import utcnow
 from .config import Config
 from .engines import (
     STOP_TIMEOUT_SECONDS,
     EngineError,
     NarratorEngine,
     SubprocessEngine,
-    build_engine,
-    build_voice_engine,
-    engine_load_args,
     engine_log_path,
-    engine_model_name,
-    start_engine,
 )
 from .errors import ApiError, JobError
 from .manifests import NO_DEFAULTS, ModelDefaults, fingerprint
@@ -44,11 +39,6 @@ __all__ = [
     "CLEARANCE_MARGIN_SECONDS",
     "CLEARANCE_TIMEOUT_SECONDS",
     "DEFAULT_READY_TIMEOUT_SECONDS",
-    "KIND_ALIGN",
-    "KIND_DENOISE",
-    "KIND_LLM",
-    "KIND_NOUNS",
-    "KIND_TTS",
     "DyingResident",
     "Occupant",
     "Residency",
@@ -57,10 +47,7 @@ __all__ = [
     "ResidentModel",
     "ResidentSeparator",
     "ResidentVoice",
-    "build_engine",
-    "build_voice_engine",
     "describe_resident",
-    "engine_model_name",
     "resident_record_path",
     "say_to",
     "stop_budget_of",
@@ -683,12 +670,6 @@ class Residency:
         self._record_residents()
         return resident
 
-    _start = staticmethod(start_engine)
-
-    _engine_args = staticmethod(engine_load_args)
-
-    load_voice: ClassVar[Callable[..., ResidentVoice]]
-
     def unload(self, subject_id: str) -> Resident:
         self._refuse_mutation_if_claimed(f"unload {subject_id}")
         resident = self._resident
@@ -704,7 +685,7 @@ class Residency:
             engine=leaving.engine,
             session=leaving.session,
             pids=leaving.pids,
-            since=_now(),
+            since=utcnow(),
             log_path=resident.log_path,
         )
         with self._claim_lock:
@@ -762,7 +743,7 @@ class Residency:
             dying = self._dying
             document = {
                 "crucible_pid": os.getpid(),
-                "recorded_at": _now(),
+                "recorded_at": utcnow(),
                 "subject": self.resident_id
                 or (None if dying is None else dying.subject_id),
                 "stop_budget_seconds": self._stop_budget(),
@@ -806,7 +787,7 @@ class Residency:
             found = process_identity(wanted.pid)
             if found is None or not found.same_process_as(wanted):
                 continue
-            asked_at = _now()
+            asked_at = utcnow()
             if ask_pid_to_stop(found.pid):
                 print(
                     f"crucible: a previous Crucible left pid {found.pid} "

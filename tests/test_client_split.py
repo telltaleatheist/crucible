@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import inspect
 import io
 import json
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from crucible import apiclient, protocol
+from crucible import protocol
 from crucible.cli import api_cmd, common
 from crucible.client import connection, errors, pair, transport
 
@@ -105,9 +106,5 @@ def test_every_api_verb_is_a_row_with_help_and_a_handler_or_children() -> None:
     assert all(callable(leaf.run) for leaf in _leaves(api_cmd.API_VERBS))
 
 
-def test_the_old_module_name_forwards_reads_and_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert apiclient.call is api_cmd.call
-    assert apiclient.Connection is connection.Connection
-    marker = object()
-    monkeypatch.setattr(apiclient, "follow", marker)
-    assert api_cmd.follow is marker
+def test_the_verbs_live_in_api_cmd_and_nothing_forwards_to_them() -> None:
+    assert importlib.util.find_spec("crucible.apiclient") is None

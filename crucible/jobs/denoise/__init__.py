@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ... import workers
 from ...backend import CUDA_LINUX
+from ...cardkinds import KIND_DENOISE
 from ...clock import utcnow
 from ...config import Config
 from ...denoisemodels import (
@@ -25,7 +26,6 @@ from ...jobtypes import DENOISE_JOB, RVC_ENV, UNLOAD_DENOISER
 from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
-    KIND_DENOISE,
     Occupant,
     Residency,
     ResidentSeparator,
@@ -42,7 +42,7 @@ from ..template import (
     require_model,
     run_model,
 )
-from ..unload import UnloadJobType, UnloadParams
+from ..unload import UnloadJobType
 
 __all__ = [
     "JOB_TYPES",
@@ -57,8 +57,6 @@ __all__ = [
 JOB_TYPE = DENOISE_JOB.name
 
 ENV_JOB_TYPE = RVC_ENV.name
-
-UnloadDenoiserParams = UnloadParams
 
 NO_PARAMS = (
     "denoise takes no params — every separation knob is an engine default this "

@@ -6,8 +6,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
+from . import clock
 from .cardkinds import KIND_NOUNS
-from .clock import now as _utcnow
 from .errors import ApiError
 from .jobtypes import JOB_TYPE_SPECS, CardEffect
 
@@ -84,7 +84,7 @@ class Lease:
 
 class Leases:
     def __init__(self, now: Callable[[], datetime] | None = None) -> None:
-        self._now = _utcnow if now is None else now
+        self._now = clock.now if now is None else now
         self._lock = threading.Lock()
         self._lease: Lease | None = None
         self._closed: str | None = None

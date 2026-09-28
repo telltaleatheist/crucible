@@ -5,13 +5,16 @@ import json
 import urllib.error
 from pathlib import Path
 
-from .. import apiclient, catalog, denoisemodels, rvcbase, weights
+from .. import catalog, denoisemodels, rvcbase, weights
 from ..alignmodels import AlignManifest, AlignManifestError, load_all_align_manifests
 from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
+from ..client import transport
+from ..client.connection import Connection
 from ..errors import CrucibleError
 from ..manifests import ManifestError, ModelManifest, load_all_manifests
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from . import common
+from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
 
@@ -35,14 +38,14 @@ def _nobody_holds(_subject: catalog.Subject) -> None:
 
 
 def _remove_through_the_server(
-    server: apiclient.Connection,
+    server: Connection,
     found: weights.InstalledWeights,
     args: argparse.Namespace,
 ) -> tuple[Path, int] | int:
     try:
-        apiclient.call(server, "DELETE", f"/v1/catalog/{args.kind}/{args.id}")
+        transport.call(server, "DELETE", f"/v1/catalog/{args.kind}/{args.id}")
     except urllib.error.HTTPError as exc:
-        return apiclient.report_http_error(exc, server)
+        return report_http_error(exc, server)
     except (urllib.error.URLError, OSError) as exc:
         return _fail(
             f"server_unreachable: the server at {server.url} answered a moment "

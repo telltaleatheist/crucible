@@ -6,8 +6,9 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import catalog, ladder, upstreams
+from ... import catalog, upstreams
 from ... import settings as settings_module
+from ...cardfacts import card_for
 from ...errors import ApiError
 from ...inflight import read_act
 from ..caller import client_agent
@@ -46,7 +47,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 config,
                 resolved,
                 gpu_vendor=backend.gpu.vendor,
-                card=ladder.card_for(config.home, backend.gpu),
+                card=card_for(config.home, backend.gpu),
             )
         )
         if resolved.changed:

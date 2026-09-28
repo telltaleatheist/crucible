@@ -12,11 +12,11 @@ usage (argparse's own).
 
 | module | verbs |
 |---|---|
-| `__init__` | `build_parser`, `main`, and the names other modules and tests import |
+| `__init__` | `build_parser` and `main`; everything else is imported from the module that defines it |
 | `__main__` | `python -m crucible.cli` |
 | `common` | exit codes, `_fail`, `Refusal`, `here`, `server_here`, `_backend_mismatch`, `backend_changed_fix`, `no_viable_backend`, `_env_spec`; the one place `detect_backend` and `load_config` are reached from |
 | `init` | `init`, `--config-from` carrying, the desktop-reserve decision |
-| `install` | `install`; re-exports `INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`, which live in `crucible/jobenv.py` |
+| `install` | `install` and its smoke import; the installer tables (`INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`) live in `crucible/jobenv.py` |
 | `capability` | `capability`, `ladder`, and the measure and capability steps `install` runs |
 | `weights` | `remove`, `models`, `rvc`, `denoise` |
 | `voices` | `voices list/pull/pin/check/card/export` |
@@ -59,12 +59,11 @@ Every route the server publishes has a verb or a stated reason not to (`tests/te
 the SDK's `holdJob` and `releaseHold`; `release` answers `{"released": <job-id>}` as `lease release`
 does, since the route answers 204.
 
-`crucible/apiclient.py` is a forwarding module kept for one release: every read,
-write and delete of an attribute on it lands on `cli/api_cmd.py`, so
-`monkeypatch.setattr(apiclient, "call", ...)` still reaches the verbs, and a module
-that imported `apiclient` while `crucible.cli` was still loading gets the same answers.
-`cli/voices.py`, `cli/weights.py` and `cli/common.py` still import it; they move to
-`crucible.client` when it goes.
+The verbs live in `cli/api_cmd.py` and the client core in `crucible/client/`
+(`connection`, `errors`, `transport`, `pair`). `cli/voices.py`, `cli/weights.py` and
+`cli/common.py` call `crucible.client` directly and borrow only `report_http_error` from
+`api_cmd`; a test that stubs the wire patches `crucible.client.transport.call`, or
+`api_cmd.call`/`follow`/`emit` for the verbs.
 
 ### Constraints on the layout
 

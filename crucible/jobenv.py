@@ -259,17 +259,25 @@ def recipe_roots() -> list[Path]:
     return sorted(path for path in root.iterdir() if path.is_dir())
 
 
-def recipe_index_urls() -> list[str]:
-    urls = [DEFAULT_INDEX_URL]
+def _index_urls_in(text: str) -> Iterator[str]:
+    for line in _option_lines(text):
+        found = _INDEX_OPTION.match(line)
+        if found is not None:
+            yield found.group("url")
+
+
+def _recipe_index_options() -> Iterator[str]:
     for directory in recipe_roots():
         for recipe in sorted(directory.glob("*.txt")):
-            for line in _option_lines(recipe_text(recipe)):
-                found = _INDEX_OPTION.match(line)
-                if found is not None and found.group("url") not in urls:
-                    urls.append(found.group("url"))
+            yield from _index_urls_in(recipe_text(recipe))
+
+
+def recipe_index_urls() -> list[str]:
+    urls = [DEFAULT_INDEX_URL]
     hub = os.environ.get(HF_ENDPOINT_ENV) or DEFAULT_HF_ENDPOINT
-    if hub not in urls:
-        urls.append(hub)
+    for url in (*_recipe_index_options(), hub):
+        if url not in urls:
+            urls.append(url)
     return urls
 
 
@@ -595,16 +603,9 @@ class EnvPlan:
     lines: tuple[str, ...] = ()
 
 
-def plan_env(
-    *,
-    directory: Path,
-    stamp: Path,
-    recipe: Path,
-    backend_kind: str,
-    installed: bool,
-    force: bool,
-    install_command: str,
-) -> EnvPlan:
+def _plan_before_the_stamp(
+    directory: Path, stamp: Path, recipe: Path, force: bool, install_command: str
+) -> EnvPlan | None:
     if force:
         return EnvPlan(
             PLAN_BUILD,
@@ -618,13 +619,16 @@ def plan_env(
             f"{directory} exists but {stamp.name} does not: the last "
             f"`{install_command}` did not finish",
         )
-    record = _read_stamp(stamp)
-    if record is None:
-        return EnvPlan(
-            PLAN_BUILD,
-            f"{stamp} was written by an older Crucible and does not say what "
-            f"{directory} was built from",
-        )
+    return None
+
+
+def _refuse_what_pip_cannot_repair(
+    record: dict[str, Any],
+    directory: Path,
+    recipe: Path,
+    backend_kind: str,
+    install_command: str,
+) -> None:
     if record["backend"] != backend_kind:
         raise EnvError(
             f"{directory} was installed for backend {record['backend']!r} and "
@@ -632,7 +636,6 @@ def plan_env(
             "wheels is not re-pointed at another's by pip, so this is the one "
             f"drift that is genuinely a rebuild: `{install_command} --force`"
         )
-
     after = recipe_text(recipe)
     problems = unverifiable_recipe_changes(record["recipe_text"], after, recipe.name)
     if problems:
@@ -645,6 +648,34 @@ def plan_env(
             f"installed. `{install_command} --force` rebuilds it."
         )
 
+
+def _moved_references_plan(
+    recipe: Path, stamped: dict[str, Any], here: dict[str, Any]
+) -> EnvPlan:
+    moved = sorted(
+        name for name in set(stamped) | set(here) if stamped.get(name) != here.get(name)
+    )
+    lines = tuple(
+        line for line in _requirement_lines(recipe) if _reference_name(line) in moved
+    )
+    if len(lines) != len(moved):
+        raise EnvError(
+            f"{recipe.name} pins {moved} at commits this env was not built "
+            f"from, and only {len(lines)} of those are lines in the file. A "
+            "reference that moved must be a line this install can reinstall"
+        )
+    return EnvPlan(
+        PLAN_REFERENCES,
+        ", ".join(
+            f"{name} {(stamped.get(name) or 'absent')[:12]} -> "
+            f"{(here.get(name) or 'absent')[:12]}"
+            for name in moved
+        ),
+        lines,
+    )
+
+
+def _recipe_drift(record: dict[str, Any], recipe: Path) -> EnvPlan | None:
     here_environment = environment_sha256(recipe)
     here_references = recipe_direct_references(recipe)
     stamped_environment = environment_digest(record["recipe_text"])
@@ -656,29 +687,34 @@ def plan_env(
             f"{stamped_environment[:12]} -> {here_environment[:12]}",
         )
     if stamped_references != here_references:
-        moved = sorted(
-            name for name in set(stamped_references) | set(here_references)
-            if stamped_references.get(name) != here_references.get(name)
-        )
-        lines = tuple(
-            line for line in _requirement_lines(recipe)
-            if _reference_name(line) in moved
-        )
-        if len(lines) != len(moved):
-            raise EnvError(
-                f"{recipe.name} pins {moved} at commits this env was not built "
-                f"from, and only {len(lines)} of those are lines in the file. A "
-                "reference that moved must be a line this install can reinstall"
-            )
+        return _moved_references_plan(recipe, stamped_references, here_references)
+    return None
+
+
+def plan_env(
+    *,
+    directory: Path,
+    stamp: Path,
+    recipe: Path,
+    backend_kind: str,
+    installed: bool,
+    force: bool,
+    install_command: str,
+) -> EnvPlan:
+    early = _plan_before_the_stamp(directory, stamp, recipe, force, install_command)
+    if early is not None:
+        return early
+    record = _read_stamp(stamp)
+    if record is None:
         return EnvPlan(
-            PLAN_REFERENCES,
-            ", ".join(
-                f"{name} {(stamped_references.get(name) or 'absent')[:12]} -> "
-                f"{(here_references.get(name) or 'absent')[:12]}"
-                for name in moved
-            ),
-            lines,
+            PLAN_BUILD,
+            f"{stamp} was written by an older Crucible and does not say what "
+            f"{directory} was built from",
         )
+    _refuse_what_pip_cannot_repair(record, directory, recipe, backend_kind, install_command)
+    drift = _recipe_drift(record, recipe)
+    if drift is not None:
+        return drift
     if not installed:
         return EnvPlan(
             PLAN_RECIPE, f"{directory} does not hold what {recipe.name} pins"

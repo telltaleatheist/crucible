@@ -15,6 +15,7 @@ import pytest
 
 from crucible import ttsstream
 from crucible.settle import SETTLEMENT_HOLDER
+from crucible.ttsstream.validate import batch_width_for
 
 from . import fake_narrator_engine
 from .conftest import a_clearance_to_hold
@@ -979,9 +980,9 @@ def test_a_cancelled_row_has_no_gap_to_keep(
 def test_the_batch_width_has_no_default_for_an_unmeasured_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert ttsstream.batch_width_for("higgs-v3") == 1
+    assert batch_width_for("higgs-v3") == 1
     with pytest.raises(Exception) as caught:
-        ttsstream.batch_width_for("some-engine-nobody-measured")
+        batch_width_for("some-engine-nobody-measured")
     assert getattr(caught.value, "code", None) == "unknown_narrator_engine"
 
 
