@@ -306,8 +306,9 @@ def test_each_engine_states_whether_it_serves_a_decision() -> None:
     assert "server-common.cpp" in llama.basis
     mlx = decide_reading("mlx-lm")
     assert mlx.served and mlx.max_logprobs == 40
-    pages = decide_reading("mlx-vlm")
-    assert not pages.served and "compute_logprobs=False" in pages.basis
+    vlm = decide_reading("mlx-vlm")
+    assert vlm.served and vlm.max_logprobs == 40
+    assert "top_logprobs_k" in vlm.basis and "float32" in vlm.basis
 
 
 def test_vllm_is_started_with_the_cap_the_reader_clamps_to() -> None:
@@ -344,6 +345,7 @@ def test_a_cap_on_an_engine_that_serves_nothing_is_refused(
 ) -> None:
     from crucible.engines import decide_reading
 
+    monkeypatch.setattr(ENGINES["mlx-vlm"], "decide_logprobs", False)
     monkeypatch.setattr(ENGINES["mlx-vlm"], "max_logprobs", 5)
     with pytest.raises(EngineError) as caught:
         decide_reading("mlx-vlm")

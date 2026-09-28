@@ -7,7 +7,7 @@ trained_context = 262144
 context_default = 16384
 modalities = ["text", "image"]
 display = "Qwen 3.5 · 9B · with vision"
-description = "The 9B with its vision tower served, for decisions about images. Shares qwen3.5-9b's download; costs its 0.85 GiB tower and a 1.90 GiB image reserve on a PC card, and the 0.92 GB projector on Windows. On a 24 GB card it leaves only ~1,700 tokens of KV, so it does not usefully fit there."
+description = "The 9B with its vision tower served, for decisions about images. Shares qwen3.5-9b's download; costs its 0.85 GiB tower and a 1.90 GiB image reserve on a PC card, and the 0.92 GB projector on Windows. On a 24 GB card it leaves only ~1,700 tokens of KV, so it does not usefully fit there. On a Mac it reads the same bf16 folder through mlx-vlm with its tower (0.91 GB over the text form), plus a 0.36 GB reserve for encoding eight 640 px images, each about 400 tokens of context."
 
 [defaults]
 thinking = false
@@ -29,6 +29,22 @@ engine_args = [
 weights_bytes = 18_950_883_603
 overhead_bytes = 3_516_504_474
 kv_bytes_per_token = 40_337
+basis = "computed"
+measured_at_context = 16384
+
+[backends.mlx-darwin]
+engine = "mlx-vlm"
+hf_repo = "mlx-community/Qwen3.5-9B-bf16"
+revision = "27cdb77d9381d508abfe5d4e06bcb95471e312ac"
+serves = ["text", "image"]
+memory_bytes_estimate = 21_788_134_697
+engine_args = ["--width", "1"]
+max_context = 131072
+
+[backends.mlx-darwin.memory]
+weights_bytes = 18_819_722_691
+overhead_bytes = 2_431_541_094
+kv_bytes_per_token = 32_768
 basis = "computed"
 measured_at_context = 16384
 

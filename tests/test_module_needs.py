@@ -208,11 +208,11 @@ def test_an_explicit_subject_this_backend_cannot_hold_is_STILL_unknown_subject(
 ) -> None:
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         response = post_module(
-            mac, auth, a_module(subjects=[{"kind": "model", "id": "qwen3.5-9b-vl"}])
+            mac, auth, a_module(subjects=[{"kind": "model", "id": "qwen3.8-27b-4bit-vl"}])
         )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_module"
-    assert "qwen3.5-9b-vl" in response.json()["error"]["message"]
+    assert "qwen3.8-27b-4bit-vl" in response.json()["error"]["message"]
 
 
 def test_unmet_is_an_EMPTY_LIST_on_every_other_task(

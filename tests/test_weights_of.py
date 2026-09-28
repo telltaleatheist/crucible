@@ -311,7 +311,9 @@ def test_the_vision_forms_load_and_agree_with_their_bases(
     assert alias.modalities == ("text", "image")
     assert alias.display == f"{base.display} · with vision"
     assert alias.local is None
-    assert MLX_DARWIN not in alias.backends
+    assert (MLX_DARWIN in alias.backends) == (alias_id == "qwen3.5-9b-vl")
+    if MLX_DARWIN in alias.backends:
+        assert alias.spec(MLX_DARWIN).engine == "mlx-vlm"
     for kind, spec in alias.backends.items():
         base_spec = base.spec(kind)
         assert (spec.hf_repo, spec.revision, spec.file) == (
@@ -359,8 +361,8 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
             "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
         ],
         MLX_DARWIN: [
-            "qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b",
-            "qwen3.5-2b", "qwen3.5-0.8b",
+            "qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b-vl", "qwen3.5-9b",
+            "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
         ],
         LLAMA_WINDOWS: [
             "qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit", "qwen3.5-9b-vl",

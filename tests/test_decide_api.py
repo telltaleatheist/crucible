@@ -433,7 +433,10 @@ def test_images_on_a_text_model_are_model_text_only(
     assert error["details"] == {
         "model": MODEL, "backend": "cuda-linux", "serves": ["text"],
         "modalities": ["text"], "images": 1,
+        "image_models": ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.5-4b",
+                         "qwen3.5-2b", "qwen3.5-0.8b"],
     }
+    assert '{"type": "load-model", "model": "qwen3.8-27b-4bit-vl"}' in error["message"]
     assert engine.requests == []
 
 

@@ -16,6 +16,7 @@ if __name__ == "__main__":
 import argparse
 import base64
 import binascii
+import hashlib
 import io
 import json
 import signal
@@ -32,6 +33,22 @@ KNOWN_FIELDS = frozenset(
     {"model", "messages", "temperature", "top_p", "n", "max_tokens", "stream", "user"}
 )
 
+QUESTION_ONLY_FIELDS = frozenset({"logprobs", "top_logprobs", "chat_template_kwargs"})
+
+QUESTION_FIELDS = KNOWN_FIELDS | QUESTION_ONLY_FIELDS
+
+TEMPLATE_KWARGS = frozenset({"enable_thinking"})
+
+ROLES = frozenset({"system", "user", "assistant"})
+
+MAX_TOP_LOGPROBS = 40
+
+MAX_IMAGES = 8
+
+VISION_CACHED_MODEL_TYPES = frozenset({"qwen3_5"})
+
+VISION_CACHE_ENTRIES = 16
+
 
 class Refusal(Exception):
     def __init__(self, status: int, code: str, message: str) -> None:
@@ -46,6 +63,7 @@ class Row:
     finish_reason: str
     prompt_tokens: int
     completion_tokens: int
+    logprobs: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -59,6 +77,29 @@ class Job:
     error: Exception | None = None
 
 
+@dataclass
+class Asked:
+    messages: list[dict[str, Any]]
+    images: list[Any]
+    image_key: str | None
+    max_tokens: int
+    top_logprobs: int | None
+    template_kwargs: dict[str, Any]
+    done: threading.Event = field(default_factory=threading.Event)
+    row: Row | None = None
+    error: Exception | None = None
+
+
+def logits_in_float32(_tokens: Any, logits: Any) -> Any:
+    import mlx.core as mx
+
+    return logits.astype(mx.float32)
+
+
+def token_entry(text: str, logprob: float) -> dict[str, Any]:
+    return {"token": text, "logprob": float(logprob), "bytes": list(text.encode("utf-8"))}
+
+
 class Reader:
     def __init__(self, model_dir: str) -> None:
         import mlx_vlm
@@ -66,6 +107,7 @@ class Reader:
         self._mlx_vlm = mlx_vlm
         self._check_upstream()
         self.model, self.processor = mlx_vlm.load(model_dir)
+        self._vision_features: Any = None
 
     def grid_of(self, image: Any) -> tuple[int, ...]:
         out = self.processor.image_processor(images=[image], return_tensors="np")
@@ -95,15 +137,23 @@ class Reader:
             )
 
     def _embed(self, job: Job) -> tuple[Any, Any, dict[str, Any]]:
-        import mlx.core as mx
         from mlx_vlm.prompt_utils import apply_chat_template
+
+        formatted = apply_chat_template(
+            self.processor, self.model.config, job.prompt, num_images=1
+        )
+        return self._embedded([job.image], formatted, {})
+
+    def _embedded(
+        self, images: list[Any], formatted: Any, vision: dict[str, Any]
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        import mlx.core as mx
         from mlx_vlm.utils import prepare_inputs, should_add_special_tokens
 
         model, processor = self.model, self.processor
-        formatted = apply_chat_template(processor, model.config, job.prompt, num_images=1)
         inputs = prepare_inputs(
             processor,
-            images=[job.image],
+            images=images or None,
             audio=None,
             prompts=[formatted],
             image_token_index=getattr(model.config, "image_token_index", None),
@@ -124,6 +174,7 @@ class Reader:
             inputs.get("pixel_values"),
             mask=inputs.get("attention_mask"),
             **data_kwargs,
+            **vision,
         )
         mx.eval(embedding.inputs_embeds)
         gen_kwargs = {
@@ -132,14 +183,12 @@ class Reader:
         }
         return input_ids, embedding, gen_kwargs
 
-    def read_batch(self, jobs: list[Job]) -> list[Row]:
-        import mlx.core as mx
+    def _prefill_step(
+        self, first_ids: Any, first_embedding: Any, first_kwargs: dict[str, Any]
+    ) -> int | None:
         from mlx_vlm.generate import ar
 
-        model, processor = self.model, self.processor
-        n = len(jobs)
-        rows = [self._embed(job) for job in jobs]
-        first_ids, first_embedding, first_kwargs = rows[0]
+        model = self.model
         step = ar.DEFAULT_PREFILL_STEP_SIZE
         if hasattr(ar, "_default_prefill_step_size_for_offload"):
             step = ar._default_prefill_step_size_for_offload(
@@ -154,6 +203,16 @@ class Reader:
             prefill_kwargs=dict(first_kwargs),
         ):
             step = None
+        return step
+
+    def read_batch(self, jobs: list[Job]) -> list[Row]:
+        import mlx.core as mx
+        from mlx_vlm.generate import ar
+
+        model, processor = self.model, self.processor
+        n = len(jobs)
+        rows = [self._embed(job) for job in jobs]
+        step = self._prefill_step(*rows[0])
         generator = ar.BatchGenerator(
             model.language_model,
             processor,
@@ -201,6 +260,85 @@ class Reader:
         mx.clear_cache()
         return answers
 
+    def _vision(self, job: Asked) -> dict[str, Any]:
+        if job.image_key is None or self.model.config.model_type not in VISION_CACHED_MODEL_TYPES:
+            return {}
+        if self._vision_features is None:
+            from mlx_vlm.vision_cache import VisionFeatureCache
+
+            self._vision_features = VisionFeatureCache(max_size=VISION_CACHE_ENTRIES)
+        return {"vision_cache": self._vision_features, "_image_key": job.image_key}
+
+    def answer(self, job: Asked) -> Row:
+        import mlx.core as mx
+        from mlx_vlm.generate import ar
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        model, processor = self.model, self.processor
+        formatted = apply_chat_template(
+            processor,
+            model.config,
+            job.messages,
+            num_images=len(job.images),
+            **job.template_kwargs,
+        )
+        input_ids, embedding, gen_kwargs = self._embedded(
+            job.images, formatted, self._vision(job)
+        )
+        reading = job.top_logprobs is not None
+        generator = ar.BatchGenerator(
+            model.language_model,
+            processor,
+            prefill_batch_size=1,
+            completion_batch_size=1,
+            compute_logprobs=reading,
+            top_logprobs_k=job.top_logprobs or 0,
+            max_tokens=job.max_tokens,
+            greedy_sampling=True,
+            prefill_step_size=self._prefill_step(input_ids, embedding, gen_kwargs),
+        )
+        try:
+            (uid,) = generator.insert(
+                input_ids.tolist(),
+                [job.max_tokens],
+                prompt_kwargs=ar._split_prompt_kwargs_per_row(gen_kwargs, 1),
+                logits_processors=[[logits_in_float32]] if reading else None,
+            )
+            steps: list[Any] = []
+            while generator.has_work:
+                _prompt_stats, responses = generator.next()
+                steps.extend(response for response in responses if response.uid == uid)
+        finally:
+            generator.close()
+        row = self._row_of(steps, int(input_ids.shape[1]), reading)
+        mx.clear_cache()
+        return row
+
+    def _row_of(self, steps: list[Any], prompt_tokens: int, reading: bool) -> Row:
+        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+        detokenizer = self.processor.detokenizer
+        detokenizer.reset()
+        spoken = [step.token for step in steps if step.finish_reason != "stop"]
+        for token in spoken:
+            detokenizer.add_token(token)
+        detokenizer.finalize()
+        return Row(
+            text=detokenizer.text,
+            finish_reason=steps[-1].finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=len(spoken),
+            logprobs=[self._step_entry(tokenizer, step) for step in steps] if reading else None,
+        )
+
+    @staticmethod
+    def _step_entry(tokenizer: Any, step: Any) -> dict[str, Any]:
+        entry = token_entry(tokenizer.decode([step.token]), step.token_logprob)
+        entry["top_logprobs"] = [
+            token_entry(tokenizer.decode([token]), logprob)
+            for token, logprob in (step.top_logprobs or [])
+        ]
+        return entry
+
 
 class Batcher:
     def __init__(self, reader: Reader, width: int, log: Callable[[str], None]) -> None:
@@ -227,7 +365,14 @@ class Batcher:
             while not self._waiting:
                 self._lock.wait()
             first = self._waiting[0]
-            batch = [job for job in self._waiting if job.grid == first.grid][: self._width]
+            if isinstance(first, Asked):
+                batch = [first]
+            else:
+                batch = [
+                    job
+                    for job in self._waiting
+                    if isinstance(job, Job) and job.grid == first.grid
+                ][: self._width]
             for job in batch:
                 self._waiting.remove(job)
             return batch
@@ -237,7 +382,7 @@ class Batcher:
             batch = self._take()
             started = time.monotonic()
             try:
-                rows = self._reader.read_batch(batch)
+                rows = self._read(batch)
             except Exception as exc:
                 self._log(f"batch of {len(batch)} failed: {exc!r}")
                 for job in batch:
@@ -253,8 +398,20 @@ class Batcher:
             except Exception as exc:
                 self._log(f"batch of {len(batch)} done in {elapsed:.1f}s (describing it failed: {exc!r})")
 
+    def _read(self, batch: list[Any]) -> list[Row]:
+        if isinstance(batch[0], Asked):
+            return [self._reader.answer(batch[0])]
+        return self._reader.read_batch(batch)
+
     @staticmethod
-    def _describe(batch: list[Job], rows: list[Row], elapsed: float) -> str:
+    def _describe(batch: list[Any], rows: list[Row], elapsed: float) -> str:
+        if isinstance(batch[0], Asked):
+            asked, row = batch[0], rows[0]
+            return (
+                f"question with {len(asked.images)} image(s): {elapsed:.2f}s, "
+                f"prompt {row.prompt_tokens} tokens, top_logprobs "
+                f"{asked.top_logprobs}, finish={row.finish_reason}"
+            )
         grid = "x".join(str(v) for v in batch[0].grid)
         sizes = sorted({f"{job.image.width}x{job.image.height}" for job in batch})
         return (
@@ -351,19 +508,177 @@ def parse_request(body: dict[str, Any], served: str) -> tuple[Any, str, int]:
     return decode_image(url), prompt, max_tokens
 
 
+def is_page_request(body: dict[str, Any]) -> bool:
+    if QUESTION_ONLY_FIELDS & set(body):
+        return False
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return True
+    if len(messages) != 1 or not isinstance(messages[0], dict):
+        return False
+    parts = messages[0].get("content")
+    return messages[0].get("role") == "user" and isinstance(parts, list) and any(
+        isinstance(part, dict) and part.get("type") == "image_url" for part in parts
+    )
+
+
+def _check_sampling(body: dict[str, Any], served: str) -> int:
+    if body.get("model") != served:
+        raise Refusal(
+            404, "model_not_found", f"{body.get('model')!r} is not loaded; {served!r} is"
+        )
+    if body.get("stream") is True:
+        raise Refusal(400, "no_streaming", "a question is answered whole, never streamed")
+    if body.get("temperature") != 0:
+        raise Refusal(
+            400,
+            "not_greedy",
+            f"temperature must be 0 and was {body.get('temperature')!r}: this server "
+            "decodes greedily, which is what crucible/decide.py sends",
+        )
+    if body.get("top_p", 1) != 1:
+        raise Refusal(400, "not_greedy", f"top_p must be 1 and was {body['top_p']!r}")
+    if body.get("n", 1) != 1:
+        raise Refusal(400, "one_choice", f"n must be 1 and was {body['n']!r}")
+    max_tokens = body.get("max_tokens")
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        raise Refusal(
+            400, "max_tokens_required", f"max_tokens must be a positive int, not {max_tokens!r}"
+        )
+    return max_tokens
+
+
+def _top_logprobs(body: dict[str, Any]) -> int | None:
+    wanted = body.get("logprobs", False)
+    if not isinstance(wanted, bool):
+        raise Refusal(400, "bad_logprobs", f"logprobs must be true or false, not {wanted!r}")
+    top = body.get("top_logprobs")
+    if not wanted:
+        if top is not None:
+            raise Refusal(
+                400,
+                "top_logprobs_without_logprobs",
+                "top_logprobs was sent without logprobs: true; send both",
+            )
+        return None
+    if top is None:
+        return 0
+    if not isinstance(top, int) or isinstance(top, bool) or top < 0:
+        raise Refusal(400, "bad_top_logprobs", f"top_logprobs must be an int >= 0, not {top!r}")
+    if top > MAX_TOP_LOGPROBS:
+        raise Refusal(
+            400,
+            "too_many_top_logprobs",
+            f"top_logprobs is {top} and this server returns at most "
+            f"{MAX_TOP_LOGPROBS} (MAX_TOP_LOGPROBS in crucible/engines/mlx_vlm_serve.py, "
+            f"the max_logprobs MlxVlmEngine states); ask for {MAX_TOP_LOGPROBS} or fewer",
+        )
+    return top
+
+
+def _template_kwargs(body: dict[str, Any]) -> dict[str, Any]:
+    kwargs = body.get("chat_template_kwargs") or {}
+    if not isinstance(kwargs, dict):
+        raise Refusal(400, "bad_template_kwargs", "chat_template_kwargs must be an object")
+    unknown = sorted(set(kwargs) - TEMPLATE_KWARGS)
+    if unknown:
+        raise Refusal(
+            400,
+            "unknown_template_kwarg",
+            f"chat_template_kwargs carries {unknown}; this server passes only "
+            f"{sorted(TEMPLATE_KWARGS)} to the chat template",
+        )
+    return dict(kwargs)
+
+
+def _turn_images(turn: dict[str, Any], index: int) -> list[str]:
+    parts = turn.get("content")
+    if isinstance(parts, str):
+        return []
+    if not isinstance(parts, list):
+        raise Refusal(
+            400, "content_parts", f"messages[{index}].content must be a string or a list of parts"
+        )
+    urls: list[str] = []
+    for part in parts:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind == "image_url":
+            urls.append(_part_url(part, index))
+        elif kind != "text" or not isinstance(part.get("text"), str):
+            raise Refusal(
+                400,
+                "content_parts",
+                f"messages[{index}] carries a part that is neither text nor image_url: {kind!r}",
+            )
+    if urls and turn["role"] != "user":
+        raise Refusal(400, "content_parts", f"messages[{index}] is {turn['role']!r}; only a user turn carries images")
+    return urls
+
+
+def _part_url(part: dict[str, Any], index: int) -> str:
+    url = (part.get("image_url") or {}).get("url")
+    if not isinstance(url, str):
+        raise Refusal(400, "not_a_data_uri", f"messages[{index}]: image_url.url is missing")
+    return url
+
+
+def _image_urls(messages: Any) -> list[str]:
+    if not isinstance(messages, list) or not messages:
+        raise Refusal(400, "no_messages", "messages must be a non-empty list of turns")
+    urls: list[str] = []
+    for index, turn in enumerate(messages):
+        if not isinstance(turn, dict) or turn.get("role") not in ROLES:
+            raise Refusal(
+                400, "bad_turn", f"messages[{index}] must be an object whose role is one of {sorted(ROLES)}"
+            )
+        urls += _turn_images(turn, index)
+    if len(urls) > MAX_IMAGES:
+        raise Refusal(
+            400,
+            "too_many_images",
+            f"the question carries {len(urls)} images; this server reads at most {MAX_IMAGES}",
+        )
+    return urls
+
+
+def parse_question(body: dict[str, Any], served: str) -> Asked:
+    unknown = sorted(set(body) - QUESTION_FIELDS)
+    if unknown:
+        raise Refusal(
+            400,
+            "unknown_field",
+            f"this server does not understand {unknown}; a question reads "
+            f"{sorted(QUESTION_FIELDS)}",
+        )
+    max_tokens = _check_sampling(body, served)
+    top_logprobs = _top_logprobs(body)
+    template_kwargs = _template_kwargs(body)
+    urls = _image_urls(body.get("messages"))
+    images = [decode_image(url) for url in urls]
+    return Asked(
+        messages=body["messages"],
+        images=images,
+        image_key=hashlib.sha256("\n".join(urls).encode("utf-8")).hexdigest() if urls else None,
+        max_tokens=max_tokens,
+        top_logprobs=top_logprobs,
+        template_kwargs=template_kwargs,
+    )
+
+
 def completion_document(served: str, row: Row) -> dict[str, Any]:
+    choice: dict[str, Any] = {
+        "index": 0,
+        "message": {"role": "assistant", "content": row.text},
+    }
+    if row.logprobs is not None:
+        choice["logprobs"] = {"content": row.logprobs}
+    choice["finish_reason"] = row.finish_reason
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": served,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": row.text},
-                "finish_reason": row.finish_reason,
-            }
-        ],
+        "choices": [choice],
         "usage": {
             "prompt_tokens": row.prompt_tokens,
             "completion_tokens": row.completion_tokens,
@@ -417,6 +732,22 @@ class _Handler(BaseHTTPRequestHandler):
         except Refusal as refusal:
             self._refuse(refusal)
             return
+        if is_page_request(body):
+            self._read_page(body)
+        else:
+            self._answer_question(body)
+
+    def _answer_question(self, body: dict[str, Any]) -> None:
+        try:
+            asked = parse_question(body, self.served)
+        except Refusal as refusal:
+            self._refuse(refusal)
+            return
+        assert self.batcher is not None
+        self.batcher.submit(asked)
+        self._reply(asked)
+
+    def _read_page(self, body: dict[str, Any]) -> None:
         try:
             image, prompt, max_tokens = parse_request(body, self.served)
         except Refusal as refusal:
@@ -433,6 +764,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         job = Job(image=image, prompt=prompt, max_tokens=max_tokens, grid=grid)
         self.batcher.submit(job)
+        self._reply(job)
+
+    def _reply(self, job: Job | Asked) -> None:
         job.done.wait()
         if job.error is not None:
             self._send(
@@ -446,7 +780,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Crucible's own page server for mlx-darwin: dots.ocr through mlx-vlm, in process."
+        description=(
+            "Crucible's own mlx-vlm server for mlx-darwin, in process: dots.ocr "
+            "pages, and the decision door's questions with their top logprobs."
+        )
     )
     parser.add_argument("--model", required=True, help="the weights directory, reported verbatim")
     parser.add_argument("--host", required=True)

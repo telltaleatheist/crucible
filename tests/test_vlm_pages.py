@@ -31,7 +31,7 @@ from .test_llm_api import llm_client, run_job
 
 PAGE_MODEL = "dots-ocr"
 TEXT_MODEL = "qwen3.5-9b"
-CUDA_ONLY_VISION_MODEL = "qwen3.5-9b-vl"
+CUDA_ONLY_VISION_MODEL = "qwen3.8-27b-4bit-vl"
 
 PAGE_WIDTH, PAGE_HEIGHT = 1300, 2112
 
