@@ -4,7 +4,7 @@ revision = "28f6c4d3733be9746bb26ddd7b09c9d2a4950198"
 
 [mistborn]
 hf_repo = "owenmorgan/mistborn-higgs-v3"
-revision = "c2e7488d4dcdbb7061fe1b47f5158c6c5844f2e1"
+revision = "8a8d1bf375c7c4aa097a481d332b94e835a8c6f4"
 
 [owen]
 hf_repo = "owenmorgan/owen-morgan-higgs-v3"
