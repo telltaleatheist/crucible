@@ -243,6 +243,25 @@ so only different input changes the outcome. A piece that loops at the last rung
 job as `asr_decode_loop` with its time range. A repetition penalty was rejected: it pushes
 against the fillers and verbatim repeats the model was chosen to keep.
 
+**Context echo is checked first** (`loopguard.context_echo`, before rules 1-4). Over
+near-silence Qwen3-ASR can recite its own `context` instead of transcribing (ContentStudio,
+job 7f3459cf: 55 s at -41.7 dB decoded as the filler instruction word for word; one piece
+tripped the rate rule, spent the whole ladder and failed as a loop, and a slower recital
+would have shipped as transcript). A piece is an echo when it holds `ECHO_RUN_WORDS` (8)
+consecutive words that also stand consecutively in the context, or when all of it (at least
+`ECHO_WHOLE_MIN_WORDS`, 4, words) is a run of the context; words are compared as
+`words_of` gives them (lowercase, edge punctuation stripped). An echo is not a loop: it never
+enters the ladder, so it can never end in `asr_decode_loop`. The piece keeps its span, its
+text and words are dropped (no segment), it is listed under the document's `context_echo`
+(`start`, `end`, `reason: "context_echo"`, `echoed_words`) and in `transcript.text.json` as a
+row with empty `text` and `reason: "context_echo"`, and the job says so in one note:
+`context_echo 0.0-25.2s: "Verbatim transcript. Transcribe every disfluency…" — the model
+recited its context over audio with no speech; the piece is left empty`, plus
+`. params.speech_only: true skips silence before decoding` when `speech_only` is off. The
+`done` event carries `context_echo_pieces`. Its verdict is journaled (`outcome:
+"context_echo"`), so a resume reads the journaled text, finds the same echo and decodes
+nothing again. Recognising echoes moved `JOURNAL_FORMAT_VERSION` to 2.
+
 An empty decode (or punctuation only) is silence, not a hole. A piece whose every word was
 in its overlap is also silence.
 

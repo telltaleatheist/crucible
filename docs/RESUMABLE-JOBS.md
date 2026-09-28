@@ -151,7 +151,7 @@ disk at submit, the one case that reads the file.
 
 ## 4. The reference: Qwen3-ASR (`crucible/jobs/asr/qwen.py`)
 
-`JOURNAL_FORMAT_VERSION = 1`. A unit is keyed by the piece it belongs to:
+`JOURNAL_FORMAT_VERSION = 2` (2 since the loop guard recognises a context echo). A unit is keyed by the piece it belongs to:
 `piece_key` = `L<level>.<first sample>-<last sample>` of the piece's core on the
 worker's own 16 kHz timeline (integers, never a float's spelling).
 
@@ -160,7 +160,7 @@ worker's own 16 kHz timeline (integers, never a float's spelling).
 | `plan.L<level>.<all\|region>` | after each split | window, overlap, duration, samples, the `speech_only` kept table, every piece's `[core start, core duration, audio start, audio duration]` |
 | `text.<piece>` | as each result lands off the worker (the worker sends a batch's results when the batch is decoded) | `text`, `tokens`, `hit_token_limit` |
 | `words.<piece>` | after each aligner batch of 16 | the aligner's `items`; a piece the aligner failed is NOT written, so a resume after `asr_align_failed` re-aligns only the failures |
-| `verdict.<piece>` | when the piece's fate is decided | `landed` (with its owned text and word count), `silent`, or `redecode` (the loop guard's `redecoded` entry verbatim) |
+| `verdict.<piece>` | when the piece's fate is decided | `landed` (with its owned text and word count), `silent`, `context_echo` (span and echoed word count; the piece is done and left empty), or `redecode` (the loop guard's `redecoded` entry verbatim) |
 
 **Identity** (`AsrJobType.journal_identity`): the model and revision, the
 engine and the dtype it runs at on this card, `language`, `context`,

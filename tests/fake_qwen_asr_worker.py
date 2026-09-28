@@ -76,8 +76,12 @@ def transcribe_one(piece: dict, max_tokens: int) -> dict:
     loop_at = os.environ.get("CRUCIBLE_FAKE_QWEN_LOOP_AT")
     silent_at = os.environ.get("CRUCIBLE_FAKE_QWEN_SILENT_AT")
     above = _float("CRUCIBLE_FAKE_QWEN_LOOP_ABOVE_S", 0.0)
+    echo_at = os.environ.get("CRUCIBLE_FAKE_QWEN_ECHO_AT")
     if _covers(start, duration, None if silent_at is None else float(silent_at)):
         return {"text": "", "tokens": 1, "hit_token_limit": False}
+    if _covers(start, duration, None if echo_at is None else float(echo_at)):
+        text = os.environ["CRUCIBLE_FAKE_QWEN_ECHO_TEXT"]
+        return {"text": text, "tokens": len(text.split()), "hit_token_limit": False}
     if _covers(start, duration, None if loop_at is None else float(loop_at)) and (
         window > above
     ):

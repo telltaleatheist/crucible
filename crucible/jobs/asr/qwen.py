@@ -44,7 +44,7 @@ TEXT_ARTIFACT = "transcript.text.json"
 
 ALIGN_BATCH = 16
 
-JOURNAL_FORMAT_VERSION = 1
+JOURNAL_FORMAT_VERSION = 2
 
 WORKER_ENVIRONMENT_FOR_ENGINE: dict[str, dict[str, str]] = {
     VLLM_ENGINE: {**VLLM_ENVIRONMENT, "VLLM_ENABLE_V1_MULTIPROCESSING": "0"},
@@ -190,6 +190,7 @@ class Piece:
     tokens: int = 0
     hit_token_limit: bool = False
     items: list[dict[str, Any]] = field(default_factory=list)
+    reason: str | None = None
     timeline: speechonly.Timeline | None = None
 
     @property
@@ -358,6 +359,7 @@ class QwenAsrRun:
         self._duration_s = 0.0
         self._finished: list[Piece] = []
         self._redecoded: list[dict[str, Any]] = []
+        self._echoed: list[dict[str, Any]] = []
         self._silent = 0
         self._text_pieces: dict[str, Piece] = {}
         self._journal = journal
@@ -379,6 +381,7 @@ class QwenAsrRun:
         finally:
             self._stop_all()
             self._save_progress(force=True)
+        self._ctx.done_extra(context_echo_pieces=len(self._echoed))
         return self._document()
 
     def _round(self, pending: list[Piece]) -> list[Piece]:
@@ -386,6 +389,10 @@ class QwenAsrRun:
         self._transcribe(pending)
         to_align: list[Piece] = []
         for piece in pending:
+            echo = loopguard.context_echo(piece.text, self._context)
+            if echo is not None:
+                self._leave_empty(piece, echo)
+                continue
             signal = loopguard.text_signal(
                 piece.text, piece.audio_duration_s, piece.hit_token_limit, piece.budget
             )
@@ -445,6 +452,31 @@ class QwenAsrRun:
         )
         self._total += len(children) - 1
         return children
+
+    def _leave_empty(self, piece: Piece, echo: loopguard.ContextEcho) -> None:
+        entry = {
+            "start": piece.start_s,
+            "end": piece.end_s,
+            "reason": echo.kind,
+            "echoed_words": echo.words,
+        }
+        piece.text = ""
+        piece.items = []
+        piece.reason = echo.kind
+        self._echoed.append(entry)
+        self._text_pieces[piece_key(piece)] = piece
+        self._verdict(piece, {"outcome": echo.kind, **entry})
+        self._ctx.note(self._echo_sentence(piece, echo))
+
+    def _echo_sentence(self, piece: Piece, echo: loopguard.ContextEcho) -> str:
+        start, end = speechonly.span(self._timeline, piece.start_s, piece.end_s)
+        sentence = (
+            f'{echo.kind} {start:.1f}-{end:.1f}s: "{echo.quote}…" — the model '
+            "recited its context over audio with no speech; the piece is left empty"
+        )
+        if self._speech is None:
+            sentence += ". params.speech_only: true skips silence before decoding"
+        return sentence
 
     def _land(self, piece: Piece) -> None:
         self._finished.append(piece)
@@ -529,7 +561,7 @@ class QwenAsrRun:
     def _save_progress(self, *, force: bool = False) -> None:
         if self._journal is None or self._total <= 0:
             return
-        done = len(self._finished) + self._silent
+        done = len(self._finished) + self._silent + len(self._echoed)
         detail = f"{self._decoded:,} decoded"
         if self._word_timestamps:
             detail += f", {self._aligned:,} aligned"
@@ -854,15 +886,16 @@ class QwenAsrRun:
             audio_start, audio_end = speechonly.span(self._timeline, 
                 piece.audio_start_s, piece.audio_start_s + piece.audio_duration_s
             )
-            rows.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "audio_start": audio_start,
-                    "audio_end": audio_end,
-                    "text": piece.text,
-                }
-            )
+            row = {
+                "start": start,
+                "end": end,
+                "audio_start": audio_start,
+                "audio_end": audio_end,
+                "text": piece.text,
+            }
+            if piece.reason is not None:
+                row["reason"] = piece.reason
+            rows.append(row)
         document = {
             "model": self._model,
             "revision": self._spec.revision,
@@ -950,6 +983,13 @@ class QwenAsrRun:
             piece.items = list(result["items"])
 
 
+    def _in_source_time(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        moved = []
+        for entry in entries:
+            start, end = speechonly.span(self._timeline, entry["start"], entry["end"])
+            moved.append({**entry, "start": start, "end": end})
+        return moved
+
     def _document(self) -> dict[str, Any]:
         segments = []
         for piece in sorted(self._finished, key=lambda p: p.start_s):
@@ -971,10 +1011,6 @@ class QwenAsrRun:
                     )
                 row["words"] = words
             segments.append(speechonly.to_source(row, self._timeline))
-        redecoded = []
-        for entry in self._redecoded:
-            start, end = speechonly.span(self._timeline, entry["start"], entry["end"])
-            redecoded.append({**entry, "start": start, "end": end})
         aligner = self._aligner
         return transcript_document(
             model=self._model,
@@ -1003,9 +1039,10 @@ class QwenAsrRun:
             layout={
                 "piece_max_s": self._piece_s,
                 "overlap_s": self._overlap_s,
-                "pieces": len(self._finished) + self._silent,
+                "pieces": len(self._finished) + self._silent + len(self._echoed),
                 "silent_pieces": self._silent,
-                "redecoded": redecoded,
+                "redecoded": self._in_source_time(self._redecoded),
+                "context_echo": self._in_source_time(self._echoed),
             },
             speech=self._speech,
             timeline=self._timeline,
