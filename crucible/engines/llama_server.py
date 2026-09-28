@@ -76,6 +76,10 @@ class LlamaServerEngine(SubprocessEngine):
 
     decide_logprobs = True
     max_logprobs = None
+    decide_items_basis = (
+        "llama-server b10970 answers one prompt per request and checkpoints the "
+        "shared state at the last user message, so the items go as one request each"
+    )
     decide_basis = (
         "llama-server b10970's /v1/chat/completions maps logprobs/top_logprobs to "
         "n_probs (tools/server/server-common.cpp L1403-1412) and returns "

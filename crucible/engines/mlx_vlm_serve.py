@@ -4,9 +4,9 @@ import os
 import sys
 
 def _stop_engine_module_shadowing_mlx_vlm_library() -> None:
-    engines_dir = os.path.dirname(os.path.abspath(__file__))
+    engines_dir = os.path.dirname(os.path.realpath(__file__))
     sys.path[:] = [
-        entry for entry in sys.path if os.path.abspath(entry or os.getcwd()) != engines_dir
+        entry for entry in sys.path if os.path.realpath(entry or os.getcwd()) != engines_dir
     ]
 
 
@@ -17,6 +17,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import io
 import json
 import signal
@@ -48,6 +49,24 @@ MAX_IMAGES = 8
 VISION_CACHED_MODEL_TYPES = frozenset({"qwen3_5"})
 
 VISION_CACHE_ENTRIES = 16
+
+
+def _load_items_forward() -> Any:
+    try:
+        from . import items_forward
+
+        return items_forward
+    except ImportError:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "items_forward.py")
+        spec = importlib.util.spec_from_file_location("crucible_items_forward", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+ITEMS = _load_items_forward()
 
 
 class Refusal(Exception):
@@ -87,6 +106,16 @@ class Asked:
     template_kwargs: dict[str, Any]
     done: threading.Event = field(default_factory=threading.Event)
     row: Row | None = None
+    error: Exception | None = None
+
+
+@dataclass
+class ItemsJob:
+    ask: Any
+    images: list[Any]
+    image_key: str | None
+    done: threading.Event = field(default_factory=threading.Event)
+    row: dict[str, Any] | None = None
     error: Exception | None = None
 
 
@@ -260,7 +289,88 @@ class Reader:
         mx.clear_cache()
         return answers
 
-    def _vision(self, job: Asked) -> dict[str, Any]:
+    def items(self, job: ItemsJob) -> dict[str, Any]:
+        import mlx.core as mx
+
+        tokenizer = getattr(self.processor, "tokenizer", self.processor)
+        prepared: list[dict[str, Any]] = []
+
+        def tokenize(messages: list[dict[str, Any]]) -> list[int]:
+            inputs = self._prepared(messages, job)
+            prepared.append(inputs)
+            return inputs["input_ids"][0].tolist()
+
+        document = ITEMS.answer_items(
+            job.ask,
+            tokenize,
+            lambda split: self._item_rows(split, prepared[0], job),
+            lambda token: tokenizer.decode([token]),
+        )
+        mx.clear_cache()
+        return document
+
+    def _prepared(self, messages: list[dict[str, Any]], job: ItemsJob) -> dict[str, Any]:
+        from mlx_vlm.prompt_utils import apply_chat_template
+        from mlx_vlm.utils import prepare_inputs, should_add_special_tokens
+
+        model, processor = self.model, self.processor
+        formatted = apply_chat_template(
+            processor, model.config, messages, num_images=len(job.images),
+            **job.ask.template_kwargs,
+        )
+        return prepare_inputs(
+            processor,
+            images=job.images or None,
+            audio=None,
+            prompts=[formatted],
+            image_token_index=getattr(model.config, "image_token_index", None),
+            resize_shape=None,
+            add_special_tokens=should_add_special_tokens(model.config.model_type, processor),
+            pad_to_uniform_size=False,
+        )
+
+    def _item_rows(self, split: Any, inputs: dict[str, Any], job: ItemsJob) -> list[list[tuple[int, float]]]:
+        import mlx.core as mx
+        from mlx_vlm.models.cache import make_prompt_cache
+
+        model = self.model
+        language = model.language_model
+        inner, head = ITEMS.text_parts(model)
+        extra = {
+            k: v for k, v in inputs.items() if k not in ("input_ids", "pixel_values", "attention_mask")
+        }
+        whole = mx.array([split.shared + max(split.suffixes, key=len)])
+        embedding = model.get_input_embeddings(
+            whole, inputs.get("pixel_values"), **extra, **self._vision(job)
+        )
+        embeds = embedding.inputs_embeds
+        positions = getattr(embedding, "position_ids", None)
+        shared = len(split.shared)
+
+        def forward(ids: Any, embedded: Any, placed: Any, cache: list[Any]) -> Any:
+            kwargs: dict[str, Any] = {"inputs_embeds": embedded, "cache": cache}
+            if placed is not None:
+                kwargs["position_ids"] = placed
+            return inner(ids, **kwargs)
+
+        def shared_pass() -> list[Any]:
+            cache = make_prompt_cache(language)
+            for start in range(0, shared, ITEMS.CHUNK_TOKENS):
+                end = min(shared, start + ITEMS.CHUNK_TOKENS)
+                placed = None if positions is None else positions[..., start:end]
+                forward(whole[:, start:end], embeds[:, start:end], placed, cache)
+                mx.eval([entry.state for entry in cache])
+            return cache
+
+        def item_pass(cache: list[Any], suffix: list[int]) -> Any:
+            ids = mx.array([suffix])
+            own = ITEMS.copied(make_prompt_cache(language), cache)
+            placed = None if positions is None else positions[..., shared:shared + len(suffix)]
+            return forward(ids, inner.embed_tokens(ids), placed, own)
+
+        return ITEMS.read_items(split, shared_pass, item_pass, head, job.ask.top_logprobs)
+
+    def _vision(self, job: Asked | ItemsJob) -> dict[str, Any]:
         if job.image_key is None or self.model.config.model_type not in VISION_CACHED_MODEL_TYPES:
             return {}
         if self._vision_features is None:
@@ -365,7 +475,7 @@ class Batcher:
             while not self._waiting:
                 self._lock.wait()
             first = self._waiting[0]
-            if isinstance(first, Asked):
+            if isinstance(first, (Asked, ItemsJob)):
                 batch = [first]
             else:
                 batch = [
@@ -398,13 +508,21 @@ class Batcher:
             except Exception as exc:
                 self._log(f"batch of {len(batch)} done in {elapsed:.1f}s (describing it failed: {exc!r})")
 
-    def _read(self, batch: list[Any]) -> list[Row]:
+    def _read(self, batch: list[Any]) -> list[Any]:
+        if isinstance(batch[0], ItemsJob):
+            return [self._reader.items(batch[0])]
         if isinstance(batch[0], Asked):
             return [self._reader.answer(batch[0])]
         return self._reader.read_batch(batch)
 
     @staticmethod
-    def _describe(batch: list[Any], rows: list[Row], elapsed: float) -> str:
+    def _describe(batch: list[Any], rows: list[Any], elapsed: float) -> str:
+        if isinstance(batch[0], ItemsJob):
+            document = rows[0]
+            return (
+                f"items pass with {len(batch[0].images)} image(s): {elapsed:.2f}s, "
+                f"{document['shared_tokens']} shared tokens, {len(document['slots'])} items"
+            )
         if isinstance(batch[0], Asked):
             asked, row = batch[0], rows[0]
             return (
@@ -665,6 +783,19 @@ def parse_question(body: dict[str, Any], served: str) -> Asked:
     )
 
 
+def parse_items_job(body: dict[str, Any], served: str) -> ItemsJob:
+    try:
+        ask = ITEMS.parse_items(body, (served,))
+    except ITEMS.ItemsRefusal as refusal:
+        raise Refusal(refusal.status, refusal.code, str(refusal)) from None
+    urls = _image_urls(ask.messages)
+    return ItemsJob(
+        ask=ask,
+        images=[decode_image(url) for url in urls],
+        image_key=hashlib.sha256("\n".join(urls).encode("utf-8")).hexdigest() if urls else None,
+    )
+
+
 def completion_document(served: str, row: Row) -> dict[str, Any]:
     choice: dict[str, Any] = {
         "index": 0,
@@ -718,7 +849,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._refuse(Refusal(404, "not_found", f"no route {self.path}"))
 
     def do_POST(self) -> None:
-        if self.path not in ("/v1/chat/completions", "/chat/completions"):
+        if self.path not in ("/v1/chat/completions", "/chat/completions", ITEMS.ITEMS_PATH):
             self._refuse(Refusal(404, "not_found", f"no route {self.path}"))
             return
         try:
@@ -732,7 +863,9 @@ class _Handler(BaseHTTPRequestHandler):
         except Refusal as refusal:
             self._refuse(refusal)
             return
-        if is_page_request(body):
+        if self.path == ITEMS.ITEMS_PATH:
+            self._read_items(body)
+        elif is_page_request(body):
             self._read_page(body)
         else:
             self._answer_question(body)
@@ -746,6 +879,16 @@ class _Handler(BaseHTTPRequestHandler):
         assert self.batcher is not None
         self.batcher.submit(asked)
         self._reply(asked)
+
+    def _read_items(self, body: dict[str, Any]) -> None:
+        try:
+            job = parse_items_job(body, self.served)
+        except Refusal as refusal:
+            self._refuse(refusal)
+            return
+        assert self.batcher is not None
+        self.batcher.submit(job)
+        self._reply(job)
 
     def _read_page(self, body: dict[str, Any]) -> None:
         try:
@@ -766,8 +909,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.batcher.submit(job)
         self._reply(job)
 
-    def _reply(self, job: Job | Asked) -> None:
+    def _reply(self, job: Job | Asked | ItemsJob) -> None:
         job.done.wait()
+        if isinstance(job.error, ITEMS.ItemsRefusal):
+            self._send(job.error.status, ITEMS.refusal_document(job.error))
+            return
         if job.error is not None:
             self._send(
                 500,
@@ -775,6 +921,9 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         assert job.row is not None
+        if isinstance(job, ItemsJob):
+            self._send(200, job.row)
+            return
         self._send(200, completion_document(self.served, job.row))
 
 

@@ -38,10 +38,28 @@ STOCK_GENERATION_THREAD = (
     "        self._generation_thread.start()\n"
 )
 
+STOCK_ITEMS_ANCHORS = (
+    "\n    def _generate(self):\n"
+    "        while not self._stop:\n"
+    "            request = None\n"
+    "            # We got a request\n"
+    "            if request is not None:\n"
+    "                rqueue, request, args = request\n"
+    "\n\nclass APIHandler(BaseHTTPRequestHandler):\n"
+    "    def do_POST(self):\n"
+    "        request_factories = {\n"
+    '            "/v1/completions": self.handle_text_completions,\n'
+    "        }\n"
+)
+ITEMS = envpatches.MLX_LM_DECIDE_ITEMS
+ITEMS_HELPER = envpatches.MLX_LM_DECIDE_ITEMS_HELPER
+ITEMS_SCRIPT = envpatches.LLM_SCRIPTS_DIR / ITEMS.script
+ITEMS_HELPER_SCRIPT = envpatches.LLM_SCRIPTS_DIR / ITEMS_HELPER.script
+
 
 def pristine() -> str:
     validator = FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
-    return validator + STOCK_GENERATION_THREAD
+    return validator + STOCK_GENERATION_THREAD + STOCK_ITEMS_ANCHORS
 
 
 def pristine_generate() -> str:
@@ -525,3 +543,95 @@ def test_env_patch_llm_with_no_env_has_nothing_to_do(
     capsys.readouterr()
     assert cli.main(["env", "patch", "llm"]) == 0
     assert "nothing to patch" in capsys.readouterr().out
+
+
+def helper_of(env: Path) -> Path:
+    return env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "_crucible_items.py"
+
+
+def test_the_items_applier_adds_the_route_and_the_job_and_keeps_a_snapshot(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    done = run_script(env, ITEMS_SCRIPT)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("PATCHED ")
+    text = server_of(env).read_text(encoding="utf-8")
+    assert text.count(ITEMS.marker) == 1
+    assert text.count("_crucible_items.mlx_lm_serve_http(self)") == 1
+    assert '"MlxLmItemsJob"' in text and "drain_batch = True" in text
+    assert Path(str(server_of(env)) + ".orig").read_text(encoding="utf-8") == pristine()
+    again = run_script(env, ITEMS_SCRIPT)
+    assert again.stdout.startswith("ALREADY_PATCHED ")
+    assert server_of(env).read_text(encoding="utf-8") == text
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(ITEMS,))
+    assert row["status"] == envpatches.APPLIED
+
+
+def test_the_items_applier_writes_nothing_when_an_anchor_moved(tmp_path: Path) -> None:
+    moved = pristine().replace("# We got a request", "# A request arrived")
+    env = make_env(tmp_path, moved)
+    done = run_script(env, ITEMS_SCRIPT)
+    assert done.returncode == 2 and "ANCHOR_NOT_FOUND" in done.stderr
+    assert server_of(env).read_text(encoding="utf-8") == moved
+
+
+def test_the_helper_is_items_forward_verbatim_and_placed_once(tmp_path: Path) -> None:
+    from crucible.engines import items_forward
+
+    env = make_env(tmp_path)
+    done = run_script(env, ITEMS_HELPER_SCRIPT)
+    assert done.returncode == 0 and done.stdout.startswith("PATCHED ")
+    assert helper_of(env).read_bytes() == Path(items_forward.__file__).read_bytes()
+    assert run_script(env, ITEMS_HELPER_SCRIPT).stdout.startswith("ALREADY_PATCHED ")
+    assert ITEMS_HELPER.marker == f"ITEMS_VERSION = {items_forward.ITEMS_VERSION}"
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(ITEMS_HELPER,))
+    assert row["status"] == envpatches.APPLIED
+
+
+def _older_four(env: Path) -> None:
+    for patch in envpatches.LLM_PATCHES:
+        if patch not in envpatches.SELF_APPLIED_LLM_PATCHES:
+            assert run_script(env, envpatches.LLM_SCRIPTS_DIR / patch.script).returncode == 0
+
+
+def _scripts_with_this_python(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    ran: list[list[str]] = []
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess:
+        ran.append(argv)
+        return subprocess.run(
+            [sys.executable, *argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, timeout=60, check=False,
+        )
+
+    monkeypatch.setattr(envpatches, "_run_script", run)
+    return ran
+
+
+def test_the_engine_applies_the_items_patches_itself_at_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = make_env(tmp_path)
+    _older_four(env)
+    ran = _scripts_with_this_python(monkeypatch)
+    engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "no-weights", "m", 0, MLX_ARGS)
+    assert "no model directory" in str(caught.value)
+    assert [Path(argv[1]).name for argv in ran] == [ITEMS.script, ITEMS_HELPER.script]
+    assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
+    assert helper_of(env).is_file()
+
+
+def test_an_items_patch_that_will_not_go_in_is_refused_by_name_at_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = make_env(tmp_path, pristine().replace("# We got a request", "# A request arrived"))
+    _older_four(env)
+    _scripts_with_this_python(monkeypatch)
+    engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "weights", "m", 0, MLX_ARGS)
+    message = str(caught.value)
+    assert message.startswith("llm_env_unpatched:") and "mlx-lm-decide-items" in message
+    assert "crucible env patch llm" in message
+    assert not (tmp_path / "e.log").exists(), "nothing was spawned"

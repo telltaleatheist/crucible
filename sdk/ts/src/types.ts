@@ -810,6 +810,36 @@ export interface DecideResponse {
   };
 }
 
+/** One item of {@link DecideItemsRequest}: its text, and optionally its own options. */
+export interface DecideItem {
+  readonly text: string;
+  readonly options?: Readonly<Record<string, string>>;
+}
+
+/** The items form of `POST /v1/decide`: choice questions about one state, answered in item order. */
+export interface DecideItemsRequest {
+  readonly model: string;
+  readonly state: unknown;
+  readonly images?: readonly string[];
+  readonly instructions?: string;
+  readonly options?: Readonly<Record<string, string>>;
+  readonly items: readonly DecideItem[];
+  readonly missing?: DecideMissing;
+}
+
+/** The items form's reply: one choice answer per item, in item order. */
+export interface DecideItemsResponse {
+  readonly model: DecideResponse['model'];
+  readonly engine: string;
+  readonly answers: readonly DecideChoiceAnswer[];
+  readonly timingMs: { readonly total: number; readonly engineRequests: number };
+  readonly tokens: {
+    readonly shared: number | null;
+    readonly perItem: readonly number[];
+    readonly images: number;
+  };
+}
+
 /** The band a client packs its chunks to, as the voice's manifest declares it. */
 export interface VoicePace {
   /**

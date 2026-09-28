@@ -115,6 +115,24 @@ def decide_reading(engine_name: str) -> DecideReading:
     return DecideReading(served=True, max_logprobs=cls.max_logprobs, basis=basis)
 
 
+@dataclass(frozen=True)
+class DecideItemsReading:
+    batched: bool
+    basis: str
+
+
+def decide_items_reading(engine_name: str) -> DecideItemsReading:
+    cls = engine_class(engine_name)
+    basis = cls.decide_items_basis
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no decide_items_basis. Whether an engine reads a "
+            "list of items in one batched request is read from its source, and the "
+            "reading says where"
+        )
+    return DecideItemsReading(batched=cls.decide_items_batched, basis=basis)
+
+
 def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
     cls = engine_class(engine_name)
     return cls(python=python, log_path=log_path)
@@ -201,7 +219,9 @@ def engine_load_args(
 __all__ = [
     "ChatAdmission",
     "chat_admission",
+    "DecideItemsReading",
     "DecideReading",
+    "decide_items_reading",
     "decide_reading",
     "ENGINES",
     "STOP_TIMEOUT_SECONDS",
