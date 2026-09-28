@@ -17,6 +17,9 @@ does not say.
   (`resume_unsupported`), `piece_s`/`overlap_s` on whisper, overlap without word
   timestamps, a speech knob without `speech_only`. A transcript made under rules the caller
   did not ask for has nothing in it to say so.
+- **Speech only is the default.** `speech_only` unset resolves to `not vad_filter` (Owen,
+  2026-09-28): a job that names no detector gets Crucible's, `vad_filter: true` alone keeps
+  faster-whisper's, `speech_only: false` transcribes everything. Both true is refused.
 - **No default model, no CPU fallback.** A job names its model or `resolve_model` refuses
   it. BookForge retries a failed CUDA load on CPU at int8; Crucible never does. It has no CPU
   backend, and an int8 CPU transcript is a different transcript.

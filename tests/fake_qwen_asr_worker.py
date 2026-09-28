@@ -48,7 +48,16 @@ def handle_split(results, request: dict) -> None:
     os.makedirs(request["out_dir"], exist_ok=True)
     count = max(1, math.ceil((end - base) / window - 1e-9))
     send(results, "progress", stage="decoding", processed_s=total)
-    send(results, "ready", duration_s=total, pieces=count)
+    speech = request.get("speech")
+    send(
+        results,
+        "ready",
+        duration_s=total,
+        pieces=count,
+        samples=int(total * 16000),
+        speech_s=None if speech is None else total,
+        kept=None if speech is None else [[0, int(total * 16000)]],
+    )
     stem = os.path.splitext(os.path.basename(request["source"]))[0]
     tag = "" if region is None else f".r{base:g}"
     for position in range(count):

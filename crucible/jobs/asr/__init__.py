@@ -122,7 +122,7 @@ class AsrParams(BaseModel):
     context: StrictStr | None = None
     piece_s: float | None = None
     overlap_s: float | None = None
-    speech_only: StrictBool = False
+    speech_only: StrictBool | None = None
     speech_threshold: float | None = None
     speech_pad_s: float | None = None
     speech_min_gap_s: float | None = None
@@ -172,6 +172,9 @@ class AsrParams(BaseModel):
 
     @model_validator(mode="after")
     def speech_knobs_need_speech_only(self) -> "AsrParams":
+        if self.speech_only is None:
+            self.speech_only = not self.vad_filter
+            return self
         if self.speech_only:
             if self.vad_filter:
                 raise ValueError(

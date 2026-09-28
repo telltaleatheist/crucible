@@ -625,6 +625,13 @@ def _echo_notes(events: list[dict]) -> list[str]:
     ]
 
 
+ECHO_NOTE = (
+    'context_echo 180.0-360.0s: "Verbatim transcript of a livestream. Transcribe…" '
+    "— the model recited its context over audio with no speech; the piece is left empty"
+)
+SPEECH_ONLY_HINT = ". params.speech_only: true skips silence before decoding"
+
+
 @pytest.mark.parametrize("copies", [1, 9])
 def test_a_piece_that_recites_the_context_is_left_empty_and_never_redecoded(
     qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
@@ -635,11 +642,7 @@ def test_a_piece_that_recites_the_context_is_left_empty_and_never_redecoded(
     job_id, events = run_job(qwen_client, auth)
     assert events[-1]["event"] == "done", events[-1]
     assert events[-1]["data"]["context_echo_pieces"] == 1
-    assert _echo_notes(events) == [
-        'context_echo 180.0-360.0s: "Verbatim transcript of a livestream. Transcribe…" '
-        '— the model recited its context over audio with no speech; the '
-        "piece is left empty. params.speech_only: true skips silence before decoding"
-    ]
+    assert _echo_notes(events) == [ECHO_NOTE]
     assert not any(
         e["event"] == "note" and "re-decoding" in e["data"]["message"] for e in events
     )
@@ -688,6 +691,17 @@ def test_a_repeated_phrase_not_from_the_context_still_spends_the_ladder_and_fail
         if e["event"] == "note" and "re-decoding" in e["data"]["message"]
     ]
     assert len(notes) == 2
+
+
+def test_the_echo_note_names_speech_only_when_the_job_turned_it_off(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    sent: dict[str, Path],
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_TEXT", CONTEXT)
+    _, events = run_job(qwen_client, auth, params={**PARAMS, "speech_only": False})
+    assert events[-1]["event"] == "done", events[-1]
+    assert _echo_notes(events) == [ECHO_NOTE + SPEECH_ONLY_HINT]
 
 
 def test_a_resumed_job_does_not_decode_or_redecode_a_journaled_echo(
