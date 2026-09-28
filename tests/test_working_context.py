@@ -9,9 +9,11 @@ from typing import Any
 import pytest
 
 from crucible.backend import Backend, Gpu
-from crucible.capability import CLASSES, Candidate, WorkingContext, decide, decide_all
+from crucible.capabilityclasses import CLASSES
+from crucible.fit import Candidate, WorkingContext
 from crucible.manifests import MemoryTerms
 from crucible.pages import PAGE_CONCURRENCY
+from crucible.verdict import decide, decide_all
 
 THREE_NINETY_TI = 25_757_220_864
 M1_ULTRA = 68_719_476_736

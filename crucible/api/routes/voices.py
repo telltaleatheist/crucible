@@ -6,14 +6,9 @@ from fastapi import Request, Response
 
 from ...errors import ApiError
 from ...jobs import voice_rows
+from ...voicecatalog import load_all_voices
 from ...voicerepo import pinned_backends, remove_home_pin, repin
-from ...voices import (
-    VoiceError,
-    load_all_voices,
-    remove_home_voice,
-    voice_document,
-    write_home_voice,
-)
+from ...voices import VoiceError, remove_home_voice, voice_document, write_home_voice
 from ...weights import WeightsError, resolve_revision
 from ..context import AppContext, Routers
 from ..deps import tts_enabled

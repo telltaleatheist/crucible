@@ -6,7 +6,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capability, upstreams
+from crucible import upstreams
 from crucible.sampling import SAMPLING_HEADER
 
 from . import fake_upstream

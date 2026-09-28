@@ -37,7 +37,7 @@ and
 
 ## 1. What is reversed
 
-`crucible/capability.py` says, in `translate`'s `binary_note`:
+`crucible/capabilityclasses.py` says, in `translate`'s `binary_note`:
 
 > *"Translation is binary per server: it needs a 27B and the smallest this build
 > ships is already 4-bit, so this host cannot translate."*
@@ -202,7 +202,7 @@ because the variants he names do not all exist:
 | 3.5:9b | `qwen3.5-9b` (bf16) — yes |
 | 3.8:27b | the bf16 is GONE (2026-09-17) — it fit nothing either of us owns, so `qwen3.8-27b-8bit` replaced it: MLX 8-bit on the Mac, where it fits. **Mac only** since 2026-09-23 — its FP8 cuda-linux arm was removed (Owen: *"we shouldnt have an 8 bit 27b on here. waste of space, wont fit in the gpu"*; the FP8 weights alone are 28.75 GiB against a 24 GB card). The PC's 27B is `qwen3.8-27b-4bit` |
 | 9b quantized to 16 bit | that IS bf16 — `qwen3.5-9b` |
-| a 9B 4-bit | **no** — `capability.py` currently says out loud that this build ships none |
+| a 9B 4-bit | **no** — `capabilityclasses.py` currently says out loud that this build ships none |
 | 27b 4-bit | `qwen3.8-27b-4bit` — yes |
 
 So the gap is a 4-bit 9B, and it is the variant that makes translate possible on
@@ -259,7 +259,7 @@ Owen's, the same day:
 > *"we should drop batches to 1 at a time before we quantize. id rather it go slow than
 > sound worse"*.
 
-What they do in the walk (`crucible/capability.py`, `precision.py`, `ttsplan.py`):
+What they do in the walk (`crucible/capabilityclasses.py`, `crucible/verdict.py`, `precision.py`, `ttsplan.py`):
 
 - **Nothing under 4 bits is ever a candidate** (`precision.MIN_WEIGHT_BITS`). A GGUF that
   names a Q3/Q2/IQ2 quantization is refused at load; every other catalog is filtered by the

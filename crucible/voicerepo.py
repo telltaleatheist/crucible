@@ -166,7 +166,6 @@ def parse_pins(text: str, path: Path) -> dict[str, Pin]:
     return pins
 
 
-_parse_pins = parse_pins
 
 
 def packaged_pins() -> dict[str, Pin]:

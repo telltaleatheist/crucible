@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from . import VERSION, catalog, lineup
-from .capability import BY_NAME, WSL_ONLY_JOB_TYPES, models_by_class
+from .capabilityclasses import BY_NAME, models_by_class
+from .verdict import WSL_ONLY_JOB_TYPES
 from .backend import LLAMA_WINDOWS
 from .errors import ApiError, CrucibleError
 from .manifests import BACKEND_ENGINES

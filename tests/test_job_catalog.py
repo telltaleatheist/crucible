@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from crucible import classnames, installonsubmit, jobenv, jobtypes, leases, settle
 from crucible.cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
-from crucible.config import declared_tts_footprints, load_config, write_config
+from crucible.config import load_config, write_config
 from crucible.engines import EngineError
 from crucible.errors import ApiError, JobError
 from crucible.jobs import ALL_JOB_TYPES, build_registry
@@ -27,6 +27,7 @@ from crucible.jobs.queue import (
 from crucible.jobs.registry_table import REGISTRY_TABLE
 from crucible.jobs.template import ManifestCatalog, as_job_error, parse_params
 from crucible.jobs.unload import UnloadJobType
+from crucible.narratorengines import declared_tts_footprints
 from crucible.workers import WorkerError
 
 from .conftest import FAKE_BACKEND

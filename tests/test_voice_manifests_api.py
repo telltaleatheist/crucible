@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from crucible.api.routes import voices as api_module
 from crucible import voices as voices_module
 from crucible.residency import KIND_TTS
-from crucible.voices import load_all_voices, load_voice
+from crucible.voicecatalog import load_all_voices, load_voice
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40

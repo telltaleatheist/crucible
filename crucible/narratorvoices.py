@@ -212,7 +212,6 @@ def write_document(
 
 __all__ = [
     "DOCUMENT_NAME",
-    "DOCUMENT_READERS",
     "DOCUMENT_VARIABLE",
     "MLX_MODEL_VARIABLE",
     "NarratorVoicesError",

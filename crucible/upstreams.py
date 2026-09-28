@@ -12,19 +12,7 @@ from typing import Any, Iterator
 import httpx
 
 from .errors import ApiError
-from .upstreamrecord import (
-    UPSTREAM_FIELD,
-    UPSTREAM_NAMES,
-    UpstreamRecord,
-    blank,
-    record_from_patch,
-    require_key,
-    require_name,
-    require_upstream_model,
-    require_url,
-    settings_entry,
-    split_model,
-)
+from .upstreamrecord import UpstreamRecord, require_key, require_url
 
 ANTHROPIC_BASE = "https://api.anthropic.com"
 OPENAI_BASE = "https://api.openai.com"
@@ -1015,12 +1003,8 @@ __all__ = [
     "OllamaStreamTranslator",
     "SOURCE_DROPPED",
     "SOURCE_UPSTREAM_DEFAULT",
-    "UPSTREAM_FIELD",
-    "UPSTREAM_NAMES",
-    "UpstreamRecord",
     "anthropic_to_openai",
     "auth_headers",
-    "blank",
     "chat_headers",
     "chat_url",
     "forward_body",
@@ -1029,9 +1013,4 @@ __all__ = [
     "ollama_to_openai",
     "resolve_ollama_context",
     "stated_context",
-    "record_from_patch",
-    "require_name",
-    "require_upstream_model",
-    "settings_entry",
-    "split_model",
 ]

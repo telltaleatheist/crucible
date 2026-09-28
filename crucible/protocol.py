@@ -5,6 +5,7 @@ API_HEADER = "X-Crucible-Api"
 ACT_HEADER = "X-Crucible-Act"
 CLIENT_HEADER = "X-Crucible-Client"
 HANDOVER_HEADER = "X-Crucible-Handover"
+USER_AGENT_HEADER = "User-Agent"
 
 LOOPBACK = "127.0.0.1"
 DEFAULT_PORT = 7100

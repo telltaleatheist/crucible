@@ -11,7 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, hosttools, procgroup, jobenv, tasks, workers
-from crucible.accelerator import GIB, ComputeApp
+from crucible.accelerator import ComputeApp
+from crucible.memorybudget import GIB
 from crucible.alignmodels import load_align_manifest
 from crucible.errors import JobError
 from crucible.jobs import align as align_job

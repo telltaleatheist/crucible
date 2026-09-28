@@ -5,16 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from crucible.voices import (
-    VOICES_DIR_ENV,
-    CLIPS_FROM_REQUEST,
-    NARRATOR_ENGINE_SAMPLING,
-    VoiceError,
-    load_all_voices,
-    load_voice,
-    parse_voice,
-    voices_dir,
-)
+from crucible.voices import CLIPS_FROM_REQUEST, VOICES_DIR_ENV, VoiceError, parse_voice, voices_dir
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
+from crucible.voicecatalog import load_all_voices, load_voice
 
 from .conftest import configure_box
 

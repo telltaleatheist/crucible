@@ -11,7 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, procgroup, rvcbase, jobenv, tasks
-from crucible.accelerator import GIB, ComputeApp
+from crucible.accelerator import ComputeApp
+from crucible.memorybudget import GIB
 from crucible.errors import ApiError
 from crucible.jobs import rvc as rvc_job
 from crucible.rvcmodels import load_rvc_manifest

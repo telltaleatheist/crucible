@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Mapping
 
-from . import capability
+from . import verdict
 from .backend import Backend, CardFacts
+from .capabilityrecord import CapabilityRecord
 from .cardfacts import card_for
-from .config import CAPABILITY_FLAGS, CapabilityRecord, Config, write_config
+from .config import CAPABILITY_FLAGS, Config, write_config
 
 
 def decide_on(
@@ -17,8 +18,8 @@ def decide_on(
     gpu_vendor: str,
     card: CardFacts | None,
     chosen: Mapping[str, str],
-) -> tuple[capability.Decision, ...]:
-    return capability.decide_all(
+) -> tuple[verdict.Decision, ...]:
+    return verdict.decide_all(
         backend_kind,
         total_bytes=total_bytes,
         desktop_allowance_bytes=desktop_allowance_bytes,
@@ -30,7 +31,7 @@ def decide_on(
 
 def decide_for(
     config: Config, backend: Backend, *, card: CardFacts | None = None
-) -> tuple[capability.Decision, ...]:
+) -> tuple[verdict.Decision, ...]:
     return decide_on(
         backend.kind,
         total_bytes=backend.gpu.vram_bytes,
@@ -46,10 +47,10 @@ def record_of(
     *,
     total_bytes: int,
     desktop_allowance_bytes: int,
-    decisions: tuple[capability.Decision, ...],
+    decisions: tuple[verdict.Decision, ...],
     routes: Mapping[str, str],
 ) -> CapabilityRecord:
-    return capability.record(
+    return verdict.record(
         backend_kind,
         total_bytes=total_bytes,
         desktop_allowance_bytes=desktop_allowance_bytes,
@@ -61,7 +62,7 @@ def record_of(
 def write_capability(
     config: Config,
     backend: Backend,
-    decisions: tuple[capability.Decision, ...],
+    decisions: tuple[verdict.Decision, ...],
     flags: dict[str, bool],
 ) -> Path:
     values = {

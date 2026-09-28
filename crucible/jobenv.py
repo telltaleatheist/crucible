@@ -16,6 +16,7 @@ from . import envpatches, interpreter
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .jobtypes import ENVS, FAMILIES, LLM_ENV
+from .narratorengines import HIGGS_V3
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
 
@@ -29,7 +30,7 @@ BACKEND_HEADLINE_PACKAGE: dict[str, str] = {
 NARRATOR_PACKAGE = "narrator"
 
 CUDA_LINUX_SERVING_STACK: dict[str, str] = {
-    "higgs-v3": "sglang-omni",
+    HIGGS_V3: "sglang-omni",
 }
 
 RECIPE_PYTHON: dict[str, str] = {

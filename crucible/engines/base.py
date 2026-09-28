@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .. import procgroup
+from ..enginespec import flag_value
 from ..errors import EngineError
 from ..logtail import tail_of_last_run
 
@@ -28,18 +29,8 @@ BIND_FAILURE_LINES: tuple[str, ...] = (
 BIND_SCAN_LINES = 200
 
 
-def str_flag(args: "list[str] | tuple[str, ...]", flag: str) -> str | None:
-    found: str | None = None
-    for index, arg in enumerate(args):
-        if arg == flag and index + 1 < len(args):
-            found = args[index + 1]
-        elif arg.startswith(flag + "="):
-            found = arg.split("=", 1)[1]
-    return found
-
-
 def int_flag(args: "list[str] | tuple[str, ...]", flag: str) -> int | None:
-    found = str_flag(args, flag)
+    found = flag_value(args, flag)
     if found is None:
         return None
     try:

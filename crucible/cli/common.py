@@ -17,8 +17,8 @@ from ..backend import (
 )
 from ..config import Config, load_config
 from ..errors import ConfigError, CrucibleError, NoViableBackend
-from ..protocol import user_agent
-from ..voices import NARRATOR_ENGINE_SAMPLING
+from ..protocol import USER_AGENT_HEADER, user_agent
+from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 
 
 EXIT_OK = 0
@@ -130,7 +130,7 @@ def server_here(config: Config, backend: Backend):
         headers={
             "Authorization": f"Bearer {config.token}",
             API_HEADER: str(API_VERSION),
-            "User-Agent": user_agent("cli", VERSION),
+            USER_AGENT_HEADER: user_agent("cli", VERSION),
         },
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

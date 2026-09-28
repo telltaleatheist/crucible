@@ -285,11 +285,10 @@ def test_the_engine_protocol_nobody_implemented_is_gone() -> None:
 
 
 def test_str_flag_reads_the_last_spelling_as_argparse_does() -> None:
-    from crucible.engines.base import str_flag
-    from crucible.engines.vllm import AUTO_DTYPE, dtype_of
+    from crucible.enginespec import AUTO_DTYPE, dtype_of, flag_value
 
-    assert str_flag(["--dtype", "half", "--dtype=bfloat16"], "--dtype") == "bfloat16"
-    assert str_flag(["--x", "1"], "--dtype") is None
+    assert flag_value(["--dtype", "half", "--dtype=bfloat16"], "--dtype") == "bfloat16"
+    assert flag_value(["--x", "1"], "--dtype") is None
     assert dtype_of(["--dtype", "float16"]) == "float16"
     assert dtype_of([]) == AUTO_DTYPE
 

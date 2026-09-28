@@ -30,11 +30,9 @@ its weights.
   build's **declared** voices for the module generator
   (`declared_voice_ids`, `declared_voice_backends`). `catalog` calls only
   these public functions.
-- `voices.load_all_voices`, `load_voice`, `unserved_pins` and
-  `voice_aliases_of` still resolve for one release through a module
-  `__getattr__` that imports `voicecatalog` on first use, so the import graph
-  has no `voices` ↔ `voicecatalog` edge. New code imports them from
-  `voicecatalog`; the re-exports go next tier.
+- `load_all_voices`, `load_voice`, `unserved_pins` and `voice_aliases_of`
+  are imported from `voicecatalog` only; `voices` does not forward them, so
+  the import graph has no `voices` ↔ `voicecatalog` edge.
 
 ## Sources and precedence
 

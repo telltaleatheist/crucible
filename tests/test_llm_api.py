@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 
 from crucible import accelerator
 from crucible import accelerator, jobenv, tasks
-from crucible.accelerator import GIB, ComputeApp
+from crucible.accelerator import ComputeApp
+from crucible.memorybudget import GIB
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
 from crucible.engines import ENGINES

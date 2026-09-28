@@ -10,7 +10,8 @@ from ...clock import utcnow
 from ...config import Config
 from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
 from ...errors import ApiError
-from ...narratorvoices import DOCUMENT_READERS, write_document
+from ...narratorengines import DOCUMENT_READERS
+from ...narratorvoices import write_document
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     KIND_TTS,
@@ -19,8 +20,9 @@ from ...residency import (
     ResidentVoice,
     say_to,
 )
+from ...voicecatalog import load_all_voices
 from ...voicereference import ReferenceError, VoiceReference, parse_reference
-from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest, load_all_voices
+from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest
 from ..base import ModelDescriptor
 from ..template import ManifestCatalog, parse_params
 
@@ -188,7 +190,7 @@ def _unloadable_reason(
         )
     if not is_installed:
         directory = weights.subject_dir(config, manifest, backend.kind)
-        return f"no weights at {directory} — run `crucible voices pull {manifest.id}`"
+        return f"no weights at {directory} — run `{manifest.pull_command}`"
     return None
 
 
@@ -260,7 +262,7 @@ def voice_rows(
                 config, backend, residency, manifest, leases=leases, store=store
             )
         )
-    from ...voices import unserved_pins
+    from ...voicecatalog import unserved_pins
 
     for voice_id, (revision, why) in sorted(unserved_pins().items()):
         rows.append(

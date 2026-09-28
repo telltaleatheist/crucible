@@ -352,7 +352,7 @@ parser's 5% tolerance, and the manifest says why in place.
     pool   = min(pool, kv_per_token x context x max_num_seqs)
     refuse if pool < kv_per_token x context
 
-No third term, per `capability.py`'s ruling 3 — the allowance IS the margin.
+No third term, per `verdict.py`'s ruling 3 — the allowance IS the margin.
 `capability.decide()` is untouched and stays on TOTAL, per its ruling 2: a
 capability is a fact about the host, and a browser open during `crucible
 install` must not disable TTS for good.

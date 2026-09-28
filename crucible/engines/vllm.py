@@ -3,18 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..enginespec import (
-    AUTO_DTYPE,
-    BF16_FALLBACK_DTYPE,
-    bf16_fallback,
-    card_args,
-    card_needs,
-    dtype_of,
-    run_dtype,
-    stated_dtype,
-)
-from ..enginespec import VLLM_ENGINE as ENGINE_NAME
-from .base import EngineError, SubprocessEngine, int_flag, plan_flags
+from ..enginespec import VLLM_ENGINE
+from ..errors import EngineError
+from .base import SubprocessEngine, int_flag, plan_flags
 
 MODULE = "vllm.entrypoints.openai.api_server"
 
@@ -40,7 +31,7 @@ ENVIRONMENT: dict[str, str] = {
 
 
 class VllmEngine(SubprocessEngine):
-    name = ENGINE_NAME
+    name = VLLM_ENGINE
 
     decide_logprobs = True
     max_logprobs = MAX_LOGPROBS

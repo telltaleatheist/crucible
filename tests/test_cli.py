@@ -12,7 +12,7 @@ from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config
 from crucible.errors import NoViableBackend
 from crucible.interfaces import InterfaceError
-from crucible.voices import NARRATOR_ENGINE_SAMPLING
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 
 from .conftest import FAKE_BACKEND
 

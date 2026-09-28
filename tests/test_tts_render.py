@@ -10,13 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, residency as residency_module
-from crucible.accelerator import GIB
+from crucible.memorybudget import GIB
 from crucible.errors import ApiError
 from crucible.jobs import asr as asr_jobs
 from crucible.jobs.tts import render as render_jobs
 from crucible.residency import KIND_TTS
 from crucible.voicerepo import REPO_MANIFEST_NAME
-from crucible.voices import load_voice
+from crucible.voicecatalog import load_voice
 
 from . import fake_narrator_engine
 from .conftest import (

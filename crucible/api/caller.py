@@ -4,9 +4,7 @@ import re
 
 from fastapi import Request
 
-from ..protocol import CLIENT_HEADER
-
-USER_AGENT_HEADER = "user-agent"
+from ..protocol import CLIENT_HEADER, USER_AGENT_HEADER
 
 _CLIENT_NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 

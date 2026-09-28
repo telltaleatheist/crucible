@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, hosttools, jobenv, tasks
-from crucible.accelerator import GIB
 from crucible.alignmodels import load_align_manifest
 from crucible.asrmodels import (
     QWEN_CONTEXT_MAX_TOKENS,
@@ -22,6 +21,7 @@ from crucible.engines.vllm import ENVIRONMENT as VLLM_ENVIRONMENT
 from crucible.jobs import align as align_job
 from crucible.jobs import asr as asr_job
 from crucible.jobs.asr import loopguard, qwen
+from crucible.memorybudget import GIB
 
 from .conftest import (
     FAKE_BACKEND,

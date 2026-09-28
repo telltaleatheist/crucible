@@ -18,7 +18,7 @@ from crucible.jobenv import (
     require_env,
     tts_env,
 )
-from crucible.voices import NARRATOR_ENGINE_SAMPLING
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 
 from .conftest import write_env_stamp
 

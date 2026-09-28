@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capability, pages
+from crucible import capabilityclasses, pages
 
 HANDOVER_PROMPT = Path(__file__).resolve().parent / "dots_prompt.txt"
 
@@ -170,7 +170,7 @@ def test_the_request_block_states_how_many_pages_may_be_in_flight(
 def test_the_fits_arithmetic_asks_for_the_published_number(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    work = capability.BY_NAME["pages"].work
+    work = capabilityclasses.BY_NAME["pages"].work
     assert work is not None
     published = client.get("/v1/info", headers=auth).json()
     assert work.concurrency == published["pages_engine"]["request"]["concurrency"]
@@ -181,8 +181,8 @@ def test_changing_the_published_number_moves_the_arithmetic() -> None:
     source = (
         "import crucible.pages as pages\n"
         "pages.PAGE_CONCURRENCY = 3\n"
-        "import crucible.capability as capability\n"
-        "print(capability.BY_NAME['pages'].work.concurrency)\n"
+        "import crucible.capabilityclasses as capabilityclasses\n"
+        "print(capabilityclasses.BY_NAME['pages'].work.concurrency)\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", source],

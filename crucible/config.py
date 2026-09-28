@@ -12,23 +12,10 @@ from typing import Any
 
 import tomli_w
 
-from .capabilityrecord import (
-    DESKTOP_BASES,
-    DESKTOP_BASIS_DECLARED,
-    DESKTOP_BASIS_MEASURED,
-    DESKTOP_BASIS_STATED,
-    CapabilityRecord,
-    CapabilityRow,
-    desktop_reserve_words,
-)
+from .capabilityrecord import DESKTOP_BASES, CapabilityRecord, CapabilityRow
 from .classnames import ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .errors import ConfigError
-from .narratorengines import ESTIMATE_BASES as TTS_ESTIMATE_BASES
-from .narratorengines import (
-    NARRATOR_ENGINE_SAMPLING,
-    EngineFootprint,
-    declared_tts_footprints,
-)
+from .narratorengines import ESTIMATE_BASES, NARRATOR_ENGINE_SAMPLING, EngineFootprint
 from .tomltable import check_table
 from .upstreamrecord import UPSTREAM_FIELD, UPSTREAM_NAMES, UpstreamRecord
 
@@ -608,10 +595,10 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
                 f"{block['memory_bytes_estimate']}"
             )
         basis = block["estimate_basis"]
-        if basis not in TTS_ESTIMATE_BASES:
+        if basis not in ESTIMATE_BASES:
             raise ConfigError(
                 f"{where}: estimate_basis {basis!r} is not one of "
-                f"{sorted(TTS_ESTIMATE_BASES)}"
+                f"{sorted(ESTIMATE_BASES)}"
             )
         note = block.get("estimate_note")
         if basis == "declared" and (note is None or note.strip() == ""):

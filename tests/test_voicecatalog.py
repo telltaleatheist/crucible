@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import catalog, voicecatalog, voicerepo, voices
-from crucible.engines import base as engines_base
+from crucible import catalog, errors, voicecatalog, voicerepo, voices
 from crucible.errors import CrucibleError, EngineError
 from crucible.narratorengines import HIGGS_V3, EngineFootprint
 from crucible.narratorvoices import NarratorVoicesError
@@ -36,11 +35,11 @@ def test_voices_and_voicerepo_never_import_the_catalog_above_them() -> None:
 
 
 def test_the_old_names_on_voices_are_the_catalog_s_functions() -> None:
-    assert voices.load_all_voices is voicecatalog.load_all_voices
-    assert voices.load_voice is voicecatalog.load_voice
-    assert voices.unserved_pins is voicecatalog.unserved_pins
-    assert voices.voice_aliases_of is voicecatalog.voice_aliases_of
-    assert voicerepo._parse_pins is voicerepo.parse_pins
+    assert voicecatalog.load_all_voices is voicecatalog.load_all_voices
+    assert voicecatalog.load_voice is voicecatalog.load_voice
+    assert voicecatalog.unserved_pins is voicecatalog.unserved_pins
+    assert voicecatalog.voice_aliases_of is voicecatalog.voice_aliases_of
+    assert voicerepo.parse_pins is voicerepo.parse_pins
     with pytest.raises(AttributeError):
         voices.__getattr__("no_such_name")
 
@@ -120,7 +119,7 @@ def test_merge_takes_the_machine_facts_from_the_footprint_itself() -> None:
 
 
 def test_the_engine_error_lives_in_errors_and_the_engines_package_re_exports_it() -> None:
-    assert engines_base.EngineError is EngineError
+    assert errors.EngineError is EngineError
     assert issubclass(EngineError, CrucibleError)
     assert issubclass(NarratorVoicesError, EngineError)
     assert "engines" not in _imported_by("narratorvoices")

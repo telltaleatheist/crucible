@@ -6,14 +6,14 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capability, cli
+from crucible import capabilityclasses, cli, verdict
 from crucible.config import config_path, load_config
 
 from .conftest import FAKE_BACKEND, TOKEN
 
 
 def _record_with(decisions: tuple[Any, ...]) -> Any:
-    return capability.record(
+    return verdict.record(
         FAKE_BACKEND.kind,
         total_bytes=FAKE_BACKEND.gpu.vram_bytes,
         desktop_allowance_bytes=3 * 1024**3,
@@ -23,8 +23,8 @@ def _record_with(decisions: tuple[Any, ...]) -> Any:
 
 
 def _decide(name: str) -> Any:
-    entry = capability.BY_NAME[name]
-    return capability.decide(
+    entry = capabilityclasses.BY_NAME[name]
+    return verdict.decide(
         entry,
         FAKE_BACKEND.kind,
         total_bytes=FAKE_BACKEND.gpu.vram_bytes,

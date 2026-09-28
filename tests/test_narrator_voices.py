@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from crucible.narratorengines import DOCUMENT_READERS, NARRATOR_ENGINE_SAMPLING
 from crucible.narratorvoices import (
     DOCUMENT_NAME,
-    DOCUMENT_READERS,
     DOCUMENT_VARIABLE,
     MLX_MODEL_VARIABLE,
     NarratorVoicesError,
@@ -17,12 +17,9 @@ from crucible.narratorvoices import (
     voice_entry,
     write_document,
 )
+from crucible.voicecatalog import load_all_voices
 from crucible.voicereference import ClipEntry, parse_reference, reference_path
-from crucible.voices import (
-    NARRATOR_ENGINE_SAMPLING,
-    load_all_voices,
-    parse_voice,
-)
+from crucible.voices import parse_voice
 
 from .conftest import wav_bytes
 from .test_voices import GOOD

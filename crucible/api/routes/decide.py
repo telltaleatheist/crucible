@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
-from ... import upstreams
+from ... import enginespec, upstreamrecord
 from ...decide import DecideRequest, DecideResponse
 from ...engines import chat_admission, decide_reading
 from ...errors import ApiError
@@ -72,7 +72,7 @@ def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.Engine
 
 
 def _refuse_an_upstream(model: str) -> None:
-    if upstreams.split_model(model) is None:
+    if upstreamrecord.split_model(model) is None:
         return
     raise ApiError(
         400,
@@ -123,7 +123,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     wait=inflight.retry_after(),
                 )
             concurrency = (
-                limit if limit is not None else decide_core.UNSTATED_ENGINE_CONCURRENCY
+                limit if limit is not None else enginespec.UNSTATED_ENGINE_CONCURRENCY
             )
             chat_over = settle_after_chat(ctx.settlement)
             post = _engine_post(ctx.http, resident)

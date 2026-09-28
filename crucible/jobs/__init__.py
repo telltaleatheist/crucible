@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ..capability import BY_NAME as CAPABILITY_CLASSES
-from ..capability import CLASSES, classes_for_job_type
+from ..capabilityclasses import BY_NAME as CAPABILITY_CLASSES
+from ..capabilityclasses import CLASSES, classes_for_job_type
 from ..errors import ApiError
 from ..jobenv import INSTALLER_FOR
 from ..jobtypes import BY_NAME as SPECS
@@ -100,7 +100,7 @@ _UNCOVERED = sorted(set(ALL_JOB_TYPES.values()) - {entry.job_type for entry in C
 if _UNCOVERED:
     raise TypeError(
         f"job type(s) {_UNCOVERED} have no capability class in "
-        "crucible/capability.py, so nothing decides whether this host can run "
+        "crucible/capabilityclasses.py, so nothing decides whether this host can run "
         "them and `job_type_disabled` would have no number to name"
     )
 
@@ -113,7 +113,7 @@ _MISFILED = sorted(
 if _MISFILED:
     raise TypeError(
         f"(family, class) pairs {_MISFILED} in crucible/jobtypes.py name a class "
-        "that crucible/capability.py's CLASSES does not file under that family"
+        "that crucible/capabilityclasses.py's CLASSES does not file under that family"
     )
 
 

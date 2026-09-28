@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .memorybudget import gib_text
+
 DESKTOP_BASIS_MEASURED = "measured"
 DESKTOP_BASIS_DECLARED = "declared"
 DESKTOP_BASIS_STATED = "stated"
@@ -19,7 +21,7 @@ def desktop_reserve_words(allowance_bytes: int, basis: str) -> str:
         DESKTOP_BASIS_DECLARED: "not measured; Crucible's default",
         DESKTOP_BASIS_STATED: "as set for this machine",
     }.get(basis, basis)
-    return f"kept {allowance_bytes / 1024 ** 3:.1f} GiB for this PC's desktop ({said})"
+    return f"kept {gib_text(allowance_bytes)} for this PC's desktop ({said})"
 
 
 @dataclass(frozen=True)

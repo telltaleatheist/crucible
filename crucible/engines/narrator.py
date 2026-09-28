@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterator
 from .. import procgroup
 from ..accelerator import proc_entries
 from ..errors import EngineError, JobCancelled
-from ..narratorengines import HIGGS_V3, VoicesDocumentView
+from ..narratorengines import HIGGS_V3, VOICES_PULL_COMMAND, VoicesDocumentView
 from .base import LOG_TAIL_LINES, SubprocessEngine, find_free_port
 
 MODULE = "narrator.serve"
@@ -194,7 +194,7 @@ _ENDED = _Ended()
 class NarratorEngine(SubprocessEngine):
     env_job_type = "tts"
 
-    pull_command = "crucible voices pull"
+    pull_command = VOICES_PULL_COMMAND
 
     binds_a_port = False
 

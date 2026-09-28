@@ -7,7 +7,7 @@ import httpx
 from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
-from ... import upstreams
+from ... import upstreamrecord
 from ...engines import chat_admission
 from ...errors import ApiError
 from ...inflight import read_act
@@ -83,7 +83,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "a chat request must name a model; this server proxies only to the "
                 "model that is resident",
             )
-        if upstreams.split_model(requested) is not None:
+        if upstreamrecord.split_model(requested) is not None:
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )

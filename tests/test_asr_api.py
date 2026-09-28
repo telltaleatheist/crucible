@@ -10,9 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, hosttools, jobenv, tasks
-from crucible.accelerator import GIB, ComputeApp
+from crucible.accelerator import ComputeApp
 from crucible.asrmodels import ASR_LINEUP, load_asr_manifest
 from crucible.jobs import asr as asr_job
+from crucible.memorybudget import GIB
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 

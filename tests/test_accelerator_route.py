@@ -8,7 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv
-from crucible.accelerator import GIB, ComputeApp, ProbeError
+from crucible.accelerator import ComputeApp, ProbeError
+from crucible.memorybudget import GIB
 from crucible import residency as residency_module
 from crucible.manifests import load_manifest
 

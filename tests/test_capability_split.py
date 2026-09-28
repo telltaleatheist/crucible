@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -11,12 +12,9 @@ import pytest
 from crucible import (
     accelerator,
     asrplan,
-    capability,
     capabilityclasses,
     capabilityquery,
-    contextceiling,
     fit,
-    installplan,
     memorybudget,
     servingplan,
     ttsplan,
@@ -32,25 +30,17 @@ GIB = memorybudget.GIB
 REPO = Path(__file__).resolve().parents[1]
 
 
-def test_capability_still_answers_every_name_it_used_to_own() -> None:
-    assert capability.CLASSES is capabilityclasses.CLASSES
-    assert capability.Candidate is fit.Candidate
-    assert capability.Decision is verdict.Decision
-    assert capability.served_rows is capabilityquery.served_rows
-    assert capability.check_load_context is contextceiling.check_load_context
-    assert capability.install_plan is installplan.install_plan
-    assert capability.available_bytes is memorybudget.available_bytes
+def test_the_capability_shim_is_gone() -> None:
+    assert importlib.util.find_spec("crucible.capability") is None
 
 
 def test_the_class_verdict_has_a_name_apart_from_the_decision_door() -> None:
-    assert capability.decide is verdict.decide_capabilities
-    assert capability.decide_capabilities is verdict.decide_capabilities
+    assert verdict.decide is verdict.decide_capabilities
 
 
 def test_one_owner_for_the_memory_arithmetic() -> None:
     assert vram.engine_budget_bytes is memorybudget.engine_budget_bytes
     assert accelerator.available_bytes is memorybudget.available_bytes
-    assert accelerator.GIB is memorybudget.GIB
     assert memorybudget.available_bytes(4 * GIB, 8 * GIB) == 0
     assert memorybudget.engine_budget_bytes(24 * GIB, 3 * GIB, 30 * GIB) == 21 * GIB
     assert memorybudget.engine_budget_bytes(24 * GIB, 3 * GIB, 10 * GIB) == 10 * GIB
@@ -73,12 +63,14 @@ def test_accelerator_imports_neither_capability_nor_the_engines() -> None:
             check=True,
         ).stdout.split()
     )
-    assert "crucible.capability" not in loaded
+    assert "crucible.verdict" not in loaded
     assert "crucible.engines" not in loaded
 
 
 def test_serving_variant_has_one_home_both_ladders_use() -> None:
-    assert ttsplan.ServingVariant is servingplan.ServingVariant
+    ladder = ttsplan.variants(1, GIB)
+    assert ladder
+    assert all(isinstance(variant, servingplan.ServingVariant) for variant in ladder)
     assert asrplan.ServingVariant is servingplan.ServingVariant
     assert asrplan.LADDER_BACKEND == CUDA_LINUX
 

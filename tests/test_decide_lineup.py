@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from crucible import capability
+from crucible import capabilityclasses, classnames, fit
 from crucible.backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
-from crucible.capability import BY_NAME, NINE_B_FLOOR, classes_for_model, decide
-from crucible.decide import UNSTATED_ENGINE_CONCURRENCY
+from crucible.capabilityclasses import BY_NAME, NINE_B_FLOOR, classes_for_model
+from crucible.enginespec import UNSTATED_ENGINE_CONCURRENCY
 from crucible.errors import ApiError
 from crucible.inflight import ACT_NAMES, read_act
 from crucible.manifests import ManifestError, load_manifest, parse_manifest
+from crucible.verdict import decide
 
 from .conftest import FAKE_BACKEND
 
@@ -29,8 +30,8 @@ def test_decide_is_a_class_an_act_and_not_routable() -> None:
     assert entry.job_type == "llm"
     assert entry.plainly == "decide"
     assert entry.routable is False
-    assert "decide" not in capability.ROUTABLE_CLASSES
-    assert "decide" in capability.SELECTABLE_CLASSES
+    assert "decide" not in classnames.ROUTABLE_CLASSES
+    assert "decide" in classnames.SELECTABLE_CLASSES
     assert entry.min_params_b is None
     assert "decide" in ACT_NAMES
     assert read_act({"X-Crucible-Act": "decide"}) == "decide"
@@ -45,7 +46,7 @@ def test_an_unknown_act_is_still_refused() -> None:
 def test_decide_work_cites_the_door_and_is_not_sixteen_states() -> None:
     work = BY_NAME["decide"].work
     assert work is not None
-    assert work.tokens == capability.DECIDE_STATE_TOKENS == 8192
+    assert work.tokens == capabilityclasses.DECIDE_STATE_TOKENS == 8192
     assert work.concurrency == 2
     assert f"{UNSTATED_ENGINE_CONCURRENCY} questions" in work.source
 
@@ -101,7 +102,7 @@ def test_the_nine_b_and_the_27bs_keep_their_classes_and_gain_decide() -> None:
 
 def test_a_floor_is_a_comparison_not_a_family(tmp_path: Path) -> None:
     source = BY_NAME["clean"].candidates
-    unfloored = capability.CatalogCandidates(source.load, source.families, None)
+    unfloored = fit.CatalogCandidates(source.load, source.families, None)
     assert "qwen3.5-4b" in [c.id for c in unfloored(CUDA_LINUX)]
     assert "qwen3.5-4b" not in ids("clean", CUDA_LINUX)
 
