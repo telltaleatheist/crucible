@@ -83,6 +83,10 @@ import {
   type ChatResponse,
   type ChunkData,
   type DecideAnswer,
+  type DecideChoiceAnswer,
+  type DecideChoiceQuestion,
+  type DecideItemsRequest,
+  type DecideItemsResponse,
   type DecideCallTiming,
   type DecideOptions,
   type DecideQuestion,
@@ -940,6 +944,36 @@ export class CrucibleClient {
 
     const body = await this.#json('/v1/decide', init, 'decide');
     return readDecideResponse(body, questions, report);
+  }
+
+  /** `POST /v1/decide` with `items`: one choice answer per item about one state, in item order. */
+  async decideItems(request: DecideItemsRequest, options: DecideOptions = {}): Promise<DecideItemsResponse> {
+    const given = request as Partial<DecideItemsRequest> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('request', 'decideItems(...) needs {model, state, items}');
+    }
+    if (!('state' in given) || given.state === undefined) {
+      throw new CrucibleConfigError('state', 'is required and was not given');
+    }
+    const shared = given.options === undefined ? undefined : readOptionMap(given.options, 'options');
+    const items = readDecideItems(given.items, shared);
+    const payload: Record<string, unknown> = {
+      model: requireText(given.model, 'model'),
+      state: given.state,
+    };
+    if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
+    if (given.instructions !== undefined) payload['instructions'] = requireText(given.instructions, 'instructions');
+    if (shared !== undefined) payload['options'] = shared;
+    payload['items'] = items.map((item) => (item.own ? { text: item.text, options: item.options } : { text: item.text }));
+    const report = readMissingMode(given.missing, payload);
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
+    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(payload) };
+    if (options.signal !== undefined) init.signal = options.signal;
+
+    const body = await this.#json('/v1/decide', init, 'decideItems');
+    return readDecideItemsResponse(body, items, report);
   }
 
   /**
@@ -2303,6 +2337,96 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
     }
   }
   return out;
+}
+
+function readOptionMap(value: unknown, where: string): Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new CrucibleConfigError(where, 'must be an object of option name -> description');
+  }
+  const read: Record<string, string> = {};
+  for (const [option, description] of Object.entries(value as Record<string, unknown>)) {
+    read[option] = requireText(description, `${where}.${option}`);
+  }
+  if (Object.keys(read).length < 2) {
+    throw new CrucibleConfigError(where, 'needs at least 2 options');
+  }
+  return read;
+}
+
+interface ReadItem {
+  readonly text: string;
+  readonly options: Record<string, string>;
+  readonly own: boolean;
+}
+
+function readDecideItems(value: unknown, shared: Record<string, string> | undefined): ReadItem[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new CrucibleConfigError('items', 'must be a non-empty array of {text, options?}');
+  }
+  return value.map((raw, index) => {
+    const where = `items[${index}]`;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new CrucibleConfigError(where, 'must be an object {text, options?}');
+    }
+    const item = raw as Record<string, unknown>;
+    for (const key of Object.keys(item)) {
+      if (key !== 'text' && key !== 'options') {
+        throw new CrucibleConfigError(`${where}.${key}`, 'is not a field of an item (it takes text, options)');
+      }
+    }
+    const text = requireText(item['text'], `${where}.text`);
+    if (item['options'] !== undefined) {
+      return { text, options: readOptionMap(item['options'], `${where}.options`), own: true };
+    }
+    if (shared === undefined) {
+      throw new CrucibleConfigError(`${where}.options`, 'is not given and the request has no shared options');
+    }
+    return { text, options: shared, own: false };
+  });
+}
+
+function readMissingMode(missing: unknown, payload: Record<string, unknown>): boolean {
+  if (missing === undefined) return false;
+  if (missing !== 'refuse' && missing !== 'report') {
+    throw new CrucibleConfigError('missing', `must be 'refuse' or 'report', got ${JSON.stringify(missing)}`);
+  }
+  payload['missing'] = missing;
+  return missing === 'report';
+}
+
+function readDecideItemsResponse(body: Json, items: readonly ReadItem[], report: boolean): DecideItemsResponse {
+  const where = 'decideItems';
+  const raw = body['answers'];
+  if (!Array.isArray(raw) || raw.length !== items.length) {
+    throw new CrucibleProtocolError(
+      `${where}.answers is not a list of ${items.length} answers, one per item asked`,
+    );
+  }
+  const answers = items.map((item, index) => {
+    const asked: DecideChoiceQuestion = { type: 'choice', instructions: item.text, options: item.options };
+    const entry = raw[index] as Json;
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new CrucibleProtocolError(`${where}.answers[${index}] is not an object`);
+    }
+    return readDecideAnswer(entry, asked, `${where}.answers[${index}]`, report) as DecideChoiceAnswer;
+  });
+  const timing = objectField(body, 'timing_ms', where);
+  const tokens = objectField(body, 'tokens', where);
+  const perItem = tokens['per_item'];
+  if (!Array.isArray(perItem) || perItem.length !== items.length || !perItem.every((n) => typeof n === 'number')) {
+    throw new CrucibleProtocolError(`${where}.tokens.per_item is not ${items.length} numbers`);
+  }
+  return {
+    model: readDecideModel(objectField(body, 'model', where), `${where}.model`),
+    engine: str(body, 'engine', where),
+    answers,
+    timingMs: { total: num(timing, 'total', `${where}.timing_ms`), engineRequests: num(timing, 'engine_requests', `${where}.timing_ms`) },
+    tokens: {
+      shared: nullableNum(tokens, 'shared', `${where}.tokens`),
+      perItem: perItem as number[],
+      images: num(tokens, 'images', `${where}.tokens`),
+    },
+  };
 }
 
 function readDecideResponse(

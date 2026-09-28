@@ -9,10 +9,11 @@ from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
-from ... import enginespec, upstreamrecord
+from ... import decide_items, enginespec, upstreamrecord
 from ...capabilityclasses import BY_NAME
-from ...decide import DecideRequest, DecideResponse
-from ...engines import chat_admission, decide_reading
+from ...decide import DecideItemsResponse, DecideRequest, DecideResponse
+from ...engines import chat_admission, decide_items_reading, decide_reading
+from ...engines.items_forward import ITEMS_PATH
 from ...errors import ApiError
 from ...inflight import read_act
 from ...manifests import load_manifest
@@ -44,10 +45,31 @@ def _decide_engine_refused(resident: Any, response: httpx.Response) -> ApiError:
     )
 
 
-def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.EnginePost:
-    url = f"{resident.base_url}/v1/chat/completions"
+def _items_route_missing(resident: Any) -> ApiError:
+    load = json.dumps({"type": "load-model", "model": resident.model_id})
+    return decide_core.decide_not_served(
+        resident,
+        f"the engine process answers no {ITEMS_PATH}: it was started before its "
+        f"env carried the items route. Load the model again (POST /v1/jobs {load}); "
+        "the load applies the route",
+        {"form": "items"},
+    )
 
-    async def post(body: dict[str, Any]) -> Any:
+
+def _refused(resident: Any, path: str, response: httpx.Response) -> ApiError:
+    if path == ITEMS_PATH and response.status_code == 404:
+        return _items_route_missing(resident)
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    named = decide_items.engine_refusal(response.status_code, payload)
+    return named if named is not None else _decide_engine_refused(resident, response)
+
+
+def _engine_call(client: httpx.AsyncClient, resident: Any) -> decide_items.EngineCall:
+    async def call(path: str, body: dict[str, Any]) -> Any:
+        url = f"{resident.base_url}{path}"
         payload = json.dumps(body).encode("utf-8")
         try:
             response = await sent_across_the_wire(
@@ -57,7 +79,7 @@ def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.Engine
         except httpx.HTTPError as exc:
             raise engine_unreachable(resident, exc) from None
         if response.status_code != 200:
-            raise _decide_engine_refused(resident, response)
+            raise _refused(resident, path, response)
         try:
             return response.json()
         except ValueError as exc:
@@ -68,6 +90,15 @@ def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.Engine
                 f"with a body that is not JSON: {exc}. Its log is {resident.log_path}",
                 {"engine": resident.engine},
             ) from None
+
+    return call
+
+
+def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.EnginePost:
+    call = _engine_call(client, resident)
+
+    async def post(body: dict[str, Any]) -> Any:
+        return await call("/v1/chat/completions", body)
 
     return post
 
@@ -100,12 +131,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @private.post(
         "/decide",
         response_model=None,
-        responses={200: {"model": DecideResponse}},
+        responses={200: {"model": DecideResponse | DecideItemsResponse}},
     )
     async def decide(request: Request, body: DecideRequest) -> Response:
         """One answer distribution per question, read off the resident model's
-        next-token logprobs. Every refusal a caller can cause is made before anything is
-        sent to the engine.
+        next-token logprobs; with `items`, one choice answer per item in one request.
+        Every refusal a caller can cause is made before anything is decided.
         """
         act = read_act(request.headers)
         _refuse_an_upstream(body.model)
@@ -124,7 +155,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     n_images,
                     lambda: _image_models(backend.kind),
                 )
-            plans = decide_core.plan_all(body)
+            if body.items is not None:
+                decide_items.check_item_count(body.items)
+                plans = decide_items.item_plans(body)
+            else:
+                plans = decide_core.plan_all(body)
             reading = decide_reading(resident.engine)
             decide_core.refuse_unreadable_labels(resident, reading, plans)
 
@@ -139,22 +174,23 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 limit if limit is not None else enginespec.UNSTATED_ENGINE_CONCURRENCY
             )
             chat_over = settle_after_chat(ctx.settlement)
-            post = _engine_post(ctx.http, resident)
+            if body.items is not None:
+                work = decide_items.decide_items_on_engine(
+                    _engine_call(ctx.http, resident), _engine_post(ctx.http, resident),
+                    resident, body, plans,
+                    batched=decide_items_reading(resident.engine).batched,
+                    max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                )
+            else:
+                work = decide_core.decide_on_engine(
+                    _engine_post(ctx.http, resident), resident, body, plans,
+                    max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                )
             entry = inflight.open(
                 act=act, model=resident.model_id, client=client_agent(request)
             )
         try:
-            answered = await unless_the_caller_leaves(
-                decide_core.decide_on_engine(
-                    post,
-                    resident,
-                    body,
-                    plans,
-                    max_logprobs=reading.max_logprobs,
-                    concurrency=concurrency,
-                ),
-                request,
-            )
+            answered = await unless_the_caller_leaves(work, request)
             if answered is None:
                 response: Response = caller_gone(resident)
             else:

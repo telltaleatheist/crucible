@@ -628,6 +628,42 @@ started exactly as `load-model` would).
   context is sized in `capabilityclasses`.
 - Refuse mode carries no `missing_labels` key. Report mode nulls a missing
   label and never invents a number.
+- The items form (api.md "The items form") reads a list of items about one
+  state. Whether an engine does it in one request is `decide_items_batched`,
+  stated with `decide_items_basis` and read by `engines.decide_items_reading`.
+  mlx-lm and mlx-vlm answer `POST /v1/crucible/items` with
+  `engines/items_forward.py`: every item's lone-question prompt is tokenized
+  through the chat template, the common token prefix runs once (in
+  2,048-token chunks), and each item's tail runs from a copy of that cache
+  (`copied`: the state arrays, into a fresh `make_prompt_cache`); the head is
+  applied to the last position only, in float32, top-k by argsort. Items run
+  one after another: batching the tails (right-padded, the cache repeated per
+  row) measured 0.275 s per item at 1 row, 0.207 at 4, 0.243 at 8 and 0.631
+  at 16 on the Mac 9B, not worth the padding. On mlx-vlm the images are
+  embedded once with the shared prefix (`get_input_embeddings` over the shared
+  part plus the longest tail, so the rope positions are the lone question's),
+  and a tail is text only. vLLM and llama-server answer one prompt per request,
+  so the items go through the questions machinery, prime first; vLLM batches
+  them and reuses the prefix.
+- mlx-lm gets the route from two env patches: `mlx-lm-decide-items` edits
+  `mlx_lm/server.py` (the `/v1/crucible/items` branch at the top of
+  `do_POST`, and a branch in `_generate` that drains an active batch and then
+  runs the items job on the generation thread, where MLX's stream is), and
+  `mlx-lm-decide-items-helper` copies `engines/items_forward.py` in as
+  `mlx_lm/_crucible_items.py` (`creates=True`: a missing file is `missing`,
+  not "no such package"). Both are `SELF_APPLIED_LLM_PATCHES`: `MlxLmEngine`
+  applies them itself at start when they are missing, with the env's own
+  python, after the other four are checked as before, so a Mac that upgrades
+  needs no `crucible env patch llm` for them. The helper's marker is
+  `ITEMS_VERSION = <n>`: change `ITEMS_VERSION` with every change to
+  `items_forward.py`, or an env keeps the older copy. An engine process
+  started before its env had the route answers 404, which the door reports as
+  `503 decide_not_served` naming the `load-model` job that fixes it.
+- An items job holds mlx-lm's generation thread for its whole run (81.5 s for
+  250 Briefcase items on the 9B); chat requests queue behind it.
+- `mlx_vlm_serve.py` compares realpaths when it drops its own directory from
+  `sys.path`: run from `/tmp` on macOS (`/private/tmp`), the abspath test missed
+  and `import mlx_vlm` found `engines/mlx_vlm.py`.
 
 ## Chat defaults (`sampling`)
 

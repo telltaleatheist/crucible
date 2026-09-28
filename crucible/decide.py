@@ -107,8 +107,23 @@ Question = Annotated[
 ]
 
 
+_Options = Annotated[dict[_NonEmpty, _NonEmpty], Field(min_length=2)]
+
+
+class DecideItem(_Strict):
+    """One item of the items form: its text, and optionally its own options."""
+
+    text: _NonEmpty
+    """The item, quoted verbatim into its own question (never referred to by
+    number): a transcript passage, or a question about the image."""
+    options: _Options | None = None
+    """This item's own options (name to one-line description, letters A, B, C…
+    in the order given, 2 to 26), rendered inline under the item. Absent: the
+    request's `options`."""
+
+
 class DecideRequest(_Strict):
-    """`POST /v1/decide`: one forward pass per question at the resident model, nothing decoded or loaded."""
+    """`POST /v1/decide`: one forward pass per question at the resident model, or a list of items about one state; nothing decoded or loaded."""
 
     model: _NonEmpty
     """The Crucible model id, which must already be resident (`409
@@ -118,9 +133,26 @@ class DecideRequest(_Strict):
     """What the questions are about: a string, used verbatim, or any other JSON
     value, serialised as compact JSON. Required and never null; may be `""` only
     when `images` carry the state."""
-    questions: dict[_NonEmpty, Question] = Field(min_length=1)
+    questions: Annotated[dict[_NonEmpty, Question], Field(min_length=1)] | None = None
     """Question name to question. Names are single path members (no `/`, `\\`,
-    leading dot) and key the answers. Answers come back in this order."""
+    leading dot) and key the answers. Answers come back in this order. Exactly
+    one of `questions` and `items` is sent."""
+    instructions: _NonEmpty | None = None
+    """The items form's ask, written under every item's text: "Which of the
+    categories listed above does the speaker do in this passage?". Each item's
+    question is `text`, a newline, then this; absent, `text` alone. Refused with
+    `questions`."""
+    options: _Options | None = None
+    """The items form's shared options (name to one-line description, letters
+    A, B, C… in the order given, 2 to 26). An item without its own `options`
+    uses these."""
+    items: Annotated[list[DecideItem], Field(min_length=1)] | None = None
+    """The items form: an ordered list of choice questions about ONE state,
+    each answered exactly as a lone choice question would be (it sees the state
+    and its own question, never another item), in one request: on the Mac the
+    shared state runs once and every item continues from its cache. Answers
+    come back as a list in this order. At most 512 (`too_many_items`); token
+    caps in docs/internals/api.md."""
     images: list[str] | None = None
     """Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no
     whitespace, no `data:` prefix), read as part of the state, after its text.
@@ -145,10 +177,10 @@ class DecideRequest(_Strict):
 
     @field_validator("questions")
     @classmethod
-    def _names_are_path_members(cls, value: dict[str, Any]) -> dict[str, Any]:
+    def _names_are_path_members(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         from .jobs.base import validate_member_name
 
-        for name in value:
+        for name in value or {}:
             validate_member_name(name)
         return value
 
@@ -179,6 +211,27 @@ class DecideRequest(_Strict):
     def _state_or_images(self) -> "DecideRequest":
         if isinstance(self.state, str) and not self.state.strip() and not self.images:
             raise ValueError("state may not be empty unless images carry the state")
+        return self
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "DecideRequest":
+        if (self.questions is None) == (self.items is None):
+            raise ValueError(
+                "send exactly one of `questions` (named questions) and `items` "
+                "(an ordered list read in one pass)"
+            )
+        if self.questions is not None:
+            stray = [name for name in ("instructions", "options") if getattr(self, name) is not None]
+            if stray:
+                raise ValueError(f"{stray} belong to the items form; with `questions` "
+                                 "each question carries its own")
+            return self
+        unlabelled = [i for i, item in enumerate(self.items or []) if item.options is None]
+        if unlabelled and self.options is None:
+            raise ValueError(
+                f"items {unlabelled[:10]} carry no `options` and the request has no "
+                "shared `options`; send `options` once, or on each item"
+            )
         return self
 
 
@@ -345,6 +398,44 @@ class DecideResponse(_Strict):
     """Prompt sizes."""
 
 
+class ItemsTiming(_Strict):
+    """Where the items form's time went."""
+
+    total: float
+    """The whole decision, ms, Crucible's clock."""
+    engine_requests: int
+    """1 when the engine read every item in one batched request (mlx-lm,
+    mlx-vlm); otherwise one per item plus the shared prefix sent first."""
+
+
+class ItemsTokens(_Strict):
+    """How big the items form's prompts were."""
+
+    shared: int | None
+    """The tokens every item's prompt shares (system, state, images), run once;
+    null where each item went as its own request."""
+    per_item: list[int]
+    """Each item's whole prompt (shared part included), in item order."""
+    images: int
+    """How many images every item's prompt carried."""
+
+
+class DecideItemsResponse(_Strict):
+    """An items-form decision: one choice distribution per item, in item order."""
+
+    model: ModelProvenance
+    """Which weights answered (`{id, revision, fingerprint}`)."""
+    engine: str
+    """The engine kind that answered: `vllm`, `mlx-lm`, `mlx-vlm`."""
+    answers: list[ChoiceAnswer]
+    """One choice answer per item, in the request's item order, in the shape
+    a lone choice question answers with."""
+    timing_ms: ItemsTiming
+    """Crucible's clock."""
+    tokens: ItemsTokens
+    """Prompt sizes."""
+
+
 @dataclass(frozen=True)
 class Plan:
     name: str
@@ -385,7 +476,7 @@ def plan(name: str, question: ChoiceQuestion | ScoreQuestion | YesNoQuestion) ->
 
 
 def plan_all(request: DecideRequest) -> list[Plan]:
-    return [plan(name, question) for name, question in request.questions.items()]
+    return [plan(name, question) for name, question in (request.questions or {}).items()]
 
 
 def check_image_count(images: list[str] | None) -> int:
@@ -843,6 +934,8 @@ __all__ = [
     "Answer",
     "ChoiceAnswer",
     "ChoiceQuestion",
+    "DecideItem",
+    "DecideItemsResponse",
     "DecideRequest",
     "DecideResponse",
     "DecideTiming",
@@ -851,6 +944,8 @@ __all__ = [
     "EnginePost",
     "ForwardTiming",
     "IMAGES_NOTE",
+    "ItemsTiming",
+    "ItemsTokens",
     "LABEL_MARGIN",
     "LETTERS",
     "MAX_IMAGES",

@@ -5,6 +5,7 @@ import io
 import json
 import math
 import os
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -562,3 +563,98 @@ def test_a_decision_about_three_images_is_answered_end_to_end_on_mlx_darwin(serv
     assert len(asked) == 4
     assert all(entry["images"] == [[w, h, list(c)] for w, h, c in THREE_FRAMES] for entry in asked)
     assert sorted(entry["top_logprobs_k"] for entry in asked) == [0, 6, 6, 9]
+
+
+class _ItemsReader:
+    def __init__(self, refuse: bool = False) -> None:
+        self.jobs: list[Any] = []
+        self._refuse = refuse
+
+    def items(self, job: Any) -> dict:
+        self.jobs.append(job)
+        if self._refuse:
+            raise mlx_vlm_serve.ITEMS.ItemsRefusal(
+                400, "item_too_long", "item 1 is 2000 tokens", {"item": 1, "tokens": 2000, "max_tokens": 1024})
+        return {"object": "crucible.items", "shared_tokens": 9, "item_tokens": [1] * len(job.ask.questions),
+                "slots": [{"top_logprobs": [{"token": "A", "logprob": -0.1}]} for _ in job.ask.questions]}
+
+
+def _items_server(reader: _ItemsReader) -> tuple[Any, str]:
+    from http.server import ThreadingHTTPServer
+
+    batcher = mlx_vlm_serve.Batcher(reader, 1, lambda line: None)
+    handler = type("ItemsHandler", (mlx_vlm_serve._Handler,), {"served": "/w", "batcher": batcher})
+    server = ThreadingHTTPServer(("127.0.0.1", find_free_port()), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _post_items(base: str, body: dict) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        base + mlx_vlm_serve.ITEMS.ITEMS_PATH, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+def _items_body(images: list[str]) -> dict:
+    from crucible import decide_items
+
+    return decide_items.items_body(
+        "/w", decide_items.open_messages("", images), ["Question: a?", "Question: b?"], 5, 4000)
+
+
+def test_the_items_route_reads_one_job_with_its_images_and_answers_the_document() -> None:
+    reader = _ItemsReader()
+    server, base = _items_server(reader)
+    try:
+        status, document = _post_items(base, _items_body(frames()[:1]))
+    finally:
+        server.shutdown()
+    assert status == 200, document
+    assert document["object"] == "crucible.items" and len(document["slots"]) == 2
+    (job,) = reader.jobs
+    assert job.ask.questions == ["Question: a?", "Question: b?"]
+    assert [image.size for image in job.images] == [(64, 36)]
+    assert job.image_key is not None
+
+
+def test_an_items_refusal_from_the_reader_is_a_400_with_its_details() -> None:
+    server, base = _items_server(_ItemsReader(refuse=True))
+    try:
+        status, document = _post_items(base, _items_body([]))
+    finally:
+        server.shutdown()
+    assert status == 400
+    assert document["error"]["code"] == "item_too_long"
+    assert document["error"]["details"] == {"item": 1, "tokens": 2000, "max_tokens": 1024}
+
+
+def test_an_items_request_it_cannot_read_is_refused_before_the_reader() -> None:
+    reader = _ItemsReader()
+    server, base = _items_server(reader)
+    try:
+        status, document = _post_items(base, {**_items_body([]), "model": "other"})
+        closed, closed_doc = _post_items(base, {**_items_body([]), "messages": [{"role": "user", "content": "x"}]})
+    finally:
+        server.shutdown()
+    assert status == 404 and document["error"]["code"] == "model_not_found"
+    assert closed == 400 and closed_doc["error"]["code"] == "open_user_turn"
+    assert reader.jobs == []
+
+
+def test_the_served_script_loads_items_forward_by_path_when_run_alone() -> None:
+    probe = (
+        "import sys\n"
+        "import importlib.util as u\n"
+        f"spec = u.spec_from_file_location('serve', r'{SERVE_SCRIPT}')\n"
+        "m = u.module_from_spec(spec); sys.modules['serve'] = m; spec.loader.exec_module(m)\n"
+        "print(m.ITEMS.ITEMS_PATH, m.ITEMS.__name__)\n"
+    )
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["/v1/crucible/items", "crucible_items_forward"]

@@ -43,6 +43,12 @@ class VllmEngine(SubprocessEngine):
         f"--logprobs-mode {LOGPROBS_MODE}"
     )
 
+    decide_items_basis = (
+        "vLLM 0.29.0 batches concurrent requests itself (up to --max-num-seqs) and "
+        "reuses the shared state through its prefix cache, so the items go as one "
+        "request each after the state is sent alone"
+    )
+
     chat_concurrency_flag = "--max-num-seqs"
     chat_concurrency_basis = (
         "vLLM 0.29.0 schedules at most --max-num-seqs sequences per step "

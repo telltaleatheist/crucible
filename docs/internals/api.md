@@ -26,6 +26,7 @@ The domain the routes call:
 | `crucible/inputs.py` | job inputs (uploads, inline bytes, artifact references), their digests, journal identity |
 | `crucible/uploads.py` | the upload blob store: the blob, its `.json` sidecar, the sha256 recorded there |
 | `crucible/decide.py` | `decide_on_engine` (the HTTP post is injected), `refuse_images_not_served`, `refuse_unreadable_labels` |
+| `crucible/decide_items.py` | the items form: `item_plans`, `check_item_count`, `decide_items_on_engine` (the engine call and the chat post are injected), `engine_refusal` |
 | `crucible/voicerepo.py` | `repin` and `pinned_backends` (the hub lookup is injected) |
 
 Route handlers are closures over `ctx`, attached by `register(routers, ctx)`. In
@@ -281,6 +282,103 @@ Mac that is `qwen3.5-9b-vl`, which a client loads before it sends images. With
 several questions the shared prefix is sent alone
 first so the engine caches it, then questions run under a concurrency gate; the
 failure reported is the first in the request's question order.
+
+### The items form
+
+One request carries an ordered list of items about ONE state; the answers come
+back as a list, one choice answer per item in today's shape (`probabilities`,
+`logprobs`, `confidence`, `label_mass`, and `missing_labels` under
+`missing: "report"`). The questions form is unchanged byte for byte.
+
+```json
+{"model": "qwen3.5-9b", "state": "<250 units joined with \n>\n\n<legend>",
+ "instructions": "Which of the categories listed above does the speaker do in this passage?",
+ "options": {"hate": "Hate", "conspiracy": "Conspiracy", "none": "None of these"},
+ "items": [{"text": "Passage from the transcript above: \"<unit 1>\""},
+           {"text": "Is a face visible?", "options": {"yes": "Yes", "no": "No"}}],
+ "missing": "report"}
+```
+
+```json
+{"model": {"id": "qwen3.5-9b", "revision": "...", "fingerprint": "..."},
+ "engine": "mlx-lm",
+ "answers": [{"type": "choice", "choice": "none", "probabilities": {...},
+              "logprobs": {...}, "confidence": 0.79, "label_mass": 0.998,
+              "missing_labels": []}, ...],
+ "timing_ms": {"total": 81500.0, "engine_requests": 1},
+ "tokens": {"shared": 5166, "per_item": [5290, 5283], "images": 0}}
+```
+
+- Item i is the lone choice question `item.text + "\n" + instructions` (just
+  `text` without `instructions`) over `item.options`, or the request's
+  `options` when the item has none. Each item sees the state and its own
+  question only, never another item, so its answer is the one the questions
+  form gives for the same question (checked end to end on the Mac: 249 of 250
+  argmax equal, mean largest |Δp| 0.012, which is the float difference between
+  mlx-lm's batch generator and the items pass).
+- Limits: 512 items (`400 too_many_items`, with `items` and `max_items`);
+  1,024 tokens per item past the shared state (`400 item_too_long`, naming
+  the item); each item's whole prompt at most `min(32768, max_model_len - 1)`
+  (`400 item_prompt_too_long`, with the shared and whole counts). A letter
+  outside the top tokens is `label_not_in_probs` naming `items[i]`. Every
+  refusal is made before anything is decided: the counts on Crucible's side,
+  the token caps by the engine after tokenizing and before any forward pass.
+- 512 because the Mac 9B takes 0.33 s per Briefcase item (250 in 81.5 s), so
+  512 is about 170 s, and a 27B about three times that, inside the 900 s the
+  proxy waits for an engine.
+- On mlx-lm and mlx-vlm the request is ONE call to `POST /v1/crucible/items`
+  (engines-and-capability.md "The decision door"): the shared state runs once
+  and each item continues from a copy of its cache. Elsewhere the items go
+  through the questions machinery: the shared prefix alone first, then one
+  request per item under the engine's admission (vLLM batches them itself and
+  reuses the prefix). `timing_ms.engine_requests` says which happened;
+  `tokens.shared` is null on the second.
+
+Measured on the Mac Studio (qwen3.5-9b, mlx-lm 0.31.3), Briefcase's 250 units
+(state 20,936 characters, 5,166 shared tokens, flags options, prefix layout):
+
+| path | 250 items | per item |
+| --- | --- | --- |
+| questions form through the mlx-lm server, 17 in flight | 173.6 s | 0.69 s |
+| items form, one `/v1/crucible/items` call | 81.5 s | 0.33 s |
+| questions form through mlx_vlm_serve (50 items) | 383.3 s | 7.7 s |
+| items form through mlx_vlm_serve (50 items) | 21.6 s | 0.43 s |
+
+ContentStudio's shape (one 640×360 frame, five items with their own options:
+yes/no, 1-5, desktop/video, yes/no, yes/no/maybe) on mlx_vlm_serve: 1.9 s as
+items, 4.3 s as five questions, the same argmax on all five.
+
+#### Why there is no filler: one sequence with many slots was measured and refused
+
+The first design put every item in ONE sequence, each ending at an answer slot
+followed by a filler token, and read all the slots from one forward pass (vLLM
+`prompt_logprobs`, a Crucible route on the Mac). Measured on the same 250 units
+against arm A (one question per unit through today's door), all 250 in one
+pass, forward and reversed order:
+
+| filler | order | mean \|Δp\| | argmax agree | Spearman | P(none) shift | letter mass at the slot |
+| --- | --- | --- | --- | --- | --- | --- |
+| newline | fwd | 0.139 | 24.8% | 0.53 | -0.37 | 0.006 |
+| `?` | fwd | 0.134 | 28.8% | 0.24 | -0.45 | 0.006 |
+| `.` | fwd | 0.108 | 48.0% | 0.60 | -0.29 | 0.006 |
+| `-` | fwd | 0.122 | 34.8% | 0.46 | -0.37 | 0.005 |
+| space | fwd | 0.120 | 33.2% | 0.54 | -0.38 | 0.004 |
+| none letter `I` | fwd | 0.109 | 60.0% | 0.68 | +0.49 | 1.000 |
+| `.` | rev | 0.097 | 50.0% | 0.64 | -0.23 | 0.005 |
+| none letter `I` | rev | 0.108 | 60.4% | 0.67 | +0.49 | 0.999 |
+
+By 25-item bin the first bin is the best (argmax agreement 56-84%) and from the
+second bin on it falls to 12-56%: after one or two slots the model has learned
+from the list itself that an answer line holds the filler, so the letters keep
+under 1% of the mass (a punctuation filler) or collapse onto the filler (the
+none letter: P(none) +0.49). Reversing the order does not repair it (forward vs
+reverse argmax agreement 35-58%, 99% for the none letter because it answers
+`I` everywhere). Every filler is an in-context example of the answer, so no
+filler is neutral; the items form keeps each item's question apart instead, and
+pays for it in tokens: the state once, then each item's own question (about
+124 tokens here). Moving the shared option legend ahead of the items' text
+would cut that to about 50 (48.7 s for the 250) but changes the prompt, and the
+argmax then agrees with today's door on 81.6% of units, so it is not done.
 
 ## The operator page
 

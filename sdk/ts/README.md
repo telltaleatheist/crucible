@@ -92,6 +92,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `chat(options)` | `POST /v1/openai/chat/completions` | `ChatResponse` |
 | `chatStream(options)` | the same, streamed | `AsyncIterable<string>` of content deltas |
 | `decide(request, {act?})` | `POST /v1/decide` | `DecideResponse` |
+| `decideItems(request, {act?})` | `POST /v1/decide` with `items` | `DecideItemsResponse` |
 | `voices()` | `GET /v1/voices` | `VoiceInfo[]` |
 | `loadVoice(id)` | `POST /v1/jobs {type: "load-voice"}` | the job id |
 | `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
@@ -400,6 +401,35 @@ The reply is checked against the request: an answer for every question asked, of
 asked, with a probability for every option — anything else is a `CrucibleProtocolError`.
 Option order is letter order on the server, and a JavaScript object lists integer-like
 keys first, so give options names that are not integers.
+
+### `decideItems()`
+
+Many choice questions about ONE state in one request: an ordered list of items, each with
+its own options or the request's shared `options`, answered as a list in the same order.
+Every item is answered exactly as the lone question `text + "
+" + instructions` would be
+(it sees the state and its own question, never another item); on the Mac the state runs
+once and each item continues from its cache (250 transcript units in 81.5 s on the 9B,
+where one question at a time took 0.69 s each).
+
+```ts
+const frame = await crucible.decideItems({
+  model: 'qwen3.5-9b-vl',
+  state: '',
+  images: [pngBase64],
+  instructions: 'Answer about the image.',
+  items: [
+    { text: 'Is a face visible?', options: { yes: 'Yes', no: 'No' } },
+    { text: 'How busy is the frame?', options: { 1: 'empty', 2: 'calm', 3: 'some', 4: 'busy', 5: 'crowded' } },
+    { text: 'A desktop or a video frame?', options: { desktop: 'A desktop', video: 'A video' } },
+  ],
+});
+frame.answers[0];   // {type: 'choice', choice: 'yes', probabilities, confidence, labelMass}
+```
+
+At most 512 items (400 `too_many_items`); an item past 1,024 tokens is 400 `item_too_long`
+naming it. `tokens.shared` is the state's size when it ran once, `null` where each item
+went as its own request (`timingMs.engineRequests` says which).
 
 ## tts
 

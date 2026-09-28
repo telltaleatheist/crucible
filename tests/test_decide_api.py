@@ -681,3 +681,112 @@ def test_images_travel_as_data_uri_parts_ahead_of_the_text(
         assert content[0] == part and len(content) == 2
         assert content[1]["type"] == "text"
         assert content[1]["text"].startswith(("Question: ", "Statement: "))
+
+
+ITEMS_EXAMPLE: dict[str, Any] = {
+    "model": MODEL,
+    "state": "The first sentence.\nThe second sentence.\nThe third sentence.",
+    "instructions": "Which of the categories listed above does the speaker do in this passage?",
+    "options": {"hate": "Hate", "conspiracy": "Conspiracy", "none": "None of these"},
+    "items": [
+        {"text": 'Passage: "The first sentence."'},
+        {"text": 'Passage: "The second sentence."'},
+        {"text": 'Passage: "The third sentence."'},
+    ],
+}
+
+ITEM_RAW = {
+    "first": {"A": 0.1, "B": 0.1, "C": 0.78},
+    "second": {"A": 0.7, "B": 0.2, "C": 0.08},
+    "third": {"A": 0.05, "B": 0.9, "C": 0.04},
+}
+
+
+def item_probs(messages: list[dict[str, Any]]) -> dict[str, float]:
+    question = question_of(messages) or ""
+    return next((row for word, row in ITEM_RAW.items() if word in question), {})
+
+
+def test_the_items_form_answers_a_list_in_order_in_the_choice_shape(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+) -> None:
+    engine = loaded(probs_for=item_probs)
+    response = _decide(llm_client, auth, ITEMS_EXAMPLE)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [a["choice"] for a in body["answers"]] == ["none", "hate", "conspiracy"]
+    first = body["answers"][0]
+    assert first["type"] == "choice" and "missing_labels" not in first
+    assert first["probabilities"] == pytest.approx({"hate": 0.1 / 0.98, "conspiracy": 0.1 / 0.98, "none": 0.78 / 0.98})
+    assert first["label_mass"] == pytest.approx(0.98)
+    assert body["engine"] == "vllm" and body["timing_ms"]["engine_requests"] == 4
+    assert body["tokens"]["shared"] is None and len(body["tokens"]["per_item"]) == 3
+    questions = [question_of(r["messages"]) for r in engine.requests[1:]]
+    assert sorted(questions) == sorted(f'Passage: "The {w} sentence."' for w in ("first", "second", "third"))
+    assert all(ITEMS_EXAMPLE["instructions"] in _user_text(r["messages"]) for r in engine.requests[1:])
+
+
+def test_every_item_goes_as_the_lone_choice_question_would(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+) -> None:
+    from crucible import decide as decide_core
+
+    engine = loaded(probs_for=item_probs)
+    assert _decide(llm_client, auth, ITEMS_EXAMPLE).status_code == 200
+    lone = [
+        decide_core.question_messages(ITEMS_EXAMPLE["state"], [], decide_core.plan(
+            "q", decide_core.ChoiceQuestion(
+                type="choice", instructions=f"{item['text']}\n{ITEMS_EXAMPLE['instructions']}",
+                options=ITEMS_EXAMPLE["options"])))
+        for item in ITEMS_EXAMPLE["items"]
+    ]
+    sent = [r["messages"] for r in engine.requests[1:]]
+    assert sorted(map(str, sent)) == sorted(map(str, lone))
+    assert engine.requests[0]["messages"] == decide_core.prime_messages(ITEMS_EXAMPLE["state"], [])
+
+
+def test_too_many_items_is_refused_before_anything_is_sent(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+) -> None:
+    engine = loaded(probs_for=item_probs)
+    body = {**ITEMS_EXAMPLE, "items": [{"text": f"t{i}"} for i in range(513)]}
+    response = _decide(llm_client, auth, body)
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "too_many_items"
+    assert error["details"] == {"items": 513, "max_items": 512}
+    assert engine.requests == []
+
+
+def test_an_item_with_too_many_options_is_refused_by_its_index(
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+) -> None:
+    engine = loaded(probs_for=item_probs)
+    body = {**ITEMS_EXAMPLE, "items": [
+        {"text": "a"}, {"text": "b", "options": {f"o{i}": "d" for i in range(27)}}]}
+    response = _decide(llm_client, auth, body)
+    assert response.status_code == 400
+    assert response.json()["error"]["details"]["question"] == "items[1]"
+    assert engine.requests == []
+
+
+def test_an_items_engine_started_before_its_route_says_to_load_again(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    loaded: Callable[..., FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crucible.api.routes import decide as decide_route
+    from crucible.engines import DecideItemsReading
+
+    monkeypatch.setattr(
+        decide_route, "decide_items_reading",
+        lambda engine: DecideItemsReading(batched=True, basis="test: batched"),
+    )
+    loaded(probs_for=item_probs)
+    response = _decide(llm_client, auth, ITEMS_EXAMPLE)
+    assert response.status_code == 503, response.text
+    error = response.json()["error"]
+    assert error["code"] == "decide_not_served"
+    assert "/v1/crucible/items" in error["message"] and "load-model" in error["message"]
+    assert error["details"]["form"] == "items"

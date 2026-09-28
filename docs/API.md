@@ -782,7 +782,7 @@ The orchestrator releases its claim; releasing when nothing is claimed succeeds.
 
 ### `POST /v1/decide`
 
-One answer distribution per question, read off the resident model's next-token logprobs. Every refusal a caller can cause is made before anything is sent to the engine.
+One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. Every refusal a caller can cause is made before anything is decided.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -792,21 +792,14 @@ One answer distribution per question, read off the resident model's next-token l
 | --- | --- | --- | --- | --- |
 | `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
+| `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
+| `options` | object of string or null | no | — | The items form's shared options (name to one-line description, letters A, B, C… in the order given, 2 to 26). An item without its own `options` uses these. |
+| `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
-*Answers:* `200` DecideResponse, `422` HTTPValidationError
-
-**Answer `200`** (`application/json`), the body:
-
-| field | type | required | default | what it is |
-| --- | --- | --- | --- | --- |
-| `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars"). |
-| `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
-| `answers` | object of ChoiceAnswer or ScoreAnswer or YesNoAnswer | yes | — | Question name to answer, in the request's question order. |
-| `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |
-| `tokens` | DecideTokens | yes | — | Prompt sizes. |
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Models in full
 
@@ -1007,6 +1000,27 @@ Pick one of named options. Labelled A, B, C… in the order given.
 | `instructions` | string | yes | — | The question, as a person would ask it: "Which team should handle this?". |
 | `options` | object of string | yes | — | Option name to a one-line description, in the order the letters are assigned: the first option is `A`. At least 2; more than 26 is refused as `too_many_options`, because past `Z` there is no one-token label to read. |
 
+### `DecideItem`
+
+One item of the items form: its text, and optionally its own options.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `text` | string | yes | — | The item, quoted verbatim into its own question (never referred to by number): a transcript passage, or a question about the image. |
+| `options` | object of string or null | no | — | This item's own options (name to one-line description, letters A, B, C… in the order given, 2 to 26), rendered inline under the item. Absent: the request's `options`. |
+
+### `DecideItemsResponse`
+
+An items-form decision: one choice distribution per item, in item order.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`). |
+| `engine` | string | yes | — | The engine kind that answered: `vllm`, `mlx-lm`, `mlx-vlm`. |
+| `answers` | array of ChoiceAnswer | yes | — | One choice answer per item, in the request's item order, in the shape a lone choice question answers with. |
+| `timing_ms` | ItemsTiming | yes | — | Crucible's clock. |
+| `tokens` | ItemsTokens | yes | — | Prompt sizes. |
+
 ### `DecidePairing`
 
 | field | type | required | default | what it is |
@@ -1017,13 +1031,16 @@ Pick one of named options. Labelled A, B, C… in the order given.
 
 ### `DecideRequest`
 
-`POST /v1/decide`: one forward pass per question at the resident model, nothing decoded or loaded.
+`POST /v1/decide`: one forward pass per question at the resident model, or a list of items about one state; nothing decoded or loaded.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion | yes | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
+| `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
+| `options` | object of string or null | no | — | The items form's shared options (name to one-line description, letters A, B, C… in the order given, 2 to 26). An item without its own `options` uses these. |
+| `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
 
@@ -1108,6 +1125,25 @@ One request to the engine, timed by Crucible.
 | `terminal_states` | TerminalStates | yes | — | The states after which a job or a task never changes again. |
 | `voice_sources` | object of VoiceSourceLabel | yes | — |  |
 | `service_commands` | array of ServiceCommand | yes | — |  |
+
+### `ItemsTiming`
+
+Where the items form's time went.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
+| `engine_requests` | integer | yes | — | 1 when the engine read every item in one batched request (mlx-lm, mlx-vlm); otherwise one per item plus the shared prefix sent first. |
+
+### `ItemsTokens`
+
+How big the items form's prompts were.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `shared` | integer or null | yes | — | The tokens every item's prompt shares (system, state, images), run once; null where each item went as its own request. |
+| `per_item` | array of integer | yes | — | Each item's whole prompt (shared part included), in item order. |
+| `images` | integer | yes | — | How many images every item's prompt carried. |
 
 ### `JobBusyDetails`
 

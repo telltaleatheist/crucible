@@ -27,6 +27,7 @@ class EnvPatch:
     stale_marker: str | None
     script: str
     why: str
+    creates: bool = False
 
 
 class PatchError(RuntimeError):
@@ -124,6 +125,9 @@ def check_patches(
             rows.append(_row(patch, NO_ENV, f"there is no venv at {env_dir}"))
             continue
         target = packages / patch.rel_path
+        if not target.is_file() and patch.creates:
+            rows.append(_row(patch, MISSING, f"{patch.rel_path} has not been placed"))
+            continue
         if not target.is_file():
             rows.append(
                 _row(
@@ -249,11 +253,50 @@ MLX_LM_CACHE_COUNTERS = EnvPatch(
     ),
 )
 
+MLX_LM_DECIDE_ITEMS = EnvPatch(
+    id="mlx-lm-decide-items",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/server.py",
+    marker="_crucible_items.mlx_lm_run_job(self.model_provider, request, rqueue)",
+    absent_marker=None,
+    stale_marker=None,
+    script="patch_mlx_lm_decide_items.py",
+    why=(
+        "stock mlx-lm 0.31.3 answers one prompt per request, so the decide door's "
+        "items form (many questions about one state) costs a request each on the "
+        "Mac; the patch adds POST /v1/crucible/items, which runs the shared state "
+        "once and every item from a copy of its cache on the generation thread. "
+        "MlxLmEngine applies it itself at start"
+    ),
+)
+
+MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
+    id="mlx-lm-decide-items-helper",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/_crucible_items.py",
+    marker="ITEMS_VERSION = 1",
+    absent_marker=None,
+    stale_marker=None,
+    script="patch_mlx_lm_decide_items_helper.py",
+    why=(
+        "the items route runs Crucible's engines/items_forward.py, copied into "
+        "the env as mlx_lm/_crucible_items.py; an older copy reads the wrong "
+        "request. MlxLmEngine applies it itself at start"
+    ),
+    creates=True,
+)
+
+SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
+    MLX_LM_DECIDE_ITEMS,
+    MLX_LM_DECIDE_ITEMS_HELPER,
+)
+
 LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_TOP_LOGPROBS,
     MLX_LM_FP32_LOGPROBS,
     MLX_LM_FATAL_GENERATION_THREAD,
     MLX_LM_CACHE_COUNTERS,
+    *SELF_APPLIED_LLM_PATCHES,
 )
 
 
@@ -407,6 +450,18 @@ def check(
     return check_patches(env_dir, recipe_pins, patches=found.patches)
 
 
+def ensure_applied(
+    patches: tuple[EnvPatch, ...], env_dir: Path, python: Path, *, runner: Any = None
+) -> None:
+    pins = {patch.distribution: "" for patch in patches}
+    rows = check_patches(env_dir, pins, patches=patches)
+    if all(row["status"] == APPLIED for row in rows):
+        return
+    apply_patches(
+        env_dir, python, pins, runner=runner, patches=patches, scripts_dir=LLM_SCRIPTS_DIR
+    )
+
+
 def require_applied(patch: EnvPatch, env_dir: Path) -> None:
     [row] = check_patches(env_dir, {patch.distribution: ""}, patches=(patch,))
     if row["status"] != APPLIED:
@@ -424,6 +479,8 @@ __all__ = [
     "LLM_PATCHES",
     "LLM_SCRIPTS_DIR",
     "MLX_LM_CACHE_COUNTERS",
+    "MLX_LM_DECIDE_ITEMS",
+    "MLX_LM_DECIDE_ITEMS_HELPER",
     "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_TOP_LOGPROBS",
@@ -434,6 +491,7 @@ __all__ = [
     "PatchError",
     "PatchSet",
     "REGISTRY",
+    "SELF_APPLIED_LLM_PATCHES",
     "SOUND_STATUSES",
     "STALE",
     "apply",
@@ -441,6 +499,7 @@ __all__ = [
     "check",
     "check_cuda_toolkit_links",
     "check_patches",
+    "ensure_applied",
     "ensure_cuda_toolkit_links",
     "patched_job_types",
     "patches_for",

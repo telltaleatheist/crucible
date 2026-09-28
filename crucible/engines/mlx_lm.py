@@ -44,6 +44,15 @@ class MlxLmEngine(SubprocessEngine):
         "mlx-lm-top-logprobs-40 patch raises it to 40, checked at engine start"
     )
 
+    decide_items_batched = True
+    decide_items_basis = (
+        "mlx-lm 0.31.3 answers one prompt per request; Crucible's "
+        "mlx-lm-decide-items patch (applied by this engine at start) adds POST "
+        "/v1/crucible/items, which runs engines/items_forward.py on the generation "
+        "thread: the shared state once, then every item as a batched row over a "
+        "copy of its cache"
+    )
+
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:
@@ -58,20 +67,27 @@ class MlxLmEngine(SubprocessEngine):
                 "(engines/mlx_lm.py, REQUIRED_FLAGS)"
             )
         if self._python.is_file():
-            env_dir = self._python.parent.parent
-            for patch in envpatches.LLM_PATCHES:
-                try:
-                    envpatches.require_applied(patch, env_dir)
-                except PatchError as exc:
-                    raise EngineError(
-                        f"llm_env_unpatched: {exc}. This engine states what it "
-                        f"serves (max_logprobs {self.max_logprobs}, logprobs "
-                        "computed in float32) because of the llm env's patches "
-                        "and will not start without every one; run `crucible "
-                        "env patch llm` (or `crucible install llm --force`) and "
-                        "load again"
-                    ) from exc
+            self._require_patched(self._python.parent.parent)
         super().start(model_dir, served_name, port, args)
+
+    def _require_patched(self, env_dir: Path) -> None:
+        self_applied = envpatches.SELF_APPLIED_LLM_PATCHES
+        gated = [p for p in envpatches.LLM_PATCHES if p not in self_applied]
+        try:
+            for patch in gated:
+                envpatches.require_applied(patch, env_dir)
+            envpatches.ensure_applied(self_applied, env_dir, self._python)
+            for patch in self_applied:
+                envpatches.require_applied(patch, env_dir)
+        except PatchError as exc:
+            raise EngineError(
+                f"llm_env_unpatched: {exc}. This engine states what it "
+                f"serves (max_logprobs {self.max_logprobs}, logprobs "
+                "computed in float32, the decide door's items route) because "
+                "of the llm env's patches and will not start without every "
+                "one; run `crucible env patch llm` (or `crucible install llm "
+                "--force`) and load again"
+            ) from exc
 
     @classmethod
     def served_name(cls, weights_dir: Path, model_id: str) -> str:

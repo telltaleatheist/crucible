@@ -27,6 +27,14 @@ class MlxVlmEngine(SubprocessEngine):
         "float32 (logits_in_float32)"
     )
 
+    decide_items_batched = True
+    decide_items_basis = (
+        "Crucible's Mac server (engines/mlx_vlm_serve.py) answers POST "
+        "/v1/crucible/items with engines/items_forward.py: the images embedded "
+        "once with the shared state, then every item as a batched row over a copy "
+        "of its cache, at the rope positions the lone question would have"
+    )
+
     @classmethod
     def served_name(cls, weights_dir: Path, model_id: str) -> str:
         return str(weights_dir)
