@@ -463,7 +463,7 @@ def test_install_writes_the_flag_and_the_reason_even_when_it_disables(
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     config = load_config(home)
-    assert cli._capability_step(config, cli.common.detect_backend(), "tts") == 1
+    assert cli.capability._capability_step(config, cli.common.detect_backend(), "tts") == 1
     out = capsys.readouterr()
     assert "DISABLED" in out.err
     after = load_config(home)
@@ -477,7 +477,7 @@ def test_install_turns_the_flag_on_when_the_card_holds_it(
     assert cli.main(["init"]) == 0
     capsys.readouterr()
     config = load_config(home)
-    assert cli._capability_step(config, cli.common.detect_backend(), "tts") == 0
+    assert cli.capability._capability_step(config, cli.common.detect_backend(), "tts") == 0
     after = load_config(home)
     assert after.enable_tts is True
     assert after.capability.row("tts").selected != ""

@@ -12,7 +12,7 @@ from .verdict import WSL_ONLY_JOB_TYPES
 from .backend import LLAMA_WINDOWS
 from .errors import ApiError, CrucibleError
 from .manifests import BACKEND_ENGINES
-from .tasks import require_installable, require_narrator_engine
+from .tasks.validate import require_installable, require_narrator_engine
 
 DIR_NAME = "modules"
 

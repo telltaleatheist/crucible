@@ -6,10 +6,10 @@ from typing import Any
 from fastapi import Request, Response
 
 from ...admission import refuse_lease_on_an_upstream
+from ...cardkinds import KIND_NOUNS
 from ...errors import ApiError
 from ...inflight import require_act_name
 from ...leases import require_ttl
-from ...residency import KIND_NOUNS
 from ..caller import client_agent
 from ..context import AppContext, Routers
 from ..schemas import LeaseOpen

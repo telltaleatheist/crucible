@@ -10,7 +10,7 @@ import pytest
 from crucible import accelerator, llamacpp, weights
 from crucible.backend import Backend, Gpu
 from crucible.config import Config
-from crucible.engines import ENGINES, LlamaServerEngine, engine_model_name
+from crucible.engines import ENGINES, LlamaServerEngine, engine_load_args, engine_model_name
 from crucible.engines.llama_server import (
     GRACEFUL_STOP_SECONDS,
     PAGES_ENGINE_FAILED,
@@ -408,7 +408,7 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
     manifest = load_manifest("dots-ocr")
     spec = manifest.spec(LLAMA_WINDOWS)
     weights_dir = tmp_path / "dots"
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, spec, weights_dir, None, context=manifest.context_for(LLAMA_WINDOWS)
     )
     assert args[:2] == ["-m", str(weights_dir / "dots.ocr-Q8_0.gguf")]
@@ -433,7 +433,7 @@ def test_the_spawn_line_is_facts_3_and_the_alias_decision(tmp_path: Path) -> Non
 def test_a_text_model_gets_no_mmproj(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.5-9b")
     spec = manifest.spec(LLAMA_WINDOWS)
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, spec, tmp_path, None, context=manifest.context_for(LLAMA_WINDOWS)
     )
     assert "--mmproj" not in args
@@ -689,7 +689,7 @@ def test_a_load_preflight_passes_on_a_fake_llama_windows_accelerator(
 def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.8-27b-4bit")
     spec = manifest.spec(LLAMA_WINDOWS)
-    args = Residency._engine_args(manifest, spec, tmp_path, None, context=65536)
+    args = engine_load_args(manifest, spec, tmp_path, None, context=65536)
     assert args.count("-c") == 1
     assert args[args.index("-c") + 1] == "65536"
 
@@ -697,6 +697,6 @@ def test_a_loads_context_is_llama_servers_c(tmp_path: Path) -> None:
 def test_mlx_lm_is_handed_no_context_flag(tmp_path: Path) -> None:
     manifest = load_manifest("qwen3.8-27b-8bit")
     spec = manifest.spec("mlx-darwin")
-    args = Residency._engine_args(manifest, spec, tmp_path, None, context=131072)
+    args = engine_load_args(manifest, spec, tmp_path, None, context=131072)
     assert "131072" not in args
     assert "--max-model-len" not in args and "-c" not in args

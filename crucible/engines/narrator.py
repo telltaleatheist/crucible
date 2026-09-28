@@ -277,7 +277,7 @@ class NarratorEngine(SubprocessEngine):
                     "defaults for them are 1 — one chunk at a time, a measured "
                     "7x — and 42 GB, which is a 64 GB machine's number. "
                     "`accelerator.probe_unified_memory` reads it and "
-                    "`residency.load_voice` passes it"
+                    "`jobs.tts.common.occupy_voice` passes it"
                 )
             self._mlx_tier: MlxTier | None = mlx_render_profile(
                 narrator_engine, mlx_total_bytes

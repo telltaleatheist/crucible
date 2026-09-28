@@ -698,13 +698,13 @@ def test_the_cli_refuses_the_base_by_name(
         id = BASE
         json = False
 
-    assert cli.cmd_remove(Args()) != 0
+    assert cli.weights.cmd_remove(Args()) != 0
     err = capsys.readouterr().err
     assert "weights_shared" in err and ALIAS in err
     Args.id = ALIAS
-    assert cli.cmd_remove(Args()) == 0
+    assert cli.weights.cmd_remove(Args()) == 0
     Args.id = BASE
-    assert cli.cmd_remove(Args()) == 0
+    assert cli.weights.cmd_remove(Args()) == 0
 
 
 def test_the_windows_migration_removes_the_alias_before_its_base(

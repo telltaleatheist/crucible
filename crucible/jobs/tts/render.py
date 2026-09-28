@@ -9,18 +9,20 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ... import hosttools, jobenv
+from ...cardkinds import KIND_TTS
 from ...config import Config
 from ...engines import EngineError, EngineWouldNotStop, NarratorEngine
 from ...errors import ApiError, JobCancelled, JobError
 from ...jobtypes import TTS_JOB
 from ...narratorvoices import take_sampling
-from ...residency import KIND_TTS, Residency, describe_resident
+from ...residency import Residency, describe_resident
 from ...voices import VoiceManifest
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..template import as_job_error, card_guard, parse_params, require_model, run_model
 from .common import (
     describe_voices,
     known_voice,
+    occupy_voice,
     require_loadable,
     voice_load_plan,
     voice_provenance,
@@ -611,7 +613,8 @@ class TtsJobType:
         ctx.warming(state.detail)
 
         try:
-            self._residency.load_voice(
+            occupy_voice(
+                self._residency,
                 manifest,
                 spec,
                 weights_dir,

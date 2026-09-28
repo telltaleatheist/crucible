@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.manifests import (
     MODALITIES,
     LANGUAGE_MODEL_ONLY,
@@ -101,9 +101,9 @@ def page_engines(monkeypatch: pytest.MonkeyPatch) -> PageEngines:
         engines.built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: model_id,
     )
@@ -317,9 +317,9 @@ def test_only_the_model_field_is_rewritten(
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: f"/home/owen/.crucible/models/{model_id}",
     )

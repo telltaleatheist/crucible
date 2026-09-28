@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import capabilityclasses, cli, verdict
+from crucible import capabilitystore, cli
 from crucible.config import config_path, load_config
 
 from .conftest import FAKE_BACKEND, TOKEN
@@ -42,7 +43,7 @@ def test_a_record_written_by_another_process_is_served_without_a_restart(
         assert undecided.status_code == 503
         assert undecided.json()["error"]["code"] == "capability_undecided"
 
-        cli._write_capability(load_config(home), FAKE_BACKEND, (_decide("echo"),), {})
+        capabilitystore.write_capability(load_config(home), FAKE_BACKEND, (_decide("echo"),), {})
 
         decided = client.get("/v1/capability", headers=auth)
         assert decided.status_code == 200, decided.text
@@ -63,7 +64,7 @@ def test_a_flag_turned_off_in_the_file_is_honoured_by_the_door(
         assert accepted.status_code == 202, accepted.text
 
         current = load_config(home)
-        cli._write_capability(current, FAKE_BACKEND, (), {"enable_echo": False})
+        capabilitystore.write_capability(current, FAKE_BACKEND, (), {"enable_echo": False})
 
         refused = client.post(
             "/v1/jobs",
@@ -120,7 +121,7 @@ def test_the_stamp_is_taken_before_the_read(home: Path, make_client: Callable[..
         current = path.stat()
         assert loaded.stamp == (current.st_mtime_ns, current.st_size)
         assert loaded.follow_file() is False
-        cli._write_capability(loaded, FAKE_BACKEND, (), {})
+        capabilitystore.write_capability(loaded, FAKE_BACKEND, (), {})
         assert loaded.follow_file() is True
         assert loaded.follow_file() is False
 

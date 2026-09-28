@@ -13,7 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from crucible import admission, inputs, uploads, voicerepo
+from crucible import uploads, voicerepo
 from crucible import decide as decide_core
 from crucible.admission import AdmissionContext, AdmittedJob, JobRequest, Refusal, admit
 from crucible.api import context as context_module
@@ -95,15 +95,6 @@ def test_the_upload_store_writes_the_sidecar_the_digest_reads(tmp_path: Path) ->
     assert uploads.blob_path(tmp_path, blob.blob_id).read_bytes() == payload
     assert uploads.recorded_sha256(tmp_path, blob.blob_id, len(payload)) == blob.sha256
     assert uploads.recorded_sha256(tmp_path, blob.blob_id, len(payload) - 1) is None
-
-
-def test_inputs_moved_to_the_domain_and_the_old_names_still_import() -> None:
-    from crucible.api import inputs as old
-
-    assert old._materialise_inputs is inputs.materialise_inputs
-    assert old._input_digests is inputs.input_digests
-    assert old._journal_identity is inputs.journal_identity
-    assert old._refuse_resume_without_a_journal is inputs.refuse_resume_without_a_journal
 
 
 def test_decide_on_engine_runs_with_an_injected_post() -> None:
@@ -320,12 +311,6 @@ def test_one_events_after_loop_serves_a_job_and_ends_at_its_terminal_event() -> 
     frames = asyncio.run(collect())
     assert frames == [sse.format_event(events[0]), sse.format_event(events[1])]
     assert closed == [True]
-
-
-def test_the_lease_refusal_moved_with_a_name_left_behind() -> None:
-    from crucible.api import upstream
-
-    assert upstream._refuse_lease_on_an_upstream is admission.refuse_lease_on_an_upstream
 
 
 def test_the_decide_route_posts_through_the_injected_engine_call(

@@ -14,8 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import VERSION
-from ..clock import now as _now
+from .. import VERSION, clock
 from ..clock import utcnow
 from ..errors import ApiError, JobCancelled, JobError
 from ..journal import Journals
@@ -140,13 +139,6 @@ class LaneSlot:
         job_id, self.job_id = self.job_id, None
         return job_id
 
-    append = admit
-    remove = release
-
-
-def busy_details(job: Job) -> dict[str, Any]:
-    return job.busy_details()
-
 
 class JobStore:
     def __init__(self, config: Any, backend: Any, registry: dict[str, JobType]) -> None:
@@ -242,7 +234,7 @@ class JobStore:
         return job.status
 
     @property
-    def _pending(self) -> LaneSlot:
+    def admitted(self) -> LaneSlot:
         return self._admitted
 
     def _retention_seconds(self) -> float:
@@ -424,7 +416,7 @@ class JobStore:
             self._reap_one(
                 job,
                 ReapReason.RELEASED,
-                _now(),
+                clock.now(),
                 "its hold was released: the chain that held it is complete",
             )
         return was
@@ -433,7 +425,7 @@ class JobStore:
         job.fetched.add(name)
 
     def reap(self) -> list[Reaped]:
-        now = _now()
+        now = clock.now()
         horizon = self._retention_seconds()
         taken: list[Reaped] = []
         for job in list(self._jobs.values()):

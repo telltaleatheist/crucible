@@ -74,8 +74,8 @@ def test_doctor_says_nothing_about_them_when_they_are_off(
 
 
 def test_align_is_installable_and_rvc_is_installable(viable: None) -> None:
-    assert "align" in cli.INSTALLABLE_JOB_TYPES
-    assert "rvc" in cli.INSTALLABLE_JOB_TYPES
+    assert "align" in jobenv.INSTALLABLE_JOB_TYPES
+    assert "rvc" in jobenv.INSTALLABLE_JOB_TYPES
     assert set(jobenv.WORKER_JOB_TYPES) == {"align", "asr", "rvc"}
 
 

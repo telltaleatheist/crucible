@@ -12,7 +12,7 @@ from crucible.pairing import pairing_file_path
 
 
 def write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path:
-    return cli._write_pairing_file(home, name=name, port=port, token=token)
+    return cli.token._write_pairing_file(home, name=name, port=port, token=token)
 
 
 def test_the_file_is_one_loopback_line_with_a_trailing_newline(
@@ -89,7 +89,7 @@ def test_token_url_prints_the_same_line_the_file_holds(
 def test_the_loopback_line_is_printed_once_on_a_loopback_bind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lines = cli._pairing_lines("crucible@pc", "127.0.0.1", 7100, "tok3n")
+    lines = cli.token._pairing_lines("crucible@pc", "127.0.0.1", 7100, "tok3n")
     assert lines == ["crucible://crucible%40pc@127.0.0.1:7100/#tok3n"]
 
 
@@ -97,7 +97,7 @@ def test_a_wildcard_bind_prints_the_loopback_line_and_then_the_interfaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(pairing, "ipv4_addresses", lambda: ["192.168.68.20"])
-    lines = cli._pairing_lines("crucible@pc", "0.0.0.0", 7100, "tok3n")
+    lines = cli.token._pairing_lines("crucible@pc", "0.0.0.0", 7100, "tok3n")
     assert lines == [
         "crucible://crucible%40pc@127.0.0.1:7100/#tok3n",
         "crucible://crucible%40pc@192.168.68.20:7100/#tok3n",
@@ -110,7 +110,7 @@ def _synced(home: Path, **overrides) -> str | None:
     config = load_config(home)
     for name, value in overrides.items():
         object.__setattr__(config, name, value)
-    cli._sync_pairing_file(config)
+    cli.token._sync_pairing_file(config)
     return pairing.read_pairing_file(home)
 
 

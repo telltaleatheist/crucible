@@ -254,10 +254,10 @@ a field the SDK deliberately leaves unread is named there with the reason.
   scheduler, cancel and restart), `decode` (narrator's `batch_chunk` and `batch_item`
   messages into PCM or a named `RowFailure`/`ItemEnd`, with no session state),
   `manager` (`StreamManager`: one session, the residency claim, the grace watchdog) and
-  `validate` (`batch_width_for`, `require_streamable`, `require_sayable`). The knobs
-  tests turn (`GRACE_SECONDS`, `BATCH_COALESCE_SECONDS`, `STREAM_BATCH_WIDTH`) are read
-  through the package at call time, so patching `crucible.ttsstream.X` still reaches the
-  code that uses it.
+  `validate` (`batch_width_for`, `require_streamable`, `require_sayable`). The package
+  answers only `StreamManager`, `StreamSession` and the knobs tests turn (`GRACE_SECONDS`,
+  `BATCH_COALESCE_SECONDS`, `STREAM_BATCH_WIDTH`), which the submodules read as
+  `ttsstream.X` at call time so patching the package reaches the code that uses them.
 - Operator tasks live in `crucible/tasks/` (see `jobs-runtime.md`, "Operator tasks"); the
   route layer reads only `TaskStore`, `Task` and `TASK_TYPES`.
 - Jobs, tasks and streaming sessions share one loop, `sse.events_after`, over a

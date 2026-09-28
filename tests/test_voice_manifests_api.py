@@ -12,6 +12,7 @@ from crucible.api.routes import voices as api_module
 from crucible import voices as voices_module
 from crucible.residency import KIND_TTS
 from crucible.voicecatalog import load_all_voices, load_voice
+from crucible.cardkinds import KIND_TTS
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
@@ -507,12 +508,12 @@ def test_a_lease_or_a_queued_job_on_a_local_voice_is_not_an_orphan(
 
     store = tts_client.app.state.store
     job = store.create("load-voice", CUSTOM, {})
-    store._pending.append(job.id)
+    store.admitted.admit(job.id)
     try:
         assert job in store.queued()
         assert orphan() is False, "a job naming the voice holds it"
     finally:
-        store._pending.remove(job.id)
+        store.admitted.release(job.id)
         store._jobs.pop(job.id, None)
     assert orphan() is True
 

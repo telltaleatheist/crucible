@@ -15,8 +15,9 @@ from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
 from .jobs import ALL_JOB_TYPES
 from .jobtypes import FAMILIES, spec_of
 from .narratorengines import NARRATOR_ENGINE_SAMPLING
-from .tasks import CANCELLED, FAILED, TERMINAL_STATES, Task, TaskStore, env_installed
 from .voicecatalog import load_all_voices
+from .tasks import Task, TaskStore, env_installed
+from .tasks.states import CANCELLED, FAILED, TERMINAL_STATES
 
 INSTALLING = "installing"
 

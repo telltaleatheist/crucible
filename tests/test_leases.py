@@ -15,7 +15,7 @@ from crucible.leases import (
     MIN_TTL_SECONDS,
     Leases,
 )
-from crucible.residency import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
+from crucible.cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
 
 from .conftest import parse_sse
 from .fake_engine import FakeEngine

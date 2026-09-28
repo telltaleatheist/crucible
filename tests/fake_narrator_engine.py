@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.engines.narrator import NarratorEngine
 from crucible.narratorvoices import VoicesDocument
 
@@ -57,7 +57,7 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_voice_engine", build)
+    monkeypatch.setattr(engines_module, "build_voice_engine", build)
     return built
 
 

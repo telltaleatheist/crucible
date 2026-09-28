@@ -15,7 +15,8 @@ from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 
 from .conftest import FAKE_BACKEND, holding_the_card, parse_sse, write_env_stamp
-from crucible.residency import KIND_DENOISE, Residency
+from crucible.cardkinds import KIND_DENOISE
+from crucible.residency import Residency
 
 MODEL = "denoise-roformer"
 VOCALS_MODEL = "vocals-roformer"

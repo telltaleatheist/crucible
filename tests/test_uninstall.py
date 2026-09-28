@@ -508,7 +508,7 @@ def test_the_cli_verb_exists_with_its_four_flags() -> None:
     parsed = cli.build_parser().parse_args(
         ["uninstall", "--dry-run", "--purge-weights", "--wsl-too", "--json"]
     )
-    assert parsed.func is cli.cmd_uninstall
+    assert parsed.func is cli.uninstall_cmd.cmd_uninstall
     assert (parsed.dry_run, parsed.purge_weights, parsed.wsl_too, parsed.json) == (
         True,
         True,

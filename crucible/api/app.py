@@ -29,7 +29,8 @@ from ..jobs.queue import JobStore
 from ..leases import Leases
 from ..residency import Residency
 from ..settle import Settlement
-from ..tasks import ReloadRefused, TaskStore
+from ..tasks import TaskStore
+from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
 from .context import AppContext, Routers, Services
 from .deps import (

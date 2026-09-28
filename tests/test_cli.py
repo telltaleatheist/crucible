@@ -192,7 +192,7 @@ def test_service_install_ends_with_the_pairing_line(
     capsys.readouterr()
     assert cli.main(["service", "install"]) == 0
     out = capsys.readouterr().out
-    assert cli.PAIRING_NOT_PRINTED in out
+    assert cli.token.PAIRING_NOT_PRINTED in out
     assert load_config(home).token not in out
 
 
@@ -419,7 +419,7 @@ def test_init_refuses_a_blank_or_spaced_token(home: Path, viable: None) -> None:
 
 def test_every_installable_name_has_a_smoke_import() -> None:
     for backend_kind in ("cuda-linux", "mlx-darwin"):
-        for job_type in cli.INSTALLABLE_JOB_TYPES:
+        for job_type in jobenv.INSTALLABLE_JOB_TYPES:
             if job_type in jobenv.WORKER_JOB_TYPES:
                 try:
                     jobenv.recipe_for(jobenv.worker_env(job_type, backend_kind))
@@ -436,7 +436,7 @@ def test_every_installable_name_has_a_smoke_import() -> None:
                     }
                 )
             for key in keys:
-                assert cli.SMOKE_IMPORT.get(key, {}).get(backend_kind), (
+                assert jobenv.SMOKE_IMPORT.get(key, {}).get(backend_kind), (
                     f"{job_type}/{backend_kind}: the {key!r} env has no smoke import"
                 )
 
@@ -444,7 +444,7 @@ def test_every_installable_name_has_a_smoke_import() -> None:
 def test_an_env_with_no_smoke_import_is_refused_rather_than_called_installed(
     tmp_path: Path,
 ) -> None:
-    refusal = cli._smoke_import(tmp_path / "python", "llm", "rocm-linux")
+    refusal = cli.install._smoke_import(tmp_path / "python", "llm", "rocm-linux")
     assert refusal is not None
     assert "SMOKE_IMPORT" in refusal
 
@@ -459,7 +459,7 @@ def test_a_failing_import_is_refused_by_name_with_the_last_lines(
         stderr = "Traceback\nImportError: libcudart.so.12: cannot open shared object file"
 
     monkeypatch.setattr(cli.install.subprocess, "run", lambda *a, **k: _Completed())
-    refusal = cli._smoke_import(tmp_path / "python", "llm", "cuda-linux")
+    refusal = cli.install._smoke_import(tmp_path / "python", "llm", "cuda-linux")
     assert refusal is not None
     assert refusal.startswith("env_smoke_failed:")
     assert "libcudart" in refusal
@@ -468,10 +468,11 @@ def test_a_failing_import_is_refused_by_name_with_the_last_lines(
 def _live_server_double(
     monkeypatch: pytest.MonkeyPatch, home: Path
 ) -> list[tuple[str, str, object]]:
-    from crucible import apiclient
+    from crucible.client import transport
+    from crucible.client.connection import Connection
 
     calls: list[tuple[str, str, object]] = []
-    doubled = apiclient.Connection(
+    doubled = Connection(
         url="http://127.0.0.1:7100", token="t", name="crucible@test", source="local"
     )
     monkeypatch.setattr(cli.common, "server_here", lambda _config, _backend: doubled)
@@ -481,7 +482,7 @@ def _live_server_double(
         calls.append((method, path, json_body))
         return {"voice": None, "path": str(home / "voices" / "pins.toml")}
 
-    monkeypatch.setattr(apiclient, "call", call)
+    monkeypatch.setattr(transport, "call", call)
     return calls
 
 

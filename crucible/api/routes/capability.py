@@ -4,7 +4,8 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import capabilityclasses, capabilityquery, installplan, ladder
+from ... import capabilityclasses, capabilityquery, installplan
+from ...cardfacts import card_for
 from ...errors import ApiError
 from ...installonsubmit import live_decisions
 from ...jobenv import INSTALLER_FOR
@@ -90,7 +91,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             capability_class=query.get("class"),
             context_tokens=query.get(capabilityquery.CONTEXT_TOKENS_PARAM),
             concurrency=query.get(capabilityquery.CONCURRENCY_PARAM),
-            card=ladder.card_for(config.home, backend.gpu),
+            card=card_for(config.home, backend.gpu),
         )
         for row in document["classes"]:
             row["route"] = (

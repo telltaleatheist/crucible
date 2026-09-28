@@ -6,6 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import tasks
+from crucible.platform.paths import HOST_DOOR_ENV
+from crucible.tasks import hostdoor
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 from .test_engine_task import FakeDoor, door, events, wait_for, windows_client
@@ -18,19 +20,19 @@ def restart(client: TestClient, auth: dict[str, str]) -> Any:
 def test_a_server_no_orchestrator_started_is_refused_by_its_OWN_name(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv(tasks.HOST_DOOR_ENV, raising=False)
+    monkeypatch.delenv(HOST_DOOR_ENV, raising=False)
     answer = restart(client, auth)
     assert answer.status_code == 409
     error = answer.json()["error"]
-    assert error["code"] == tasks.ENGINE_RESTART_NEEDS_ORCHESTRATOR
-    assert error["details"]["env"] == tasks.HOST_DOOR_ENV
+    assert error["code"] == hostdoor.ENGINE_RESTART_NEEDS_ORCHESTRATOR
+    assert error["details"]["env"] == HOST_DOOR_ENV
     assert "move" not in error["message"].lower()
 
 
 def test_a_restart_takes_no_fields_at_all(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, "http://127.0.0.1:7101")
+    monkeypatch.setenv(HOST_DOOR_ENV, "http://127.0.0.1:7101")
     refused = client.post(
         "/v1/tasks", headers=auth, json={"type": "engine-restart", "target": "wsl"}
     )
@@ -44,13 +46,13 @@ def test_any_backend_may_be_restarted_unlike_the_move(
     import os
 
     door.script = [("done", {"engine": "http://127.0.0.1:7100"})]
-    os.environ[tasks.HOST_DOOR_ENV] = door.url
+    os.environ[HOST_DOOR_ENV] = door.url
     try:
         answer = restart(client, auth)
         assert answer.status_code == 202, answer.text
         task = wait_for(client, auth, answer.json()["task_id"])
     finally:
-        os.environ.pop(tasks.HOST_DOOR_ENV, None)
+        os.environ.pop(HOST_DOOR_ENV, None)
     assert task["state"] == "done", task
 
 
@@ -60,11 +62,11 @@ def test_the_restart_goes_to_slash_restart_with_the_engines_bearer_and_no_body_f
     from .conftest import TOKEN
 
     door.script = [("done", {})]
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door.url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door.url)
     answer = restart(client, auth)
     wait_for(client, auth, answer.json()["task_id"])
     assert len(door.seen) == 1
-    assert door.seen[0]["path"] == tasks.HOST_DOOR_RESTART_PATH
+    assert door.seen[0]["path"] == hostdoor.HOST_DOOR_RESTART_PATH
     assert door.seen[0]["authorization"] == f"Bearer {TOKEN}"
     assert door.seen[0]["body"] == {}
 
@@ -77,7 +79,7 @@ def test_the_orchestrators_events_arrive_UNALTERED_under_this_tasks_id(
         ("step", {"name": "wait for /v1/ping", "index": 2, "total": 2}),
         ("done", {"engine": "http://127.0.0.1:7100"}),
     ]
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door.url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door.url)
     answer = restart(client, auth)
     task_id = answer.json()["task_id"]
     wait_for(client, auth, task_id)
@@ -95,7 +97,7 @@ def test_engine_not_ours_comes_back_with_the_orchestrators_OWN_code(
     client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     door.refusal = (409, "engine_not_ours", "watched and never acted on")
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door.url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door.url)
     answer = restart(client, auth)
     task = wait_for(client, auth, answer.json()["task_id"])
     assert task["state"] == "failed"
@@ -109,7 +111,7 @@ def test_a_failed_event_from_the_orchestrator_is_NOT_described_twice(
         ("step", {"name": "restart the guest's unit", "index": 1, "total": 2}),
         ("failed", {"code": "engine_did_not_return", "message": "nothing answered"}),
     ]
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door.url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door.url)
     answer = restart(client, auth)
     task_id = answer.json()["task_id"]
     task = wait_for(client, auth, task_id)
@@ -124,22 +126,22 @@ def test_a_stream_that_just_STOPS_is_the_expected_shape_and_says_to_read_info(
 ) -> None:
     door.script = [("step", {"name": "restart the guest's unit", "index": 1, "total": 2})]
     door.cut_after = 1
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door.url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door.url)
     answer = restart(client, auth)
     task = wait_for(client, auth, answer.json()["task_id"])
     assert task["state"] == "failed"
-    assert task["error"]["code"] == tasks.HOST_INSTALL_FAILED
+    assert task["error"]["code"] == hostdoor.HOST_INSTALL_FAILED
     assert "/v1/info" in task["error"]["message"]
 
 
 def test_an_orchestrator_whose_door_is_dead_is_host_unreachable(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, "http://127.0.0.1:1")
+    monkeypatch.setenv(HOST_DOOR_ENV, "http://127.0.0.1:1")
     answer = restart(client, auth)
     assert answer.status_code == 202, answer.text
     task = wait_for(client, auth, answer.json()["task_id"])
-    assert task["error"]["code"] == tasks.HOST_UNREACHABLE
+    assert task["error"]["code"] == hostdoor.HOST_UNREACHABLE
 
 
 def test_engine_restart_is_a_task_type_and_the_vocabulary_is_closed(

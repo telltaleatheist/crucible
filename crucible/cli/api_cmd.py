@@ -13,28 +13,12 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Mapping
 
 from ..client import transport
-from ..client.connection import (
-    PAIRING_ENV,
-    SERVERS_DIR,
-    Connection,
-    saved_pairing_path,
-    server_slug,
-)
+from ..client.connection import PAIRING_ENV, Connection
 from ..client.connection import resolve as resolve_connection
-from ..client.errors import (
-    CONNECT_NOTE,
-    ClientRefusal,
-    ServerError,
-    error_in,
-    host_of,
-    next_step,
-    unreachable,
-)
-from ..client.pair import PAIR_DEFAULT_PORT, PAIR_TIMEOUT_SECONDS, pair
-from ..client.transport import REQUEST_TIMEOUT_SECONDS, call, follow, upload
+from ..client.errors import ClientRefusal, error_in, next_step, unreachable
+from ..client.transport import call, follow, upload
 from ..protocol import ACT_HEADER
 from .common import EXIT_OK, EXIT_REFUSED
-from .pair import add_pair_parser, cmd_pair
 
 SUCCEEDED = "done"
 
@@ -1090,41 +1074,3 @@ def add_parser(subparsers: Any) -> None:
     add_verbs(parser.add_subparsers(dest="api_command", required=True), API_VERBS)
     parser.set_defaults(func=command)
 
-
-__all__ = [
-    "CONNECT_NOTE",
-    "EXIT_OK",
-    "EXIT_REFUSED",
-    "PAIRING_ENV",
-    "PAIR_DEFAULT_PORT",
-    "PAIR_TIMEOUT_SECONDS",
-    "REQUEST_TIMEOUT_SECONDS",
-    "SERVERS_DIR",
-    "SUCCEEDED",
-    "ClientRefusal",
-    "Connection",
-    "ServerError",
-    "add_pair_parser",
-    "add_parser",
-    "call",
-    "cmd_pair",
-    "command",
-    "decide_questions",
-    "download",
-    "emit",
-    "emit_line",
-    "error_in",
-    "follow",
-    "follow_to_the_end",
-    "host_of",
-    "pair",
-    "read_json_argument",
-    "read_text_argument",
-    "report_http_error",
-    "resolve",
-    "saved_pairing_path",
-    "server_slug",
-    "split_assignment",
-    "unreachable",
-    "upload",
-]

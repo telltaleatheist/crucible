@@ -14,30 +14,25 @@ from crucible.tasks import hostdoor, runner, states, validate
 
 from .conftest import FAKE_BACKEND
 
-OLD_PUBLIC_NAMES = (
-    "CANCELLED", "DONE", "FAILED", "HISTORY", "RUNNING", "ENGINE_RESTART_NEEDS_ORCHESTRATOR",
-    "HOST_DOOR_ENV", "HOST_DOOR_PATH", "HOST_DOOR_RESTART_PATH", "HOST_INSTALL_FAILED",
-    "HOST_UNREACHABLE", "PROGRESS_INTERVAL_SECONDS", "TASK_TYPES", "TERMINAL_STATES",
-    "ModuleEntry", "ReloadRefused", "Task", "TaskCancelled", "TaskStore", "env_installed",
-    "install_command", "require_installable", "require_narrator_engine", "module_document",
-    "validate_module", "which", "searched_note",
-)
+PUBLIC_NAMES = {
+    "PROGRESS_INTERVAL_SECONDS", "TASK_TYPES", "Task", "TaskStore", "env_installed",
+    "install_command", "searched_note", "which",
+}
 
 
-def test_the_package_still_answers_every_name_the_module_had() -> None:
-    missing = [name for name in OLD_PUBLIC_NAMES if not hasattr(tasks, name)]
-    assert missing == []
+def test_the_package_answers_its_public_surface_and_no_more() -> None:
+    assert set(tasks.__all__) == PUBLIC_NAMES
+    assert all(hasattr(tasks, name) for name in PUBLIC_NAMES)
 
 
 def test_task_states_are_the_job_states_and_a_task_is_never_interrupted() -> None:
     assert (states.RUNNING, states.DONE, states.FAILED, states.CANCELLED) == (
         job_states.RUNNING, job_states.DONE, job_states.FAILED, job_states.CANCELLED,
     )
-    assert tasks.TERMINAL_STATES == job_states.TERMINAL_STATES - {job_states.INTERRUPTED}
+    assert states.TERMINAL_STATES == job_states.TERMINAL_STATES - {job_states.INTERRUPTED}
 
 
 def test_the_host_door_variable_has_one_owner() -> None:
-    assert tasks.HOST_DOOR_ENV == paths.HOST_DOOR_ENV
     assert hostdoor.HOST_DOOR_ENV is paths.HOST_DOOR_ENV
 
 
@@ -120,7 +115,7 @@ def test_the_relay_passes_host_events_through_and_names_the_terminal_one() -> No
 def test_the_relay_stops_at_a_cancel() -> None:
     task = _task()
     task.cancel_requested = True
-    with pytest.raises(tasks.TaskCancelled):
+    with pytest.raises(states.TaskCancelled):
         hostdoor.relay_lines(task, [b"{}"], lambda kind, data: None)
 
 

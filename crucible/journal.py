@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from .clock import now as utcnow
+from . import clock
 from .errors import ApiError
 
 JOURNAL_FORMAT = 1
@@ -160,7 +160,7 @@ class Journal:
 
     def put(self, key: str, data: Any) -> None:
         _check_key(key)
-        now = utcnow()
+        now = clock.now()
         write_atomically(
             self.units_dir / f"{key}.json",
             {"key": key, "saved_at": now.isoformat(), "data": data},
@@ -232,7 +232,7 @@ class Journal:
 
     def set_writer(self, job_id: str, state: str, *, resumed: bool | None = None) -> None:
         with self._lock:
-            writer = {"job_id": job_id, "state": state, "at": utcnow().isoformat()}
+            writer = {"job_id": job_id, "state": state, "at": clock.now().isoformat()}
             self._manifest["writer"] = writer
             history = list(self._manifest.get("jobs") or [])
             for row in history:
@@ -286,7 +286,7 @@ class Journals:
                 "resume journal",
             )
         resume_id = uuid.uuid4().hex
-        now = utcnow()
+        now = clock.now()
         manifest = {
             "journal_format": JOURNAL_FORMAT,
             "resume_id": resume_id,
@@ -406,7 +406,7 @@ class Journals:
                     {"resume_id": resume_id},
                 ) from None
             expires = _parse_time(manifest.get("expires_at"))
-            if expires is not None and utcnow() > expires and (
+            if expires is not None and clock.now() > expires and (
                 self.writer_state(manifest)["state"] not in LIVE_STATES
             ):
                 raise ApiError(
@@ -530,7 +530,7 @@ class Journals:
         }
 
     def _remove(self, resume_id: str, why: str, because: str) -> bool:
-        when = utcnow().isoformat()
+        when = clock.now().isoformat()
         directory = self._root / resume_id
         write_atomically(
             self._root / GONE / f"{resume_id}.json",
@@ -557,7 +557,7 @@ class Journals:
 
 
     def reap(self, now: datetime | None = None) -> list[str]:
-        moment = now if now is not None else utcnow()
+        moment = now if now is not None else clock.now()
         taken: list[str] = []
         if not self._rooted or not self._root.is_dir():
             return taken

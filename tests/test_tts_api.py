@@ -15,7 +15,8 @@ from crucible import accelerator, jobenv, residency as residency_module, tasks, 
 from crucible.accelerator import ComputeApp
 from crucible.memorybudget import GIB
 from crucible.jobs import ALL_JOB_TYPES
-from crucible.residency import KIND_LLM, KIND_TTS, ResidentVoice
+from crucible.cardkinds import KIND_LLM, KIND_TTS
+from crucible.residency import ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
 from crucible.voicerepo import REPO_MANIFEST_NAME
 from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING

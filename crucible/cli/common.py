@@ -15,6 +15,7 @@ from ..backend import (
     backend_not_here,
     detect_backend,
 )
+from ..client.connection import Connection
 from ..config import Config, load_config
 from ..errors import ConfigError, CrucibleError, NoViableBackend
 from ..protocol import USER_AGENT_HEADER, user_agent
@@ -122,8 +123,6 @@ def loopback_url(config: Config) -> str:
 
 
 def server_here(config: Config, backend: Backend):
-    from ..apiclient import Connection
-
     url = loopback_url(config)
     request = urllib.request.Request(
         url + "/v1/info",

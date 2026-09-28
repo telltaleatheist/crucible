@@ -7,7 +7,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible.engines import ENGINES
+from crucible.engines import ENGINES, start_engine
 from crucible.inflight import InFlight
 
 from .fake_engine import FakeEngine
@@ -189,7 +189,6 @@ def test_the_count_survives_many_open_close_cycles() -> None:
 
 
 def test_a_load_that_fails_any_way_at_all_takes_its_engine_down() -> None:
-
     class _Recording:
 
         def __init__(self) -> None:
@@ -205,8 +204,6 @@ def test_a_load_that_fails_any_way_at_all_takes_its_engine_down() -> None:
             self.stopped = True
 
     from crucible.errors import JobCancelled
-    from crucible.residency import Residency
-
     for boom in (
         JobCancelled("narrator was cancelled mid-request"),
         KeyError("loaded"),
@@ -219,7 +216,7 @@ def test_a_load_that_fails_any_way_at_all_takes_its_engine_down() -> None:
             raise _boom
 
         with pytest.raises(type(boom)):
-            Residency._start(
+            start_engine(
                 engine,
                 Path("weights"),
                 "served",
@@ -236,7 +233,6 @@ def test_a_load_that_fails_any_way_at_all_takes_its_engine_down() -> None:
 
 
 def test_the_original_failure_is_what_the_caller_is_told() -> None:
-
     class _Fine:
         def start(self, *_a: Any, **_k: Any) -> None:
             return None
@@ -247,13 +243,11 @@ def test_the_original_failure_is_what_the_caller_is_told() -> None:
         def stop(self) -> None:
             return None
 
-    from crucible.residency import Residency
-
     def confirm() -> None:
         raise ValueError("the sample rate disagreed")
 
     with pytest.raises(ValueError, match="the sample rate disagreed"):
-        Residency._start(
+        start_engine(
             _Fine(),
             Path("weights"),
             "served",

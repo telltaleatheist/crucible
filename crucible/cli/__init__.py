@@ -20,41 +20,7 @@ from . import (
     voices,
     weights,
 )
-from .capability import _capability_step, write_capability as _write_capability
-from .common import EXIT_REFUSED, _backend_mismatch
-from .init import carried_from
-from .install import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT, _smoke_import
-from .serve import cmd_serve
-from .token import (
-    PAIRING_NOT_PRINTED,
-    _pairing_lines,
-    _sync_pairing_file,
-    _write_pairing_file,
-)
-from .uninstall_cmd import cmd_uninstall
-from .weights import cmd_remove
-
-__all__ = [
-    "EXIT_REFUSED",
-    "INSTALLABLE_JOB_TYPES",
-    "INSTALLER_FOR",
-    "PAIRING_NOT_PRINTED",
-    "SMOKE_IMPORT",
-    "_backend_mismatch",
-    "_capability_step",
-    "_pairing_lines",
-    "_smoke_import",
-    "_sync_pairing_file",
-    "_write_capability",
-    "_write_pairing_file",
-    "build_parser",
-    "carried_from",
-    "cmd_remove",
-    "cmd_serve",
-    "cmd_uninstall",
-    "common",
-    "main",
-]
+__all__ = ["build_parser", "main"]
 
 
 def _run_tray_verb(verb: str) -> None:

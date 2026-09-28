@@ -16,6 +16,8 @@ from crucible import (
     upstreams,
     verdict,
 )
+from crucible import upstreams
+from crucible.cardfacts import card_for
 from crucible.config import config_path, crucible_home, load_config
 
 from .conftest import FAKE_BACKEND, configure_box
@@ -39,7 +41,7 @@ def decided(total: int = 26 * 1024 ** 3, allowance: int = 3 * 1024 ** 3) -> Any:
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
             chosen={},
-            card=ladder.card_for(home, FAKE_BACKEND.gpu),
+            card=card_for(home, FAKE_BACKEND.gpu),
         ),
         routes={},
     )
@@ -401,7 +403,7 @@ def test_routing_back_to_local_restores_the_row_exactly(
 def test_the_operators_routes_survive_a_capability_rewrite(
     settings_client, auth, home: Path
 ) -> None:
-    from crucible.cli import _write_capability
+    from crucible.capabilitystore import write_capability
 
     from .conftest import FAKE_BACKEND
 
@@ -421,7 +423,7 @@ def test_the_operators_routes_survive_a_capability_rewrite(
         gpu_vendor=FAKE_BACKEND.gpu.vendor,
         chosen={},
     )
-    _write_capability(config, FAKE_BACKEND, decisions, {"enable_tts": True})
+    write_capability(config, FAKE_BACKEND, decisions, {"enable_tts": True})
     after = load_config(home)
     assert after.route_model("translate") == "anthropic/claude-sonnet-5"
     assert after.upstream("anthropic").key == ANTHROPIC_KEY

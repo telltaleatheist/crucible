@@ -20,6 +20,7 @@ from crucible.backend import Backend, Gpu
 from crucible.config import DEFAULT_OPEN_PAIRING, load_config, mint_token, write_config
 from crucible.narratorengines import declared_tts_footprints
 from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.manifests import load_manifest
 
 from .fake_engine import FakeEngine
@@ -249,9 +250,9 @@ def engine_factory(
             built.append(engine)
             return engine
 
-        monkeypatch.setattr(residency_module, "build_engine", build)
+        monkeypatch.setattr(engines_module, "build_engine", build)
         monkeypatch.setattr(
-            residency_module,
+            engines_module,
             "engine_model_name",
             lambda engine_name, model_dir, model_id: model_id,
         )

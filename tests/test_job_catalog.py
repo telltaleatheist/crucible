@@ -60,7 +60,7 @@ def test_the_job_type_names_and_families_are_the_ones_clients_send() -> None:
 
 
 def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
-    effect = leases.CardEffect
+    effect = jobtypes.CardEffect
     assert leases.CARD_EFFECTS == {
         "load-model": effect(makes_resident=KIND_LLM),
         "load-voice": effect(makes_resident=KIND_TTS),
@@ -76,7 +76,6 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
         "rvc": effect(),
         "align-longform": effect(),
     }
-    assert leases.CardEffect is jobtypes.CardEffect
 
 
 def test_the_settlement_leaves_resident_only_what_a_load_put_there() -> None:

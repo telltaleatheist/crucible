@@ -16,7 +16,7 @@ from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
 from ..leaseonload import LeaseOnLoad, open_lease_for_load
 from ..template import as_job_error, card_guard, parse_params, require_model, run_model
-from ..unload import UnloadJobType, UnloadParams
+from ..unload import UnloadJobType
 from .common import (
     describe_voices,
     known_voice,
@@ -38,9 +38,6 @@ __all__ = [
     "UnloadVoiceJobType",
     "voice_rows",
 ]
-
-UnloadVoiceParams = UnloadParams
-
 
 class ReferenceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")

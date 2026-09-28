@@ -8,7 +8,8 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import tasks
+from crucible.platform.paths import HOST_DOOR_ENV
+from crucible.tasks import hostdoor
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, TOKEN
 
@@ -90,7 +91,7 @@ def windows_client(
     from dataclasses import replace
 
     windows = replace(FAKE_BACKEND, kind="llama-windows", platform="windows")
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, door_url)
+    monkeypatch.setenv(HOST_DOOR_ENV, door_url)
     return make_client(backend=windows)
 
 
@@ -122,7 +123,7 @@ def events(client: TestClient, auth: dict[str, str], task_id: str) -> list[dict[
 def test_off_win32_it_is_engine_move_not_here(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, "http://127.0.0.1:7101")
+    monkeypatch.setenv(HOST_DOOR_ENV, "http://127.0.0.1:7101")
     response = client.post(
         "/v1/tasks", headers=auth, json={"type": "engine", "target": "wsl"}
     )
@@ -137,7 +138,7 @@ def test_the_mac_gets_the_same_refusal(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(tasks.HOST_DOOR_ENV, "http://127.0.0.1:7101")
+    monkeypatch.setenv(HOST_DOOR_ENV, "http://127.0.0.1:7101")
     with make_client(backend=FAKE_MAC_BACKEND) as mac:
         response = mac.post(
             "/v1/tasks", headers=auth, json={"type": "engine", "target": "wsl"}
@@ -152,7 +153,7 @@ def test_a_server_no_host_started_is_engine_move_needs_host(
 ) -> None:
     from dataclasses import replace
 
-    monkeypatch.delenv(tasks.HOST_DOOR_ENV, raising=False)
+    monkeypatch.delenv(HOST_DOOR_ENV, raising=False)
     windows = replace(FAKE_BACKEND, kind="llama-windows", platform="windows")
     with make_client(backend=windows) as server:
         response = server.post(
@@ -183,7 +184,7 @@ def test_the_reverse_move_is_refused_by_name_rather_than_half_done(
 def test_the_request_is_checked_before_the_machine(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv(tasks.HOST_DOOR_ENV, raising=False)
+    monkeypatch.delenv(HOST_DOOR_ENV, raising=False)
     response = client.post(
         "/v1/tasks", headers=auth, json={"type": "engine", "target": "amiga"}
     )
@@ -367,12 +368,12 @@ def test_the_env_var_the_host_sets_is_the_one_the_server_reads() -> None:
     from crucible.platform.paths import door_url
 
     environment = server_environment({})
-    assert tasks.HOST_DOOR_ENV in environment
-    assert environment[tasks.HOST_DOOR_ENV] == door_url("")
-    assert environment[tasks.HOST_DOOR_ENV] == "http://127.0.0.1:7101"
+    assert HOST_DOOR_ENV in environment
+    assert environment[HOST_DOOR_ENV] == door_url("")
+    assert environment[HOST_DOOR_ENV] == "http://127.0.0.1:7101"
     from crucible.host.controller_door import INSTALL_PATH
 
-    assert tasks.HOST_DOOR_PATH == INSTALL_PATH
+    assert hostdoor.HOST_DOOR_PATH == INSTALL_PATH
 
 
 def test_the_token_is_NOT_in_the_child_s_environment() -> None:

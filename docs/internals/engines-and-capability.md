@@ -382,7 +382,7 @@ started exactly as `load-model` would).
   `jobs.tts.common.occupy_voice`, `jobs.align.occupy_aligner`,
   `jobs.denoise.occupy_separator`. An occupant whose kind or id is not the one
   asked for is stopped and refused.
-- `engines.start_engine` (still `Residency._start`) tears down a half-started
+- `engines.start_engine` tears down a half-started
   engine on **any** `BaseException`. An orphan there sits in no slot, so the
   guard would call it foreign.
 - A voice load is not finished at `ready`. narrator's `load`/`loaded` exchange
@@ -397,6 +397,9 @@ started exactly as `load-model` would).
   `served_name(weights_dir, model_id)`. The defaults are the manifest's args
   plus the plan's flags, and the model id. `engines.engine_load_args` and
   `engine_model_name` look the class up by `spec.engine`.
+- `jobs.llm` and `jobs.tts.common` call `engines.build_engine`, `engines.engine_model_name`
+  and `engines.build_voice_engine` through the module, so a test's fake engine patches
+  `crucible.engines`.
 - Argv order: the manifest's args, then `card_args`, then the KV plan's flags.
   argparse uses the last spelling, so later flags override. `VllmEngine`
   adds `--max-model-len` and the decide flags (mlx-lm has no such flag, and

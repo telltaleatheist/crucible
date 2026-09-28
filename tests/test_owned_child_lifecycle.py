@@ -49,7 +49,7 @@ cli.common.detect_backend = lambda: SimpleNamespace(kind='fixture', gpu=SimpleNa
 cli.token._sync_pairing_file = lambda config: None
 import crucible.api
 crucible.api.create_app = lambda config, backend: app
-raise SystemExit(cli.cmd_serve(SimpleNamespace(host=None, port=None, log_level='error', controller_stdin=True)))
+raise SystemExit(cli.serve.cmd_serve(SimpleNamespace(host=None, port=None, log_level='error', controller_stdin=True)))
 """.replace("REPO_PATH", repr(str(Path(__file__).resolve().parents[1]))), encoding="utf-8")
     return script
 

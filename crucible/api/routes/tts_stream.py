@@ -7,7 +7,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from ...jobs.tts.common import known_voice
-from ...ttsstream import require_sayable, require_streamable
+from ...ttsstream.validate import require_sayable, require_streamable
 from .. import sse
 from ..caller import client_agent
 from ..context import AppContext, Routers

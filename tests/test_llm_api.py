@@ -17,6 +17,7 @@ from crucible.accelerator import ComputeApp
 from crucible.memorybudget import GIB
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible import residency as residency_module
+from crucible import engines as engines_module
 from crucible.engines import ENGINES
 from crucible.engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
 from crucible.manifests import load_manifest
@@ -129,9 +130,9 @@ def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: model_id,
     )
@@ -1148,9 +1149,9 @@ def test_health_says_warming_while_a_load_is_in_flight(
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: model_id,
     )
@@ -1206,9 +1207,9 @@ def test_an_engine_that_never_becomes_ready_fails_the_job(
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: model_id,
     )
@@ -1408,9 +1409,9 @@ def engines_under_a_path_name(
         built.append(engine)
         return engine
 
-    monkeypatch.setattr(residency_module, "build_engine", build)
+    monkeypatch.setattr(engines_module, "build_engine", build)
     monkeypatch.setattr(
-        residency_module,
+        engines_module,
         "engine_model_name",
         lambda engine_name, model_dir, model_id: str(Path(model_dir).resolve()),
     )

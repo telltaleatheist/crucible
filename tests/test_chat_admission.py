@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from crucible.api import _chat_limit_of, _chat_queue_full
-from crucible.engines import ENGINES, EngineError, chat_admission
+from crucible.api.proxy import chat_limit_of, chat_queue_full
+from crucible.engines import ENGINES, EngineError, chat_admission, engine_load_args
 from crucible.inflight import RECENT_DURATIONS, InFlight
 
 
@@ -22,11 +22,10 @@ class _FakeResident:
 
 def _mlx_args(model_id: str = "qwen3.5-9b") -> tuple[str, ...]:
     from crucible.manifests import load_manifest
-    from crucible.residency import Residency
 
     manifest = load_manifest(model_id)
     return tuple(
-        Residency._engine_args(
+        engine_load_args(
             manifest, manifest.backends["mlx-darwin"], Path("/w"), None,
             context=manifest.context_for("mlx-darwin"),
         )
@@ -99,10 +98,9 @@ def test_an_engine_that_states_no_concurrency_is_not_bounded() -> None:
 
 def test_vllm_admits_its_max_num_seqs_plus_one() -> None:
     from crucible.manifests import load_manifest
-    from crucible.residency import Residency
 
     manifest = load_manifest("qwen3.5-9b")
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, manifest.backends["cuda-linux"], Path("/w"), None,
         context=manifest.context_for("cuda-linux"),
     )
@@ -168,8 +166,8 @@ def test_a_basis_with_no_concurrency_is_refused(
 
 
 def test_an_empty_card_reports_no_limit_rather_than_an_unlimited_one() -> None:
-    assert _chat_limit_of(_FakeResidency(None)) == (None, None)
-    limit, basis = _chat_limit_of(
+    assert chat_limit_of(_FakeResidency(None)) == (None, None)
+    limit, basis = chat_limit_of(
         _FakeResidency(_FakeResident("q", "mlx-lm", _mlx_args()))
     )
     assert limit == 17
@@ -241,7 +239,7 @@ def _body(response: Any) -> dict[str, Any]:
 
 
 def test_the_refusal_is_503_named_and_says_nothing_was_sent() -> None:
-    response = _chat_queue_full(
+    response = chat_queue_full(
         resident=_FakeResident("qwen3.5-9b", "mlx-lm"),
         limit=2,
         basis="one generation thread",
@@ -256,7 +254,7 @@ def test_the_refusal_is_503_named_and_says_nothing_was_sent() -> None:
 
 
 def test_the_refusal_carries_retry_after_as_a_header() -> None:
-    response = _chat_queue_full(
+    response = chat_queue_full(
         resident=_FakeResident("qwen3.5-9b", "mlx-lm"),
         limit=2,
         basis="one generation thread",
@@ -266,7 +264,7 @@ def test_the_refusal_carries_retry_after_as_a_header() -> None:
 
 
 def test_an_unmeasured_wait_omits_the_header_rather_than_guessing_one() -> None:
-    response = _chat_queue_full(
+    response = chat_queue_full(
         resident=_FakeResident("qwen3.5-9b", "mlx-lm"),
         limit=2,
         basis="one generation thread",
@@ -315,10 +313,9 @@ def test_each_engine_states_whether_it_serves_a_decision() -> None:
 def test_vllm_is_started_with_the_cap_the_reader_clamps_to() -> None:
     from crucible.engines.vllm import DECIDE_ARGS
     from crucible.manifests import load_manifest
-    from crucible.residency import Residency
 
     manifest = load_manifest("qwen3.5-9b")
-    args = Residency._engine_args(
+    args = engine_load_args(
         manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None,
         context=manifest.context_for("cuda-linux"),
     )
