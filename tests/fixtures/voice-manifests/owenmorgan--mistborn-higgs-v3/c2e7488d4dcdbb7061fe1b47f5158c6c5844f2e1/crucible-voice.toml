@@ -16,12 +16,12 @@ sample_rate     = 24000
 
 [voice.pace]
 basis              = "measured"
-pace_chars_per_sec = 13.56
-max_chars_per_sec  = 17.63
-min_chars_per_sec  = 10.43
-measured_from      = "mb_v16 ckpt-3375 length ladder: median of 99 clean in-band (300-800) renders, 2026-09-26"
-safe_min_chars     = 300
-safe_max_chars     = 800
+pace_chars_per_sec = 13.25
+max_chars_per_sec  = 17.23
+min_chars_per_sec  = 10.19
+measured_from      = "mb_v17 ckpt-3213 length ladder (direct SGLang): median of 40 clean in-band (500-700) renders, p05 12.18 / p95 15.5; band 500-700 at 2.1% in band, 2026-09-28"
+safe_min_chars     = 500
+safe_max_chars     = 700
 
 [voice.arms.cuda-linux]
 max_chars       = 800
