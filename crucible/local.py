@@ -13,21 +13,12 @@ from urllib.parse import quote
 
 from . import VERSION, controller_client, processlock, traylife
 from .config import crucible_home, load_config, own_engine_backend
-from .controller_client import (
-    CONTROLLER_URL,
-    ENGINE_URL,
-    QUIT_SECONDS,
-    LocalError,
-    controller_start_failed,
-    request,
-    token_mismatch,
-    wrong_controller,
-)
+from .controller_client import LocalError, request
 from .errors import ConfigError, CrucibleError
 from .pairing import parse_pairing_line
-from .platform.installation import RECORD, installed_control, publish_installation, release_order
-from .platform.installation import RELEASE_PATTERN as _RELEASE
+from .platform.installation import installed_control, publish_installation
 from .platform.paths import LOG_NAME
+from .platform.quarantine import quarantine
 from .protocol import API_VERSION, DOOR_PORT
 
 TRAY_VERBS = ("tray", "install-desktop", "remove-desktop")
@@ -45,8 +36,12 @@ def connection(home: Path) -> tuple[str, str, str]:
         try:
             pair = parse_pairing_line(path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError) as exc:
-            raise LocalError(f"local_pairing_invalid: {path}: {exc}") from exc
-        return ENGINE_URL, pair.name, pair.token
+            raise LocalError(
+                f"local_pairing_invalid: {path} could not be read as a pairing line ({exc}). "
+                "Run `crucible local shutdown`, then `crucible local start`: the shutdown "
+                f"sets {path} aside and the controller writes it again when it starts"
+            ) from exc
+        return controller_client.ENGINE_URL, pair.name, pair.token
     config = load_config(home)
     host = config.host
     if host == "0.0.0.0":
@@ -60,7 +55,7 @@ def connection(home: Path) -> tuple[str, str, str]:
 
 def _stopped_on_purpose(token: str) -> dict:
     try:
-        observed = request(CONTROLLER_URL + "/local/status", token=token)
+        observed = request(controller_client.CONTROLLER_URL + "/local/status", token=token)
     except (OSError, ValueError, LocalError):
         return {}
     if observed.get("state") == "stopped" and observed.get("intentional") is True:
@@ -160,7 +155,7 @@ def _wait_for_pairing(home: Path, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while not (home / "pairing").exists():
         if time.monotonic() >= deadline:
-            raise controller_start_failed(home, timeout)
+            raise controller_client.controller_start_failed(home, timeout)
         time.sleep(controller_client.POLL_SECONDS)
 
 
@@ -230,7 +225,7 @@ def _reconciled_sharing(home: Path) -> dict:
 def _still_settling(action: str, home: Path, observed: dict, deadline: float) -> None:
     if observed["state"] == "unauthorized" and sys.platform == "win32":
         if time.monotonic() >= deadline:
-            raise token_mismatch(home)
+            raise controller_client.token_mismatch(home)
         return
     if observed["state"] in ("wrong_service", "unauthorized", "broken"):
         raise LocalError(f"{observed['state']}: {observed['detail']}")
@@ -268,10 +263,6 @@ def run_engine_verb(action: str, home: Path | None = None, *, timeout: float = 6
     return _settle(action, home, timeout)
 
 
-def act(action: str, home: Path | None = None, *, timeout: float = 60) -> dict:
-    return run_engine_verb(action, home, timeout=timeout)
-
-
 def _shutdown_service(home: Path) -> None:
     from . import service
 
@@ -282,7 +273,23 @@ def _shutdown_service(home: Path) -> None:
     observed = service.status(service.mechanism_for(config.backend_kind),
                               service.user_home(), runner=service.subprocess_runner)
     if observed.installed:
-        act("stop")
+        run_engine_verb("stop")
+
+
+def _controller_bearer(home: Path) -> str:
+    try:
+        return connection(home)[2]
+    except LocalError:
+        token = controller_client.bearer(home)
+        if token is None:
+            raise
+        return token
+
+
+def _set_aside_a_broken_pairing(home: Path) -> None:
+    pairing = home / "pairing"
+    if pairing.exists() and controller_client.pairing_token(home) is None:
+        quarantine(pairing)
 
 
 def shutdown() -> None:
@@ -294,11 +301,12 @@ def shutdown() -> None:
     controller_client.shutdown_controller(
         home,
         send=lambda url, **options: request(url, **options),
-        engine_token=lambda: connection(home)[2],
+        engine_token=lambda: _controller_bearer(home),
         call=lambda path, token: door_call(path, home, token),
-        stop_engine=lambda: act("stop"),
+        stop_engine=lambda: run_engine_verb("stop"),
         alive=lambda pid: processlock.alive(pid),
     )
+    _set_aside_a_broken_pairing(home)
 
 
 def refusal_text(exc: BaseException) -> str:
@@ -315,9 +323,6 @@ def refusal_text(exc: BaseException) -> str:
     if not isinstance(code, str) or not isinstance(message, str):
         return str(exc)
     return f"{exc} - {code}: {message}"
-
-
-said = refusal_text
 
 
 def _no_tray_verbs(verb: str) -> None:
@@ -345,7 +350,7 @@ def _answer(action: str, tray_verbs: Callable[[str], None]) -> dict | None:
     if action in TRAY_VERBS:
         tray_verbs(action)
         return None
-    return status() if action == "status" else act(action)
+    return status() if action == "status" else run_engine_verb(action)
 
 
 def command(args: argparse.Namespace, tray_verbs: Callable[[str], None] = _no_tray_verbs) -> int:
@@ -368,11 +373,3 @@ def add_parser(subparsers, tray_verbs: Callable[[str], None] | None = None) -> N
         parser.set_defaults(func=command)
     else:
         parser.set_defaults(func=lambda args: command(args, tray_verbs))
-
-
-__all__ = [
-    "CONTROLLER_URL", "ENGINE_URL", "LocalError", "QUIT_SECONDS", "RECORD", "_RELEASE",
-    "act", "command", "connection", "door_call", "publish_installation", "release_order",
-    "refusal_text", "run_engine_verb", "said", "shutdown", "status", "token_mismatch",
-    "wrong_controller",
-]

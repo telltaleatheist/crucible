@@ -364,13 +364,13 @@ def test_it_is_one_task_at_a_time_like_every_other(
 
 def test_the_env_var_the_host_sets_is_the_one_the_server_reads() -> None:
     from crucible.host.app import server_environment
-    from crucible.host.paths import door_url
+    from crucible.platform.paths import door_url
 
     environment = server_environment({})
     assert tasks.HOST_DOOR_ENV in environment
     assert environment[tasks.HOST_DOOR_ENV] == door_url("")
     assert environment[tasks.HOST_DOOR_ENV] == "http://127.0.0.1:7101"
-    from crucible.host.door import INSTALL_PATH
+    from crucible.host.controller_door import INSTALL_PATH
 
     assert tasks.HOST_DOOR_PATH == INSTALL_PATH
 

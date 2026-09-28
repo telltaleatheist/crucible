@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from crucible.host.runner import ControlledChild, ProcessRunner
+from crucible.platform.runner import ControlledChild, ProcessRunner
 
 
 def wait_file(path: Path, process: subprocess.Popen, timeout: float = 10) -> None:
@@ -133,10 +133,10 @@ def test_owned_pipe_is_opt_in_and_argv_runs_python_directly(monkeypatch):
 
 
 def test_control_port_bind_failure_cleans_owned_child_and_fails(tmp_path, monkeypatch):
-    from crucible.host import app
-    from crucible.host.errors import HostError
-    from crucible.host.menu import Distro, Engine, Owner
+    from crucible.host import app, pairing_sync
     from crucible.host.presence import Presence
+    from crucible.host.state import Distro, Engine, Owner
+    from crucible.platform.errors import HostError
     events = []
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path))
     monkeypatch.setattr(app, "log_path", lambda env: tmp_path / "host.log")
@@ -147,10 +147,10 @@ def test_control_port_bind_failure_cleans_owned_child_and_fails(tmp_path, monkey
     watcher = SimpleNamespace(release=lambda: events.append("release"), stop_child=lambda: events.append("child stopped"))
     monkeypatch.setattr(app, "PresenceWatcher", lambda *args, **kwargs: watcher)
     def start(host):
-        host._c.presence = Presence(Distro.ABSENT, Engine.RUNNING, "fixture", Owner.HOST_CHILD)
+        host.context.presence = Presence(Distro.ABSENT, Engine.RUNNING, "fixture", Owner.HOST_CHILD)
     monkeypatch.setattr(app.Host, "start", start)
     monkeypatch.setattr(app.Host, "claim", lambda self: False)
-    monkeypatch.setattr(app, "_write_pairing", lambda context: None)
+    monkeypatch.setattr(pairing_sync, "write_pairing", lambda context: None)
     def occupied(*args, **kwargs): raise OSError("port occupied")
     monkeypatch.setattr(app, "serve", occupied)
     with pytest.raises(HostError, match="host_door_unavailable"):
@@ -159,8 +159,8 @@ def test_control_port_bind_failure_cleans_owned_child_and_fails(tmp_path, monkey
 
 
 def test_stop_timeout_preserves_the_child_handle_for_retry(tmp_path):
-    from crucible.host.presence import PresenceWatcher
     from crucible.host.log import HostLog
+    from crucible.host.presence import PresenceWatcher
     class StubbornChild:
         pid = 123
         attempts = 0

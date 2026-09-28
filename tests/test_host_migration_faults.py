@@ -9,10 +9,10 @@ from urllib.error import HTTPError
 
 import pytest
 
-from crucible.host import app, installer, presence
+from crucible.host import app, cleanup_record, pairing_sync, presence
 from crucible.host.catalog import HttpCatalog, StoppedWindowsCatalog
-from crucible.host.errors import HostError
-from crucible.host.menu import Distro, Engine, Owner
+from crucible.platform.errors import HostError
+from crucible.host.state import Distro, Engine, Owner
 from tests.test_host import FakeCatalog, Scripted, _context, migration
 
 
@@ -71,7 +71,7 @@ def move_host(tmp_path, monkeypatch, base):
     monkeypatch.setattr(app, 'PresenceWatcher', lambda *args, **kwargs: guest)
     monkeypatch.setattr(app, 'engine_url', lambda path='': base + path)
     (tmp_path / 'pairing').write_text('original pairing', encoding='utf-8')
-    installer.record_cleanup(tmp_path, {('model', 'a')})
+    cleanup_record.record_cleanup(tmp_path, {('model', 'a')})
     host = app.Host(context)
     monkeypatch.setattr(host, 'claim', lambda: True)
     return host, old
@@ -83,10 +83,10 @@ def test_guest_http_auth_failure_cannot_publish_owner_or_enable_cleanup(tmp_path
         with pytest.raises(HTTPError) as caught:
             host.finish_wsl_move()
         assert caught.value.code == 401
-        assert host._c.watcher is old
-        assert host._c.presence.owner is Owner.HOST_CHILD
+        assert host.context.watcher is old
+        assert host.context.presence.owner is Owner.HOST_CHILD
         assert (tmp_path / 'pairing').read_text() == 'original pairing'
-        assert installer.cleanup_subjects(tmp_path) == {('model', 'a')}
+        assert cleanup_record.cleanup_subjects(tmp_path) == {('model', 'a')}
         with pytest.raises(HostError, match='Windows models are kept'):
             host.stopped_windows_catalog()
         assert not any(method == 'DELETE' for method, _, _ in calls)
@@ -97,9 +97,9 @@ def test_activation_failure_does_not_commit_wsl_ownership(tmp_path, monkeypatch,
     with guest_http() as (base, calls):
         host, old = move_host(tmp_path, monkeypatch, base)
         if fault == 'pairing':
-            monkeypatch.setattr(app, '_write_pairing', lambda context: None)
+            monkeypatch.setattr(pairing_sync, 'write_pairing', lambda context: None)
         else:
-            monkeypatch.setattr(app, '_write_pairing', lambda context: (tmp_path / 'pairing').write_text('crucible://guest@127.0.0.1:7100/#token'))
+            monkeypatch.setattr(pairing_sync, 'write_pairing', lambda context: (tmp_path / 'pairing').write_text('crucible://guest@127.0.0.1:7100/#token'))
         if fault == 'claim':
             monkeypatch.setattr(host, 'claim', lambda: False)
         if fault == 'hold':
@@ -108,9 +108,9 @@ def test_activation_failure_does_not_commit_wsl_ownership(tmp_path, monkeypatch,
             monkeypatch.setattr(host, '_hold', failed_hold)
         with pytest.raises((HostError, OSError)):
             host.finish_wsl_move()
-        assert host._c.watcher is old
-        assert host._c.presence.owner is Owner.HOST_CHILD
-        assert installer.cleanup_subjects(tmp_path) == {('model', 'a')}
+        assert host.context.watcher is old
+        assert host.context.presence.owner is Owner.HOST_CHILD
+        assert cleanup_record.cleanup_subjects(tmp_path) == {('model', 'a')}
         with pytest.raises(HostError, match='Windows models are kept'):
             host.stopped_windows_catalog()
         assert not any(method == 'DELETE' for method, _, _ in calls)
@@ -138,7 +138,7 @@ def test_native_stop_timeout_keeps_owned_child_and_prevents_switch(tmp_path, mon
     assert context.watcher.child is child
     assert context.presence.owner is Owner.HOST_CHILD
     assert windows._keys() == {('model', 'a'), ('model', 'b')}
-    assert installer.cleanup_subjects(tmp_path) == windows._keys()
+    assert cleanup_record.cleanup_subjects(tmp_path) == windows._keys()
 
 
 def test_restart_journal_retires_missing_stamp_via_owner_not_guest_http(tmp_path, monkeypatch):
@@ -154,13 +154,13 @@ def test_restart_journal_retires_missing_stamp_via_owner_not_guest_http(tmp_path
     row = SimpleNamespace(kind='model', id='a', name='a', installed=lambda: None,
                           remove=lambda: weights.remove(config, manifest, spec))
     monkeypatch.setattr(catalog, 'subjects', lambda *_: [row])
-    installer.record_cleanup(tmp_path, {('model', 'a')})
+    cleanup_record.record_cleanup(tmp_path, {('model', 'a')})
     with guest_http() as (base, calls):
-        stopped = StoppedWindowsCatalog(config, backend, installer.cleanup_subjects(tmp_path))
+        stopped = StoppedWindowsCatalog(config, backend, cleanup_record.cleanup_subjects(tmp_path))
         walk = migration(stopped, HttpCatalog(base, 'token', where='guest fixture'), [], tmp_path)
-        walk._migrate_weights(allow_pull=False)
+        walk.migrate_weights(allow_pull=False)
         assert not residue.exists()
-        restarted = StoppedWindowsCatalog(config, backend, installer.cleanup_subjects(tmp_path))
-        migration(restarted, HttpCatalog(base, 'token', where='guest fixture'), [], tmp_path)._migrate_weights(allow_pull=False)
+        restarted = StoppedWindowsCatalog(config, backend, cleanup_record.cleanup_subjects(tmp_path))
+        migration(restarted, HttpCatalog(base, 'token', where='guest fixture'), [], tmp_path).migrate_weights(allow_pull=False)
         assert all(method == 'GET' for method, _, _ in calls)
         assert all(auth == 'Bearer token' for _, _, auth in calls)

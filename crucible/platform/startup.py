@@ -96,8 +96,8 @@ def install(runner: Runner) -> StartupOutcome:
     result = runner.run(install_argv(runner.env), timeout_s=SHORTCUT_TIMEOUT_SECONDS)
     if not result.ok:
         raise HostError(
-            "host_no_localappdata" if "APPDATA" in result.said() else "host_no_pack",
-            f"the Startup item {lnk} could not be written: {result.said()}",
+            "host_no_localappdata" if "APPDATA" in result.output_tail() else "host_no_pack",
+            f"the Startup item {lnk} could not be written: {result.output_tail()}",
         )
     return StartupOutcome(
         path=str(lnk),
@@ -112,7 +112,7 @@ def remove(runner: Runner) -> StartupOutcome:
     if not result.ok:
         raise HostError(
             "host_no_pack",
-            f"the Startup item {lnk} could not be removed: {result.said()}",
+            f"the Startup item {lnk} could not be removed: {result.output_tail()}",
         )
     removed = "removed" in result.stdout
     return StartupOutcome(

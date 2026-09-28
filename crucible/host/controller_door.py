@@ -10,9 +10,9 @@ from typing import Any, Callable, Protocol
 
 from .. import API_VERSION
 from ..peer import ROLE_ORCHESTRATOR
+from ..platform.errors import HostError
 from ..platform.paths import DOOR_HOST, DOOR_PORT
 from ..protocol import HANDOVER_HEADER
-from .errors import HostError
 from .installer import ENGINE_TARGET_WSL, Event
 from .log import HostLog
 

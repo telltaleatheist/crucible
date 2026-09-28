@@ -27,8 +27,6 @@ class RunResult:
                 return candidate if len(candidate) <= 400 else "..." + candidate[-400:]
         return f"exit {self.code}"
 
-    said = output_tail
-
 
 class Runner(Protocol):
     @property

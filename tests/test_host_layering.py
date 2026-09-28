@@ -11,12 +11,13 @@ from crucible import controller_client, protocol, wsl
 from crucible.host import installwatch, outcome, retry
 from crucible.host.state import EngineDecision, MoveState
 from crucible.platform import powershell, runner
+from tests.test_long_functions_split import _functions, _too_long_or_deep
 
 ROOT = Path(__file__).resolve().parents[1]
 
 GENERATED_TABLE = ROOT / "crucible" / "platform" / "wsl_table.py"
 
-HOST_MODULES_THE_NEUTRAL_ONES_MAY_LOAD = {"crucible.host", "crucible.host.errors", "crucible.host.wsl_states", "crucible.platform.wsl_table"}
+HOST_MODULES_THE_NEUTRAL_ONES_MAY_LOAD: set[str] = set()
 
 
 def _crucible_sources(*skip: Path) -> list[Path]:
@@ -54,7 +55,7 @@ def test_the_package_reexports_the_protocol_constants() -> None:
 
     assert crucible.API_HEADER is protocol.API_HEADER
     assert crucible.API_VERSION == protocol.API_VERSION
-    assert crucible.CLIENT_NAME_HEADER is protocol.CLIENT_HEADER
+    assert not hasattr(crucible, "CLIENT_NAME_HEADER")
     assert inflight.ACT_HEADER is protocol.ACT_HEADER
     assert protocol.user_agent("cli", crucible.VERSION) == f"crucible-cli/{crucible.VERSION}"
 
@@ -151,5 +152,18 @@ def test_a_stream_that_outlives_its_budget_is_asked_to_stop_and_never_killed() -
 def test_a_paired_engine_needs_no_label_to_be_built() -> None:
     from crucible import sharing
 
-    assert sharing.Engine is sharing.PairedEngine
+    assert not hasattr(sharing, "Engine")
     assert sharing.PairedEngine.__init__.__defaults__ == ("sharing",)
+
+
+HOST_AREA_FILES = sorted(
+    [path.relative_to(ROOT / "crucible").as_posix() for folder in ("host", "platform")
+     for path in (ROOT / "crucible" / folder).glob("*.py")]
+    + ["local.py", "desktop.py", "traylife.py", "controller_client.py", "wsl.py", "uninstall.py",
+       "lan.py", "sharing.py", "service.py", "processlock.py"]
+)
+
+
+@pytest.mark.parametrize("relative", HOST_AREA_FILES)
+def test_no_host_area_function_is_long_or_deep(relative: str) -> None:
+    assert _too_long_or_deep(relative, _functions(relative)) == []

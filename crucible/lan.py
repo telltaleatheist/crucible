@@ -12,7 +12,7 @@ from .atomicjson import write_json
 from .backend import LLAMA_WINDOWS
 from .config import crucible_home
 from .errors import CrucibleError
-from .platform import landoor
+from .platform import lan_door
 from .platform.paths import ENGINE_PORT
 from .platform.powershell import POWERSHELL, quote, runas_argv
 from .platform.runner import ProcessRunner, RunResult, Runner
@@ -26,7 +26,7 @@ FORWARD_TIMEOUT = 5.0
 
 Say = Callable[[str], None]
 
-AskPrivate = Callable[[Sequence[landoor.NetworkInterface]], bool]
+AskPrivate = Callable[[Sequence[lan_door.NetworkInterface]], bool]
 
 PROMPT_WAITING = (
     "Windows is asking for administrator permission in a prompt on THIS PC's "
@@ -128,15 +128,15 @@ def _refuse_a_native_engine(engine: PairedEngine, port: int) -> None:
     )
 
 
-def _network(runner: Runner) -> landoor.NetworkFacts:
+def _network(runner: Runner) -> lan_door.NetworkFacts:
     try:
-        return landoor.read_network(runner)
+        return lan_door.read_network(runner)
     except (ValueError, KeyError, TypeError) as exc:
         raise LanError(f"lan_addresses_unreadable: {exc}") from exc
 
 
-def _candidates(facts: landoor.NetworkFacts) -> list[landoor.NetworkInterface]:
-    found = landoor.offered(facts)
+def _candidates(facts: lan_door.NetworkFacts) -> list[lan_door.NetworkInterface]:
+    found = lan_door.offered(facts)
     if not found:
         raise LanError(
             "lan_no_addresses: this PC is not connected to any network another "
@@ -146,10 +146,10 @@ def _candidates(facts: landoor.NetworkFacts) -> list[landoor.NetworkInterface]:
     return found
 
 
-def _networks(facts: landoor.NetworkFacts) -> list[dict[str, Any]]:
+def _networks(facts: lan_door.NetworkFacts) -> list[dict[str, Any]]:
     rows = []
-    for interface in landoor.offered(facts):
-        admitted, why = landoor.admits(interface, facts)
+    for interface in lan_door.offered(facts):
+        admitted, why = lan_door.admits(interface, facts)
         rows.append({
             "address": interface.address,
             "interface": interface.alias,
@@ -249,7 +249,7 @@ def _not_applied(result: RunResult | None, runner: Runner, detail: str) -> LanEr
     )
 
 
-def _ask_on_terminal(public: Sequence[landoor.NetworkInterface]) -> bool:
+def _ask_on_terminal(public: Sequence[lan_door.NetworkInterface]) -> bool:
     names = ", ".join(interface.label for interface in public)
     plural = len(public) > 1
     print(
@@ -267,7 +267,7 @@ def _ask_on_terminal(public: Sequence[landoor.NetworkInterface]) -> bool:
 
 
 def _door_to_enable(home: Path, runner: Runner, engine: PairedEngine, port: int,
-                    adopt: bool) -> landoor.LanDoor:
+                    adopt: bool) -> lan_door.LanDoor:
     if type(port) is not int or not 1 <= port <= 65535:
         raise LanError("lan_bad_port: expected a port from 1 to 65535")
     _require_windows(runner)
@@ -279,8 +279,8 @@ def _door_to_enable(home: Path, runner: Runner, engine: PairedEngine, port: int,
         )
     engine.verify()
     _refuse_a_native_engine(engine, port)
-    door = landoor.detect(runner, port)
-    if door.mechanism == landoor.MIRRORED:
+    door = lan_door.detect(runner, port)
+    if door.mechanism == lan_door.MIRRORED:
         raise LanError(
             "lan_mirrored: this machine's .wslconfig asks for mirrored "
             "networking, where the guest is already on this host's interfaces "
@@ -294,22 +294,22 @@ def _door_to_enable(home: Path, runner: Runner, engine: PairedEngine, port: int,
     return door
 
 
-def _networks_to_mark(candidates: list[landoor.NetworkInterface],
-                      facts: landoor.NetworkFacts,
-                      ask_private: AskPrivate | None) -> list[landoor.NetworkInterface]:
+def _networks_to_mark(candidates: list[lan_door.NetworkInterface],
+                      facts: lan_door.NetworkFacts,
+                      ask_private: AskPrivate | None) -> list[lan_door.NetworkInterface]:
     shut = [
         interface for interface in candidates
-        if interface.profile == "Public" and not landoor.admits(interface, facts)[0]
+        if interface.profile == "Public" and not lan_door.admits(interface, facts)[0]
     ]
     return list(shut) if shut and ask_private is not None and ask_private(shut) else []
 
 
-def _pending_record(port: int, candidates: list[landoor.NetworkInterface],
-                    to_mark: list[landoor.NetworkInterface]) -> dict[str, Any]:
+def _pending_record(port: int, candidates: list[lan_door.NetworkInterface],
+                    to_mark: list[lan_door.NetworkInterface]) -> dict[str, Any]:
     record: dict[str, Any] = {
         "schema_version": 1,
         "port": port,
-        "rule": landoor.RULE_NAME,
+        "rule": lan_door.RULE_NAME,
         "authorities": [f"{interface.address}:{port}" for interface in candidates],
         "state": "pending",
     }
@@ -318,16 +318,16 @@ def _pending_record(port: int, candidates: list[landoor.NetworkInterface],
     return record
 
 
-def _missing_commands(door: landoor.LanDoor, port: int,
-                      to_mark: list[landoor.NetworkInterface]) -> list[list[str]]:
+def _missing_commands(door: lan_door.LanDoor, port: int,
+                      to_mark: list[lan_door.NetworkInterface]) -> list[list[str]]:
     return [
         command
         for present, command in (
-            (door.forward, landoor.add_argv(port)),
-            (door.firewall, landoor.firewall_add_argv(port)),
+            (door.forward, lan_door.add_argv(port)),
+            (door.firewall, lan_door.firewall_add_argv(port)),
         )
         if not present
-    ] + [landoor.make_private_argv(interface) for interface in to_mark]
+    ] + [lan_door.make_private_argv(interface) for interface in to_mark]
 
 
 def _publish_admitted(home: Path, runner: Runner, engine: PairedEngine,
@@ -352,7 +352,7 @@ def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGI
     _write(home, record)
     missing = _missing_commands(door, port, to_mark)
     result = _apply(runner, missing, elevated=facts.elevated, say=say) if missing else None
-    after = landoor.detect(runner, port)
+    after = lan_door.detect(runner, port)
     if not (after.forward and after.firewall):
         raise _not_applied(result, runner, after.detail)
     record["state"] = "open"
@@ -389,10 +389,10 @@ def disable(home: Path, runner: Runner, engine: PairedEngine, *,
     except LanError:
         elevated = False
     result = _apply(
-        runner, [landoor.remove_argv(port), landoor.firewall_remove_argv(port)],
+        runner, [lan_door.remove_argv(port), lan_door.firewall_remove_argv(port)],
         elevated=elevated, say=say,
     )
-    after = landoor.detect(runner, port)
+    after = lan_door.detect(runner, port)
     if after.forward or after.firewall:
         refused = _prompt_failed(result, runner)
         if refused is not None:
@@ -415,7 +415,7 @@ def status(home: Path, runner: Runner, engine: PairedEngine) -> dict[str, Any]:
     if record is None:
         return {"state": "disabled", "remote_reachability": "not_tested"}
     engine.verify()
-    door = landoor.detect(runner, record["port"])
+    door = lan_door.detect(runner, record["port"])
     published = engine.request("GET", "settings").get("lan_advertise")
     facts = _network(runner)
     networks = _networks(facts)
@@ -468,29 +468,34 @@ def _to_stderr(line: str) -> None:
     print(f"crucible: {line}", file=sys.stderr, flush=True)
 
 
+def _asker(args: argparse.Namespace) -> AskPrivate | None:
+    if args.make_private:
+        return lambda _public: True
+    if sys.stdin is not None and sys.stdin.isatty():
+        return _ask_on_terminal
+    return None
+
+
+def _answer(args: argparse.Namespace, home: Path, runner: Runner) -> dict[str, Any]:
+    engine = PairedEngine(home, "lan")
+    if args.lan_action == "enable":
+        return enable(home, runner, engine, port=args.port, adopt=args.adopt,
+                      ask_private=_asker(args), say=_to_stderr)
+    if args.lan_action == "reconcile":
+        return reconcile(home, runner)
+    if args.lan_action == "disable":
+        return disable(home, runner, engine, say=_to_stderr)
+    return status(home, runner, engine)
+
+
 def command(args: argparse.Namespace) -> int:
     home = crucible_home()
     runner = ProcessRunner(sys.platform, os.environ)
     try:
         if args.lan_action == "explain":
-            print(landoor.ELEVATION_SENTENCE)
+            print(lan_door.ELEVATION_SENTENCE)
             return 0
-        engine = PairedEngine(home, "lan")
-        if args.lan_action == "enable":
-            if args.make_private:
-                ask: AskPrivate | None = lambda _public: True
-            elif sys.stdin is not None and sys.stdin.isatty():
-                ask = _ask_on_terminal
-            else:
-                ask = None
-            result = enable(home, runner, engine, port=args.port, adopt=args.adopt,
-                            ask_private=ask, say=_to_stderr)
-        elif args.lan_action == "reconcile":
-            result = reconcile(home, runner)
-        elif args.lan_action == "disable":
-            result = disable(home, runner, engine, say=_to_stderr)
-        else:
-            result = status(home, runner, engine)
+        result = _answer(args, home, runner)
         print(json.dumps(result, indent=2))
         if result.get("next"):
             print(f"crucible: {result['next']}", file=sys.stderr)

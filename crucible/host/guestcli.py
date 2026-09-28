@@ -22,8 +22,8 @@ def managed_distro() -> str:
 
 
 def run(words: Sequence[str]) -> int:
+    from ..platform.errors import HostError
     from ..platform.runner import ProcessRunner
-    from .errors import HostError
 
     if sys.platform != "win32":
         print(

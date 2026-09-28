@@ -29,6 +29,11 @@ GUEST_READ_SECONDS = 60.0
 
 ORCHESTRATOR_ROLE = "orchestrator"
 
+UPGRADE_NEXT_STEP = (
+    "Restart Windows so the controller starts again from this release, then run "
+    "`crucible local shutdown` again"
+)
+
 Send = Callable[..., dict]
 
 
@@ -56,7 +61,11 @@ def request(url: str, *, token: str | None = None, method: str = "GET",
     with open_url(url, token=token, method=method, timeout=timeout, headers=headers) as response:
         value = json.load(response)
     if not isinstance(value, dict):
-        raise LocalError(f"local_protocol_invalid: {url} did not return an object")
+        raise LocalError(
+            f"local_protocol_invalid: {url} answered with something other than a JSON "
+            "object, so it is not a Crucible endpoint this build understands. Run "
+            "`crucible local status` to see what is answering there"
+        )
     return value
 
 
@@ -309,16 +318,18 @@ def _shutdown_contract(call: Callable[[str, str], tuple[dict, str]], token: str)
     info, token = call("/v1/info", token)
     server = info.get("server")
     if not isinstance(server, dict) or info.get("role") != ORCHESTRATOR_ROLE or server.get("api_version") != API_VERSION:
-        raise LocalError("controller_upgrade_unsupported: authenticated controller identity is incompatible")
+        raise LocalError("controller_upgrade_unsupported: authenticated controller identity "
+                         f"is incompatible. {UPGRADE_NEXT_STEP}")
     release = server.get("version")
     lifecycle = info.get("local_lifecycle_version")
     if type(lifecycle) is not int or lifecycle != 1:
         raise LocalError(f"controller_upgrade_unsupported: no supported shutdown contract "
-                         f"for {release!r} (lifecycle {lifecycle!r})")
+                         f"for {release!r} (lifecycle {lifecycle!r}). {UPGRADE_NEXT_STEP}")
     engine = info.get("engine")
     owner = engine.get("owner") if isinstance(engine, dict) else None
     if owner not in KNOWN_OWNERS:
-        raise LocalError("controller_upgrade_unsupported: the controller does not own the answering engine")
+        raise LocalError("controller_upgrade_unsupported: the controller does not own the "
+                         f"answering engine. {UPGRADE_NEXT_STEP}")
     return owner, token
 
 

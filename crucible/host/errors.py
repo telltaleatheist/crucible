@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from ..platform.errors import HostError
 from ..platform.paths import INSTALL_ONE_LINER
 
 HOST_ERROR_CODES: dict[str, str] = {
@@ -98,6 +97,3 @@ HOST_ERROR_CODES: dict[str, str] = {
         "means the generated table and the predicates have drifted."
     ),
 }
-
-
-__all__ = ["HOST_ERROR_CODES", "HostError"]

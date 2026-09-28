@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..atomicjson import write_json
-from .errors import HostError
+from ..platform.errors import HostError
 from .state import MoveState
 from ..platform.wsl_table import WSL_OUTCOME_NAME, WSL_STATES
 
@@ -35,10 +35,6 @@ TRANSIENT_CANNOT_CODES: frozenset[str] = frozenset({REBOOT_BUDGET_SPENT_CODE})
 RESTART_BANNER_CODES: frozenset[str] = REBOOT_CODES | TRANSIENT_CANNOT_CODES
 
 FIRMWARE_CANNOT_CODES: frozenset[str] = frozenset({"virtualization_disabled"})
-
-REBOOT_CODE = REBOOT_REQUIRED_CODE
-
-CANNOT_CODES = TRANSIENT_CANNOT_CODES
 
 
 def _utc_now() -> str:
@@ -80,7 +76,7 @@ def path(home: Path) -> Path:
 def classify(code: str) -> MoveState:
     if code in REBOOT_CODES:
         return REBOOT_PENDING
-    if code in CANNOT_CODES:
+    if code in TRANSIENT_CANNOT_CODES:
         return CANNOT
     for row in WSL_STATES:
         if row.code == code:
@@ -154,7 +150,7 @@ def read_or_quarantine(home: Path, log: Callable[[str], None]) -> Outcome | None
     try:
         return read(home)
     except HostError as exc:
-        from .quarantine import quarantine
+        from ..platform.quarantine import quarantine
 
         aside = quarantine(path(home))
         log(

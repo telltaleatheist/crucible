@@ -5,7 +5,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import CLIENT_NAME_HEADER
+from crucible.protocol import CLIENT_HEADER
 
 CHROME = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -41,7 +41,7 @@ def test_a_stated_name_is_what_the_job_records(
     job_id = _submit(
         client,
         auth,
-        **{CLIENT_NAME_HEADER: "bookforge-reader", "User-Agent": CHROME},
+        **{CLIENT_HEADER: "bookforge-reader", "User-Agent": CHROME},
     )
     assert _client_of(client, auth, job_id) == "bookforge-reader"
 
@@ -67,7 +67,7 @@ def test_an_invalid_name_falls_back_rather_than_refusing(
     client: TestClient, auth: dict[str, str], stated: str, why: str
 ) -> None:
     job_id = _submit(
-        client, auth, **{CLIENT_NAME_HEADER: stated, "User-Agent": "curl/8.5.0"}
+        client, auth, **{CLIENT_HEADER: stated, "User-Agent": "curl/8.5.0"}
     )
     assert _client_of(client, auth, job_id) == "curl/8.5.0", why
 
@@ -75,9 +75,9 @@ def test_an_invalid_name_falls_back_rather_than_refusing(
 def test_a_name_with_no_user_agent_to_fall_back_to_still_works(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    job_id = _submit(client, auth, **{CLIENT_NAME_HEADER: "bookforge-reader"})
+    job_id = _submit(client, auth, **{CLIENT_HEADER: "bookforge-reader"})
     assert _client_of(client, auth, job_id) == "bookforge-reader"
 
 
 def test_the_header_is_spelled_the_same_as_the_sdk_sends_it() -> None:
-    assert CLIENT_NAME_HEADER == "X-Crucible-Client"
+    assert CLIENT_HEADER == "X-Crucible-Client"

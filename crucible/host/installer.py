@@ -12,19 +12,17 @@ from typing import Callable, Sequence
 
 from .. import wsl
 from ..errors import CrucibleError
+from ..memorybudget import gib_text
 from ..platform import lan_door
-from ..platform.paths import ENGINE_PORT, INSTALL_ONE_LINER, engine_url
+from ..platform.errors import HostError
+from ..platform.paths import ENGINE_PORT, INSTALL_ONE_LINER, PROGRESS_INTERVAL_SECONDS, engine_url
+from ..platform.quarantine import quarantine
 from ..platform.runner import Runner, RunResult
 from ..platform.wsl_table import WSL_CONF_MARKER
 from ..wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE, guest_argv
 from . import outcome, wslstate
 from .catalog import CatalogPort, CatalogRefusal, Subject
 from .cleanup_record import CLEANUP_RECORD, record_cleanup
-from .cleanup_record import CLEANUP_RECORD_INVALID as CLEANUP_RECORD_INVALID
-from .cleanup_record import cleanup_subjects as cleanup_subjects
-from .cleanup_record import quarantine_bad_cleanup_record as quarantine_bad_cleanup_record
-from .errors import HostError
-from .quarantine import quarantine
 
 ENGINE_TARGET_WSL = "wsl"
 IMPORT_ARTEFACTS: frozenset[str] = frozenset({"ext4.vhdx"})
@@ -126,19 +124,21 @@ REBOOT_STILL_OWED_SENTENCE = (
 RESTART_BUDGET = 3
 
 
+def _feature_word(was: int | None, now: int | None) -> str:
+    if was == 1:
+        return "was already on"
+    if now == 1:
+        return "turned on now"
+    if now is None:
+        return "state unreadable"
+    return f"still {wslstate.FEATURE_STATES.get(now, 'unknown')}"
+
+
 def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
-    words: list[str] = []
-    for name in wslstate.WSL_FEATURES:
-        was, now = before.features.get(name), after.features.get(name)
-        if was == 1:
-            said = "was already on"
-        elif now == 1:
-            said = "turned on now"
-        elif now is None:
-            said = "state unreadable"
-        else:
-            said = f"still {wslstate.FEATURE_STATES.get(now, 'unknown')}"
-        words.append(f"{name} {said}")
+    words = [
+        f"{name} {_feature_word(before.features.get(name), after.features.get(name))}"
+        for name in wslstate.WSL_FEATURES
+    ]
     return "; ".join(words) + f"; then: {after.answer.line()}"
 
 
@@ -279,8 +279,6 @@ class EngineInstall:
         self._emit(Event("line", {"text": text, "stream": stream}))
 
     def _bytes(self, done: int, total: int | None, name: str) -> None:
-        from ..tasks import PROGRESS_INTERVAL_SECONDS
-
         now = self._monotonic()
         if done != total and now - self._last_bytes < PROGRESS_INTERVAL_SECONDS:
             return
@@ -591,7 +589,7 @@ class EngineInstall:
             return
         self._line(
             f"This PC's drive {destination.anchor or destination} has "
-            f"{free / 1024 ** 3:.0f} GiB free. The Linux engine's disk lives "
+            f"{gib_text(free, 0)} free. The Linux engine's disk lives "
             "there and grows into it, so that is the real limit on what it can hold."
         )
 
@@ -842,8 +840,6 @@ class EngineInstall:
             self._sleep(MIGRATE_POLL_SECONDS)
         raise self._still_held(held)
 
-    _migrate_weights = migrate_weights
-
     def _finish_migration(self, moved: list[str]) -> None:
         detail = (
             f"moved {len(moved)} subject(s): {', '.join(moved)}"
@@ -872,7 +868,10 @@ class EngineInstall:
                 f"{', '.join(this_round.deferred)} could not be removed from the Windows "
                 "engine because an alias still holds its weights, and no alias "
                 "was removed this round to free them. The guest has every "
-                "subject; the Windows copies stay until this is answered.",
+                "subject and nothing needs doing to keep using Crucible: the "
+                f"controller retries the cleanup recorded in {self._home / CLEANUP_RECORD} "
+                "on its own, and `crucible uninstall --purge-weights` on this Windows "
+                "side removes the Windows copies with everything else.",
             )
         return this_round
 

@@ -8,24 +8,15 @@ from typing import Any, Callable
 
 from .. import API_VERSION, VERSION
 from .. import peer as peer_module
+from ..controller_client import request
 from ..pairing import parse_pairing_line
 from ..platform import portholder, startup
-from ..platform.hostconfig import (
-    CONSENT_KEY,
-    CONSENT_TABLE,
-    WSL_KEY,
-    WSL_NEVER,
-    ConfigUnreadable,
-    consented_distro,
-    declined_wsl,
-    read_token,
-    server_name_and_token,
-)
+from ..platform.errors import HostError
+from ..platform.hostconfig import consented_distro
 from ..platform.installation import publish_installation
 from ..platform.paths import (
     CONSOLE_CMD,
     DOOR_PORT,
-    ENGINE_PORT,
     HOST_DOOR_ENV,
     INSTALL_ONE_LINER,
     console_cmd_path,
@@ -36,23 +27,14 @@ from ..platform.paths import (
     previous_log_path,
 )
 from ..platform.runner import ProcessRunner, Runner
-from ..processlock import alive
 from ..wsl import CRUCIBLE_DISTRO
-from . import controller_door as door_module
-from . import installer, migration, move_policy, operator_stop, outcome, wslstate
+from . import installer, migration, move_policy, operator_stop, outcome, pairing_sync
 from . import presence as presence_module
-from .catalog import CatalogPort, GuestCatalog, HttpCatalog, StoppedWindowsCatalog
-from .context import DEFAULT_RELEASE, INSTALL_SH_URL, HostContext
+from .catalog import CatalogPort, HttpCatalog
+from .context import HostContext
 from .controller_door import OrchestratorDoor, serve
-from .errors import HostError
-from .info import ORCHESTRATOR_GPU, OWNER_ON_THE_WIRE, controller_info
+from .info import OWNER_ON_THE_WIRE, controller_info
 from .log import HostLog
-from .move_policy import booted_since as _booted_since
-from .move_policy import move_sequence as _sequence
-from .pairing_sync import engine_token, engine_token_detail
-from .pairing_sync import guest_pairing_line as _guest_line
-from .pairing_sync import host_mode_pairing_line as _host_mode_line
-from .pairing_sync import write_pairing as _write_pairing
 from .presence import Presence, PresenceWatcher
 from .state import Distro, Engine, EngineDecision, Owner
 
@@ -69,8 +51,6 @@ HOST_CHILD_START_WAIT_SECONDS = 30.0
 INIT_TIMEOUT_SECONDS = 300.0
 
 STOP_TIMEOUT_SECONDS = 60.0
-
-_alive = alive
 
 
 def orchestrator_name() -> str:
@@ -122,8 +102,6 @@ def _step(name: str, index: int, total: int = 2) -> "installer.Event":
 
 
 def _read_engine_info(token: str) -> dict[str, Any]:
-    from ..local import request
-
     return request(engine_url("/v1/info"), token=token)
 
 
@@ -143,10 +121,6 @@ class Host:
             windows_catalog=lambda: self.stopped_windows_catalog(),
             guest_catalog=lambda: self._active_guest_catalog(),
         )
-
-    @property
-    def _c(self) -> HostContext:
-        return self.context
 
     @property
     def stopped_by_operator(self) -> bool:
@@ -195,7 +169,7 @@ class Host:
             operator_stop.clear(self.context.home)
             if not self.context.watcher.ping():
                 self.start()
-                _write_pairing(self.context)
+                pairing_sync.write_pairing(self.context)
                 self._claimed = False
                 self.claim()
             return self.local_status()
@@ -214,8 +188,6 @@ class Host:
             raise HostError("engine_not_ours", "Cannot replace an unmanaged engine")
 
     def _booted_guest(self) -> tuple[PresenceWatcher, Presence, str]:
-        from ..local import request
-
         self.context.watcher.release()
         watcher = PresenceWatcher(self.context.runner, self.context.log, distro=CRUCIBLE_DISTRO)
         presence = watcher.boot()
@@ -244,7 +216,7 @@ class Host:
         was_stopped = self.stopped_by_operator
         context.watcher, context.presence = watcher, presence
         try:
-            _write_pairing(context)
+            pairing_sync.write_pairing(context)
             if pairing.read_text(encoding="utf-8").strip() != line.strip():
                 raise HostError("engine_move_failed", "Windows pairing was not updated")
             operator_stop.clear(context.home)
@@ -321,10 +293,10 @@ class Host:
         return migration.stopped_windows_catalog(self.context.home)
 
     def verify_active_guest(self) -> None:
-        migration.verify_active_guest(self.context.presence, engine_token(self.context), _read_engine_info)
+        migration.verify_active_guest(self.context.presence, pairing_sync.engine_token(self.context), _read_engine_info)
 
     def _active_guest_catalog(self) -> CatalogPort:
-        token = engine_token(self.context)
+        token = pairing_sync.engine_token(self.context)
         if token is None:
             raise HostError(migration.NOT_READY, "The active guest has no credential")
         return HttpCatalog(engine_url(), token, where="the active WSL engine")
@@ -393,7 +365,7 @@ class Host:
             return False
         if owner not in (Owner.WSL_UNIT, Owner.HOST_CHILD):
             return False
-        token = engine_token(self.context)
+        token = pairing_sync.engine_token(self.context)
         if token is None:
             log(
                 "claim: this machine's engine token could not be read, so no "
@@ -416,7 +388,7 @@ class Host:
     def release_claim(self) -> None:
         if not self._claimed:
             return
-        token = engine_token(self.context)
+        token = pairing_sync.engine_token(self.context)
         if token is None:
             return
         log = self.context.log.write
@@ -442,7 +414,7 @@ class Host:
             self.context.name,
             self.context.presence.owner,
             engine_url=engine_url(),
-            token=lambda: engine_token(self.context),
+            token=lambda: pairing_sync.engine_token(self.context),
             log=self.context.log.write,
         )
 
@@ -618,9 +590,9 @@ def _open_door(context: HostContext, host: Host) -> None:
     log = context.log
     door = OrchestratorDoor(
         log,
-        _sequence(context, host),
-        token=lambda: engine_token(context),
-        token_detail=lambda: engine_token_detail(context),
+        move_policy.move_sequence(context, host),
+        token=lambda: pairing_sync.engine_token(context),
+        token_detail=lambda: pairing_sync.engine_token_detail(context),
         orchestrator=host,
     )
     host.attach_install_door(door)
@@ -665,7 +637,7 @@ def run(argv: list[str] | None = None, *, headless: bool = True) -> int:
         context.presence = Presence(Distro.UNKNOWN, Engine.STOPPED, operator_stop.REASON, Owner.NONE)
     else:
         host.start()
-    _write_pairing(context)
+    pairing_sync.write_pairing(context)
     host.claim()
     _open_door(context, host)
     _background(host.watch, "crucible-watch")
@@ -673,15 +645,3 @@ def run(argv: list[str] | None = None, *, headless: bool = True) -> int:
     _background(host.carry_guest_to_this_release, "crucible-guest-release")
     host.wait_until_quit()
     return 0
-
-
-__all__ = [
-    "CONSENT_KEY", "CONSENT_TABLE", "ConfigUnreadable", "DEFAULT_RELEASE", "ENGINE_PORT",
-    "GuestCatalog", "HOST_CHILD_START_WAIT_SECONDS", "Host", "HostContext", "INSTALL_SH_URL",
-    "LOCK_NAME", "ORCHESTRATOR_GPU", "OWNER_ON_THE_WIRE", "PRESENCE_SETTLE_CEILING_SECONDS",
-    "StoppedWindowsCatalog", "WSL_KEY", "WSL_NEVER", "_alive", "_booted_since", "_guest_line",
-    "_host_mode_line", "_sequence", "_write_pairing", "acquire", "consented_distro",
-    "declined_wsl", "door_module", "engine_token", "engine_token_detail", "init_argv",
-    "installer", "orchestrator_name", "read_token", "run", "server_argv", "server_environment",
-    "server_name_and_token", "wslstate",
-]
