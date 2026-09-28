@@ -6,7 +6,7 @@ from urllib.error import URLError
 
 import pytest
 
-from crucible import desktop, local, processlock, sharing
+from crucible import desktop, local, processlock, sharing, traylife
 from crucible.processlock import ProcessLock
 
 
@@ -40,7 +40,7 @@ def test_close_tray_waits_for_process_after_pid_file_removed(monkeypatch, tmp_pa
     def wait(seconds):
         waits.append(seconds)
         pid.unlink(missing_ok=True)
-    monkeypatch.setattr(desktop.time, "sleep", wait)
+    monkeypatch.setattr(traylife.time, "sleep", wait)
     desktop.close_tray()
     assert len(checks) == 4
     assert len(waits) == 2
@@ -52,8 +52,8 @@ def test_close_tray_refuses_swap_if_process_lingers_after_pid_removal(monkeypatc
     monkeypatch.setattr(desktop, "crucible_home", lambda: tmp_path)
     monkeypatch.setattr(processlock, "alive", lambda value: True)
     times = iter([0, 0, 16])
-    monkeypatch.setattr(desktop.time, "monotonic", lambda: next(times, 16))
-    monkeypatch.setattr(desktop.time, "sleep", lambda seconds: pid.unlink())
+    monkeypatch.setattr(traylife.time, "monotonic", lambda: next(times, 16))
+    monkeypatch.setattr(traylife.time, "sleep", lambda seconds: pid.unlink())
     with pytest.raises(local.LocalError, match="tray_close_failed"):
         desktop.close_tray()
 
@@ -78,7 +78,7 @@ def test_console_open_uses_ui_token_parameter(monkeypatch, tmp_path):
     monkeypatch.setattr(local, "connection", lambda _: ("http://127.0.0.1:7100", "test", "a+b/c"))
     opened = []
     monkeypatch.setattr(local.webbrowser, "open", opened.append)
-    local.act("open-console", tmp_path)
+    local.run_engine_verb("open-console", tmp_path)
     assert opened == ["http://127.0.0.1:7100/#token=a%2Bb%2Fc"]
 
 
@@ -92,7 +92,7 @@ def test_start_reports_optional_sharing_failure_without_hiding_healthy_engine(mo
         assert home == tmp_path
         raise sharing.SharingError("Tailscale is offline")
     monkeypatch.setattr(sharing, "reconcile", offline)
-    result = local.act("start", tmp_path)
+    result = local.run_engine_verb("start", tmp_path)
     assert result["state"] == "running"
     assert result["sharing"] == {"state": "degraded", "detail": "Tailscale is offline", "remote_reachability": "not_tested"}
 
@@ -109,7 +109,7 @@ def test_start_does_not_spawn_over_http_error(monkeypatch, tmp_path, existing_pa
     monkeypatch.setattr(local, "request", incompatible)
     monkeypatch.setattr(local, "_spawn_controller", lambda home: pytest.fail("must not spawn at an occupied port"))
     with pytest.raises(local.LocalError, match="wrong_controller"):
-        local.act("start", tmp_path)
+        local.run_engine_verb("start", tmp_path)
 
 
 @pytest.mark.parametrize("owner", ["child", "wsl-unit", "found"])
@@ -140,7 +140,7 @@ def test_upgrade_uses_authenticated_supported_contract(monkeypatch, tmp_path, ow
     monkeypatch.setattr(local, "request", request)
     monkeypatch.setattr(processlock, "alive", lambda pid: not stopped)
     local_calls = []
-    monkeypatch.setattr(local, "act", lambda action: local_calls.append(action))
+    monkeypatch.setattr(local, "run_engine_verb", lambda action: local_calls.append(action))
     if contract != 1:
         with pytest.raises(local.LocalError, match="controller_upgrade_unsupported"):
             local.shutdown()
@@ -305,7 +305,7 @@ def test_a_controller_that_quit_is_gone_however_the_socket_ended(
 
     monkeypatch.setattr(local, "request", request)
     monkeypatch.setattr(processlock, "alive", lambda pid: not stopped)
-    monkeypatch.setattr(local, "act", lambda action: None)
+    monkeypatch.setattr(local, "run_engine_verb", lambda action: None)
 
     local.shutdown()
     assert stopped == [True]
@@ -330,7 +330,7 @@ def test_a_guest_of_another_version_does_not_fail_this_installations_start(
         "state": "running", "version": "0.6.3", "backend": "cuda-linux",
         "detail": "the guest", "name": "x", "url": "u", "schema_version": 1,
     })
-    monkeypatch.setattr(local, "act", local.act)
+    monkeypatch.setattr(local, "run_engine_verb", local.run_engine_verb)
     from crucible import service
     monkeypatch.setattr(service, "start", lambda *a, **k: None)
     monkeypatch.setattr(service, "mechanism_for", lambda kind: "systemd")
@@ -339,6 +339,6 @@ def test_a_guest_of_another_version_does_not_fail_this_installations_start(
     from crucible import sharing
     monkeypatch.setattr(sharing, "reconcile", lambda home: {"state": "disabled"})
 
-    observed = local.act("start", tmp_path)
+    observed = local.run_engine_verb("start", tmp_path)
     assert observed["state"] == "running"
     assert observed["version"] == "0.6.3", "a guest of another version is not this start's problem"

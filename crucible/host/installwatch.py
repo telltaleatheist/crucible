@@ -15,9 +15,9 @@ from typing import Callable, Iterator, TextIO
 from .. import controller_client, local
 from ..errors import ConfigError
 from ..platform import hostconfig
+from ..platform.errors import HostError
 from ..platform.paths import LOG_NAME, door_url
 from . import outcome
-from .errors import HostError
 from .installer import STEP_WORDS, TRY_AGAIN_HINT
 from .log import plain
 

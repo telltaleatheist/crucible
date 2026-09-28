@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import urllib.error
 import urllib.request
@@ -12,12 +13,14 @@ import pytest
 from crucible import controller_client, local
 from crucible.host import (
     app,
+    cleanup_record,
     controller_door,
     installer,
     migration,
     move_policy,
     operator_stop,
     outcome,
+    pairing_sync,
     presence,
     wslstate,
 )
@@ -41,9 +44,9 @@ def test_the_operator_stop_is_one_persisted_state(tmp_path: Path) -> None:
 def test_a_stopped_ownerless_engine_still_has_its_pairing_token(tmp_path: Path) -> None:
     context = _context(tmp_path, Scripted())
     (tmp_path / "pairing").write_text("crucible://engine@127.0.0.1:7100/#kept\n", encoding="utf-8")
-    assert app.engine_token(context) is None
+    assert pairing_sync.engine_token(context) is None
     operator_stop.record(tmp_path)
-    assert app.engine_token(context) == "kept"
+    assert pairing_sync.engine_token(context) == "kept"
 
 
 def _cannot(tmp_path: Path, code: str) -> None:
@@ -85,11 +88,11 @@ def test_an_active_guest_resumes_its_cleanup_before_completing(tmp_path, monkeyp
     context = _context(tmp_path, Scripted())
     context.presence = presence.Presence(Distro.PRESENT, Engine.RUNNING, "guest", Owner.WSL_UNIT)
     host = app.Host(context)
-    installer.record_cleanup(tmp_path, {("model", "a")})
+    cleanup_record.record_cleanup(tmp_path, {("model", "a")})
     calls: list[str] = []
     monkeypatch.setattr(host, "resume_model_cleanup", lambda *, raise_errors: calls.append(f"resume {raise_errors}"))
     monkeypatch.setattr(installer.EngineInstall, "complete", lambda self: calls.append("complete"))
-    app._sequence(context, host)(lambda event: None)
+    move_policy.move_sequence(context, host)(lambda event: None)
     assert calls == ["resume True", "complete"]
     assert outcome.read(tmp_path).state == outcome.DONE
 
@@ -98,7 +101,7 @@ def test_the_model_cleanup_keeps_its_record_until_the_guest_answers(tmp_path) ->
     context = _context(tmp_path, Scripted())
     windows = FakeCatalog("stopped Windows", [("model", "a")])
     guest = FakeCatalog("active guest", [("model", "a")])
-    installer.record_cleanup(tmp_path, {("model", "a")})
+    cleanup_record.record_cleanup(tmp_path, {("model", "a")})
     cleanup = migration.ModelCleanup(
         context, lock=app.threading.RLock(), windows_catalog=lambda: windows,
         guest_catalog=lambda: guest, clock=lambda: 100.0,
@@ -166,13 +169,12 @@ def test_the_door_dispatches_through_one_route_table(tmp_path: Path) -> None:
         server.server_close()
 
 
-def test_the_old_module_names_are_the_new_modules() -> None:
-    from crucible.host import door
-    from crucible.host import landoor as host_landoor
-    from crucible.platform import lan_door, landoor
-
-    assert door is controller_door
-    assert landoor is lan_door is host_landoor
+@pytest.mark.parametrize("old", [
+    "crucible.host.door", "crucible.host.landoor", "crucible.platform.landoor", "crucible.host.paths",
+    "crucible.host.runner", "crucible.host.portholder", "crucible.host.startup", "crucible.host.wsl_states",
+])
+def test_the_old_module_names_are_gone(old: str) -> None:
+    assert importlib.util.find_spec(old) is None
 
 
 def test_local_runs_the_tray_verbs_it_is_handed(capsys) -> None:
@@ -226,8 +228,10 @@ def test_a_controller_with_no_pid_record_names_the_file(tmp_path: Path) -> None:
 
 def test_the_walks_verbs_other_modules_call_are_public() -> None:
     assert callable(installer.EngineInstall.complete)
-    assert installer.EngineInstall._migrate_weights is installer.EngineInstall.migrate_weights
-    assert presence.PresenceWatcher._wait_for_ping is presence.PresenceWatcher.wait_for_ping
+    assert callable(installer.EngineInstall.migrate_weights)
+    assert callable(presence.PresenceWatcher.wait_for_ping)
+    assert not hasattr(installer.EngineInstall, "_migrate_weights")
+    assert not hasattr(presence.PresenceWatcher, "_wait_for_ping")
 
 
 def test_the_wheel_url_is_read_from_a_named_row() -> None:

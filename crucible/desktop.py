@@ -7,7 +7,6 @@ import shlex
 import subprocess
 import sys
 import threading
-import time as time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -133,7 +132,7 @@ def _move_items(home: Path, retrying: bool, try_again: Callable[[], None]) -> li
 
     from .host import menu as host_menu
     from .host import outcome
-    from .host.errors import HostError
+    from .platform.errors import HostError
 
     try:
         recorded = outcome.read(home)
@@ -216,7 +215,7 @@ class TrayIcon:
         self.notice["adopt"] = False
 
     def _run_engine_verb(self, verb: str) -> None:
-        self.state.update(local.act(verb))
+        self.state.update(local.run_engine_verb(verb))
         if self.state.get("sharing", {}).get("state") == "degraded":
             self.notice["message"] = "Crucible is running; sharing needs attention: " + self.state["sharing"]["detail"]
 
@@ -249,8 +248,8 @@ class TrayIcon:
         self.refresh()
 
     def _try_again_now(self) -> None:
-        from .host.errors import HostError
         from .host.retry import try_again as run_try_again
+        from .platform.errors import HostError
 
         try:
             ended = run_try_again(self.home, self._say)

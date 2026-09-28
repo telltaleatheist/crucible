@@ -8,9 +8,9 @@ from typing import Callable
 
 from .. import controller_client, local
 from ..controller_client import LocalError, bearer, open_url
+from ..platform.errors import HostError
 from ..platform.paths import LOG_NAME, door_url
 from . import outcome
-from .errors import HostError
 
 DOOR = door_url()
 INSTALL_URL = DOOR + "/install"

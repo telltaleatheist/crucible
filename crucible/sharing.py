@@ -27,7 +27,7 @@ class SharingError(CrucibleError):
 def _json(runner: Runner, argv: list[str]) -> dict[str, Any]:
     result = runner.run(argv, timeout_s=TIMEOUT)
     if not result.ok:
-        raise SharingError(f"sharing_command_failed: {' '.join(argv)}: {result.said()}")
+        raise SharingError(f"sharing_command_failed: {' '.join(argv)}: {result.output_tail()}")
     try:
         data = json.loads(result.stdout)
     except ValueError as exc:
@@ -52,7 +52,7 @@ def _matches(entry: Any, target: str) -> bool:
 def _run(runner: Runner, argv: list[str]) -> None:
     result = runner.run(argv, timeout_s=TIMEOUT)
     if not result.ok:
-        raise SharingError(f"sharing_command_failed: {' '.join(argv)}: {result.said()}")
+        raise SharingError(f"sharing_command_failed: {' '.join(argv)}: {result.output_tail()}")
 
 
 def _write(home: Path, data: dict[str, Any]) -> None:
@@ -194,20 +194,23 @@ def reconcile(home: Path, runner: Runner | None = None) -> dict[str, Any]:
     return enable(home, runner, PairedEngine(home, "sharing"), port=record["port"])
 
 
+def _answer(args: argparse.Namespace, home: Path, runner: Runner) -> dict[str, Any]:
+    engine = PairedEngine(home, "sharing")
+    if args.sharing_action == "enable":
+        return enable(home, runner, engine, port=args.port, adopt=args.adopt)
+    if args.sharing_action == "reconcile":
+        record = read(home)
+        return {"state": "disabled"} if record is None else enable(home, runner, engine, port=record["port"])
+    if args.sharing_action == "disable":
+        return disable(home, runner, engine)
+    return status(home, runner, engine)
+
+
 def command(args: argparse.Namespace) -> int:
     home = crucible_home()
     runner = ProcessRunner(sys.platform, os.environ)
     try:
-        engine = PairedEngine(home, "sharing")
-        if args.sharing_action == "enable":
-            result = enable(home, runner, engine, port=args.port, adopt=args.adopt)
-        elif args.sharing_action == "reconcile":
-            record = read(home)
-            result = {"state": "disabled"} if record is None else enable(home, runner, engine, port=record["port"])
-        elif args.sharing_action == "disable":
-            result = disable(home, runner, engine)
-        else:
-            result = status(home, runner, engine)
+        result = _answer(args, home, runner)
         print(json.dumps(result, indent=2))
         return 1 if result.get("state") == "degraded" else 0
     except (CrucibleError, OSError, ValueError) as exc:
@@ -224,6 +227,3 @@ def add_parser(subparsers: Any) -> None:
             action.add_argument("--port", type=int, default=DEFAULT_PORT)
             action.add_argument("--adopt", action="store_true", help="take ownership of an existing matching forward")
         action.set_defaults(func=command)
-
-
-Engine = PairedEngine

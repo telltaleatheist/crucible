@@ -710,7 +710,7 @@ def test_the_cli_refuses_the_base_by_name(
 def test_the_windows_migration_removes_the_alias_before_its_base(
     tmp_path: Path, hub: FakeHub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from crucible.host import installer
+    from crucible.host import cleanup_record, installer
     from crucible.host.catalog import StoppedWindowsCatalog
 
     from .test_host import FakeCatalog, migration
@@ -720,13 +720,13 @@ def test_the_windows_migration_removes_the_alias_before_its_base(
     alias = load_manifest(ALIAS)
     weights.pull(config, alias, alias.spec(LLAMA_WINDOWS))
     keys = {("model", BASE), ("model", ALIAS)}
-    installer.record_cleanup(home, keys)
+    cleanup_record.record_cleanup(home, keys)
     stopped = StoppedWindowsCatalog(
-        config, _backend(LLAMA_WINDOWS), installer.cleanup_subjects(home)
+        config, _backend(LLAMA_WINDOWS), cleanup_record.cleanup_subjects(home)
     )
     assert {row.key for row in stopped.installed_subjects()} == keys
     guest = FakeCatalog("guest", sorted(keys))
     events: list[installer.Event] = []
-    migration(stopped, guest, events, home)._migrate_weights(allow_pull=False)
+    migration(stopped, guest, events, home).migrate_weights(allow_pull=False)
     assert stopped.installed_subjects() == []
     assert not weights.subject_dir(config, alias, LLAMA_WINDOWS).exists()

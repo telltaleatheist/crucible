@@ -19,6 +19,8 @@ LOG_NAME = "host.log"
 LOG_PREVIOUS_NAME = "host.log.1"
 LOG_ROLL_BYTES = 2 * 1024 * 1024
 
+PROGRESS_INTERVAL_SECONDS = 0.5
+
 CONSOLE_CMD = "crucible.cmd"
 
 PYTHONW = "pythonw.exe"

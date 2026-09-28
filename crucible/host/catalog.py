@@ -6,10 +6,10 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..platform.errors import HostError
 from ..platform.runner import Runner
 from ..protocol import API_HEADER, API_VERSION, LOOPBACK, api_headers
 from ..wsl import default_user_argv
-from .errors import HostError
 
 CATALOG_TIMEOUT_SECONDS = 60.0
 

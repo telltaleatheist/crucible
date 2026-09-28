@@ -5,10 +5,11 @@ from dataclasses import dataclass
 from typing import Callable, Mapping
 
 from .. import wsl
+from ..memorybudget import gib_text
+from ..platform.errors import HostError
 from ..platform.powershell import query_argv, runas_argv
 from ..platform.runner import Runner, RunResult
 from ..platform.wsl_table import WSL_STATE_CODES, WSL_STATES, WslStateDef
-from .errors import HostError
 
 NO_HYPERVISOR = re.compile(
     r"HCS_E_HYPERV_NOT_INSTALLED|0x80370102|hypervisor|virtual machine platform",
@@ -262,10 +263,6 @@ def _free_bytes(result: RunResult) -> int | None:
     return int(first[0]) * 1024
 
 
-def gib(value: int) -> str:
-    return f"{value / 1024 ** 3:.1f} GiB"
-
-
 def _systemd_on(result: RunResult) -> bool:
     return re.search(r"systemd\s*=\s*true", result.stdout, re.IGNORECASE) is not None
 
@@ -313,8 +310,8 @@ def render(text: str, result: RunResult, seen: Evidence) -> str:
         "{said}": result.output_tail(),
         "{app_distro}": seen.app_distro or "",
         "{release}": seen.release,
-        "{required}": gib(seen.required_bytes),
-        "{free}": "an unreadable amount" if free is None else gib(free),
+        "{required}": gib_text(seen.required_bytes),
+        "{free}": "an unreadable amount" if free is None else gib_text(free),
     }
     out = text
     for key, value in replacements.items():
@@ -354,8 +351,6 @@ def state_row(code: str) -> WslStateDef:
 
 
 GUEST_WHEEL_URL_TEMPLATE = state_row(NETWORK_ROW).action_url
-
-_WHEEL_URL_TEMPLATE = GUEST_WHEEL_URL_TEMPLATE
 
 
 class _Probes:

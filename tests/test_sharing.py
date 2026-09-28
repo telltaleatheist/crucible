@@ -5,7 +5,7 @@ import pytest
 
 from crucible import sharing, launcher
 from crucible.errors import CrucibleError
-from crucible.host.runner import RunResult
+from crucible.platform.runner import RunResult
 
 
 class Runner:
@@ -178,7 +178,7 @@ def test_windows_interfaces_read_structured_addresses_and_filter(monkeypatch):
 
 
 def test_windows_custom_home_is_the_same_for_host_and_installer():
-    from crucible.host.paths import crucible_root, host_pack_dir
+    from crucible.platform.paths import crucible_root, host_pack_dir
     env = {"CRUCIBLE_HOME": r"D:\My models\Crucible"}
     assert str(crucible_root(env)) == r"D:\My models\Crucible"
     assert str(host_pack_dir(env)) == r"D:\My models\Crucible\host"
@@ -196,7 +196,7 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
             elif argv[0] == "certutil":
                 output = "a" * 64
             elif argv[-1].endswith("SHA256SUMS"):
-                from crucible.host.wsl_states import UBUNTU_WSL_ROOTFS
+                from crucible.platform.wsl_table import UBUNTU_WSL_ROOTFS
                 output = f"{chr(98) * 64} *other.tar.gz\n{chr(97) * 64} *{UBUNTU_WSL_ROOTFS}\n"
             elif argv[-1] == "/etc/wsl.conf":
                 output = "# crucible-rootfs\n[boot]\nsystemd=true\n"
@@ -220,7 +220,7 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
 
 def test_guided_switch_executes_callbacks_instead_of_reporting_promises(tmp_path):
     from crucible.host.installer import EngineInstall
-    from crucible.host.errors import HostError
+    from crucible.platform.errors import HostError
     callbacks = []
     walk = EngineInstall(Runner(), lambda event: None, release="0.6.0", home=tmp_path,
                          install_sh_url="https://example.invalid/install.sh",

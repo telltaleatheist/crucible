@@ -11,15 +11,20 @@ from typing import Callable, Mapping, Sequence
 
 import pytest
 
+from crucible import wsl
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
-from crucible.host import door as door_module
-from crucible.host import installer, landoor, log, move_policy, outcome, paths, presence, startup, wslstate
+from crucible.host import controller_door as door_module
+from crucible.host import cleanup_record, installer, log, move_policy, outcome, pairing_sync, presence, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
-from crucible.host.errors import HOST_ERROR_CODES, HostError
-from crucible.host.menu import Distro, Engine, Owner
-from crucible.host.runner import RunResult
-from crucible.host.wsl_states import CRUCIBLE_DISTRO, WSL_STATE_CODES, WSL_STATES
+from crucible.host.errors import HOST_ERROR_CODES
+from crucible.host.info import OWNER_ON_THE_WIRE
+from crucible.host.state import Distro, Engine, Owner
+from crucible.platform import lan_door as landoor
+from crucible.platform import hostconfig, paths, startup
+from crucible.platform.errors import HostError
+from crucible.platform.runner import RunResult
+from crucible.platform.wsl_table import CRUCIBLE_DISTRO, WSL_STATE_CODES, WSL_STATES
 
 WINDOWS_ONLY = pytest.mark.skipif(
     sys.platform != "win32",
@@ -188,8 +193,8 @@ def test_the_numbers_4_1_states_are_constants_with_4_1s_names() -> None:
 
 def test_wsl_list_is_parsed_by_the_row_shape_and_not_by_a_localised_header() -> None:
     text = "  NAME              STATE           VERSION\n* Ubuntu            Running         2\n  crucible          Stopped         2\n"
-    assert presence.parse_wsl_list(text) == ["Ubuntu", "crucible"]
-    assert presence.parse_wsl_list("\x00 c\x00r\x00u\x00c\x00i\x00b\x00l\x00e  Running 2") == [
+    assert wsl.parse_distro_list(text) == ["Ubuntu", "crucible"]
+    assert wsl.parse_distro_list("\x00 c\x00r\x00u\x00c\x00i\x00b\x00l\x00e  Running 2") == [
         "crucible"
     ]
 
@@ -405,7 +410,7 @@ def test_a_guest_engines_pairing_line_is_COPIED_and_never_composed(
     )
     context = _context(tmp_path, runner)
     app_module.Host(context).start()
-    app_module._write_pairing(context)
+    pairing_sync.write_pairing(context)
     written = (tmp_path / "pairing").read_text(encoding="utf-8")
     assert written == GUEST_LINE
     assert "the-wrong-one" not in written
@@ -424,7 +429,7 @@ def test_a_guest_engine_whose_line_cannot_be_read_writes_NO_file(
     )
     context = _context(tmp_path, runner)
     app_module.Host(context).start()
-    app_module._write_pairing(context)
+    pairing_sync.write_pairing(context)
     assert not (tmp_path / "pairing").exists()
     assert "worse than no file" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
@@ -627,7 +632,7 @@ def test_the_disk_row_fills_both_of_its_figures_when_it_is_asked_for() -> None:
 
 
 def test_a_generated_row_with_no_predicate_is_refused_by_name(monkeypatch) -> None:
-    from crucible.host import wsl_states as generated
+    from crucible.platform import wsl_table as generated
 
     extra = generated.WslStateDef(
         code="a_row_nobody_wrote_a_predicate_for",
@@ -1756,7 +1761,7 @@ def test_the_guest_gets_a_subject_BEFORE_the_windows_copy_is_deleted(tmp_path: P
     guest = FakeCatalog("guest")
     guest.pull_latency = 2
     events: list[installer.Event] = []
-    migration(windows, guest, events, tmp_path)._migrate_weights()
+    migration(windows, guest, events, tmp_path).migrate_weights()
 
     for subject in ("model qwen3.5-9b", "voice mistborn"):
         assert f"pull {subject}" in guest.calls
@@ -1772,11 +1777,25 @@ def test_the_guest_gets_a_subject_BEFORE_the_windows_copy_is_deleted(tmp_path: P
     }
 
 
+def test_a_round_that_only_meets_shared_weights_names_the_record_and_the_way_out(tmp_path: Path) -> None:
+    class SharedWindows(FakeCatalog):
+        def remove(self, subject: Subject) -> None:
+            raise CatalogRefusal("weights_shared", f"{subject} is held by an alias")
+
+    windows = SharedWindows("windows", [("model", "base")])
+    guest = FakeCatalog("guest", [("model", "base")])
+    with pytest.raises(HostError) as caught:
+        migration(windows, guest, [], tmp_path).migrate_weights()
+    assert caught.value.code == "weights_shared"
+    assert str(tmp_path / cleanup_record.CLEANUP_RECORD) in caught.value.message
+    assert "crucible uninstall --purge-weights" in caught.value.message
+
+
 def test_a_subject_the_guest_ALREADY_has_is_not_pulled_again(tmp_path: Path) -> None:
     windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
     guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
     events: list[installer.Event] = []
-    migration(windows, guest, events, tmp_path)._migrate_weights()
+    migration(windows, guest, events, tmp_path).migrate_weights()
     assert not any(call.startswith("pull") for call in guest.calls)
     assert "remove model qwen3.5-9b" in windows.calls
     assert windows.subjects == []
@@ -1810,7 +1829,7 @@ def test_activation_precedes_retirement_and_native_binary_is_not_migrated(tmp_pa
         order.append("stopped")
     def switched():
         assert order == ["stopped"]
-        assert (tmp_path / installer.CLEANUP_RECORD).is_file()
+        assert (tmp_path / cleanup_record.CLEANUP_RECORD).is_file()
         order.append("switched")
     def cleanup_catalog():
         assert order == ["stopped", "switched"]
@@ -1823,7 +1842,7 @@ def test_activation_precedes_retirement_and_native_binary_is_not_migrated(tmp_pa
     assert {row.key for row in windows.subjects} == {("engine", "llama.cpp")}
     assert {row.key for row in guest.subjects} == {("model", "a")}
     assert not any(call.startswith("remove") for call in guest.calls)
-    assert not (tmp_path / installer.CLEANUP_RECORD).exists()
+    assert not (tmp_path / cleanup_record.CLEANUP_RECORD).exists()
 
 
 def test_failed_activation_keeps_all_windows_models_and_resume_record(tmp_path: Path) -> None:
@@ -1840,7 +1859,7 @@ def test_failed_activation_keeps_all_windows_models_and_resume_record(tmp_path: 
     with pytest.raises(HostError, match="fixture"):
         walk.run()
     assert {row.key for row in windows.subjects} == {("model", "a")}
-    assert (tmp_path / installer.CLEANUP_RECORD).is_file()
+    assert (tmp_path / cleanup_record.CLEANUP_RECORD).is_file()
 
 
 def test_malformed_installed_flag_cannot_authorize_source_deletion() -> None:
@@ -1859,10 +1878,10 @@ def test_stopped_catalog_resumes_partial_deletion_through_the_weights_owner(tmp_
         residue.unlink(missing_ok=True)
     row = SimpleNamespace(kind="model", id="fixture", name="Fixture", installed=lambda: None, remove=remove)
     monkeypatch.setattr(catalog, "subjects", lambda config, backend: [row])
-    installer.record_cleanup(tmp_path, {("model", "fixture")})
+    cleanup_record.record_cleanup(tmp_path, {("model", "fixture")})
     config = SimpleNamespace(backend_kind="llama-windows", home=tmp_path)
     backend = SimpleNamespace(kind="llama-windows")
-    stopped = catalog_module.StoppedWindowsCatalog(config, backend, installer.cleanup_subjects(tmp_path))
+    stopped = catalog_module.StoppedWindowsCatalog(config, backend, cleanup_record.cleanup_subjects(tmp_path))
     pending = stopped.installed_subjects()
     assert len(pending) == 1, "a removed stamp cannot hide a partially deleted model"
     stopped.remove(pending[0])
@@ -1875,24 +1894,24 @@ def test_controller_resumes_cleanup_and_keeps_journal_on_failure(tmp_path, monke
     host = app_module.Host(context)
     windows = FakeCatalog("stopped Windows", [("model", "a")])
     guest = FakeCatalog("active guest", [("model", "a")])
-    installer.record_cleanup(tmp_path, {("model", "a")})
+    cleanup_record.record_cleanup(tmp_path, {("model", "a")})
     monkeypatch.setattr(host, "stopped_windows_catalog", lambda: windows)
-    monkeypatch.setattr(app_module, "engine_token", lambda _: "fixture-token")
+    monkeypatch.setattr(pairing_sync, "engine_token", lambda _: "fixture-token")
     monkeypatch.setattr(app_module, "HttpCatalog", lambda *a, **kw: guest)
     host._cleanup.running = True
     guest.unreachable = True
     host.resume_model_cleanup()
-    assert (tmp_path / installer.CLEANUP_RECORD).exists()
+    assert (tmp_path / cleanup_record.CLEANUP_RECORD).exists()
     assert windows.subjects and not host._cleanup.running
     guest.unreachable = False
     host.resume_model_cleanup()
-    assert not (tmp_path / installer.CLEANUP_RECORD).exists()
+    assert not (tmp_path / cleanup_record.CLEANUP_RECORD).exists()
     assert windows.subjects == [] and guest.subjects
 
 
 def test_cleanup_refuses_an_engine_still_owned_by_windows(tmp_path):
     host = app_module.Host(_context(tmp_path, Scripted()))
-    host._c.presence = presence.Presence(Distro.ABSENT, Engine.RUNNING, "native", Owner.HOST_CHILD)
+    host.context.presence = presence.Presence(Distro.ABSENT, Engine.RUNNING, "native", Owner.HOST_CHILD)
     with pytest.raises(HostError, match="Windows models are kept"):
         host.stopped_windows_catalog()
 
@@ -1901,7 +1920,7 @@ def test_background_cleanup_never_downloads_or_deletes_if_destination_missing(tm
     windows = FakeCatalog("stopped Windows", [("model", "a"), ("model", "b")])
     guest = FakeCatalog("active guest", [("model", "a")])
     with pytest.raises(HostError, match="Windows models are kept"):
-        migration(windows, guest, [], tmp_path)._migrate_weights(allow_pull=False)
+        migration(windows, guest, [], tmp_path).migrate_weights(allow_pull=False)
     assert not any(call.startswith("pull") for call in guest.calls)
     assert not any(call.startswith("remove") for call in windows.calls)
 
@@ -1910,7 +1929,7 @@ def test_retry_after_guest_activation_never_rebuilds_native_http_source(tmp_path
     context = _context(tmp_path, Scripted())
     context.presence = presence.Presence(Distro.PRESENT, Engine.RUNNING, "guest", Owner.WSL_UNIT)
     host = app_module.Host(context)
-    installer.record_cleanup(tmp_path, {("model", "a")})
+    cleanup_record.record_cleanup(tmp_path, {("model", "a")})
     calls = []
     def resumed(*, raise_errors):
         assert raise_errors is True
@@ -1921,7 +1940,7 @@ def test_retry_after_guest_activation_never_rebuilds_native_http_source(tmp_path
         raise AssertionError("The active guest cannot be constructed as a native source")
     monkeypatch.setattr(app_module, "HttpCatalog", wrong_source)
     monkeypatch.setattr(move_policy, "HttpCatalog", wrong_source)
-    app_module._sequence(context, host)(lambda event: None)
+    move_policy.move_sequence(context, host)(lambda event: None)
     assert calls == ["resume native cleanup", "complete"]
 
 
@@ -1929,13 +1948,13 @@ def test_an_interrupted_move_resumes_from_the_two_catalogs(tmp_path: Path) -> No
     windows = FakeCatalog("windows", [("model", "a"), ("voice", "b")])
     guest = FakeCatalog("guest", [("model", "a")])
     events: list[installer.Event] = []
-    migration(windows, guest, events, tmp_path)._migrate_weights()
+    migration(windows, guest, events, tmp_path).migrate_weights()
     assert guest.calls.count("pull voice b") == 1
     assert not any(call == "pull model a" for call in guest.calls)
     assert windows.subjects == []
     windows.calls.clear()
     guest.calls.clear()
-    migration(windows, guest, events, tmp_path)._migrate_weights()
+    migration(windows, guest, events, tmp_path).migrate_weights()
     assert not any(call.startswith(("pull", "remove")) for call in guest.calls + windows.calls)
 
 
@@ -1945,7 +1964,7 @@ def test_subject_in_use_is_WAITED_OUT_and_never_skipped(tmp_path: Path) -> None:
     windows.release_after[("model", "qwen3.5-9b")] = 3
     guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
     events: list[installer.Event] = []
-    migration(windows, guest, events, tmp_path)._migrate_weights()
+    migration(windows, guest, events, tmp_path).migrate_weights()
     assert windows.calls.count("remove model qwen3.5-9b") == 3, "retried, not skipped"
     assert windows.subjects == []
     held = [
@@ -1966,7 +1985,7 @@ def test_a_subject_held_forever_FAILS_THE_STEP_by_name_and_names_who(
     guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
     events: list[installer.Event] = []
     with pytest.raises(HostError) as caught:
-        migration(windows, guest, events, tmp_path)._migrate_weights()
+        migration(windows, guest, events, tmp_path).migrate_weights()
     assert caught.value.code == "subject_in_use"
     assert "the resident model" in caught.value.message
     assert {row.key for row in windows.subjects} == {("model", "qwen3.5-9b")}
@@ -1982,7 +2001,7 @@ def test_a_pull_that_never_arrives_leaves_the_windows_copy_alone(tmp_path: Path)
     events: list[installer.Event] = []
     walk = migration(windows, monkeypatch_free, events, tmp_path)
     with pytest.raises(HostError) as caught:
-        walk._migrate_weights()
+        walk.migrate_weights()
     assert caught.value.code == "subject_pull_timeout"
     assert "has NOT been removed" in caught.value.message
     assert "remove model qwen3.5-9b" not in windows.calls
@@ -2001,7 +2020,7 @@ def test_a_removal_refused_for_any_OTHER_reason_fails_and_keeps_both_copies(
     guest = FakeCatalog("guest", [("model", "a")])
     events: list[installer.Event] = []
     with pytest.raises(HostError) as caught:
-        migration(windows, guest, events, tmp_path)._migrate_weights()
+        migration(windows, guest, events, tmp_path).migrate_weights()
     assert caught.value.code == "subject_remove_failed"
     assert {row.key for row in windows.subjects} == {("model", "a")}
 
@@ -2011,7 +2030,7 @@ def test_no_windows_engine_is_a_fact_the_step_states_and_not_a_failure(
 ) -> None:
     events: list[installer.Event] = []
     walk = migration(None, None, events, tmp_path)
-    walk._migrate_weights()
+    walk.migrate_weights()
     said = " ".join(str(event.data.get("text", "")) for event in events if event.event == "line")
     assert "no Windows engine" in said or "nothing to migrate" in said
 
@@ -2204,7 +2223,7 @@ def _orchestrator(
     context.name = "crucible-orchestrator@test"
     context.presence = presence.Presence(Distro.PRESENT, Engine.RUNNING, "up", owner)
     monkeypatch.setattr(app_module, "engine_url", lambda path="": f"{engine.url}{path}")
-    monkeypatch.setattr(app_module, "engine_token", lambda _c: engine.token)
+    monkeypatch.setattr(pairing_sync, "engine_token", lambda _c: engine.token)
     return app_module.Host(context)
 
 
@@ -2244,7 +2263,7 @@ def test_a_claim_that_fails_is_a_LOG_LINE_and_never_a_crash(
 ) -> None:
     with FakeEngine(token="a-different-token") as engine:
         host = _orchestrator(tmp_path, Scripted(), Owner.WSL_UNIT, engine, monkeypatch)
-        monkeypatch.setattr(app_module, "engine_token", lambda _c: "the-wrong-one")
+        monkeypatch.setattr(pairing_sync, "engine_token", lambda _c: "the-wrong-one")
         assert host.claim() is False
     assert "peer_token_mismatch" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
@@ -2275,8 +2294,8 @@ def _a_quitting_host(
     runner = Scripted()
     host = _orchestrator(tmp_path, runner, owner, engine, monkeypatch)
     host.claim()
-    host._c.watcher.hold("Ubuntu")
-    host._c.watcher.child = FakeChild()
+    host.context.watcher.hold("Ubuntu")
+    host.context.watcher.child = FakeChild()
     runner.calls.clear()
     return host, runner
 
@@ -2286,7 +2305,7 @@ def test_a_quit_that_holds_a_claim_RELEASES_it(tmp_path: Path, monkeypatch) -> N
         host, _runner = _a_quitting_host(tmp_path, Owner.WSL_UNIT, engine, monkeypatch)
         assert host._claimed is True
         door_module.OrchestratorDoor(
-            host._c.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
+            host.context.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
         ).quit()
         assert len(engine.releases) == 1
         assert engine.releases[0]["orchestrator"]["url"] == paths.door_url("")
@@ -2298,15 +2317,15 @@ def test_a_FOUND_engines_orchestrator_releases_NOTHING_and_still_stops(
 ) -> None:
     with FakeEngine() as engine:
         host, runner = _a_quitting_host(tmp_path, Owner.FOUND, engine, monkeypatch)
-        child = host._c.watcher.child
+        child = host.context.watcher.child
         assert host._claimed is False, "a found engine is never claimed"
         door_module.OrchestratorDoor(
-            host._c.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
+            host.context.log, lambda _emit: None, token=lambda: "tok", orchestrator=host
         ).quit()
         assert engine.releases == []
         assert child.terminated is False, "an engine it did not start is not stopped"
         assert not any("systemctl" in " ".join(c) for c in runner.calls)
-        assert host._c.watcher.held is None
+        assert host.context.watcher.held is None
         assert host._shutdown_complete.is_set()
     assert "owner=found" in (tmp_path / "host.log").read_text(encoding="utf-8")
 
@@ -2391,7 +2410,7 @@ def test_a_child_restart_stops_the_child_and_starts_one(
     runner = Scripted(pings=[200])
     with FakeEngine() as engine:
         host = _orchestrator(tmp_path, runner, Owner.HOST_CHILD, engine, monkeypatch)
-        host._c.watcher.child = FakeChild()
+        host.context.watcher.child = FakeChild()
         seen: list[str] = []
         host.restart_engine(lambda event: seen.append(event.event))
     assert runner.spawned, "a child was started again"
@@ -2408,7 +2427,7 @@ def test_a_restart_that_does_not_come_back_FAILS_by_name(
         host.restart_engine(lambda event: events.append((event.event, event.data)))
     assert events[-1][0] == "failed"
     assert events[-1][1]["code"] == "engine_did_not_return"
-    assert host._c.presence.engine is Engine.FAILED
+    assert host.context.presence.engine is Engine.FAILED
 
 
 def test_a_restarted_engine_is_CLAIMED_AGAIN_because_it_forgot(
@@ -2513,8 +2532,8 @@ def test_a_path_this_door_does_not_serve_says_what_it_DOES_serve(
 def test_the_wire_owner_words_are_the_only_three(tmp_path: Path) -> None:
     from crucible import peer as peer_module
 
-    assert set(app_module.OWNER_ON_THE_WIRE.values()) == set(peer_module.OWNERS)
-    assert Owner.NONE not in app_module.OWNER_ON_THE_WIRE, "an absence is not an owner"
+    assert set(OWNER_ON_THE_WIRE.values()) == set(peer_module.OWNERS)
+    assert Owner.NONE not in OWNER_ON_THE_WIRE, "an absence is not an owner"
 
 
 UBUNTU_CONSENT = '[orchestrator]\ndistro = "Ubuntu"\n'
@@ -2536,18 +2555,18 @@ def _consented_watcher(
 def test_no_setting_means_the_machine_behaves_exactly_as_it_did(
     tmp_path: Path,
 ) -> None:
-    assert app_module.consented_distro(tmp_path) is None
+    assert hostconfig.consented_distro(tmp_path) is None
     (tmp_path / "config.toml").write_text('[auth]\ntoken = "t"\n', encoding="utf-8")
-    assert app_module.consented_distro(tmp_path) is None
+    assert hostconfig.consented_distro(tmp_path) is None
     (tmp_path / "config.toml").write_text("[orchestrator]\n", encoding="utf-8")
-    assert app_module.consented_distro(tmp_path) is None
+    assert hostconfig.consented_distro(tmp_path) is None
 
 
 def test_the_setting_is_read_from_the_table_PHASE17_names(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text(UBUNTU_CONSENT, encoding="utf-8")
-    assert app_module.consented_distro(tmp_path) == "Ubuntu"
-    assert app_module.CONSENT_TABLE == "orchestrator"
-    assert app_module.CONSENT_KEY == "distro"
+    assert hostconfig.consented_distro(tmp_path) == "Ubuntu"
+    assert hostconfig.CONSENT_TABLE == "orchestrator"
+    assert hostconfig.CONSENT_KEY == "distro"
 
 
 def test_the_setting_does_not_disturb_the_token_beside_it(tmp_path: Path) -> None:
@@ -2555,8 +2574,8 @@ def test_the_setting_does_not_disturb_the_token_beside_it(tmp_path: Path) -> Non
         '[auth]\ntoken = "the-token"\n\n[orchestrator]\ndistro = "Ubuntu"\n',
         encoding="utf-8",
     )
-    assert app_module.consented_distro(tmp_path) == "Ubuntu"
-    assert app_module.read_token(tmp_path) == "the-token"
+    assert hostconfig.consented_distro(tmp_path) == "Ubuntu"
+    assert hostconfig.read_token(tmp_path) == "the-token"
 
 
 def test_a_setting_that_is_present_and_unusable_is_REFUSED_not_ignored(
@@ -2567,14 +2586,14 @@ def test_a_setting_that_is_present_and_unusable_is_REFUSED_not_ignored(
             f"[orchestrator]\n{value}\n", encoding="utf-8"
         )
         with pytest.raises(HostError) as caught:
-            app_module.consented_distro(tmp_path)
+            hostconfig.consented_distro(tmp_path)
         assert caught.value.code == "orchestrator_distro_invalid"
         assert caught.value.code in HOST_ERROR_CODES
     (tmp_path / "config.toml").write_text(
         "[orchestrator]\nnot toml at all\n", encoding="utf-8"
     )
     with pytest.raises(HostError) as caught:
-        app_module.consented_distro(tmp_path)
+        hostconfig.consented_distro(tmp_path)
     assert caught.value.code == "orchestrator_distro_invalid"
 
 
@@ -2763,7 +2782,7 @@ def test_a_system_unit_guest_is_brought_up_by_its_own_manager(
 
 def test_an_ownerless_host_does_not_blame_its_config(host_log: log.HostLog) -> None:
     from types import SimpleNamespace
-    from crucible.host.app import engine_token_detail
+    from crucible.host.pairing_sync import engine_token_detail
 
     context = SimpleNamespace(
         presence=presence.Presence(Distro.PRESENT, Engine.RUNNING, "up", Owner.NONE),
@@ -2938,7 +2957,7 @@ def test_the_restart_of_a_system_unit_guest_goes_through_root(
 
 def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) -> None:
     import subprocess as sp
-    from crucible.host.runner import ProcessRunner
+    from crucible.platform.runner import ProcessRunner
 
     seen: dict[str, object] = {}
 
@@ -2983,7 +3002,7 @@ def piping(stdout: bytes = b"", stderr: bytes = b"", code: int = 0):
 def a_runner(monkeypatch, fake_run) -> object:
     import subprocess as sp
 
-    from crucible.host.runner import ProcessRunner
+    from crucible.platform.runner import ProcessRunner
 
     monkeypatch.setattr(sp, "run", fake_run)
     return ProcessRunner("win32", {}, cwd="C:/Users/x/AppData/Local/Crucible")
@@ -2996,7 +3015,7 @@ def test_wsl_exes_own_utf16_message_is_read_as_a_sentence(monkeypatch) -> None:
 
     assert result.stderr == WSL_E_DISTRO_NOT_FOUND
     assert "\x00" not in result.stderr
-    assert result.said().startswith("There is no distribution with the supplied name.")
+    assert result.output_tail().startswith("There is no distribution with the supplied name.")
 
 
 def test_a_bom_marks_the_same_stream_even_when_it_is_one_word(monkeypatch) -> None:
@@ -3485,7 +3504,7 @@ def _real_sequence_host(
     host = app_module.Host(context)
     host._install_door = door_module.OrchestratorDoor(
         context.log,
-        app_module._sequence(context, host),
+        move_policy.move_sequence(context, host),
         token=lambda: "t",
         orchestrator=FakeOrchestrator(),
     )
@@ -3714,24 +3733,24 @@ def test_a_sound_outcome_is_not_quarantined(tmp_path: Path) -> None:
 
 
 def test_a_corrupt_cleanup_record_is_quarantined_and_the_cleanup_dropped(tmp_path: Path) -> None:
-    record = tmp_path / installer.CLEANUP_RECORD
+    record = tmp_path / cleanup_record.CLEANUP_RECORD
     record.write_text("{not json", encoding="utf-8")
     said: list[str] = []
-    aside = installer.quarantine_bad_cleanup_record(tmp_path, said.append)
+    aside = cleanup_record.quarantine_bad_cleanup_record(tmp_path, said.append)
     assert aside is not None and aside.is_file() and ".bad-" in aside.name
     assert not record.exists()
     assert said and str(aside) in said[0] and "crucible uninstall --purge-weights" in said[0]
-    installer.record_cleanup(tmp_path, {("model", "a")})
-    assert installer.quarantine_bad_cleanup_record(tmp_path, said.append) is None
+    cleanup_record.record_cleanup(tmp_path, {("model", "a")})
+    assert cleanup_record.quarantine_bad_cleanup_record(tmp_path, said.append) is None
     assert record.is_file(), "a sound record stays where it is"
 
 
 def test_a_cleanup_record_that_is_not_json_is_refused_by_name_not_by_a_traceback(tmp_path: Path) -> None:
-    (tmp_path / installer.CLEANUP_RECORD).write_text("{not json", encoding="utf-8")
+    (tmp_path / cleanup_record.CLEANUP_RECORD).write_text("{not json", encoding="utf-8")
     with pytest.raises(HostError) as caught:
-        installer.cleanup_subjects(tmp_path)
-    assert caught.value.code == installer.CLEANUP_RECORD_INVALID
-    assert str(tmp_path / installer.CLEANUP_RECORD) in caught.value.message
+        cleanup_record.cleanup_subjects(tmp_path)
+    assert caught.value.code == cleanup_record.CLEANUP_RECORD_INVALID
+    assert str(tmp_path / cleanup_record.CLEANUP_RECORD) in caught.value.message
 
 
 def _import_walk(tmp_path: Path, runner: Scripted, events: list[installer.Event]) -> installer.EngineInstall:
@@ -3769,7 +3788,7 @@ def test_a_wsl_directory_with_foreign_files_is_refused_with_the_directory_and_th
 
 
 def test_a_distro_crucible_did_not_make_is_named_with_the_unregister_command_and_its_cost(tmp_path: Path) -> None:
-    from crucible.host.wsl_states import WSL_CONF_MARKER
+    from crucible.platform.wsl_table import WSL_CONF_MARKER
 
     events: list[installer.Event] = []
     runner = Scripted(answers={
@@ -3815,7 +3834,7 @@ TASKLIST_SAMPLE = '"other.exe","4242","Console","1","10,000 K"\r\n'
 
 
 def test_the_port_holder_is_read_from_netstat_and_tasklist_and_named_with_its_pid(monkeypatch) -> None:
-    from crucible.host import portholder
+    from crucible.platform import portholder
 
     assert portholder.listening_pid(NETSTAT_SAMPLE, 7101) == 4242
     assert portholder.listening_pid(NETSTAT_SAMPLE, 7100) is None
@@ -3943,8 +3962,7 @@ def test_try_again_names_the_log_when_the_controller_will_not_start(tmp_path: Pa
 def test_there_is_one_alive_and_it_reads_access_denied_as_alive() -> None:
     from crucible import processlock, uninstall
 
-    assert app_module._alive is processlock.alive
-    assert uninstall._alive is processlock.alive
+    assert uninstall.alive is processlock.alive
     assert processlock.alive(os.getpid()) is True
     assert processlock.alive(2 ** 22 + 1) is False
 

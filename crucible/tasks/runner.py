@@ -9,9 +9,8 @@ from typing import Any, Callable
 
 from .. import interpreter, procgroup, tasks
 from ..errors import ApiError
+from ..platform.paths import PROGRESS_INTERVAL_SECONDS
 from .states import Task
-
-PROGRESS_INTERVAL_SECONDS = 0.5
 
 TERMINATE_GRACE_SECONDS = 10.0
 

@@ -7,8 +7,9 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import CLIENT_NAME_HEADER, weights
+from crucible import weights
 from crucible.manifests import load_manifest
+from crucible.protocol import CLIENT_HEADER
 
 from .conftest import FAKE_BACKEND
 
@@ -203,7 +204,7 @@ def test_the_removal_records_the_client_s_stated_name_over_its_user_agent(
         headers={
             **auth,
             "User-Agent": "python-httpx/0.27",
-            CLIENT_NAME_HEADER: "foundry/owens-pc",
+            CLIENT_HEADER: "foundry/owens-pc",
         },
     )
     assert response.status_code == 204

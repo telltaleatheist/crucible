@@ -9,10 +9,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import catalog, service, wsl
 from .errors import CrucibleError
+from .memorybudget import gib_text
 from .platform import hostconfig
 from .platform.paths import LOG_NAME
 from .processlock import alive
-from .wsl import CRUCIBLE_DISTRO, GUEST_CRUCIBLE
+from .wsl import CRUCIBLE_DISTRO
 
 
 class UninstallError(CrucibleError):
@@ -194,7 +195,7 @@ def path_bytes(path: Path) -> int:
 
 
 def gib(value: int) -> str:
-    return f"{value / 1024 ** 3:.2f} GiB"
+    return gib_text(value, 2)
 
 
 def _remove_path(home: Path, path: Path) -> list[str]:
@@ -216,9 +217,6 @@ def wsl_list_argv() -> list[str]:
     return wsl.list_argv()
 
 
-parse_wsl_list = wsl.parse_distro_list
-
-
 def wsl_uninstall_argv(
     *, purge_weights: bool, dry_run: bool, distro: str = CRUCIBLE_DISTRO
 ) -> list[str]:
@@ -227,14 +225,11 @@ def wsl_uninstall_argv(
         flags += " --purge-weights"
     if dry_run:
         flags += " --dry-run"
-    return wsl.guest_shell_argv(distro, f'"{GUEST_CRUCIBLE}" uninstall{flags}')
+    return wsl.guest_shell_argv(distro, f'"{wsl.GUEST_CRUCIBLE}" uninstall{flags}')
 
 
 def local_argv(running_from: Path, action: str) -> list[str]:
     return [str(running_from), *LOCAL_VERB, action]
-
-
-_alive = alive
 
 
 def read_host_pid(home: Path) -> int | None:
@@ -248,7 +243,7 @@ def read_host_pid(home: Path) -> int | None:
     if not text.isdigit():
         return None
     pid = int(text)
-    return pid if _alive(pid) else None
+    return pid if alive(pid) else None
 
 
 def read_backend_kind(home: Path) -> str | None:
@@ -537,7 +532,7 @@ def _end_controller(
         f"{pid} alone (not its tree) in Task Manager, then run this uninstall again"
     )
     lines = _run_or_raise(runner, local_argv(running_from, "shutdown"), "stop_failed", unfinished)
-    if _alive(pid):
+    if alive(pid):
         raise UninstallError(f"stop_failed: {unfinished}")
     return lines
 
@@ -704,7 +699,7 @@ def _wsl_step(
             f"`{' '.join(listed.argv)}` exited {listed.returncode}: "
             f"{listed.text()}",
         )
-    names = parse_wsl_list(listed.stdout)
+    names = wsl.parse_distro_list(listed.stdout)
     if CRUCIBLE_DISTRO not in names:
         return _wsl_refused(
             "wsl_distro_absent",
@@ -845,7 +840,6 @@ __all__ = [
     "gib",
     "known_entries",
     "mechanism_for_platform",
-    "parse_wsl_list",
     "path_bytes",
     "plan",
     "read_backend_kind",

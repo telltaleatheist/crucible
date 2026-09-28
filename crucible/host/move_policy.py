@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager, Protocol
 
+from ..platform.errors import HostError
 from ..platform.hostconfig import CONSENT_TABLE, WSL_KEY, WSL_NEVER, declined_wsl, read_token
 from ..platform.paths import ENGINE_PORT, engine_url
 from ..wsl import CRUCIBLE_DISTRO
-from . import installer, outcome, wslstate
+from . import cleanup_record, installer, outcome, wslstate
 from .catalog import CatalogPort, GuestCatalog, HttpCatalog
 from .context import HostContext
 from .controller_door import OrchestratorDoor
-from .errors import HostError
 from .state import EngineDecision, Owner
 
 Emit = installer.Emit
@@ -232,8 +232,8 @@ class MoveRecorder:
 
 
 def _complete_the_active_guest(context: HostContext, host: MoveHost, emit: Emit) -> None:
-    record = context.home / installer.CLEANUP_RECORD
-    if record.exists() and installer.quarantine_bad_cleanup_record(context.home, context.log.write) is None:
+    record = context.home / cleanup_record.CLEANUP_RECORD
+    if record.exists() and cleanup_record.quarantine_bad_cleanup_record(context.home, context.log.write) is None:
         host.resume_model_cleanup(raise_errors=True)
     else:
         host.verify_active_guest()

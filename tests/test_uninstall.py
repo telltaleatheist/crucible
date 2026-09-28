@@ -347,7 +347,7 @@ def test_the_tray_is_asked_to_stop_its_engine_then_to_quit_and_is_never_force_ki
     python = str(installed_home / "server" / "bin" / "python")
     runner = Runner({("wsl.exe", "-l"): answer(out=f"Ubuntu\n{uninstall.CRUCIBLE_DISTRO}\n")})
     monkeypatch.setattr(
-        uninstall, "_alive",
+        uninstall, "alive",
         lambda pid: pid == 4242 and not runner.ran(python, "-m", "crucible.cli", "local", "shutdown"),
     )
     plan = uninstall.run(make(installed_home, platform="win32", runner=runner, wsl_too=True))
@@ -366,7 +366,7 @@ def test_a_controller_that_will_not_quit_is_named_with_its_log_and_nothing_is_re
     installed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (installed_home / "host.pid").write_text("4242", encoding="utf-8")
-    monkeypatch.setattr(uninstall, "_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(uninstall, "alive", lambda pid: pid == 4242)
     plan = uninstall.run(make(installed_home, platform="win32"))
     refused = step(plan, "stop-controller").refused
     assert refused is not None and refused.fatal
@@ -387,7 +387,7 @@ def test_a_controller_with_no_engine_has_nothing_to_stop_and_is_still_ended(
     python = str(installed_home / "server" / "bin" / "python")
     runner = Runner()
     monkeypatch.setattr(
-        uninstall, "_alive",
+        uninstall, "alive",
         lambda pid: pid == 4242 and not runner.ran(python, "-m", "crucible.cli", "local", "shutdown"),
     )
     plan = uninstall.run(make(installed_home, platform="win32", runner=runner))
@@ -400,7 +400,7 @@ def test_a_stale_lock_is_not_a_running_tray(
     installed_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (installed_home / "host.pid").write_text("4242", encoding="utf-8")
-    monkeypatch.setattr(uninstall, "_alive", lambda pid: False)
+    monkeypatch.setattr(uninstall, "alive", lambda pid: False)
     plan = make(installed_home, platform="win32")
     for name in ("stop-engine", "stop-controller"):
         refused = step(plan, name).refused

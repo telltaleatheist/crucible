@@ -7,8 +7,8 @@ import pytest
 
 from crucible import lan
 from crucible.errors import CrucibleError
-from crucible.host import landoor
-from crucible.host.runner import RunResult
+from crucible.platform import lan_door as landoor
+from crucible.platform.runner import RunResult
 
 WINDOWS_ENV = {"USERPROFILE": r"C:\Users\tellt"}
 

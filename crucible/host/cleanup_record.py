@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Callable
 
 from ..atomicjson import write_json
-from .errors import HostError
-from .quarantine import quarantine
+from ..platform.errors import HostError
+from ..platform.quarantine import quarantine
 
 CLEANUP_RECORD = "migration-cleanup.json"
 

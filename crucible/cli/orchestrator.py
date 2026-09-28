@@ -10,8 +10,8 @@ from .common import EXIT_OK, EXIT_REFUSED, _fail
 def _orchestrator_try_again() -> int:
     from ..config import crucible_home
     from ..host import outcome as host_outcome
-    from ..host.errors import HostError
     from ..host.retry import try_again
+    from ..platform.errors import HostError
 
     try:
         ended = try_again(crucible_home())
@@ -35,9 +35,9 @@ def cmd_guest(args: argparse.Namespace) -> int:
 
 
 def cmd_orchestrator(args: argparse.Namespace) -> int:
-    from ..host import startup as host_startup
-    from ..host.errors import HostError
-    from ..host.runner import ProcessRunner
+    from ..platform import startup as host_startup
+    from ..platform.errors import HostError
+    from ..platform.runner import ProcessRunner
 
     if sys.platform != "win32":
         return _fail(

@@ -5,10 +5,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, ContextManager
 
-from . import installer
+from ..platform.errors import HostError
+from . import cleanup_record, installer
 from .catalog import CatalogPort, StoppedWindowsCatalog
 from .context import HostContext
-from .errors import HostError
 from .presence import Presence
 from .state import Engine, Owner
 
@@ -35,7 +35,7 @@ def stopped_windows_catalog(home: Path) -> CatalogPort:
     from ..backend import detect_backend
     from ..config import load_config
 
-    return StoppedWindowsCatalog(load_config(home), detect_backend(), installer.cleanup_subjects(home))
+    return StoppedWindowsCatalog(load_config(home), detect_backend(), cleanup_record.cleanup_subjects(home))
 
 
 class ModelCleanup:
@@ -58,7 +58,7 @@ class ModelCleanup:
 
     @property
     def record(self) -> Path:
-        return self._context.home / installer.CLEANUP_RECORD
+        return self._context.home / cleanup_record.CLEANUP_RECORD
 
     def due(self) -> bool:
         presence = self._context.presence
@@ -89,7 +89,7 @@ class ModelCleanup:
 
     def _quarantined(self) -> bool:
         context = self._context
-        return installer.quarantine_bad_cleanup_record(context.home, context.log.write) is not None
+        return cleanup_record.quarantine_bad_cleanup_record(context.home, context.log.write) is not None
 
     def _retire_windows_copies(self) -> None:
         context = self._context

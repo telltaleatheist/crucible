@@ -9,13 +9,10 @@ from .. import wsl
 from ..platform.paths import ENGINE_HOST, ENGINE_PORT, engine_url
 from ..platform.runner import Child, Runner, RunResult
 from ..service import UNIT_NAME
-from ..wsl import CRUCIBLE_DISTRO, guest_argv
-from ..wsl import parse_distro_list as parse_wsl_list
+from ..wsl import CRUCIBLE_DISTRO
 from .log import HostLog
 from .state import Distro, Engine, Owner
-from .wslstate import LXSS_KEY as LXSS_KEY
 from .wslstate import read_wsl_distros, wsl_answer_line
-from .wslstate import registered_wsl_distros as registered_wsl_distros
 
 BOOT_WAIT_SECONDS = 30
 WATCH_SECONDS = 15
@@ -34,7 +31,7 @@ RECIPE_HOST_MODE_RESPAWN = "host-mode-respawn"
 
 
 def wsl_boot_argv(distro: str = CRUCIBLE_DISTRO) -> list[str]:
-    return guest_argv(distro, ["true"])
+    return wsl.guest_argv(distro, ["true"])
 
 
 def wsl_list_argv() -> list[str]:
@@ -50,7 +47,7 @@ def guest_pairing_argv(distro: str) -> list[str]:
 
 
 def keepalive_argv(distro: str) -> list[str]:
-    return guest_argv(distro, ["sleep", "infinity"])
+    return wsl.guest_argv(distro, ["sleep", "infinity"])
 
 
 HANDOVER_SECONDS = 600
@@ -178,7 +175,7 @@ class PresenceWatcher:
         if not listed.ok:
             self._log.write(f"find-engine: wsl -l -v --running: {listed.output_tail()}")
             return None
-        for name in parse_wsl_list(listed.stdout):
+        for name in wsl.parse_distro_list(listed.stdout):
             line = self.read_guest_pairing(name)
             if line is not None:
                 self._log.write(
@@ -277,8 +274,6 @@ class PresenceWatcher:
             if self._monotonic() >= deadline:
                 return False
             self._sleep(1.0)
-
-    _wait_for_ping = wait_for_ping
 
     def recover(self) -> bool:
         probe = self.probe_unit()
@@ -395,7 +390,7 @@ class PresenceWatcher:
         if self.held_distro is None:
             return None
         distro = self.held_distro
-        bridge = self._runner.spawn(guest_argv(distro, ["sleep", str(int(seconds))]))
+        bridge = self._runner.spawn(wsl.guest_argv(distro, ["sleep", str(int(seconds))]))
         self._log.write(
             f'hold: "{distro}" is handed over to pid {bridge.pid} for {int(seconds)} s, '
             "so the next tray finds its engine still up (#35)"

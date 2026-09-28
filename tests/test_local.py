@@ -6,7 +6,7 @@ from urllib.error import URLError
 
 import pytest
 
-from crucible import local
+from crucible import controller_client, local
 
 
 def test_record_is_atomic_and_contains_no_credentials(tmp_path):
@@ -58,10 +58,11 @@ def test_timeout_is_not_reported_as_stopped(monkeypatch, tmp_path):
 
 
 def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatch):
-    from crucible.host.app import Host, HostContext, engine_token
+    from crucible.host.app import Host, HostContext
+    from crucible.host.pairing_sync import engine_token
     from crucible.host.log import HostLog
     from crucible.host.presence import Presence, UnitProbe
-    from crucible.host.menu import Distro, Engine, Owner
+    from crucible.host.state import Distro, Engine, Owner
     from types import SimpleNamespace
     (tmp_path / "engine.stopped").write_text("stopped")
     (tmp_path / "pairing").write_text("crucible://engine@127.0.0.1:7100/#secret")
@@ -82,9 +83,9 @@ def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
     from crucible.host.presence import Presence, UnitProbe
-    from crucible.host.menu import Distro, Engine, Owner
-    from crucible.host.runner import RunResult
-    from crucible.host.errors import HostError
+    from crucible.host.state import Distro, Engine, Owner
+    from crucible.platform.runner import RunResult
+    from crucible.platform.errors import HostError
     from types import SimpleNamespace
     runner = SimpleNamespace(run=lambda *args, **kwargs: RunResult(code=1, stdout="", stderr="denied", failure=None))
     context = HostContext(runner=runner, log=HostLog(tmp_path / "log", tmp_path / "old"), home=tmp_path,
@@ -102,7 +103,7 @@ def test_controller_exit_waits_for_child_shutdown(tmp_path):
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
     from crucible.host.presence import Presence, UnitProbe
-    from crucible.host.menu import Distro, Engine, Owner
+    from crucible.host.state import Distro, Engine, Owner
     from types import SimpleNamespace
     entered, finish = threading.Event(), threading.Event()
     def stop_child():
@@ -152,11 +153,11 @@ def test_watch_failure_is_not_an_operator_stop(monkeypatch, tmp_path):
 @pytest.mark.parametrize("fault", [None, "ping", "empty-info", "info-name", "api-version", "native-backend"])
 def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
-    from crucible.host import app
+    from crucible.host import app, pairing_sync
     from crucible.host.log import HostLog
     from crucible.host.presence import Presence, UnitProbe
-    from crucible.host.menu import Distro, Engine, Owner
-    from crucible.host.errors import HostError
+    from crucible.host.state import Distro, Engine, Owner
+    from crucible.platform.errors import HostError
     line = "crucible://guest@127.0.0.1:7100/#guest-token"
     pairing = tmp_path / "pairing"
     pairing.write_text("old pairing")
@@ -170,7 +171,7 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
         presence=Presence(Distro.ABSENT, Engine.RUNNING, "native", Owner.HOST_CHILD), release="test")
     host = app.Host(context)
     monkeypatch.setattr(app, "PresenceWatcher", lambda *a, **kw: guest)
-    monkeypatch.setattr(app, "_write_pairing", lambda c: pairing.write_text(line))
+    monkeypatch.setattr(pairing_sync, "write_pairing", lambda c: pairing.write_text(line))
     monkeypatch.setattr(host, "claim", lambda: events.append("guest claimed") or True)
     def request(url, **kwargs):
         if url.endswith("ping"):
@@ -182,7 +183,7 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
         return {"server": {"name": "wrong" if fault == "info-name" else "guest",
                            "api_version": 2 if fault == "api-version" else 1},
                 "host": {"backend": "llama-windows" if fault == "native-backend" else "cuda-linux"}}
-    monkeypatch.setattr(local, "request", request)
+    monkeypatch.setattr(app, "request", request)
     if fault is not None:
         with pytest.raises(HostError, match="not reaching"):
             host.finish_wsl_move()
@@ -200,9 +201,9 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
 def test_controller_failure_always_has_one_terminal_event(tmp_path, already_emitted):
     from types import SimpleNamespace
     from urllib.request import Request, urlopen
-    from crucible.host.door import OrchestratorDoor, serve, INSTALL_PATH
+    from crucible.host.controller_door import OrchestratorDoor, serve, INSTALL_PATH
     from crucible.host.log import HostLog
-    from crucible.host.errors import HostError
+    from crucible.platform.errors import HostError
     from crucible.host.installer import Event
     def failing(emit):
         if already_emitted:
@@ -282,7 +283,7 @@ def test_an_engine_of_another_version_is_not_a_successful_start(monkeypatch, tmp
     _stub_the_service_path(monkeypatch)
     try:
         with pytest.raises(local.LocalError) as caught:
-            local.act("start", tmp_path)
+            local.run_engine_verb("start", tmp_path)
         assert "engine_version_stale" in str(caught.value)
         assert "0.0.1-previous" in str(caught.value)
         assert local.VERSION in str(caught.value)
@@ -295,7 +296,7 @@ def test_an_orchestrator_only_installation_judges_nobodys_engine(monkeypatch, tm
     _config(tmp_path, '[orchestrator]\ndistro = "Ubuntu"\n')
     _stub_the_service_path(monkeypatch)
     try:
-        observed = local.act("start", tmp_path)
+        observed = local.run_engine_verb("start", tmp_path)
         assert observed["state"] == "running"
         assert observed["version"] == "0.0.1-previous"
     finally:
@@ -310,7 +311,7 @@ def test_a_config_that_cannot_be_read_is_refused_by_name_and_never_read_as_ours(
     _stub_the_service_path(monkeypatch)
     try:
         with pytest.raises(local.LocalError) as caught:
-            local.act("start", tmp_path)
+            local.run_engine_verb("start", tmp_path)
         assert "local_config_unreadable" in str(caught.value)
         assert "engine_version_stale" not in str(caught.value)
     finally:
@@ -336,7 +337,7 @@ def test_a_refusal_behind_an_http_error_still_names_itself():
     exc = urllib.error.HTTPError(
         "http://127.0.0.1:7101/local/stop", 409, "Conflict", {}, io.BytesIO(body)
     )
-    said = local.said(exc)
+    said = local.refusal_text(exc)
     assert "engine_stop_failed" in said
     assert "Unit not loaded" in said
     assert "409" in said, "the status code is still worth keeping"
@@ -350,15 +351,15 @@ def test_a_failure_with_no_structured_body_is_reported_as_it_came():
         "http://127.0.0.1:7101/local/stop", 502, "Bad Gateway", {},
         io.BytesIO(b"<html>nginx</html>"),
     )
-    assert local.said(exc) == str(exc)
-    assert local.said(ValueError("plain")) == "plain"
+    assert local.refusal_text(exc) == str(exc)
+    assert local.refusal_text(ValueError("plain")) == "plain"
 
 
 
 def test_a_token_mismatch_names_both_files_the_log_and_the_recovery(tmp_path):
-    from crucible.host.paths import INSTALL_ONE_LINER
+    from crucible.platform.paths import INSTALL_ONE_LINER
 
-    said = str(local.token_mismatch(tmp_path))
+    said = str(controller_client.token_mismatch(tmp_path))
     assert said.startswith("engine_token_mismatch:")
     for name in ("pairing", "config.toml", "host.log"):
         assert str(tmp_path / name) in said, name
@@ -387,19 +388,74 @@ def test_the_door_is_also_tried_with_the_config_token_before_the_guest_is_asked(
 
 
 def test_a_wrong_controller_names_what_holds_the_port(monkeypatch):
-    from crucible.host import portholder
+    from crucible.platform import portholder
 
     monkeypatch.setattr(portholder, "held_sentence", lambda port, run=None: f"port {port} is held by other.exe (pid 7); stop it or run `crucible local shutdown`")
-    said = str(local.wrong_controller("HTTP 404"))
+    said = str(controller_client.wrong_controller("HTTP 404"))
     assert said.startswith("wrong_controller:")
     assert "other.exe (pid 7)" in said
     assert "HTTP 404" in said
 
 
 def test_a_controller_that_does_not_start_names_its_log_and_the_reinstall(tmp_path):
-    from crucible.host.paths import INSTALL_ONE_LINER
+    from crucible.platform.paths import INSTALL_ONE_LINER
 
-    said = str(local.controller_start_failed(tmp_path, 60))
+    said = str(controller_client.controller_start_failed(tmp_path, 60))
     assert said.startswith("controller_start_failed:")
     assert str(tmp_path / "host.log") in said
     assert INSTALL_ONE_LINER in said
+
+
+def test_a_broken_windows_pairing_names_the_file_and_the_way_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    (tmp_path / "pairing").write_text("not a pairing line\n")
+    with pytest.raises(local.LocalError) as caught:
+        local.connection(tmp_path)
+    said = str(caught.value)
+    assert said.startswith("local_pairing_invalid:")
+    assert str(tmp_path / "pairing") in said
+    assert "crucible local shutdown" in said and "crucible local start" in said
+
+
+def test_shutdown_reaches_the_controller_past_a_broken_pairing_and_sets_it_aside(tmp_path, monkeypatch):
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(local.traylife, "close_tray", lambda home: None)
+    (tmp_path / "pairing").write_text("not a pairing line\n")
+    (tmp_path / "config.toml").write_text('[auth]\ntoken = "from-config"\n', encoding="utf-8")
+    asked: list[str] = []
+
+    def shutdown_controller(home, *, engine_token, **_collaborators):
+        asked.append(engine_token())
+
+    monkeypatch.setattr(controller_client, "shutdown_controller", shutdown_controller)
+    local.shutdown()
+    assert asked == ["from-config"]
+    assert not (tmp_path / "pairing").exists()
+    assert len(list(tmp_path.glob("pairing.bad-*"))) == 1
+
+
+def test_the_controller_refusals_name_the_next_command(tmp_path):
+    info = {"server": {"api_version": controller_client.API_VERSION, "version": "0.1.0"},
+            "role": "orchestrator", "local_lifecycle_version": 0}
+    with pytest.raises(local.LocalError) as caught:
+        controller_client._shutdown_contract(lambda path, token: (info, token), "t")
+    assert "controller_upgrade_unsupported" in str(caught.value)
+    assert "crucible local shutdown" in str(caught.value)
+
+
+def test_a_non_object_answer_names_the_status_command(monkeypatch):
+    import io
+
+    class Answer(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(controller_client, "open_url", lambda url, **kw: Answer(b"[]"))
+    with pytest.raises(local.LocalError) as caught:
+        controller_client.request("http://127.0.0.1:7101/v1/ping")
+    assert "local_protocol_invalid" in str(caught.value)
+    assert "crucible local status" in str(caught.value)
