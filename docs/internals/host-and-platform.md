@@ -676,9 +676,12 @@ raises (`503 interfaces_unreadable`), never an empty list.
 ## Host tools (`hosttools.py`)
 
 `which()` searches `<home>/tools/bin` first, then PATH (minus Windows drives in WSL). Pinned
-ffmpeg per platform in `FFMPEG_BUILDS` (linux-x86_64: BtbN static LGPL n8.1.3, rehosted on our
-`tools` release; glibc ≥ 2.28; audio needs no GPL codecs). darwin-arm64 has no row and uses
-Homebrew on PATH. ffprobe is placed beside ffmpeg. The digest is checked before anything is
+ffmpeg per platform in `FFMPEG_BUILDS`, both on our `tools` release: linux-x86_64 is BtbN's
+static LGPL n8.1.3 rehosted unchanged (glibc ≥ 2.28); darwin-arm64 is our own n8.1.3 built
+from ffmpeg.org's signed source on the Mac (`--disable-autodetect --disable-shared
+--enable-static`, VideoToolbox/AudioToolbox/SecureTransport, zlib/bzlib/iconv from the
+system, macOS 13+, ad-hoc codesigned; the archive also carries LICENSE.txt). Audio needs no
+GPL codecs. ffprobe is placed beside ffmpeg. The digest is checked before anything is
 placed; files are written under temporary names and renamed. Worker PATH puts the tools dir
 first so libraries (urvc's `static_ffmpeg`) never download their own. Every "tool missing"
 names the directories and PATH searched (`searched_note`).

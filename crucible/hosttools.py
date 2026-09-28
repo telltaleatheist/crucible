@@ -59,6 +59,22 @@ FFMPEG_BUILDS: dict[str, ToolBuild] = {
             "ffmpeg-n8.1.3-linux64-lgpl-8.1.tar.xz, re-hosted unchanged"
         ),
     ),
+    "darwin-arm64": ToolBuild(
+        version="n8.1.3",
+        url=(
+            "https://github.com/telltaleatheist/crucible/releases/download/"
+            "tools/ffmpeg-n8.1.3-darwin-arm64-lgpl.tar.xz"
+        ),
+        sha256="f4216e6ff3c2db7de78ad9cb154a66aa2a98f5b4a3b060cfbc5af5a71bc0d7b4",
+        bytes=8_090_236,
+        root="ffmpeg-n8.1.3-darwin-arm64-lgpl",
+        provenance=(
+            "built on owens-mac-studio 2026-09-28 from ffmpeg.org ffmpeg-8.1.3.tar.xz "
+            "(sha256 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3, "
+            "signature checked against key D67658D8); LGPL 2.1+, static, Apple clang, "
+            "macOS 13+, system frameworks only, ad-hoc signed"
+        ),
+    ),
 }
 
 

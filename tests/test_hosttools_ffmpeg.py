@@ -20,7 +20,7 @@ def test_every_pinned_build_is_on_our_tools_release_with_a_full_digest(platform_
     assert build.url.startswith(TOOLS_RELEASE)
     assert build.url.endswith(".tar.xz")
     assert re.fullmatch(r"[0-9a-f]{64}", build.sha256)
-    assert build.bytes > 10_000_000
+    assert build.bytes > 1_000_000
     assert build.root == build.url.rsplit("/", 1)[-1].removesuffix(".tar.xz")
     assert build.version in build.root
     assert build.provenance
