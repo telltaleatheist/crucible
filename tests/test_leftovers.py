@@ -18,12 +18,12 @@ from crucible.jobs.tts.common import VOICE_ROW_FIELDS, voice_row
 from crucible.tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
 from crucible.voicecard import CardError, export_manifest
 from crucible.voicerepo import REPO_MANIFEST_NAME, parse_repo_manifest
+from crucible.voicecatalog import load_voice
 from crucible.voices import (
     MANIFEST_ENGINE,
     MANIFEST_OVERRIDE,
     MANIFEST_REPO,
     check_pace,
-    load_voice,
 )
 
 from .conftest import configure_box
