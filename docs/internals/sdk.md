@@ -121,7 +121,7 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
 - `X-Crucible-Client` carries the bare `clientName` beside `User-Agent`, because a
   browser silently drops `User-Agent`. The server validates 1-80 characters with
   no control characters and falls back to `User-Agent` otherwise; the header name
-  must match `crucible/__init__.py`'s `CLIENT_NAME_HEADER`. It is sent on the
+  must match `crucible/protocol.py`'s `CLIENT_HEADER`. It is sent on the
   unauthenticated pairing doors too.
 - **Stale pooled sockets.** undici keeps an idle connection about 4 s and
   uvicorn's default keep-alive is 5 s, so a request a few seconds after the last

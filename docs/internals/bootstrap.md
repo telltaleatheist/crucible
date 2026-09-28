@@ -179,7 +179,7 @@ the code does not say by itself.
   `wsl --install` needs, upgrading a native install) and a second caller would
   race it. Linux and macOS walk the steps locally.
 - The door is `http://127.0.0.1:7101` (not `localhost`, which may resolve to
-  `::1`). Its other end is `crucible/host/door.py`; change both together. The
+  `::1`). Its other end is `crucible/host/controller_door.py`; change both together. The
   envelope is `crucible/tasks.py`'s `append_event` (`{id, event, data}`) so the
   Windows server can relay it under a task id without reshaping it.
 - Event kinds beyond tasks.py's: `state` (a WSL table row, and how a caller learns

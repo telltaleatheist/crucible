@@ -9,10 +9,11 @@ constraints, the measured numbers and the owner's rulings behind them.
 ## Package constants (`crucible/__init__.py`)
 
 - `VERSION` is the build. `API_VERSION` is the HTTP contract, and it changes only on a
-  breaking change. `API_HEADER` and `CLIENT_NAME_HEADER` live here rather than in
-  `api.py` because the orchestrator half (`peer.py`, running inside the Windows tray)
-  has to send them and must not import FastAPI or uvicorn.
-- `CLIENT_NAME_HEADER` exists because browsers cannot set `User-Agent`. It is a
+  breaking change. `API_HEADER`, `CLIENT_HEADER` and `USER_AGENT_HEADER` live in
+  `crucible/protocol.py` rather than in the api package because the controller half
+  (`peer.py`, running inside the Windows tray) has to send them and must not import
+  FastAPI or uvicorn.
+- `CLIENT_HEADER` exists because browsers cannot set `User-Agent`. It is a
   forbidden header, so a browser client would otherwise be recorded as a
   `Mozilla/5.0 ...` string.
 - `KEEP_ALIVE_SECONDS = 75` is shared by both uvicorn entry points

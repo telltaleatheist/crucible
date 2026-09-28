@@ -328,7 +328,7 @@ is what runs.
 
 `LOCALAPPDATA` is read from the environment and never assembled from a username. The
 existence of that `crucible.cmd` is what "the host is installed" means
-(`crucible/host/paths.py`).
+(`crucible/platform/paths.py`).
 
 **macOS and Linux** — the server pack's console script, under the home the operator set:
 
