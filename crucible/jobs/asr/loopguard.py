@@ -22,6 +22,10 @@ REPEAT_MIN_COUNT = 8
 COLLAPSE_RUN_ITEMS = 12
 ZERO_SPAN_SECONDS = 0.0005
 
+ECHO_RUN_WORDS = 8
+ECHO_WHOLE_MIN_WORDS = 4
+ECHO_QUOTE_WORDS = 6
+
 BUDGET_TOKENS_PER_SECOND = 4096 / 180
 BUDGET_FLOOR_TOKENS = 256
 
@@ -33,6 +37,21 @@ class LoopSignal:
 
     kind: str
     detail: str
+
+
+@dataclass(frozen=True)
+class ContextEcho:
+
+    kind = "context_echo"
+    words: int
+    quote: str
+
+    @property
+    def detail(self) -> str:
+        return (
+            f"{self.words} consecutive word(s) of the job's context, starting "
+            f"{self.quote!r}"
+        )
 
 
 def token_budget(duration_s: float, max_new_tokens: int) -> int:
@@ -47,6 +66,58 @@ def words_of(text: str) -> list[str]:
         if word:
             words.append(word)
     return words
+
+
+def _spoken(text: str) -> list[tuple[str, str]]:
+    pairs = []
+    for raw in text.split():
+        word = _WORD_EDGES.sub("", raw).lower()
+        if word:
+            pairs.append((raw, word))
+    return pairs
+
+
+def _runs(words: Sequence[str], size: int) -> set[tuple[str, ...]]:
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def _echo_start(said: Sequence[str], source: Sequence[str]) -> int | None:
+    if ECHO_WHOLE_MIN_WORDS <= len(said) < ECHO_RUN_WORDS:
+        return 0 if tuple(said) in _runs(source, len(said)) else None
+    runs = _runs(source, ECHO_RUN_WORDS)
+    for start in range(len(said) - ECHO_RUN_WORDS + 1):
+        if tuple(said[start : start + ECHO_RUN_WORDS]) in runs:
+            return start
+    return None
+
+
+def _echo_length(said: Sequence[str], source: Sequence[str], start: int) -> int:
+    longest = 0
+    for origin in range(len(source)):
+        length = 0
+        while (
+            start + length < len(said)
+            and origin + length < len(source)
+            and said[start + length] == source[origin + length]
+        ):
+            length += 1
+        longest = max(longest, length)
+    return longest
+
+
+def context_echo(text: str, context: str | None) -> ContextEcho | None:
+    if not context:
+        return None
+    spoken = _spoken(text)
+    said = [word for _, word in spoken]
+    source = words_of(context)
+    start = _echo_start(said, source)
+    if start is None:
+        return None
+    quoted = [raw for raw, _ in spoken[start : start + ECHO_QUOTE_WORDS]]
+    return ContextEcho(
+        words=_echo_length(said, source, start), quote=" ".join(quoted)
+    )
 
 
 def repeated_phrase(words: Sequence[str]) -> tuple[int, int, int] | None:

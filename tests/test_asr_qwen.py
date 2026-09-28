@@ -586,3 +586,130 @@ def test_the_mac_runs_qwen_asr_one_piece_at_a_time_with_the_same_document(
     assert load["kv_cache_memory_bytes"] is None
     assert load["gpu_memory_utilization"] is None
     assert lines(sent["align"])[0]["device"] == "mps"
+
+
+def test_the_context_recited_whole_is_an_echo_before_any_loop_rule() -> None:
+    echo = loopguard.context_echo(CONTEXT, CONTEXT)
+    assert echo is not None and echo.kind == "context_echo"
+    assert echo.words == len(loopguard.words_of(CONTEXT))
+    assert echo.quote == "Verbatim transcript of a livestream. Transcribe"
+
+
+def test_a_nine_word_run_from_the_middle_of_the_context_is_an_echo() -> None:
+    text = "okay so today, transcribe every disfluency exactly as spoken including filler sounds and then we start"
+    echo = loopguard.context_echo(text, CONTEXT)
+    assert echo is not None
+    assert echo.words == 9
+    assert echo.quote == "transcribe every disfluency exactly as spoken"
+
+
+def test_a_short_piece_that_is_all_context_is_an_echo_and_three_words_are_not() -> None:
+    assert loopguard.context_echo("Um, uh, ah, er.", CONTEXT) is not None
+    assert loopguard.context_echo("um, uh, ah", CONTEXT) is None
+
+
+def test_words_the_context_shares_in_scattered_places_are_speech() -> None:
+    text = (
+        "So the transcript was verbatim, and every word of it, um, was spoken in "
+        "the livestream, including a few repeated words and false starts."
+    )
+    assert loopguard.context_echo(text, CONTEXT) is None
+    assert loopguard.context_echo(LINE * 60, CONTEXT) is None
+    assert loopguard.context_echo(CONTEXT, None) is None
+
+
+def _echo_notes(events: list[dict]) -> list[str]:
+    return [
+        e["data"]["message"] for e in events
+        if e["event"] == "note" and e["data"]["message"].startswith("context_echo")
+    ]
+
+
+@pytest.mark.parametrize("copies", [1, 9])
+def test_a_piece_that_recites_the_context_is_left_empty_and_never_redecoded(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    sent: dict[str, Path], copies: int,
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_TEXT", " ".join([CONTEXT] * copies))
+    job_id, events = run_job(qwen_client, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["context_echo_pieces"] == 1
+    assert _echo_notes(events) == [
+        'context_echo 180.0-360.0s: "Verbatim transcript of a livestream. Transcribe…" '
+        '— the model recited its context over audio with no speech; the '
+        "piece is left empty. params.speech_only: true skips silence before decoding"
+    ]
+    assert not any(
+        e["event"] == "note" and "re-decoding" in e["data"]["message"] for e in events
+    )
+    document = transcript(qwen_client, auth, job_id)
+    assert [s["start"] for s in document["segments"]] == [0.0, 360.0]
+    assert document["redecoded"] == []
+    assert document["pieces"] == 3
+    assert [(r["start"], r["end"], r["reason"]) for r in document["context_echo"]] == [
+        (180.0, 360.0, "context_echo")
+    ]
+    splits = [line for line in lines(sent["asr"]) if line["op"] == "split"]
+    assert [s["max_piece_s"] for s in splits] == [180]
+
+
+def test_the_published_text_leaves_the_echoed_words_out(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_TEXT", CONTEXT)
+    job_id, events = run_job(qwen_client, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    response = qwen_client.get(
+        f"/v1/jobs/{job_id}/artifacts/transcript.text.json", headers=auth
+    )
+    assert response.status_code == 200, response.text
+    assert "disfluency" not in response.text
+    rows = response.json()["pieces"]
+    assert [(r["start"], r["text"], r.get("reason")) for r in rows][1] == (
+        180.0, "", "context_echo"
+    )
+    segments = transcript(qwen_client, auth, job_id)["segments"]
+    assert all("disfluency" not in s["text"] for s in segments)
+
+
+def test_a_repeated_phrase_not_from_the_context_still_spends_the_ladder_and_fails(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", "repeat")
+    job_id, events = run_job(qwen_client, auth)
+    assert events[-1]["event"] == "failed", events[-1]
+    assert events[-1]["data"]["error"]["code"] == "asr_decode_loop"
+    assert _echo_notes(events) == []
+    notes = [
+        e for e in events
+        if e["event"] == "note" and "re-decoding" in e["data"]["message"]
+    ]
+    assert len(notes) == 2
+
+
+def test_a_resumed_job_does_not_decode_or_redecode_a_journaled_echo(
+    qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    sent: dict[str, Path],
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_AT", "200")
+    monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_ECHO_TEXT", " ".join([CONTEXT] * 9))
+    first = submit(qwen_client, auth)
+    assert first.status_code == 202, first.json()
+    resume_id = first.json()["resume_id"]
+    with qwen_client.stream(
+        "GET", f"/v1/jobs/{first.json()['job_id']}/events", headers=auth
+    ) as stream:
+        assert parse_sse(line for line in stream.iter_lines())[-1]["event"] == "done"
+    sent["asr"].unlink()
+    job_id, events = run_job(qwen_client, auth, params={**PARAMS, "resume": resume_id})
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["context_echo_pieces"] == 1
+    assert len(_echo_notes(events)) == 1
+    ops = [line["op"] for line in lines(sent["asr"])]
+    assert ops == ["load", "split"]
+    document = transcript(qwen_client, auth, job_id)
+    assert [s["start"] for s in document["segments"]] == [0.0, 360.0]
+    assert [r["start"] for r in document["context_echo"]] == [180.0]
