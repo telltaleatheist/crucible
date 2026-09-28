@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..errors import EngineError
 from .base import SubprocessEngine, weights_subject_id
+from .mlx_vlm_serve import MAX_TOP_LOGPROBS
 
 SERVE_SCRIPT = Path(__file__).resolve().with_name("mlx_vlm_serve.py")
 
@@ -13,11 +14,17 @@ WIDTH_FLAG = "--width"
 class MlxVlmEngine(SubprocessEngine):
     name = "mlx-vlm"
 
-    decide_logprobs = False
+    decide_logprobs = True
+    max_logprobs = MAX_TOP_LOGPROBS
     decide_basis = (
-        "the Mac page server computes no logprobs "
-        "(engines/mlx_vlm_serve.py: batch_generate(compute_logprobs=False)) and "
-        "refuses a body carrying logprobs (KNOWN_FIELDS)"
+        "Crucible's Mac server (engines/mlx_vlm_serve.py) answers a question body "
+        "with choices[0].logprobs.content[].top_logprobs from mlx-vlm 0.7.1's "
+        "BatchGenerator(compute_logprobs=True, top_logprobs_k=k), which argsorts the "
+        "whole vocabulary and caps nothing (mlx_vlm/generate/ar.py "
+        "GenerationBatch._step L1229-1254, PromptProcessingBatch.generate "
+        "L2182-2267, read on the Mac Studio 2026-09-28); the server caps "
+        "top_logprobs at MAX_TOP_LOGPROBS to match mlx-lm and normalises them in "
+        "float32 (logits_in_float32)"
     )
 
     @classmethod

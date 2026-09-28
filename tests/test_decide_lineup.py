@@ -78,8 +78,8 @@ def test_decide_offers_every_tier_best_first(backend: str) -> None:
     expected = {
         CUDA_LINUX: ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
                      "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
-        MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
-                     "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
+        MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b-vl",
+                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
         LLAMA_WINDOWS: ["qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit",
                         "qwen3.5-9b-vl", "qwen3.5-9b", "qwen3.5-4b",
                         "qwen3.5-2b", "qwen3.5-0.8b"],
@@ -280,3 +280,51 @@ def test_params_b_is_a_number_and_not_a_bool() -> None:
             "demo",
         )
     assert "params_b must be int or float, got bool" in str(caught.value)
+
+
+def test_the_9b_vl_answers_images_on_the_mac_from_the_9b_s_own_folder() -> None:
+    from crucible import decide as decide_core
+
+    vl, text = load_manifest("qwen3.5-9b-vl"), load_manifest("qwen3.5-9b")
+    spec, base = vl.spec(MLX_DARWIN), text.spec(MLX_DARWIN)
+    assert spec.engine == "mlx-vlm" and base.engine == "mlx-lm"
+    assert vl.serves(MLX_DARWIN) == ("text", "image")
+    assert (spec.hf_repo, spec.revision) == (base.hf_repo, base.revision)
+    assert spec.memory is not None and spec.memory.basis == "computed"
+    assert spec.memory.weights_bytes > base.memory.weights_bytes
+    assert "--width" in spec.engine_args
+    decide_core.refuse_images_not_served("qwen3.5-9b-vl", vl, MLX_DARWIN, 8)
+
+
+def test_a_mac_decision_with_images_on_a_text_model_names_the_9b_vl() -> None:
+    from crucible import decide as decide_core
+    from crucible.api.routes.decide import _image_models
+
+    assert _image_models(MLX_DARWIN) == ["qwen3.5-9b-vl"]
+    with pytest.raises(ApiError) as caught:
+        decide_core.refuse_images_not_served(
+            "qwen3.5-9b", load_manifest("qwen3.5-9b"), MLX_DARWIN, 3,
+            lambda: _image_models(MLX_DARWIN),
+        )
+    assert caught.value.code == "model_text_only"
+    assert caught.value.details["image_models"] == ["qwen3.5-9b-vl"]
+    assert '{"type": "load-model", "model": "qwen3.5-9b-vl"}' in caught.value.message
+
+
+def test_with_no_image_model_the_refusal_says_to_drop_the_images() -> None:
+    from crucible import decide as decide_core
+
+    with pytest.raises(ApiError) as caught:
+        decide_core.refuse_images_not_served(
+            "qwen3.5-9b", load_manifest("qwen3.5-9b"), MLX_DARWIN, 1
+        )
+    assert caught.value.details["image_models"] == []
+    assert "without `images`" in caught.value.message
+
+
+def test_the_mac_studio_still_decides_text_on_the_27b() -> None:
+    verdict = decide(
+        BY_NAME["decide"], MLX_DARWIN, total_bytes=64 * GIB,
+        desktop_allowance_bytes=3 * GIB, gpu_vendor="apple", chosen=None,
+    )
+    assert verdict.selected == "qwen3.8-27b-8bit"

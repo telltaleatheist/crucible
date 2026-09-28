@@ -12,7 +12,7 @@ listed under "Where each part lives", `memorybudget`,
 | backend | host | engines |
 |---|---|---|
 | `cuda-linux` | Linux with an NVIDIA card (on Windows: the server inside WSL2) | vLLM for text and pages |
-| `mlx-darwin` | Apple Silicon | `mlx-lm` for text, Crucible's own `mlx_vlm_serve` for pages |
+| `mlx-darwin` | Apple Silicon | `mlx-lm` for text, Crucible's own `mlx_vlm_serve` for pages and for image decisions |
 | `llama-windows` | Windows, natively | `llama-server` (llama.cpp) on GGUF |
 
 - One engine per (backend, class family); `manifests.BACKEND_ENGINES` owns the
@@ -488,7 +488,7 @@ started exactly as `load-model` would).
   Logprobs are computed after logits processors, so a decision sends its own
   sampling and applies no manifest defaults.
 
-### mlx-vlm page server (`mlx_vlm.py`, `mlx_vlm_serve.py`)
+### mlx-vlm server (`mlx_vlm.py`, `mlx_vlm_serve.py`)
 
 - `python -m mlx_vlm server` never put the image in the prompt for dots.ocr
   (216 prompt tokens against 3,464; measured 2026-09-14). Crucible runs the
@@ -505,11 +505,42 @@ started exactly as `load-model` would).
 - The server loads before it binds, so a 200 from `/v1/models` means ready.
   Images are converted to RGB. `--width` comes from the manifest and is
   required.
-- It refuses temperature ≠ 0, top_p ≠ 1, n ≠ 1, streaming, unknown fields, any
-  message shape other than one image plus one text part, and a wrong model.
-  Private upstream names are checked at start (`_check_upstream`). They are
-  safe only because the mlx-vlm version is pinned exactly.
-- It serves no decisions (a logprobs path there would need Owen's ruling).
+- A **page** is a body with no `logprobs`, `top_logprobs` or
+  `chat_template_kwargs` and exactly one user message carrying an `image_url`
+  part (`is_page_request`). It refuses temperature ≠ 0, top_p ≠ 1, n ≠ 1,
+  streaming, unknown fields, any message shape other than one image plus one
+  text part, and a wrong model. Private upstream names are checked at start
+  (`_check_upstream`). They are safe only because the mlx-vlm version is
+  pinned exactly. The page path was checked byte for byte against the
+  shipped server on the Mac Studio (dots.ocr, 2026-09-28: same text, usage
+  and time).
+- Every other body is a **question** (`parse_question`): the decision door's
+  system + user turns, 0 to 8 `data:` images in the user turn (in order),
+  greedy, `max_tokens` honoured, `chat_template_kwargs` limited to
+  `enable_thinking`. A question runs alone (`Asked`), never batched with pages
+  or other questions: its prompt length is its own, and mixed lengths in one
+  batch produce garbage. Eight ~640 px frames in one call are ~3 MP, far below
+  the pages that tripped the Metal watchdog.
+- `logprobs: true` returns `choices[0].logprobs.content[]`, one entry per
+  generated step (a stop token included), each `{token, logprob, bytes,
+  top_logprobs: [{token, logprob, bytes}]}`, the OpenAI chat shape the door
+  reads. mlx-vlm 0.7.1's `BatchGenerator(compute_logprobs=True,
+  top_logprobs_k=k)` argsorts the whole vocabulary and caps nothing; the
+  server caps `top_logprobs` at `MAX_TOP_LOGPROBS` = 40 (mlx-lm's number) and
+  refuses more as `too_many_top_logprobs`. `MlxVlmEngine.max_logprobs` is
+  that constant.
+- mlx-vlm normalises in the logits' dtype (bf16 for bf16 weights), which is
+  the error `patch_mlx_lm_fp32_logprobs` fixes for mlx-lm. Here the server
+  passes `logits_in_float32` as the row's logits processor, so the log-sum-exp
+  runs in float32; greedy argmax is unchanged. Measured on the 9B-vl
+  (2026-09-28): the top 40 sum to 1.000.
+- Questions over the same images reuse the vision tower's output
+  (`VisionFeatureCache`, 16 entries, keyed by the sha256 of the data URIs) on
+  model types whose `get_input_embeddings` reads it (`VISION_CACHED_MODEL_TYPES`:
+  `qwen3_5`). A decision's prime and questions all carry the same images.
+- Measured on the Mac Studio, 9B-vl bf16, 2026-09-28: a question about one
+  640×360 frame is ~322 prompt tokens and 0.65–0.77 s; three frames ~770
+  tokens and 1.2–1.6 s; the first request after load 4 s.
 
 ### llama-server (`llama-windows`)
 
@@ -562,6 +593,33 @@ started exactly as `load-model` would).
   answer schema in OpenAPI with `{}`.
 - Whether a model answers images **here** is its manifest's backend block
   (`serves`), never the weights' modalities (`model_text_only` otherwise).
+  The refusal's `image_models` detail lists the `decide` candidates whose
+  block serves images on this backend, largest first, and the message names
+  the `load-model` job for the first. A decision never loads anything.
+- On `mlx-darwin` images are answered by `qwen3.5-9b-vl` through mlx-vlm. Its
+  block shares `qwen3.5-9b`'s download (`mlx-community/Qwen3.5-9B-bf16`, an
+  mlx-vlm conversion that carries the vision tower; mlx-lm drops the tower when
+  it loads the same folder). Its memory terms are `computed`: weights are the
+  four safetensors files (18,819,722,691 bytes); overhead is the 9B text
+  form's 2,069,045,094 plus an image reserve of 362,496,000 = 8 images × 1,600
+  patches (640×640 at patch 16) × (1,536 fp32 pixel values × 4 bytes + 10,064
+  bf16 activations × 2 bytes: qkv 3×1,152, MLP 4,304, two residuals of 1,152)
+  plus 8 × 400 merged tokens × 4,096 × 2 bytes; the vision attention is fused
+  SDPA per image, so no score matrix is held. Each 640 px image costs one
+  context token per 32×32 px (patch 16, merge 2): 400 for a square, 220 for
+  640×360, plus 2 delimiters, so eight are ~3,216 tokens inside `decide`'s
+  8,192-token working context, and `kv_bytes_per_token` (32,768: 8 full-attention
+  layers × K and V × 4 heads × 256 × bf16) covers them like any other token.
+- The 0.8B/2B/4B keep their text-only mlx-lm blocks: a model id has one
+  block per backend, and those blocks serve chat and text decisions with
+  mlx-lm's continuous batching and prefix cache. Their mlx-community repos are
+  mlx-vlm conversions too, so an image form would be a `-vl` alias per size
+  (`weights_of` the base, same pin, `engine = "mlx-vlm"`, `serves = ["text",
+  "image"]`, `--width 1`), the same shape as the 9B.
+- A Mac whose largest fitting decide candidate is a 9B now selects
+  `qwen3.5-9b-vl` for `decide` (candidates sort by memory, and the vision form
+  is larger), as the PC and Windows lineups already do. The Mac Studio's
+  64 GB still selects `qwen3.8-27b-8bit`.
 - On vLLM the prefix cache of a hybrid (attention plus mamba) model works in 544-token
   blocks (the engine sets the attention block to 544 so its page is at least
   the mamba page; measured 2026-09-23: a 121-token prompt sent three times

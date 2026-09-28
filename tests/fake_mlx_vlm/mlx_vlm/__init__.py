@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 
 __version__ = "0.7.1+fake"
 
+STOP_TEXT = "<|endoftext|>"
+
+STOP_TOKEN = 151643
+
 
 class _Config:
-    model_type = "dots_ocr"
-    image_token_index = 151665
+    def __init__(self) -> None:
+        self.model_type = os.environ.get("CRUCIBLE_FAKE_MLX_VLM_MODEL_TYPE", "dots_ocr")
+        self.image_token_index = 151665
 
 
 class _Embedding:
@@ -19,11 +25,24 @@ class _Embedding:
         return {"inputs_embeds": self.inputs_embeds}
 
 
+def _record(entry: dict) -> None:
+    record = os.environ.get("CRUCIBLE_FAKE_MLX_VLM_BATCHES")
+    if record:
+        with open(record, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+
+
 class FakeModel:
-    config = _Config()
-    language_model = "the language model"
+    def __init__(self) -> None:
+        self.config = _Config()
+        self.language_model = "the language model"
 
     def get_input_embeddings(self, input_ids: object, pixel_values: object, mask=None, **kwargs):
+        cache = kwargs.get("vision_cache")
+        if cache is not None:
+            key = kwargs["_image_key"]
+            _record({"vision_key": key, "cached": cache.get(key) is not None})
+            cache.put(key, "features")
         return _Embedding(("embeds", input_ids))
 
 
@@ -44,6 +63,12 @@ class _Detokenizer:
         self.text = "".join(chr(code) for code in self._codes)
 
 
+class _Tokenizer:
+
+    def decode(self, tokens: list[int]) -> str:
+        return "".join(STOP_TEXT if token == STOP_TOKEN else chr(token) for token in tokens)
+
+
 class _ImageProcessor:
 
     def __call__(self, images, return_tensors=None):
@@ -59,6 +84,7 @@ class FakeProcessor:
     def __init__(self) -> None:
         self.detokenizer = _Detokenizer()
         self.image_processor = _ImageProcessor()
+        self.tokenizer = _Tokenizer()
 
 
 def load(path_or_hf_repo: str, **kwargs):

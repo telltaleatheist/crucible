@@ -10,6 +10,7 @@ from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
 from ... import enginespec, upstreamrecord
+from ...capabilityclasses import BY_NAME
 from ...decide import DecideRequest, DecideResponse
 from ...engines import chat_admission, decide_reading
 from ...errors import ApiError
@@ -71,6 +72,14 @@ def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.Engine
     return post
 
 
+def _image_models(backend_kind: str) -> list[str]:
+    return [
+        candidate.id
+        for candidate in BY_NAME["decide"].candidates(backend_kind)
+        if "image" in load_manifest(candidate.id).serves(backend_kind)
+    ]
+
+
 def _refuse_an_upstream(model: str) -> None:
     if upstreamrecord.split_model(model) is None:
         return
@@ -109,7 +118,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
             n_images = decide_core.check_image_count(body.images)
             if n_images:
                 decide_core.refuse_images_not_served(
-                    resident.model_id, load_manifest(resident.model_id), backend.kind, n_images
+                    resident.model_id,
+                    load_manifest(resident.model_id),
+                    backend.kind,
+                    n_images,
+                    lambda: _image_models(backend.kind),
                 )
             plans = decide_core.plan_all(body)
             reading = decide_reading(resident.engine)

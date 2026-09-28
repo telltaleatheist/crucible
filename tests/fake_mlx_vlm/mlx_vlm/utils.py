@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .prompt_utils import QUESTION_MARK
+
 
 class FakeArray:
     def __init__(self, rows: list[list[object]], prompt_tokens: int) -> None:
@@ -10,8 +12,20 @@ class FakeArray:
         return self._rows
 
 
+def _question_inputs(images, prompt: str) -> dict:
+    seen = [[image.width, image.height, list(image.getpixel((0, 0)))] for image in images or []]
+    prompt_tokens = 20 + len(prompt) + sum((w * h) // 1024 for w, h, _ in seen)
+    return {
+        "input_ids": FakeArray([{"images": seen, "prompt": prompt}], prompt_tokens),
+        "pixel_values": "pixels" if seen else None,
+        "attention_mask": "mask",
+    }
+
+
 def prepare_inputs(processor, images, audio, prompts, image_token_index, resize_shape,
                    add_special_tokens, pad_to_uniform_size):
+    if len(prompts) == 1 and prompts[0].startswith(QUESTION_MARK):
+        return _question_inputs(images, prompts[0])
     if len(images) != 1:
         raise AssertionError(f"prepare_inputs was handed {len(images)} images; the reader embeds one at a time")
     height, width = images[0].height, images[0].width

@@ -698,12 +698,31 @@ def decide_not_served(
     )
 
 
+def _image_models_offer(backend_kind: str, image_models: list[str]) -> str:
+    if not image_models:
+        return (
+            f" No model this build ships answers images on {backend_kind}; send "
+            "the decision without `images`, or to a Crucible on another backend"
+        )
+    load = json.dumps({"type": "load-model", "model": image_models[0]})
+    return (
+        f" The models that answer images on {backend_kind}, largest first, are "
+        f"{image_models}: load one (POST /v1/jobs {load}) and send the decision "
+        "to it"
+    )
+
+
 def refuse_images_not_served(
-    model_id: str, manifest: Any, backend_kind: str, n_images: int
+    model_id: str,
+    manifest: Any,
+    backend_kind: str,
+    n_images: int,
+    image_models: Callable[[], list[str]] = list,
 ) -> None:
     served = manifest.serves(backend_kind)
     if "image" in served:
         return
+    offered = image_models()
     raise ApiError(
         400,
         "model_text_only",
@@ -711,11 +730,13 @@ def refuse_images_not_served(
         f"{backend_kind} (its weights accept "
         f"{list(manifest.modalities)}) and this decision carries "
         f"{n_images} image(s). Whether a model answers images HERE is "
-        "its manifest's backend block (`serves`, docs/internals/engines-and-capability.md \"The decision door\")",
+        "its manifest's backend block (`serves`, docs/internals/engines-and-capability.md \"The decision door\")."
+        + _image_models_offer(backend_kind, offered),
         {"model": model_id, "backend": backend_kind,
          "serves": list(served),
          "modalities": list(manifest.modalities),
-         "images": n_images},
+         "images": n_images,
+         "image_models": offered},
     )
 
 

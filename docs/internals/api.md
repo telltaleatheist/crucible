@@ -273,7 +273,12 @@ a field the SDK deliberately leaves unread is named there with the reason.
 
 Every refusal is made before anything is sent. Images are checked against what
 the manifest's backend block serves here (`manifest.serves(backend.kind)`), not
-the weights' modalities. With several questions the shared prefix is sent alone
+the weights' modalities; a refusal (`model_text_only`) lists in `image_models`
+the models that do answer images on this backend (`_image_models` in
+`api/routes/decide.py`, the `decide` candidates whose block serves `image`) and
+names the `load-model` job for the first. The route never loads one: on the
+Mac that is `qwen3.5-9b-vl`, which a client loads before it sends images. With
+several questions the shared prefix is sent alone
 first so the engine caches it, then questions run under a concurrency gate; the
 failure reported is the first in the request's question order.
 

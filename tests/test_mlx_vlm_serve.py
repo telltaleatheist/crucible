@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 from PIL import Image
 
+from crucible import decide as decide_core
 from crucible import pages
 from crucible.engines import EngineError, find_free_port
 from crucible.engines.mlx_vlm import SERVE_SCRIPT, MlxVlmEngine
@@ -36,14 +38,19 @@ def page_body(model: str, width: int = 100, height: int = 160, **overrides: Any)
 
 class ServedFake(MlxVlmEngine):
 
-    def __init__(self, python: Path, log_path: Path, batches: Path | None = None) -> None:
+    def __init__(
+        self, python: Path, log_path: Path, batches: Path | None = None, model_type: str | None = None
+    ) -> None:
         super().__init__(python, log_path)
         self._batches = batches
+        self._model_type = model_type
 
     def environment(self) -> dict[str, str]:
         environment = {"PYTHONPATH": str(FAKE)}
         if self._batches is not None:
             environment["CRUCIBLE_FAKE_MLX_VLM_BATCHES"] = str(self._batches)
+        if self._model_type is not None:
+            environment["CRUCIBLE_FAKE_MLX_VLM_MODEL_TYPE"] = self._model_type
         return environment
 
 
@@ -324,3 +331,234 @@ def test_a_missing_width_stops_the_process_by_name(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "--width" in result.stderr
+
+
+def coloured_png(width: int, height: int, colour: tuple[int, int, int]) -> str:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), colour).save(buffer, "PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+THREE_FRAMES = (
+    (64, 36, (255, 0, 0)),
+    (48, 48, (0, 255, 0)),
+    (32, 80, (0, 0, 255)),
+)
+
+
+def frames() -> list[str]:
+    return [coloured_png(w, h, colour) for w, h, colour in THREE_FRAMES]
+
+
+YESNO = decide_core.YesNoQuestion(type="yesno", instructions="A face is visible")
+
+
+def question_body(model: str, images: list[str], k: int | None) -> dict:
+    item = decide_core.plan("face", YESNO)
+    messages = decide_core.question_messages("", images, item)
+    return decide_core.request_body(model, messages, k)
+
+
+def recorded(batches: Path) -> list[dict]:
+    return [json.loads(line) for line in batches.read_text().splitlines()]
+
+
+def test_a_question_returns_top_logprobs_in_the_openai_chat_shape(served) -> None:
+    engine, name, batches = served
+    status, document = post(engine, question_body(name, frames()[:1], 5))
+    assert status == 200, document
+    choice = document["choices"][0]
+    assert choice["message"]["content"] == "A"
+    assert choice["finish_reason"] == "length"
+    (step,) = choice["logprobs"]["content"]
+    assert step["token"] == "A" and step["logprob"] == pytest.approx(math.log(0.6))
+    assert [entry["token"] for entry in step["top_logprobs"]] == ["A", "B", "C", "D", "E"]
+    assert step["top_logprobs"][1] == {"token": "B", "logprob": pytest.approx(math.log(0.3)), "bytes": [66]}
+    assert document["usage"]["prompt_tokens"] > 0
+    (question,) = [entry for entry in recorded(batches) if entry.get("question")]
+    assert question["compute_logprobs"] is True and question["top_logprobs_k"] == 5
+    assert question["max_tokens"] == 1
+    assert question["logits_dtype"] == "float32"
+    assert "thinking=False" in question["prompt"]
+
+
+def test_the_prime_asks_for_no_logprobs_and_gets_none(served) -> None:
+    engine, name, batches = served
+    body = decide_core.request_body(name, decide_core.prime_messages("state", frames()[:1]), None)
+    status, document = post(engine, body)
+    assert status == 200, document
+    assert "logprobs" not in document["choices"][0]
+    (question,) = [entry for entry in recorded(batches) if entry.get("question")]
+    assert question["compute_logprobs"] is False and question["top_logprobs_k"] == 0
+    assert question["logits_dtype"] == "bfloat16"
+
+
+def test_three_images_in_one_question_reach_the_model_intact_and_in_order(served) -> None:
+    engine, name, batches = served
+    status, document = post(engine, question_body(name, frames(), 4))
+    assert status == 200, document
+    (question,) = [entry for entry in recorded(batches) if entry.get("question")]
+    assert question["images"] == [[w, h, list(colour)] for w, h, colour in THREE_FRAMES]
+    assert question["prompt"].startswith("Q|images=3|")
+    assert "system:" + decide_core.SYSTEM_PROMPT in question["prompt"]
+    assert decide_core.IMAGES_NOTE in question["prompt"]
+
+
+def test_a_text_only_question_carries_no_images(served) -> None:
+    engine, name, batches = served
+    body = question_body(name, [], 2)
+    status, document = post(engine, body)
+    assert status == 200, document
+    (question,) = [entry for entry in recorded(batches) if entry.get("question")]
+    assert question["images"] == [] and question["prompt"].startswith("Q|images=0|")
+
+
+def _too_many(body: dict) -> dict:
+    body["top_logprobs"] = mlx_vlm_serve.MAX_TOP_LOGPROBS + 1
+    return body
+
+
+def _no_logprobs_flag(body: dict) -> dict:
+    body.pop("logprobs")
+    return body
+
+
+def _nine_images(body: dict) -> dict:
+    image = body["messages"][-1]["content"][0]
+    body["messages"][-1]["content"] = [image] * 9 + body["messages"][-1]["content"][1:]
+    return body
+
+
+def _video_kwarg(body: dict) -> dict:
+    body["chat_template_kwargs"] = {"enable_thinking": False, "video": "x"}
+    return body
+
+
+def _image_in_system(body: dict) -> dict:
+    image = body["messages"][-1]["content"][0]
+    body["messages"][0]["content"] = [image, {"type": "text", "text": "s"}]
+    return body
+
+
+def _warm(body: dict) -> dict:
+    body["temperature"] = 0.7
+    return body
+
+
+@pytest.mark.parametrize(
+    "spoil,code",
+    [
+        (_too_many, "too_many_top_logprobs"),
+        (_no_logprobs_flag, "top_logprobs_without_logprobs"),
+        (_nine_images, "too_many_images"),
+        (_video_kwarg, "unknown_template_kwarg"),
+        (_image_in_system, "content_parts"),
+        (_warm, "not_greedy"),
+    ],
+)
+def test_a_question_the_server_cannot_answer_is_refused_by_name(served, spoil, code) -> None:
+    engine, name, batches = served
+    status, document = post(engine, spoil(question_body(name, frames()[:1], 5)))
+    assert status == 400, document
+    assert document["error"]["code"] == code
+    assert not batches.exists() or not recorded(batches)
+
+
+def test_the_cap_the_server_refuses_past_is_named_in_the_refusal(served) -> None:
+    engine, name, _ = served
+    status, document = post(engine, _too_many(question_body(name, frames()[:1], 5)))
+    assert status == 400
+    assert str(mlx_vlm_serve.MAX_TOP_LOGPROBS) in document["error"]["message"]
+
+
+def test_the_engine_states_the_cap_the_server_enforces() -> None:
+    from crucible.engines import decide_reading
+    from crucible.engines.mlx_lm import MlxLmEngine
+
+    assert MlxVlmEngine.decide_logprobs is True
+    assert MlxVlmEngine.max_logprobs == mlx_vlm_serve.MAX_TOP_LOGPROBS == MlxLmEngine.max_logprobs
+    assert decide_reading("mlx-vlm").max_logprobs == mlx_vlm_serve.MAX_TOP_LOGPROBS
+    assert mlx_vlm_serve.MAX_IMAGES == decide_core.MAX_IMAGES
+
+
+def test_a_page_body_is_still_a_page_and_its_reply_carries_no_logprobs(served) -> None:
+    engine, name, batches = served
+    assert mlx_vlm_serve.is_page_request(page_body(name))
+    assert not mlx_vlm_serve.is_page_request(question_body(name, frames()[:1], 3))
+    assert not mlx_vlm_serve.is_page_request(question_body(name, frames()[:1], None))
+    status, document = post(engine, page_body(name, width=112, height=168))
+    assert status == 200
+    assert set(document["choices"][0]) == {"index", "message", "finish_reason"}
+    assert [entry.get("question") for entry in recorded(batches)] == [None]
+
+
+def test_questions_over_the_same_images_reuse_the_vision_features(tmp_path: Path) -> None:
+    weights = tmp_path / "qwen"
+    weights.mkdir()
+    batches = tmp_path / "batches.jsonl"
+    engine = ServedFake(Path(sys.executable), tmp_path / "engine.log", batches, model_type="qwen3_5")
+    engine.start(weights, str(weights), find_free_port(), ["--width", "1"])
+    try:
+        engine.ready(60.0)
+        images = frames()
+        for k in (None, 4, 4):
+            status, document = post(engine, question_body(str(weights), images, k))
+            assert status == 200, document
+        status, _ = post(engine, question_body(str(weights), images[:1], 4))
+        assert status == 200
+    finally:
+        engine.stop()
+    seen = [entry for entry in recorded(batches) if "vision_key" in entry]
+    assert [entry["cached"] for entry in seen] == [False, True, True, False]
+    assert len({entry["vision_key"] for entry in seen}) == 2
+
+
+def test_a_decision_about_three_images_is_answered_end_to_end_on_mlx_darwin(served) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from crucible.engines import decide_reading
+    from crucible.manifests import load_manifest
+
+    engine, name, batches = served
+    manifest = load_manifest("qwen3.5-9b-vl")
+    decide_core.refuse_images_not_served("qwen3.5-9b-vl", manifest, "mlx-darwin", 3)
+    request = decide_core.DecideRequest(
+        model="qwen3.5-9b-vl",
+        state="",
+        images=frames(),
+        questions={
+            "face": {"type": "yesno", "instructions": "Any of these frames shows a face"},
+            "expressive": {"type": "score", "instructions": "How expressive is the face?",
+                           "levels": ["1", "2", "3", "4", "5"]},
+            "kind": {"type": "choice", "instructions": "What is shown?",
+                     "options": {"desktop": "a desktop UI", "video": "video footage"}},
+        },
+    )
+    resident = SimpleNamespace(
+        engine=manifest.spec("mlx-darwin").engine, engine_model_name=name,
+        model_id="qwen3.5-9b-vl", revision=manifest.spec("mlx-darwin").revision,
+        fingerprint="qwen3.5-9b-vl@" + manifest.spec("mlx-darwin").revision,
+    )
+
+    async def over_http(body: dict) -> dict:
+        status, document = await asyncio.to_thread(post, engine, body)
+        assert status == 200, document
+        return document
+
+    answered = asyncio.run(decide_core.decide_on_engine(
+        over_http, resident, request, decide_core.plan_all(request),
+        max_logprobs=decide_reading(resident.engine).max_logprobs, concurrency=4,
+    ))
+    assert answered.engine == "mlx-vlm"
+    assert answered.tokens.images == 3
+    assert answered.answers["face"].p == pytest.approx(0.6 / 0.9)
+    expressive = answered.answers["expressive"]
+    mass = 0.6 + 0.3 + 0.05 + 0.02 + 0.01
+    assert expressive.label_mass == pytest.approx(mass)
+    assert expressive.score == pytest.approx((0.6 + 0.6 + 0.15 + 0.08 + 0.05) / mass)
+    assert answered.answers["kind"].choice == "desktop"
+    asked = [entry for entry in recorded(batches) if entry.get("question")]
+    assert len(asked) == 4
+    assert all(entry["images"] == [[w, h, list(c)] for w, h, c in THREE_FRAMES] for entry in asked)
+    assert sorted(entry["top_logprobs_k"] for entry in asked) == [0, 6, 6, 9]
