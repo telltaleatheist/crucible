@@ -49,7 +49,7 @@ class Progress:
     def __init__(self, request_id: str, steps: int) -> None:
         self.request_id = request_id
         self.steps = steps
-        self.stage = "starting"
+        self.stage = None
         self.step = 0
         self.stage_seconds: dict = {}
         self._stage_started = time.time()
@@ -63,7 +63,8 @@ class Progress:
     def enter(self, stage: str) -> None:
         self._check()
         now = time.time()
-        self.stage_seconds[self.stage] = round(now - self._stage_started, 2)
+        if self.stage is not None:
+            self.stage_seconds[self.stage] = round(now - self._stage_started, 2)
         self.stage, self._stage_started = stage, now
         send("progress", stage=stage, step=self.step, steps=self.steps)
 
@@ -140,6 +141,10 @@ class MfluxEngine:
             self._release()
 
 
+def _cached_embeddings(model) -> list:
+    return [array for pair in model.prompt_cache.values() for array in pair if array is not None]
+
+
 class _MfluxStages:
     def __init__(self, engine: MfluxEngine, model, progress: Progress, peaks: dict) -> None:
         self._engine = engine
@@ -154,6 +159,7 @@ class _MfluxStages:
 
     def call_before_loop(self, **_: object) -> None:
         self._model.text_encoder = None
+        self._engine._mx.eval(*_cached_embeddings(self._model))
         self._close_stage("encoding")
         self._progress.enter("denoising")
 

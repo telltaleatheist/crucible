@@ -15,6 +15,7 @@ from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 from .config import Config
 from .errors import CrucibleError
+from .tomltable import SHA256_PATTERN
 
 HF_TOKEN_ENV = "HF_TOKEN"
 STAMP_NAME = "crucible-pull.json"
@@ -626,12 +627,18 @@ def _wanted(relative: str, spec: WeightsSource) -> bool:
     return not spec.files or any(fnmatch.fnmatch(relative, pattern) for pattern in spec.files)
 
 
+def _hashed_blob(source: Path) -> Path | None:
+    blob = source.resolve()
+    return blob if SHA256_PATTERN.match(blob.name) else None
+
+
 def _link_into(source: Path, destination: Path) -> int:
-    if destination.exists():
+    blob = _hashed_blob(source)
+    if blob is None or destination.exists():
         return 0
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.link(source.resolve(), destination)
+        os.link(blob, destination)
     except OSError:
         return 0
     return destination.stat().st_size

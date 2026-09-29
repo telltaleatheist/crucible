@@ -67,12 +67,15 @@ A picture needs them one after another, never together: the encoder turns the pr
 embeddings, the transformer denoises for `steps` steps, the VAE decodes. Both workers hold at
 most one of them:
 
-- **mflux.** `generate` builds a fresh `QwenImage21` from the weights directory (its arrays
-  are lazy; a weight is read when first used), and the worker's own callbacks drop the text
-  encoder before the first step and the transformer after the last, with `gc` and
-  `mx.clear_cache()` between stages. `mx.set_cache_limit` is the manifest's
+- **mflux.** `generate` builds a fresh `QwenImage21` from the weights directory. Its arrays are
+  lazy: a weight is read from the file when the graph that uses it is evaluated. The worker's
+  `before_loop` callback drops the text encoder and only then evaluates the prompt embeddings,
+  so each encoder layer's weights are read, used and freed in turn (the encoding stage peaked
+  at 2.4 GB for a 17.5 GB encoder); `after_loop` drops the transformer before the VAE decodes.
+  `gc` and `mx.clear_cache()` run between stages, and `mx.set_cache_limit` is the manifest's
   `mlx_cache_limit_bytes` (4 GB, Owen's `--mlx-cache-limit-gb 4`), so freed buffers do not pile
-  up across steps. Between jobs the worker holds the process and nothing else.
+  up across steps. Between jobs the worker holds the process and nothing else (0.2 to 0.8 GB,
+  once 2.8 GB right after a 1280x720).
 - **diffusers.** The pipeline is built with `text_encoder=None, transformer=None, vae=None`
   (processor and scheduler only). Each stage loads its component straight onto the card with
   `device_map="cuda"`, runs, and is released (`gc`, `torch.cuda.empty_cache()`). The embeddings
@@ -87,12 +90,45 @@ accelerator guard admits and, on CUDA, the per-process cap
 worker with a CUDA OOM instead of spilling into Windows shared memory. A request above
 `max_pixels` or `max_side` is refused before anything loads (`image_too_large`).
 
-The price is a read of each component per picture. On the Mac the files stay in the page
-cache between pictures of a batch; the measured numbers below include that read.
+The price is a read of each component per picture. What stays "resident" between the
+pictures of a leased batch is the worker process (its imports and Metal or CUDA context:
+15.4 s cold, 1.8 s warm on the Mac); the weights themselves are read again for each picture,
+from the page cache when the machine has room for it. On the Mac that read is inside the
+measured times below (the encoder stage took 2.9 to 3.9 s including it).
 
 ## Measured
 
-MEASUREMENTS_PLACEHOLDER
+On the Mac Studio (M1 Ultra, 64 GB), 2026-09-28, mflux 0.20.0 / MLX 0.32.2 in Crucible's
+3.11 interpreter, run through `worker.py` against the weights already in
+`~/.cache/huggingface`. Peak bytes are `mx.get_peak_memory()` per stage (the worker's
+`stage_peak_bytes`); footprint is `top`'s MEM for the worker process (whole GiB). Owen's
+parsec batch (`mflux-generate-qwen-2.1` at 384x512) was running on the same GPU the whole
+time and never paused, so every **time** below is contended; the memory is per process and is
+not.
+
+| picture | steps | encoding | transformer stage | VAE decode | footprint | wall (contended) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 512x512 | 8 | 0.01 GB (lazy) | 14.86 GB | 6.21 GB | 16 GiB | 33.5 to 41.3 s, 2.9 s/step |
+| 512x512 from an input image, strength 0.6 | 2 of 8 run | 2.42 GB | 15.05 GB | 6.54 GB | 16 GiB | 11.7 s |
+| 1280x720 | 8 | 0.01 GB (lazy) | 15.35 GB | 14.56 GB | 16 GiB | 84.0 s, 9.6 s/step |
+| 1024x1024 | 2 | 2.41 GB | 15.50 GB | **16.44 GB** | 15 GiB | 28.8 s |
+| 1024x1024 | 4 | 0.01 GB (lazy) | 15.50 GB | 16.44 GB | 17 GiB | 49.1 s, 8.3 s/step |
+
+- **Owen's "never more than 16 GB" holds.** The largest stage at the largest admitted size
+  (1,048,576 pixels) is the **VAE decode**, 16,441,695,780 bytes; the transformer stage is
+  15.5 GB at any size up to that. The manifest's 17,200,000,000 is that peak plus the worker
+  process's own 0.2 to 0.8 GB. Rows marked "lazy" ran before the worker evaluated the
+  embeddings in `before_loop`: the encoder then ran inside step 1, which is why those rows'
+  first step took 7 to 12 s.
+- The decode grows with the picture (6.2 GB at 0.26 MP, 14.6 at 0.92, 16.4 at 1.05), which is
+  why `max_pixels` is where the estimate was measured and a larger picture is refused rather
+  than tried.
+- A 40-step 1280x720 was not run; memory does not depend on the step count, and at the
+  contended 9.6 s per step it is about 6.5 minutes (Owen's uncontended figure: about 5).
+- Starting the worker (imports, Metal) took 15.4 s cold and 1.8 s warm; building the model
+  and running the encoder is inside each picture's time.
+- A cancel sent after step 3 of 8 stopped after step 4 (the step in flight finishes), the
+  worker answered `cancelled` and `done`, and the next two pictures ran in the same process.
 
 ## Why the CUDA arm is bf16 and staged (and what was rejected)
 
@@ -116,9 +152,12 @@ model. Candidates, in the order considered:
 there): `crucible install image` on owens-pc (the recipe is a resolver output, below, not yet
 a freeze of a working env), `crucible models pull qwen-image-2.1`, then one 512x512 at 8
 steps and one 1280x704 at 40 steps with nothing else on the card, reading
-`done.image.stage_peak_bytes` and nvidia-smi's peak. Replace the block's
-`memory_bytes_estimate` with the largest stage peak plus the CUDA context and set
-`memory_basis = "measured"`.
+`done.image.stage_peak_bytes` and nvidia-smi's peak, then one 1024x1024 at 2 steps for the
+largest admitted size. Replace the block's `memory_bytes_estimate` with the largest stage peak
+plus the CUDA context and set `memory_basis = "measured"`. Watch the VAE decode: on the Mac it
+was the largest stage at 1024x1024 (about 15 GB of activations on a 1.35 GB VAE). If the
+PC's decode passes the 19 GB cap it fails inside the worker as a CUDA OOM (never on the
+desktop), and the fix is a lower `max_pixels` on the cuda block or VAE tiling, measured.
 
 ## Recipes
 
@@ -142,17 +181,21 @@ steps and one 1280x704 at 40 steps with nothing else on the card, reading
 
 `weights.pull` now looks in the Hugging Face cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`,
 else `~/.cache/huggingface/hub`) for a snapshot at exactly the pinned revision, and
-hard-links its files into the Crucible store before the download. The hub download then
-hashes each linked file against the hub's sha256 and skips it when it matches, so a model
-someone already fetched with another tool costs no second copy and no download, and a file
-that does not match is fetched as usual. A link that cannot be made (another filesystem) is
-simply not made. Removing the Crucible copy unlinks it and leaves the cache alone, and the
-reverse. The stamp records `linked_bytes`.
+hard-links its large files into the Crucible store before the download: only files whose
+cache blob is content-addressed (a 64-hex name, the LFS and xet blobs). The hub download then
+checks each linked file against the pinned revision (an LFS file with no local metadata is
+hashed against its sha256) and fetches only what is missing or different. Small git-stored
+files are left to the hub, which copies them out of the cache itself: linking them made that
+copy fail with `SameFileError` (found on the Mac, 2026-09-28). A link that cannot be made
+(another filesystem, or a cache of plain copies, as on Windows) is simply not made. Removing
+the Crucible copy unlinks it and leaves the cache alone, and the reverse. The stamp records
+`linked_bytes`.
 
-Owen's Mac had `Qwen/Qwen-Image-2.1` at `790c9263` in `~/.cache/huggingface` (31 GB, what
-mflux downloads: every component's safetensors and configs, and the processor), so a pull
-there links those and downloads only what mflux skipped (`model_index.json`, `scheduler/`,
-the README, the licence and a 3.3 MB picture).
+Measured on the Mac, 2026-09-28, into a scratch home with the branch's `weights.pull`: Owen's
+`Qwen/Qwen-Image-2.1` at `790c9263` (mflux's download: every component and the processor)
+linked 33,127,036,062 bytes, the pull finished in 6.2 s, and only the ~8 MB mflux had not
+fetched (`model_index.json`, `scheduler/`, the README, the licence, a 3.3 MB picture) came
+from the network. No second copy on disk. The installed Crucible was not touched.
 
 ## Cancel between steps
 

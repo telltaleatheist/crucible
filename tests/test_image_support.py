@@ -17,11 +17,19 @@ from .conftest import FAKE_BACKEND, configure_box
 REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 
 
+LFS_BLOB = "9e6bc2d641e67bf277895ea8777141044a38f3edb7101bc469b2961dd7c36b4b"
+GIT_BLOB = "706df60672976086089e99f6595037f917d7602e"
+
+
 def _snapshot(root: Path) -> Path:
-    snapshot = root / "models--Qwen--Qwen-Image-2.1" / "snapshots" / REVISION
+    repo = root / "models--Qwen--Qwen-Image-2.1"
+    snapshot = repo / "snapshots" / REVISION
     (snapshot / "transformer").mkdir(parents=True)
-    (snapshot / "transformer" / "shard.safetensors").write_bytes(b"w" * 4096)
-    (snapshot / "model_index.json").write_text("{}", encoding="utf-8")
+    (repo / "blobs").mkdir()
+    (repo / "blobs" / LFS_BLOB).write_bytes(b"w" * 4096)
+    (repo / "blobs" / GIT_BLOB).write_text("{}", encoding="utf-8")
+    (snapshot / "transformer" / "shard.safetensors").symlink_to(repo / "blobs" / LFS_BLOB)
+    (snapshot / "transformer" / "config.json").symlink_to(repo / "blobs" / GIT_BLOB)
     return snapshot
 
 
@@ -39,10 +47,11 @@ def test_the_hub_cache_at_the_pinned_revision_is_linked_not_copied(
     target = tmp_path / "store"
     lines: list[str] = []
     linked = weights.adopt_hub_cache(_spec(), target, lines.append)
-    assert linked == 4096 + 2
+    assert linked == 4096
     placed = target / "transformer" / "shard.safetensors"
     assert placed.read_bytes() == b"w" * 4096
     assert placed.stat().st_ino == (snapshot / "transformer" / "shard.safetensors").stat().st_ino
+    assert not (target / "transformer" / "config.json").exists()
     assert "no second copy on disk" in lines[0]
 
 
@@ -62,8 +71,8 @@ def test_only_the_files_a_block_names_are_adopted(
 ) -> None:
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     _snapshot(tmp_path / "hub")
-    assert weights.adopt_hub_cache(_spec(("model_index.json",)), tmp_path / "store") == 2
-    assert not (tmp_path / "store" / "transformer").exists()
+    assert weights.adopt_hub_cache(_spec(("vae/*",)), tmp_path / "store") == 0
+    assert weights.adopt_hub_cache(_spec(("transformer/*",)), tmp_path / "store") == 4096
 
 
 def test_a_config_written_before_images_existed_reads_image_as_off(home: Path) -> None:

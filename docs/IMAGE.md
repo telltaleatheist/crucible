@@ -49,12 +49,13 @@ parameters, so a picture can be made again:
  "image": {"model": "qwen-image-2.1", "hf_repo": "Qwen/Qwen-Image-2.1",
            "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
            "backend": "mlx-darwin", "engine": "mflux", "dtype": "bfloat16",
-           "prompt": "…", "negative_prompt": null, "width": 1280, "height": 720,
-           "seed": 1, "steps": 40, "guidance": 1.0, "image_strength": null, "input": null,
-           "seconds": 301.2, "stage_seconds": {"encoding": 8.4, "denoising": 280.1, "decoding": 9.8},
-           "peak_bytes": 16012345678,
-           "stage_peak_bytes": {"encoding": 16012345678, "denoising": 15123456789, "decoding": 4012345678},
-           "memory_bytes_estimate": 17000000000, "memory_basis": "measured"},
+           "prompt": "…", "negative_prompt": null, "width": 1024, "height": 1024,
+           "seed": 1, "steps": 2, "guidance": 1.0, "image_strength": null, "input": null,
+           "seconds": 28.83,
+           "stage_seconds": {"encoding": 3.89, "denoising": 16.29, "decoding": 8.56, "saving": 0.08},
+           "peak_bytes": 16441695780,
+           "stage_peak_bytes": {"encoding": 2414314312, "denoising": 15502140544, "decoding": 16441695780},
+           "memory_bytes_estimate": 17200000000, "memory_basis": "measured"},
  "resident": "qwen-image-2.1"}
 ```
 
@@ -80,7 +81,8 @@ lease is open a job that would load something else (an LLM, a voice) is refused 
 
 ## Memory
 
-The model is ~33 GB on disk, and it never needs that much at once: its three parts run one after
+The model is ~33 GB on disk, and it never needs that much at once (measured on the Mac: at
+most 16.4 GB, at 1024x1024): its three parts run one after
 another (the text encoder, then the transformer, then the VAE), and each is released before the
 next is read. The estimate the guard and capability use is the peak of the largest stage at the
 largest size, not the sum. On the Mac that peak was measured (`memory_basis: "measured"`); on the
