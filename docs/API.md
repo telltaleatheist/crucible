@@ -227,7 +227,7 @@ Hold whatever is resident (model, voice or aligner) on the card for a run; jobs 
 
 ## Jobs
 
-The work. Every job type is created, polled and cancelled through the same routes.
+The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md.
 
 ### `POST /v1/jobs`
 

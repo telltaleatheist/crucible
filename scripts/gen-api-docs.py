@@ -63,7 +63,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/jobs",
         "Jobs",
-        "The work. Every job type is created, polled and cancelled through the same routes.",
+        "The work. Every job type is created, polled and cancelled through the same routes. "
+        "The `image` job's params, its result and how to prompt it are in docs/IMAGE.md.",
     ),
     (
         "/resumable",
@@ -156,6 +157,7 @@ def build_app() -> Any:
         enable_align=True,
         enable_rvc=True,
         enable_denoise=True,
+        enable_image=True,
         desktop_allowance_bytes=3 * 1024 ** 3,
         retention_days=7,
         desktop_allowance_basis="stated",

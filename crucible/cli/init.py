@@ -207,6 +207,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_align=args.enable_align,
         enable_rvc=args.enable_rvc,
         enable_denoise=args.enable_denoise,
+        enable_image=args.enable_image,
         desktop_allowance_bytes=desktop_allowance_bytes,
         retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
@@ -224,6 +225,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"align:    {'enabled' if args.enable_align else 'disabled'}")
     print(f"rvc job:  {'enabled' if args.enable_rvc else 'disabled'}")
     print(f"denoise:  {'enabled' if args.enable_denoise else 'disabled'}")
+    print(f"image:    {'enabled' if args.enable_image else 'disabled'}")
     for footprint in declared_tts_footprints(backend.kind):
         print(
             f"tts {footprint.engine}: "
@@ -334,6 +336,12 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="register the denoise (audio-separator stem separation) job type; "
         "it shares the rvc env ([jobs] enable_denoise)",
+    )
+    init.add_argument(
+        "--enable-image",
+        action="store_true",
+        help="register the image (Qwen-Image text-to-image) and unload-image job "
+        "types ([jobs] enable_image)",
     )
     init.add_argument(
         "--desktop-allowance-bytes",

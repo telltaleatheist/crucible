@@ -175,6 +175,9 @@ first, then a smaller model.
   holds it.
 - `denoise` is its own class. It shares the rvc env, but a 913 MB separator and a
   2.5 GiB urvc stack are different arithmetic.
+- `image` is its own class and job type (image.md). Its candidates' estimate is the peak of
+  the largest of the model's three stages at the largest size a block admits, not the sum of
+  the download, because the workers hold one stage at a time.
 - An app's model choice (`chosen`) is honoured or refused with numbers. It is
   never silently replaced. `decide_all` requires `chosen`, `decide` requires
   `gpu_vendor`, and `record` requires `routes`, all without defaults, so a
@@ -346,7 +349,7 @@ started exactly as `load-model` would).
 ## Residency (`residency`)
 
 - **At most one resident thing of any kind** (`llm`, `tts`, `align`,
-  `denoise`). A card holding a Higgs checkpoint has no room for a 9B. Aligner
+  `denoise`, `image`). A card holding a Higgs checkpoint has no room for a 9B. Aligner
   and separator are `workers.WorkerSession`s held open, not engines, and have
   their own slots.
 - Only the exclusive job lane mutates residency. An engine is published only

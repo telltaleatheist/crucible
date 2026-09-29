@@ -28,6 +28,8 @@ DEFAULT_RETENTION_DAYS = 7
 
 DEFAULT_INSTALL_ON_SUBMIT = True
 
+DEFAULT_ENABLE_IMAGE = False
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -105,6 +107,7 @@ class Config:
     enable_denoise: bool
     desktop_allowance_bytes: int
     desktop_allowance_basis: str
+    enable_image: bool = DEFAULT_ENABLE_IMAGE
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
@@ -247,13 +250,19 @@ def _install_on_submit(table: dict[str, Any]) -> bool:
     return _require(table, "jobs", "install_on_submit", bool)
 
 
-def _kept_install_on_submit(home: Path) -> bool:
+def _optional_jobs_flag(table: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in table.get("jobs", {}):
+        return default
+    return _require(table, "jobs", key, bool)
+
+
+def _kept_jobs_flag(home: Path, key: str, default: bool) -> bool:
     try:
         with open(config_path(home), "rb") as handle:
-            value = tomllib.load(handle).get("jobs", {}).get("install_on_submit")
+            value = tomllib.load(handle).get("jobs", {}).get(key)
     except (OSError, tomllib.TOMLDecodeError):
-        return DEFAULT_INSTALL_ON_SUBMIT
-    return value if isinstance(value, bool) else DEFAULT_INSTALL_ON_SUBMIT
+        return default
+    return value if isinstance(value, bool) else default
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
@@ -326,6 +335,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_align",
     "enable_rvc",
     "enable_denoise",
+    "enable_image",
 )
 
 
@@ -756,6 +766,7 @@ def load_config(
         enable_align=_require(table, "jobs", "enable_align", bool),
         enable_rvc=_require(table, "jobs", "enable_rvc", bool),
         enable_denoise=_require(table, "jobs", "enable_denoise", bool),
+        enable_image=_optional_jobs_flag(table, "enable_image", DEFAULT_ENABLE_IMAGE),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         desktop_allowance_bytes=_require(
@@ -792,6 +803,7 @@ def write_config(
     desktop_allowance_basis: str,
     desktop_allowance_note: str,
     install_on_submit: bool | None = None,
+    enable_image: bool | None = None,
     capability: CapabilityRecord | None = None,
     routes: tuple[RouteRecord, ...] = (),
     local_models: tuple[LocalModelRecord, ...] = (),
@@ -818,8 +830,13 @@ def write_config(
             "enable_align": enable_align,
             "enable_rvc": enable_rvc,
             "enable_denoise": enable_denoise,
+            "enable_image": (
+                _kept_jobs_flag(home, "enable_image", DEFAULT_ENABLE_IMAGE)
+                if enable_image is None
+                else enable_image
+            ),
             "install_on_submit": (
-                _kept_install_on_submit(home)
+                _kept_jobs_flag(home, "install_on_submit", DEFAULT_INSTALL_ON_SUBMIT)
                 if install_on_submit is None
                 else install_on_submit
             ),

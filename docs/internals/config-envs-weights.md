@@ -64,9 +64,10 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   document from its arguments. A caller that leaves out `routes`, `upstreams`,
   `local_models`, `tts_engines` or `retention_days` silently erases them. If
   `[tts.*]` is lost, every repo-manifest voice fails with `engine_footprint_unset`.
-  `install_on_submit=None` keeps whatever the file on disk says
-  (`_kept_install_on_submit`), so an older rewriter cannot turn an operator's
-  `false` back to true.
+  `install_on_submit=None` and `enable_image=None` keep whatever the file on disk says
+  (`_kept_jobs_flag`), so an older rewriter cannot turn an operator's `false` back to
+  true, nor a rewriter written before `image` existed turn the image type off. A config
+  with no `enable_image` key (every config before 2026-09-28) reads it as false.
 - `carried_tables` (used only by `crucible init --config-from`) copies whole tables
   unchanged, so keys this build does not know are preserved. A table that is both
   typed and carried is refused.
@@ -380,6 +381,8 @@ install.
   (contentvec, rmvpe) are not in the recipe; they are the `rvc-base` subject. On the
   Mac, BookForge's MPS memory patch for urvc is not applied. The 96-file process
   recycle bounds memory. `use_autocast` is CUDA-only.
+- **image** (mflux 0.20.0 on the Mac, diffusers at a pinned commit on CUDA): see
+  [image.md](image.md), "Recipes". The cuda-linux recipe is a resolution, not yet a freeze.
 - **tts cuda-linux** (`higgs-v3-sgl` extra, Python 3.12): this is the working
   BookForge `sglomni` env (Owen: *"mirror it. it should be exact"*). `uv` is kept
   because it is part of that env. `flashinfer-jit-cache` comes from flashinfer's own
@@ -488,6 +491,12 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
 - `resolve_revision` resolves a repo to its current head in the engine, which
   already holds the HF token, so apps do not need a copy.
 - `stranded` reports directories that no manifest declares. It never deletes them.
+- **The Hugging Face cache.** A snapshot pull first hard-links whatever the Hugging Face cache
+  holds at exactly the pinned revision (`adopt_hub_cache`, `$HF_HUB_CACHE`, else
+  `$HF_HOME/hub`, else `~/.cache/huggingface/hub`); the hub download then hashes each linked
+  file against the hub's sha256 and fetches only what is missing or different. The stamp
+  records `linked_bytes`. Measured on the Mac's Qwen-Image 2.1 (image.md, "Weights and the
+  Hugging Face cache").
 - Every weights subject (model, ASR, align, voice, RVC and denoise manifests)
   answers `pull_command` (the exact command that fetches it) and `aliases()` (the
   manifests that share its weights; empty for kinds that cannot be aliased).

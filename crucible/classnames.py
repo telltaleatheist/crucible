@@ -17,6 +17,7 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
     "align",
     "rvc",
     "denoise",
+    "image",
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)

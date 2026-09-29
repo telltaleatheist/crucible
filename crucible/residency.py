@@ -21,7 +21,14 @@ from .accelerator import (
     process_alive,
     process_identity,
 )
-from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_NOUNS, KIND_TTS
+from .cardkinds import (
+    KIND_ALIGN,
+    KIND_DENOISE,
+    KIND_IMAGE,
+    KIND_LLM,
+    KIND_NOUNS,
+    KIND_TTS,
+)
 from .clock import utcnow
 from .config import Config
 from .engines import (
@@ -44,6 +51,7 @@ __all__ = [
     "Residency",
     "Resident",
     "ResidentAligner",
+    "ResidentImage",
     "ResidentModel",
     "ResidentSeparator",
     "ResidentVoice",
@@ -219,7 +227,45 @@ class ResidentSeparator:
         }
 
 
-Resident = ResidentModel | ResidentVoice | ResidentAligner | ResidentSeparator
+@dataclass(frozen=True)
+class ResidentImage:
+    kind = KIND_IMAGE
+
+    model_id: str
+    backend: str
+    engine: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    versions: dict[str, Any]
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.model_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "image_model": self.model_id,
+            "backend": self.backend,
+            "engine": self.engine,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "versions": dict(self.versions),
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
+Resident = (
+    ResidentModel | ResidentVoice | ResidentAligner | ResidentSeparator | ResidentImage
+)
 
 
 @dataclass(frozen=True)
@@ -580,6 +626,14 @@ class Residency:
     @property
     def separator_session(self) -> "WorkerSession | None":
         return None if self.resident_separator is None else self._session
+
+    @property
+    def resident_image(self) -> ResidentImage | None:
+        return self._resident if isinstance(self._resident, ResidentImage) else None
+
+    @property
+    def image_session(self) -> "WorkerSession | None":
+        return None if self.resident_image is None else self._session
 
     @property
     def warming(self) -> str | None:

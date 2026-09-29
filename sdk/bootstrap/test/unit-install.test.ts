@@ -139,6 +139,12 @@ test('planJobTypes: flags in request order, installers only for installable type
   ]);
 });
 
+test('planJobTypes: image enables its type and builds its own env', () => {
+  const plan = planJobTypes(['image']);
+  assert.deepEqual(plan.enableFlags, ['--enable-image']);
+  assert.deepEqual(plan.installs, [{ type: 'image', argv: ['install', 'image', '--verbose'] }]);
+});
+
 for (const [label, requests, pattern] of [
   ['an empty list', [], /jobTypes is empty/],
   ['an unknown type', ['vlm'], /unknown job type "vlm"/],

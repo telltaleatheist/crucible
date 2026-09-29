@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
+from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_LLM, KIND_TTS
 from .classnames import CLASS_NAMES, ROUTABLE_CLASSES
 
 
@@ -24,8 +24,9 @@ TTS_ENV = Env("tts", worker=False)
 ALIGN_ENV = Env("align", worker=True)
 ASR_ENV = Env("asr", worker=True)
 RVC_ENV = Env("rvc", worker=True)
+IMAGE_ENV = Env("image", worker=True)
 
-ENVS: tuple[Env, ...] = (LLM_ENV, TTS_ENV, ALIGN_ENV, ASR_ENV, RVC_ENV)
+ENVS: tuple[Env, ...] = (LLM_ENV, TTS_ENV, ALIGN_ENV, ASR_ENV, RVC_ENV, IMAGE_ENV)
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,13 @@ DENOISE = Family(
     frozenset({"denoise_model_missing"}),
     catalog_is_complete=True,
 )
+IMAGE = Family(
+    "image",
+    IMAGE_ENV,
+    ("image",),
+    frozenset({"model_not_installed"}),
+    catalog_is_complete=True,
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +129,10 @@ DENOISE_JOB = JobTypeSpec(
 UNLOAD_DENOISER = JobTypeSpec(
     "unload-denoiser", DENOISE, CardEffect(takes_off=KIND_DENOISE)
 )
+IMAGE_JOB = JobTypeSpec(
+    "image", IMAGE, CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True)
+)
+UNLOAD_IMAGE = JobTypeSpec("unload-image", IMAGE, CardEffect(takes_off=KIND_IMAGE))
 
 JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     ECHO_JOB,
@@ -136,6 +148,8 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     RVC_JOB,
     DENOISE_JOB,
     UNLOAD_DENOISER,
+    IMAGE_JOB,
+    UNLOAD_IMAGE,
 )
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
@@ -180,6 +194,9 @@ __all__ = [
     "Env",
     "FAMILIES",
     "Family",
+    "IMAGE",
+    "IMAGE_ENV",
+    "IMAGE_JOB",
     "JOB_TYPE_SPECS",
     "JobTypeSpec",
     "LLM",
@@ -194,6 +211,7 @@ __all__ = [
     "TTS_JOB",
     "UNLOAD_ALIGNER",
     "UNLOAD_DENOISER",
+    "UNLOAD_IMAGE",
     "UNLOAD_MODEL",
     "UNLOAD_VOICE",
     "spec_of",

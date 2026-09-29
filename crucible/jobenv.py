@@ -46,6 +46,8 @@ WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
     ("asr", MLX_DARWIN): "mlx-whisper",
     ("rvc", CUDA_LINUX): "ultimate-rvc",
     ("rvc", MLX_DARWIN): "ultimate-rvc",
+    ("image", CUDA_LINUX): "diffusers",
+    ("image", MLX_DARWIN): "mflux",
 }
 
 JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {

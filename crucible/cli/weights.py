@@ -11,6 +11,7 @@ from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from ..client import transport
 from ..client.connection import Connection
 from ..errors import CrucibleError
+from ..imagemodels import ImageManifest, ImageManifestError, load_all_image_manifests
 from ..manifests import ManifestError, ModelManifest, load_all_manifests
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from . import common
@@ -18,11 +19,15 @@ from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
 
-def _all_manifests() -> dict[str, "ModelManifest | AsrManifest | AlignManifest"]:
-    merged: dict[str, "ModelManifest | AsrManifest | AlignManifest"] = dict(
+def _all_manifests() -> dict[str, ModelManifest | AsrManifest | AlignManifest | ImageManifest]:
+    merged: dict[str, ModelManifest | AsrManifest | AlignManifest | ImageManifest] = dict(
         load_all_manifests()
     )
-    for extra in (load_all_asr_manifests(), load_all_align_manifests()):
+    for extra in (
+        load_all_asr_manifests(),
+        load_all_align_manifests(),
+        load_all_image_manifests(),
+    ):
         for model_id, manifest in extra.items():
             if model_id in merged:
                 raise ManifestError(
@@ -104,7 +109,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
     config, backend = common.here()
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError, AlignManifestError) as exc:
+    except (ManifestError, AsrManifestError, AlignManifestError, ImageManifestError) as exc:
         return _fail(str(exc))
     rows = []
     for manifest in manifests.values():
@@ -156,7 +161,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     config, backend = common.here()
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError, AlignManifestError) as exc:
+    except (ManifestError, AsrManifestError, AlignManifestError, ImageManifestError) as exc:
         return _fail(str(exc))
     manifest = manifests.get(args.model)
     if manifest is None:

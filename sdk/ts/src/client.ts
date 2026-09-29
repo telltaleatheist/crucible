@@ -65,6 +65,8 @@ import {
   type AlignItem,
   type Alignment,
   type AlignOptions,
+  type ImageOptions,
+  type ImageResult,
   type AlignWindowResult,
   type JobInput,
   type ArtifactHold,
@@ -1274,6 +1276,42 @@ export class CrucibleClient {
     });
   }
 
+  /** Queue an `image` job (one PNG, `image.png`) and return its id. */
+  async image(options: ImageOptions): Promise<string> {
+    const given = options as Partial<ImageOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'image(...) needs {model, prompt}');
+    }
+    const strength = given.imageStrength ?? null;
+    const picture = given.image ?? null;
+    if ((strength === null) !== (picture === null)) {
+      throw new CrucibleConfigError(
+        strength === null ? 'imageStrength' : 'image',
+        'image-to-image needs both an image and an imageStrength between 0 and 1',
+      );
+    }
+    const params: Record<string, unknown> = { prompt: requireText(given.prompt, 'prompt') };
+    const optional: [keyof ImageOptions, string][] = [
+      ['negativePrompt', 'negative_prompt'],
+      ['width', 'width'],
+      ['height', 'height'],
+      ['seed', 'seed'],
+      ['steps', 'steps'],
+      ['guidance', 'guidance'],
+      ['imageStrength', 'image_strength'],
+    ];
+    for (const [key, wire] of optional) {
+      const value = given[key];
+      if (value !== undefined && value !== null) params[wire] = value;
+    }
+    return this.submit({
+      type: 'image',
+      model: requireText(given.model, 'model'),
+      params,
+      inputs: picture === null ? {} : { [given.imageName ?? 'input.png']: picture },
+    });
+  }
+
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
     return asObject(await this.#jsonValue(path, init, where), where);
   }
@@ -2020,6 +2058,41 @@ export function readAlignment(bytes: Uint8Array): Alignment {
     },
   );
   return { model: str(body, 'model', where), windows };
+}
+
+function numberMap(entry: Json | null, where: string): Record<string, number> {
+  return entry === null ? {} : readSampling(entry, where);
+}
+
+/** A finished `image` job's effective parameters, read out of its `done` frame so the picture can be made again. */
+export function readImageResult(done: DoneData): ImageResult {
+  const where = 'the image done event';
+  const image = objectField(done.extra as Json, 'image', where);
+  const at = `${where}.image`;
+  return {
+    model: str(image, 'model', at),
+    hfRepo: str(image, 'hf_repo', at),
+    revision: str(image, 'revision', at),
+    backend: str(image, 'backend', at),
+    engine: str(image, 'engine', at),
+    dtype: str(image, 'dtype', at),
+    prompt: str(image, 'prompt', at),
+    negativePrompt: nullableStr(image, 'negative_prompt', at),
+    width: num(image, 'width', at),
+    height: num(image, 'height', at),
+    seed: num(image, 'seed', at),
+    steps: num(image, 'steps', at),
+    guidance: num(image, 'guidance', at),
+    imageStrength: nullableNum(image, 'image_strength', at),
+    input: nullableStr(image, 'input', at),
+    seconds: nullableNum(image, 'seconds', at),
+    stageSeconds: numberMap(nullableObject(image, 'stage_seconds', at), `${at}.stage_seconds`),
+    peakBytes: nullableNum(image, 'peak_bytes', at),
+    stagePeakBytes: numberMap(nullableObject(image, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
+    memoryBytesEstimate: num(image, 'memory_bytes_estimate', at),
+    memoryBasis: str(image, 'memory_basis', at),
+    artifacts: done.artifacts ?? [],
+  };
 }
 
 /** A finished `tts` job's terminal news, read out of its `done` frame. */
