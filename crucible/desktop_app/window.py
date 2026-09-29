@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import queue
 import sys
 import threading
@@ -8,6 +9,7 @@ from pathlib import Path
 from tkinter import messagebox
 from typing import Any
 
+from .. import traylife
 from . import theme, views
 from .api import LocalApi
 from .controller import Controller
@@ -24,6 +26,8 @@ SIDEBAR_WIDTH = 200
 CONTENT_PAD = 36
 WINDOWS_APP_ID = "Crucible.App"
 DWM_DARK_TITLE = 20
+MAC_REOPEN = "::tk::mac::ReopenApplication"
+MAC_QUIT = "::tk::mac::Quit"
 
 
 class Asker:
@@ -66,15 +70,17 @@ def dark_title_bar(root: tk.Tk, dark: bool) -> None:
         value = ctypes.c_int(1 if dark else 0)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWM_DARK_TITLE, ctypes.byref(value),
                                                    ctypes.sizeof(value))
-        root.withdraw()
-        root.deiconify()
+        if root.state() != "withdrawn":
+            root.withdraw()
+            root.deiconify()
     except (AttributeError, OSError):
         pass
 
 
 class App:
-    def __init__(self, root: tk.Tk, controller: Controller, asker: Asker) -> None:
+    def __init__(self, root: tk.Tk, controller: Controller, asker: Asker, home: Path | None = None) -> None:
         self.root = root
+        self.home = home
         self.c = controller
         self.asker = asker
         self.heard: queue.Queue = queue.Queue()
@@ -85,7 +91,36 @@ class App:
         self.root.iconphoto(True, *self.icons)
         self.logo = tk.PhotoImage(file=str(assets_dir() / "icon-32.png"))
         self.actions = views.Actions(controller, self.go, self.copy)
+        self.bind_window_manager()
         self.build()
+
+    def bind_window_manager(self) -> None:
+        self.root.protocol("WM_DELETE_WINDOW", self.close_button)
+        if sys.platform == "darwin":
+            self.root.createcommand(MAC_REOPEN, self.show)
+            self.root.createcommand(MAC_QUIT, self.quit_with_tray)
+
+    def tray_can_reopen(self) -> bool:
+        return self.home is not None and traylife.running_pid(self.home) is not None
+
+    def close_button(self) -> None:
+        if sys.platform == "darwin" or self.tray_can_reopen():
+            self.root.withdraw()
+        else:
+            self.root.destroy()
+
+    def show(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        self.root.focus_force()
+
+    def quit_with_tray(self) -> None:
+        if self.home is not None:
+            with contextlib.suppress(OSError):
+                traylife.ask_to_close(self.home)
+        self.root.destroy()
 
     def build(self) -> None:
         for child in self.root.winfo_children():
@@ -172,11 +207,7 @@ class App:
             self.root.destroy()
             return
         if word == FOCUS:
-            self.root.deiconify()
-            self.root.lift()
-            self.root.attributes("-topmost", True)
-            self.root.after(200, lambda: self.root.attributes("-topmost", False))
-            self.root.focus_force()
+            self.show()
 
     def tick(self) -> None:
         self.c.refresh(self.screen)
@@ -210,7 +241,7 @@ def run(home: Path, instance: Instance, root: Any = None) -> int:
     root = root if root is not None else make_root()
     asker = Asker()
     controller = Controller(LocalApi(), LocalHost(home), asker)
-    app = App(root, controller, asker)
+    app = App(root, controller, asker, home)
     instance.serve(app.heard.put)
     app.start()
     root.mainloop()
