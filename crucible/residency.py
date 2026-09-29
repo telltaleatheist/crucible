@@ -23,6 +23,7 @@ from .accelerator import (
 )
 from .cardkinds import (
     KIND_ALIGN,
+    KIND_AUDIO,
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
@@ -51,6 +52,7 @@ __all__ = [
     "Residency",
     "Resident",
     "ResidentAligner",
+    "ResidentAudio",
     "ResidentImage",
     "ResidentModel",
     "ResidentSeparator",
@@ -263,8 +265,49 @@ class ResidentImage:
         }
 
 
+@dataclass(frozen=True)
+class ResidentAudio:
+    kind = KIND_AUDIO
+
+    model_id: str
+    backend: str
+    engine: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    versions: dict[str, Any]
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.model_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "audio_model": self.model_id,
+            "backend": self.backend,
+            "engine": self.engine,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "versions": dict(self.versions),
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
 Resident = (
-    ResidentModel | ResidentVoice | ResidentAligner | ResidentSeparator | ResidentImage
+    ResidentModel
+    | ResidentVoice
+    | ResidentAligner
+    | ResidentSeparator
+    | ResidentImage
+    | ResidentAudio
 )
 
 
@@ -634,6 +677,14 @@ class Residency:
     @property
     def image_session(self) -> "WorkerSession | None":
         return None if self.resident_image is None else self._session
+
+    @property
+    def resident_audio(self) -> ResidentAudio | None:
+        return self._resident if isinstance(self._resident, ResidentAudio) else None
+
+    @property
+    def audio_session(self) -> "WorkerSession | None":
+        return None if self.resident_audio is None else self._session
 
     @property
     def warming(self) -> str | None:

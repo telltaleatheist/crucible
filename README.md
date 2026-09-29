@@ -910,6 +910,25 @@ The model's three parts run one after another and only one is ever loaded, so th
 guard admits is the largest part's peak (measured on the Mac), not the 33 GB download. A
 batch leases the model after its first picture so it is not reloaded for each one.
 
+### `audio`
+
+Sound effects, music and songs (`docs/AUDIO.md`, `docs/internals/audio.md`): Stable Audio 3
+Small SFX and Medium on a CUDA card and on the Mac (Metal), YuE2 3B (songs with vocals, from
+lyrics and style tags) on CUDA only. One `audio.flac` out, plus `score.abc` for a song, and
+`done.audio` carries every effective parameter.
+
+```bash
+crucible init --enable-audio
+crucible install audio                        # one env per engine
+crucible models pull stable-audio-3-small-sfx # gated: accept the licence on Hugging Face first
+```
+
+```json
+{"type": "audio",
+ "model": "stable-audio-3-small-sfx",
+ "params": {"prompt": "TrackType: SFX. A heavy oak door creaks open slowly, close mic", "duration_s": 4}}
+```
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS

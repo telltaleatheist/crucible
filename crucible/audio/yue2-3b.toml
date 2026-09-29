@@ -1,0 +1,63 @@
+[model]
+id = "yue2-3b"
+family = "yue2"
+display = "YuE2 3B"
+kind = "song"
+licence = "CC BY-NC 4.0 (weights, with the 2026-09-16 creator addendum); Apache-2.0 (the yue2-infer code)"
+licence_url = "https://huggingface.co/m-a-p/YuE2-3B/blob/main/LICENSE"
+commercial_use = "non-commercial, except that individual creators and musicians acting for themselves may publish and monetise the songs they make (addendum of 2026-09-16); a company needs a commercial licence from the authors"
+
+[backends.cuda-linux]
+engine = "yue2"
+hf_repo = "m-a-p/YuE2-3B"
+revision = "c044757a011169583f363168348ae380946efff8"
+gated = false
+dtype = "bfloat16"
+memory_bytes_estimate = 16000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the YuE2 README, not measured through Crucible: 11.18 GiB peak on an RTX 4090 with the full chord score, 14.08 GiB at the full 24,576-token context (15.1 GB); the 3.63 B bfloat16 backbone is 7.26 GB and moves to host memory while the 0.53 GB float32 decoder runs. 16 GB leaves the CUDA context; YuE2 caps its own process at this budget"
+files = [
+  "config.json",
+  "generation_config.json",
+  "yue2_generation_config.json",
+  "weights_manifest.json",
+  "model.safetensors",
+  "qwen.tiktoken",
+  "modeling_yue2.py",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+]
+sample_rate = 48000
+channels = 2
+max_duration_s = 360
+takes = ["cfg"]
+default_cfg = 1.0
+max_cfg = 20.0
+
+[backends.cuda-linux.not_taken]
+duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); add or remove sections of lyrics to change the length"
+negative_prompt = "YuE2 has no negative prompt; with cfg above 1 it guides away from its instruction alone"
+steps = "YuE2 writes a score and codec tokens one at a time and then runs a fixed 32-step flow-matching stage; there is no step count to choose"
+
+[[backends.cuda-linux.companions]]
+name = "vae"
+hf_repo = "m-a-p/YuE2-Vae"
+revision = "152733a19ad43aa67e367f9b5503ef8075bb5126"
+
+[[backends.cuda-linux.companions.files]]
+source = "config.json"
+target = "config.json"
+sha256 = "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970"
+bytes = 1378
+
+[[backends.cuda-linux.companions.files]]
+source = "weights_manifest.json"
+target = "weights_manifest.json"
+sha256 = "017d64a4d288217a43fcac3866a0e1d55f796fa891d4dfb6de0bd170ab750026"
+bytes = 178
+
+[[backends.cuda-linux.companions.files]]
+source = "model.safetensors"
+target = "model.safetensors"
+sha256 = "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+bytes = 530512720

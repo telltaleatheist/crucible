@@ -23,6 +23,7 @@ JOB_TYPE_WORDS = {
     "rvc": ("Voice conversion", "Change one voice into another"),
     "denoise": ("Noise removal", "Clean audio and split vocals from music"),
     "image": ("Image generation", "Make pictures from a text prompt"),
+    "audio": ("Audio generation", "Make sound effects, music and songs from words"),
 }
 
 HIDDEN_JOB_TYPES = frozenset({"echo"})

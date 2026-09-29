@@ -13,6 +13,7 @@ from ..residency import Residency
 from .align import AlignJobType, UnloadAlignerJobType
 from .alignlongform.jobtype import AlignLongformJobType
 from .asr import AsrJobType
+from .audio import AudioJobType, UnloadAudioJobType
 from .base import (
     OPTIONAL_JOB_TYPE_MEMBERS,
     Job,
@@ -256,6 +257,7 @@ __all__ = [
     "AlignJobType",
     "AlignLongformJobType",
     "AsrJobType",
+    "AudioJobType",
     "DenoiseJobType",
     "EchoJobType",
     "ImageJobType",
@@ -270,6 +272,7 @@ __all__ = [
     "Residency",
     "RvcJobType",
     "UnloadAlignerJobType",
+    "UnloadAudioJobType",
     "UnloadDenoiserJobType",
     "UnloadImageJobType",
     "UnloadModelJobType",

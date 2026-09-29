@@ -1,0 +1,78 @@
+[model]
+id = "stable-audio-3-medium"
+family = "stable-audio-3"
+display = "Stable Audio 3.0 Medium"
+kind = "music"
+licence = "Stability AI Community License (weights); the bundled T5Gemma text encoder is under the Gemma Terms of Use"
+licence_url = "https://stability.ai/community-license-agreement"
+commercial_use = "free for individuals and organisations under US$1,000,000 annual revenue, after registering with Stability AI; above that an Enterprise licence. Outputs are yours"
+
+[backends.cuda-linux]
+engine = "stable-audio-3"
+hf_repo = "stabilityai/stable-audio-3-medium"
+revision = "27b5a21b791b1b033d193a9e1e3ce78493f102f9"
+gated = true
+dtype = "float16"
+memory_bytes_estimate = 8000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files and Stability's own table, not measured through Crucible: 10.4 GB of float32 weights (DiT with SAME-L 9.22 GB, T5Gemma 1.18 GB) cast to float16 is 5.2 GB; Stability's README reports 6.52 GB peak allocated at 380 s on an H200 with flash-attn, unchunked decode (5.14 GB at 120 s chunked); 8 GB leaves the CUDA context and allocator slack. Fits a 24 GB card with a 3 GB desktop allowance several times over"
+files = [
+  "model_config.json",
+  "model.safetensors",
+  "t5gemma-b-b-ul2/config.json",
+  "t5gemma-b-b-ul2/generation_config.json",
+  "t5gemma-b-b-ul2/model.safetensors",
+  "t5gemma-b-b-ul2/special_tokens_map.json",
+  "t5gemma-b-b-ul2/tokenizer.json",
+  "t5gemma-b-b-ul2/tokenizer.model",
+  "t5gemma-b-b-ul2/tokenizer_config.json",
+  "LICENSE.md",
+  "LICENSE_GEMMA.md",
+  "NOTICE",
+]
+sample_rate = 44100
+channels = 2
+max_duration_s = 380
+takes = ["duration_s", "steps"]
+default_duration_s = 60
+default_steps = 8
+max_steps = 50
+
+[backends.cuda-linux.not_taken]
+negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
+cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"
+
+[backends.mlx-darwin]
+engine = "stable-audio-3"
+hf_repo = "stabilityai/stable-audio-3-medium"
+revision = "27b5a21b791b1b033d193a9e1e3ce78493f102f9"
+gated = true
+dtype = "float32"
+memory_bytes_estimate = 16000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files, not measured through Crucible: the stable-audio-3 package runs float32 when there is no CUDA, so the 10.4 GB of weights stay 10.4 GB on the Metal (MPS) device; activations are Stability's CUDA figure (1.3 GB over the float16 weights at 380 s) doubled for float32 and again for attention without flash-attn (the package's chunked-halo SDPA fallback), plus the torch process in the one unified pool. Stability's table lists Medium as a CUDA model; this arm is the package's own no-CUDA path"
+files = [
+  "model_config.json",
+  "model.safetensors",
+  "t5gemma-b-b-ul2/config.json",
+  "t5gemma-b-b-ul2/generation_config.json",
+  "t5gemma-b-b-ul2/model.safetensors",
+  "t5gemma-b-b-ul2/special_tokens_map.json",
+  "t5gemma-b-b-ul2/tokenizer.json",
+  "t5gemma-b-b-ul2/tokenizer.model",
+  "t5gemma-b-b-ul2/tokenizer_config.json",
+  "LICENSE.md",
+  "LICENSE_GEMMA.md",
+  "NOTICE",
+]
+sample_rate = 44100
+channels = 2
+max_duration_s = 380
+takes = ["duration_s", "steps"]
+default_duration_s = 60
+default_steps = 8
+max_steps = 50
+
+[backends.mlx-darwin.not_taken]
+negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
+cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"

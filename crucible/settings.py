@@ -558,6 +558,7 @@ def apply(
         enable_rvc=config.enable_rvc,
         enable_denoise=config.enable_denoise,
         enable_image=config.enable_image,
+        enable_audio=config.enable_audio,
         retention_days=config.retention_days,
         tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,

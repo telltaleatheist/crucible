@@ -687,6 +687,7 @@ def _fetch_snapshot(
         _snapshot(
             config, manifest.path.name, spec, target,
             patterns=spec.files, on_progress=on_progress,
+            retry=manifest.pull_command,
         )
     except PullCancelled:
         shutil.rmtree(target, ignore_errors=True)
@@ -724,6 +725,27 @@ def _snapshot_record(
     }
 
 
+HF_ACCEPT_URL = "https://huggingface.co/{repo}"
+
+HF_TOKENS_URL = "https://huggingface.co/settings/tokens"
+
+
+def gated_message(
+    repo: str, config: Config, retry: str | None, cause: Exception | None = None
+) -> str:
+    again = f"`{retry}`" if retry else "the same pull"
+    return (
+        f"{repo} is gated: Hugging Face serves it only to an account that has "
+        "accepted its licence, and this server has no HF token that opens it. "
+        "Nothing was downloaded. 1) Signed in to Hugging Face, open "
+        f"{HF_ACCEPT_URL.format(repo=repo)} and accept the licence there. "
+        f"2) Make a read token at {HF_TOKENS_URL} and give it to this server: "
+        f"set ${HF_TOKEN_ENV} in the environment Crucible runs in, or put it "
+        f"under [hf] token in {config.path}. 3) Run {again} again"
+        + ("" if cause is None else f" (Hugging Face said: {cause})")
+    )
+
+
 def _snapshot(
     config: Config,
     manifest_name: str,
@@ -732,6 +754,7 @@ def _snapshot(
     *,
     patterns: Sequence[str],
     on_progress: ProgressHook | None,
+    retry: str | None = None,
 ) -> None:
     try:
         from huggingface_hub import snapshot_download
@@ -761,10 +784,7 @@ def _snapshot(
     except PullCancelled:
         raise
     except GatedRepoError as exc:
-        raise WeightsError(
-            f"{spec.hf_repo} is gated and this server has no HF token that opens it "
-            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
-        ) from exc
+        raise WeightsError(gated_message(spec.hf_repo, config, retry, exc)) from exc
     except RepositoryNotFoundError as exc:
         raise WeightsError(
             f"{spec.hf_repo} is private or does not exist; if it is private set "
@@ -871,6 +891,7 @@ def _fetch_alias_files(
         _snapshot(
             config, alias.path.name, spec, target,
             patterns=wanted, on_progress=on_progress,
+            retry=alias.pull_command,
         )
     except PullCancelled:
         for name in wanted:
@@ -930,10 +951,7 @@ class HubFile:
 def download_error(exc: Exception, errors: Any, config: Config, wanted: HubFile) -> WeightsError:
     repo, revision = wanted.repo, wanted.revision
     messages = (
-        (errors.GatedRepoError, lambda: (
-            f"{repo} is gated and this server has no HF token that opens it "
-            f"(set ${HF_TOKEN_ENV} or [hf] token in {config.path}): {exc}"
-        )),
+        (errors.GatedRepoError, lambda: gated_message(repo, config, None, exc)),
         (errors.RepositoryNotFoundError, lambda: (
             f"{repo} is private or does not exist; if it is private set "
             f"${HF_TOKEN_ENV} or [hf] token in {config.path}: {exc}"

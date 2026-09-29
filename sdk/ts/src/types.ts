@@ -1364,6 +1364,63 @@ export interface ImageResult {
   readonly leaseId: string | null;
 }
 
+/** What an `audio` job makes: `prompt` for sound effects and music, `tags` and `lyrics` for songs. */
+export interface AudioOptions {
+  readonly model: string;
+  readonly prompt?: string;
+  readonly tags?: string;
+  readonly lyrics?: string;
+  readonly negativePrompt?: string;
+  readonly durationS?: number;
+  readonly seed?: number;
+  readonly steps?: number;
+  readonly cfg?: number;
+  readonly format?: 'flac' | 'wav';
+  /** Hold the model from the moment it is loaded; `act` is the model's class: `sfx`, `music` or `song`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** Options for {@link CrucibleClient.loadAudio}. */
+export interface LoadAudioOptions {
+  /** Hold the model from the moment it is loaded; `act` is the model's class: `sfx`, `music` or `song`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** An `audio` job's effective parameters and measurements, read by {@link readAudioResult}. */
+export interface AudioResult {
+  readonly model: string;
+  readonly kind: 'sfx' | 'music' | 'song';
+  readonly hfRepo: string;
+  readonly revision: string;
+  readonly backend: string;
+  readonly engine: string;
+  readonly dtype: string;
+  readonly prompt: string | null;
+  readonly tags: string | null;
+  readonly lyrics: string | null;
+  readonly durationS: number | null;
+  readonly seed: number;
+  readonly steps: number | null;
+  readonly cfg: number | null;
+  readonly format: 'flac' | 'wav';
+  /** The audio artifact's name, `audio.flac` or `audio.wav`. */
+  readonly artifact: string;
+  /** `score.abc`, the song's ABC score, when the model wrote one; else null. */
+  readonly score: string | null;
+  readonly audioSeconds: number | null;
+  readonly sampleRate: number | null;
+  readonly channels: number | null;
+  readonly seconds: number | null;
+  readonly stageSeconds: Readonly<Record<string, number>>;
+  readonly peakBytes: number | null;
+  readonly stagePeakBytes: Readonly<Record<string, number>>;
+  readonly memoryBytesEstimate: number;
+  readonly memoryBasis: string;
+  readonly artifacts: readonly string[];
+  /** The lease this job opened or renewed from `lease`, else null. */
+  readonly leaseId: string | null;
+}
+
 /** `GET /v1/setup` — everything an app needs to be pointed at this server, token included. */
 export interface ServerSetup {
   /** The server's name, e.g. `crucible@mac-studio`. */

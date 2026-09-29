@@ -49,7 +49,7 @@ class UnloadJobType:
 
     @property
     def not_resident_code(self) -> str:
-        return f"{self._noun}_not_resident"
+        return f"{self._noun.replace(' ', '_')}_not_resident"
 
     def describe_models(self) -> list[ModelDescriptor]:
         return self._describe()

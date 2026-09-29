@@ -94,6 +94,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("llm_env", lambda: None),
     ("worker_envs", list),
     ("tts_envs", dict),
+    ("audio_envs", dict),
     ("cuda_toolkit_links", list),
     ("llm_patches", list),
     ("capability", lambda: None),
@@ -203,7 +204,9 @@ def check_config(host: Host) -> Section:
         "port": config.port,
         **{
             f"enable_{job_type}": getattr(config, f"enable_{job_type}")
-            for job_type in ("echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image")
+            for job_type in (
+                "echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image", "audio",
+            )
         },
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
         "desktop_allowance_basis": config.desktop_allowance_basis,
@@ -456,6 +459,27 @@ def check_tts_envs(host: Host) -> Section:
     )
 
 
+def check_audio_envs(host: Host) -> Section:
+    config, backend = host.config, host.backend
+    if config is None or backend is None or not config.enable_audio:
+        return Section("audio_envs", {})
+    install = "crucible install audio"
+    try:
+        specs = jobenv.audio_envs(backend.kind)
+    except jobenv.EnvError as exc:
+        return Section(
+            "audio_envs", {"audio_envs": {}}, (Finding.run("audio_env", str(exc), install),)
+        )
+    envs: dict[str, Any] = {}
+    findings: list[Finding] = []
+    for spec in specs:
+        envs[spec.key], found = _env_report(
+            f"audio_env[{spec.key}]", config.home, spec, backend.kind, install
+        )
+        findings.extend(found)
+    return Section("audio_envs", {"audio_envs": envs}, tuple(findings))
+
+
 def check_llm_patches(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None or not config.enable_llm:
@@ -573,6 +597,7 @@ CHECKS: tuple[Check, ...] = (
     check_llm_env,
     check_worker_envs,
     check_tts_envs,
+    check_audio_envs,
     check_llm_patches,
     check_job_types,
     check_desktop_reserve,
@@ -708,6 +733,8 @@ def lines_envs(report: dict[str, Any]) -> Iterator[str]:
         yield from _env_lines(f"{worker_env['job_type']} env", worker_env)
     for engine, entry in sorted(report["tts_envs"].items()):
         yield from _env_lines(f"tts env ({engine})", entry)
+    for key, entry in sorted(report["audio_envs"].items()):
+        yield from _env_lines(f"audio env ({key.removeprefix('audio-')})", entry)
 
 
 def lines_patches(report: dict[str, Any]) -> Iterator[str]:

@@ -4,10 +4,12 @@ import argparse
 import json
 import urllib.error
 from pathlib import Path
+from typing import Any
 
-from .. import catalog, denoisemodels, rvcbase, weights
+from .. import audioweights, catalog, denoisemodels, rvcbase, weights
 from ..alignmodels import AlignManifest, AlignManifestError, load_all_align_manifests
 from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
+from ..audiomodels import AudioManifest, AudioManifestError, load_all_audio_manifests
 from ..client import transport
 from ..client.connection import Connection
 from ..errors import CrucibleError
@@ -18,15 +20,20 @@ from . import common
 from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
+AnyManifest = ModelManifest | AsrManifest | AlignManifest | ImageManifest | AudioManifest
 
-def _all_manifests() -> dict[str, ModelManifest | AsrManifest | AlignManifest | ImageManifest]:
-    merged: dict[str, ModelManifest | AsrManifest | AlignManifest | ImageManifest] = dict(
-        load_all_manifests()
-    )
+MANIFEST_ERRORS = (
+    ManifestError, AsrManifestError, AlignManifestError, ImageManifestError, AudioManifestError,
+)
+
+
+def _all_manifests() -> dict[str, AnyManifest]:
+    merged: dict[str, AnyManifest] = dict(load_all_manifests())
     for extra in (
         load_all_asr_manifests(),
         load_all_align_manifests(),
         load_all_image_manifests(),
+        load_all_audio_manifests(),
     ):
         for model_id, manifest in extra.items():
             if model_id in merged:
@@ -36,6 +43,12 @@ def _all_manifests() -> dict[str, ModelManifest | AsrManifest | AlignManifest | 
                 )
             merged[model_id] = manifest
     return merged
+
+
+def _installed(config: Any, manifest: AnyManifest, spec: Any) -> weights.InstalledWeights | None:
+    if isinstance(manifest, AudioManifest):
+        return audioweights.installed(config, manifest, spec)
+    return weights.installed(config, manifest, spec)
 
 
 def _nobody_holds(_subject: catalog.Subject) -> None:
@@ -109,7 +122,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
     config, backend = common.here()
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError, AlignManifestError, ImageManifestError) as exc:
+    except MANIFEST_ERRORS as exc:
         return _fail(str(exc))
     rows = []
     for manifest in manifests.values():
@@ -125,7 +138,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
             )
             continue
         spec = manifest.spec(backend.kind)
-        found = weights.installed(config, manifest, spec)
+        found = _installed(config, manifest, spec)
         rows.append(
             {
                 "id": manifest.id,
@@ -161,7 +174,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     config, backend = common.here()
     try:
         manifests = _all_manifests()
-    except (ManifestError, AsrManifestError, AlignManifestError, ImageManifestError) as exc:
+    except MANIFEST_ERRORS as exc:
         return _fail(str(exc))
     manifest = manifests.get(args.model)
     if manifest is None:
@@ -177,7 +190,8 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     spec = manifest.spec(backend.kind)
     print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
     try:
-        result = weights.pull(
+        pull = audioweights.pull if isinstance(manifest, AudioManifest) else weights.pull
+        result = pull(
             config, manifest, spec, force=args.force,
             on_line=lambda line: print(f"  {line}"),
         )

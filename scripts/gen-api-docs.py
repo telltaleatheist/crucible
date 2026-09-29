@@ -64,7 +64,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "/jobs",
         "Jobs",
         "The work. Every job type is created, polled and cancelled through the same routes. "
-        "The `image` job's params, its result and how to prompt it are in docs/IMAGE.md.",
+        "The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; "
+        "the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md.",
     ),
     (
         "/resumable",
@@ -158,6 +159,7 @@ def build_app() -> Any:
         enable_rvc=True,
         enable_denoise=True,
         enable_image=True,
+        enable_audio=True,
         desktop_allowance_bytes=3 * 1024 ** 3,
         retention_days=7,
         desktop_allowance_basis="stated",
