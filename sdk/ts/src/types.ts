@@ -1324,6 +1324,14 @@ export interface ImageOptions {
   readonly imageStrength?: number | null;
   readonly image?: JobInput | null;
   readonly imageName?: string;
+  /** Hold the model from the moment it is loaded, for a batch; `act` must be `image`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** Options for {@link CrucibleClient.loadImage}. */
+export interface LoadImageOptions {
+  /** Hold the model from the moment it is loaded; `act` must be `image`. */
+  readonly lease?: LeaseOnLoad;
 }
 
 /** An `image` job's effective parameters and measurements, read by {@link readImageResult}. */
@@ -1350,6 +1358,10 @@ export interface ImageResult {
   readonly memoryBytesEstimate: number;
   readonly memoryBasis: string;
   readonly artifacts: readonly string[];
+  /** Whether the prompt's embeddings came from the loaded model's cache; null from a server that does not say. */
+  readonly promptCache: 'hit' | 'miss' | null;
+  /** The lease this job opened or renewed from `lease`, else null. */
+  readonly leaseId: string | null;
 }
 
 /** `GET /v1/setup` — everything an app needs to be pointed at this server, token included. */

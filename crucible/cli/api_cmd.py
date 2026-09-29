@@ -767,7 +767,7 @@ JOB_VERBS = (
             "--type", required=True,
             help="tts, asr, align, align-longform, rvc, denoise, image, echo, "
                  "load-model, unload-model, load-voice, unload-voice, unload-aligner, "
-                 "unload-denoiser, unload-image — `crucible api info` says which "
+                 "unload-denoiser, load-image, unload-image — `crucible api info` says which "
                  "this server offers",
         ),
         arg("--model", default=None, help="the model, voice, aligner or image model id this type serves"),

@@ -1,6 +1,6 @@
 # Image generation internals
 
-Covers `crucible/jobs/image/` (the `image` and `unload-image` job types and `worker.py`),
+Covers `crucible/jobs/image/` (the `image`, `load-image` and `unload-image` job types and `worker.py`),
 `crucible/imagemodels.py`, `crucible/image/*.toml`, `crucible/envs/image/*.txt`, the fifth
 resident kind (`KIND_IMAGE`, noun `generator`) and the `image` capability class. The caller's
 page is [IMAGE.md](../IMAGE.md). The job-type machinery it plugs into is
@@ -15,17 +15,20 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
 ## Shape
 
 - One family, `image` (`[jobs] enable_image`, default off; an older config without the key
-  reads as off and a rewriter that does not name it keeps what the file says). Two types:
-  `image` (makes the generator resident and reuses it, like `align`) and `unload-image`
-  (`UnloadJobType`, `generator_not_resident`).
+  reads as off and a rewriter that does not name it keeps what the file says). Three types:
+  `image` (makes the generator resident and reuses it, like `align`), `load-image` (loads it
+  and leaves it resident, like `load-voice`; its card effect reuses what it names, so warming
+  the model a lease already holds is a no-op, not `409 leased`) and `unload-image`
+  (`UnloadJobType`, `generator_not_resident`). `load-model` stays text-only: its card effect
+  makes an LLM resident and its manifests are the LLM catalog.
 - One env per backend, `image`, built by `crucible install image`, installed on submit like
   every worker env. One manifest, `qwen-image-2.1`, pulled with `crucible models pull` (the
   `models` weights family, like the ASR and align manifests). `catalog_is_complete`: an id
   the directory does not declare is refused, never pulled.
 - The worker is a `WorkerSession` (`workerio.serve`, ops `load` and `generate`, interrupt
   `cancel`) held by `Residency` as the resident. Settlement unloads it when the job ends
-  unless a lease holds it (jobs-runtime.md section 6): a batch of pictures leases the model
-  after the first, as a book leases its voice.
+  unless a lease holds it (jobs-runtime.md section 6). A batch sends `params.lease` on its
+  first picture (below).
 - One artifact per job, `image.png`, and `done.image` holding every effective parameter
   (seed included, chosen by the server when the caller sent none), the revision, the engine,
   the per-stage seconds and peak bytes, and the estimate with its basis.
@@ -196,6 +199,70 @@ Measured on the Mac, 2026-09-28, into a scratch home with the branch's `weights.
 linked 33,127,036,062 bytes, the pull finished in 6.2 s, and only the ~8 MB mflux had not
 fetched (`model_index.json`, `scheduler/`, the README, the licence, a 3.3 MB picture) came
 from the network. No second copy on disk. The installed Crucible was not touched.
+
+## The lease on an image job
+
+Owen, 2026-09-28: *"does crucible have a way to allow a user to retain a lease and keep a model
+loaded if we're generating multiple images? ... if the lease expires or something closes or
+stops, it can release the lease and the model from memory."*
+
+Before, a batch had to lease with `POST /v1/models/{id}/lease` after the first picture made the
+model resident and before settlement took it off again: a race the client could lose.
+`image` and `load-image` now take `params.lease` (`jobs/leaseonload.py`'s `LeaseOnLoad`, the
+same block `load-model` and `load-voice` take):
+
+- **Admission.** `preflight` runs `require_lease_request(lease, act="image")`: the act must be
+  a known capability class (`unknown_act`) and exactly `image` (`lease_act_mismatch`), the ttl
+  30 to 3600 (`invalid_ttl`). A bad block is refused at submit, before anything loads.
+- **The moment.** `run` gets the resident worker (`ResidentWorker._session`: the loaded one,
+  or a load), then `hold_for_load` opens the lease, then the picture is made. Settlement runs
+  only when the job ends, and by then the lease holds the card, so a long first picture cannot
+  race it.
+- **No second lease.** `hold_for_load` first looks at the open lease: if it holds the same kind
+  and subject for the same client, it is heartbeated and its id returned (`opened=False`)
+  instead of `Leases.open` refusing `409 leased`. `open_lease_for_load` (load-model,
+  load-voice) goes through the same rule. A lease held by someone else is still `leased`.
+- **Failure.** A picture that fails or is cancelled after its job *opened* the lease releases
+  it (`let_go_of`): the caller never received the id, so nothing would heartbeat or release
+  it, and settlement then clears the card as for any failed job. A renewed lease is left
+  alone.
+- **The end.** `done` carries `lease_id` (null without `lease`). Heartbeat and release are the
+  ordinary lease routes; an unrenewed lease lapses and the lane's idle pass
+  (`settle_for_lapsed_lease`) unloads the model, a released one is cleared before
+  `DELETE /v1/leases/{id}` answers.
+
+## The prompt-embedding cache
+
+Measured on owens-pc (3090 Ti, bf16, staged): every picture spent 17 to 25 s in `encoding`,
+because the diffusers arm loads the 17.5 GB text encoder, encodes, frees it and only then
+loads the transformer. The worker process survives between leased pictures; the encoder did
+not. The embeddings it produces are small, so `worker.py` keeps them:
+
+- **Key** (`Job.prompt_key`): prompt, negative prompt, whether guidance is above 1.0 (only
+  then is the negative encoded), the manifest revision and the backend, the last two sent by
+  the controller in every `generate` request. Seed, size, steps and guidance's value are not
+  in it: none of them reaches the encoder.
+- **Value.** diffusers: the four tensors `encode_prompt` returned (`prompt_embeds`, its mask,
+  and the negative pair when used), copied to host RAM at the end of the encoding stage and
+  moved back to the card on a hit. mflux: the `(embeds, mask)` pairs mflux itself keeps in
+  `model.prompt_cache`, keyed by prompt text; on a hit they are put into the fresh model's
+  `prompt_cache` and `text_encoder` is dropped before `generate_image`, so mflux never calls
+  the encoder and, its arrays being lazy, never reads the encoder's weights. mflux exposes no
+  separate encode call, but its prompt cache is that seam.
+- **Size.** One entry is `tokens x 4096 x 2` bytes per prompt (bf16; 4096 is the text
+  encoder's `hidden_size`) plus the mask: a 40-token prompt is about 0.33 MB, a 300-token one
+  about 2.5 MB, twice that with a negative prompt. The worker reports the total as
+  `prompt_cache_bytes`.
+- **Bounds.** `PromptCache`: least recently used first out, at most 32 entries
+  (`PROMPT_CACHE_ENTRIES`) and 256 MiB (`PROMPT_CACHE_BYTES`); an entry larger than the byte
+  cap is not kept. It lives in the worker process, is emptied on `load`, and goes when the
+  worker stops (unload, settlement, lease lapse, crash).
+- **Report.** The worker's result says `prompt_cache: "hit" | "miss"` and the controller copies
+  it into `done.image`. A hit still enters the `encoding` stage (to move the tensors back), so
+  `stage_seconds.encoding` is present and near 0.
+- **Not measured on hardware.** The saving (the whole encoder stage on a hit) is shown by the
+  fake worker's stage report only; a PC run of two same-prompt pictures is owed, and must go
+  through the installed Crucible, never a scratch worker beside it.
 
 ## Cancel between steps
 

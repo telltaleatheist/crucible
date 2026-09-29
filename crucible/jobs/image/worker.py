@@ -12,6 +12,7 @@ workerio.claim_stdout()
 import gc
 import threading
 import time
+from collections import OrderedDict
 
 from workerio import cap_memory, send
 
@@ -22,6 +23,10 @@ WHY_REQUIRED = "every parameter is required because each one changes the picture
 _STATE: dict = {"engine": None}
 
 _CANCEL = {"request_id": None}
+
+PROMPT_CACHE_ENTRIES = 32
+
+PROMPT_CACHE_BYTES = 256 * 1024 * 1024
 
 _CANCEL_LOCK = threading.Lock()
 
@@ -78,6 +83,44 @@ class Progress:
         return self.stage_seconds
 
 
+class PromptCache:
+    def __init__(self, entries: int = PROMPT_CACHE_ENTRIES, byte_cap: int = PROMPT_CACHE_BYTES) -> None:
+        self.entries = entries
+        self.byte_cap = byte_cap
+        self._held: OrderedDict = OrderedDict()
+        self.bytes = 0
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+    def __contains__(self, key) -> bool:
+        return key in self._held
+
+    def get(self, key):
+        found = self._held.get(key)
+        if found is None:
+            return None
+        self._held.move_to_end(key)
+        return found[0]
+
+    def put(self, key, value, size: int) -> None:
+        if size > self.byte_cap:
+            return
+        if key in self._held:
+            self.bytes -= self._held.pop(key)[1]
+        self._held[key] = (value, size)
+        self.bytes += size
+        while len(self._held) > self.entries or self.bytes > self.byte_cap:
+            self.bytes -= self._held.popitem(last=False)[1][1]
+
+    def clear(self) -> None:
+        self._held.clear()
+        self.bytes = 0
+
+
+_PROMPTS = PromptCache()
+
+
 class Job:
     def __init__(self, request: dict) -> None:
         self.request_id = require(request, "request_id", str)
@@ -91,6 +134,12 @@ class Job:
         self.image_path = optional(request, "image_path", str)
         self.image_strength = optional(request, "image_strength", (int, float))
         self.output_path = require(request, "output_path", str)
+        self.revision = require(request, "revision", str)
+        self.backend = require(request, "backend", str)
+
+    @property
+    def prompt_key(self) -> tuple:
+        return (self.prompt, self.negative_prompt, self.guidance > 1.0, self.revision, self.backend)
 
 
 class MfluxEngine:
@@ -115,13 +164,20 @@ class MfluxEngine:
         gc.collect()
         self._mx.clear_cache()
 
-    def generate(self, job: Job, progress: Progress) -> "tuple[object, dict]":
+    def nbytes(self, encoded: dict) -> int:
+        return sum(int(array.nbytes) for pair in encoded.values() for array in pair if array is not None)
+
+    def generate(self, job: Job, progress: Progress, cached: "dict | None") -> "tuple[object, dict, dict]":
         mx = self._mx
         peaks: dict = {}
+        encoded: dict = {}
         mx.reset_peak_memory()
         progress.enter("encoding")
         model = self._model_class(model_path=self._model_dir)
-        model.callbacks.register(_MfluxStages(self, model, progress, peaks))
+        if cached is not None:
+            model.prompt_cache.update(cached)
+            model.text_encoder = None
+        model.callbacks.register(_MfluxStages(self, model, progress, peaks, encoded))
         try:
             generated = model.generate_image(
                 seed=job.seed,
@@ -135,7 +191,7 @@ class MfluxEngine:
                 image_strength=job.image_strength,
             )
             peaks["decoding"] = self.peak_bytes()
-            return generated.image, peaks
+            return generated.image, peaks, encoded
         finally:
             del model
             self._release()
@@ -146,11 +202,12 @@ def _cached_embeddings(model) -> list:
 
 
 class _MfluxStages:
-    def __init__(self, engine: MfluxEngine, model, progress: Progress, peaks: dict) -> None:
+    def __init__(self, engine: MfluxEngine, model, progress: Progress, peaks: dict, encoded: dict) -> None:
         self._engine = engine
         self._model = model
         self._progress = progress
         self._peaks = peaks
+        self._encoded = encoded
 
     def _close_stage(self, name: str) -> None:
         self._peaks[name] = self._engine.peak_bytes()
@@ -160,6 +217,7 @@ class _MfluxStages:
     def call_before_loop(self, **_: object) -> None:
         self._model.text_encoder = None
         self._engine._mx.eval(*_cached_embeddings(self._model))
+        self._encoded.update(self._model.prompt_cache)
         self._close_stage("encoding")
         self._progress.enter("denoising")
 
@@ -215,6 +273,14 @@ class DiffusersEngine:
             torch_dtype=self._dtype,
             device_map=self.device,
         )
+
+    def nbytes(self, encoded: dict) -> int:
+        return sum(tensor.numel() * tensor.element_size() for tensor in encoded.values() if tensor is not None)
+
+    def _encoded(self, job: Job, cached: "dict | None") -> dict:
+        if cached is not None:
+            return _moved(cached, self.device)
+        return self._encode(job)
 
     def _encode(self, job: Job) -> dict:
         from transformers import Qwen3VLForConditionalGeneration
@@ -283,11 +349,18 @@ class DiffusersEngine:
         finally:
             del vae
 
-    def generate(self, job: Job, progress: Progress) -> "tuple[object, dict]":
+    def generate(self, job: Job, progress: Progress, cached: "dict | None") -> "tuple[object, dict, dict]":
         peaks: dict = {}
+        kept: dict = {}
         self._release()
+
+        def encode(_):
+            encoded = self._encoded(job, cached)
+            kept.update(cached if cached is not None else _moved(encoded, "cpu"))
+            return encoded
+
         stages = (
-            ("encoding", lambda _: self._encode(job)),
+            ("encoding", encode),
             ("denoising", lambda encoded: self._denoise(job, encoded, progress)),
             ("decoding", lambda latents: self._decode(job, latents)),
         )
@@ -297,7 +370,11 @@ class DiffusersEngine:
             carried = run(carried)
             peaks[stage] = self.peak_bytes()
             self._release()
-        return carried, peaks
+        return carried, peaks, kept
+
+
+def _moved(tensors: dict, device: str) -> dict:
+    return {name: None if tensor is None else tensor.to(device) for name, tensor in tensors.items()}
 
 
 ENGINES = {MfluxEngine.name: MfluxEngine, DiffusersEngine.name: DiffusersEngine}
@@ -336,6 +413,7 @@ def load(request: dict) -> None:
             "Build it with `crucible install image`."
         ) from None
     _STATE["engine"] = engine
+    _PROMPTS.clear()
     send(
         "ready",
         seconds=round(time.time() - started, 2),
@@ -349,7 +427,10 @@ def load(request: dict) -> None:
 def _run(engine, job: Job) -> dict:
     progress = Progress(job.request_id, job.steps)
     started = time.time()
-    image, peaks = engine.generate(job, progress)
+    cached = _PROMPTS.get(job.prompt_key)
+    image, peaks, encoded = engine.generate(job, progress, cached)
+    if cached is None and encoded:
+        _PROMPTS.put(job.prompt_key, encoded, engine.nbytes(encoded))
     progress.enter("saving")
     image.save(job.output_path, format="PNG")
     width, height = image.size
@@ -361,6 +442,8 @@ def _run(engine, job: Job) -> dict:
         "stage_seconds": progress.finish(),
         "stage_peak_bytes": peaks,
         "peak_bytes": max(peaks.values()) if peaks else None,
+        "prompt_cache": "miss" if cached is None else "hit",
+        "prompt_cache_bytes": _PROMPTS.bytes,
     }
 
 

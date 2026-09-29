@@ -36,6 +36,7 @@ model.
 | `guidance` | 1.0 | 1.0 to 10.0; above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt` |
 | `negative_prompt` | none | only with `guidance` above 1.0 |
 | `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Mac only for now: the CUDA arm refuses it with `image_to_image_unsupported` |
+| `lease` | none | `{"act": "image", "ttl_seconds": 30..3600}`: hold the model on the card from the moment it is loaded, for a batch (below). `act` must be `image` (`lease_act_mismatch`); an unknown act is `unknown_act`, a ttl out of range `invalid_ttl` |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
 
@@ -55,9 +56,15 @@ parameters, so a picture can be made again:
            "stage_seconds": {"encoding": 3.89, "denoising": 16.29, "decoding": 8.56, "saving": 0.08},
            "peak_bytes": 16441695780,
            "stage_peak_bytes": {"encoding": 2414314312, "denoising": 15502140544, "decoding": 16441695780},
-           "memory_bytes_estimate": 17200000000, "memory_basis": "measured"},
- "resident": "qwen-image-2.1"}
+           "memory_bytes_estimate": 17200000000, "memory_basis": "measured",
+           "prompt_cache": "miss"},
+ "resident": "qwen-image-2.1",
+ "lease_id": null}
 ```
+
+`lease_id` is the lease the job opened or renewed when it was sent `lease`, else `null`.
+`prompt_cache` is `"hit"` when this prompt (and negative prompt) was encoded by an earlier
+picture on the same loaded model, so the text encoder was skipped, else `"miss"`.
 
 The same seed reproduces a picture on the same backend and engine. The Mac and the PC run
 different engines with different samplers, so one seed does not give one picture across them.
@@ -69,15 +76,45 @@ job between two steps; the model stays loaded if a lease holds it.
 ## Many pictures in a row
 
 Like every other resident, the model comes off the card when the job that loaded it ends, unless
-something holds it. To make a batch without reloading between pictures, lease it after the first
-job, exactly as a book leases its voice:
+something holds it. To make a batch without reloading between pictures:
 
-```http
-POST /v1/models/qwen-image-2.1/lease   {"act": "image", "ttl_seconds": 600}
+1. Send `lease` on the **first** picture:
+
+   ```json
+   {"type": "image", "model": "qwen-image-2.1",
+    "params": {"prompt": "…", "seed": 1, "lease": {"act": "image", "ttl_seconds": 300}}}
+   ```
+
+   The lease opens the moment the model is loaded, before the picture is made, so nothing can
+   take the model off the card in between. The `done` event carries `lease_id`.
+2. Send the rest of the batch as ordinary `image` jobs (sending `lease` again is harmless: the
+   lease you already hold is renewed and the same `lease_id` comes back, never a second lease).
+   The loaded model is reused; nothing reloads.
+3. While you work, `POST /v1/leases/{lease_id}/heartbeat` at least once per `ttl_seconds`.
+4. At the end, `DELETE /v1/leases/{lease_id}`. The model comes off the card before that answers.
+
+If your program stops or crashes without releasing, the lease runs out `ttl_seconds` after the
+last heartbeat and the model is unloaded then. If the first picture fails or is cancelled, the
+lease it opened is given back at once (you never got its id). While the lease is open a job that
+would load something else (an LLM, a voice) is refused `409 leased`.
+
+**Warming up before the first prompt.** A UI can load the model while the user is still typing:
+
+```json
+{"type": "load-image", "model": "qwen-image-2.1",
+ "params": {"lease": {"act": "image", "ttl_seconds": 300}}}
 ```
 
-Heartbeat while the batch runs and release it at the end (`DELETE /v1/leases/{id}`). While the
-lease is open a job that would load something else (an LLM, a voice) is refused `409 leased`.
+Its `done` event carries `resident` and `lease_id`; the first picture then starts at once. Sent
+with the same `lease`, that picture renews the same lease. Without `lease`, `load-image` leaves
+the model loaded until the next picture ends.
+
+**Same prompt, different seeds is fastest.** Turning a prompt into embeddings needs the 17.5 GB
+text encoder, loaded and freed per picture (17 to 25 s on the PC). The loaded model remembers the
+embeddings of its last 32 prompts, so a picture whose prompt and negative prompt were already
+encoded skips the encoder entirely (`prompt_cache: "hit"`, `stage_seconds.encoding` near 0).
+Change the seed, size or steps freely; change a word of the prompt and it is encoded again. The
+memory goes when the model is unloaded.
 
 ## Memory
 

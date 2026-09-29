@@ -57,16 +57,24 @@ class FakeEngine:
         self.device = request["device"]
         self.versions = {"fake": "1.0"}
 
-    def generate(self, job, progress):
-        _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed})
+    def nbytes(self, encoded):
+        return len(encoded["prompt_embeds"])
+
+    def generate(self, job, progress, cached):
+        encodes = cached is None
+        _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "encoded": encodes})
         pause = float(os.environ.get("CRUCIBLE_FAKE_IMAGE_STEP_S") or 0)
+        encode_pause = float(os.environ.get("CRUCIBLE_FAKE_IMAGE_ENCODE_S") or 0)
         progress.enter("encoding")
+        if encodes:
+            time.sleep(encode_pause)
+            cached = {"prompt_embeds": job.prompt.encode("utf-8")}
         progress.enter("denoising")
         for _ in range(job.steps):
             time.sleep(pause)
             progress.stepped()
         progress.enter("decoding")
-        return TinyPng(job.width, job.height), {"encoding": 3, "denoising": 5, "decoding": 2}
+        return TinyPng(job.width, job.height), {"encoding": 3, "denoising": 5, "decoding": 2}, cached
 
 
 worker.ENGINES["mflux"] = FakeEngine

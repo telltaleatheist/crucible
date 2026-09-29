@@ -20,7 +20,7 @@ from ...imagemodels import (
     ImageManifestError,
     load_all_image_manifests,
 )
-from ...jobtypes import IMAGE_JOB, UNLOAD_IMAGE
+from ...jobtypes import IMAGE_JOB, LOAD_IMAGE, UNLOAD_IMAGE
 from ...manifests import fingerprint
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
@@ -32,6 +32,13 @@ from ...residency import (
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
+from ..leaseonload import (
+    HeldForLoad,
+    LeaseOnLoad,
+    hold_for_load,
+    let_go_of,
+    require_lease_request,
+)
 from ..template import (
     ManifestCatalog,
     ResidentWorker,
@@ -46,11 +53,15 @@ __all__ = [
     "JOB_TYPES",
     "ImageJobType",
     "ImageParams",
+    "LoadImageJobType",
+    "LoadImageParams",
     "UnloadImageJobType",
     "occupy_image",
 ]
 
 JOB_TYPE = IMAGE_JOB.name
+
+LEASE_ACT = "image"
 
 SIDE_MULTIPLE = 16
 
@@ -110,6 +121,7 @@ class ImageParams(BaseModel):
     steps: int = Field(default=DEFAULT_STEPS, ge=1, le=MAX_STEPS)
     guidance: float = Field(default=1.0, ge=1.0, le=MAX_GUIDANCE)
     image_strength: float | None = Field(default=None, gt=0.0, lt=1.0)
+    lease: LeaseOnLoad | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -348,10 +360,13 @@ class ImageJobType(ResidentWorker):
     name = JOB_TYPE
     resident_kind = KIND_IMAGE
 
-    def __init__(self, config: Config, backend: Any, residency: Residency) -> None:
+    def __init__(
+        self, config: Config, backend: Any, residency: Residency, leases: Any | None = None
+    ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
+        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -394,10 +409,14 @@ class ImageJobType(ResidentWorker):
         return self._residency.image_session
 
     def requirements(self, model_id: str, params: ImageParams) -> Needs:
+        needs = self.loadable(model_id)
+        refuse_what_the_arm_cannot_make(params, needs.spec, model_id)
+        return needs
+
+    def loadable(self, model_id: str) -> Needs:
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
         spec = worker_type.require_block(manifest, model_id, backend_kind, "image model")
-        refuse_what_the_arm_cannot_make(params, spec, model_id)
         worker_type.refuse_if_larger_than_host(
             self._backend, model_id, spec.memory_bytes_estimate
         )
@@ -414,11 +433,22 @@ class ImageJobType(ResidentWorker):
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parsed = parse_params(ImageParams, params, self.name)
-        needs = self.requirements(model, parsed)
-        self._residency.refuse_if_claimed(f"generating an image with {model!r}")
+        self._admit(model, self.requirements(model, parsed), parsed.lease, "generating an image with")
+
+    def _admit(self, model: str, needs: Needs, lease: LeaseOnLoad | None, doing: str) -> None:
+        if lease is not None:
+            require_lease_request(lease, act=LEASE_ACT)
+        self._residency.refuse_if_claimed(f"{doing} {model!r}")
         if self._residency.is_resident(KIND_IMAGE, model):
             return
         self._guard(model, needs.spec.memory_bytes_estimate)
+
+    def _hold(self, job: Job, model: str, lease: LeaseOnLoad | None) -> HeldForLoad | None:
+        if lease is None:
+            return None
+        return hold_for_load(
+            self._leases, kind=KIND_IMAGE, subject=model, request=lease, client=job.client
+        )
 
     def _worker(self, ctx: JobContext, model: str, needs: Needs) -> workers.WorkerSession:
         return self._session(
@@ -463,6 +493,25 @@ class ImageJobType(ResidentWorker):
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
         output = ctx.scratch / ARTIFACT_NAME
         session = self._worker(ctx, model, needs)
+        held = self._hold(job, model, params.lease)
+        try:
+            self._make(ctx, model, session, params, needs, source, seed, output)
+        except BaseException:
+            let_go_of(self._leases, held)
+            raise
+        ctx.done_extra(lease_id=None if held is None else held.lease_id)
+
+    def _make(
+        self,
+        ctx: JobContext,
+        model: str,
+        session: workers.WorkerSession,
+        params: ImageParams,
+        needs: Needs,
+        source: Path | None,
+        seed: int,
+        output: Path,
+    ) -> None:
         request = {
             "op": "generate",
             "request_id": uuid.uuid4().hex,
@@ -476,6 +525,8 @@ class ImageJobType(ResidentWorker):
             "image_path": None if source is None else str(source),
             "image_strength": params.image_strength,
             "output_path": str(output),
+            "revision": needs.spec.revision,
+            "backend": needs.spec.backend,
         }
         outcome = self._generate(ctx, model, session, request, params.steps)
         try:
@@ -516,7 +567,39 @@ def effective_params(
         "stage_peak_bytes": result.get("stage_peak_bytes"),
         "memory_bytes_estimate": needs.spec.memory_bytes_estimate,
         "memory_basis": needs.spec.memory_basis,
+        "prompt_cache": result.get("prompt_cache"),
     }
+
+
+class LoadImageParams(BaseModel):
+    """`params` for a load-image job: warm the image model up, optionally leased."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lease: LeaseOnLoad | None = None
+
+
+class LoadImageJobType(ImageJobType):
+
+    name = LOAD_IMAGE.name
+
+    def preflight(self, model: str | None, params: dict[str, Any]) -> None:
+        model = require_model(model, self.name)
+        parsed = parse_params(LoadImageParams, params, self.name)
+        self._admit(model, self.loadable(model), parsed.lease, "loading")
+
+    def run(self, job: Job, ctx: JobContext) -> None:
+        params = LoadImageParams.model_validate(job.params)
+        model = run_model(job.model, self.name)
+        needs = as_job_error(self.loadable, model)
+        ctx.progress(0.0, f"loading {model}")
+        self._worker(ctx, model, needs)
+        held = self._hold(job, model, params.lease)
+        ctx.progress(1.0, f"{model} is resident")
+        ctx.done_extra(
+            resident=self._residency.resident_id,
+            lease_id=None if held is None else held.lease_id,
+        )
 
 
 class UnloadImageJobType(UnloadJobType):
@@ -532,10 +615,18 @@ class UnloadImageJobType(UnloadJobType):
 JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         IMAGE_JOB,
-        lambda wiring: ImageJobType(wiring.config, wiring.backend, wiring.residency),
+        lambda wiring: ImageJobType(
+            wiring.config, wiring.backend, wiring.residency, wiring.leases
+        ),
     ),
     JobTypeBinding(
         UNLOAD_IMAGE,
         lambda wiring: UnloadImageJobType(wiring.config, wiring.backend, wiring.residency),
+    ),
+    JobTypeBinding(
+        LOAD_IMAGE,
+        lambda wiring: LoadImageJobType(
+            wiring.config, wiring.backend, wiring.residency, wiring.leases
+        ),
     ),
 )
