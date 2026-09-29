@@ -233,10 +233,10 @@ def test_sharing_menu_error_survives_health_refresh(monkeypatch, tmp_path):
         def run(self):
             next(item for item in self.menu if item.text == "Enable Tailscale sharing").action()
             assert any(item.text == "Use existing Tailscale sharing" for item in self.menu)
-            message = self.menu[0].text
+            message = self.menu[1].text
             assert "matching Tailscale forward" in message
             watchers[0]()
-            assert self.menu[0].text == message
+            assert self.menu[1].text == message
             assert self.title == "Crucible — running"
     monkeypatch.setitem(sys.modules, "pystray", SimpleNamespace(Icon=Icon, Menu=lambda *a: a, MenuItem=Item))
     desktop._run_tray(tmp_path)
@@ -342,3 +342,85 @@ def test_a_guest_of_another_version_does_not_fail_this_installations_start(
     observed = local.run_engine_verb("start", tmp_path)
     assert observed["state"] == "running"
     assert observed["version"] == "0.6.3", "a guest of another version is not this start's problem"
+
+
+class TrayItem:
+    def __init__(self, text, action, **options):
+        self.text, self.action, self.options = text, action, options
+
+
+class TrayIconStub:
+    def __init__(self):
+        self.stopped = False
+        self.menu = ()
+        self.title = ""
+
+    def update_menu(self):
+        pass
+
+    def stop(self):
+        self.stopped = True
+
+
+class InlineThread:
+    def __init__(self, target, **kw):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+def tray_icon(monkeypatch, tmp_path):
+    monkeypatch.setattr(desktop.sys, "platform", "linux")
+    monkeypatch.setattr(desktop.threading, "Thread", InlineThread)
+    monkeypatch.setattr(sharing, "read", lambda home: None)
+    pystray = SimpleNamespace(Menu=lambda *items: items, MenuItem=TrayItem)
+    tray = desktop.TrayIcon(tmp_path, pystray, TrayIconStub())
+    tray.refresh()
+    return tray
+
+
+def test_a_left_click_on_the_tray_icon_opens_crucible(monkeypatch, tmp_path):
+    tray = tray_icon(monkeypatch, tmp_path)
+    first = tray.icon.menu[0]
+    assert first.text == desktop.OPEN_LABEL and first.options == {"default": True}
+    assert [item for item in tray.icon.menu if item.options.get("default")] == [first]
+    opened = []
+    monkeypatch.setattr(tray, "open_app", lambda: opened.append(True))
+    first.action()
+    assert opened == [True]
+
+
+@pytest.mark.parametrize("window_answers,spawned", [(True, []), (False, [True])])
+def test_open_crucible_shows_the_running_window_or_starts_one(monkeypatch, tmp_path, window_answers, spawned):
+    from crucible.desktop_app import instance, launchers
+
+    tray = tray_icon(monkeypatch, tmp_path)
+    words = []
+    monkeypatch.setattr(instance, "signal", lambda home, word: words.append(word) or window_answers)
+    starts = []
+    monkeypatch.setattr(launchers, "spawn_app", lambda: starts.append(True))
+    tray.open_app()
+    assert words == [instance.FOCUS] and starts == spawned
+
+
+def test_quit_closes_the_window_then_the_tray_and_leaves_the_engine(monkeypatch, tmp_path):
+    from crucible.desktop_app import instance
+
+    tray = tray_icon(monkeypatch, tmp_path)
+    order = []
+    monkeypatch.setattr(instance, "close_running", lambda home: order.append("window") or True)
+    monkeypatch.setattr(local, "run_engine_verb", lambda verb: pytest.fail("Quit must not stop the engine"))
+    quit_item = next(item for item in tray.icon.menu if item.text == desktop.QUIT_LABEL)
+    quit_item.action()
+    assert order == ["window"] and tray.icon.stopped and tray.stopped.is_set()
+
+
+def test_quit_keeps_the_tray_when_the_window_will_not_close(monkeypatch, tmp_path):
+    from crucible.desktop_app import instance
+
+    tray = tray_icon(monkeypatch, tmp_path)
+    monkeypatch.setattr(instance, "close_running", lambda home: False)
+    tray.quit()
+    assert not tray.icon.stopped and not tray.quitting.is_set()
+    assert "app_close_failed" in tray.icon.menu[1].text and "Quit again" in tray.icon.menu[1].text

@@ -534,9 +534,38 @@ is ignored. Failures after the lock go to `<home>/app.log`; a Python without Tk 
 `app_no_tk` with the installer line.
 
 **Launch.** `crucible app` and the `crucible-app` gui-script (no console on Windows) run
-`desktop_app.app.main`. The tray's "Open Crucible" starts it as a separate process
+`desktop_app.app.main`. The tray's "Open Crucible" first sends `focus` to a running window;
+only when nothing answers does it start one as a separate process
 (`launchers.spawn_app`: `pythonw -m crucible.cli app` on Windows, `open ~/Applications/Crucible.app`
 on the Mac), so pystray and Tk never share a main loop.
+
+**The tray is the window's home; its Quit is the only full close.**
+
+- "Open Crucible" is the tray menu's first item and its `default`. pystray's win32 backend
+  runs the default item on a left click (`WM_LBUTTONUP`), so a click on the icon opens the
+  window; a right click shows the menu. pystray's darwin backend has no default action while
+  a menu is set (`HAS_DEFAULT_ACTION = False`): a click on the menu-bar icon opens the menu,
+  where "Open Crucible" is the first entry, drawn bold.
+- The window's close button (`WM_DELETE_WINDOW`) withdraws it; the process, its refresh loop
+  and its door keep running, so opening it again is instant. Minimise is Tk's own. On Windows
+  the window hides only while a tray is running (`traylife.running_pid`); with no tray to bring
+  it back, the close button ends the process, so no invisible window is left behind. On the
+  Mac it always hides, because the Dock icon stays while the process runs and a Dock click
+  runs `::tk::mac::ReopenApplication`, which shows it. A theme change redraws a hidden window
+  without showing it.
+- The tray's "Quit" sends `quit` over the door and waits up to 15 s (`instance.close_running`,
+  never a kill), then stops the tray. If the window does not close in that time (a question it
+  asked is still open), the tray stays and says `app_close_failed` with what to do. Quit stops
+  neither the orchestrator nor the engine, as "Close tray icon" before it did not; "Stop
+  Crucible" is the item that stops the engine.
+- On the Mac, Cmd-Q, the app menu's Quit and the Dock's Quit run `::tk::mac::Quit`, which asks
+  the tray to close (`traylife.ask_to_close` writes `tray.close`, which the tray reads within
+  5 s) and then ends the window. So both Quits end both halves and neither leaves the other
+  behind. The door's `quit` word ends only the window, since the tray that sends it is already
+  quitting.
+- Login starts the tray only (the Startup item and the LaunchAgent both run
+  `crucible local tray`); the window appears when the icon is clicked. The installers open the
+  window once, on a fresh install typed at the machine.
 
 **Launchers, written by `crucible local install-desktop`** (which both installers already
 run) **and removed by `remove-desktop`** (which `crucible uninstall` runs):

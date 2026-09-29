@@ -553,3 +553,125 @@ def test_every_screen_draws_in_both_palettes_without_a_server(monkeypatch) -> No
         app.go("home")
     finally:
         root.destroy()
+
+
+class FakeRoot:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.protocols: dict[str, Any] = {}
+        self.commands: dict[str, Any] = {}
+        self.shown = "normal"
+
+    def protocol(self, name: str, handler: Any) -> None:
+        self.protocols[name] = handler
+
+    def createcommand(self, name: str, handler: Any) -> None:
+        self.commands[name] = handler
+
+    def state(self) -> str:
+        return self.shown
+
+    def after(self, _ms: int, _then: Any) -> None:
+        self.calls.append("after")
+
+    def attributes(self, *_args: Any) -> None:
+        self.calls.append("attributes")
+
+    def __getattr__(self, name: str) -> Any:
+        return lambda *_a: self.calls.append(name)
+
+
+def bare_app(monkeypatch, platform: str, home: Path | None) -> Any:
+    pytest.importorskip("tkinter")
+    from crucible.desktop_app import window
+
+    monkeypatch.setattr(window.sys, "platform", platform)
+    app = window.App.__new__(window.App)
+    app.root, app.home = FakeRoot(), home
+    app.bind_window_manager()
+    return app
+
+
+def test_the_close_button_hides_the_window_while_the_tray_can_bring_it_back(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    (tmp_path / "tray.pid").write_text(str(os.getpid()))
+    app = bare_app(monkeypatch, "win32", tmp_path)
+    app.root.protocols["WM_DELETE_WINDOW"]()
+    assert app.root.calls == ["withdraw"]
+
+
+def test_the_close_button_ends_a_window_no_tray_could_reopen(monkeypatch, tmp_path: Path) -> None:
+    app = bare_app(monkeypatch, "win32", tmp_path)
+    app.root.protocols["WM_DELETE_WINDOW"]()
+    assert app.root.calls == ["destroy"]
+
+
+def test_on_the_mac_the_close_button_always_hides_and_the_dock_reopens(monkeypatch, tmp_path: Path) -> None:
+    from crucible.desktop_app import window
+
+    app = bare_app(monkeypatch, "darwin", tmp_path)
+    app.root.protocols["WM_DELETE_WINDOW"]()
+    assert app.root.calls == ["withdraw"]
+    app.root.commands[window.MAC_REOPEN]()
+    assert app.root.calls[1:3] == ["deiconify", "lift"] and app.root.calls[-1] == "focus_force"
+
+
+def test_cmd_q_on_the_mac_closes_the_tray_as_well_as_the_window(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    from crucible import traylife
+    from crucible.desktop_app import window
+
+    (tmp_path / "tray.pid").write_text(str(os.getpid()))
+    app = bare_app(monkeypatch, "darwin", tmp_path)
+    app.root.commands[window.MAC_QUIT]()
+    assert traylife.close_request_path(tmp_path).read_text() == "close\n"
+    assert app.root.calls == ["destroy"]
+
+
+def test_windows_registers_no_mac_handlers(monkeypatch, tmp_path: Path) -> None:
+    app = bare_app(monkeypatch, "win32", tmp_path)
+    assert app.root.commands == {}
+
+
+def test_the_show_word_brings_a_hidden_window_back_and_quit_ends_it(monkeypatch, tmp_path: Path) -> None:
+    app = bare_app(monkeypatch, "win32", tmp_path)
+    app.hear(instance.FOCUS)
+    assert app.root.calls[:2] == ["deiconify", "lift"] and app.root.calls[-1] == "focus_force"
+    app.root.calls.clear()
+    app.hear(instance.QUIT)
+    assert app.root.calls == ["destroy"]
+    assert not traylife_close_requested(tmp_path)
+
+
+def traylife_close_requested(home: Path) -> bool:
+    from crucible import traylife
+
+    return traylife.close_request_path(home).exists()
+
+
+def test_a_real_tk_window_is_withdrawn_by_its_close_button_and_shown_again(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    tkinter = pytest.importorskip("tkinter")
+    from crucible.desktop_app import window
+
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError as exc:
+        pytest.skip(f"no display for Tk here: {exc}")
+    (tmp_path / "tray.pid").write_text(str(os.getpid()))
+    monkeypatch.setattr(window.sys, "platform", "win32")
+    app = window.App.__new__(window.App)
+    app.root, app.home = root, tmp_path
+    try:
+        app.bind_window_manager()
+        root.update()
+        root.eval(root.protocol("WM_DELETE_WINDOW"))
+        assert root.state() == "withdrawn" and root.winfo_exists()
+        app.hear(instance.FOCUS)
+        root.update()
+        assert root.state() == "normal"
+    finally:
+        root.destroy()

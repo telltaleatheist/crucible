@@ -27,6 +27,13 @@ SHARING_UNOWNED = "sharing_unowned"
 
 TRAY_ERRORS = (OSError, ValueError, RuntimeError, CrucibleError)
 
+OPEN_LABEL = "Open Crucible"
+QUIT_LABEL = "Quit"
+WINDOW_STAYED_OPEN = (
+    "app_close_failed: the Crucible window did not close, so the tray stayed. Answer any "
+    "question the window is asking, then choose Quit again"
+)
+
 
 def close_tray() -> None:
     traylife.close_tray(crucible_home())
@@ -193,6 +200,7 @@ class TrayIcon:
         self.icon = icon
         self.close_request = traylife.close_request_path(home)
         self.stopped = threading.Event()
+        self.quitting = threading.Event()
         self.retrying = threading.Event()
         self.busy = threading.Lock()
         self.state: dict[str, Any] = {"state": "starting", "detail": "Starting Crucible"}
@@ -216,14 +224,14 @@ class TrayIcon:
         sharing_label = self._sharing_label()
         running = self.state["state"] == "running"
         self.icon.menu = self.pystray.Menu(
+            item(OPEN_LABEL, lambda *_: self.open_app(), default=True),
             item(self.notice["message"] or self.state["detail"], None, enabled=False),
             *_move_items(self.home, self.retrying.is_set(), self.try_again),
-            item("Open Crucible", lambda *_: self.open_app()),
             item("Connect an app…", lambda *_: self.action("connect")),
             item("Start Crucible", lambda *_: self.action("start"), enabled=not running),
             item("Stop Crucible", lambda *_: self.action("stop"), enabled=running),
             item(sharing_label, lambda *_: self.action("sharing")),
-            item("Close tray icon", lambda *_: self.close()),
+            item(QUIT_LABEL, lambda *_: self.quit()),
         )
         self.icon.update_menu()
 
@@ -267,8 +275,11 @@ class TrayIcon:
             self.refresh()
 
     def open_app(self) -> None:
+        from .desktop_app.instance import FOCUS, signal
         from .desktop_app.launchers import spawn_app
 
+        if signal(self.home, FOCUS):
+            return
         try:
             spawn_app()
         except OSError as exc:
@@ -305,6 +316,25 @@ class TrayIcon:
     def close(self) -> None:
         self.stopped.set()
         self.icon.stop()
+
+    def _quit_now(self) -> None:
+        from .desktop_app.instance import close_running
+
+        try:
+            closed = close_running(self.home)
+        except OSError:
+            closed = False
+        self.quitting.clear()
+        if closed:
+            self.close()
+        else:
+            self._say(WINDOW_STAYED_OPEN)
+
+    def quit(self) -> None:
+        if self.quitting.is_set():
+            return
+        self.quitting.set()
+        threading.Thread(target=self._quit_now, name="crucible-quit", daemon=True).start()
 
     def _observe(self) -> None:
         if not self.busy.acquire(blocking=False):

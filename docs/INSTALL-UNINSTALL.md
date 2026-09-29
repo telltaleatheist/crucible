@@ -155,7 +155,10 @@ The install also writes `~/Applications/Crucible.app` (the Crucible window, sign
 made on the Mac so it carries no quarantine flag) and the tray's login item, through its
 `local-install-desktop` step. On a first install typed at the Mac itself (a terminal, not
 ssh), the script opens Crucible.app when it finishes; otherwise it prints where the app is.
-`crucible uninstall` closes the window and removes the bundle.
+`crucible uninstall` closes the window and removes the bundle. The window's red close
+button hides it; the menu-bar icon's "Open Crucible" or a click on the Dock icon brings it
+back. The menu-bar icon's "Quit", Cmd-Q and the Dock's Quit each close both the window and
+the menu-bar icon; the engine keeps serving (its "Stop Crucible" item stops it).
 
 > **`service install` from a LOGIN shell.** The unit and the plist record the INSTALLING
 > shell's PATH (`crucible/service.py`'s header). A non-login `ssh mac '<cmd>'` has
@@ -194,7 +197,10 @@ What the install creates on the Windows side: `%LOCALAPPDATA%\Crucible\host` (Py
 Crucible), the Startup item that starts the tray at login, and the **Start Menu item
 "Crucible"** that opens the Crucible window (`crucible app`). On a first install typed at
 the PC itself (not over ssh, not driven by an app), the window opens when the script
-finishes. `crucible uninstall` closes the window and removes both shortcuts.
+finishes. `crucible uninstall` closes the window and removes both shortcuts. A left click
+on the tray icon opens the window, and its X hides it back to the tray; the tray menu's
+"Quit" closes the window and the tray. The engine keeps serving after Quit; the menu's
+"Stop Crucible" stops it.
 
 ### The Windows setup (`crucible-setup-<version>.exe`)
 
