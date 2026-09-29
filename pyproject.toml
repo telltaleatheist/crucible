@@ -27,6 +27,9 @@ test = ["pytest>=8", "build>=1.0", "pillow>=10"]
 [project.scripts]
 crucible = "crucible.cli:main"
 
+[project.gui-scripts]
+crucible-app = "crucible.desktop_app:main"
+
 [project.urls]
 Homepage = "https://github.com/telltaleatheist/crucible"
 
@@ -46,6 +49,7 @@ crucible = [
   "align/*.toml",
   "asr/*.toml",
   "envs/**/*",
+  "desktop_app/assets/*",
 ]
 
 [tool.pytest.ini_options]

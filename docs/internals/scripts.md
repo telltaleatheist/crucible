@@ -33,7 +33,8 @@ the repair `--check` names when they disagree.
 
 Our code and nothing published elsewhere (`config-envs-weights.md`, "Code, not environments"), under
 one tag `v<version>`: the sdist, the `py3-none-any` wheel, `<wheel>.sha256`, the client
-tarball, the bootstrap tarball, `install.sh` and `install.ps1`. The interpreter
+tarball, the bootstrap tarball, `install.sh`, `install.ps1` and the Windows setup
+`crucible-setup-<version>.exe`. The interpreter
 (python-build-standalone, pinned by digest in `crucible/interpreter.py` and
 `sdk/bootstrap/src/interpreter.ts`), job environments (PyPI, via
 `crucible/envs/<type>/<recipe>.txt`) and the WSL image (Canonical) are not release assets; the
@@ -51,6 +52,37 @@ release notes say so explicitly for readers of old releases.
 - `--branch` exists for one case: the first release of a feature branch about to merge, so
   its tarball URL exists before the merge. The branch is named in the release notes.
 
+### The Windows setup (`build-installer.sh`, `installer/windows/crucible.nsi`)
+
+`release.sh` runs `./scripts/build-installer.sh --version <v> --wheel dist/<wheel> --out dist`
+right after the wheel's digest, so a release is cut on the Windows PC (Git Bash); elsewhere
+the script refuses and says so. The script:
+
+- fetches a **pinned portable NSIS** (`nsis-<ver>.zip` from the official SourceForge
+  release) and the **pinned NScurl plugin** (`NScurl.zip` from its GitHub release) into
+  `$CRUCIBLE_BUILD_CACHE`, else `build/installer-cache`, checking each against the sha256 in
+  the script; a mismatch deletes the download and stops. No makensis install, no hand step.
+- reads the interpreter pin (`$PyUrl`, `$PySha`, `$PyAsset`, `$PyVersion`) out of the
+  generated `install.ps1`, so the setup and the one-liner cannot pin different Pythons.
+- pins the setup to the wheel it is given: its sha256 is compiled in, so `--wheel` must be the
+  exact file the release uploads (`release.sh` passes it).
+- compiles `installer/windows/crucible.nsi` with the generated `install.ps1` embedded as
+  `crucible-install.ps1` (that name tells `install.ps1` an app is driving it, so it watches the
+  WSL setup briefly and does not open the window itself; the setup's Finish page does).
+
+The setup downloads with NScurl (`/INSIST`, cancellable, with a progress bar), checks
+`NScurl::sha256` against the compiled pins, runs `install.ps1 -PythonArchive -WheelFile
+-WheelSha` over the checked files, writes `Uninstall Crucible.exe` and the per-user
+Settings → Apps entry (`HKCU\...\Uninstall\Crucible`). Its uninstaller runs `install.ps1
+-Uninstall` (so `crucible uninstall`) and only then removes itself, its folder if empty, and
+the registry entry; if the uninstall refuses, nothing more is removed.
+
+What was verified without installing (installing would replace the PC's own Startup and Start
+Menu items and share its WSL engine): makensis builds the setup from the pinned cache; the
+pinned Python URL and the release wheel URL resolve to the pinned digests; a throwaway NSIS
+script using the same `NScurl::http` / `NScurl::sha256` calls downloaded the 1.0.55 wheel and
+matched its digest; the welcome page opens and cancels cleanly.
+
 ### Promotion (`promote_release.py`)
 
 Read-only by default. `--publish` moves `releases/latest` and also requires
@@ -65,6 +97,9 @@ metadata cannot prove that, so nothing automates it (`ship.sh` only prints the c
   parser knows gh's contract, `create <tag> [files...]`: the first positional is the tag and
   a `"$VAR"` after a `--flag` is that flag's value; `NAME="value"` assignments are expanded
   (bounded, so a cycle fails instead of hanging).
+- **The Windows setup is checked when the release lists one** (`check_setup`): exactly
+  `crucible-setup-<version>.exe`, and its bytes start `MZ`, so an HTML error page uploaded
+  under that name is refused. A release cut before the setup existed lists none and passes.
 - **Promotion checks the fleet.** It runs `deploy.sh` with no arguments (read-only) and
   refuses `--publish` unless every machine in `deploy.sh`'s `FLEET` reports the tag. A
   machine behind is named with the `deploy.sh --release <ver> --only <machine>` that fixes it.

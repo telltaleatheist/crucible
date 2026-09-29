@@ -6,6 +6,7 @@ from .. import VERSION
 from ..config import CRUCIBLE_HOME_ENV
 from . import (
     api_cmd,
+    app_cmd,
     capability,
     common,
     doctor,
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     service_cmd.add_parser(subparsers)
     uninstall_cmd.add_parser(subparsers)
     doctor.add_parser(subparsers)
+    app_cmd.add_parser(subparsers)
     token.add_parser(subparsers)
 
     from ..sharing import add_parser as add_sharing_parser

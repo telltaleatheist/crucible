@@ -328,7 +328,9 @@ service (cannot own a tray icon). Target is `pythonw.exe` with a small entry poi
 `CRUCIBLE_HOME` (Explorer does not inherit the installer's environment); a `.cmd` would flash a
 console. Written with PowerShell's `WScript.Shell` COM (no pywin32). `CreateShortcut` rewrites
 in place, so install is idempotent. The entry is what makes "restart, then Crucible continues"
-true.
+true. `platform/startup.launch_python(env, words)` builds that entry point for any `crucible`
+verb; the Startup item uses `local tray`, the Start Menu item (see "The desktop app") uses
+`app`.
 
 ### Tray items from the move
 
@@ -478,6 +480,79 @@ else, so it is alive. `uninstall.py`, `traylife.py` and `local.py` all read the 
 implementation in `processlock.py`; the copy in `uninstall.py`
 that read a denied handle as dead is gone (it could have called a live tray stale and planned
 around it).
+
+## The desktop app (`crucible/desktop_app/`)
+
+Crucible's window: Home, Models, Voices, Packages, Activity and Settings, in the style of
+Ollama's app (a sidebar, one large header, rows, light and dark following the OS). It is the
+primary local UI; the browser console (`crucible/ui`) stays for reaching a server from
+another computer.
+
+**A thin client.** Everything it shows or does is the local server's HTTP API
+(`crucible/client` for the connection and transport), except what only this machine can
+answer: whether the engine runs and starting it (`local.status`, `local.run_engine_verb`),
+LAN sharing on Windows (`lan.enable` / `lan.disable` / `lan.read`), and opening the logs
+folder. Those live in `host.LocalHost`. A refusal is shown as the server's own message with
+its code, `message (code)`, under the row or screen it came from; nothing is reworded.
+
+**Layers, so tests need no Tk.** `screens.py` turns API documents into frozen view models
+(`HomeView`, `SubjectRow`, `PackageRow`, `ActivityView`, `SettingsView`); `progress.py` folds
+a task's SSE frames (`step`, `progress` with bytes or a line, `skipped`, `done`/`failed`/
+`cancelled`) into one `Progress`; `controller.py` owns the state and every action; `api.py`
+maps HTTP errors to `ApiError`. Only `window.py`, `widgets.py`, `page.py` and `views.py`
+import tkinter, and nothing else imports them. Tests drive `Controller` against a fake API
+(`tests/test_desktop_app.py`) and draw every screen once in each palette when a display
+exists.
+
+**Never freezes.** Every API call and host verb runs in a daemon thread
+(`Controller.run`); the Tk thread polls `controller.version` every 120 ms and redraws only
+when the screen's view model, notices, busy set or task changed, and not while an entry has
+focus. A refresh runs every 2 s; `activity` and `tasks` are read every time, the other
+documents at most every 15 s or after an action. A running task found on refresh is followed
+once over `/v1/tasks/{id}/events`, and when the stream ends its final state is read back from
+`/v1/tasks/{id}` (a host-failed task emits no `failed` frame). Confirmation questions from a
+worker go through `window.Asker`, which the Tk thread answers with a dialog. A pull or install
+first asks with the server's own `/v1/capability/plan` `confirm` text.
+
+**The look.** Plain Tk widgets, no theme dependency: ttk's aqua theme ignores most colours on
+the Mac, and sv-ttk or CustomTkinter would add a pip install to the installer for a look the
+palette in `theme.py` already gives on both Tk 8.6 (Windows host Python) and Tk 9.0 (the
+Mac's). Buttons and progress bars are drawn on canvases. Dark or light follows the OS
+(Windows `AppsUseLightTheme`, macOS `AppleInterfaceStyle`), re-checked every 4 s;
+`CRUCIBLE_APP_THEME=light|dark` forces one. On Windows the process is DPI aware, gets its own
+taskbar identity (`Crucible.App`) and a dark title bar in dark mode. The icon is drawn by
+`scripts/make_app_icon.py` into `desktop_app/assets/` (PNGs 16-512, `.ico`, `.icns`) and
+`installer/windows/welcome.bmp`; rerun it after changing the drawing and commit the output.
+
+**One window per home.** `instance.Instance` takes `processlock.ProcessLock(<home>/app.lock)`
+and listens on an ephemeral loopback port written with a random token to `<home>/app.door`.
+A second launch that cannot take the lock sends `<token> focus` and exits 0; the window
+deiconifies and comes forward. `<token> quit` closes it: `local.close_app` (called by
+`local shutdown`, so an upgrade can replace the host Python, and by `remove-desktop`) sends it
+and waits 15 s, then refuses `app_close_failed` naming what to do. A word without the token
+is ignored. Failures after the lock go to `<home>/app.log`; a Python without Tk is refused
+`app_no_tk` with the installer line.
+
+**Launch.** `crucible app` and the `crucible-app` gui-script (no console on Windows) run
+`desktop_app.app.main`. The tray's "Open Crucible" starts it as a separate process
+(`launchers.spawn_app`: `pythonw -m crucible.cli app` on Windows, `open ~/Applications/Crucible.app`
+on the Mac), so pystray and Tk never share a main loop.
+
+**Launchers, written by `crucible local install-desktop`** (which both installers already
+run) **and removed by `remove-desktop`** (which `crucible uninstall` runs):
+
+- Windows: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Crucible.lnk`, next to the
+  Startup item and built the same way (`pythonw.exe`, `launch_python(env, ("app",))`), with
+  the app icon. Removing it is a separate PowerShell call that names only that file.
+- Mac: `~/Applications/Crucible.app`, written locally by the installer so it carries no
+  quarantine flag. `Contents/MacOS/Crucible` is a shell script that execs the server Python
+  with `-m crucible.cli app`; LaunchServices registers the process as `com.crucible.app`
+  (measured with `lsappinfo` on the Mac Studio), so the Dock shows Crucible's name and icon.
+  The tray's LaunchAgent now runs `Contents/Resources/crucible-tray`. The bundle is signed ad
+  hoc (`codesign --sign - --force`); a failed signature is reported, not fatal, because a
+  bundle of scripts opens without one. A bundle whose `CFBundleIdentifier` is
+  `com.crucible.app` or the older `com.crucible.tray` is Crucible's; any other is refused
+  `desktop_not_owned`.
 
 ## LAN door (`platform/lan_door.py`, `lan.py`)
 

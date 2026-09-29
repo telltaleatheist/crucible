@@ -292,8 +292,20 @@ def _set_aside_a_broken_pairing(home: Path) -> None:
         quarantine(pairing)
 
 
+def close_app(home: Path) -> None:
+    from .desktop_app.instance import CLOSE_SECONDS, close_running
+
+    if not close_running(home):
+        raise LocalError(
+            "app_close_failed: the Crucible window was asked to close and was still open "
+            f"{CLOSE_SECONDS:.0f} s later; nothing was changed. Close the Crucible window, "
+            "then run this again"
+        )
+
+
 def shutdown() -> None:
     home = crucible_home()
+    close_app(home)
     traylife.close_tray(home)
     if sys.platform != "win32":
         _shutdown_service(home)

@@ -151,6 +151,12 @@ crucible capability --write
 crucible doctor
 ```
 
+The install also writes `~/Applications/Crucible.app` (the Crucible window, signed ad hoc,
+made on the Mac so it carries no quarantine flag) and the tray's login item, through its
+`local-install-desktop` step. On a first install typed at the Mac itself (a terminal, not
+ssh), the script opens Crucible.app when it finishes; otherwise it prints where the app is.
+`crucible uninstall` closes the window and removes the bundle.
+
 > **`service install` from a LOGIN shell.** The unit and the plist record the INSTALLING
 > shell's PATH (`crucible/service.py`'s header). A non-login `ssh mac '<cmd>'` has
 > `/usr/bin:/bin:/usr/sbin:/sbin` and no `/opt/homebrew/bin`, so a service installed from
@@ -183,6 +189,30 @@ irm https://github.com/telltaleatheist/crucible/releases/latest/download/install
 # the tray appears; its menu's "Install the WSL2 engine…" runs 4.3, which
 # imports the distro and runs install.sh INSIDE it. One sequence, the host's.
 ```
+
+What the install creates on the Windows side: `%LOCALAPPDATA%\Crucible\host` (Python and
+Crucible), the Startup item that starts the tray at login, and the **Start Menu item
+"Crucible"** that opens the Crucible window (`crucible app`). On a first install typed at
+the PC itself (not over ssh, not driven by an app), the window opens when the script
+finishes. `crucible uninstall` closes the window and removes both shortcuts.
+
+### The Windows setup (`crucible-setup-<version>.exe`)
+
+For friends, each release also carries a normal Windows setup: download
+`crucible-setup-<version>.exe` from the release page and run it. It is **not signed yet**, so
+Windows SmartScreen shows "Windows protected your PC": click **More info**, then **Run
+anyway**. The wizard is Welcome, Install location (default `%LOCALAPPDATA%\Crucible`, the
+same home as the one-liner; no administrator rights), progress, and Finish with **Open
+Crucible** ticked.
+
+It never carries Python. It downloads the pinned python-build-standalone archive and this
+release's wheel (NScurl, HTTPS, retrying), checks each against the sha256 built into the setup,
+deletes a mismatch and stops, and then runs the release's own generated `install.ps1` with
+`-PythonArchive`, `-WheelFile` and `-WheelSha` pointing at those checked files: one install
+procedure, not a second one. It adds "Crucible" to Settings → Apps. Uninstalling from there
+runs the same `install.ps1 -Uninstall`, which runs `crucible uninstall` and then removes the
+host pack; weights are kept, as with the one-liner. The setup is built by
+`scripts/build-installer.sh` (see `docs/internals/scripts.md`).
 
 Uninstall — everything, weights kept, from an ordinary (non-admin) PowerShell:
 

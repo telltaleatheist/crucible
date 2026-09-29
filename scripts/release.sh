@@ -10,7 +10,9 @@ dry_run=0
 usage() {
   cat <<'USAGE'
 Cut one release under a single tag v<version>: the sdist, the wheel and its
-.sha256, the client and bootstrap tarballs, install.sh and install.ps1.
+.sha256, the client and bootstrap tarballs, install.sh, install.ps1 and the Windows
+setup crucible-setup-<version>.exe (built by scripts/build-installer.sh; run it on
+the Windows PC in Git Bash).
 
   ./scripts/release.sh                 release main
   ./scripts/release.sh --dry-run       build and check, create nothing
@@ -118,7 +120,13 @@ else
 fi
 [ -s "$WHEEL_SHA" ] || fail "could not write $WHEEL_SHA"
 
-ASSETS=("$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" "$INSTALL_SH" "$INSTALL_PS1")
+echo "release: building the Windows setup"
+SETUP_EXE="$OUT/crucible-setup-$VERSION.exe"
+./scripts/build-installer.sh --version "$VERSION" --wheel "$WHEEL" --out "$OUT" >"$OUT/installer-build.log" 2>&1 \
+  || { cat "$OUT/installer-build.log" >&2; fail "the Windows setup did not build (why is above)"; }
+[ -s "$SETUP_EXE" ] || fail "expected asset $SETUP_EXE was not built"
+
+ASSETS=("$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" "$INSTALL_SH" "$INSTALL_PS1" "$SETUP_EXE")
 ASSET_LIST="$OUT/$(python scripts/promote_release.py --write-asset-list "$OUT" "${ASSETS[@]}")" \
   || fail "could not write the asset list into $OUT"
 
@@ -148,6 +156,12 @@ npm install https://github.com/$REPO_SLUG/releases/download/$TAG/crucible-bootst
 \`\`\`"
 
 NOTES_HEADER="$NOTES_HEADER
+
+### Windows setup
+
+\`crucible-setup-$VERSION.exe\` installs Crucible for the signed-in user with a normal
+wizard. It is not signed yet, so Windows SmartScreen says it protected the PC: click
+**More info**, then **Run anyway**.
 
 ### Environments
 

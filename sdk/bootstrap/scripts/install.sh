@@ -170,6 +170,9 @@ else
   say "prerequisites: $(( free_kib / 1048576 )) GiB free at $CRUCIBLE_HOME. Weights are pulled later and priced then — a 9B model is ~18 GiB, a Higgs voice ~8.5 GiB"
 fi
 
+FRESH=0
+[ -f "$CRUCIBLE_HOME/config.toml" ] || FRESH=1
+
 say "server"
 dest="$CRUCIBLE_HOME/server"
 partial="$dest.partial"
@@ -343,5 +346,11 @@ say "capability-write"
 say "local-start"
 "$CRUCIBLE" 'local' 'start' '--json' || die "step_failed: local-start"
 
+if [ "$(uname -s)" = Darwin ] && [ -d "$HOME/Applications/Crucible.app" ]; then
+  say "Crucible is in your Applications folder: $HOME/Applications/Crucible.app"
+  if [ "$FRESH" = 1 ] && [ -t 1 ] && [ -z "${SSH_CONNECTION:-}" ]; then
+    open "$HOME/Applications/Crucible.app" || say "open Crucible from your Applications folder"
+  fi
+fi
 say "installed. Pair an app with the line below."
 "$CRUCIBLE" token --url

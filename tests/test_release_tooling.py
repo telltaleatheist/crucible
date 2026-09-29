@@ -125,7 +125,7 @@ def test_the_release_uploads_our_code_and_nothing_that_is_published_elsewhere():
     assets = re.search(r'^ASSETS=\((.*)\)$', text, re.MULTILINE)
     assert assets, 'release.sh no longer names what it uploads in one ASSETS array'
     assert assets.group(1) == ('"$SDIST" "$WHEEL" "$WHEEL_SHA" "$TGZ" "$BOOT" '
-                               '"$INSTALL_SH" "$INSTALL_PS1"'), assets.group(1)
+                               '"$INSTALL_SH" "$INSTALL_PS1" "$SETUP_EXE"'), assets.group(1)
     for gone in ('envpacks', 'rootfs', 'part0', '.tar.zst'):
         assert gone not in upload, f'the release still uploads {gone!r}'
 

@@ -21,6 +21,7 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/asr", "whisper-large-v3-turbo.toml"),
     ("crucible/envs", "llm/cuda-linux.txt"),
     ("crucible/ui", "index.html"),
+    ("crucible/desktop_app/assets", "crucible.icns"),
 )
 
 

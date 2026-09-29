@@ -60,6 +60,9 @@ STATE_FILES: tuple[str, ...] = (
     "host.pid",
     "narrator-higgs-voices.json",
     "narrator-reference.wav",
+    "app.lock",
+    "app.door",
+    "app.log",
 )
 
 ENVS_DIR = "envs"
@@ -330,7 +333,9 @@ def _registration_steps(
     steps = [_service_step(mechanism, home, operator_home, env, runner)]
     if platform in ("win32", "darwin") and (home / "installation.json").is_file():
         steps.append(Step(
-            name="remove-desktop", what="remove Crucible's registered desktop presence",
+            name="remove-desktop",
+            what=("close the Crucible window and remove its launcher (the Start Menu item, or "
+                  "~/Applications/Crucible.app) and the tray's login item"),
             action=REMOVE, target="Crucible desktop registration",
             act=lambda: _run_or_raise(
                 runner, [str(running_from), "-m", "crucible.cli", "local", "remove-desktop"],
