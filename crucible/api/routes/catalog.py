@@ -41,8 +41,8 @@ def _through(subject: catalog.Subject, holder_id: str) -> str:
     return f" ({holder_id}, which shares its weights)"
 
 
-def _resident_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dict | None:
-    resident = ctx.residency.resident
+def _resident_holder(residency: Any, subject: catalog.Subject, readers: Any) -> dict | None:
+    resident = residency.resident
     if resident is None or resident.id not in readers:
         return None
     return {
@@ -56,8 +56,8 @@ def _resident_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) ->
     }
 
 
-def _lease_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dict | None:
-    lease = ctx.leases.current()
+def _lease_holder(leases: Any, subject: catalog.Subject, readers: Any) -> dict | None:
+    lease = leases.current()
     if lease is None or lease.subject not in readers:
         return None
     return {
@@ -88,13 +88,17 @@ def _task_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dic
     }
 
 
-def _subject_holder(ctx: AppContext, subject: catalog.Subject) -> dict | None:
+def held_on_card(residency: Any, leases: Any, subject: catalog.Subject) -> dict | None:
     readers = catalog.ids_reading(subject)
-    for holder in (_resident_holder, _lease_holder, _task_holder):
-        found = holder(ctx, subject, readers)
-        if found is not None:
-            return found
-    return None
+    return _resident_holder(residency, subject, readers) or _lease_holder(
+        leases, subject, readers
+    )
+
+
+def _subject_holder(ctx: AppContext, subject: catalog.Subject) -> dict | None:
+    return held_on_card(ctx.residency, ctx.leases, subject) or _task_holder(
+        ctx, subject, catalog.ids_reading(subject)
+    )
 
 
 def _installed_subject(ctx: AppContext, kind: str, subject_id: str) -> tuple[Any, Any]:

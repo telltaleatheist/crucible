@@ -136,6 +136,38 @@ const VOICE_ROW = {
     safe_min_chars: 600,
     safe_max_chars: 800,
   },
+  ref: 'crucible',
+  latest_revision: VOICE_REVISION,
+  update_available: false,
+  update_checked_at: '2026-09-28T10:00:00.000000Z',
+  update_error: null,
+  sampling: { temperature: 0.8, top_p: 0.95, top_k: 50 },
+  edge_fade_ms: { in: 10, out: 25 },
+  chunk_gap: {
+    inject_s: 0.27,
+    target_join_s: 0.53,
+    model_self_tail_s: 0.26,
+    reader_sentence_gap_s: 0.53,
+    model_internal_gap_s: null,
+    rule: 'match-reader',
+    method: 'silence at -40 dB relative to peak',
+    source: 'pause_match.py over a ladder',
+    measured_on: '2026-09-11',
+  },
+  reference_seconds_cap: 30,
+  allowed_controls: [],
+};
+
+const CHUNK_GAP = {
+  injectS: 0.27,
+  targetJoinS: 0.53,
+  modelSelfTailS: 0.26,
+  readerSentenceGapS: 0.53,
+  modelInternalGapS: null,
+  rule: 'match-reader',
+  method: 'silence at -40 dB relative to peak',
+  source: 'pause_match.py over a ladder',
+  measuredOn: '2026-09-11',
 };
 
 /** The same voice on a host whose backend its manifest has no block for. */
@@ -153,6 +185,10 @@ const UNSUPPORTED_VOICE_ROW = {
   memory_bytes_estimate: null,
   estimate_basis: null,
   max_chars: null,
+  sampling: null,
+  edge_fade_ms: null,
+  reference_seconds_cap: null,
+  allowed_controls: null,
   pace: {
     pace_chars_per_sec: 15.0,
     max_chars_per_sec: 20.0,
@@ -209,6 +245,16 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
         safeMinChars: 600,
         safeMaxChars: 800,
       },
+      ref: 'crucible',
+      latestRevision: VOICE_REVISION,
+      updateAvailable: false,
+      updateCheckedAt: '2026-09-28T10:00:00.000000Z',
+      updateError: null,
+      sampling: { temperature: 0.8, topP: 0.95, topK: 50 },
+      edgeFadeMs: { in: 10, out: 25 },
+      chunkGap: CHUNK_GAP,
+      referenceSecondsCap: 30,
+      allowedControls: [],
     },
     {
       id: 'mac-only-voice',
@@ -251,8 +297,42 @@ test('voices() reads every field /v1/voices promises, on the authed route', asyn
         safeMinChars: null,
         safeMaxChars: null,
       },
+      ref: 'crucible',
+      latestRevision: VOICE_REVISION,
+      updateAvailable: false,
+      updateCheckedAt: '2026-09-28T10:00:00.000000Z',
+      updateError: null,
+      sampling: null,
+      edgeFadeMs: null,
+      chunkGap: CHUNK_GAP,
+      referenceSecondsCap: null,
+      allowedControls: null,
     },
   ]);
+});
+
+test('a row from a server older than the voice facts reads them as unstated', async () => {
+  const older: Record<string, unknown> = { ...VOICE_ROW };
+  for (const key of [
+    'ref', 'latest_revision', 'update_available', 'update_checked_at', 'update_error',
+    'sampling', 'edge_fade_ms', 'chunk_gap', 'reference_seconds_cap', 'allowed_controls',
+  ]) {
+    delete older[key];
+  }
+  answers(200, [older]);
+  const [voice] = await client().voices();
+  assert.equal(voice!.ref, null);
+  assert.equal(voice!.updateAvailable, false);
+  assert.equal(voice!.sampling, null);
+  assert.equal(voice!.chunkGap, null);
+  assert.equal(voice!.allowedControls, null);
+});
+
+test('an update the server says is waiting reads as one', async () => {
+  answers(200, [{ ...VOICE_ROW, latest_revision: 'a'.repeat(40), update_available: true }]);
+  const [voice] = await client().voices();
+  assert.equal(voice!.updateAvailable, true);
+  assert.equal(voice!.latestRevision, 'a'.repeat(40));
 });
 
 test('a refusal with no reason still reads', async () => {

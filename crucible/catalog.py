@@ -17,7 +17,14 @@ from .imagemodels import load_all_image_manifests
 from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
-from .voicecatalog import declared_voice_backends, declared_voice_ids, load_all_voices
+from .voicecatalog import (
+    declared_voice_backends,
+    declared_voice_ids,
+    load_all_voices,
+    moves_to,
+    pull_target,
+    refresh_unresolved,
+)
 
 KINDS: tuple[str, ...] = ("model", "voice", "rvc", "rvc-base", "denoise", "engine")
 
@@ -47,6 +54,10 @@ class Subject:
     remove: Callable[[], Path]
     shares_weights_of: str | None = None
     missing_files: Callable[[], list[str]] | None = None
+    moves_to: Callable[[], str | None] | None = None
+
+    def would_move(self) -> str | None:
+        return None if self.moves_to is None else self.moves_to()
 
 
 def subjects(config: Config, backend: Backend) -> list[Subject]:
@@ -121,11 +132,33 @@ def _voice_subjects(config: Config, backend: Backend) -> list[Subject]:
                 source=f"hf:{spec.hf_repo}",
                 pull_command=voice.pull_command,
                 installed=_installed_weights(config, voice, spec),
-                pull=_pull_weights(config, voice, spec),
+                pull=_pull_voice(config, voice, backend.kind),
                 remove=_remove_weights(config, voice, spec),
+                moves_to=_voice_moves_to(config, voice),
             )
         )
     return found
+
+
+def _voice_moves_to(config: Config, voice: Any) -> Callable[[], str | None]:
+    return lambda: moves_to(config.home, voice)
+
+
+def _pull_voice(
+    config: Config, voice: Any, backend_kind: str
+) -> Callable[..., weights.InstalledWeights]:
+    def pull(**kwargs: Any) -> weights.InstalledWeights:
+        target = pull_target(config.home, voice)
+        if not target.supports(backend_kind):
+            raise weights.WeightsError(
+                f"voice {voice.id!r} moved to a revision whose crucible-voice.toml "
+                f"has no {backend_kind} arm (it declares {sorted(target.backends)}); "
+                "this machine stays on the revision it has. Publish a revision with "
+                "that arm and run `crucible voices check-updates`"
+            )
+        return weights.pull(config, target, target.spec(backend_kind), **kwargs)
+
+    return pull
 
 
 def _rvc_subjects(config: Config, backend: Backend) -> list[Subject]:
@@ -374,6 +407,17 @@ def find(
         if subject.kind == kind and subject.id == subject_id:
             return subject
     return None
+
+
+def find_resolving(
+    config: Config, backend: Backend, kind: str, subject_id: str
+) -> Subject | None:
+    found = find(config, backend, kind, subject_id)
+    if found is not None or kind != "voice":
+        return found
+    if refresh_unresolved(config.home, subject_id) is None:
+        return None
+    return find(config, backend, kind, subject_id)
 
 
 LISTING = "`crucible api catalog` (GET /v1/catalog)"

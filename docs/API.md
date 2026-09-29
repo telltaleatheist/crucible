@@ -567,6 +567,24 @@ Every voice this build has a manifest for, and where it stands here.
 | `takes` | integer | yes | — |  |
 | `needs_reference` | boolean | yes | — |  |
 | `pace` | object or null | yes | — |  |
+| `ref` | string or null | no | — | The tag this voice follows on its repo (`crucible`); null for an exact-sha pin. |
+| `latest_revision` | string or null | no | — | The commit the tag named at the last explicit check (`POST /v1/voices/updates`, `crucible voices check-updates`, or a pull); never looked up by this GET. |
+| `update_available` | boolean | no | `False` | A pull would move this voice from `revision` to `latest_revision`. |
+| `update_checked_at` | string or null | no | — | When the tag was last looked up. |
+| `update_error` | string or null | no | — | Why the last look-up failed; the voice stays on the revision it has. |
+| `sampling` | object of integer or number or null | no | — | `{temperature, top_p, top_k}` this backend's arm renders take 0 with: the sampling Crucible writes into narrator's voice document. |
+| `edge_fade_ms` | object of integer or number or null | no | — | `{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm. |
+| `chunk_gap` | object or null | no | — | The silence to add after each chunk: `inject_s` (net of the model's own tail), `target_join_s`, `model_self_tail_s`, optional `reader_sentence_gap_s` and `model_internal_gap_s`, and `rule`, `method`, `source`, `measured_on`. |
+| `reference_seconds_cap` | integer or number or null | no | — | The most reference-clip audio this arm takes, in seconds. |
+| `allowed_controls` | array of string or null | no | — | The inline control tokens (`<\|group:name\|>`) this arm allows; `[]` allows none. |
+
+### `POST /v1/voices/updates`
+
+Look up, on the Hub, the tag every voice here follows, and say which ones a pull would move. The only request that resolves a tag; GET /v1/voices never does.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
 
 ### `PUT /v1/voices/{voice_id}`
 
@@ -1399,6 +1417,16 @@ One row of `GET /v1/voices`: a voice and where it stands on this server.
 | `takes` | integer | yes | — |  |
 | `needs_reference` | boolean | yes | — |  |
 | `pace` | object or null | yes | — |  |
+| `ref` | string or null | no | — | The tag this voice follows on its repo (`crucible`); null for an exact-sha pin. |
+| `latest_revision` | string or null | no | — | The commit the tag named at the last explicit check (`POST /v1/voices/updates`, `crucible voices check-updates`, or a pull); never looked up by this GET. |
+| `update_available` | boolean | no | `False` | A pull would move this voice from `revision` to `latest_revision`. |
+| `update_checked_at` | string or null | no | — | When the tag was last looked up. |
+| `update_error` | string or null | no | — | Why the last look-up failed; the voice stays on the revision it has. |
+| `sampling` | object of integer or number or null | no | — | `{temperature, top_p, top_k}` this backend's arm renders take 0 with: the sampling Crucible writes into narrator's voice document. |
+| `edge_fade_ms` | object of integer or number or null | no | — | `{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm. |
+| `chunk_gap` | object or null | no | — | The silence to add after each chunk: `inject_s` (net of the model's own tail), `target_join_s`, `model_self_tail_s`, optional `reader_sentence_gap_s` and `model_internal_gap_s`, and `rule`, `method`, `source`, `measured_on`. |
+| `reference_seconds_cap` | integer or number or null | no | — | The most reference-clip audio this arm takes, in seconds. |
+| `allowed_controls` | array of string or null | no | — | The inline control tokens (`<\|group:name\|>`) this arm allows; `[]` allows none. |
 
 ### `VoiceSourceLabel`
 

@@ -159,6 +159,20 @@ export function optNum(object: Json, key: string, where: string): number | null 
   return value;
 }
 
+export function optBool(object: Json, key: string, where: string): boolean | null {
+  const value = optRaw(object, key);
+  if (value === null) return null;
+  if (typeof value !== 'boolean') throw wrongType(where, key, 'a boolean', value);
+  return value;
+}
+
+export function optStrArray(object: Json, key: string, where: string): string[] | null {
+  const value = optRaw(object, key);
+  if (value === null) return null;
+  if (!Array.isArray(value)) throw wrongType(where, key, 'a JSON array', value);
+  return strEntries(value, key, where);
+}
+
 export function optObject(object: Json, key: string, where: string): Json | null {
   const value = optRaw(object, key);
   if (value === null) return null;

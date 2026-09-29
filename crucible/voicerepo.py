@@ -27,6 +27,15 @@ from .voices import (
     voices_dir,
     voices_dir_is_overridden,
 )
+from .voicefacts import (
+    ARM_FACT_KEYS,
+    CHUNK_GAP,
+    ChunkGap,
+    VoiceFactError,
+    check_arm_facts,
+    check_chunk_gap,
+)
+from .voicerefs import REF_PATTERN, served_revision, unresolved_reason
 from .weights import WeightsError, resolve_revision
 
 REPO_MANIFEST_NAME = "crucible-voice.toml"
@@ -95,23 +104,34 @@ _ARM_OPTIONAL: dict[str, type] = {
     "max_chars_basis": str,
     "sampling_reason": str,
     "clips": object,
+    **ARM_FACT_KEYS,
 }
 
-_PIN_REQUIRED: dict[str, type] = {"hf_repo": str, "revision": str}
+_PIN_REQUIRED: dict[str, type] = {"hf_repo": str}
+_PIN_OPTIONAL: dict[str, type] = {"revision": str, "ref": str}
 
 
 @dataclass(frozen=True)
 class Pin:
     id: str
     hf_repo: str
-    revision: str
+    revision: str | None
     path: Path
+    ref: str | None = None
+
+    @property
+    def follows_ref(self) -> bool:
+        return self.ref is not None
+
+    def at(self, revision: str) -> "Pin":
+        return replace(self, revision=revision)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "hf_repo": self.hf_repo,
             "revision": self.revision,
+            "ref": self.ref,
             "path": str(self.path),
         }
 
@@ -138,32 +158,59 @@ def parse_pins(text: str, path: Path) -> dict[str, Pin]:
                 "digits, dot, dash and underscore, starting with a letter or "
                 "digit, at most 64 characters). A pins file is one table per voice id and nothing else"
             )
-        block = document[voice_id]
-        if not isinstance(block, dict):
-            raise VoiceError(
-                f"{where}: must be a table of hf_repo and revision, got "
-                f"{type(block).__name__}. A pins file has no top-level keys — "
-                "every row is [<voice id>]"
-            )
-        check_table(where, block, _PIN_REQUIRED, {}, error=VoiceError)
-        if not HF_REPO_PATTERN.match(block["hf_repo"]):
-            raise VoiceError(
-                f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
-                "HuggingFace repo id"
-            )
-        if not REVISION_PATTERN.match(block["revision"]):
-            raise VoiceError(
-                f"{where}: revision {block['revision']!r} must be a full "
-                "40-character commit sha, so the manifest at that sha and the "
-                "weights at that sha are the same commit; branch names are not pins"
-            )
-        pins[voice_id] = Pin(
-            id=voice_id,
-            hf_repo=block["hf_repo"],
-            revision=block["revision"],
-            path=path,
-        )
+        pins[voice_id] = _pin_row(where, voice_id, document[voice_id], path)
     return pins
+
+
+def _pin_row(where: str, voice_id: str, block: Any, path: Path) -> Pin:
+    if not isinstance(block, dict):
+        raise VoiceError(
+            f"{where}: must be a table of hf_repo and either revision or ref, got "
+            f"{type(block).__name__}. A pins file has no top-level keys — "
+            "every row is [<voice id>]"
+        )
+    check_table(where, block, _PIN_REQUIRED, _PIN_OPTIONAL, error=VoiceError)
+    if not HF_REPO_PATTERN.match(block["hf_repo"]):
+        raise VoiceError(
+            f"{where}: hf_repo {block['hf_repo']!r} is not an <owner>/<name> "
+            "HuggingFace repo id"
+        )
+    revision, ref = block.get("revision"), block.get("ref")
+    if (revision is None) == (ref is None):
+        raise VoiceError(
+            f"{where}: states "
+            + ("both revision and ref" if revision is not None else "neither revision nor ref")
+            + ". A pin is exactly one: `revision` = a 40-character "
+            "commit sha (this machine serves that commit and nothing else), or "
+            "`ref` = a tag on the repo (this machine follows it; `crucible voices "
+            "pull` moves it to the tag's commit)"
+        )
+    if revision is not None and not REVISION_PATTERN.match(revision):
+        raise VoiceError(
+            f"{where}: revision {revision!r} must be a full 40-character commit "
+            "sha, so the manifest at that sha and the weights at that sha are the "
+            f"same commit. To follow a tag, write `ref = {revision!r}` instead"
+        )
+    if ref is not None and (REVISION_PATTERN.match(ref) or not REF_PATTERN.match(ref)):
+        raise VoiceError(
+            f"{where}: ref {ref!r} is not a tag or branch name"
+            + (
+                "; it is a commit sha, which belongs in `revision`"
+                if REVISION_PATTERN.match(ref)
+                else " (letters, digits, dot, dash, underscore and slash)"
+            )
+        )
+    return Pin(id=voice_id, hf_repo=block["hf_repo"], revision=revision, path=path, ref=ref)
+
+
+def settled(home: Path, pin: Pin) -> Pin:
+    if pin.revision is not None:
+        return pin
+    assert pin.ref is not None
+    revision = served_revision(home, pin.id, pin.hf_repo, pin.ref)
+    if revision is None:
+        raise VoiceError(unresolved_reason(pin.id, pin.hf_repo, pin.ref, home))
+    return pin.at(revision)
 
 
 
@@ -368,6 +415,7 @@ class RepoManifest:
     max_chars_basis: dict[str, str | None]
     takes: list[dict[str, Any]] | None
     path: Path
+    chunk_gap: ChunkGap | None = None
 
 
 def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
@@ -379,12 +427,13 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
     voice = document["voice"]
     scalars = {
         key: value for key, value in voice.items()
-        if key not in ("pace", "arms", "takes")
+        if key not in ("pace", "arms", "takes", CHUNK_GAP)
     }
     _check_no_machine_facts(f"{path.name} [voice]", scalars)
     check_table(
         f"{path.name} [voice]", scalars, _REPO_VOICE_REQUIRED, {}, error=VoiceError
     )
+    chunk_gap = _repo_chunk_gap(path, voice)
 
     pace: dict[str, Any] | None = None
     pace_basis: str | None = None
@@ -422,7 +471,17 @@ def parse_repo_manifest(text: str, path: Path) -> RepoManifest:
         max_chars_basis=bases,
         takes=takes,
         path=path,
+        chunk_gap=chunk_gap,
     )
+
+
+def _repo_chunk_gap(path: Path, voice: dict[str, Any]) -> ChunkGap | None:
+    if CHUNK_GAP not in voice:
+        return None
+    try:
+        return check_chunk_gap(f"{path.name} [voice.{CHUNK_GAP}]", voice[CHUNK_GAP])
+    except VoiceFactError as exc:
+        raise VoiceError(str(exc)) from None
 
 
 def _check_top_level(path: Path, document: dict[str, Any]) -> int:
@@ -481,6 +540,10 @@ def _repo_arms(
             raise VoiceError(f"{where}: must be a table")
         _check_no_machine_facts(where, block)
         check_table(where, block, _ARM_REQUIRED, _ARM_OPTIONAL, error=VoiceError)
+        try:
+            check_arm_facts(where, block)
+        except VoiceFactError as exc:
+            raise VoiceError(str(exc)) from None
         bases[arm] = _check_arm_cap(where, block)
         arms[arm] = {k: v for k, v in block.items() if k != "max_chars_basis"}
     return arms, bases
@@ -508,6 +571,8 @@ def merge(repo: RepoManifest, pin: Pin, footprint: EngineFootprint) -> VoiceMani
         voice["serving"] = serving
     if repo.takes is not None:
         voice["takes"] = repo.takes
+    if repo.chunk_gap is not None:
+        voice[CHUNK_GAP] = repo.chunk_gap.to_document()
     manifest = parse_document({"voice": voice}, repo.path, pin.id)
     backends = {
         arm: replace(spec, max_chars_basis=repo.max_chars_basis[arm])
@@ -562,6 +627,7 @@ def _snapshot_path(home: Path, pin: Pin) -> Path | None:
 
 
 def fetch_repo_manifest(home: Path, pin: Pin) -> tuple[str, Path]:
+    pin = settled(home, pin)
     found = _snapshot_path(home, pin)
     if found is not None:
         return _read(found), found
@@ -664,6 +730,7 @@ def voice_for_pin(pin: Pin) -> VoiceManifest:
     from .errors import ConfigError
 
     home = crucible_home()
+    pin = settled(home, pin)
     text, path = fetch_repo_manifest(home, pin)
     repo = parse_repo_manifest(text, path)
     engine = repo.voice["narrator_engine"]
@@ -700,7 +767,7 @@ def _say_once(voice_id: str, pin: Pin, why: str) -> None:
         "voice %r is pinned to %s@%s in %s but not served: %s",
         voice_id,
         pin.hf_repo,
-        pin.revision[:12],
+        pin.ref if pin.revision is None else pin.revision[:12],
         pin.path,
         " ".join(why.split()),
     )

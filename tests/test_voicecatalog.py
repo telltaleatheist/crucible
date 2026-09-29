@@ -71,6 +71,7 @@ def test_a_packaged_pin_declares_the_arms_of_its_cached_repo_manifest(
     tmp_path: Path,
 ) -> None:
     voice_id, pin = sorted(voicerepo.packaged_pins().items())[0]
+    pin = voicerepo.settled(tmp_path, pin)
     cached = (
         tmp_path
         / voicerepo.MANIFEST_CACHE_DIRNAME

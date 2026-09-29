@@ -20,7 +20,7 @@ from crucible.residency import ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
 from crucible.voicerepo import REPO_MANIFEST_NAME
 from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
-from crucible.voicecatalog import load_voice
+from crucible.voicecatalog import load_all_voices, load_voice
 
 from .conftest import (
     FAKE_BACKEND,
@@ -200,12 +200,14 @@ def test_a_voice_with_everything_in_place_is_loadable(
     assert row["pace"]["safe_min_chars"] == 400
 
 
-def test_a_row_never_carries_the_sampling(
+def test_a_row_carries_the_sampling_its_arm_renders_with_and_not_the_reason(
     tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
 ) -> None:
     fake_weights(VOICE)
-    for row in rows(tts_client, auth).values():
-        assert "sampling" not in row
+    served = load_all_voices()
+    for voice_id, row in rows(tts_client, auth).items():
+        if row["backend_supported"]:
+            assert row["sampling"] == served[voice_id].spec(FAKE_BACKEND.kind).sampling
         assert "sampling_reason" not in row
         assert "estimate_note" not in row
         assert "narrator_engine" in row

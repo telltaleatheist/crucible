@@ -19,7 +19,7 @@ from ...residency import (
     ResidentVoice,
     say_to,
 )
-from ...voicecatalog import load_all_voices
+from ...voicecatalog import load_all_voices, ref_state, unserved_pins, unserved_ref_state
 from ...voicereference import ReferenceError, VoiceReference, parse_reference
 from ...voices import VoiceBackendSpec, VoiceError, VoiceManifest
 from ..base import ModelDescriptor
@@ -148,6 +148,10 @@ VOICE_ROW_FIELDS: dict[str, Any] = {
     "max_chars": None, "max_chars_basis": None, "pace_basis": None,
     "inherited_from": None, "manifest": None, "sample_rate": None, "takes": 0,
     "needs_reference": False, "pace": None,
+    "ref": None, "latest_revision": None, "update_available": False,
+    "update_checked_at": None, "update_error": None,
+    "sampling": None, "edge_fade_ms": None, "chunk_gap": None,
+    "reference_seconds_cap": None, "allowed_controls": None,
 }
 
 
@@ -217,6 +221,17 @@ def _backend_fields(
         "estimate_basis": spec.estimate_basis,
         "max_chars": spec.max_chars,
         "max_chars_basis": spec.max_chars_basis,
+        **_arm_facts(spec),
+    }
+
+
+def _arm_facts(spec: VoiceBackendSpec) -> dict[str, Any]:
+    facts = spec.to_dict()
+    return {
+        "sampling": facts["sampling"],
+        "edge_fade_ms": facts["edge_fade_ms"],
+        "reference_seconds_cap": facts["reference_seconds_cap"],
+        "allowed_controls": facts["allowed_controls"],
     }
 
 
@@ -243,6 +258,8 @@ def _served_voice_row(
         takes=len(manifest.takes),
         needs_reference=manifest.kind == "zeroshot",
         pace=manifest.pace.to_dict(),
+        chunk_gap=None if manifest.chunk_gap is None else manifest.chunk_gap.to_dict(),
+        **ref_state(config.home, manifest),
         **on_backend,
     )
 
@@ -258,13 +275,12 @@ def voice_rows(
                 config, backend, residency, manifest, leases=leases, store=store
             )
         )
-    from ...voicecatalog import unserved_pins
-
     for voice_id, (revision, why) in sorted(unserved_pins().items()):
         rows.append(
             voice_row(
                 id=voice_id, display=voice_id, orphan=False, reason=why,
                 revision=revision, source="pinned", manifest="repo",
+                **unserved_ref_state(config.home, voice_id),
             )
         )
     return rows

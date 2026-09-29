@@ -161,7 +161,9 @@ crucible ladder                 # measure what this card can do (install runs it
 crucible models list            # model manifests and their standing here
 crucible models pull <id>       # fetch a model's weights at its pinned revision
 crucible voices list            # voice manifests and their standing here
-crucible voices pull <id>       # fetch a voice's weights at its pinned revision
+crucible voices pull <id>       # fetch a voice at the commit its `crucible` tag names now
+crucible voices pull --all      # move every installed voice to its tag's commit
+crucible voices check-updates   # look the tags up; say which voices a pull would move
 crucible rvc list               # RVC voice-conversion manifests and their standing
 crucible rvc pull <id>          # fetch and unpack one RVC model's archive
 crucible denoise list           # separator manifests and their standing here

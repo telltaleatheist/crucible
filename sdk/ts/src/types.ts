@@ -912,6 +912,52 @@ export interface VoiceInfo {
   readonly needsReference: boolean;
   /** The band a client packs its chunks to, or null on a pinned voice this host cannot read. */
   readonly pace: VoicePace | null;
+  /** The tag this voice follows on its repo (e.g. `crucible`), or null for an exact-sha pin. */
+  readonly ref: string | null;
+  /** The commit the tag named at the last explicit check, or null when never checked. */
+  readonly latestRevision: string | null;
+  /** Whether `crucible voices pull <id>` (or a pull task) would move this voice to `latestRevision`. */
+  readonly updateAvailable: boolean;
+  /** When the tag was last looked up. */
+  readonly updateCheckedAt: string | null;
+  /** Why the last look-up failed; the voice stays on the revision it has. */
+  readonly updateError: string | null;
+  /** The sampling this backend's arm renders take 0 with, or null when `backendSupported` is false. */
+  readonly sampling: VoiceSampling | null;
+  /** The fades at each chunk edge on this arm, or null when the manifest states none. */
+  readonly edgeFadeMs: VoiceEdgeFade | null;
+  /** The silence a client adds after each chunk, or null when the manifest states none. */
+  readonly chunkGap: VoiceChunkGap | null;
+  /** The most reference-clip audio this arm takes, in seconds, or null when unstated. */
+  readonly referenceSecondsCap: number | null;
+  /** The inline control tokens this arm allows (`[]` allows none), or null when unstated. */
+  readonly allowedControls: readonly string[] | null;
+}
+
+/** The sampling a voice's arm renders take 0 with. */
+export interface VoiceSampling {
+  readonly temperature: number;
+  readonly topP: number;
+  readonly topK: number;
+}
+
+/** Raised-cosine fades applied at each chunk edge, in milliseconds. */
+export interface VoiceEdgeFade {
+  readonly in: number;
+  readonly out: number;
+}
+
+/** The sentence gap after each chunk: `injectS` is added net of the model's own tail. */
+export interface VoiceChunkGap {
+  readonly injectS: number;
+  readonly targetJoinS: number;
+  readonly modelSelfTailS: number;
+  readonly readerSentenceGapS: number | null;
+  readonly modelInternalGapS: number | null;
+  readonly rule: string;
+  readonly method: string;
+  readonly source: string;
+  readonly measuredOn: string;
 }
 
 /** The recording a zero-shot voice is cloned from, sent with {@link CrucibleClient.loadVoice}. */

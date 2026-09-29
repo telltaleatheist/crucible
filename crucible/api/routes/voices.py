@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import Request, Response
 
 from ...errors import ApiError
 from ...jobs import voice_rows
-from ...voicecatalog import load_all_voices
+from ...voicecatalog import check_updates, load_all_voices
 from ...voicerepo import pinned_backends, remove_home_pin, repin
 from ...voices import VoiceError, remove_home_voice, voice_document, write_home_voice
 from ...weights import WeightsError, resolve_revision
@@ -81,6 +82,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def voices() -> list[dict[str, Any]]:
         """Every voice this build has a manifest for, and where it stands here."""
         return rows()
+
+    @private.post("/voices/updates", dependencies=tts_on)
+    async def voice_updates() -> dict[str, Any]:
+        """Look up, on the Hub, the tag every voice here follows, and say which ones a
+        pull would move. The only request that resolves a tag; GET /v1/voices never does.
+        """
+        return {"voices": await asyncio.to_thread(check_updates, config.home)}
 
     @private.get("/voices/{voice_id}/manifest", dependencies=tts_on)
     async def voice_manifest(voice_id: str) -> dict[str, Any]:

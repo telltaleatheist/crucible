@@ -532,7 +532,7 @@ def test_a_pin_row_needs_both_halves(host: Path) -> None:
     )
     with pytest.raises(VoiceError) as caught:
         load_pins()
-    assert "missing required key(s) ['revision']" in str(caught.value)
+    assert "states neither revision nor ref" in str(caught.value)
 
 
 def test_a_branch_name_is_not_a_pin(host: Path) -> None:
