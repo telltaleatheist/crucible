@@ -544,7 +544,7 @@ def test_the_text_published_before_aligning_covers_the_re_decoded_stretch_too(
     assert starts == [0.0, 180.0, 270.0, 360.0]
 
 
-def test_a_loop_that_never_clears_fails_the_job_by_name_with_its_place(
+def test_a_loop_that_never_clears_leaves_its_piece_empty_and_the_job_completes(
     qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
     sent: dict[str, Path],
 ) -> None:
@@ -552,18 +552,22 @@ def test_a_loop_that_never_clears_fails_the_job_by_name_with_its_place(
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", "token_limit")
     job_id, events = run_job(qwen_client, auth)
     final = events[-1]
-    assert final["event"] == "failed", final
-    assert final["data"]["error"]["code"] == "asr_decode_loop"
-    message = final["data"]["error"]["message"]
-    assert "180.0-225.0s (0:03:00.0-0:03:45.0)" in message
-    assert "180 s, 90 s, 45 s" in message
+    assert final["event"] == "done", final
+    assert final["data"]["decode_loop_pieces"] == 1
     notes = [
         e["data"]["message"] for e in events
         if e["event"] == "note" and "re-decoding" in e["data"]["message"]
     ]
     assert len(notes) == 2
-    response = qwen_client.get(f"/v1/jobs/{job_id}/artifacts/transcript.json", headers=auth)
-    assert response.status_code == 404
+    [gave_up] = [
+        e["data"]["message"] for e in events
+        if e["event"] == "note" and e["data"]["message"].startswith("decode_loop ")
+    ]
+    assert "180 s, 90 s, 45 s" in gave_up
+    document = transcript(qwen_client, auth, job_id)
+    [looped] = document["decode_loop"]
+    assert (looped["start"], looped["end"], looped["reason"]) == (180.0, 225.0, "decode_loop")
+    assert all(not (180.0 <= s["start"] < 225.0) for s in document["segments"])
     assert [line["op"] for line in lines(sent["asr"])][0] == "load"
 
 
@@ -677,14 +681,15 @@ def test_the_published_text_leaves_the_echoed_words_out(
     assert all("disfluency" not in s["text"] for s in segments)
 
 
-def test_a_repeated_phrase_not_from_the_context_still_spends_the_ladder_and_fails(
+def test_a_repeated_phrase_not_from_the_context_still_spends_the_ladder_first(
     qwen_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_AT", "200")
     monkeypatch.setenv("CRUCIBLE_FAKE_QWEN_LOOP_KIND", "repeat")
     job_id, events = run_job(qwen_client, auth)
-    assert events[-1]["event"] == "failed", events[-1]
-    assert events[-1]["data"]["error"]["code"] == "asr_decode_loop"
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["decode_loop_pieces"] == 1
+    assert events[-1]["data"]["context_echo_pieces"] == 0
     assert _echo_notes(events) == []
     notes = [
         e for e in events

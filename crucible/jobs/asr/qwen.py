@@ -53,6 +53,9 @@ WORKER_ENVIRONMENT_FOR_ENGINE: dict[str, dict[str, str]] = {
 }
 
 
+DECODE_LOOP = "decode_loop"
+
+
 @dataclass(frozen=True)
 class AlignerPlan:
 
@@ -360,6 +363,7 @@ class QwenAsrRun:
         self._finished: list[Piece] = []
         self._redecoded: list[dict[str, Any]] = []
         self._echoed: list[dict[str, Any]] = []
+        self._looped: list[dict[str, Any]] = []
         self._silent = 0
         self._text_pieces: dict[str, Piece] = {}
         self._journal = journal
@@ -381,7 +385,10 @@ class QwenAsrRun:
         finally:
             self._stop_all()
             self._save_progress(force=True)
-        self._ctx.done_extra(context_echo_pieces=len(self._echoed))
+        self._ctx.done_extra(
+            context_echo_pieces=len(self._echoed),
+            decode_loop_pieces=len(self._looped),
+        )
         return self._document()
 
     def _round(self, pending: list[Piece]) -> list[Piece]:
@@ -425,13 +432,8 @@ class QwenAsrRun:
         window = loopguard.next_window(self._ladder, piece.level)
         rungs = ", ".join(f"{s:g} s" for s in self._ladder)
         if window is None:
-            raise JobError(
-                "asr_decode_loop",
-                f"the piece at {piece.where()} still loops after re-decoding at "
-                f"every window in the budget ({rungs}): {signal.detail}. Nothing "
-                "was published — a transcript with this stretch missing would "
-                "look exactly like one without it",
-            )
+            self._give_up_on(piece, signal, rungs)
+            return []
         entry = {
             "start": piece.start_s,
             "end": piece.end_s,
@@ -452,6 +454,28 @@ class QwenAsrRun:
         )
         self._total += len(children) - 1
         return children
+
+    def _give_up_on(self, piece: Piece, signal: loopguard.LoopSignal, rungs: str) -> None:
+        entry = {
+            "start": piece.start_s,
+            "end": piece.end_s,
+            "reason": DECODE_LOOP,
+            "signal": signal.kind,
+            "detail": signal.detail,
+        }
+        piece.text = ""
+        piece.items = []
+        piece.reason = DECODE_LOOP
+        self._looped.append(entry)
+        self._text_pieces[piece_key(piece)] = piece
+        self._verdict(piece, {"outcome": DECODE_LOOP, **entry})
+        start, end = speechonly.span(self._timeline, piece.start_s, piece.end_s)
+        self._ctx.note(
+            f"{DECODE_LOOP} {start:.1f}-{end:.1f}s: the piece still loops when decoded "
+            f"at every window in the budget ({rungs}): {signal.detail}. "
+            "It is left empty and listed under decode_loop in transcript.json, so the caller "
+            "can keep its own text for this stretch"
+        )
 
     def _leave_empty(self, piece: Piece, echo: loopguard.ContextEcho) -> None:
         entry = {
@@ -561,7 +585,7 @@ class QwenAsrRun:
     def _save_progress(self, *, force: bool = False) -> None:
         if self._journal is None or self._total <= 0:
             return
-        done = len(self._finished) + self._silent + len(self._echoed)
+        done = len(self._finished) + self._silent + len(self._echoed) + len(self._looped)
         detail = f"{self._decoded:,} decoded"
         if self._word_timestamps:
             detail += f", {self._aligned:,} aligned"
@@ -1039,10 +1063,14 @@ class QwenAsrRun:
             layout={
                 "piece_max_s": self._piece_s,
                 "overlap_s": self._overlap_s,
-                "pieces": len(self._finished) + self._silent + len(self._echoed),
+                "pieces": (
+                    len(self._finished) + self._silent + len(self._echoed)
+                    + len(self._looped)
+                ),
                 "silent_pieces": self._silent,
                 "redecoded": self._in_source_time(self._redecoded),
                 "context_echo": self._in_source_time(self._echoed),
+                "decode_loop": self._in_source_time(self._looped),
             },
             speech=self._speech,
             timeline=self._timeline,

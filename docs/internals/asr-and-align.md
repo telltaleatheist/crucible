@@ -242,8 +242,11 @@ catches those.
 A flagged piece is re-cut **from the original source** (so its overlap is real neighbouring
 audio, not the looping piece's) at the next rung of `window_ladder`: the piece length, then
 halves (30 -> 15 -> 7.5 at the default). Greedy decoding (temperature 0) is deterministic,
-so only different input changes the outcome. A piece that loops at the last rung fails the
-job as `asr_decode_loop` with its time range. A repetition penalty was rejected: it pushes
+so only different input changes the outcome. A piece that still loops at the last rung is
+left empty and listed under `decode_loop` in transcript.json (start, end, the signal and its
+detail); the done event carries `decode_loop_pieces` and one `note` names the span. The job
+completes, so a client can keep its own text for that stretch (training-pc-1, 2026-09-28: one
+1.9 s piece used to fail a 17,400 s re-hear pass). A repetition penalty was rejected: it pushes
 against the fillers and verbatim repeats the model was chosen to keep.
 
 **Context echo is checked first** (`loopguard.context_echo`, before rules 1-4). Over
