@@ -1,0 +1,555 @@
+from __future__ import annotations
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from crucible.client.connection import Connection
+from crucible.desktop_app import instance, screens, theme
+from crucible.desktop_app.api import ApiError, LocalApi
+from crucible.desktop_app.controller import Controller
+from crucible.desktop_app.progress import TaskWatch
+
+RUNNING = {"state": "running", "name": "crucible@test", "version": "1.0.55", "backend": "cuda-linux",
+           "detail": "The paired engine is answering"}
+
+INFO = {
+    "host": {"backend": "cuda-linux", "gpu": {"vendor": "nvidia", "name": "RTX 3090 Ti", "vram_bytes": 24 * 2**30}},
+    "capabilities": [{"job_type": "llm"}, {"job_type": "asr"}],
+    "voice_sources": {"repo": {"label": "from its repo"}, "override": {"label": "set on this machine"}},
+}
+
+CAPABILITY = {
+    "total_bytes": 24 * 2**30,
+    "desktop_allowance_bytes": 3 * 2**30,
+    "classes": [
+        {"capability": "clean", "enabled": True, "summary": "can clean up text, using qwen3.5-9b", "reason": "fits"},
+        {"capability": "asr", "enabled": True, "summary": "can transcribe", "reason": "fits"},
+        {"capability": "tts", "enabled": False, "summary": "", "reason": "no voice fits in 21.0 GiB"},
+    ],
+    "job_types": [
+        {"job_type": "echo", "classes": ["echo"], "installer": None, "narrator_engines": []},
+        {"job_type": "llm", "classes": ["clean"], "installer": "llm", "narrator_engines": []},
+        {"job_type": "asr", "classes": ["asr"], "installer": "asr", "narrator_engines": []},
+        {"job_type": "tts", "classes": ["tts"], "installer": "tts", "narrator_engines": ["higgs-v3"]},
+        {"job_type": "denoise", "classes": ["denoise"], "installer": "rvc", "narrator_engines": []},
+    ],
+}
+
+ACTIVITY = {
+    "resident": {"kind": "llm", "id": "qwen3.5-9b", "memory_bytes_estimate": 20 * 2**30,
+                 "held_by": {"who": "'bookforge' for 'decide'"}},
+    "running": [{"job_id": "j1", "type": "asr", "model": "whisper", "status": "running", "position": None,
+                 "progress": 0.66, "message": "transcribing 2775s of 4196s", "client": "bookforge"}],
+    "queued": [{"job_id": "j2", "type": "tts", "model": None, "status": "queued", "position": 1,
+                "progress": 0, "message": None, "client": None}],
+    "chat": {"rows": []},
+    "lease": {"client": "bookforge", "kind": "llm", "act": "decide"},
+}
+
+CATALOG = {"rows": [
+    {"kind": "model", "id": "qwen3.5-9b", "name": "Qwen 3.5 9B", "job_type": "llm", "installed": True,
+     "installed_bytes": 18 * 2**30, "expected_bytes": None, "resident": True},
+    {"kind": "model", "id": "qwen3.5-4b", "name": None, "job_type": "llm", "installed": False,
+     "installed_bytes": None, "expected_bytes": 8 * 2**30, "resident": False},
+    {"kind": "model", "id": "whisper-tiny", "name": None, "job_type": "asr", "installed": True,
+     "installed_bytes": 78 * 2**20, "expected_bytes": None, "resident": False},
+    {"kind": "voice", "id": "sigma", "name": "Sigma", "job_type": "tts", "installed": True,
+     "installed_bytes": 8 * 2**30, "expected_bytes": None, "resident": False},
+    {"kind": "voice", "id": "mistborn", "name": "Mistborn", "job_type": "tts", "installed": False,
+     "installed_bytes": None, "expected_bytes": 8 * 2**30, "resident": False},
+]}
+
+VOICES = [
+    {"id": "sigma", "display": "Sigma", "narrator_engine": "higgs-v3", "language": "en", "loadable": True,
+     "reason": None, "revision": "8f6b3ca2aaaa", "manifest": "override"},
+    {"id": "mistborn", "display": "Mistborn", "narrator_engine": "higgs-v3", "language": "en", "loadable": True,
+     "reason": None, "revision": "8a8d1bf3bbbb", "manifest": "repo"},
+]
+
+SETTINGS = {
+    "upstreams": {"anthropic": {"configured": True, "key_hint": "abcd"}, "openai": {"configured": False, "key_hint": None},
+                  "ollama": {"configured": False, "url": None}},
+    "upstream_labels": {"anthropic": "Anthropic", "openai": "OpenAI", "ollama": "Ollama"},
+    "desktop_allowance_bytes": 3 * 2**30,
+    "desktop_reserve": "kept 3.0 GiB for this PC's desktop",
+    "lan_advertise": ["192.168.1.5:7100"],
+}
+
+SETUP = {"urls": ["http://127.0.0.1:7100", "http://pc.example:7100"],
+         "pairing": ["crucible://crucible%40test@127.0.0.1:7100/#secret-token",
+                     "crucible://crucible%40test@pc.example:7100/#secret-token"]}
+
+
+class FakeApi:
+    def __init__(self, docs: dict[str, Any] | None = None) -> None:
+        self.docs = {
+            "/v1/info": INFO, "/v1/activity": ACTIVITY, "/v1/capability": CAPABILITY,
+            "/v1/catalog": CATALOG, "/v1/voices": VOICES, "/v1/tasks": {"tasks": []},
+            "/v1/settings": SETTINGS, "/v1/setup": SETUP,
+        }
+        self.docs.update(docs or {})
+        self.sent: list[tuple[str, str, Any]] = []
+        self.answers: dict[tuple[str, str], Any] = {}
+        self.frames: dict[str, list[dict]] = {}
+        self.forgotten = 0
+
+    def get(self, path: str) -> Any:
+        value = self.docs.get(path)
+        if isinstance(value, ApiError):
+            raise value
+        if value is None:
+            raise ApiError("not_found", f"no {path}", 404)
+        return value
+
+    def send(self, method: str, path: str, body: Any = None) -> Any:
+        self.sent.append((method, path, body))
+        answer = self.answers.get((method, path))
+        if isinstance(answer, ApiError):
+            raise answer
+        return answer
+
+    def follow(self, path: str):
+        yield from self.frames.get(path, [])
+
+    def forget(self) -> None:
+        self.forgotten += 1
+
+
+class FakeHost:
+    def __init__(self, status: Any = RUNNING, lan_supported: bool = True) -> None:
+        self._status = status
+        self.acted: list[str] = []
+        self.lan: dict | None = None
+        self.supported = lan_supported
+        self.lan_calls: list[bool] = []
+        self.opened = 0
+
+    def status(self) -> Any:
+        if isinstance(self._status, Exception):
+            raise self._status
+        return self._status
+
+    def act(self, action: str) -> Any:
+        self.acted.append(action)
+        return RUNNING
+
+    def lan_supported(self) -> bool:
+        return self.supported
+
+    def lan_record(self) -> dict | None:
+        return self.lan
+
+    def set_lan(self, on: bool, ask) -> dict:
+        self.lan_calls.append(on)
+        self.lan = {"authorities": ["192.168.1.5:7100"]} if on else None
+        return {"state": "configured" if on else "disabled"}
+
+    def open_logs(self) -> Path:
+        self.opened += 1
+        return Path("logs")
+
+
+def controller(api: FakeApi | None = None, host: FakeHost | None = None, answers: list[bool] | None = None,
+               asked: list[str] | None = None) -> Controller:
+    replies = list(answers if answers is not None else [True])
+    questions = asked if asked is not None else []
+
+    def ask(question: str) -> bool:
+        questions.append(question)
+        return replies.pop(0) if replies else True
+    return Controller(api or FakeApi(), host or FakeHost(), ask, run=lambda work: work())
+
+
+def test_home_shows_the_machine_memory_what_is_loaded_and_the_running_job() -> None:
+    c = controller()
+    c.refresh_now("home")
+    view = c.view("home")
+    facts = {fact.label: fact.value for fact in view.facts}
+    assert view.headline == "Crucible is running" and view.action is None
+    assert facts["Version"] == "1.0.55" and facts["Machine"] == "RTX 3090 Ti"
+    assert facts["Memory"] == "24.0 GB card memory, 3.0 GB kept for the desktop"
+    assert facts["Loaded"].startswith("qwen3.5-9b (llm), about 20.0 GB, held by 'bookforge'")
+    running, queued = view.work
+    assert running.fraction == pytest.approx(0.66) and running.cancel == "j1" and running.target == "job"
+    assert running.title == "asr with whisper for bookforge"
+    assert queued.detail == "waiting, number 1 in line"
+
+
+def test_unified_memory_is_named_as_such_on_a_mac() -> None:
+    info = {"host": {"gpu": {"vendor": "apple", "name": "Apple M1 Ultra", "vram_bytes": 64 * 2**30}}}
+    facts = screens.memory_facts(info, {"total_bytes": 64 * 2**30, "desktop_allowance_bytes": 0})
+    assert facts[-1].value == "64.0 GB unified memory"
+
+
+@pytest.mark.parametrize("state,action,label", [
+    ("stopped", "start", "Start Crucible"),
+    ("unreachable", "start", "Start Crucible"),
+    ("broken", "repair", "Repair Crucible"),
+    ("unauthorized", "restart", "Restart Crucible"),
+])
+def test_a_server_that_is_down_offers_the_one_action_that_fixes_it(state: str, action: str, label: str) -> None:
+    c = controller(host=FakeHost({"state": state, "detail": "Engine did not answer"}))
+    c.refresh_now("models")
+    view = c.view("home")
+    assert (view.action, view.action_label) == (action, label)
+    assert view.detail == f"Engine did not answer. Click {label} to fix it."
+    assert isinstance(c.view("models"), screens.HomeView)
+    assert c.docs == {}
+
+
+def test_no_installation_names_the_installer_to_run(monkeypatch) -> None:
+    view = screens.not_installed_view(RuntimeError("crucible_not_installed: nothing at C:\\x"), "win32")
+    assert "PowerShell" in view.detail and "install.ps1 | iex" in view.detail
+    mac = screens.not_installed_view(RuntimeError("nothing"), "darwin")
+    assert "Terminal" in mac.detail and "install.sh | sh" in mac.detail
+
+
+def test_start_runs_the_host_verb_and_forgets_the_old_connection() -> None:
+    api, host = FakeApi(), FakeHost({"state": "stopped", "detail": ""})
+    c = controller(api, host)
+    c.server("start")
+    assert host.acted == ["start"] and api.forgotten == 1 and c.running()
+
+
+def test_models_list_installed_first_and_never_offer_to_remove_what_is_loaded() -> None:
+    c = controller()
+    c.refresh_now("models")
+    rows = c.view("models")
+    assert [row.id for row in rows] == ["whisper-tiny", "qwen3.5-9b", "qwen3.5-4b"]
+    tiny, loaded, available = rows
+    assert loaded.note == "Loaded now" and not loaded.can_remove
+    assert tiny.can_remove and tiny.size == "78 MB"
+    assert available.can_pull and available.size == "8.0 GB download" and available.subtitle == "llm"
+
+
+def test_while_a_download_runs_no_other_download_or_removal_is_offered() -> None:
+    tasks = {"tasks": [{"task_id": "t1", "type": "pull", "state": "running",
+                        "request": {"kind": "model", "id": "qwen3.5-4b"}}]}
+    rows = screens.model_rows(CATALOG, tasks)
+    pulling = next(row for row in rows if row.id == "qwen3.5-4b")
+    assert pulling.note == "Downloading" and not pulling.can_pull
+    assert not any(row.can_remove for row in rows)
+
+
+def test_voices_join_the_catalog_and_offer_to_undo_a_local_override() -> None:
+    c = controller()
+    c.refresh_now("voices")
+    sigma, mistborn = c.view("voices")
+    assert sigma.installed and sigma.extra == ("reset",)
+    assert sigma.subtitle == "higgs-v3, en, pinned to 8f6b3ca2, set on this machine"
+    assert not mistborn.installed and mistborn.can_pull and mistborn.extra == ()
+
+
+def test_voices_refused_by_the_server_show_its_words() -> None:
+    refusal = ApiError("job_type_not_installed", "tts is not installed here. Install it under Packages", 409)
+    c = controller(FakeApi({"/v1/voices": refusal}))
+    c.refresh_now("voices")
+    assert c.screen_errors("voices") == ["tts is not installed here. Install it under Packages (job_type_not_installed)"]
+
+
+def test_packages_say_installed_installable_or_which_package_brings_them() -> None:
+    c = controller()
+    c.refresh_now("packages")
+    rows = {row.job_type: row for row in c.view("packages")}
+    assert "echo" not in rows
+    assert rows["llm"].installed and rows["llm"].verdict == "Can clean up text, using qwen3.5-9b"
+    assert rows["tts"].installable and rows["tts"].engines == ("higgs-v3",)
+    assert rows["tts"].verdict == "No voice fits in 21.0 GiB" and rows["tts"].tone == screens.WARN
+    assert not rows["denoise"].installable and rows["denoise"].note == "Comes with Voice conversion"
+
+
+def test_settings_mask_secrets_but_copy_the_whole_pairing_line() -> None:
+    c = controller()
+    c.refresh_now("settings")
+    view = c.view("settings")
+    local, remote = view.pairing
+    assert local.shown == "crucible://crucible%40test@127.0.0.1:7100/#••••••••"
+    assert local.line.endswith("#secret-token") and local.where == "apps on this computer"
+    assert remote.where == "pc.example"
+    anthropic = view.upstreams[0]
+    assert anthropic.shown == "•••• abcd" and anthropic.field == "key"
+    assert view.upstreams[2].field == "url"
+    assert view.allowance_gib == "3" and not view.lan_on
+
+
+def test_lan_sharing_is_switched_through_the_host_and_reread() -> None:
+    host = FakeHost()
+    c = controller(host=host)
+    c.set_lan(True)
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert host.lan_calls == [True] and view.lan_on
+    assert view.lan_words == "Other computers on this network can pair with it: 192.168.1.5:7100."
+
+
+def test_a_mac_says_how_it_is_shared_without_offering_a_switch() -> None:
+    c = controller(host=FakeHost(lan_supported=False))
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert not view.lan_supported and view.lan_on
+    assert "http://pc.example:7100" in view.lan_words
+
+
+def test_a_pull_asks_with_the_servers_plan_then_follows_its_progress() -> None:
+    api = FakeApi({"/v1/capability/plan?subject=qwen3.5-4b": {"confirm": "Download qwen3.5-4b.\n\nDownload it?"},
+                   "/v1/tasks/t9": {"state": "done"}})
+    api.answers[("POST", "/v1/tasks")] = {"task_id": "t9"}
+    api.frames["/v1/tasks/t9/events"] = [
+        {"event": "started", "data": {"type": "pull"}},
+        {"event": "step", "data": {"name": "pull model qwen3.5-4b", "index": 1, "total": 1}},
+        {"event": "progress", "data": {"bytes_done": 2 * 2**30, "bytes_total": 8 * 2**30, "file": "a"}},
+    ]
+    asked: list[str] = []
+    c = controller(api, asked=asked)
+    seen: list[str] = []
+    original = TaskWatch.apply
+
+    def spy(self: TaskWatch, event: str, data: dict) -> None:
+        original(self, event, data)
+        seen.append(self.view().detail)
+    TaskWatch.apply = spy
+    try:
+        c.pull("model", "qwen3.5-4b")
+    finally:
+        TaskWatch.apply = original
+    assert asked == ["Download qwen3.5-4b.\n\nDownload it?"]
+    assert api.sent == [("POST", "/v1/tasks", {"type": "pull", "kind": "model", "id": "qwen3.5-4b"})]
+    assert seen[-1] == "2.0 GB of 8.0 GB"
+    final = c.watch_view()
+    assert final.title == "Downloading qwen3.5-4b" and final.detail == "Finished" and final.fraction == 1.0
+    assert final.cancel is None and "model:qwen3.5-4b" not in c.busy
+
+
+def test_saying_no_to_the_plan_sends_nothing() -> None:
+    api = FakeApi({"/v1/capability/plan?subject=qwen3.5-4b": {"confirm": "Download it?"}})
+    c = controller(api, answers=[False])
+    c.pull("model", "qwen3.5-4b")
+    assert api.sent == [] and c.watch is None
+
+
+def test_a_task_that_failed_on_the_host_says_so_and_where_to_look() -> None:
+    watch = TaskWatch.of({"task_id": "t1", "type": "install", "request": {"job_type": "tts"}})
+    watch.settle({"state": "failed", "error": None})
+    assert watch.view().detail.startswith("It failed on the server without a reason.")
+    watch = TaskWatch.of({"task_id": "t2", "type": "install", "request": {"job_type": "tts"}})
+    watch.apply("failed", {"code": "reload_refused", "message": "run the install again"})
+    assert watch.view().detail == "run the install again (reload_refused)"
+
+
+def test_a_refused_removal_shows_the_servers_message_under_that_row() -> None:
+    api = FakeApi()
+    api.answers[("DELETE", "/v1/catalog/model/whisper-tiny")] = ApiError(
+        "subject_in_use", "whisper-tiny is named by a running job; wait for it or cancel it under Activity", 409)
+    c = controller(api)
+    c.remove("model", "whisper-tiny", "78 MB")
+    assert c.notices["model:whisper-tiny"] == (
+        "whisper-tiny is named by a running job; wait for it or cancel it under Activity (subject_in_use)")
+
+
+def test_an_install_names_its_engine_and_is_watched() -> None:
+    api = FakeApi({"/v1/tasks/t3": {"state": "done"}})
+    api.answers[("POST", "/v1/tasks")] = {"task_id": "t3"}
+    c = controller(api)
+    c.install("tts", "higgs-v3")
+    assert api.sent[0] == ("POST", "/v1/tasks", {"type": "install", "job_type": "tts", "narrator_engine": "higgs-v3"})
+    assert c.watch_view().title == "Installing tts (higgs-v3)"
+
+
+def test_a_running_task_found_on_refresh_is_followed_once() -> None:
+    tasks = {"tasks": [{"task_id": "t5", "type": "install", "state": "running", "request": {"job_type": "asr"}}]}
+    api = FakeApi({"/v1/tasks": tasks, "/v1/tasks/t5": {"state": "running"}})
+    api.frames["/v1/tasks/t5/events"] = [{"event": "progress", "data": {"line": "Collecting torch"}}]
+    c = controller(api)
+    c.refresh_now("activity")
+    c.refresh_now("activity")
+    view = c.view("activity")
+    assert view.work[0].title == "Installing asr" and view.work[0].detail == "Collecting torch"
+    assert view.work[0].target == "task" and view.work[0].cancel == "t5"
+    assert view.lease == "bookforge is keeping llm loaded for decide"
+
+
+def test_cancelling_a_job_asks_first_and_a_task_does_not() -> None:
+    api = FakeApi()
+    asked: list[str] = []
+    c = controller(api, answers=[True], asked=asked)
+    c.cancel("job", "j1")
+    c.cancel("task", "t1")
+    assert api.sent == [("DELETE", "/v1/jobs/j1", None), ("DELETE", "/v1/tasks/t1", None)]
+    assert len(asked) == 1
+
+
+def test_keys_and_the_allowance_are_written_through_settings() -> None:
+    api = FakeApi()
+    api.answers[("PUT", "/v1/settings")] = SETTINGS
+    c = controller(api)
+    c.save_upstream("openai", "key", " sk-new ")
+    c.save_upstream("anthropic", "key", "")
+    c.save_allowance("4")
+    c.save_allowance("four")
+    assert api.sent == [
+        ("PUT", "/v1/settings", {"upstreams": {"openai": {"key": "sk-new"}}}),
+        ("PUT", "/v1/settings", {"upstreams": {"anthropic": None}}),
+        ("PUT", "/v1/settings", {"desktop_allowance_bytes": 4 * 2**30}),
+    ]
+    assert c.notices["allowance"] == "'four' is not a number of GB; type one, like 3 (allowance_not_a_number)"
+
+
+def test_one_action_at_a_time_per_row() -> None:
+    held: list = []
+    c = Controller(FakeApi(), FakeHost(), lambda q: True, run=held.append)
+    c.remove("model", "whisper-tiny", "")
+    c.remove("model", "whisper-tiny", "")
+    assert len(held) == 1 and "model:whisper-tiny" in c.busy
+
+
+def test_slow_documents_are_not_refetched_every_tick() -> None:
+    now = [0.0]
+    api = FakeApi()
+    reads: list[str] = []
+    real_get = api.get
+    api.get = lambda path: reads.append(path) or real_get(path)
+    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), clock=lambda: now[0])
+    c.refresh_now("home")
+    c.refresh_now("home")
+    assert reads.count("/v1/info") == 1 and reads.count("/v1/activity") == 2
+    now[0] = 16.0
+    c.refresh_now("home")
+    assert reads.count("/v1/info") == 2
+
+
+class Envelope(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = json.dumps({"error": {"code": "unknown_subject", "message": "no model called 'x'. "
+                                     "`crucible models list` names the ones there are"}}).encode()
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+
+def test_the_real_client_carries_the_servers_message_and_next_step_verbatim() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Envelope)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        api = LocalApi(lambda: Connection(url=url, token="t", name="crucible@test", source="local"))
+        with pytest.raises(ApiError) as caught:
+            api.get("/v1/catalog")
+    finally:
+        server.shutdown()
+    assert caught.value.code == "unknown_subject" and caught.value.status == 404
+    assert caught.value.message == "no model called 'x'. `crucible models list` names the ones there are"
+
+
+def test_an_engine_that_does_not_answer_names_the_command_that_says_why() -> None:
+    api = LocalApi(lambda: Connection(url="http://127.0.0.1:9", token="t", name="crucible@test", source="local"))
+    with pytest.raises(ApiError) as caught:
+        api.get("/v1/info")
+    assert caught.value.code == "server_unreachable"
+    assert "`crucible local status`" in caught.value.message
+
+
+def test_no_local_engine_is_an_api_error_with_its_code() -> None:
+    from crucible.client.errors import ClientRefusal
+
+    def refuse() -> Connection:
+        raise ClientRefusal("no_local_engine: nothing here. Pass --url")
+    with pytest.raises(ApiError) as caught:
+        LocalApi(refuse).get("/v1/info")
+    assert caught.value.code == "no_local_engine" and caught.value.message == "nothing here. Pass --url"
+
+
+def test_one_window_per_home_and_a_second_launch_brings_it_forward(tmp_path: Path) -> None:
+    first = instance.Instance(tmp_path)
+    assert first.claim()
+    heard: list[str] = []
+    first.serve(heard.append)
+    try:
+        assert not instance.Instance(tmp_path).claim()
+        assert instance.still_open(tmp_path)
+        assert instance.signal(tmp_path, instance.FOCUS)
+        deadline = time.monotonic() + 5
+        while not heard and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert heard == ["focus"]
+    finally:
+        first.close()
+    assert not instance.door_path(tmp_path).exists() and not instance.still_open(tmp_path)
+
+
+def test_a_stranger_without_the_token_is_ignored(tmp_path: Path) -> None:
+    import socket
+
+    first = instance.Instance(tmp_path)
+    first.claim()
+    heard: list[str] = []
+    port = first.serve(heard.append)
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as link:
+            link.sendall(b"wrong quit\n")
+            assert link.recv(8) == b""
+    finally:
+        first.close()
+    assert heard == []
+
+
+def test_close_running_asks_the_window_to_quit_and_waits(tmp_path: Path) -> None:
+    first = instance.Instance(tmp_path)
+    first.claim()
+    first.serve(lambda word: first.close() if word == instance.QUIT else None)
+    assert instance.close_running(tmp_path, timeout=5)
+    assert instance.close_running(tmp_path, timeout=5)
+
+
+def test_a_door_file_that_names_nothing_is_not_a_window(tmp_path: Path) -> None:
+    instance.door_path(tmp_path).write_text("garbage", encoding="ascii")
+    assert not instance.signal(tmp_path, instance.FOCUS)
+
+
+def test_the_theme_follows_the_override_then_the_os() -> None:
+    assert theme.current("linux", {"CRUCIBLE_APP_THEME": "dark"}) is theme.DARK
+    assert theme.current("linux", {"CRUCIBLE_APP_THEME": "light"}) is theme.LIGHT
+    assert theme.current("linux", {}) is theme.LIGHT
+    assert theme.tone_colour(theme.DARK, "bad") == theme.DARK.bad
+    assert theme.tone_colour(theme.DARK, "idle") == theme.DARK.muted
+
+
+
+def test_every_screen_draws_in_both_palettes_without_a_server(monkeypatch) -> None:
+    tkinter = pytest.importorskip("tkinter")
+    from crucible.desktop_app import views, window
+
+    try:
+        root = tkinter.Tk()
+    except tkinter.TclError as exc:
+        pytest.skip(f"no display for Tk here: {exc}")
+    root.withdraw()
+    try:
+        api = FakeApi()
+        api.answers[("DELETE", "/v1/catalog/model/whisper-tiny")] = ApiError("subject_in_use", "busy; wait", 409)
+        c = controller(api)
+        c.remove("model", "whisper-tiny", "")
+        for palette in ("light", "dark"):
+            monkeypatch.setenv(theme.THEME_ENV, palette)
+            app = window.App(root, c, window.Asker())
+            assert app.palette.name == palette
+            for screen, _title in views.SCREENS:
+                c.refresh_now(screen)
+                app.go(screen)
+                root.update_idletasks()
+                assert app.scroll.inner.winfo_children(), screen
+        c.status = {"state": "stopped", "detail": ""}
+        app.go("models")
+        app.go("home")
+    finally:
+        root.destroy()

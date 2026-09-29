@@ -23,6 +23,7 @@ _REFERENCE = re.compile(r'\$([A-Z][A-Z0-9_]*)')
 _ARGUMENT = re.compile(r'--[A-Za-z][A-Za-z-]*(?:=\S+)?|"\$[A-Z][A-Z0-9_]*"|\S+')
 _VERSION_IN_NAME = re.compile(r'\d+\.\d+\.\d+')
 _WHEEL_SUFFIX = '-py3-none-any.whl'
+_WINDOWS_PROGRAM = b'MZ'
 _FLEET = re.compile(r'^FLEET="([^"]*)"$', re.MULTILINE)
 _READING = re.compile(r'^  (\S+)\s+(\S.*?)\s*$')
 
@@ -133,6 +134,19 @@ def expected_assets(assets: list[dict], version: str, *, fetch=fetch_asset,
     return uploaded_asset_names(version, text=release_sh_text(f'v{version}'))
 
 
+def setup_name(version: str) -> str:
+    return f'crucible-setup-{version}.exe'
+
+
+def check_setup(names: list[str], version: str, fetch) -> None:
+    setups = [name for name in names if name.startswith('crucible-setup-')]
+    if setups and setups != [setup_name(version)]:
+        raise ValueError(f'expected the one Windows setup {setup_name(version)}, found {setups}')
+    if setups and not fetch(version, setups[0]).startswith(_WINDOWS_PROGRAM):
+        raise ValueError(f'{setups[0]} is not a Windows program; rebuild it with '
+                         f'./scripts/build-installer.sh on the Windows PC')
+
+
 def validate_assets(assets: list[dict], version: str, *, fetch=fetch_asset,
                     uploaded: list[str] | None = None) -> None:
     names = uploaded if uploaded is not None else expected_assets(assets, version, fetch=fetch)
@@ -158,6 +172,7 @@ def validate_assets(assets: list[dict], version: str, *, fetch=fetch_asset,
             raise ValueError(
                 f'asset {name} names version {found.group(0)}, not {version}')
 
+    check_setup(names, version, fetch)
     published = hashlib.sha256(fetch(version, wheel)).hexdigest()
     attested = fetch(version, wheel_sha).decode('utf-8').split()
     if not attested or not re.fullmatch(r'[a-f0-9]{64}', attested[0]):

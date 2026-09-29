@@ -6,6 +6,10 @@ may sit on a LAN with no route out, and a page that needs a network to be legibl
 is sometimes blank. The original design is `docs/history/PHASE13-OPERATOR.md` section 4
 (history, not maintained).
 
+On the machine Crucible runs on, the primary UI is now the desktop window (`crucible app`,
+`crucible/desktop_app`, described in `host-and-platform.md`); the tray's "Open Crucible"
+opens that window. This console stays the way to reach a server from another computer.
+
 ## Sections and the read that owns each
 
 | Section   | Reads |

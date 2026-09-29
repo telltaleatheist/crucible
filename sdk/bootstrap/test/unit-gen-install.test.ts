@@ -468,3 +468,23 @@ test('the WSL image comes from Canonical, and its digest from Canonical\'s own s
   assert.ok(py.text.includes('useradd --create-home --shell /bin/bash crucible'));
   assert.ok(py.text.includes('# crucible-rootfs'));
 });
+
+test('install.sh opens Crucible.app only on a fresh install typed at the Mac itself', () => {
+  const sh = generateInstallSh();
+  const fresh = sh.indexOf('[ -f "$CRUCIBLE_HOME/config.toml" ] || FRESH=1');
+  assert.ok(fresh > 0 && fresh < sh.indexOf('say "init"'), 'freshness is read before init writes config.toml');
+  const tail = sh.slice(sh.indexOf('say "local-start"'), sh.indexOf('"$CRUCIBLE" token --url'));
+  assert.match(tail, /\[ "\$\(uname -s\)" = Darwin \] && \[ -d "\$HOME\/Applications\/Crucible.app" \]/);
+  assert.match(tail, /\[ "\$FRESH" = 1 \] && \[ -t 1 \] && \[ -z "\$\{SSH_CONNECTION:-\}" \]/);
+  assert.match(tail, /open "\$HOME\/Applications\/Crucible.app"/);
+});
+
+test('install.ps1 opens the Crucible window only on a fresh install typed at the PC itself', () => {
+  const ps1 = generateInstallPs1();
+  assert.ok(ps1.indexOf('$Fresh = -not (Test-Path -LiteralPath $Cmd)') < ps1.indexOf('Native { & $Cmd local shutdown }'),
+    'freshness is read before anything writes crucible.cmd');
+  const tail = ps1.slice(ps1.indexOf('crucible.host.installwatch'));
+  assert.match(tail, /\$Interactive = \[Environment\]::UserInteractive -and -not \$FromApp -and -not \$env:SSH_CONNECTION/);
+  assert.match(tail, /if \(\$Fresh -and \$Interactive\) \{/);
+  assert.match(tail, /Start-Process -FilePath \$Pythonw -ArgumentList "-m","crucible.cli","app"/);
+});

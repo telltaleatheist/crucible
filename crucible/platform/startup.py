@@ -19,13 +19,17 @@ SHORTCUT_TIMEOUT_SECONDS = 60.0
 SHORTCUT_DESCRIPTION = "Crucible — the engine's presence on this machine"
 
 
-def startup_python(env: Mapping[str, str]) -> str:
+def launch_python(env: Mapping[str, str], words: tuple[str, ...]) -> str:
     return (
         "import os,runpy,sys;"
         f"os.environ['CRUCIBLE_HOME']={str(crucible_root(env))!r};"
-        "sys.argv=['crucible','local','tray'];"
+        "sys.argv=[" + ",".join(repr(word) for word in ("crucible", *words)) + "];"
         "runpy.run_module('crucible.cli',run_name='__main__')"
     )
+
+
+def startup_python(env: Mapping[str, str]) -> str:
+    return launch_python(env, ("local", "tray"))
 
 
 @dataclass(frozen=True)
@@ -54,7 +58,9 @@ def shortcut_path(env: Mapping[str, str]) -> PureWindowsPath:
     return startup_dir(env) / SHORTCUT_NAME
 
 
-def write_script(target: str, arguments: str, working_dir: str, lnk: str) -> str:
+def write_script(target: str, arguments: str, working_dir: str, lnk: str,
+                 description: str = SHORTCUT_DESCRIPTION, icon: str | None = None) -> str:
+    icon_line = "" if icon is None else "; $s.IconLocation = " + _ps_quote(icon)
     return (
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut("
         + _ps_quote(lnk)
@@ -66,7 +72,8 @@ def write_script(target: str, arguments: str, working_dir: str, lnk: str) -> str
         + "; $s.WorkingDirectory = "
         + _ps_quote(working_dir)
         + "; $s.Description = "
-        + _ps_quote(SHORTCUT_DESCRIPTION)
+        + _ps_quote(description)
+        + icon_line
         + "; $s.Save()"
     )
 

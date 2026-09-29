@@ -137,6 +137,18 @@ the code does not say by itself.
   script tries as itself, then `sudo -n` (never prompts), and otherwise prints the
   one line to run. Inside WSL the server is a system unit and has no linger
   question.
+- The launcher is not a step of its own: `local-install-desktop` (`crucible local
+  install-desktop`) writes the Start Menu item on Windows and `~/Applications/Crucible.app` on
+  the Mac. Only the generated scripts then OPEN it, and only on a fresh install typed at the
+  machine: `install.sh` when `config.toml` did not exist before `init`, on Darwin, with stdout
+  a terminal and no `SSH_CONNECTION`; `install.ps1` when `crucible.cmd` did not exist, the
+  session is interactive, not ssh, and not driven by an app (`$FromApp`). `install()` never
+  opens a window: an app driving the install is already the UI. `install.sh`'s last line stays
+  the pairing line.
+- `install.ps1 -PythonArchive <file> -WheelFile <file> -WheelSha <hex>` take already-downloaded
+  files instead of curl, for the Windows setup (`docs/internals/scripts.md`). Every check
+  still runs on them: the archive against the pinned `$PySha`, the wheel against `-WheelSha`.
+  Without the flags nothing changes.
 
 ## Generated outputs
 

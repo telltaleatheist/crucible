@@ -48,7 +48,8 @@ gh release create "$TAG" \\
 def uploaded(version: str) -> list[str]:
     return [f'crucible-{version}.tar.gz', f'crucible-{version}-py3-none-any.whl',
             f'crucible-{version}-py3-none-any.whl.sha256', f'crucible-client-{version}.tgz',
-            f'crucible-bootstrap-{version}.tgz', 'install.sh', 'install.ps1']
+            f'crucible-bootstrap-{version}.tgz', 'install.sh', 'install.ps1',
+            f'crucible-setup-{version}.exe']
 
 
 def complete_names(version: str) -> tuple[list[str], list[str]]:
@@ -71,6 +72,8 @@ def fetcher(overrides: dict[str, bytes] | None = None, version: str = '1.2.3'):
             return f'{WHEEL_DIGEST}  {name[:-len(".sha256")]}\n'.encode()
         if name == promote_release.ASSET_LIST:
             return json.dumps(uploaded(version)).encode()
+        if name.endswith('.exe'):
+            return b'MZ a windows setup'
         return b'some asset'
     return fetch
 
@@ -122,7 +125,7 @@ def test_an_older_release_falls_back_to_the_release_sh_that_cut_it(capsys):
 
     names = promote_release.expected_assets(assets, '1.2.3', fetch=fetcher(),
                                             release_sh_text=old)
-    assert names == uploaded('1.2.3')
+    assert names == [name for name in uploaded('1.2.3') if not name.endswith('.exe')]
     assert asked == ['v1.2.3']
     assert f'carries no {promote_release.ASSET_LIST}' in capsys.readouterr().out
 
@@ -214,6 +217,26 @@ def test_a_release_with_two_wheels_is_refused():
         promote_release.validate_assets(
             [], '1.2.3', fetch=fetcher(),
             uploaded=[*names, 'crucible-1.2.4-py3-none-any.whl'])
+
+
+def test_a_setup_that_is_not_a_windows_program_is_refused():
+    names, assets = published()
+    fetch = fetcher({'crucible-setup-1.2.3.exe': b'<html>not found</html>'})
+    with pytest.raises(ValueError, match='crucible-setup-1.2.3.exe is not a Windows program'):
+        promote_release.validate_assets(assets, '1.2.3', fetch=fetch, uploaded=names)
+
+
+def test_a_setup_of_another_version_is_refused():
+    names = [name for name in uploaded('1.2.3') if not name.endswith('.exe')] + ['crucible-setup-1.2.2.exe']
+    with pytest.raises(ValueError, match='expected the one Windows setup crucible-setup-1.2.3.exe'):
+        promote_release.check_setup(names, '1.2.3', fetcher())
+
+
+def test_a_release_cut_before_the_setup_existed_still_passes():
+    names, assets = published()
+    names = [name for name in names if not name.endswith('.exe')]
+    assets = [asset for asset in assets if not asset['name'].endswith('.exe')]
+    promote_release.validate_assets(assets, '1.2.3', fetch=fetcher(), uploaded=names)
 
 
 def test_the_fleet_is_the_one_deploy_sh_names():
@@ -324,6 +347,7 @@ def gh_shim(tmp_path: Path, *, assets: list[dict], prerelease: bool = True,
           '      *.whl) printf %s "$GH_TEST_WHEEL" ;;\n'
           '      *.whl.sha256) printf "%s  x\\n" "$GH_TEST_DIGEST" ;;\n'
           '      assets.json) cat "$GH_TEST_DIR/assets.json" ;;\n'
+          '      *.exe) printf "MZ a windows setup" ;;\n'
           '      *) printf "some asset" ;;\n'
           '    esac\n'
           '    ;;\n'

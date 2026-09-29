@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import plistlib
-import shlex
 import subprocess
 import sys
 import threading
@@ -21,6 +20,8 @@ LABEL = "com.crucible.tray"
 REFRESH_SECONDS = 5
 
 LAUNCHCTL_SECONDS = 15
+
+SHORTCUT_SECONDS = 60.0
 
 SHARING_UNOWNED = "sharing_unowned"
 
@@ -40,6 +41,8 @@ def _mac_agent() -> Path:
 
 
 def _refuse_a_foreign_bundle(bundle: Path) -> None:
+    from .desktop_app.launchers import OWNED_IDS
+
     info = bundle / "Contents" / "Info.plist"
     if not info.is_file():
         raise LocalError(
@@ -47,7 +50,7 @@ def _refuse_a_foreign_bundle(bundle: Path) -> None:
             f"left alone. Move it out of {bundle.parent}, then run `crucible local install-desktop` again"
         )
     with info.open("rb") as f:
-        if plistlib.load(f).get("CFBundleIdentifier") != LABEL:
+        if plistlib.load(f).get("CFBundleIdentifier") not in OWNED_IDS:
             raise LocalError(
                 f"desktop_not_owned: {bundle} belongs to another installation, so it was "
                 f"left alone. Move it out of {bundle.parent}, then run this again"
@@ -55,19 +58,9 @@ def _refuse_a_foreign_bundle(bundle: Path) -> None:
 
 
 def _write_mac_bundle(bundle: Path, home: Path) -> Path:
-    contents = bundle / "Contents"
-    binary = contents / "MacOS" / "Crucible"
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    command = [sys.executable, "-m", "crucible.cli", "local", "tray"]
-    binary.write_text("#!/bin/sh\nexport CRUCIBLE_HOME=" + shlex.quote(str(home)) +
-                      "\ncd " + shlex.quote(str(Path(__file__).resolve().parent.parent)) +
-                      " || exit 1\nexec " + shlex.join(command) + "\n", encoding="utf-8")
-    binary.chmod(0o755)
-    with (contents / "Info.plist").open("wb") as f:
-        plistlib.dump({"CFBundleIdentifier": LABEL, "CFBundleName": "Crucible",
-                       "CFBundleExecutable": "Crucible", "CFBundlePackageType": "APPL",
-                       "LSUIElement": True}, f)
-    return binary
+    from .desktop_app.launchers import write_mac_bundle
+
+    return write_mac_bundle(bundle, home, sys.executable, Path(__file__).resolve().parent.parent)
 
 
 def _launchctl(*words: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -87,10 +80,37 @@ def _load_mac_agent(binary: Path) -> Path:
     return agent
 
 
+def _install_start_menu(runner: ProcessRunner) -> str:
+    from .desktop_app.launchers import assets_dir, start_menu_install_argv, start_menu_path
+
+    lnk = start_menu_path(runner.env)
+    icon = str(assets_dir() / "crucible.ico")
+    result = runner.run(start_menu_install_argv(runner.env, icon), timeout_s=SHORTCUT_SECONDS)
+    if not result.ok:
+        raise LocalError(
+            f"start_menu_failed: the Start Menu item {lnk} could not be written: "
+            f"{result.output_tail()}. Run `crucible local install-desktop` again"
+        )
+    return str(lnk)
+
+
+def _remove_start_menu(runner: ProcessRunner) -> None:
+    from .desktop_app.launchers import start_menu_path, start_menu_remove_argv
+
+    result = runner.run(start_menu_remove_argv(runner.env), timeout_s=SHORTCUT_SECONDS)
+    if not result.ok:
+        raise LocalError(
+            f"start_menu_failed: the Start Menu item {start_menu_path(runner.env)} could not be "
+            f"removed: {result.output_tail()}. Run `crucible local remove-desktop` again"
+        )
+
+
 def install_desktop() -> None:
     if sys.platform == "win32":
         from .platform.startup import install
-        install(ProcessRunner(sys.platform, os.environ))
+        runner = ProcessRunner(sys.platform, os.environ)
+        login = install(runner)
+        print(json.dumps({"login_item": login.path, "app": _install_start_menu(runner)}))
         return
     if sys.platform != "darwin":
         print(json.dumps({"desktop": "skipped", "detail": "Linux uses its service manager; no desktop component installed"}))
@@ -98,9 +118,12 @@ def install_desktop() -> None:
     bundle = _mac_bundle()
     if bundle.exists():
         _refuse_a_foreign_bundle(bundle)
-    binary = _write_mac_bundle(bundle, crucible_home().resolve())
-    agent = _load_mac_agent(binary)
-    print(json.dumps({"app": str(bundle), "login_item": str(agent)}))
+    from .desktop_app.launchers import sign_mac_bundle
+
+    tray_script = _write_mac_bundle(bundle, crucible_home().resolve())
+    signed = sign_mac_bundle(bundle)
+    agent = _load_mac_agent(tray_script)
+    print(json.dumps({"app": str(bundle), "signature": signed, "login_item": str(agent)}))
 
 
 def _remove_mac_desktop() -> None:
@@ -117,10 +140,13 @@ def _remove_mac_desktop() -> None:
 
 
 def remove_desktop() -> None:
+    local.close_app(crucible_home())
     close_tray()
     if sys.platform == "win32":
         from .platform.startup import remove
-        remove(ProcessRunner(sys.platform, os.environ))
+        runner = ProcessRunner(sys.platform, os.environ)
+        remove(runner)
+        _remove_start_menu(runner)
     elif sys.platform == "darwin":
         _remove_mac_desktop()
 
@@ -192,7 +218,7 @@ class TrayIcon:
         self.icon.menu = self.pystray.Menu(
             item(self.notice["message"] or self.state["detail"], None, enabled=False),
             *_move_items(self.home, self.retrying.is_set(), self.try_again),
-            item("Open Crucible", lambda *_: self.action("open-console")),
+            item("Open Crucible", lambda *_: self.open_app()),
             item("Connect an app…", lambda *_: self.action("connect")),
             item("Start Crucible", lambda *_: self.action("start"), enabled=not running),
             item("Stop Crucible", lambda *_: self.action("stop"), enabled=running),
@@ -239,6 +265,15 @@ class TrayIcon:
         finally:
             self.busy.release()
             self.refresh()
+
+    def open_app(self) -> None:
+        from .desktop_app.launchers import spawn_app
+
+        try:
+            spawn_app()
+        except OSError as exc:
+            self._say(f"app_open_failed: the Crucible window would not open ({exc}). "
+                      "Run `crucible app` in a terminal to see why")
 
     def action(self, verb: str) -> None:
         threading.Thread(target=lambda: self._act(verb), daemon=True).start()

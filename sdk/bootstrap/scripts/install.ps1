@@ -6,7 +6,10 @@ param(
   [switch]$Uninstall,
   [switch]$PurgeWeights,
   [switch]$DryRun,
-  [switch]$WslToo
+  [switch]$WslToo,
+  [string]$PythonArchive = '',
+  [string]$WheelFile = '',
+  [string]$WheelSha = ''
 )
 
 $ErrorActionPreference = "Continue"
@@ -18,6 +21,7 @@ $Partial = "$HostDir.partial"
 $Stamp = Join-Path $HostDir '.crucible'
 $Cmd = Join-Path $HostDir "crucible.cmd"
 $Pythonw = Join-Path $HostDir "pythonw.exe"
+$Fresh = -not (Test-Path -LiteralPath $Cmd)
 
 function Say($m) { Write-Host "crucible: $m" }
 function Die($m) { Write-Host "crucible: $m" -ForegroundColor Red; if ($PSCommandPath) { exit 1 } else { throw "crucible: $m" } }
@@ -122,9 +126,14 @@ if ($have -eq $PySha -and (Test-Path $PythonExe)) {
   New-Item -ItemType Directory -Force -Path $DownloadDir | Out-Null
   $archive = Join-Path $DownloadDir $PyAsset
   if (Test-Path $archive) { Remove-Item $archive -Force }
-  Say "host: python $PyVersion from python-build-standalone"
-  Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $archive "$PyUrl" } | Show
-  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }
+  if ($PythonArchive) {
+    Say "host: python $PyVersion from $PythonArchive"
+    Copy-Item -LiteralPath $PythonArchive -Destination $archive -Force
+  } else {
+    Say "host: python $PyVersion from python-build-standalone"
+    Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $archive "$PyUrl" } | Show
+    if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: $PyUrl" }
+  }
   $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
   if ($got -ne $PySha) {
     Remove-Item $archive -Force
@@ -166,12 +175,21 @@ $Wheel = "crucible-$Release-py3-none-any.whl"
 $WheelPath = Join-Path $DownloadDir $Wheel
 if (Test-Path $WheelPath) { Remove-Item $WheelPath -Force }
 Say "host: $Wheel"
-Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $WheelPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" } | Show
-if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" }
-$wantRaw = & curl.exe -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256"
-if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256" }
-$want = ($wantRaw | Out-String).Trim().Split()[0].ToLower()
-if ($want -notmatch '^[0-9a-f]{64}$') { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256 is not a sha256" }
+if ($WheelFile) {
+  Copy-Item -LiteralPath $WheelFile -Destination $WheelPath -Force
+} else {
+  Native { & curl.exe -fL --retry 3 --retry-delay 2 --create-dirs -sS -o $WheelPath "https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" } | Show
+  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/$Wheel" }
+}
+if ($WheelSha) {
+  $want = $WheelSha.Trim().ToLower()
+  if ($want -notmatch '^[0-9a-f]{64}$') { Die "runtime_download_failed: -WheelSha $WheelSha is not a sha256" }
+} else {
+  $wantRaw = & curl.exe -fsSL --retry 3 "https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256"
+  if ($LASTEXITCODE -ne 0) { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256" }
+  $want = ($wantRaw | Out-String).Trim().Split()[0].ToLower()
+  if ($want -notmatch '^[0-9a-f]{64}$') { Die "runtime_download_failed: https://github.com/telltaleatheist/crucible/releases/download/v$Release/crucible-$Release-py3-none-any.whl.sha256 is not a sha256" }
+}
 $gotWheel = (Get-FileHash -Algorithm SHA256 -Path $WheelPath).Hash.ToLower()
 if ($gotWheel -ne $want) {
   Remove-Item $WheelPath -Force
@@ -228,4 +246,10 @@ if ($FromApp) { $Watch += '--brief' }
 Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) {
   Say "The Linux engine sets itself up in the background; the Crucible icon by the clock shows how it is going."
+}
+Say "Crucible is in your Start Menu: search for Crucible."
+$Interactive = [Environment]::UserInteractive -and -not $FromApp -and -not $env:SSH_CONNECTION
+if ($Fresh -and $Interactive) {
+  Say "opening Crucible"
+  Start-Process -FilePath $Pythonw -ArgumentList "-m","crucible.cli","app"
 }
