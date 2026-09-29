@@ -10,6 +10,7 @@ DOCS = ROOT / "docs"
 
 SCANNED = ("crucible", "scripts", "sdk", "docs/internals")
 BARE_NAMES_SCANNED = ("crucible", "scripts", "docs/internals")
+MANIFEST_SUFFIX = ".toml"
 SKIPPED_PARTS = {"__pycache__", "node_modules", "dist", "build", ".git"}
 TEXT_SUFFIXES = {
     ".py", ".sh", ".ps1", ".md", ".txt", ".toml", ".js", ".ts", ".html", ".css", ".json",
@@ -57,6 +58,8 @@ def _bare_citations() -> list[tuple[str, Path, str]]:
     cited = []
     for top in BARE_NAMES_SCANNED:
         for path in _files(top):
+            if path.suffix == MANIFEST_SUFFIX:
+                continue
             text = _read(path)
             for match in BARE_DOC.finditer(text):
                 cited.append((_where(path, text, match.start()), path, match.group(1)))
