@@ -95,7 +95,7 @@ def validate_pull(config: Config, backend: Backend, request: dict[str, Any]) -> 
             f"{kind!r} is not a subject kind; they are {list(catalog.KINDS)}",
             {"kind": kind, "id": subject_id},
         )
-    subject = catalog.find(config, backend, kind, subject_id)
+    subject = catalog.find_resolving(config, backend, kind, subject_id)
     if subject is None:
         raise ApiError(
             404,
@@ -104,13 +104,19 @@ def validate_pull(config: Config, backend: Backend, request: dict[str, Any]) -> 
             f"{backend.kind}. GET /v1/catalog lists every subject it can hold",
             {"kind": kind, "id": subject_id},
         )
-    if subject.installed() is not None:
+    if subject.installed() is not None and subject.would_move() is None:
         raise ApiError(
             409,
             "already_installed",
             f"{kind} {subject_id!r} is already installed on this server. A pull "
             f"of an installed subject is refused rather than skipped; to replace "
-            f"it deliberately, run `{subject.pull_command} --force` on the server",
+            f"it deliberately, run `{subject.pull_command} --force` on the server"
+            + (
+                ". To look for a newer published revision of a voice, POST "
+                "/v1/voices/updates (`crucible voices check-updates`) first"
+                if kind == "voice"
+                else ""
+            ),
             {"kind": kind, "id": subject_id},
         )
 
@@ -236,7 +242,7 @@ def subject_entry(config: Config, backend: Backend, where: str, raw: Any) -> Ent
         return f"{where}: `kind` and `id` must both be strings"
     if kind not in catalog.KINDS:
         return f"{where}: {kind!r} is not a subject kind; they are {list(catalog.KINDS)}"
-    if catalog.find(config, backend, kind, subject_id) is None:
+    if catalog.find_resolving(config, backend, kind, subject_id) is None:
         return f"{where}: this server has no {kind} called {subject_id!r} for {backend.kind}"
     return ModuleEntry(name=f"pull {kind} {subject_id}", kind=kind, subject_id=subject_id)
 

@@ -11,7 +11,16 @@ from ..client import transport
 from ..client.connection import Connection
 from ..config import config_path, crucible_home
 from ..errors import ConfigError
-from ..voicecatalog import load_all_voices, load_voice
+from ..voicecatalog import (
+    check_updates,
+    following_pin,
+    load_all_voices,
+    load_voice,
+    pull_target,
+    refresh_ref,
+)
+from ..tomltable import REVISION_PATTERN
+from ..voicerefs import VoiceRefError, resolve_ref
 from ..voices import VoiceError
 from . import common
 from .api_cmd import report_http_error
@@ -82,29 +91,130 @@ def cmd_voices_list(args: argparse.Namespace) -> int:
 
 def cmd_voices_pull(args: argparse.Namespace) -> int:
     config, backend = common.here()
+    if args.all == (args.voice is not None):
+        return _fail(
+            "name one voice (`crucible voices pull mistborn`) or pass --all to move "
+            "every voice installed here to the revision its tag names now"
+        )
     try:
-        manifest = load_voice(args.voice)
+        voice_ids = [args.voice] if args.voice is not None else _installed_following(
+            config, backend
+        )
     except VoiceError as exc:
         return _fail(str(exc))
-    if not manifest.supports(backend.kind):
+    if not voice_ids:
+        print("no installed voice here follows a tag; nothing to move")
+    for voice_id in voice_ids:
+        code = _pull_one(config, backend, voice_id, force=args.force)
+        if code != EXIT_OK:
+            return code
+    return EXIT_OK
+
+
+def _installed_following(config, backend) -> list[str]:
+    return [
+        voice.id
+        for voice in load_all_voices().values()
+        if voice.supports(backend.kind)
+        and voice.spec(backend.kind).source == weights.PINNED
+        and following_pin(voice.id) is not None
+        and weights.installed(config, voice, voice.spec(backend.kind)) is not None
+    ]
+
+
+def _pull_one(config, backend, voice_id: str, *, force: bool) -> int:
+    looked = refresh_ref(config.home, voice_id)
+    if looked is not None and looked.error is not None:
+        print(f"{voice_id}: {looked.error}")
+    try:
+        manifest = load_voice(voice_id)
+        target = pull_target(config.home, manifest)
+    except VoiceError as exc:
+        return _fail(str(exc))
+    if not target.supports(backend.kind):
         return _fail(
-            f"voice {args.voice!r} has no {backend.kind} block; "
-            f"{manifest.path.name} declares {sorted(manifest.backends)}"
+            f"voice {voice_id!r} has no {backend.kind} block; "
+            f"{target.path.name} declares {sorted(target.backends)}"
         )
-    spec = manifest.spec(backend.kind)
+    if target is not manifest:
+        refused = _refuse_if_loaded(config, backend, voice_id)
+        if refused is not None:
+            return refused
+    spec = target.spec(backend.kind)
     if spec.source == weights.LOCAL:
-        print(f"{manifest.id}: {spec.path} for {backend.kind}")
+        print(f"{target.id}: {spec.path} for {backend.kind}")
     else:
-        print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+        print(f"{target.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
     try:
         result = weights.pull(
-            config, manifest, spec, force=args.force,
+            config, target, spec, force=force,
             on_line=lambda line: print(f"  {line}"),
         )
     except weights.WeightsError as exc:
         return _fail(str(exc))
-    print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    print(f"{target.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
     return EXIT_OK
+
+
+def _refuse_if_loaded(config, backend, voice_id: str) -> int | None:
+    server = common.server_here(config, backend)
+    if server is None:
+        return None
+    try:
+        activity = transport.call(server, "GET", "/v1/activity")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return _fail(
+            f"the server at {server.url} did not say what it has loaded ({exc}), so "
+            f"voice {voice_id!r} is not moved underneath it. Run `crucible voices "
+            f"pull {voice_id}` again"
+        )
+    resident = activity.get("resident") if isinstance(activity, dict) else None
+    if isinstance(resident, dict) and resident.get("id") == voice_id:
+        return _fail(
+            f"voice {voice_id!r} is loaded on the server at {server.url}, and its "
+            "weights are not swapped underneath it; this machine stays on the "
+            "revision it has. Unload it (`crucible api job submit --type "
+            f"unload-voice --follow`), then run `crucible voices pull {voice_id}`"
+        )
+    return None
+
+
+def cmd_voices_check_updates(args: argparse.Namespace) -> int:
+    config, backend = common.here()
+    server = common.server_here(config, backend)
+    try:
+        rows = (
+            check_updates(config.home)
+            if server is None
+            else transport.call(server, "POST", "/v1/voices/updates")["voices"]
+        )
+    except urllib.error.HTTPError as exc:
+        return report_http_error(exc, server)
+    except (urllib.error.URLError, OSError) as exc:
+        return _fail(
+            f"server_unreachable: the server here stopped answering ({exc}). Run "
+            "`crucible voices check-updates` again"
+        )
+    except VoiceError as exc:
+        return _fail(str(exc))
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+    for row in rows:
+        print(_update_line(row))
+    return EXIT_OK
+
+
+def _update_line(row: dict) -> str:
+    here = (row.get("revision") or "nothing")[:12]
+    latest = (row.get("latest_revision") or "unknown")[:12]
+    if row.get("update_error"):
+        state = f"hub did not answer; staying on {here}: {row['update_error']}"
+    elif row.get("update_available"):
+        state = f"{here} -> {latest}: run `crucible voices pull {row['id']}`"
+    else:
+        state = f"current at {here}"
+    return f"{row['id']:<22} {row['hf_repo']}@{row['ref']}  {state}"
 
 
 def _repo_at(reference: str) -> tuple[str, str] | None:
@@ -127,6 +237,11 @@ def _repo_manifest_for(reference: str):
             )
         return parse_repo_manifest(path.read_text(encoding="utf-8"), path), None
     repo, revision = named
+    if not REVISION_PATTERN.match(revision):
+        try:
+            revision = resolve_ref(crucible_home(), repo, revision)
+        except VoiceRefError as exc:
+            raise VoiceError(str(exc)) from None
     pin = Pin(id="probe", hf_repo=repo, revision=revision, path=Path(reference))
     text, path = fetch_repo_manifest(crucible_home(), pin)
     return parse_repo_manifest(text, path), pin
@@ -385,13 +500,28 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     voices_list.set_defaults(func=cmd_voices_list)
 
     voices_pull = voice_commands.add_parser(
-        "pull", help="fetch a voice's weights at the manifest's pinned revision"
+        "pull",
+        help="fetch a voice's weights at its pin: the tag's current commit, or the exact sha",
     )
-    voices_pull.add_argument("voice", help="the Crucible voice id, e.g. deathstalker")
+    voices_pull.add_argument(
+        "voice", nargs="?", default=None, help="the Crucible voice id, e.g. deathstalker"
+    )
+    voices_pull.add_argument(
+        "--all",
+        action="store_true",
+        help="move every voice installed here to the revision its tag names now",
+    )
     voices_pull.add_argument(
         "--force", action="store_true", help="re-pull even if it is already installed"
     )
     voices_pull.set_defaults(func=cmd_voices_pull)
+
+    voices_updates = voice_commands.add_parser(
+        "check-updates",
+        help="look up each voice's tag on the Hub and say which a pull would move",
+    )
+    voices_updates.add_argument("--json", action="store_true", help="machine-readable")
+    voices_updates.set_defaults(func=cmd_voices_check_updates)
 
     voices_pin = voice_commands.add_parser(
         "pin", help="point a voice id at a repo and commit (docs/internals/voices.md, \"Pins\")"

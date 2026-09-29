@@ -23,6 +23,15 @@ from .tomltable import (
     VOICE_ID_PATTERN,
     check_table,
 )
+from .voicefacts import (
+    ARM_FACT_KEYS,
+    CHUNK_GAP,
+    ArmFacts,
+    ChunkGap,
+    VoiceFactError,
+    check_arm_facts,
+    check_chunk_gap,
+)
 from .weights import LOCAL, PINNED
 
 VOICES_DIR_ENV = "CRUCIBLE_VOICES_DIR"
@@ -99,6 +108,7 @@ _BACKEND_OPTIONAL: dict[str, type] = {
     "sampling_reason": str,
     "max_chars": int,
     "clips": object,
+    **ARM_FACT_KEYS,
 }
 
 _CLIP_REQUIRED: dict[str, type] = {
@@ -163,6 +173,7 @@ class VoiceBackendSpec:
     sampling_reason: str | None
     clips: tuple[ReferenceClip, ...] | str | None
     max_chars_basis: str | None = None
+    facts: ArmFacts = field(default_factory=ArmFacts)
 
     @property
     def clips_from_request(self) -> bool:
@@ -210,6 +221,13 @@ class VoiceBackendSpec:
             "sampling_reason": self.sampling_reason,
             "clips": clips,
             "max_chars_basis": self.max_chars_basis,
+            "edge_fade_ms": self.facts.edge_fade_ms,
+            "reference_seconds_cap": self.facts.reference_seconds_cap,
+            "allowed_controls": (
+                None
+                if self.facts.allowed_controls is None
+                else list(self.facts.allowed_controls)
+            ),
         }
 
 
@@ -265,6 +283,7 @@ class VoiceManifest:
     measured_from: str | None = None
     inherited_from: str | None = None
     weights_of: str | None = None
+    chunk_gap: ChunkGap | None = None
     weights_base: "VoiceManifest | None" = field(default=None, compare=False, repr=False)
     weights_aliases: "tuple[VoiceManifest, ...]" = field(
         default=(), compare=False, repr=False
@@ -326,6 +345,7 @@ class VoiceManifest:
             "pace_basis": self.pace_basis,
             "measured_from": self.measured_from,
             "inherited_from": self.inherited_from,
+            "chunk_gap": None if self.chunk_gap is None else self.chunk_gap.to_dict(),
         }
 
 
@@ -859,6 +879,7 @@ def parse_document(
     serving = _check_serving(path, voice, narrator_engine)
     backends = _check_backends(path, voice, pace)
     takes = _check_takes(path, voice, narrator_engine)
+    chunk_gap = _check_chunk_gap(path, voice)
     return VoiceManifest(
         id=voice["id"],
         display=voice["display"],
@@ -872,7 +893,17 @@ def parse_document(
         takes=takes,
         path=path,
         weights_of=weights_of,
+        chunk_gap=chunk_gap,
     )
+
+
+def _check_chunk_gap(path: Path, voice: dict[str, Any]) -> ChunkGap | None:
+    if CHUNK_GAP not in voice:
+        return None
+    try:
+        return check_chunk_gap(f"{path.name} [voice.{CHUNK_GAP}]", voice[CHUNK_GAP])
+    except VoiceFactError as exc:
+        raise VoiceError(str(exc)) from None
 
 
 
@@ -904,7 +935,7 @@ def _check_weights_of(path: Path, voice: dict[str, Any]) -> str | None:
 def _check_scalars(path: Path, voice: dict[str, Any], expected_id: str) -> None:
     scalars = {
         key: value for key, value in voice.items()
-        if key not in ("pace", "serving", "backends", "takes", "weights_of")
+        if key not in ("pace", "serving", "backends", "takes", "weights_of", CHUNK_GAP)
     }
     check_table(f"{path.name} [voice]", scalars, _VOICE_REQUIRED, {}, error=VoiceError)
     _check_voice_id(path, voice["id"], expected_id)
@@ -983,6 +1014,10 @@ def _check_backend(
     if not isinstance(block["sampling"], dict):
         raise VoiceError(f"{where}: sampling must be a table")
     sampling, reason = _check_sampling(where, block, voice["narrator_engine"])
+    try:
+        facts = check_arm_facts(where, block)
+    except VoiceFactError as exc:
+        raise VoiceError(str(exc)) from None
     return VoiceBackendSpec(
         backend=kind,
         hf_repo=source.hf_repo,
@@ -996,6 +1031,7 @@ def _check_backend(
         sampling=sampling,
         sampling_reason=reason,
         clips=_check_clips(where, block, voice["kind"]),
+        facts=facts,
     )
 
 
@@ -1082,6 +1118,8 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
     }
     if manifest.takes != (Take(index=0, overrides={}, reason=None),):
         voice["takes"] = [_take_document(take) for take in manifest.takes]
+    if manifest.chunk_gap is not None:
+        voice[CHUNK_GAP] = manifest.chunk_gap.to_document()
     return {"voice": voice}, _not_carried(manifest)
 
 
@@ -1108,6 +1146,7 @@ def _backend_document(spec: VoiceBackendSpec) -> dict[str, Any]:
             if isinstance(spec.clips, str)
             else [clip.to_dict() for clip in spec.clips]
         )
+    block.update(spec.facts.to_document())
     return block
 
 

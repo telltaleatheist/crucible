@@ -743,6 +743,7 @@ COVERED: dict[str, str] = {
 }
 
 EXCLUDED: dict[str, str] = {
+    "POST /v1/voices/updates": "`crucible voices check-updates` posts it",
     "POST /v1/pairing/start": "the requesting app's half; this CLI already has a token",
     "POST /v1/pairing/poll": "the requesting app's half; this CLI already has a token",
     "GET /v1/peer": "PHASE17: the orchestrator's relation, not a client's",

@@ -40,9 +40,11 @@ import {
   nullableStrArray,
   objectField,
   oneOf,
+  optBool,
   optNum,
   optObject,
   optStr,
+  optStrArray,
   str,
   strArray,
   type Json,
@@ -140,8 +142,11 @@ import {
   type UpstreamName,
   type UpstreamSetting,
   type UpstreamTestResult,
+  type VoiceChunkGap,
+  type VoiceEdgeFade,
   type VoiceInfo,
   type VoicePace,
+  type VoiceSampling,
   type VoiceServing,
   type WrittenArtifact,
 } from './types.js';
@@ -2206,6 +2211,51 @@ function readVoiceInfo(entry: Json, where: string): VoiceInfo {
     serving: readVoiceServing(entry, where),
     needsReference,
     pace: readNullableVoicePace(entry, where),
+    ref: optStr(entry, 'ref', where),
+    latestRevision: optStr(entry, 'latest_revision', where),
+    updateAvailable: optBool(entry, 'update_available', where) ?? false,
+    updateCheckedAt: optStr(entry, 'update_checked_at', where),
+    updateError: optStr(entry, 'update_error', where),
+    sampling: readVoiceSampling(entry, where),
+    edgeFadeMs: readVoiceEdgeFade(entry, where),
+    chunkGap: readVoiceChunkGap(entry, where),
+    referenceSecondsCap: optNum(entry, 'reference_seconds_cap', where),
+    allowedControls: optStrArray(entry, 'allowed_controls', where),
+  };
+}
+
+function readVoiceSampling(entry: Json, where: string): VoiceSampling | null {
+  const block = optObject(entry, 'sampling', where);
+  if (block === null) return null;
+  const at = `${where}.sampling`;
+  return {
+    temperature: num(block, 'temperature', at),
+    topP: num(block, 'top_p', at),
+    topK: num(block, 'top_k', at),
+  };
+}
+
+function readVoiceEdgeFade(entry: Json, where: string): VoiceEdgeFade | null {
+  const block = optObject(entry, 'edge_fade_ms', where);
+  if (block === null) return null;
+  const at = `${where}.edge_fade_ms`;
+  return { in: num(block, 'in', at), out: num(block, 'out', at) };
+}
+
+function readVoiceChunkGap(entry: Json, where: string): VoiceChunkGap | null {
+  const block = optObject(entry, 'chunk_gap', where);
+  if (block === null) return null;
+  const at = `${where}.chunk_gap`;
+  return {
+    injectS: num(block, 'inject_s', at),
+    targetJoinS: num(block, 'target_join_s', at),
+    modelSelfTailS: num(block, 'model_self_tail_s', at),
+    readerSentenceGapS: nullableNum(block, 'reader_sentence_gap_s', at),
+    modelInternalGapS: nullableNum(block, 'model_internal_gap_s', at),
+    rule: str(block, 'rule', at),
+    method: str(block, 'method', at),
+    source: str(block, 'source', at),
+    measuredOn: str(block, 'measured_on', at),
   };
 }
 

@@ -5,7 +5,7 @@ import sys
 import uuid
 from typing import Any, Awaitable, Callable
 
-from .. import catalog, tasks
+from .. import catalog, tasks, voicecatalog
 from ..backend import Backend
 from ..clock import utcnow
 from ..config import Config
@@ -48,12 +48,14 @@ class TaskStore:
         reload: Callable[[], list[str]],
         holder: Callable[[], Held | None],
         take_up: Callable[[], list[str]] | None = None,
+        in_use: Callable[[catalog.Subject], dict[str, Any] | None] | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._reload = reload
         self._holder = holder
         self._take_up = take_up
+        self._in_use = in_use
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
         self._running_id: str | None = None
@@ -278,13 +280,33 @@ class TaskStore:
     async def _run_pull(self, task: Task) -> None:
         task.raise_if_cancelled()
         kind, subject_id = task.request["kind"], task.request["id"]
+        if kind == "voice":
+            await asyncio.to_thread(voicecatalog.refresh_ref, self._config.home, subject_id)
         subject = catalog.find(self._config, self._backend, kind, subject_id)
         if subject is None:
             raise ApiError(
                 404, "unknown_subject", f"no {kind} called {subject_id!r}"
             )
+        self._refuse_moving_in_use(subject)
         self._step(task, f"pull {kind} {subject_id}", 1, 1)
         await self._pull(task, subject)
+
+    def _refuse_moving_in_use(self, subject: catalog.Subject) -> None:
+        revision = subject.would_move()
+        if revision is None or subject.installed() is None or self._in_use is None:
+            return
+        held = self._in_use(subject)
+        if held is None:
+            return
+        raise ApiError(
+            409,
+            "subject_in_use",
+            f"{subject.kind} {subject.id!r} would move to {revision[:12]}, and "
+            f"{held['who']}. Its weights are not swapped underneath it: this "
+            "machine stays on the revision it has. Once it is free, submit the "
+            f"pull again (or run `{subject.pull_command}`)",
+            {**held, "revision": revision},
+        )
 
     async def _pull(self, task: Task, subject: catalog.Subject) -> None:
         try:

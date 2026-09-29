@@ -460,11 +460,56 @@ def _pinned_manifest_or_offline(
     return str(target)
 
 
+PINNED_VOICE_TAG = "crucible"
+
+
+def _fixture_voice_refs() -> dict[tuple[str, str], str]:
+    refs: dict[tuple[str, str], str] = {}
+    for repo_dir in sorted(PINNED_VOICE_MANIFESTS.iterdir()):
+        shas = sorted(p.name for p in repo_dir.iterdir() if p.is_dir())
+        if len(shas) == 1:
+            refs[(repo_dir.name.replace("--", "/", 1), PINNED_VOICE_TAG)] = shas[0]
+    return refs
+
+
+FIXTURE_VOICE_REFS = _fixture_voice_refs()
+
+HUB_REFS: dict[tuple[str, str], str] = {}
+
+
+def _ref_or_offline(self: Any, repo_id: str, *args: Any, revision: str | None = None, **kwargs: Any) -> Any:
+    from types import SimpleNamespace
+
+    sha = HUB_REFS.get((repo_id, str(revision)))
+    if sha is None:
+        return _hub_is_offline()
+    return SimpleNamespace(id=repo_id, sha=sha)
+
+
+def cached_as_of_the_fixtures(home: Path, hf_repo: str, ref: str) -> Any:
+    from crucible import voicerefs
+
+    found = voicerefs.read_checks(home).get(f"{hf_repo}@{ref}")
+    if found is not None:
+        return found
+    sha = FIXTURE_VOICE_REFS.get((hf_repo, ref))
+    if sha is None:
+        return None
+    return voicerefs.RefCheck(
+        hf_repo=hf_repo, ref=ref, revision=sha, checked_at="fixture", error=None
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_test_reaches_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
     import huggingface_hub
 
+    from crucible import voicerefs
+
+    HUB_REFS.clear()
+    HUB_REFS.update(FIXTURE_VOICE_REFS)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", _pinned_manifest_or_offline)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", _hub_is_offline)
-    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", _hub_is_offline)
+    monkeypatch.setattr(huggingface_hub.HfApi, "model_info", _ref_or_offline)
     monkeypatch.setattr(huggingface_hub.HfApi, "list_repo_files", _hub_is_offline)
+    monkeypatch.setattr(voicerefs, "cached", cached_as_of_the_fixtures)

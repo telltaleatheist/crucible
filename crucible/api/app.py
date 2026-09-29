@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,6 +33,7 @@ from ..settle import Settlement
 from ..tasks import TaskStore
 from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
+from ..voicecatalog import seed_unresolved
 from .context import AppContext, Routers, Services
 from .deps import (
     BeforeEveryRequest,
@@ -220,6 +222,7 @@ def _services(
         reload=lambda: keeper.reload(settlement.holder),
         holder=settlement.holder,
         take_up=keeper.take_up_installed,
+        in_use=lambda subject: catalog_routes.held_on_card(residency, leases, subject),
     )
     return Services(
         leases=leases,
@@ -249,6 +252,23 @@ def _proxy_client() -> httpx.AsyncClient:
     )
 
 
+def _look_up_unresolved_voice_tags(home: Path) -> None:
+    def look_up() -> None:
+        try:
+            for found in seed_unresolved(home):
+                _say(
+                    f"voice tag {found.hf_repo}@{found.ref}: "
+                    + (found.revision or f"not resolved ({found.error})")
+                )
+        except Exception as exc:
+            _say(
+                f"could not look up the voices' tags ({type(exc).__name__}: {exc}); "
+                "run `crucible voices check-updates`"
+            )
+
+    threading.Thread(target=look_up, name="crucible-voice-tags", daemon=True).start()
+
+
 def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -257,6 +277,8 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         store.restore()
         residency.start_reclaiming()
         store.start()
+        if app.state.config.enable_tts:
+            _look_up_unresolved_voice_tags(app.state.config.home)
         app.state.http = _proxy_client()
         try:
             yield

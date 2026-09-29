@@ -1,19 +1,19 @@
 [deathstalker]
 hf_repo = "owenmorgan/deathstalker-higgs-v3"
-revision = "28f6c4d3733be9746bb26ddd7b09c9d2a4950198"
+ref = "crucible"
 
 [mistborn]
 hf_repo = "owenmorgan/mistborn-higgs-v3"
-revision = "8a8d1bf375c7c4aa097a481d332b94e835a8c6f4"
+ref = "crucible"
 
 [owen]
 hf_repo = "owenmorgan/owen-morgan-higgs-v3"
-revision = "5885e74691be8c39d137dd8dd5b03813f822d1c4"
+ref = "crucible"
 
 [sigma]
 hf_repo = "owenmorgan/sigma-higgs-v3"
-revision = "8f6b3ca274cbc7b83a537ce25e05d223eb35c987"
+ref = "crucible"
 
 [thirdreich]
 hf_repo = "owenmorgan/thirdreich-higgs-v3"
-revision = "f83ce206e82ca639fa8a16cddd7ace713f9027c6"
+ref = "crucible"

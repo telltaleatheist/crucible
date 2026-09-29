@@ -1,9 +1,9 @@
 # Voices
 
 How a voice is described, where its description comes from, and how narrator is
-configured to serve it. Modules: `voices`, `voicerepo`, `voicecatalog`,
-`voicecard`, `voicereference`, `narratorvoices`, `engines/narrator`, `engines/higgs-v3/base.toml`,
-`voices/pins.toml`.
+configured to serve it. Modules: `voices`, `voicefacts`, `voicerefs`, `voicerepo`,
+`voicecatalog`, `voicecard`, `voicereference`, `narratorvoices`, `engines/narrator`,
+`engines/higgs-v3/base.toml`, `voices/pins.toml`, `scripts/publish-voice.py`.
 
 Crucible ships no voices. It downloads them, and a voice's facts come down with
 its weights.
@@ -69,15 +69,63 @@ its weights.
   `bosonai/higgs-tts-3-4b`, which cannot carry a manifest, and they are the
   engine's own base behaviour rather than trained voices.
 
+## One source of truth: the repo, and its `crucible` tag
+
+Owen, 2026-09-28: *"single source of truth. that source should be where the
+models are served."* A voice IS its repo's `crucible-voice.toml` at the commit a
+machine pulled: pace, safe band, caps, sampling, takes, chunk gap, edge fades,
+reference cap, allowed controls. No client keeps a copy, and nothing in Crucible
+has to change to deploy a voice.
+
+**Deploying a voice is three steps:**
+
+1. Push the weights and their `crucible-voice.toml` to the voice's HF repo, in one
+   commit. Check it first: `crucible voices check <owner>/<name>@<sha>`.
+2. Move the tag: `python scripts/publish-voice.py <voice-id> <sha>`. It reads the
+   HF token from `$HF_TOKEN` or `huggingface-cli login` (never printed), refuses a
+   sha the repo does not have and a manifest Crucible's own parser refuses, and
+   only then moves `crucible`. `--create` makes the tag on a repo that has none, at
+   the revision this build shipped before tags (`SEED_REVISIONS`).
+3. Each machine runs `crucible voices pull <voice-id>` (or `--all`, or a pull task).
+   `crucible voices check-updates` (`POST /v1/voices/updates`) says first which
+   voices would move.
+
+No BookForge JSON, no `pins.toml` edit and no Crucible release.
+
 ## Pins
 
-A pins file maps each id to `hf_repo` plus a 40-character `revision`:
+A pins file maps each id to `hf_repo` plus exactly one of `ref` (a tag the
+machine follows) or `revision` (a 40-character sha it serves and nothing else):
 
 ```toml
 [mistborn]
-hf_repo  = "owenmorgan/mistborn-higgs-v3"
-revision = "<40-hex sha>"
+hf_repo = "owenmorgan/mistborn-higgs-v3"
+ref     = "crucible"
 ```
+
+- The packaged rows all say `ref = "crucible"`.
+- A pin with an exact `revision` (the home file, which the ladder's `PUT` writes)
+  wins over the packaged ref and means exactly that sha.
+- **Which commit a ref pin serves** (`voicerepo.settled`): the sha recorded in
+  `<home>/voices/<id>/<arm>/crucible-pull.json`, else the last looked-up sha in
+  `<home>/voice-refs.json`, else the voice is unserved with
+  `voice_ref_unresolved` and the command that fixes it. The row's `revision` is
+  that sha.
+- **Reads never touch the network.** `GET /v1/voices` reads the pull record and
+  `voice-refs.json`. A tag is looked up (`voicerefs.check`, `HfApi.model_info` at
+  the ref) only by `crucible voices check-updates` / `POST /v1/voices/updates`,
+  by a pull (`crucible voices pull`, a pull task, and a pull submitted for a voice
+  never looked up), and once at server start for ref pins with no sha at all.
+- **A pull moves the box** to the tag's current sha (`voicecatalog.pull_target`),
+  fetches that commit's manifest and weights, and records the sha. A pull task
+  for an installed voice is admitted only when the cached look-up says it would
+  move. A voice that is resident or leased is not swapped: the task refuses with
+  `subject_in_use` (the same `held_on_card` guard `DELETE /v1/catalog` uses), and
+  the CLI refuses while the server here has it loaded.
+- **An unreachable Hub** leaves the box on what it has. `voice-refs.json` keeps
+  the last sha it knew and records the error, and the row's `update_error` says so.
+- A corrupt `voice-refs.json` is moved aside as `voice-refs.json.bad-<timestamp>`
+  and read as empty.
 
 - `PUT /v1/voices/{id}` with `{"pin": {"hf_repo", "revision"}}` (or `crucible
   voices pin <id> <repo>@<sha>`) writes the **home** pins file only. The
@@ -128,6 +176,37 @@ parsed.
   `(repo, sha)`, then the Hub (`hf_hub_download` fetches that one file, so
   uninstalled voices still list real facts). "This revision has no manifest"
   and "the Hub did not answer" are different refusals.
+
+## Facts clients read off the row (`voicefacts`)
+
+Every per-voice fact a client used to keep a copy of is on the `/v1/voices` row,
+so BookForge can delete its copies. All are optional in the manifest. Absent
+means `null` on the row, and Crucible never invents one. Wire names are
+snake_case.
+
+| row field | manifest | meaning |
+|---|---|---|
+| `sampling` | `[voice.arms.<arm>] sampling` | `{temperature, top_p, top_k}` the row's arm renders take 0 with. This is exactly what Crucible writes into narrator's voice document (`narratorvoices`), which is what the engine applies. Crucible never reads `generation_config.json`; a repo whose `generation_config.json` disagrees with its manifest renders at the manifest's numbers. |
+| `edge_fade_ms` | `[voice.arms.<arm>] edge_fade_ms = { in, out }` | raised-cosine fades at each chunk edge, in milliseconds (BookForge `edgeFadeMs`). Higgs is `pads=false`, so a chunk ends on a hard sample and an unfaded join clicks. |
+| `reference_seconds_cap` | `[voice.arms.<arm>] reference_seconds_cap` | the most reference-clip audio the arm takes, in seconds, above 0 and at most `voicereference.MAX_REFERENCE_SECONDS` (BookForge `referenceSecondsCap`). |
+| `allowed_controls` | `[voice.arms.<arm>] allowed_controls = [...]` | inline control tokens shaped `<\|group:name\|>` the arm allows; `[]` allows none on purpose (BookForge `allowedControls`). |
+| `chunk_gap` | `[voice.chunk_gap]` | the silence a client adds after each chunk (BookForge `chunkGap`, which it passes to narrator as `NARRATOR_SENTENCE_GAP`). |
+
+`[voice.chunk_gap]` keys, all seconds >= 0 unless prose:
+
+- `inject_s` (required): the silence added after each chunk, **net of the tail
+  the model already emits**.
+- `target_join_s` (required): the join it should come to. It must equal
+  `inject_s + model_self_tail_s` within 0.011 s, or the manifest is refused.
+- `model_self_tail_s` (required): the trailing silence the model emits itself.
+- `reader_sentence_gap_s`, `model_internal_gap_s` (optional): the reader's pause
+  in the training clips, and the model's own sentence gap inside one render.
+- `rule`, `method`, `source`, `measured_on` (required prose): which target was
+  chosen, how it was counted, from which run, and when.
+
+Each table has one validator in `voicefacts`, built on `tomltable.check_table`,
+and the repo schema and the internal schema call the same one. `voice_document`
+and `crucible voices export` write them back when present.
 
 ## The voice schema (`voices`)
 
@@ -348,6 +427,8 @@ narrator's camelCase:
 - `## Measured limits` is rendered only from manifest fields, with
   `measured_from` reproduced verbatim. It is inserted before the first other
   section when it is missing.
+- `export` writes `[voice.chunk_gap]` and each arm's `edge_fade_ms`,
+  `reference_seconds_cap` and `allowed_controls` when the voice states them.
 - `export` converts a packaged manifest to `crucible-voice.toml` and returns
   the machine rows it drops. It **asks** for `pace` and `max_chars` bases and
   never guesses them. A voice with `edges = "percentile"` cannot be exported,

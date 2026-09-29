@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import re
 
+from .voicefacts import (
+    ALLOWED_CONTROLS,
+    CHUNK_GAP,
+    EDGE_FADE_MS,
+    REFERENCE_SECONDS_CAP,
+    ChunkGap,
+)
 from .voicerepo import REPO_MANIFEST_NAME, REPO_SCHEMA, RepoManifest
 from .voices import (
     MAX_CHARS_BASES,
@@ -229,6 +236,7 @@ def export_manifest(
         )
     elif uncertified:
         lines += _UNCERTIFIED_LINES
+    lines += _chunk_gap_lines(manifest.chunk_gap)
     for arm in sorted(manifest.backends):
         lines += _arm_lines(arm, manifest.backends[arm], max_chars_basis)
     lines += _take_lines(manifest.takes)
@@ -372,6 +380,34 @@ def _exported_pace_lines(
     return lines
 
 
+def _chunk_gap_lines(chunk_gap: ChunkGap | None) -> list[str]:
+    if chunk_gap is None:
+        return []
+    lines = ["", f"[voice.{CHUNK_GAP}]"]
+    for key, value in chunk_gap.to_document().items():
+        rendered = _toml_string(value) if isinstance(value, str) else _toml_number(value)
+        lines.append(f"{key:<21} = {rendered}")
+    return lines
+
+
+def _arm_fact_lines(spec: VoiceBackendSpec) -> list[str]:
+    facts = spec.facts
+    lines: list[str] = []
+    if facts.edge_fade_ms is not None:
+        fade = ", ".join(
+            f"{key} = {_toml_number(value)}" for key, value in facts.edge_fade_ms.items()
+        )
+        lines.append(f"{EDGE_FADE_MS:<21} = {{ {fade} }}")
+    if facts.reference_seconds_cap is not None:
+        lines.append(
+            f"{REFERENCE_SECONDS_CAP:<21} = {_toml_number(facts.reference_seconds_cap)}"
+        )
+    if facts.allowed_controls is not None:
+        tokens = ", ".join(_toml_string(token) for token in facts.allowed_controls)
+        lines.append(f"{ALLOWED_CONTROLS:<21} = [{tokens}]")
+    return lines
+
+
 def _arm_lines(
     arm: str, spec: VoiceBackendSpec, max_chars_basis: str | None
 ) -> list[str]:
@@ -385,6 +421,7 @@ def _arm_lines(
     lines.append(f"sampling        = {{ {sampling} }}")
     if spec.sampling_reason is not None:
         lines.append(f"sampling_reason = {_toml_string(spec.sampling_reason)}")
+    lines += _arm_fact_lines(spec)
     if isinstance(spec.clips, str):
         lines.append(f"clips           = {_toml_string(spec.clips)}")
     elif spec.clips:

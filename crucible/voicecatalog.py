@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
-from . import voicerepo
+from . import voicerefs, voicerepo
 from .config import crucible_home
 from .narratorengines import NARRATOR_ENGINE_SAMPLING
 from .voices import (
     MANIFEST_OVERRIDE,
+    MANIFEST_REPO,
     PINS_FILE,
     VoiceError,
     VoiceManifest,
@@ -175,15 +177,137 @@ def _check_shared_base(voice: VoiceManifest, base: VoiceManifest | None) -> None
             )
 
 
+def following_pin(voice_id: str) -> voicerepo.Pin | None:
+    pin = voicerepo.load_pins().get(voice_id)
+    return pin if pin is not None and pin.follows_ref else None
+
+
+def served_revision_of(voice: VoiceManifest) -> str | None:
+    revisions = {spec.revision for spec in voice.backends.values()}
+    return next(iter(revisions)) if len(revisions) == 1 else None
+
+
+def refresh_ref(home: Path, voice_id: str) -> voicerefs.RefCheck | None:
+    pin = following_pin(voice_id)
+    if pin is None:
+        return None
+    assert pin.ref is not None
+    return voicerefs.check(home, pin.hf_repo, pin.ref)
+
+
+def refresh_unresolved(home: Path, voice_id: str) -> voicerefs.RefCheck | None:
+    pin = following_pin(voice_id)
+    if pin is None:
+        return None
+    assert pin.ref is not None
+    if voicerefs.served_revision(home, pin.id, pin.hf_repo, pin.ref) is not None:
+        return None
+    return voicerefs.check(home, pin.hf_repo, pin.ref)
+
+
+def seed_unresolved(home: Path) -> list[voicerefs.RefCheck]:
+    return [
+        found
+        for found in (refresh_unresolved(home, voice_id) for voice_id in sorted(voicerepo.load_pins()))
+        if found is not None
+    ]
+
+
+def _follows(voice: VoiceManifest) -> voicerepo.Pin | None:
+    if voice.manifest_source != MANIFEST_REPO:
+        return None
+    return following_pin(voice.id)
+
+
+def moves_to(home: Path, voice: VoiceManifest) -> str | None:
+    pin = _follows(voice)
+    if pin is None:
+        return None
+    assert pin.ref is not None
+    latest = voicerefs.cached(home, pin.hf_repo, pin.ref)
+    if latest is None or latest.revision is None:
+        return None
+    return None if latest.revision == served_revision_of(voice) else latest.revision
+
+
+def pull_target(home: Path, voice: VoiceManifest) -> VoiceManifest:
+    revision = moves_to(home, voice)
+    if revision is None:
+        return voice
+    pin = _follows(voice)
+    assert pin is not None
+    return voicerepo.voice_for_pin(pin.at(revision))
+
+
+def ref_state(home: Path, voice: VoiceManifest) -> dict[str, Any]:
+    pin = _follows(voice)
+    if pin is None:
+        return {}
+    return _ref_fields(home, pin, served_revision_of(voice))
+
+
+def unserved_ref_state(home: Path, voice_id: str) -> dict[str, Any]:
+    pin = following_pin(voice_id)
+    return {} if pin is None else _ref_fields(home, pin, None)
+
+
+def _ref_fields(home: Path, pin: voicerepo.Pin, current: str | None) -> dict[str, Any]:
+    assert pin.ref is not None
+    latest = voicerefs.cached(home, pin.hf_repo, pin.ref)
+    latest_revision = None if latest is None else latest.revision
+    return {
+        "ref": pin.ref,
+        "latest_revision": latest_revision,
+        "update_available": latest_revision is not None and latest_revision != current,
+        "update_checked_at": None if latest is None else latest.checked_at,
+        "update_error": None if latest is None else latest.error,
+    }
+
+
+def check_updates(home: Path) -> list[dict[str, Any]]:
+    following = {
+        voice_id: pin
+        for voice_id, pin in sorted(voicerepo.load_pins().items())
+        if pin.follows_ref
+    }
+    for pin in following.values():
+        assert pin.ref is not None
+        voicerefs.check(home, pin.hf_repo, pin.ref)
+    served = load_all_voices()
+    rows: list[dict[str, Any]] = []
+    for voice_id, pin in following.items():
+        voice = served.get(voice_id)
+        current = None if voice is None else served_revision_of(voice)
+        rows.append(
+            {
+                "id": voice_id,
+                "hf_repo": pin.hf_repo,
+                "revision": current,
+                **_ref_fields(home, pin, current),
+            }
+        )
+    return rows
+
+
 __all__ = [
+    "check_updates",
     "declared_voice_backends",
     "declared_voice_ids",
     "engine_voices",
+    "following_pin",
     "load_all_voices",
     "load_voice",
     "load_voice_file",
+    "moves_to",
+    "pull_target",
+    "ref_state",
+    "refresh_ref",
+    "refresh_unresolved",
     "resolve_weights_of",
+    "seed_unresolved",
+    "served_revision_of",
     "unserved_pins",
+    "unserved_ref_state",
     "voice_aliases_of",
     "voices_in",
 ]

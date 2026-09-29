@@ -139,6 +139,49 @@ class VoiceInfo(_Open):
     takes: int
     needs_reference: bool
     pace: dict[str, Any] | None
+    ref: str | None = Field(
+        default=None,
+        description="The tag this voice follows on its repo (`crucible`); null for an exact-sha pin.",
+    )
+    latest_revision: str | None = Field(
+        default=None,
+        description="The commit the tag named at the last explicit check (`POST /v1/voices/updates`, "
+        "`crucible voices check-updates`, or a pull); never looked up by this GET.",
+    )
+    update_available: bool = Field(
+        default=False,
+        description="A pull would move this voice from `revision` to `latest_revision`.",
+    )
+    update_checked_at: str | None = Field(
+        default=None, description="When the tag was last looked up."
+    )
+    update_error: str | None = Field(
+        default=None,
+        description="Why the last look-up failed; the voice stays on the revision it has.",
+    )
+    sampling: dict[str, Number] | None = Field(
+        default=None,
+        description="`{temperature, top_p, top_k}` this backend's arm renders take 0 with: the "
+        "sampling Crucible writes into narrator's voice document.",
+    )
+    edge_fade_ms: dict[str, Number] | None = Field(
+        default=None,
+        description="`{in, out}`: raised-cosine fades, in milliseconds, at each chunk edge on this arm.",
+    )
+    chunk_gap: dict[str, Any] | None = Field(
+        default=None,
+        description="The silence to add after each chunk: `inject_s` (net of the model's own tail), "
+        "`target_join_s`, `model_self_tail_s`, optional `reader_sentence_gap_s` and "
+        "`model_internal_gap_s`, and `rule`, `method`, `source`, `measured_on`.",
+    )
+    reference_seconds_cap: Number | None = Field(
+        default=None,
+        description="The most reference-clip audio this arm takes, in seconds.",
+    )
+    allowed_controls: list[str] | None = Field(
+        default=None,
+        description="The inline control tokens (`<|group:name|>`) this arm allows; `[]` allows none.",
+    )
 
 
 class ActivityServer(_Open):
