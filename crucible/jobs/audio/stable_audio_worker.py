@@ -75,9 +75,14 @@ class StableAudio3Engine:
             require_flash_attention()
         with open(os.path.join(model_dir, "model_config.json"), encoding="utf-8") as handle:
             config = localise_text_encoder(json.load(handle), os.path.join(model_dir, T5GEMMA_DIR))
+        # The package's loader moves the float32 model to the device and only then
+        # halves it, so Medium's 10.4 GB of float32 weights met the card whole and
+        # overran its 7.45 GiB cap before any sound was made (PC, 2026-09-29). Load
+        # and halve in host memory; only the float16 copy goes to the card.
         model = load_diffusion_cond(
-            config, os.path.join(model_dir, "model.safetensors"), device=self.device, model_half=half
+            config, os.path.join(model_dir, "model.safetensors"), device="cpu", model_half=half
         )
+        model.to(self.device)
         model.use_lora = False
         model.lora_names = []
         self._model = StableAudioModel(model, config, self.device, half)
