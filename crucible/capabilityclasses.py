@@ -6,6 +6,12 @@ from typing import Any, Callable
 
 from .alignmodels import align_manifests_dir, load_all_align_manifests
 from .asrmodels import asr_manifests_dir, load_all_asr_manifests
+from .audiomodels import (
+    audio_manifests_dir,
+    load_music_manifests,
+    load_sfx_manifests,
+    load_song_manifests,
+)
 from .classnames import CLASS_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .denoisemodels import denoise_manifests_dir, load_all_denoise_manifests
 from .enginespec import UNSTATED_ENGINE_CONCURRENCY
@@ -23,6 +29,9 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_all_rvc_manifests: rvc_manifests_dir,
     load_all_denoise_manifests: denoise_manifests_dir,
     load_all_image_manifests: image_manifests_dir,
+    load_sfx_manifests: audio_manifests_dir,
+    load_music_manifests: audio_manifests_dir,
+    load_song_manifests: audio_manifests_dir,
 }
 
 
@@ -268,6 +277,30 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="generate images",
         noun="image models",
         candidates=_from_catalog(load_all_image_manifests),
+    ),
+    CapabilityClass(
+        name="sfx",
+        job_type="audio",
+        purpose="sound effects from a text prompt",
+        plainly="make sound effects",
+        noun="sound-effect models",
+        candidates=_from_catalog(load_sfx_manifests),
+    ),
+    CapabilityClass(
+        name="music",
+        job_type="audio",
+        purpose="instrumental music from a text prompt",
+        plainly="make music",
+        noun="music models",
+        candidates=_from_catalog(load_music_manifests),
+    ),
+    CapabilityClass(
+        name="song",
+        job_type="audio",
+        purpose="songs with sung vocals from lyrics and style tags",
+        plainly="make songs with vocals",
+        noun="song models",
+        candidates=_from_catalog(load_song_manifests),
     ),
 )
 

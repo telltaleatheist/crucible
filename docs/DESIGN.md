@@ -64,6 +64,7 @@ and is not a second copy of that list.
 | `rvc` | audio + model id + params | audio | ultimate-rvc. `docs/internals/jobs-runtime.md` 10.3. |
 | `denoise` | one block of audio | the separated stems | audio-separator in the `rvc` env, resident across a book; the client sends the book in blocks. `docs/internals/jobs-runtime.md` 10.4. |
 | `image` | a prompt (and, on the Mac, optionally a starting picture) | one PNG + the effective parameters | Qwen-Image 2.1 in bf16: mflux on the Mac, diffusers on CUDA, its three parts loaded one at a time so the peak is the largest part, not the sum. `docs/IMAGE.md`, `docs/internals/image.md`. |
+| `audio` | a prompt, or style tags and lyrics | one FLAC (or WAV), plus the ABC score for a song, + the effective parameters | Stable Audio 3 Small SFX (sound effects) and Medium (music) on CUDA and on the Mac's Metal, YuE2 3B (songs with vocals) on CUDA only; one env per engine. `docs/AUDIO.md`, `docs/internals/audio.md`. |
 | `echo` | any blob | the same blob, with progress events | Test-only, enabled by config flag. Proves the stream and artifact path. Phase 1. |
 
 There is **no `vlm-pages` type**, and the reason is the one piece of this table that research

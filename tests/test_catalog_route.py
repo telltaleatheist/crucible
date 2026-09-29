@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from crucible import catalog, denoisemodels, lineup, rvcbase
 from crucible.alignmodels import load_all_align_manifests
+from crucible.audiomodels import load_all_audio_manifests
 from crucible.imagemodels import load_all_image_manifests
 from crucible.asrmodels import load_all_asr_manifests
 from crucible.errors import CrucibleError
@@ -86,6 +87,8 @@ def test_the_model_rows_are_the_three_manifest_directories(
         **{m.id: "align" for m in load_all_align_manifests().values()
            if m.supports(FAKE_BACKEND.kind)},
         **{m.id: "image" for m in load_all_image_manifests().values()
+           if m.supports(FAKE_BACKEND.kind)},
+        **{m.id: "audio" for m in load_all_audio_manifests().values()
            if m.supports(FAKE_BACKEND.kind)},
     }
     assert {row["id"]: row["job_type"] for row in rows} == expected
@@ -188,7 +191,8 @@ def _supports(kind: str, subject_id: str, backend_kind: str) -> bool:
     }
     if kind == "model":
         for loader in (load_all_manifests, load_all_asr_manifests,
-                       load_all_align_manifests, load_all_image_manifests):
+                       load_all_align_manifests, load_all_image_manifests,
+                       load_all_audio_manifests):
             found = loader().get(subject_id)
             if found is not None:
                 return found.supports(backend_kind)

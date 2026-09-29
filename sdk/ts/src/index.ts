@@ -1,4 +1,11 @@
-export { CrucibleClient, engineOf, readAlignment, readImageResult, readRenderResult } from './client.js';
+export {
+  CrucibleClient,
+  engineOf,
+  readAlignment,
+  readAudioResult,
+  readImageResult,
+  readRenderResult,
+} from './client.js';
 export type {
   CrucibleClientOptions,
   EventsOptions,
@@ -110,6 +117,8 @@ export type {
   AlignOptions,
   ImageOptions,
   ImageResult,
+  AudioOptions,
+  AudioResult,
   AlignWindow,
   AlignWindowResult,
   AsrOptions,
@@ -165,6 +174,7 @@ export type {
   LlmCapability,
   LeaseOnLoad,
   LoadImageOptions,
+  LoadAudioOptions,
   LoadModelOptions,
   LoadVoiceOptions,
   CrucibleRole,

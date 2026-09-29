@@ -23,11 +23,11 @@ import { describeTarget, resolveTarget, streamOn, type Target } from './target.j
 import { BOOTSTRAP_VERSION } from './version.js';
 
 /** The job types `crucible init --enable-<type>` knows, in the order the CLI lists them. */
-export const JOB_TYPES = ['echo', 'llm', 'asr', 'tts', 'align', 'rvc', 'denoise', 'image'] as const;
+export const JOB_TYPES = ['echo', 'llm', 'asr', 'tts', 'align', 'rvc', 'denoise', 'image', 'audio'] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 /** The job types `crucible install <type>` has an installer for (`cli.INSTALLABLE_JOB_TYPES`). */
-export const INSTALLABLE_JOB_TYPES: readonly JobType[] = ['llm', 'tts', 'asr', 'align', 'rvc', 'image'];
+export const INSTALLABLE_JOB_TYPES: readonly JobType[] = ['llm', 'tts', 'asr', 'align', 'rvc', 'image', 'audio'];
 
 /** One job type to enable; `tts` must name its narrator engine. */
 export type JobTypeRequest = Exclude<JobType, 'tts'> | { type: 'tts'; narratorEngine: string };

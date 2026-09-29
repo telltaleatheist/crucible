@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import envpatches, interpreter
+from .audiomodels import engines_on as audio_engines_on
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .jobtypes import ENVS, FAMILIES, LLM_ENV
@@ -35,6 +36,22 @@ CUDA_LINUX_SERVING_STACK: dict[str, str] = {
 
 RECIPE_PYTHON: dict[str, str] = {
     "higgs-v3-cuda-linux": "3.12",
+}
+
+AUDIO_JOB_TYPE = "audio"
+
+AUDIO_ENGINE_HEADLINE: dict[str, str] = {
+    "stable-audio-3": "stable-audio-3",
+    "yue2": "yue2-infer",
+}
+
+AUDIO_ENGINE_MODULE: dict[str, str] = {
+    "stable-audio-3": "stable_audio_3",
+    "yue2": "yue2",
+}
+
+AUDIO_CUDA_EXTRA_MODULE: dict[str, str] = {
+    "stable-audio-3": "flash_attn",
 }
 
 WORKER_JOB_TYPES: tuple[str, ...] = tuple(env.name for env in ENVS if env.worker)
@@ -84,6 +101,19 @@ SMOKE_IMPORT: dict[str, dict[str, str]] = {
     },
     "tts-higgs-v3": {CUDA_LINUX: NARRATOR_PACKAGE},
     "tts": {MLX_DARWIN: NARRATOR_PACKAGE},
+    **{
+        f"{AUDIO_JOB_TYPE}-{engine}": {
+            backend_kind: ", ".join(
+                [module]
+                + ([AUDIO_CUDA_EXTRA_MODULE[engine]]
+                   if backend_kind == CUDA_LINUX and engine in AUDIO_CUDA_EXTRA_MODULE
+                   else [])
+            )
+            for backend_kind in (CUDA_LINUX, MLX_DARWIN)
+            if engine in audio_engines_on(backend_kind)
+        }
+        for engine, module in AUDIO_ENGINE_MODULE.items()
+    },
 }
 
 
@@ -161,6 +191,32 @@ def tts_env(narrator_engine: str, backend_kind: str) -> EnvSpec:
         recipe_name=backend_kind,
         headline=NARRATOR_PACKAGE,
     )
+
+
+def audio_env(engine: str, backend_kind: str) -> EnvSpec:
+    if engine not in audio_engines_on(backend_kind):
+        raise EnvError(
+            f"no audio engine {engine!r} on {backend_kind!r}; the audio engines "
+            f"there are {list(audio_engines_on(backend_kind))}"
+        )
+    recipe_name = f"{engine}-{backend_kind}"
+    return EnvSpec(
+        job_type=AUDIO_JOB_TYPE,
+        key=f"{AUDIO_JOB_TYPE}-{engine}",
+        recipe_name=recipe_name,
+        headline=AUDIO_ENGINE_HEADLINE[engine],
+        python_version=RECIPE_PYTHON.get(recipe_name),
+    )
+
+
+def audio_envs(backend_kind: str) -> tuple[EnvSpec, ...]:
+    engines = audio_engines_on(backend_kind)
+    if not engines:
+        raise EnvError(
+            f"audio has no engine on {backend_kind!r}; it runs on "
+            f"{sorted(k for k in (CUDA_LINUX, MLX_DARWIN) if audio_engines_on(k))}"
+        )
+    return tuple(audio_env(engine, backend_kind) for engine in engines)
 
 
 def worker_env(job_type: str, backend_kind: str) -> EnvSpec:
@@ -302,6 +358,8 @@ _DIRECT_REFERENCE = re.compile(
 
 _VCS_COMMIT = re.compile(r"@(?P<sha>[0-9a-f]{40})(?:#|$)")
 
+_ARCHIVE_DIGEST = re.compile(r"#sha256=(?P<sha>[0-9a-f]{64})$")
+
 
 def _requirement_lines(path: Path) -> Iterator[str]:
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -401,11 +459,14 @@ def recipe_direct_references(path: Path) -> dict[str, str]:
         match = _DIRECT_REFERENCE.match(stripped)
         if match is None:
             continue
-        commit = _VCS_COMMIT.search(match.group("url"))
+        commit = _VCS_COMMIT.search(match.group("url")) or _ARCHIVE_DIGEST.search(
+            match.group("url")
+        )
         if commit is None:
             raise EnvError(
                 f"{path.name}: {stripped!r} names no commit. A direct reference "
-                "is pinned by `@<40-character sha>` before any `#fragment`; a "
+                "is pinned by `@<40-character sha>` before any `#fragment`, or, "
+                "for a wheel URL, by a `#sha256=<64 hex digits>` fragment; a "
                 "branch name is not a pin"
             )
         name = match.group("name").strip().lower().replace("_", "-")
@@ -423,7 +484,9 @@ def installed_direct_references(home: Path, spec: EnvSpec) -> dict[str, str]:
             document = json.loads(record.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise EnvError(f"could not read {record}: {exc}") from None
-        commit = document.get("vcs_info", {}).get("commit_id")
+        commit = document.get("vcs_info", {}).get("commit_id") or (
+            document.get("archive_info", {}).get("hashes", {}).get("sha256")
+        )
         if not commit:
             continue
         name = record.parent.name.split("-")[0].lower().replace("_", "-")

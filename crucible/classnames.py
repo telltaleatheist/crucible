@@ -8,6 +8,8 @@ ROUTABLE_CLASSES: tuple[str, ...] = (
     "generate",
 )
 
+AUDIO_CLASSES: tuple[str, ...] = ("sfx", "music", "song")
+
 SELECTABLE_CLASSES: tuple[str, ...] = (
     *ROUTABLE_CLASSES,
     "decide",
@@ -18,6 +20,7 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
     "rvc",
     "denoise",
     "image",
+    *AUDIO_CLASSES,
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)

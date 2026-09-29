@@ -1,0 +1,190 @@
+# Audio generation: the `audio` job
+
+Words in, sound out: sound effects, instrumental music, and full songs with sung vocals. One job
+type, `audio`, serves three models; which one you name decides what you get. How it runs and
+why is [internals/audio.md](internals/audio.md); this page is what a caller sends, what comes
+back, and how to write a prompt each model understands.
+
+| model | makes | class | PC (cuda-linux) | Mac (mlx-darwin) | longest | licence |
+| --- | --- | --- | --- | --- | --- | --- |
+| `stable-audio-3-small-sfx` | sound effects | `sfx` | yes | yes | 120 s | Stability AI Community (gated) |
+| `stable-audio-3-medium` | instrumental music, stems, also effects | `music` | yes | yes | 380 s (6 min 20 s) | Stability AI Community (gated) |
+| `yue2-3b` | songs with vocals, from lyrics and style tags | `song` | yes | **no** (below) | about 6 min, set by the lyrics | CC BY-NC 4.0 + creator addendum |
+
+`GET /v1/capability` has one row per class: "can make sound effects, using
+stable-audio-3-small-sfx", "can make music, using stable-audio-3-medium", "can make songs with
+vocals, using yue2-3b", each with the fit reason, or why not.
+
+**YuE2 is not on the Mac.** Its official code supports Linux with an NVIDIA card; its pinned
+torch (2.10) silently corrupts the bfloat16 attention it runs on Apple's Metal backend
+(YuE issue #176; the fix, PR #181, is unmerged, and the bug is fixed in torch 2.13, which
+YuE2 does not allow), and the model is bfloat16-only. The MLX ports on Hugging Face are
+community work nobody at m-a-p stands behind. A Mac that asks for `yue2-3b` is refused
+`backend_unsupported` by name; send songs to the PC.
+
+## Turning it on
+
+```bash
+crucible init --enable-audio          # or [jobs] enable_audio = true
+crucible install audio                # builds one env per audio engine this machine runs
+crucible models pull stable-audio-3-small-sfx
+crucible models pull stable-audio-3-medium
+crucible models pull yue2-3b          # PC only
+```
+
+None of these is needed by hand: a job for a missing env or model starts the install and
+answers `409 installing`, like every other type. The one step Crucible cannot take for you is
+accepting a licence (next section).
+
+### The Stable Audio models are gated
+
+Hugging Face serves `stabilityai/stable-audio-3-small-sfx` and `stabilityai/stable-audio-3-medium`
+only to an account that has accepted the Stability AI Community License. Until then a job or a
+pull is refused `409 model_gated`, and the refusal says exactly what to do:
+
+1. Signed in to Hugging Face, open https://huggingface.co/stabilityai/stable-audio-3-small-sfx
+   and https://huggingface.co/stabilityai/stable-audio-3-medium and accept the licence on each
+   (acceptance is immediate).
+2. Make a read token at https://huggingface.co/settings/tokens and give it to the server: set
+   `HF_TOKEN` in the environment Crucible runs in, or put it under `[hf] token` in the config
+   file the refusal names.
+3. Run `crucible models pull stable-audio-3-small-sfx` (and `-medium`) again, or resend the job.
+
+YuE2's repos (`m-a-p/YuE2-3B`, `m-a-p/YuE2-Vae`) are not gated.
+
+## The request
+
+A sound effect:
+
+```json
+{"type": "audio",
+ "model": "stable-audio-3-small-sfx",
+ "params": {"prompt": "TrackType: SFX. A heavy oak door creaks open slowly in a stone hallway, close mic, dry",
+            "duration_s": 4, "seed": 1}}
+```
+
+Music:
+
+```json
+{"type": "audio",
+ "model": "stable-audio-3-medium",
+ "params": {"prompt": "TrackType: Music, VocalType: Instrumental. Warm lo-fi hip hop, dusty Rhodes, soft vinyl crackle, laid-back boom bap drums, 84 BPM",
+            "duration_s": 120}}
+```
+
+A song:
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and light drums, lyrical memorable melody, 88 BPM",
+            "lyrics": "[Verse]\nThe kettle sings the morning in\nThe window fogs, the day begins\n\n[Chorus]\nStay, stay a while\nThe light is soft, the hour is mild\n",
+            "seed": 3}}
+```
+
+| param | who takes it | default | rule |
+| --- | --- | --- | --- |
+| `prompt` | sfx, music | required | not blank; a song model refuses it by name (send `tags`) |
+| `tags` | song | required | the style: comma-separated genre, instruments, voice, language, tempo |
+| `lyrics` | song | required | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. Refused by name on sfx and music |
+| `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
+| `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
+| `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
+| `negative_prompt` | nobody yet | | refused by name: the post-trained Stable Audio checkpoints ignore it (only Stability's `-base` checkpoints read it) and YuE2 has none |
+| `seed` | all | chosen and reported | 0 to 4294967295; the same seed and params on the same model and machine give the same sound |
+| `format` | all | `flac` | `flac` (24-bit) or `wav` (24-bit PCM) |
+| `lease` | all | none | `{"act": "<the model's class>", "ttl_seconds": 30..3600}`: `sfx`, `music` or `song`. Any other act is `lease_act_mismatch` |
+
+Unknown params are refused, never ignored. A param the named model does not take is refused
+`audio_param_unsupported` with the reason and the list of what it does take; a missing one is
+`audio_param_missing`; a value past the model's ceiling is `audio_param_out_of_range`. An audio
+job takes no input files (`invalid_inputs`).
+
+## The result
+
+One artifact, `audio.flac` (or `audio.wav`); a song adds `score.abc`, the chord-annotated ABC
+score YuE2 writes before it composes the audio. The `done` event carries `audio`, every
+effective parameter, so a sound can be made again:
+
+```json
+{"artifacts": ["audio.flac", "score.abc"],
+ "audio": {"model": "yue2-3b", "kind": "song", "hf_repo": "m-a-p/YuE2-3B",
+           "revision": "c044757a011169583f363168348ae380946efff8",
+           "backend": "cuda-linux", "engine": "yue2", "dtype": "bfloat16",
+           "prompt": null, "tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…",
+           "duration_s": null, "seed": 3, "steps": null, "cfg": 1.0, "format": "flac",
+           "artifact": "audio.flac", "score": "score.abc",
+           "audio_seconds": 182.4, "sample_rate": 48000, "channels": 2,
+           "seconds": 71.2,
+           "stage_seconds": {"scoring": 9.1, "composing": 50.2, "synthesizing": 8.4, "decoding": 2.1, "saving": 0.4},
+           "peak_bytes": 12000000000,
+           "stage_peak_bytes": {"scoring": 9000000000, "composing": 12000000000, "synthesizing": 11000000000, "decoding": 3000000000},
+           "memory_bytes_estimate": 16000000000, "memory_basis": "declared",
+           "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"}},
+ "resident": "yue2-3b",
+ "lease_id": null}
+```
+
+(The numbers above show the shape; no audio model has been measured through Crucible yet.)
+`steps`, `duration_s` and `cfg` are `null` where the model does not take them. Stable Audio
+reports stages `encoding`, `denoising` (one progress event per step), `decoding`, `saving`;
+YuE2 reports `scoring` and `composing` (every 64 tokens), `synthesizing`, `decoding`, `saving`.
+Every progress event carries `fraction`. `DELETE /v1/jobs/{id}` stops the job between two
+steps or tokens; the model stays loaded if a lease holds it.
+
+## Many sounds in a row
+
+The model comes off the card when the job that loaded it ends, unless something holds it. For a
+batch, send `lease` on the first job (or warm up first with `load-audio`):
+
+```json
+{"type": "load-audio", "model": "stable-audio-3-small-sfx",
+ "params": {"lease": {"act": "sfx", "ttl_seconds": 300}}}
+```
+
+Then send the batch as ordinary `audio` jobs (sending the same `lease` again renews it and
+returns the same `lease_id`), heartbeat `POST /v1/leases/{lease_id}/heartbeat` within each
+`ttl_seconds`, and `DELETE /v1/leases/{lease_id}` at the end. `unload-audio` takes the model off
+at once when nothing holds it. The `image` job's page, [IMAGE.md](IMAGE.md), walks through the
+same lease flow in more detail.
+
+## Writing a prompt
+
+### Stable Audio 3 (Stability's own prompting guide, `docs/guides/prompting.md` in their repo)
+
+- **Say what makes the sound, how it is triggered and how long it lasts, and how it was
+  recorded.** Source, action, production: "a heavy oak door, pushed open slowly, close mic in a
+  stone hallway".
+- **Sound effects: start with `TrackType: SFX`** for more semantically sensible effects, and
+  ask for a short duration.
+- **Music: name the genre, the instruments, the mood and energy, and the tempo in BPM**
+  ("124 BPM"). `TrackType: Music, VocalType: Instrumental` gives higher quality, more coherent
+  music; tags like `Genre: Funk, Genre: Jazz` and `Instruments: Guitar, Saxophone` help.
+- **Stems:** start with `TrackType: Instrument` (add `Format: Duo` for two).
+- **Write like the training metadata:** the models learned from Freesound and AudioSparx
+  descriptions, so plain descriptive phrases work better than instructions.
+- **Set a realistic duration** for what you describe: a door slam is 2 s, not 60.
+- **No intelligible vocals.** Stable Audio does not sing words; use `yue2-3b` for songs.
+
+### YuE2 (the YuE2 model card and `protocol.py`)
+
+- **Tags are comma-separated** and cover genre, instruments, vocal character, language and
+  tempo, e.g. "English, warm piano pop, expressive female voice, acoustic piano, rounded bass
+  and light drums, lyrical memorable melody, unhurried phrasing, 88 BPM".
+- **Lyrics are sections**: `[Verse]`, `[Chorus]`, `[Bridge]`, `[Outro]` and so on, each block
+  separated by a blank line. The number and length of the sections set the song's length.
+- **English and Chinese** are the languages it was trained for.
+- **The score comes first.** YuE2 writes `score.abc` (melody and chords) and then composes the
+  audio from it; read the score to see what it planned.
+
+## Licences
+
+- **Stable Audio 3 Small SFX and Medium:** Stability AI Community License
+  (https://stability.ai/community-license-agreement). Free, commercial use included, for
+  individuals and organisations under US$1,000,000 annual revenue, after registering with
+  Stability AI; above that an Enterprise licence. The outputs are yours. The bundled T5Gemma
+  text encoder is also under the Gemma Terms of Use.
+- **YuE2 3B:** weights CC BY-NC 4.0 (non-commercial), with the authors' addendum of
+  2026-09-16 letting individual creators and musicians, acting for themselves, publish and
+  monetise the songs they make. A company needs a commercial licence from the authors. The
+  `yue2-infer` code is Apache-2.0.

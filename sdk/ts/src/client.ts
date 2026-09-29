@@ -69,6 +69,8 @@ import {
   type AlignOptions,
   type ImageOptions,
   type ImageResult,
+  type AudioOptions,
+  type AudioResult,
   type AlignWindowResult,
   type JobInput,
   type ArtifactHold,
@@ -108,6 +110,7 @@ import {
   type Lease,
   type LeaseOnLoad,
   type LoadImageOptions,
+  type LoadAudioOptions,
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
@@ -1328,6 +1331,52 @@ export class CrucibleClient {
     });
   }
 
+  /** Queue an `audio` job (one `audio.flac` or `audio.wav`, plus `score.abc` for a song) and return its id. */
+  async audio(options: AudioOptions): Promise<string> {
+    const given = options as Partial<AudioOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'audio(...) needs {model, prompt} or {model, tags, lyrics}');
+    }
+    if (given.prompt === undefined && given.tags === undefined) {
+      throw new CrucibleConfigError(
+        'prompt',
+        'audio(...) needs a prompt (sound effects, music) or tags and lyrics (songs)',
+      );
+    }
+    const params: Record<string, unknown> = {};
+    const optional: [keyof AudioOptions, string][] = [
+      ['prompt', 'prompt'],
+      ['tags', 'tags'],
+      ['lyrics', 'lyrics'],
+      ['negativePrompt', 'negative_prompt'],
+      ['durationS', 'duration_s'],
+      ['seed', 'seed'],
+      ['steps', 'steps'],
+      ['cfg', 'cfg'],
+      ['format', 'format'],
+    ];
+    for (const [key, wire] of optional) {
+      const value = given[key];
+      if (value !== undefined && value !== null) params[wire] = value;
+    }
+    return this.submit({
+      type: 'audio',
+      model: requireText(given.model, 'model'),
+      params: { ...params, ...leaseParams(given.lease) },
+      inputs: {},
+    });
+  }
+
+  /** Queue a `load-audio` job (warm an audio model up before the first request) and return its id. */
+  async loadAudio(model: string, options?: LoadAudioOptions): Promise<string> {
+    return this.submit({
+      type: 'load-audio',
+      model: requireText(model, 'model'),
+      params: leaseParams(options?.lease),
+      inputs: {},
+    });
+  }
+
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
     return asObject(await this.#jsonValue(path, init, where), where);
   }
@@ -2109,6 +2158,43 @@ export function readImageResult(done: DoneData): ImageResult {
     memoryBasis: str(image, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
     promptCache: readPromptCache(image, at),
+    leaseId: optStr(done.extra as Json, 'lease_id', where),
+  };
+}
+
+/** A finished `audio` job's effective parameters, read out of its `done` frame so the sound can be made again. */
+export function readAudioResult(done: DoneData): AudioResult {
+  const where = 'the audio done event';
+  const audio = objectField(done.extra as Json, 'audio', where);
+  const at = `${where}.audio`;
+  return {
+    model: str(audio, 'model', at),
+    kind: oneOf(str(audio, 'kind', at), ['sfx', 'music', 'song'] as const, `${at}.kind`),
+    hfRepo: str(audio, 'hf_repo', at),
+    revision: str(audio, 'revision', at),
+    backend: str(audio, 'backend', at),
+    engine: str(audio, 'engine', at),
+    dtype: str(audio, 'dtype', at),
+    prompt: nullableStr(audio, 'prompt', at),
+    tags: nullableStr(audio, 'tags', at),
+    lyrics: nullableStr(audio, 'lyrics', at),
+    durationS: nullableNum(audio, 'duration_s', at),
+    seed: num(audio, 'seed', at),
+    steps: nullableNum(audio, 'steps', at),
+    cfg: nullableNum(audio, 'cfg', at),
+    format: oneOf(str(audio, 'format', at), ['flac', 'wav'] as const, `${at}.format`),
+    artifact: str(audio, 'artifact', at),
+    score: nullableStr(audio, 'score', at),
+    audioSeconds: nullableNum(audio, 'audio_seconds', at),
+    sampleRate: nullableNum(audio, 'sample_rate', at),
+    channels: nullableNum(audio, 'channels', at),
+    seconds: nullableNum(audio, 'seconds', at),
+    stageSeconds: numberMap(nullableObject(audio, 'stage_seconds', at), `${at}.stage_seconds`),
+    peakBytes: nullableNum(audio, 'peak_bytes', at),
+    stagePeakBytes: numberMap(nullableObject(audio, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
+    memoryBytesEstimate: num(audio, 'memory_bytes_estimate', at),
+    memoryBasis: str(audio, 'memory_basis', at),
+    artifacts: done.artifacts ?? [],
     leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
 }

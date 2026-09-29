@@ -525,11 +525,18 @@ def _installer_of(job_type: str, env: Any) -> str:
         return name
     if name.startswith("tts-"):
         return "tts"
+    if name.startswith(f"{jobenv.AUDIO_JOB_TYPE}-"):
+        return jobenv.AUDIO_JOB_TYPE
     return INSTALLER_FOR[ALL_JOB_TYPES[job_type]]
 
 
 def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | None:
     try:
+        if installer == jobenv.AUDIO_JOB_TYPE:
+            return sum(
+                jobenv.recipe_archive_bytes(jobenv.recipe_for(spec))
+                for spec in jobenv.audio_envs(backend_kind)
+            )
         if installer in jobenv.WORKER_JOB_TYPES:
             recipe = jobenv.recipe_for(jobenv.worker_env(installer, backend_kind))
         elif installer == "tts":

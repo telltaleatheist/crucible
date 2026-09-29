@@ -1,0 +1,78 @@
+[model]
+id = "stable-audio-3-small-sfx"
+family = "stable-audio-3"
+display = "Stable Audio 3.0 Small SFX"
+kind = "sfx"
+licence = "Stability AI Community License (weights); the bundled T5Gemma text encoder is under the Gemma Terms of Use"
+licence_url = "https://stability.ai/community-license-agreement"
+commercial_use = "free for individuals and organisations under US$1,000,000 annual revenue, after registering with Stability AI; above that an Enterprise licence. Outputs are yours"
+
+[backends.cuda-linux]
+engine = "stable-audio-3"
+hf_repo = "stabilityai/stable-audio-3-small-sfx"
+revision = "ae12755283df9d62ca39a9b050a39a0b607b8c20"
+gated = true
+dtype = "float16"
+memory_bytes_estimate = 3500000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files and Stability's own table, not measured through Crucible: 3.45 GB of float32 weights (DiT with SAME-S 2.27 GB, T5Gemma 1.18 GB) cast to float16 is 1.73 GB; Stability's README reports 2.40 GB peak allocated at 120 s on an H200, unchunked decode; 3.5 GB leaves the CUDA context and allocator slack"
+files = [
+  "model_config.json",
+  "model.safetensors",
+  "t5gemma-b-b-ul2/config.json",
+  "t5gemma-b-b-ul2/generation_config.json",
+  "t5gemma-b-b-ul2/model.safetensors",
+  "t5gemma-b-b-ul2/special_tokens_map.json",
+  "t5gemma-b-b-ul2/tokenizer.json",
+  "t5gemma-b-b-ul2/tokenizer.model",
+  "t5gemma-b-b-ul2/tokenizer_config.json",
+  "LICENSE.md",
+  "LICENSE_GEMMA.md",
+  "NOTICE",
+]
+sample_rate = 44100
+channels = 2
+max_duration_s = 120
+takes = ["duration_s", "steps"]
+default_duration_s = 10
+default_steps = 8
+max_steps = 50
+
+[backends.cuda-linux.not_taken]
+negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Small SFX checkpoint (only the -base checkpoints read it); describe what you want instead"
+cfg = "Stability's inference guide says cfg has no effect on the post-trained Small SFX checkpoint (it samples at cfg 1.0 in 8 steps)"
+
+[backends.mlx-darwin]
+engine = "stable-audio-3"
+hf_repo = "stabilityai/stable-audio-3-small-sfx"
+revision = "ae12755283df9d62ca39a9b050a39a0b607b8c20"
+gated = true
+dtype = "float32"
+memory_bytes_estimate = 6000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files, not measured through Crucible: the stable-audio-3 package runs float32 when there is no CUDA, so the 3.45 GB of weights stay 3.45 GB on the Metal (MPS) device; Stability's CUDA peak at 120 s is 0.67 GB over the float16 weights, doubled for float32 activations, plus the torch process in the one unified pool"
+files = [
+  "model_config.json",
+  "model.safetensors",
+  "t5gemma-b-b-ul2/config.json",
+  "t5gemma-b-b-ul2/generation_config.json",
+  "t5gemma-b-b-ul2/model.safetensors",
+  "t5gemma-b-b-ul2/special_tokens_map.json",
+  "t5gemma-b-b-ul2/tokenizer.json",
+  "t5gemma-b-b-ul2/tokenizer.model",
+  "t5gemma-b-b-ul2/tokenizer_config.json",
+  "LICENSE.md",
+  "LICENSE_GEMMA.md",
+  "NOTICE",
+]
+sample_rate = 44100
+channels = 2
+max_duration_s = 120
+takes = ["duration_s", "steps"]
+default_duration_s = 10
+default_steps = 8
+max_steps = 50
+
+[backends.mlx-darwin.not_taken]
+negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Small SFX checkpoint (only the -base checkpoints read it); describe what you want instead"
+cfg = "Stability's inference guide says cfg has no effect on the post-trained Small SFX checkpoint (it samples at cfg 1.0 in 8 steps)"

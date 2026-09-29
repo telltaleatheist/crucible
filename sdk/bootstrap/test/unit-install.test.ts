@@ -139,6 +139,12 @@ test('planJobTypes: flags in request order, installers only for installable type
   ]);
 });
 
+test('planJobTypes: audio enables its type and builds its own envs', () => {
+  const plan = planJobTypes(['audio']);
+  assert.deepEqual(plan.enableFlags, ['--enable-audio']);
+  assert.deepEqual(plan.installs, [{ type: 'audio', argv: ['install', 'audio', '--verbose'] }]);
+});
+
 test('planJobTypes: image enables its type and builds its own env', () => {
   const plan = planJobTypes(['image']);
   assert.deepEqual(plan.enableFlags, ['--enable-image']);

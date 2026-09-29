@@ -50,11 +50,33 @@ def cmd_install(args: argparse.Namespace) -> int:
     config, backend = common.here()
     if backend.kind == LLAMA_WINDOWS:
         return _install_llama_windows(config, backend, args)
+    if args.job_type == jobenv.AUDIO_JOB_TYPE:
+        return _install_audio(config, backend, args)
     try:
         spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
-        recipe = jobenv.recipe_for(spec)
     except jobenv.EnvError as exc:
         return _fail(str(exc))
+    refusal = _build_env(config, backend, spec, args)
+    if refusal is not None:
+        return _fail(refusal)
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
+    _measure_step(config, backend, gpu=not args.no_gpu_measure)
+    return _capability_step(
+        config,
+        backend,
+        *jobenv.JOB_TYPES_SERVED_BY_ENV.get(args.job_type, (args.job_type,)),
+    )
+
+
+def _build_env(
+    config: Config, backend: Backend, spec: jobenv.EnvSpec, args: argparse.Namespace
+) -> str | None:
+    try:
+        recipe = jobenv.recipe_for(spec)
+    except jobenv.EnvError as exc:
+        return str(exc)
     print(f"backend: {backend.kind}")
     print(f"recipe:  {recipe}")
     print(f"target:  {jobenv.env_dir(config.home, spec)}")
@@ -68,15 +90,15 @@ def cmd_install(args: argparse.Namespace) -> int:
             on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
         )
     except (jobenv.EnvError, interpreter.InterpreterError) as exc:
-        return _fail(str(exc))
+        return str(exc)
     elapsed = time.monotonic() - started
     if not status.installed:
-        return _fail(f"the env did not come out installed: {status.detail}")
+        return f"the env did not come out installed: {status.detail}"
     refusal = _smoke_import(
         jobenv.env_python(config.home, spec), spec.key, backend.kind
     )
     if refusal is not None:
-        return _fail(refusal)
+        return refusal
     print(f"installed in {elapsed:.0f}s: {status.detail}")
     for name in sorted(status.packages):
         if name in (
@@ -84,15 +106,29 @@ def cmd_install(args: argparse.Namespace) -> int:
             "ctranslate2", "onnxruntime",
         ):
             print(f"  {name}=={status.packages[name]}")
-    refusal = _ensure_tools(config, args)
-    if refusal is not None:
-        return _fail(refusal)
+    return None
+
+
+def _install_audio(config: Config, backend: Backend, args: argparse.Namespace) -> int:
+    if args.narrator_engine is not None:
+        return _fail(
+            "--narrator-engine names which tts env to build and means nothing for "
+            "'audio'; run `crucible install audio` without it"
+        )
+    try:
+        specs = jobenv.audio_envs(backend.kind)
+    except jobenv.EnvError as exc:
+        return _fail(str(exc))
+    for spec in specs:
+        print(f"audio engine: {spec.key.removeprefix('audio-')}")
+        refusal = _build_env(config, backend, spec, args)
+        if refusal is not None:
+            return _fail(
+                f"{refusal}. The audio envs already built are kept; running "
+                "`crucible install audio` again builds only what is missing"
+            )
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
-    return _capability_step(
-        config,
-        backend,
-        *jobenv.JOB_TYPES_SERVED_BY_ENV.get(args.job_type, (args.job_type,)),
-    )
+    return _capability_step(config, backend, jobenv.AUDIO_JOB_TYPE)
 
 
 def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
@@ -168,7 +204,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "the job type to install. 'rvc' also installs 'denoise', which "
             "shares its env (audio-separator is torch, and the rvc env already "
-            "holds the torch it wants)"
+            "holds the torch it wants). 'audio' builds one env per audio engine "
+            "this backend runs (Stable Audio 3; YuE2 on cuda-linux)"
         ),
     )
     install.add_argument(

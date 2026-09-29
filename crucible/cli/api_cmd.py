@@ -765,12 +765,15 @@ JOB_VERBS = (
     Verb("submit", "POST /v1/jobs", cmd_job_submit, (
         arg(
             "--type", required=True,
-            help="tts, asr, align, align-longform, rvc, denoise, image, echo, "
+            help="tts, asr, align, align-longform, rvc, denoise, image, audio, echo, "
                  "load-model, unload-model, load-voice, unload-voice, unload-aligner, "
-                 "unload-denoiser, load-image, unload-image — `crucible api info` says which "
-                 "this server offers",
+                 "unload-denoiser, load-image, unload-image, load-audio, unload-audio — "
+                 "`crucible api info` says which this server offers",
         ),
-        arg("--model", default=None, help="the model, voice, aligner or image model id this type serves"),
+        arg(
+            "--model", default=None,
+            help="the model, voice, aligner, image or audio model id this type serves",
+        ),
         arg("--params", default=None, help="the type's params object, as JSON or @file"),
         arg(
             "--input", action="append", default=[], metavar="NAME=PATH",

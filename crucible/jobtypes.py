@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_LLM, KIND_TTS
-from .classnames import CLASS_NAMES, ROUTABLE_CLASSES
+from .cardkinds import (
+    KIND_ALIGN,
+    KIND_AUDIO,
+    KIND_DENOISE,
+    KIND_IMAGE,
+    KIND_LLM,
+    KIND_TTS,
+)
+from .classnames import AUDIO_CLASSES, CLASS_NAMES, ROUTABLE_CLASSES
 
 
 @dataclass(frozen=True)
@@ -25,8 +32,17 @@ ALIGN_ENV = Env("align", worker=True)
 ASR_ENV = Env("asr", worker=True)
 RVC_ENV = Env("rvc", worker=True)
 IMAGE_ENV = Env("image", worker=True)
+AUDIO_ENV = Env("audio", worker=False)
 
-ENVS: tuple[Env, ...] = (LLM_ENV, TTS_ENV, ALIGN_ENV, ASR_ENV, RVC_ENV, IMAGE_ENV)
+ENVS: tuple[Env, ...] = (
+    LLM_ENV,
+    TTS_ENV,
+    ALIGN_ENV,
+    ASR_ENV,
+    RVC_ENV,
+    IMAGE_ENV,
+    AUDIO_ENV,
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +96,13 @@ IMAGE = Family(
     "image",
     IMAGE_ENV,
     ("image",),
+    frozenset({"model_not_installed"}),
+    catalog_is_complete=True,
+)
+AUDIO = Family(
+    "audio",
+    AUDIO_ENV,
+    AUDIO_CLASSES,
     frozenset({"model_not_installed"}),
     catalog_is_complete=True,
 )
@@ -139,6 +162,16 @@ LOAD_IMAGE = JobTypeSpec(
     CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True),
     leaves_it_resident=True,
 )
+AUDIO_JOB = JobTypeSpec(
+    "audio", AUDIO, CardEffect(makes_resident=KIND_AUDIO, reuses_what_it_names=True)
+)
+UNLOAD_AUDIO = JobTypeSpec("unload-audio", AUDIO, CardEffect(takes_off=KIND_AUDIO))
+LOAD_AUDIO = JobTypeSpec(
+    "load-audio",
+    AUDIO,
+    CardEffect(makes_resident=KIND_AUDIO, reuses_what_it_names=True),
+    leaves_it_resident=True,
+)
 
 JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     ECHO_JOB,
@@ -157,6 +190,9 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     IMAGE_JOB,
     UNLOAD_IMAGE,
     LOAD_IMAGE,
+    AUDIO_JOB,
+    UNLOAD_AUDIO,
+    LOAD_AUDIO,
 )
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
@@ -191,6 +227,9 @@ __all__ = [
     "ASR",
     "ASR_ENV",
     "ASR_JOB",
+    "AUDIO",
+    "AUDIO_ENV",
+    "AUDIO_JOB",
     "BY_NAME",
     "CardEffect",
     "DENOISE",
@@ -208,6 +247,7 @@ __all__ = [
     "JobTypeSpec",
     "LLM",
     "LLM_ENV",
+    "LOAD_AUDIO",
     "LOAD_IMAGE",
     "LOAD_MODEL",
     "LOAD_VOICE",
@@ -218,6 +258,7 @@ __all__ = [
     "TTS_ENV",
     "TTS_JOB",
     "UNLOAD_ALIGNER",
+    "UNLOAD_AUDIO",
     "UNLOAD_DENOISER",
     "UNLOAD_IMAGE",
     "UNLOAD_MODEL",

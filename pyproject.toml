@@ -49,6 +49,7 @@ crucible = [
   "align/*.toml",
   "asr/*.toml",
   "image/*.toml",
+  "audio/*.toml",
   "envs/**/*",
   "desktop_app/assets/*",
 ]

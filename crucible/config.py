@@ -30,6 +30,8 @@ DEFAULT_INSTALL_ON_SUBMIT = True
 
 DEFAULT_ENABLE_IMAGE = False
 
+DEFAULT_ENABLE_AUDIO = False
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -108,6 +110,7 @@ class Config:
     desktop_allowance_bytes: int
     desktop_allowance_basis: str
     enable_image: bool = DEFAULT_ENABLE_IMAGE
+    enable_audio: bool = DEFAULT_ENABLE_AUDIO
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
@@ -336,6 +339,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_rvc",
     "enable_denoise",
     "enable_image",
+    "enable_audio",
 )
 
 
@@ -767,6 +771,7 @@ def load_config(
         enable_rvc=_require(table, "jobs", "enable_rvc", bool),
         enable_denoise=_require(table, "jobs", "enable_denoise", bool),
         enable_image=_optional_jobs_flag(table, "enable_image", DEFAULT_ENABLE_IMAGE),
+        enable_audio=_optional_jobs_flag(table, "enable_audio", DEFAULT_ENABLE_AUDIO),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         desktop_allowance_bytes=_require(
@@ -804,6 +809,7 @@ def write_config(
     desktop_allowance_note: str,
     install_on_submit: bool | None = None,
     enable_image: bool | None = None,
+    enable_audio: bool | None = None,
     capability: CapabilityRecord | None = None,
     routes: tuple[RouteRecord, ...] = (),
     local_models: tuple[LocalModelRecord, ...] = (),
@@ -834,6 +840,11 @@ def write_config(
                 _kept_jobs_flag(home, "enable_image", DEFAULT_ENABLE_IMAGE)
                 if enable_image is None
                 else enable_image
+            ),
+            "enable_audio": (
+                _kept_jobs_flag(home, "enable_audio", DEFAULT_ENABLE_AUDIO)
+                if enable_audio is None
+                else enable_audio
             ),
             "install_on_submit": (
                 _kept_jobs_flag(home, "install_on_submit", DEFAULT_INSTALL_ON_SUBMIT)
