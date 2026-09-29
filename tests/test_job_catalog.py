@@ -53,6 +53,7 @@ THE_JOB_TYPES = {
     "unload-denoiser": "denoise",
     "image": "image",
     "unload-image": "image",
+    "load-image": "image",
 }
 
 
@@ -75,6 +76,7 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
         "unload-denoiser": effect(takes_off=KIND_DENOISE),
         "image": effect(makes_resident=KIND_IMAGE, reuses_what_it_names=True),
         "unload-image": effect(takes_off=KIND_IMAGE),
+        "load-image": effect(makes_resident=KIND_IMAGE, reuses_what_it_names=True),
         "echo": effect(),
         "asr": effect(),
         "rvc": effect(),
@@ -83,7 +85,7 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
 
 
 def test_the_settlement_leaves_resident_only_what_a_load_put_there() -> None:
-    assert settle.LEAVES_IT_RESIDENT == frozenset({"load-model", "load-voice"})
+    assert settle.LEAVES_IT_RESIDENT == frozenset({"load-model", "load-voice", "load-image"})
 
 
 def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
@@ -110,6 +112,7 @@ def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
         "rvc",
         "denoise",
         "image",
+        "load-image",
     }
     assert not installonsubmit.InstallOnSubmit.installable("sorcery")
 

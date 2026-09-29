@@ -552,4 +552,5 @@ def test_a_model_lease_still_refuses_exactly_what_it_refused_before() -> None:
     }
     assert blocked == {
         "load-model", "unload-model", "load-voice", "tts", "align", "denoise", "image",
+        "load-image",
     }

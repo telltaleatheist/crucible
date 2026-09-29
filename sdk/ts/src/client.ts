@@ -105,6 +105,7 @@ import {
   type JobStatus,
   type Lease,
   type LeaseOnLoad,
+  type LoadImageOptions,
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
@@ -1307,8 +1308,18 @@ export class CrucibleClient {
     return this.submit({
       type: 'image',
       model: requireText(given.model, 'model'),
-      params,
+      params: { ...params, ...leaseParams(given.lease) },
       inputs: picture === null ? {} : { [given.imageName ?? 'input.png']: picture },
+    });
+  }
+
+  /** Queue a `load-image` job (warm the image model up before the first prompt) and return its id. */
+  async loadImage(model: string, options?: LoadImageOptions): Promise<string> {
+    return this.submit({
+      type: 'load-image',
+      model: requireText(model, 'model'),
+      params: leaseParams(options?.lease),
+      inputs: {},
     });
   }
 
@@ -2092,7 +2103,15 @@ export function readImageResult(done: DoneData): ImageResult {
     memoryBytesEstimate: num(image, 'memory_bytes_estimate', at),
     memoryBasis: str(image, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
+    promptCache: readPromptCache(image, at),
+    leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
+}
+
+function readPromptCache(image: Json, where: string): 'hit' | 'miss' | null {
+  const said = optStr(image, 'prompt_cache', where);
+  if (said === null || said === 'hit' || said === 'miss') return said;
+  throw new CrucibleProtocolError(`${where}.prompt_cache is ${JSON.stringify(said)}, not "hit" or "miss"`);
 }
 
 /** A finished `tts` job's terminal news, read out of its `done` frame. */

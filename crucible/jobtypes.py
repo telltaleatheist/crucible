@@ -133,6 +133,12 @@ IMAGE_JOB = JobTypeSpec(
     "image", IMAGE, CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True)
 )
 UNLOAD_IMAGE = JobTypeSpec("unload-image", IMAGE, CardEffect(takes_off=KIND_IMAGE))
+LOAD_IMAGE = JobTypeSpec(
+    "load-image",
+    IMAGE,
+    CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True),
+    leaves_it_resident=True,
+)
 
 JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     ECHO_JOB,
@@ -150,6 +156,7 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     UNLOAD_DENOISER,
     IMAGE_JOB,
     UNLOAD_IMAGE,
+    LOAD_IMAGE,
 )
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
@@ -201,6 +208,7 @@ __all__ = [
     "JobTypeSpec",
     "LLM",
     "LLM_ENV",
+    "LOAD_IMAGE",
     "LOAD_MODEL",
     "LOAD_VOICE",
     "RVC",

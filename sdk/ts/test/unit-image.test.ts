@@ -143,3 +143,50 @@ test('readImageResult reads the effective parameters a picture can be made again
 test('readImageResult refuses a done frame with no image block', () => {
   assert.throws(() => readImageResult({ artifacts: ['image.png'], extra: {} }), CrucibleProtocolError);
 });
+
+test('image() sends lease beside the params when the caller asks for one', async () => {
+  answer(200, { job_id: 'job-image-3' });
+  await client().image({
+    model: 'qwen-image-2.1',
+    prompt: 'a red apple',
+    seed: 2,
+    lease: { act: 'image', ttlSeconds: 300 },
+  });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    prompt: 'a red apple',
+    seed: 2,
+    lease: { act: 'image', ttl_seconds: 300 },
+  });
+});
+
+test('loadImage() queues a load-image job, with or without a lease', async () => {
+  answer(200, { job_id: 'job-load-image' });
+  assert.equal(await client().loadImage('qwen-image-2.1', { lease: { act: 'image', ttlSeconds: 120 } }), 'job-load-image');
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'load-image',
+    model: 'qwen-image-2.1',
+    params: { lease: { act: 'image', ttl_seconds: 120 } },
+    inputs: {},
+  });
+  await client().loadImage('qwen-image-2.1');
+  assert.deepEqual(JSON.parse(lastBody).params, {});
+});
+
+test('readImageResult reads prompt_cache and lease_id, and null from an older server', () => {
+  const fresh = readImageResult({
+    artifacts: ['image.png'],
+    extra: { image: { ...DONE_IMAGE, prompt_cache: 'hit' }, lease_id: 'lease-1' },
+  });
+  assert.equal(fresh.promptCache, 'hit');
+  assert.equal(fresh.leaseId, 'lease-1');
+  const older = readImageResult({ artifacts: ['image.png'], extra: { image: DONE_IMAGE } });
+  assert.equal(older.promptCache, null);
+  assert.equal(older.leaseId, null);
+});
+
+test('readImageResult refuses a prompt_cache it does not know', () => {
+  assert.throws(
+    () => readImageResult({ artifacts: ['image.png'], extra: { image: { ...DONE_IMAGE, prompt_cache: 'maybe' } } }),
+    CrucibleProtocolError,
+  );
+});

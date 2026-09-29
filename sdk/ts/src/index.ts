@@ -164,6 +164,7 @@ export type {
   Lease,
   LlmCapability,
   LeaseOnLoad,
+  LoadImageOptions,
   LoadModelOptions,
   LoadVoiceOptions,
   CrucibleRole,
