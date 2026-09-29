@@ -25,6 +25,7 @@ from .base import (
 from .binding import Wiring
 from .denoise import DenoiseJobType, UnloadDenoiserJobType
 from .echo import EchoJobType
+from .image import ImageJobType, UnloadImageJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
 from .registry_table import REGISTRY_TABLE
 from .rvc import RvcJobType
@@ -257,6 +258,7 @@ __all__ = [
     "AsrJobType",
     "DenoiseJobType",
     "EchoJobType",
+    "ImageJobType",
     "Job",
     "JobContext",
     "JobType",
@@ -269,6 +271,7 @@ __all__ = [
     "RvcJobType",
     "UnloadAlignerJobType",
     "UnloadDenoiserJobType",
+    "UnloadImageJobType",
     "UnloadModelJobType",
     "UnloadVoiceJobType",
     "build_registry",

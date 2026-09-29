@@ -203,7 +203,7 @@ def check_config(host: Host) -> Section:
         "port": config.port,
         **{
             f"enable_{job_type}": getattr(config, f"enable_{job_type}")
-            for job_type in ("echo", "llm", "asr", "tts", "align", "rvc", "denoise")
+            for job_type in ("echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image")
         },
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
         "desktop_allowance_basis": config.desktop_allowance_basis,

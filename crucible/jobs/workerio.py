@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import importlib
 import json
 import os
@@ -58,23 +59,77 @@ def read_request(label: str):
     return _parsed(line, label)
 
 
-def serve(label: str, ops: dict) -> int:
+def _answer(line: str, label: str, ops: dict):
+    request = _parsed(line, label)
+    if request is None:
+        return 1
+    op = request.get("op")
+    handler = ops.get(op)
+    if handler is None:
+        return fail(f"the {label} request's op is {op!r}; this worker takes {sorted(ops)}")
+    try:
+        handler(request)
+    except KeyError as exc:
+        return fail(str(exc.args[0]))
+    except Exception as exc:
+        return fail(f"{type(exc).__name__}: {exc}")
+    return None
+
+
+class _Pending:
+    def __init__(self) -> None:
+        self._lines: collections.deque = collections.deque()
+        self._ready = threading.Condition()
+
+    def put(self, line) -> None:
+        with self._ready:
+            self._lines.append(line)
+            self._ready.notify()
+
+    def get(self):
+        with self._ready:
+            while not self._lines:
+                self._ready.wait()
+            return self._lines.popleft()
+
+
+def _interrupt_of(line: str, interrupts: dict):
+    try:
+        request = json.loads(line)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(request, dict):
+        return None, None
+    return interrupts.get(request.get("op")), request
+
+
+def _feed(pending: _Pending, interrupts: dict) -> None:
     for line in sys.stdin:
         if not line.strip():
             continue
-        request = _parsed(line, label)
-        if request is None:
-            return 1
-        op = request.get("op")
-        handler = ops.get(op)
+        handler, request = _interrupt_of(line, interrupts)
         if handler is None:
-            return fail(f"the {label} request's op is {op!r}; this worker takes {sorted(ops)}")
-        try:
+            pending.put(line)
+        else:
             handler(request)
-        except KeyError as exc:
-            return fail(str(exc.args[0]))
-        except Exception as exc:
-            return fail(f"{type(exc).__name__}: {exc}")
+    pending.put(None)
+
+
+def _lines(label: str, interrupts: dict | None):
+    if not interrupts:
+        return (line for line in sys.stdin if line.strip())
+    pending = _Pending()
+    threading.Thread(
+        target=_feed, args=(pending, interrupts), name=f"{label}-stdin", daemon=True
+    ).start()
+    return iter(pending.get, None)
+
+
+def serve(label: str, ops: dict, interrupts: dict | None = None) -> int:
+    for line in _lines(label, interrupts):
+        code = _answer(line, label, ops)
+        if code is not None:
+            return code
     return 0
 
 

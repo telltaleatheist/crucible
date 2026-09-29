@@ -10,6 +10,7 @@ from .classnames import CLASS_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .denoisemodels import denoise_manifests_dir, load_all_denoise_manifests
 from .enginespec import UNSTATED_ENGINE_CONCURRENCY
 from .fit import Candidate, CatalogCandidates, WorkingContext, cached_catalog
+from .imagemodels import image_manifests_dir, load_all_image_manifests
 from .manifests import BACKEND_ENGINES, load_all_manifests, manifests_dir
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests, rvc_manifests_dir
@@ -21,6 +22,7 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_all_align_manifests: align_manifests_dir,
     load_all_rvc_manifests: rvc_manifests_dir,
     load_all_denoise_manifests: denoise_manifests_dir,
+    load_all_image_manifests: image_manifests_dir,
 }
 
 
@@ -258,6 +260,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="remove noise or split stems",
         noun="separator models",
         candidates=_from_catalog(load_all_denoise_manifests),
+    ),
+    CapabilityClass(
+        name="image",
+        job_type="image",
+        purpose="image generation from a text prompt",
+        plainly="generate images",
+        noun="image models",
+        candidates=_from_catalog(load_all_image_manifests),
     ),
 )
 

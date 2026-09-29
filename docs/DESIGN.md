@@ -63,6 +63,7 @@ and is not a second copy of that list.
 | `asr` | one audio file | transcript with word timestamps | Six manifests, no default: four Qwen3-ASR (0.6B and 1.7B, each with an MLX conversion) and two whisper (`whisper-large-v3-turbo`, `whisper-tiny`), in `crucible/asr/*.toml`. `docs/internals/asr-and-align.md`. |
 | `rvc` | audio + model id + params | audio | ultimate-rvc. `docs/internals/jobs-runtime.md` 10.3. |
 | `denoise` | one block of audio | the separated stems | audio-separator in the `rvc` env, resident across a book; the client sends the book in blocks. `docs/internals/jobs-runtime.md` 10.4. |
+| `image` | a prompt (and, on the Mac, optionally a starting picture) | one PNG + the effective parameters | Qwen-Image 2.1 in bf16: mflux on the Mac, diffusers on CUDA, its three parts loaded one at a time so the peak is the largest part, not the sum. `docs/IMAGE.md`, `docs/internals/image.md`. |
 | `echo` | any blob | the same blob, with progress events | Test-only, enabled by config flag. Proves the stream and artifact path. Phase 1. |
 
 There is **no `vlm-pages` type**, and the reason is the one piece of this table that research

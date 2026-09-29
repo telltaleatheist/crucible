@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..jobtypes import JOB_TYPE_SPECS
-from . import align, asr, denoise, echo, llm, rvc, tts
+from . import align, asr, denoise, echo, image, llm, rvc, tts
 from .alignlongform import jobtype as alignlongform
 from .binding import JobTypeBinding
 
@@ -14,6 +14,7 @@ REGISTRY_TABLE: tuple[JobTypeBinding, ...] = (
     *alignlongform.JOB_TYPES,
     *rvc.JOB_TYPES,
     *denoise.JOB_TYPES,
+    *image.JOB_TYPES,
 )
 
 if tuple(binding.spec for binding in REGISTRY_TABLE) != JOB_TYPE_SPECS:

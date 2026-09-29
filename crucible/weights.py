@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ from .errors import CrucibleError
 
 HF_TOKEN_ENV = "HF_TOKEN"
 STAMP_NAME = "crucible-pull.json"
+HUB_CACHE_ENVS = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE")
 
 
 class _QuietUnauthenticated(logging.Filter):
@@ -588,17 +590,73 @@ def pull(
         refuse_if_shared(config, manifest, spec.backend)
         shutil.rmtree(target)
     stamp = _clear_stamp(target, STAMP_NAME)
+    linked = adopt_hub_cache(spec, target, on_line)
     started = _fetch_snapshot(config, manifest, spec, target, on_line, on_progress)
     elapsed = time.monotonic() - started
     _require_snapshot_complete(manifest, spec, target)
     size = directory_bytes(target)
-    _write_record(stamp, _snapshot_record(manifest, spec, size, elapsed))
+    _write_record(stamp, {**_snapshot_record(manifest, spec, size, elapsed), "linked_bytes": linked})
     _say(
         on_line,
         f"pulled {size / 1e9:.2f} GB in {elapsed:.0f}s "
         f"({size / 1e6 / max(elapsed, 1e-6):.0f} MB/s)",
     )
     return _read_back(installed(config, manifest, spec), stamp)
+
+
+def hub_cache_root() -> Path:
+    for name in HUB_CACHE_ENVS:
+        stated = os.environ.get(name)
+        if stated:
+            return Path(stated).expanduser()
+    home = os.environ.get("HF_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface"
+    return base / "hub"
+
+
+def cached_snapshot(spec: WeightsSource) -> Path | None:
+    if not spec.hf_repo or not spec.revision:
+        return None
+    owner, _, name = spec.hf_repo.partition("/")
+    snapshot = hub_cache_root() / f"models--{owner}--{name}" / "snapshots" / spec.revision
+    return snapshot if snapshot.is_dir() else None
+
+
+def _wanted(relative: str, spec: WeightsSource) -> bool:
+    return not spec.files or any(fnmatch.fnmatch(relative, pattern) for pattern in spec.files)
+
+
+def _link_into(source: Path, destination: Path) -> int:
+    if destination.exists():
+        return 0
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source.resolve(), destination)
+    except OSError:
+        return 0
+    return destination.stat().st_size
+
+
+def adopt_hub_cache(
+    spec: WeightsSource, target: Path, on_line: Callable[[str], None] | None = None
+) -> int:
+    snapshot = cached_snapshot(spec)
+    if snapshot is None:
+        return 0
+    linked = sum(
+        _link_into(source, target / source.relative_to(snapshot))
+        for source in sorted(snapshot.rglob("*"))
+        if source.is_file() and _wanted(source.relative_to(snapshot).as_posix(), spec)
+    )
+    if linked:
+        _say(
+            on_line,
+            f"linked {linked / 1e9:.2f} GB from the Hugging Face cache at {snapshot} "
+            "(the same revision, no second copy on disk); each file is hashed "
+            "against the hub before it counts, and anything missing or different "
+            "is downloaded",
+        )
+    return linked
 
 
 def _fetch_snapshot(

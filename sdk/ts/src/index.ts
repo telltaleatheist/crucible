@@ -1,4 +1,4 @@
-export { CrucibleClient, engineOf, readAlignment, readRenderResult } from './client.js';
+export { CrucibleClient, engineOf, readAlignment, readImageResult, readRenderResult } from './client.js';
 export type {
   CrucibleClientOptions,
   EventsOptions,
@@ -108,6 +108,8 @@ export type {
   ArtifactHold,
   Alignment,
   AlignOptions,
+  ImageOptions,
+  ImageResult,
   AlignWindow,
   AlignWindowResult,
   AsrOptions,

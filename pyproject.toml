@@ -45,6 +45,7 @@ crucible = [
   "rvcbase/*.toml",
   "align/*.toml",
   "asr/*.toml",
+  "image/*.toml",
   "envs/**/*",
 ]
 

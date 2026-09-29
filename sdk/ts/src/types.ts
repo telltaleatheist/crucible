@@ -1265,6 +1265,47 @@ export interface Alignment {
   readonly windows: readonly AlignWindowResult[];
 }
 
+/** What an `image` job makes; a field left out takes the server's default (1024x1024, 40 steps, a random seed). */
+export interface ImageOptions {
+  readonly model: string;
+  readonly prompt: string;
+  readonly negativePrompt?: string | null;
+  readonly width?: number;
+  readonly height?: number;
+  readonly seed?: number;
+  readonly steps?: number;
+  readonly guidance?: number;
+  readonly imageStrength?: number | null;
+  readonly image?: JobInput | null;
+  readonly imageName?: string;
+}
+
+/** An `image` job's effective parameters and measurements, read by {@link readImageResult}. */
+export interface ImageResult {
+  readonly model: string;
+  readonly hfRepo: string;
+  readonly revision: string;
+  readonly backend: string;
+  readonly engine: string;
+  readonly dtype: string;
+  readonly prompt: string;
+  readonly negativePrompt: string | null;
+  readonly width: number;
+  readonly height: number;
+  readonly seed: number;
+  readonly steps: number;
+  readonly guidance: number;
+  readonly imageStrength: number | null;
+  readonly input: string | null;
+  readonly seconds: number | null;
+  readonly stageSeconds: Readonly<Record<string, number>>;
+  readonly peakBytes: number | null;
+  readonly stagePeakBytes: Readonly<Record<string, number>>;
+  readonly memoryBytesEstimate: number;
+  readonly memoryBasis: string;
+  readonly artifacts: readonly string[];
+}
+
 /** `GET /v1/setup` — everything an app needs to be pointed at this server, token included. */
 export interface ServerSetup {
   /** The server's name, e.g. `crucible@mac-studio`. */

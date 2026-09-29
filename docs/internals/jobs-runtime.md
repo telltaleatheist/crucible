@@ -9,7 +9,8 @@ Covers `crucible/jobtypes.py` (the job-type catalog), `crucible/jobs/` (registry
 `crucible/rvc/*.toml`, `crucible/rvcbase/*.toml`, `crucible/denoise/*.toml`.
 
 The resume journal's wire contract is [docs/RESUMABLE-JOBS.md](../RESUMABLE-JOBS.md). Only the
-implementation rules are repeated here.
+implementation rules are repeated here. The `image` type (the fifth resident kind, `generator`)
+has its own page: [image.md](image.md).
 
 ## 1. Standing rulings
 
@@ -102,7 +103,8 @@ which imports `residency` and every job package. A table there could be read by 
   and `load-voice`; the job packages import them from there.
 - `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
   The kind comes from `spec.unloads`, the noun from `cardkinds.KIND_NOUNS`, and the codes stay
-  `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`). The four copies had drifted;
+  `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`, and since 2026-09-28
+  `generator` for `unload-image`). The four copies had drifted;
   the rulings (2026-09-27):
   - progress is reported only after `await_clearance` returns (llm reported `unloading` before
     the wait, so a wait that then failed left a 0 % progress line on a job that never started);
@@ -485,8 +487,14 @@ request goes in on stdin and newline-delimited JSON comes back on fd 1.
 - Workers spawn in their own process group, so a stop reaches ffmpeg or urvc children.
 - `run_worker` is `start`/`send`/`stop` in a row. A one-shot worker's stdin is closed after its
   request, because a process blocked on a read it will never get is a silent hang.
-  `WorkerSession` (align, denoise) keeps stdin open for the next request. It is not a pool, and
+  `WorkerSession` (align, denoise, image) keeps stdin open for the next request. It is not a pool, and
   the residency holder stops it. `rvc` deliberately does NOT use a session (section 10.3).
+- A session request may carry a `cancel_request`: on a cancel the server writes that line to the
+  worker's stdin instead of stopping it, and the worker (`workerio.serve(..., interrupts)`) stops
+  between steps and stays up; after `CANCEL_GRACE_SECONDS` it is stopped the old way. Only
+  `image` sends one (image.md, "Cancel between steps"). `_Reader.lines` hands control back at
+  least every `POLL_SECONDS`, so a worker that reports progress faster than that is still
+  checked for a cancel.
 - `ready_silence_timeout` is a silence timeout, reset by every message. After `ready` there is no
   timeout at all, because an 18-hour transcription is legitimately quiet for long stretches.
   Cancel is polled every `POLL_SECONDS`.

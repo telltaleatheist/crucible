@@ -21,6 +21,8 @@ STOP_ON_EOF_SECONDS = 30.0
 
 POLL_SECONDS = 0.5
 
+CANCEL_GRACE_SECONDS = 120.0
+
 LOG_TAIL_LINES = procgroup.LOG_TAIL_LINES
 
 READY = "ready"
@@ -69,9 +71,10 @@ class _Reader:
             self._lines.put(None)
 
     def lines(self, poll: float) -> Iterator[str | None]:
+        deadline = time.monotonic() + poll
         while True:
             try:
-                item = self._lines.get(timeout=poll)
+                item = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 return
             yield item
@@ -199,6 +202,41 @@ def run_worker(
         log_handle.close()
 
 
+class _CancelWatch:
+    def __init__(
+        self,
+        cancelled: Callable[[], bool] | None,
+        request: dict[str, Any] | None,
+    ) -> None:
+        self._cancelled = cancelled
+        self._request = request
+        self._asked_at: float | None = None
+
+    @property
+    def asked(self) -> bool:
+        return self._asked_at is not None
+
+    def check(self, conversation: "_Conversation") -> None:
+        if self._cancelled is None:
+            return
+        script = conversation.script
+        if self._asked_at is None:
+            if not self._cancelled():
+                return
+            if self._request is None:
+                conversation.stop()
+                raise JobCancelled(f"{script.name} was cancelled")
+            conversation._write(self._request, keep_open=True)
+            self._asked_at = time.monotonic()
+            return
+        if time.monotonic() - self._asked_at > CANCEL_GRACE_SECONDS:
+            conversation.stop()
+            raise JobCancelled(
+                f"{script.name} was asked to stop between steps and had not after "
+                f"{CANCEL_GRACE_SECONDS:.0f}s, so it was stopped"
+            )
+
+
 class _Conversation:
     def __init__(
         self, process: subprocess.Popen[str], script: Path, log_path: Path
@@ -208,6 +246,9 @@ class _Conversation:
         self.script = script
         self.log_path = log_path
         self.reader = _Reader(process.stdout)
+
+    def stop(self) -> None:
+        _terminate(self.process, self.script, self.log_path)
 
 
     def _write(self, request: dict[str, Any], keep_open: bool) -> None:
@@ -247,8 +288,10 @@ class _Conversation:
         cancelled: Callable[[], bool] | None,
         keep_open: bool,
         on_result: Callable[[dict[str, Any]], None] | None = None,
+        cancel_request: dict[str, Any] | None = None,
     ) -> WorkerOutcome:
         self._write(request, keep_open)
+        watch = _CancelWatch(cancelled, cancel_request)
 
         process, script, log_path = self.process, self.script, self.log_path
         ready: dict[str, Any] | None = None
@@ -258,9 +301,7 @@ class _Conversation:
         deadline = time.monotonic() + ready_silence_timeout
 
         while not (done and keep_open):
-            if cancelled is not None and cancelled():
-                _terminate(process, script, log_path)
-                raise JobCancelled(f"{script.name} was cancelled")
+            watch.check(self)
 
             for line in self.reader.lines(POLL_SECONDS):
                 if line is None:
@@ -316,7 +357,7 @@ class _Conversation:
 
             if ended:
                 break
-            if ready is None and time.monotonic() >= deadline:
+            if ready is None and not watch.asked and time.monotonic() >= deadline:
                 _terminate(process, script, log_path)
                 raise WorkerError(
                     f"{script.name} said nothing at all for "
@@ -324,6 +365,11 @@ class _Conversation:
                     f"{_log_tail(log_path)}"
                 )
 
+        if watch.asked:
+            raise JobCancelled(
+                f"{script.name} stopped when it was asked to"
+                + (f" and then exited {process.wait()}" if ended else "; it keeps running")
+            )
         if not keep_open:
             code = process.wait()
             if code != 0:
@@ -434,6 +480,7 @@ class WorkerSession:
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
         on_result: Callable[[dict[str, Any]], None] | None = None,
+        cancel_request: dict[str, Any] | None = None,
     ) -> WorkerOutcome:
         if self._conversation is None:
             raise WorkerError(
@@ -454,9 +501,11 @@ class WorkerSession:
                 on_progress=on_progress,
                 cancelled=cancelled,
                 on_result=on_result,
+                cancel_request=cancel_request,
             )
         except JobCancelled:
-            self._discard()
+            if not self.alive:
+                self._discard()
             raise
 
     def _exchange(
@@ -468,6 +517,7 @@ class WorkerSession:
         on_progress: Callable[[dict[str, Any]], None] | None,
         cancelled: Callable[[], bool] | None,
         on_result: Callable[[dict[str, Any]], None] | None = None,
+        cancel_request: dict[str, Any] | None = None,
     ) -> WorkerOutcome:
         assert self._conversation is not None
         return self._conversation.exchange(
@@ -478,6 +528,7 @@ class WorkerSession:
             cancelled=cancelled,
             keep_open=True,
             on_result=on_result,
+            cancel_request=cancel_request,
         )
 
     def stop(self) -> None:

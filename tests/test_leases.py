@@ -15,7 +15,7 @@ from crucible.leases import (
     MIN_TTL_SECONDS,
     Leases,
 )
-from crucible.cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
+from crucible.cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_LLM, KIND_TTS
 
 from .conftest import parse_sse
 from .fake_engine import FakeEngine
@@ -451,7 +451,7 @@ def test_every_job_type_this_build_knows_is_ruled_on() -> None:
         assert not (effect.reuses_what_it_names and effect.makes_resident is None)
         for kind in (effect.makes_resident, effect.takes_off):
             assert kind in (
-                None, KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE
+                None, KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE
             ), job_type
 
 
@@ -502,8 +502,8 @@ def test_a_lease_refuses_the_unloader_of_its_own_kind_and_no_other() -> None:
         for job_type, effect in CARD_EFFECTS.items()
         if effect.takes_off is not None
     }
-    assert len(unloaders) == 4, unloaders
-    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE):
+    assert len(unloaders) == 5, unloaders
+    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE):
         blocked = {
             job_type
             for job_type in unloaders
@@ -551,5 +551,5 @@ def test_a_model_lease_still_refuses_exactly_what_it_refused_before() -> None:
         if refused(KIND_LLM, job_type, SOMETHING_ELSE)
     }
     assert blocked == {
-        "load-model", "unload-model", "load-voice", "tts", "align", "denoise",
+        "load-model", "unload-model", "load-voice", "tts", "align", "denoise", "image",
     }

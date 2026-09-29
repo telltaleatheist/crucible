@@ -884,6 +884,30 @@ mirror at a pinned revision, verifying both digests before it places either; the
 own downloader is never allowed to run, because it pulls from a GitHub release. A job
 without them is still refused by name, and the refusal names this command.
 
+### `image`
+
+Text to image with Qwen-Image 2.1 (`docs/IMAGE.md`, `docs/internals/image.md`): mflux on the
+Mac, diffusers on a CUDA card, the same bf16 weights on both. One prompt in, `image.png` out,
+and `done.image` carries every effective parameter (the seed included) so a picture can be
+made again.
+
+```bash
+crucible init --enable-image        # or add [jobs] enable_image = true
+crucible install image
+crucible models pull qwen-image-2.1 # ~33 GB; a Mac that already has it in ~/.cache/huggingface links it
+```
+
+```json
+{"type": "image",
+ "model": "qwen-image-2.1",
+ "params": {"prompt": "A kitchen table with one red apple, low angle, natural light. No text, no letters, no numbers, no logos.",
+            "width": 1280, "height": 720, "seed": 1, "steps": 40}}
+```
+
+The model's three parts run one after another and only one is ever loaded, so the memory the
+guard admits is the largest part's peak (measured on the Mac), not the 33 GB download. A
+batch leases the model after its first picture so it is not reloaded for each one.
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS

@@ -9,10 +9,11 @@ from . import denoisemodels, lineup, llamacpp, rvcbase, weights
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .backend import Backend
-from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_LLM, KIND_TTS
+from .cardkinds import KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_LLM, KIND_TTS
 from .clock import utcnow
 from .config import Config
 from .errors import ApiError, CrucibleError
+from .imagemodels import load_all_image_manifests
 from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
@@ -27,6 +28,7 @@ _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "align": KIND_ALIGN,
     "tts": KIND_TTS,
     "denoise": KIND_DENOISE,
+    "image": KIND_IMAGE,
 }
 
 
@@ -64,6 +66,7 @@ def _model_subjects(config: Config, backend: Backend) -> list[Subject]:
         ("llm", load_all_manifests()),
         ("asr", load_all_asr_manifests()),
         ("align", load_all_align_manifests()),
+        ("image", load_all_image_manifests()),
     ):
         for manifest in loaded.values():
             if manifest.supports(backend.kind):
@@ -305,6 +308,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_manifests(),
                 *load_all_asr_manifests(),
                 *load_all_align_manifests(),
+                *load_all_image_manifests(),
             }
         ),
         "voice": sorted(declared_voice_ids()),
@@ -333,6 +337,7 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
             load_all_manifests,
             load_all_asr_manifests,
             load_all_align_manifests,
+            load_all_image_manifests,
         )
     if kind == "voice":
         return declared_voice_backends(subject_id)
