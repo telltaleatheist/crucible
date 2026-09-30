@@ -309,8 +309,83 @@ class DiffusersEngine:
             encoded["negative_prompt_embeds_mask"] = negative_mask
         return encoded
 
+    def _latent_side(self, pixels: int) -> int:
+        return 2 * (int(pixels) // (self._pipe.vae_scale_factor * 2))
+
+    def _encode_start_image(self, job: Job):
+        """The input picture as packed, normalised latents at the job's size.
+
+        Stretched to width x height like mflux's scale_to_dimensions, so both arms
+        start from the same framing.
+        """
+        from PIL import Image
+
+        pipe = self._pipe
+        vae = self._component(self._diffusers.AutoencoderKLQwenImage21, "vae")
+        pipe.vae = vae
+        try:
+            with Image.open(job.image_path) as opened:
+                picture = opened.convert("RGB")
+            pixels = pipe.image_processor.preprocess(picture, height=job.height, width=job.width)
+            pixels = pixels.unsqueeze(2).to(device=self.device, dtype=vae.dtype)
+            with self._torch.no_grad():
+                latents = pipe._encode_vae_image(pixels, generator=None)
+            channels = latents.shape[1]
+            side_h, side_w = self._latent_side(job.height), self._latent_side(job.width)
+            return pipe._pack_latents(latents, 1, channels, side_h, side_w)
+        finally:
+            pipe.vae = None
+            del vae
+
+    def _start_schedule(self, job: Job, clean):
+        """mflux's image-to-image start, on the diffusers scheduler.
+
+        mflux begins at step `max(1, int(steps * strength))` of the full schedule and
+        blends the input with noise at that step's sigma, so a higher strength keeps
+        more of the input. The pipeline shifts whatever sigmas it is handed by the
+        image's sequence length; the shift and the terminal stretch are per-sigma
+        given the same last value, so handing it the tail of the unshifted schedule
+        reproduces the tail of the shifted one. The start sigma is read from a copy
+        of the scheduler set exactly as the pipeline will set it.
+        """
+        import copy
+
+        import numpy as np
+        from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_shift
+        from diffusers.utils.torch_utils import randn_tensor
+
+        pipe = self._pipe
+        torch = self._torch
+        start = max(1, int(job.steps * job.image_strength))
+        tail = np.linspace(1.0, 1 / job.steps, job.steps)[start:].tolist()
+        config = pipe.scheduler.config
+        mu = calculate_shift(
+            clean.shape[1],
+            config.get("base_image_seq_len", 256),
+            config.get("max_image_seq_len", 4096),
+            config.get("base_shift", 0.5),
+            config.get("max_shift", 1.15),
+        )
+        probe = copy.deepcopy(pipe.scheduler)
+        probe.set_timesteps(sigmas=tail, device=self.device, mu=mu)
+        sigma = float(probe.sigmas[0])
+        channels = clean.shape[2]
+        side_h, side_w = self._latent_side(job.height), self._latent_side(job.width)
+        generator = torch.Generator(self.device).manual_seed(job.seed)
+        noise = randn_tensor(
+            (1, 1, channels, side_h, side_w), generator=generator, device=self.device, dtype=clean.dtype
+        )
+        noise = pipe._pack_latents(noise, 1, channels, side_h, side_w)
+        return (1.0 - sigma) * clean + sigma * noise, tail
+
     def _denoise(self, job: Job, encoded: dict, progress: Progress):
         pipe = self._pipe
+        start = {}
+        if job.image_path is not None and job.image_strength is not None:
+            clean = self._encode_start_image(job)
+            self._release()
+            latents, sigmas = self._start_schedule(job, clean)
+            start = {"latents": latents, "sigmas": sigmas}
         pipe.transformer = self._component(
             self._diffusers.QwenImage21Transformer2DModel, "transformer"
         )
@@ -322,6 +397,7 @@ class DiffusersEngine:
         try:
             return pipe(
                 **encoded,
+                **start,
                 true_cfg_scale=job.guidance,
                 width=job.width,
                 height=job.height,

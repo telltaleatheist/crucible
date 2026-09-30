@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import sys
 import time
@@ -11,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, tasks, verdict
+from crucible.errors import ApiError
 from crucible.imagemodels import load_image_manifest
 from crucible.jobs import image as image_job
 from crucible.memorybudget import GIB
@@ -174,11 +176,28 @@ def test_a_picture_larger_than_the_sized_limit_is_refused_before_loading(
     assert loads(transcript) == []
 
 
-def test_image_to_image_is_refused_on_an_arm_that_does_not_declare_it(
-    ready: TestClient, auth: dict[str, str]
+def test_image_to_image_is_refused_on_an_arm_that_does_not_declare_it() -> None:
+    spec = dataclasses.replace(
+        load_image_manifest(MODEL).spec(FAKE_BACKEND.kind), image_to_image=False
+    )
+    params = image_job.ImageParams(prompt=PROMPT, width=512, height=512, image_strength=0.5)
+    with pytest.raises(ApiError) as refused:
+        image_job.refuse_what_the_arm_cannot_make(params, spec, MODEL)
+    assert refused.value.code == "image_to_image_unsupported"
+
+
+def test_the_pc_accepts_an_input_image(
+    ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
-    error = refusal(submit(ready, auth, params={"prompt": PROMPT, "image_strength": 0.5}))
-    assert error["code"] == "image_to_image_unsupported"
+    picture = base64.b64encode(PNG_HEAD + b"rest of a picture").decode("ascii")
+    _, events = run_job(
+        ready,
+        auth,
+        params={"prompt": PROMPT, "width": 512, "height": 512, "steps": 4, "image_strength": 0.6},
+        inputs={"start.png": {"inline_base64": picture}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["image"]["input"] == "start.png"
 
 
 def test_an_image_is_made_with_step_progress_and_a_reproducible_result(

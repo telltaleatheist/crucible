@@ -44,7 +44,7 @@ def test_the_shipped_manifest_pins_both_arms_to_one_revision() -> None:
     assert (mac.engine, pc.engine) == ("mflux", "diffusers")
     assert mac.revision == pc.revision
     assert (mac.size_multiple, pc.size_multiple) == (16, 32)
-    assert mac.image_to_image and not pc.image_to_image
+    assert mac.image_to_image and pc.image_to_image
     assert mac.mlx_cache_limit_bytes and pc.mlx_cache_limit_bytes is None
     assert manifest.pull_command == "crucible models pull qwen-image-2.1"
 

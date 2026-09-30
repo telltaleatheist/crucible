@@ -52,9 +52,12 @@ sentence there, and `crucible install image` refuses it `needs_wsl`.
   handing back a different size.
 - **Image-to-image.** mflux starts from the input image at `init_time_step = steps *
   image_strength`, so higher keeps more of the input (Owen's `--image photo.png`). diffusers'
-  Qwen-Image 2.1 pipeline takes images only as editing conditions, which is a different
-  operation with no strength, so the CUDA block says `image_to_image = false` and the job is
-  refused by name rather than run as an edit.
+  Qwen-Image 2.1 pipeline takes images only as editing conditions (a different operation with
+  no strength), so the CUDA worker builds mflux's start itself: it VAE-encodes the stretched
+  input, hands the pipeline the tail of the unshifted sigma schedule from that step (the
+  resolution shift and terminal stretch are per-sigma, so the tail shifts to the tail of the
+  full schedule), and blends input and seeded noise at the first shifted sigma, read from a
+  copy of the scheduler set the same way. Both blocks say `image_to_image = true`.
 - **Guidance.** Both pipelines sample Qwen-Image 2.1 without guidance (1.0). A negative prompt
   is read only when guidance is above 1.0, and guidance above 1.0 does nothing without a
   negative prompt, so each without the other is refused (`invalid_params`) rather than

@@ -35,7 +35,7 @@ model.
 | `steps` | 40 | 1 to 100; fewer is faster and rougher |
 | `guidance` | 1.0 | 1.0 to 10.0; above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt` |
 | `negative_prompt` | none | only with `guidance` above 1.0 |
-| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Mac only for now: the CUDA arm refuses it with `image_to_image_unsupported` |
+| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))` |
 | `lease` | none | `{"act": "image", "ttl_seconds": 30..3600}`: hold the model on the card from the moment it is loaded, for a batch (below). `act` must be `image` (`lease_act_mismatch`); an unknown act is `unknown_act`, a ttl out of range `invalid_ttl` |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
