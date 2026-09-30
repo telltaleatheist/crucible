@@ -48,6 +48,7 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
+from . import inpaint
 
 __all__ = [
     "JOB_TYPES",
@@ -121,6 +122,8 @@ class ImageParams(BaseModel):
     steps: int = Field(default=DEFAULT_STEPS, ge=1, le=MAX_STEPS)
     guidance: float = Field(default=1.0, ge=1.0, le=MAX_GUIDANCE)
     image_strength: float | None = Field(default=None, gt=0.0, lt=1.0)
+    mask: str | None = None
+    mask_blur: int | None = Field(default=None, ge=0, le=inpaint.MAX_MASK_BLUR)
     lease: LeaseOnLoad | None = None
 
     @field_validator("prompt")
@@ -140,6 +143,31 @@ class ImageParams(BaseModel):
                 f"{SIDE_MULTIPLE}-pixel tiles. Send {below} or {below + SIDE_MULTIPLE}"
             )
         return value
+
+    @field_validator("mask")
+    @classmethod
+    def names_an_input(cls, value: str | None) -> str | None:
+        if value is not None and value.strip() == "":
+            raise ValueError(
+                "mask is empty; send the name of the input that carries the mask, "
+                'for example "mask.png"'
+            )
+        return value
+
+    @model_validator(mode="after")
+    def blur_needs_a_mask(self) -> "ImageParams":
+        if self.mask_blur is not None and self.mask is None:
+            raise ValueError(
+                "mask_blur softens the edge of a mask and this job has none; send mask "
+                "(the name of the mask input) or drop mask_blur"
+            )
+        return self
+
+    @property
+    def effective_mask_blur(self) -> int | None:
+        if self.mask is None:
+            return None
+        return inpaint.DEFAULT_MASK_BLUR if self.mask_blur is None else self.mask_blur
 
     @model_validator(mode="after")
     def guidance_needs_a_negative(self) -> "ImageParams":
@@ -190,19 +218,48 @@ def refuse_what_the_arm_cannot_make(params: ImageParams, spec: ImageBackendSpec,
             "server whose capability row says it does",
             details,
         )
+    if params.mask is not None and not spec.inpaint:
+        raise ApiError(
+            400,
+            "inpaint_unsupported",
+            f"{model} on {spec.backend} ({spec.engine}) does not regenerate a masked "
+            "region; drop mask and mask_blur, or send the job to a server that does",
+            details,
+        )
 
 
-def input_image(ctx: JobContext, params: ImageParams) -> Path | None:
+@dataclass(frozen=True)
+class Pictures:
+    image: Path | None = None
+    mask: Path | None = None
+
+
+def _require_picture(path: Path, role: str) -> None:
+    with path.open("rb") as handle:
+        head = handle.read(16)
+    if not any(head[at : at + len(magic)] == magic for magic, at, _ in IMAGE_MAGIC):
+        raise JobError(
+            "invalid_inputs",
+            f"input {path.name!r} ({role}) is not a "
+            f"{', '.join(name for _, _, name in IMAGE_MAGIC)} image (its first bytes "
+            f"are {head[:8].hex()}); send the picture itself",
+        )
+
+
+def input_pictures(ctx: JobContext, params: ImageParams) -> Pictures:
     inputs = ctx.inputs()
+    if params.mask is not None:
+        return _masked(inputs, params.mask)
     if params.image_strength is None:
         if inputs:
             raise JobError(
                 "invalid_inputs",
-                f"this job carries input(s) {sorted(inputs)} and no image_strength; "
-                "an input image is only read for image-to-image, which needs "
-                "image_strength (0 to 1, how much of the input survives)",
+                f"this job carries input(s) {sorted(inputs)} and no image_strength or "
+                "mask; an input image is only read for image-to-image (image_strength, "
+                "0 to 1, how much of the input survives) or inpainting (mask, the name "
+                "of the mask input)",
             )
-        return None
+        return Pictures()
     if len(inputs) != 1:
         raise JobError(
             "invalid_inputs",
@@ -210,16 +267,36 @@ def input_image(ctx: JobContext, params: ImageParams) -> Path | None:
             f"({sorted(inputs)}); image-to-image starts from exactly one image",
         )
     path = next(iter(inputs.values()))
-    with path.open("rb") as handle:
-        head = handle.read(16)
-    if not any(head[at : at + len(magic)] == magic for magic, at, _ in IMAGE_MAGIC):
+    _require_picture(path, "the image")
+    return Pictures(image=path)
+
+
+def _masked(inputs: dict[str, Path], mask_name: str) -> Pictures:
+    if mask_name not in inputs:
         raise JobError(
             "invalid_inputs",
-            f"input {path.name!r} is not a "
-            f"{', '.join(name for _, _, name in IMAGE_MAGIC)} image (its first bytes "
-            f"are {head[:8].hex()}); send the picture itself",
+            f"mask names the input {mask_name!r} and this job carries {sorted(inputs)}; "
+            "send the mask as an input under that name, beside the image",
         )
-    return path
+    others = sorted(name for name in inputs if name != mask_name)
+    if len(others) != 1:
+        raise JobError(
+            "invalid_inputs",
+            f"a masked job carries exactly two inputs, the image and the mask "
+            f"{mask_name!r}; this one carries {sorted(inputs)}",
+        )
+    image, mask = inputs[others[0]], inputs[mask_name]
+    _require_picture(image, "the image")
+    _require_picture(mask, "the mask")
+    image_size, mask_size = inpaint.picture_size(image), inpaint.picture_size(mask)
+    if image_size is not None and mask_size is not None and image_size != mask_size:
+        raise JobError(
+            "mask_size_mismatch",
+            f"the mask {mask_name!r} is {mask_size[0]}x{mask_size[1]} and the image "
+            f"{image.name!r} is {image_size[0]}x{image_size[1]}; draw the mask on the "
+            "image's own canvas, the same size",
+        )
+    return Pictures(image=image, mask=mask)
 
 
 WORKER_ENVIRONMENT = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
@@ -489,13 +566,13 @@ class ImageJobType(ResidentWorker):
         params = ImageParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.requirements, model, params)
-        source = input_image(ctx, params)
+        pictures = input_pictures(ctx, params)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
         output = ctx.scratch / ARTIFACT_NAME
         session = self._worker(ctx, model, needs)
         held = self._hold(job, model, params.lease)
         try:
-            self._make(ctx, model, session, params, needs, source, seed, output)
+            self._make(ctx, model, session, params, needs, pictures, seed, output)
         except BaseException:
             let_go_of(self._leases, held)
             raise
@@ -508,7 +585,7 @@ class ImageJobType(ResidentWorker):
         session: workers.WorkerSession,
         params: ImageParams,
         needs: Needs,
-        source: Path | None,
+        pictures: Pictures,
         seed: int,
         output: Path,
     ) -> None:
@@ -522,8 +599,10 @@ class ImageJobType(ResidentWorker):
             "seed": seed,
             "steps": params.steps,
             "guidance": params.guidance,
-            "image_path": None if source is None else str(source),
+            "image_path": None if pictures.image is None else str(pictures.image),
             "image_strength": params.image_strength,
+            "mask_path": None if pictures.mask is None else str(pictures.mask),
+            "mask_blur": params.effective_mask_blur,
             "output_path": str(output),
             "revision": needs.spec.revision,
             "backend": needs.spec.backend,
@@ -534,16 +613,19 @@ class ImageJobType(ResidentWorker):
         except workers.WorkerError as exc:
             self._forget(ctx, model)
             raise JobError("worker_failed", str(exc)) from None
+        refused = result.get("refused")
+        if refused:
+            raise JobError(str(refused["code"]), str(refused["message"]))
         ctx.artifact(ARTIFACT_NAME, output)
         ctx.progress(1.0, f"{result['width']}x{result['height']} image made", stage="done")
         ctx.done_extra(
-            image=effective_params(params, seed, needs, result, source),
+            image=effective_params(params, seed, needs, result, pictures),
             resident=self._residency.resident_id,
         )
 
 
 def effective_params(
-    params: ImageParams, seed: int, needs: Needs, result: dict[str, Any], source: Path | None
+    params: ImageParams, seed: int, needs: Needs, result: dict[str, Any], pictures: Pictures
 ) -> dict[str, Any]:
     return {
         "model": needs.manifest.id,
@@ -560,7 +642,10 @@ def effective_params(
         "steps": params.steps,
         "guidance": params.guidance,
         "image_strength": params.image_strength,
-        "input": None if source is None else source.name,
+        "input": None if pictures.image is None else pictures.image.name,
+        "mask": params.mask,
+        "mask_blur": params.effective_mask_blur,
+        "mask_coverage": result.get("mask_coverage"),
         "seconds": result.get("seconds"),
         "stage_seconds": result.get("stage_seconds"),
         "peak_bytes": result.get("peak_bytes"),

@@ -1321,9 +1321,17 @@ export interface ImageOptions {
   readonly seed?: number;
   readonly steps?: number;
   readonly guidance?: number;
+  /** Image-to-image: how much of the input survives, 0 to 1 exclusive (higher keeps more). With `mask`, optional: left out, the masked region is regenerated from scratch. */
   readonly imageStrength?: number | null;
   readonly image?: JobInput | null;
+  /** The input name the picture is sent under; default `input.png`. */
   readonly imageName?: string;
+  /** Inpainting and outpainting: a picture the size of `image`, white where to regenerate, black where to keep. Needs `image`. */
+  readonly mask?: JobInput | null;
+  /** The input name the mask is sent under (it becomes `params.mask`); default `mask.png`. */
+  readonly maskName?: string;
+  /** How many pixels inside the mask's edge the new picture fades into the kept one; 0 to 256, the server's default 8. Only with `mask`. */
+  readonly maskBlur?: number;
   /** Hold the model from the moment it is loaded, for a batch; `act` must be `image`. */
   readonly lease?: LeaseOnLoad;
 }
@@ -1351,6 +1359,12 @@ export interface ImageResult {
   readonly guidance: number;
   readonly imageStrength: number | null;
   readonly input: string | null;
+  /** The mask input's name for an inpainting job, else null (and null from a server without masks). */
+  readonly mask: string | null;
+  /** The feather the mask was pasted back with, in pixels; null without a mask. */
+  readonly maskBlur: number | null;
+  /** The share of the picture the mask selected, 0 to 1; null without a mask. */
+  readonly maskCoverage: number | null;
   readonly seconds: number | null;
   readonly stageSeconds: Readonly<Record<string, number>>;
   readonly peakBytes: number | null;

@@ -1293,11 +1293,24 @@ export class CrucibleClient {
     }
     const strength = given.imageStrength ?? null;
     const picture = given.image ?? null;
-    if ((strength === null) !== (picture === null)) {
+    const mask = given.mask ?? null;
+    const imageName = given.imageName ?? 'input.png';
+    const maskName = given.maskName ?? 'mask.png';
+    if (mask !== null) {
+      if (picture === null) {
+        throw new CrucibleConfigError('image', 'a mask marks a region of an image; send the image too');
+      }
+      if (maskName === imageName) {
+        throw new CrucibleConfigError('maskName', `the image and the mask are both named ${JSON.stringify(maskName)}`);
+      }
+    } else if ((strength === null) !== (picture === null)) {
       throw new CrucibleConfigError(
         strength === null ? 'imageStrength' : 'image',
-        'image-to-image needs both an image and an imageStrength between 0 and 1',
+        'image-to-image needs both an image and an imageStrength between 0 and 1 (or a mask, to regenerate one region)',
       );
+    }
+    if (mask === null && given.maskBlur !== undefined) {
+      throw new CrucibleConfigError('maskBlur', 'maskBlur softens the edge of a mask; send mask too');
     }
     const params: Record<string, unknown> = { prompt: requireText(given.prompt, 'prompt') };
     const optional: [keyof ImageOptions, string][] = [
@@ -1308,16 +1321,23 @@ export class CrucibleClient {
       ['steps', 'steps'],
       ['guidance', 'guidance'],
       ['imageStrength', 'image_strength'],
+      ['maskBlur', 'mask_blur'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
     }
+    const inputs: Record<string, JobInput> = {};
+    if (picture !== null) inputs[imageName] = picture;
+    if (mask !== null) {
+      params.mask = maskName;
+      inputs[maskName] = mask;
+    }
     return this.submit({
       type: 'image',
       model: requireText(given.model, 'model'),
       params: { ...params, ...leaseParams(given.lease) },
-      inputs: picture === null ? {} : { [given.imageName ?? 'input.png']: picture },
+      inputs,
     });
   }
 
@@ -2150,6 +2170,9 @@ export function readImageResult(done: DoneData): ImageResult {
     guidance: num(image, 'guidance', at),
     imageStrength: nullableNum(image, 'image_strength', at),
     input: nullableStr(image, 'input', at),
+    mask: optStr(image, 'mask', at),
+    maskBlur: optNum(image, 'mask_blur', at),
+    maskCoverage: optNum(image, 'mask_coverage', at),
     seconds: nullableNum(image, 'seconds', at),
     stageSeconds: numberMap(nullableObject(image, 'stage_seconds', at), `${at}.stage_seconds`),
     peakBytes: nullableNum(image, 'peak_bytes', at),

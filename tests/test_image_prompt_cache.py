@@ -13,6 +13,8 @@ BASE = {
     "guidance": 1.0,
     "image_path": None,
     "image_strength": None,
+    "mask_path": None,
+    "mask_blur": None,
     "output_path": "out.png",
     "revision": "rev-a",
     "backend": "cuda-linux",

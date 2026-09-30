@@ -376,7 +376,7 @@ BookForge's `crucible` provider follows).
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
 | `denoise` | separator id | `{}` — and that is the contract | exactly one audio file |
-| `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","lease"]}` — see docs/IMAGE.md | none, or one image with `image_strength` |
+| `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur","lease"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
 | `load-image` | image model id | `{"lease": {"act": "image", "ttl_seconds": …}}` — optional; warms the model up before the first prompt | none |
 | `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs)`[, "duration_s","steps","cfg","seed","format","lease"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
 | `load-audio` | audio model id | `{"lease": {"act": "sfx" \| "music" \| "song", "ttl_seconds": …}}` — optional; the act is the model's own class | none |

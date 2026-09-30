@@ -128,6 +128,75 @@ test('an image without a strength, or a strength without an image, is refused be
   );
 });
 
+test('inpainting sends the picture and the mask as two inputs and names the mask in params', async () => {
+  answer(200, { job_id: 'job-image-mask' });
+  await client().image({
+    model: 'qwen-image-2.1',
+    prompt: 'a kitchen table with a blue vase',
+    width: 1024,
+    height: 768,
+    image: { blobId: 'photo' },
+    imageName: 'photo.png',
+    mask: { blobId: 'selection' },
+    maskBlur: 12,
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'image',
+    model: 'qwen-image-2.1',
+    params: {
+      prompt: 'a kitchen table with a blue vase',
+      width: 1024,
+      height: 768,
+      mask_blur: 12,
+      mask: 'mask.png',
+    },
+    inputs: { 'photo.png': { blob_id: 'photo' }, 'mask.png': { blob_id: 'selection' } },
+  });
+  await client().image({
+    model: 'qwen-image-2.1',
+    prompt: 'x',
+    image: { blobId: 'photo' },
+    mask: { blobId: 'selection' },
+    maskName: 'sel.png',
+    imageStrength: 0.2,
+  });
+  const body = JSON.parse(lastBody);
+  assert.deepEqual(body.params, { prompt: 'x', image_strength: 0.2, mask: 'sel.png' });
+  assert.deepEqual(Object.keys(body.inputs).sort(), ['input.png', 'sel.png']);
+});
+
+test('a mask without an image, a maskBlur without a mask, or one name for both is refused before sending', async () => {
+  await assert.rejects(
+    client().image({ model: 'qwen-image-2.1', prompt: 'x', mask: { blobId: 'm' } }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(
+    client().image({ model: 'qwen-image-2.1', prompt: 'x', maskBlur: 4 }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(
+    client().image({
+      model: 'qwen-image-2.1',
+      prompt: 'x',
+      image: { blobId: 'a' },
+      imageName: 'same.png',
+      mask: { blobId: 'm' },
+      maskName: 'same.png',
+    }),
+    CrucibleConfigError,
+  );
+});
+
+test('readImageResult reads the mask fields, and null from an older server', () => {
+  const masked = readImageResult({
+    artifacts: ['image.png'],
+    extra: { image: { ...DONE_IMAGE, input: 'photo.png', mask: 'mask.png', mask_blur: 8, mask_coverage: 0.25 } },
+  });
+  assert.deepEqual([masked.input, masked.mask, masked.maskBlur, masked.maskCoverage], ['photo.png', 'mask.png', 8, 0.25]);
+  const older = readImageResult({ artifacts: ['image.png'], extra: { image: DONE_IMAGE } });
+  assert.deepEqual([older.mask, older.maskBlur, older.maskCoverage], [null, null, null]);
+});
+
 test('readImageResult reads the effective parameters a picture can be made again from', () => {
   const result = readImageResult({ artifacts: ['image.png'], extra: { image: DONE_IMAGE } });
   assert.equal(result.seed, 1);

@@ -16,6 +16,8 @@ from collections import OrderedDict
 
 from workerio import cap_memory, send
 
+inpaint = workerio.load_sibling("inpaint", __file__)
+
 LABEL = "image"
 
 WHY_REQUIRED = "every parameter is required because each one changes the picture"
@@ -133,9 +135,19 @@ class Job:
         self.guidance = float(require(request, "guidance", (int, float)))
         self.image_path = optional(request, "image_path", str)
         self.image_strength = optional(request, "image_strength", (int, float))
+        self.mask_path = optional(request, "mask_path", str)
+        self.mask_blur = optional(request, "mask_blur", int)
+        self.mask = None
         self.output_path = require(request, "output_path", str)
         self.revision = require(request, "revision", str)
         self.backend = require(request, "backend", str)
+
+    @property
+    def start_step(self) -> int:
+        """mflux's init_time_step: the step image-to-image starts at, 0 for pure noise."""
+        if self.image_strength is None:
+            return 0
+        return max(1, int(self.steps * self.image_strength))
 
     @property
     def prompt_key(self) -> tuple:
@@ -177,8 +189,9 @@ class MfluxEngine:
         if cached is not None:
             model.prompt_cache.update(cached)
             model.text_encoder = None
-        model.callbacks.register(_MfluxStages(self, model, progress, peaks, encoded))
         try:
+            repaint = None if job.mask is None else self._repaint(model, job)
+            model.callbacks.register(_MfluxStages(self, model, progress, peaks, encoded, repaint))
             generated = model.generate_image(
                 seed=job.seed,
                 prompt=job.prompt,
@@ -187,7 +200,7 @@ class MfluxEngine:
                 height=job.height,
                 num_inference_steps=job.steps,
                 guidance=job.guidance,
-                image_path=job.image_path,
+                image_path=None if job.image_strength is None else job.image_path,
                 image_strength=job.image_strength,
             )
             peaks["decoding"] = self.peak_bytes()
@@ -196,18 +209,62 @@ class MfluxEngine:
             del model
             self._release()
 
+    def _repaint(self, model, job: Job) -> "_MfluxRepaint":
+        """What the per-step blend needs, built the way mflux builds its image-to-image start:
+        the input VAE-encoded and packed (LatentCreator.encode_image, Qwen21LatentCreator), and
+        the very noise generate_image starts from (create_noise with the job's seed)."""
+        from mflux.models.common.latent_creator.latent_creator import LatentCreator
+        from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
+
+        mx = self._mx
+        encoded = LatentCreator.encode_image(
+            vae=model.vae,
+            image_path=job.image_path,
+            height=job.height,
+            width=job.width,
+            tiling_config=model.tiling_config,
+        )
+        clean = Qwen21LatentCreator.pack_latents(encoded, job.height, job.width)
+        noise = Qwen21LatentCreator.create_noise(job.seed, job.height, job.width)
+        mask = mx.array(job.mask.latent).astype(clean.dtype)
+        mx.eval(clean, noise, mask)
+        return _MfluxRepaint(clean, noise, mask)
+
+
+class _MfluxRepaint:
+    """The latent blend on mflux, from its in-loop callback.
+
+    mflux 0.20.0's loop (`QwenImage21.generate_image`) hands the callback the latents after
+    each scheduler step and reads nothing back. MLX updates an array in place on item
+    assignment (every name bound to it sees the change: the "In Place Updates" section of
+    MLX's indexing docs), so writing the blend into `latents[...]` is what the next step reads.
+    """
+
+    def __init__(self, clean, noise, mask) -> None:
+        self._clean = clean
+        self._noise = noise
+        self._mask = mask
+
+    def __call__(self, latents, step: int, config) -> None:
+        sigma = float(config.scheduler.sigmas[step + 1].item())
+        blended = inpaint.blend_step(latents, self._clean, self._noise, self._mask, sigma)
+        latents[...] = blended.astype(latents.dtype)
+
 
 def _cached_embeddings(model) -> list:
     return [array for pair in model.prompt_cache.values() for array in pair if array is not None]
 
 
 class _MfluxStages:
-    def __init__(self, engine: MfluxEngine, model, progress: Progress, peaks: dict, encoded: dict) -> None:
+    def __init__(
+        self, engine: MfluxEngine, model, progress: Progress, peaks: dict, encoded: dict, repaint=None
+    ) -> None:
         self._engine = engine
         self._model = model
         self._progress = progress
         self._peaks = peaks
         self._encoded = encoded
+        self._repaint = repaint
 
     def _close_stage(self, name: str) -> None:
         self._peaks[name] = self._engine.peak_bytes()
@@ -221,7 +278,9 @@ class _MfluxStages:
         self._close_stage("encoding")
         self._progress.enter("denoising")
 
-    def call_in_loop(self, latents, **_: object) -> None:
+    def call_in_loop(self, latents, t=None, config=None, **_: object) -> None:
+        if self._repaint is not None:
+            self._repaint(latents, t, config)
         self._engine._mx.eval(latents)
         self._progress.stepped()
 
@@ -319,14 +378,11 @@ class DiffusersEngine:
         start from the same framing. RGBA, as the pipeline itself converts its
         condition images: the 2.1 VAE's first convolution takes four channels.
         """
-        from PIL import Image
-
         pipe = self._pipe
         vae = self._component(self._diffusers.AutoencoderKLQwenImage21, "vae")
         pipe.vae = vae
         try:
-            with Image.open(job.image_path) as opened:
-                picture = opened.convert("RGBA")
+            picture = inpaint.open_picture(job.image_path).convert("RGBA")
             pixels = pipe.image_processor.preprocess(picture, height=job.height, width=job.width)
             pixels = pixels.unsqueeze(2).to(device=self.device, dtype=vae.dtype)
             with self._torch.no_grad():
@@ -343,10 +399,11 @@ class DiffusersEngine:
 
         mflux begins at step `max(1, int(steps * strength))` of the full schedule and
         blends the input with noise at that step's sigma, so a higher strength keeps
-        more of the input. The pipeline shifts whatever sigmas it is handed by the
-        image's sequence length; the shift and the terminal stretch are per-sigma
-        given the same last value, so handing it the tail of the unshifted schedule
-        reproduces the tail of the shifted one. The start sigma is read from a copy
+        more of the input. A masked job without a strength starts at step 0, whose
+        sigma is 1: pure noise, the whole region regenerated. The pipeline shifts
+        whatever sigmas it is handed by the image's sequence length; the shift and the
+        terminal stretch are per-sigma given the same last value, so handing it the tail
+        of the unshifted schedule reproduces the tail of the shifted one. The start sigma is read from a copy
         of the scheduler set exactly as the pipeline will set it.
         """
         import copy
@@ -357,8 +414,7 @@ class DiffusersEngine:
 
         pipe = self._pipe
         torch = self._torch
-        start = max(1, int(job.steps * job.image_strength))
-        tail = np.linspace(1.0, 1 / job.steps, job.steps)[start:].tolist()
+        tail = np.linspace(1.0, 1 / job.steps, job.steps)[job.start_step :].tolist()
         config = pipe.scheduler.config
         mu = calculate_shift(
             clean.shape[1],
@@ -377,21 +433,27 @@ class DiffusersEngine:
             (1, 1, channels, side_h, side_w), generator=generator, device=self.device, dtype=clean.dtype
         )
         noise = pipe._pack_latents(noise, 1, channels, side_h, side_w)
-        return (1.0 - sigma) * clean + sigma * noise, tail
+        return (1.0 - sigma) * clean + sigma * noise, tail, noise
 
     def _denoise(self, job: Job, encoded: dict, progress: Progress):
         pipe = self._pipe
         start = {}
-        if job.image_path is not None and job.image_strength is not None:
+        repaint = None
+        if job.image_path is not None and (job.image_strength is not None or job.mask is not None):
             clean = self._encode_start_image(job)
             self._release()
-            latents, sigmas = self._start_schedule(job, clean)
+            latents, sigmas, noise = self._start_schedule(job, clean)
             start = {"latents": latents, "sigmas": sigmas}
+            if job.mask is not None:
+                mask = self._torch.from_numpy(job.mask.latent).to(device=self.device, dtype=clean.dtype)
+                repaint = _DiffusersRepaint(clean, noise, mask)
         pipe.transformer = self._component(
             self._diffusers.QwenImage21Transformer2DModel, "transformer"
         )
 
         def on_step(pipeline, index, timestep, tensors):
+            if repaint is not None:
+                tensors["latents"] = repaint(pipeline, index, tensors["latents"])
             progress.stepped()
             return tensors
 
@@ -450,6 +512,27 @@ class DiffusersEngine:
         return carried, peaks, kept
 
 
+class _DiffusersRepaint:
+    """The latent blend on diffusers, from `callback_on_step_end`.
+
+    QwenImageInpaintPipeline's loop, without forking QwenImage21Pipeline: after the scheduler
+    step at index i the latents are at `scheduler.sigmas[i + 1]` (the step index scale_noise
+    reads under set_begin_index(0); the last is the appended 0, so the last step puts the input
+    back clean), and outside the mask they are replaced by the input noised to that sigma with
+    the noise the start was made from. The pipeline reads `latents` back from the callback.
+    """
+
+    def __init__(self, clean, noise, mask) -> None:
+        self._clean = clean
+        self._noise = noise
+        self._mask = mask
+
+    def __call__(self, pipeline, index: int, latents):
+        sigma = float(pipeline.scheduler.sigmas[index + 1])
+        blended = inpaint.blend_step(latents, self._clean, self._noise, self._mask, sigma)
+        return blended.to(latents.dtype)
+
+
 def _moved(tensors: dict, device: str) -> dict:
     return {name: None if tensor is None else tensor.to(device) for name, tensor in tensors.items()}
 
@@ -504,11 +587,15 @@ def load(request: dict) -> None:
 def _run(engine, job: Job) -> dict:
     progress = Progress(job.request_id, job.steps)
     started = time.time()
+    if job.mask_path is not None:
+        job.mask = inpaint.load_mask(job.mask_path, job.image_path, job.width, job.height, job.mask_blur)
     cached = _PROMPTS.get(job.prompt_key)
     image, peaks, encoded = engine.generate(job, progress, cached)
     if cached is None and encoded:
         _PROMPTS.put(job.prompt_key, encoded, engine.nbytes(encoded))
     progress.enter("saving")
+    if job.mask is not None:
+        image = inpaint.paste_back(image, job.mask.original, job.mask.feather)
     image.save(job.output_path, format="PNG")
     width, height = image.size
     return {
@@ -521,6 +608,7 @@ def _run(engine, job: Job) -> dict:
         "peak_bytes": max(peaks.values()) if peaks else None,
         "prompt_cache": "miss" if cached is None else "hit",
         "prompt_cache_bytes": _PROMPTS.bytes,
+        "mask_coverage": None if job.mask is None else round(job.mask.coverage, 4),
     }
 
 
@@ -535,6 +623,10 @@ def generate(request: dict) -> None:
     send("ready", steps=job.steps)
     try:
         result = _run(engine, job)
+    except inpaint.MaskRefused as refused:
+        send("result", refused={"code": refused.code, "message": str(refused)})
+        send("done")
+        return
     except Cancelled as stopped:
         send("progress", stage="cancelled", step=stopped.step, steps=job.steps, during=stopped.stage)
         send("done")

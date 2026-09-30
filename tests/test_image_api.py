@@ -148,6 +148,9 @@ def wait_until_running(client: TestClient, auth: dict[str, str], job_id: str) ->
         ({"prompt": PROMPT, "guidance": 4.0}, "needs a negative_prompt"),
         ({"prompt": PROMPT, "image_strength": 1.0}, "less than 1"),
         ({"prompt": PROMPT, "quantize": 8}, "Extra inputs are not permitted"),
+        ({"prompt": PROMPT, "mask_blur": 4}, "this job has none"),
+        ({"prompt": PROMPT, "mask": " "}, "mask is empty"),
+        ({"prompt": PROMPT, "mask": "mask.png", "mask_blur": 999}, "less than or equal to 256"),
     ],
 )
 def test_params_are_refused_by_name(
@@ -184,6 +187,14 @@ def test_image_to_image_is_refused_on_an_arm_that_does_not_declare_it() -> None:
     with pytest.raises(ApiError) as refused:
         image_job.refuse_what_the_arm_cannot_make(params, spec, MODEL)
     assert refused.value.code == "image_to_image_unsupported"
+
+
+def test_inpainting_is_refused_on_an_arm_that_does_not_declare_it() -> None:
+    spec = dataclasses.replace(load_image_manifest(MODEL).spec(FAKE_BACKEND.kind), inpaint=False)
+    params = image_job.ImageParams(prompt=PROMPT, width=512, height=512, mask="mask.png")
+    with pytest.raises(ApiError) as refused:
+        image_job.refuse_what_the_arm_cannot_make(params, spec, MODEL)
+    assert refused.value.code == "inpaint_unsupported"
 
 
 def test_the_pc_accepts_an_input_image(
@@ -417,3 +428,160 @@ def test_a_card_that_cannot_hold_one_stage_is_disabled_with_the_numbers() -> Non
     assert decided.enabled is False
     assert decided.summary.startswith("cannot generate images")
     assert decided.shortfall_bytes > 0
+
+
+def _png(picture: Any) -> str:
+    from io import BytesIO
+
+    buffer = BytesIO()
+    picture.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _red(width: int = 512, height: int = 512) -> str:
+    from PIL import Image
+
+    return _png(Image.new("RGB", (width, height), (200, 0, 0)))
+
+
+def _left_half(width: int = 512, height: int = 512) -> str:
+    from PIL import Image
+
+    drawn = Image.new("L", (width, height), 0)
+    drawn.paste(255, (0, 0, width // 2, height))
+    return _png(drawn)
+
+
+def generates(transcript: Path) -> list[dict]:
+    rows = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    return [row for row in rows if row.get("op") == "generate" and "masked" in row]
+
+
+def test_a_mask_regenerates_only_its_region_and_keeps_every_other_pixel(
+    ready: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    from io import BytesIO
+
+    import numpy as np
+    from PIL import Image
+
+    job_id, events = run_job(
+        ready,
+        auth,
+        params={"prompt": PROMPT, "width": 512, "height": 512, "steps": 4, "mask": "mask.png"},
+        inputs={"photo.png": {"inline_base64": _red()}, "mask.png": {"inline_base64": _left_half()}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    image = events[-1]["data"]["image"]
+    assert (image["input"], image["mask"], image["mask_blur"], image["image_strength"]) == (
+        "photo.png", "mask.png", 8, None
+    )
+    assert image["mask_coverage"] == 0.5
+    made = generates(transcript)[-1]
+    assert (made["masked"], made["start_step"], made["mask_blur"]) == (True, 0, 8)
+    png = ready.get(f"/v1/jobs/{job_id}/artifacts/image.png", headers=auth).content
+    pixels = np.asarray(Image.open(BytesIO(png)).convert("RGB"))
+    assert (pixels[:, 256:] == [200, 0, 0]).all()
+    assert (pixels[:, :240] == [0, 0, 255]).all()
+
+
+def test_a_mask_with_a_strength_starts_the_region_from_the_input(
+    ready: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    _, events = run_job(
+        ready,
+        auth,
+        params={
+            "prompt": PROMPT, "width": 512, "height": 512, "steps": 20,
+            "mask": "m.png", "mask_blur": 0, "image_strength": 0.2,
+        },
+        inputs={"photo.png": {"inline_base64": _red()}, "m.png": {"inline_base64": _left_half()}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["image"]["mask_blur"] == 0
+    made = generates(transcript)[-1]
+    assert (made["start_step"], made["mask_blur"], made["image_strength"]) == (4, 0, 0.2)
+
+
+@pytest.mark.parametrize(
+    ("inputs", "code", "words"),
+    [
+        ({"photo.png": "red"}, "invalid_inputs", "mask names the input 'mask.png'"),
+        ({"mask.png": "half"}, "invalid_inputs", "exactly two inputs"),
+        ({"a.png": "red", "b.png": "red", "mask.png": "half"}, "invalid_inputs", "exactly two inputs"),
+        ({"photo.png": "red", "mask.png": "text"}, "invalid_inputs", "(the mask) is not a"),
+        ({"photo.png": "red", "mask.png": "small"}, "mask_size_mismatch", "256x256"),
+        ({"photo.png": "red", "mask.png": "black"}, "mask_empty", "selects nothing"),
+    ],
+)
+def test_a_mask_the_job_cannot_use_is_refused_by_name(
+    ready: TestClient, auth: dict[str, str], transcript: Path,
+    inputs: dict[str, str], code: str, words: str,
+) -> None:
+    from PIL import Image
+
+    payloads = {
+        "red": _red(),
+        "half": _left_half(),
+        "small": _left_half(256, 256),
+        "black": _png(Image.new("L", (512, 512), 0)),
+        "text": base64.b64encode(b"not a picture").decode("ascii"),
+    }
+    _, events = run_job(
+        ready,
+        auth,
+        params={"prompt": PROMPT, "width": 512, "height": 512, "steps": 2, "mask": "mask.png"},
+        inputs={name: {"inline_base64": payloads[kind]} for name, kind in inputs.items()},
+    )
+    assert events[-1]["event"] == "failed", events[-1]
+    error = events[-1]["data"]["error"]
+    assert error["code"] == code
+    assert words in error["message"]
+    if code != "mask_empty":
+        assert loads(transcript) == []
+
+
+def test_an_empty_mask_is_refused_without_losing_the_loaded_model(
+    ready: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    from PIL import Image
+
+    leased(ready, auth)
+    _, events = run_job(
+        ready,
+        auth,
+        params={"prompt": PROMPT, "width": 512, "height": 512, "steps": 2, "mask": "mask.png"},
+        inputs={
+            "photo.png": {"inline_base64": _red()},
+            "mask.png": {"inline_base64": _png(Image.new("L", (512, 512), 0))},
+        },
+    )
+    assert events[-1]["data"]["error"]["code"] == "mask_empty"
+    assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "image"
+    assert run_job(ready, auth)[1][-1]["event"] == "done"
+    assert len(loads(transcript)) == 1
+
+
+def test_the_mac_regenerates_a_masked_region_too(
+    make_client: Callable[..., TestClient],
+    home: Path,
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    transcript: Path,
+) -> None:
+    monkeypatch.setattr(accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB))
+    _env(home, FAKE_MAC_BACKEND.kind, monkeypatch)
+    _weights(home, FAKE_MAC_BACKEND.kind)
+    with make_client(enable_image=True, backend=FAKE_MAC_BACKEND, desktop_allowance_bytes=16 * GIB) as client:
+        _, events = run_job(
+            client,
+            auth,
+            params={"prompt": PROMPT, "width": 528, "height": 512, "steps": 2, "mask": "mask.png"},
+            inputs={
+                "photo.png": {"inline_base64": _red(528, 512)},
+                "mask.png": {"inline_base64": _left_half(528, 512)},
+            },
+        )
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["image"]["engine"] == "mflux"
+    assert generates(transcript)[-1]["masked"] is True
