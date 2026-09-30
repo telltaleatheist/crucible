@@ -601,3 +601,63 @@ def test_the_trial_table_reads_only_positive_limits(tmp_path: Path) -> None:
     found = video_job.trial_settings(SimpleNamespace(path=config))
     assert found == {"max_side": 1920, "silence_timeout_s": 900.0}
     assert video_job.trial_settings(SimpleNamespace(path=tmp_path / "missing.toml")) == {}
+
+
+def _add_to_config(home: Path, text: str) -> None:
+    config = home / "config.toml"
+    config.write_text(config.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def test_without_a_video_desktop_table_the_mac_runs_as_before(
+    mac: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    _, events = run_job(mac, auth)
+    assert events[-1]["data"]["video"]["desktop"] is None
+    assert rows(transcript, "load")[0]["desktop"] is None
+
+
+def test_a_video_desktop_table_reaches_the_mac_worker_and_the_done_event(
+    mac: TestClient, auth: dict[str, str], home: Path, transcript: Path
+) -> None:
+    _add_to_config(home, "\n[video_desktop]\nmax_tile_tokens = 12000\nlow_ram = false\n")
+    _, events = run_job(mac, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    desktop = events[-1]["data"]["video"]["desktop"]
+    expected = {**video_job.DESKTOP_DEFAULTS, "max_tile_tokens": 12000, "low_ram": False}
+    assert {key: desktop[key] for key in expected} == expected
+    assert desktop["environment"] == {
+        "MLX_MAX_OPS_PER_BUFFER": "20", "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1",
+    }
+    assert rows(transcript, "load")[0]["desktop"] == expected
+
+
+def test_the_pc_ignores_a_video_desktop_table(
+    ready: TestClient, auth: dict[str, str], home: Path, transcript: Path
+) -> None:
+    _add_to_config(home, "\n[video_desktop]\ndit_eval_every = 1\n")
+    _, events = run_job(ready, auth)
+    assert events[-1]["data"]["video"]["desktop"] is None
+    assert rows(transcript, "load")[0]["desktop"] is None
+
+
+def test_the_desktop_table_fills_defaults_and_ignores_bad_values(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[video_desktop]\ntile_spatial = 0\nmax_tile_tokens = 0\ndit_eval_every = true\n"
+        'mlx_max_ops_per_buffer = 8\nlow_ram = "yes"\ntile_overlap = 4\n',
+        encoding="utf-8",
+    )
+    found = video_job.desktop_settings(SimpleNamespace(path=config))
+    assert found == {
+        **video_job.DESKTOP_DEFAULTS, "max_tile_tokens": 0, "mlx_max_ops_per_buffer": 8,
+        "tile_overlap": 4,
+    }
+    assert video_job.desktop_environment(found) == {
+        "MLX_MAX_OPS_PER_BUFFER": "8", "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1",
+    }
+    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "missing.toml")) is None
+    assert video_job.desktop_environment(None) == {}
+    (tmp_path / "plain.toml").write_text("[video_trial]\nmax_frames = 481\n", encoding="utf-8")
+    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "plain.toml")) is None

@@ -487,3 +487,117 @@ operator owns the memory risk: step up gradually, read each clip's `stage_peak_b
 stop before the extrapolated next step passes what the machine can hold. The table is
 absent by default, survives config rewrites (unowned tables are carried), and should be
 removed when the measuring is done.
+
+## Keeping the desktop responsive: `[video_desktop]`
+
+Measured on the Mac Studio (M1 Ultra, 2026-09-30): during a 20 s 1280x704 render (53,680 video
+tokens in the full-size pass, allowed there by `[video_trial]`), the refining stage holds the
+GPU at 100% active residency with no idle time. The cursor freezes now and then, because
+WindowServer draws on the same GPU and has to wait for the kernel or command buffer in front of
+it. The memory compressor also grew from 6.5 to 25 GB (about 16,000 decompressions a second),
+with 14 GB wired. These knobs trade speed for a desktop that stays usable. They are not clip
+limits (those are `[video_trial]`), and only the Mac's engine reads them. The PC ignores the
+table.
+
+```toml
+[video_desktop]          # present: the defaults below apply to every key left out
+max_tile_tokens = 16000  # cut a denoising pass into temporal tiles of about this many tokens
+tile_spatial = 1         # spatial tiles per axis on top of that (2 = 2x2)
+tile_overlap = 2         # latent cells shared by neighbouring tiles
+dit_eval_every = 1       # wait for the GPU after every transformer block
+low_ram = true           # stream the transformer's blocks from disk
+mlx_max_ops_per_buffer = 20
+mlx_max_mb_per_buffer = 40
+```
+
+**No table means none of this**: no env vars are set, nothing is tiled or streamed, and the
+worker runs exactly as before. When the table is present, a key left out takes the value shown
+above, and a value of the wrong type or out of range is ignored rather than guessed at. The
+table is read when the worker starts, so a change applies from the next load, not to a worker
+already resident under a lease. Every clip records what it ran with in `done.video.desktop`:
+the settings, the env vars the worker actually saw, the MLX cache limit, and each pass's
+`tiles` ([frames, rows, columns]) and `tile_tokens`. It is null without the table.
+
+How each knob maps onto the libraries (mlx 0.32.2, tag `v0.32.2` = `1f8e74e3`; ltx-2-mlx at
+`1724ca67`):
+
+- **`mlx_max_ops_per_buffer`, `mlx_max_mb_per_buffer`** become the worker's
+  `MLX_MAX_OPS_PER_BUFFER` and `MLX_MAX_MB_PER_BUFFER`. `mlx/utils.h` lines 182-192
+  (`env::max_ops_per_buffer`, `env::max_mb_per_buffer`) read them once per process.
+  `mlx/backend/metal/device.cpp` 603-626 picks per-chip defaults from the GPU architecture's
+  last letter: an Ultra (`d`) is 50 ops and 50 MB, a base or Pro (`g`) 40 and 40, a phone 20
+  and 40. The env overrides them. The encoder counts one op per dispatch (`device.cpp` 412,
+  420) and adds each distinct input buffer's size (`device.cpp` 350). `needs_commit`
+  (`device.cpp` 511-513) is true past either limit, and `eval.cpp` 59 then commits the command
+  buffer after the current primitive. So these limits bound how much work sits in one command
+  buffer, giving the GPU scheduler more points to switch to WindowServer between buffers. **They
+  never split a kernel.** At these sizes every int8 linear's weight is 16 to 64 MB, so the
+  MB limit already commits nearly every large matmul by itself; the knob mostly affects runs
+  of small element-wise kernels. `MLX_SDPA_BLOCKS` (`scaled_dot_product_attention.cpp` 519)
+  applies only to the vector path (query length 8 or less), not to the full self-attention
+  this model runs (`sdpa_full_self_attention_metal`, one dispatch over all queries and keys).
+  No MLX setting splits that.
+- **`dit_eval_every`** becomes `LTX2_DIT_EVAL_EVERY`, read once at import by
+  `ltx_core_mlx/model/transformer/model.py` 33-41 (port default 8). At 943-951, `LTXModel`
+  calls `mx.eval` after every Nth block. `mx.eval` is a blocking sync: the CPU waits for the
+  GPU to finish the blocks so far, and until it has encoded the next block the GPU queue is
+  empty. That gap, 48 times a forward at 1, is where WindowServer gets the GPU cleanly. With
+  `low_ram` the model already evaluates after every block (the streaming branch at 943), so
+  this knob then changes nothing. The text encoder already syncs per layer
+  (`LTX2_GEMMA_EVAL_EVERY`, default 1: `text_encoders/gemma/encoders/base_encoder.py` 165,
+  `embeddings_connector.py` 351).
+- **`max_tile_tokens`, `tile_spatial`, `tile_overlap`** become the port's modality tiling, the
+  same `TileCountConfig` its CLI builds from `--tile-frames`, `--tile-spatial` and
+  `--tile-overlap` (`ltx_pipelines_mlx/cli.py` 148-164). `DistilledPipeline` reads
+  `self._tile_count` when each pass builds its model and wraps the transformer in
+  `TiledLTXModel` (`distilled.py` 465-469 for the half-size pass, 634-638 for the full-size
+  one). `TiledLTXModel` (`ltx_core_mlx/components/modality_tiling.py` 390-458) runs the
+  transformer once per tile on that tile's video tokens plus all the audio, blends the video
+  back with trapezoid weights over the overlap, and averages the audio. The worker sets
+  `_tile_count` before each pass. Each pass gets as many temporal tiles as keep a tile near
+  `max_tile_tokens` (0 turns it off), times the fixed spatial count. A count
+  `split_by_count` would refuse (more tiles than cells, or a tile no longer than the overlap:
+  `ltx_core_mlx/model/video_vae/tiling.py` 683-697) is lowered instead of failing the clip.
+  **This is the one knob that bounds a single kernel:** attention is one dispatch over all of
+  a tile's tokens, and its work grows with their square.
+- **`low_ram`** constructs the pipeline with `low_ram_streaming=True`, the port's `--low-ram`.
+  `load_transformer` (`utils/_orchestration.py` 93-122) keeps block 0 and wraps the model in
+  `StreamingLTXModel` (`ltx_core_mlx/loader/block_streaming.py` 286-345). That streams each
+  block's weights from the mmap'd file into one shared, `mx.compile`d block, evaluating after
+  each. `BasePipeline.__init__` also sets MLX's cache limit to 0 (`_base.py` 138), which
+  overrides the manifest's 4 GB and returns freed buffers at once. The transformer then holds
+  about one block (the port measured about 2.8 GB peak Metal instead of 10 to 12, on LTX-2.3 q8)
+  instead of 20.6 GB. This is the knob for the memory pressure, not for the stalls.
+
+**A pause between denoising steps** (`mx.synchronize()` and a few milliseconds of sleep) is
+not included. A step at these sizes takes tens of seconds to minutes, so one gap per step gives
+WindowServer nothing. The stalls come from single long kernels and from the queue never
+draining. The per-block sync above already gives 48 gaps a forward (per tile), at the natural
+boundary, without a hand-tuned sleep.
+
+**Expected cost**, not measured, with the 20 s clip's full-size pass as the example:
+
+- `max_tile_tokens = 16000` cuts that pass (61 latent frames x 22 x 40) into 4 temporal tiles
+  of 17 frames, 14,960 tokens each. The linear layers do 11% more work (the overlap) and the
+  audio path runs 4 times, but attention drops from 53,680² to 4 x 14,960² (about a third).
+  At 53k tokens attention dominates, so that pass may well get *faster*. Clips of 16,000
+  tokens or fewer (the 5 s default is 14,080) are not tiled at all and cost nothing. The real
+  cost is coherence: tokens attend across tiles only through the overlap, and the port lists
+  modality tiling as validated on LTX-2.3 only, so look for seams or drift at the tile
+  boundaries.
+- `dit_eval_every = 1`: 48 syncs a forward instead of 6, a few milliseconds each. That is
+  under 1% of a forward that takes tens of seconds, a few percent on small clips.
+- 20 ops and 40 MB per command buffer: more commits, each costing microseconds; a few percent
+  at most.
+- `low_ram = true`: the port measured about 5% more time per step (M2 Pro, q8). With tiling it
+  streams the whole transformer once per tile per step, 4 x 20.6 GB per step in the example.
+  That is fast while the file stays in the page cache; the memory it frees is what keeps it
+  there. From the SSD it could add a few seconds per tile-forward.
+
+**Suggested start for "responsive while Owen works" on the M1 Ultra** is the table as shown
+(the defaults). Render the same 20 s clip, watch the cursor and `sudo powermetrics --samplers
+gpu_power` residency, and read `done.video.desktop.passes` and `stage_seconds`. If the cursor
+still hitches, lower `max_tile_tokens` to 8,000 (attention per kernel then drops to about a
+fortieth of the untiled 53k pass) before touching anything else. If the clip shows seams, raise
+`tile_overlap` to 4. If the render is too slow and memory is fine, set `low_ram = false`
+first. The declared stage memory is unchanged: these knobs only lower the real peaks.

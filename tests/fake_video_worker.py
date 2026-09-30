@@ -53,6 +53,11 @@ class FakeEngine:
         self.versions = {"fake": "1.0", "engine": request["engine"]}
         self._seen: set = set()
         self._two_pass = request["engine"] == "ltx-2-mlx"
+        self._desktop = request.get("desktop")
+        self._environment = {
+            name: os.environ.get(name)
+            for name in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER", "LTX2_DIT_EVAL_EVERY")
+        }
         if self._two_pass:
             self.spans = videocore.TWO_PASS_SPANS
 
@@ -98,6 +103,9 @@ class FakeEngine:
             "prompt_cache": "hit" if hit else "miss",
             "quantization": {"fake": True},
             "sampling": {"passes": ["half", "full"] if self._two_pass else ["full"]},
+            "desktop": None if self._desktop is None else {
+                **self._desktop, "environment": self._environment,
+            },
         }
 
 
