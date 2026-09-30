@@ -44,6 +44,7 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "max_side": int,
     "max_pixels": int,
     "image_to_image": bool,
+    "inpaint": bool,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
     "mlx_cache_limit_bytes": int,
@@ -69,6 +70,7 @@ class ImageBackendSpec:
     max_side: int
     max_pixels: int
     image_to_image: bool
+    inpaint: bool
     mlx_cache_limit_bytes: int | None = None
 
     @property
@@ -89,6 +91,7 @@ class ImageBackendSpec:
             "max_side": self.max_side,
             "max_pixels": self.max_pixels,
             "image_to_image": self.image_to_image,
+            "inpaint": self.inpaint,
             "mlx_cache_limit_bytes": self.mlx_cache_limit_bytes,
         }
 

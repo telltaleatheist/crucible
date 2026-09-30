@@ -8,10 +8,11 @@ from .cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
 )
-from .classnames import AUDIO_CLASSES, CLASS_NAMES, ROUTABLE_CLASSES
+from .classnames import AUDIO_CLASSES, CLASS_NAMES, ROUTABLE_CLASSES, SEGMENT_CLASSES
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ ASR_ENV = Env("asr", worker=True)
 RVC_ENV = Env("rvc", worker=True)
 IMAGE_ENV = Env("image", worker=True)
 AUDIO_ENV = Env("audio", worker=False)
+SEGMENT_ENV = Env("segment", worker=True)
 VIDEO_ENV = Env("video", worker=False)
 
 ENVS: tuple[Env, ...] = (
@@ -44,6 +46,7 @@ ENVS: tuple[Env, ...] = (
     RVC_ENV,
     IMAGE_ENV,
     AUDIO_ENV,
+    SEGMENT_ENV,
     VIDEO_ENV,
 )
 
@@ -106,6 +109,13 @@ AUDIO = Family(
     "audio",
     AUDIO_ENV,
     AUDIO_CLASSES,
+    frozenset({"model_not_installed"}),
+    catalog_is_complete=True,
+)
+SEGMENT = Family(
+    "segment",
+    SEGMENT_ENV,
+    SEGMENT_CLASSES,
     frozenset({"model_not_installed"}),
     catalog_is_complete=True,
 )
@@ -182,6 +192,18 @@ LOAD_AUDIO = JobTypeSpec(
     CardEffect(makes_resident=KIND_AUDIO, reuses_what_it_names=True),
     leaves_it_resident=True,
 )
+SEGMENT_JOB = JobTypeSpec(
+    "segment", SEGMENT, CardEffect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True)
+)
+UNLOAD_SEGMENT = JobTypeSpec(
+    "unload-segment", SEGMENT, CardEffect(takes_off=KIND_SEGMENT)
+)
+LOAD_SEGMENT = JobTypeSpec(
+    "load-segment",
+    SEGMENT,
+    CardEffect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True),
+    leaves_it_resident=True,
+)
 VIDEO_JOB = JobTypeSpec(
     "video", VIDEO, CardEffect(makes_resident=KIND_VIDEO, reuses_what_it_names=True)
 )
@@ -213,6 +235,9 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     AUDIO_JOB,
     UNLOAD_AUDIO,
     LOAD_AUDIO,
+    SEGMENT_JOB,
+    UNLOAD_SEGMENT,
+    LOAD_SEGMENT,
     VIDEO_JOB,
     UNLOAD_VIDEO,
     LOAD_VIDEO,
@@ -273,10 +298,14 @@ __all__ = [
     "LOAD_AUDIO",
     "LOAD_IMAGE",
     "LOAD_MODEL",
+    "LOAD_SEGMENT",
     "LOAD_VOICE",
     "RVC",
     "RVC_ENV",
     "RVC_JOB",
+    "SEGMENT",
+    "SEGMENT_ENV",
+    "SEGMENT_JOB",
     "TTS",
     "TTS_ENV",
     "TTS_JOB",
@@ -285,6 +314,7 @@ __all__ = [
     "UNLOAD_DENOISER",
     "UNLOAD_IMAGE",
     "UNLOAD_MODEL",
+    "UNLOAD_SEGMENT",
     "UNLOAD_VIDEO",
     "UNLOAD_VOICE",
     "VIDEO",

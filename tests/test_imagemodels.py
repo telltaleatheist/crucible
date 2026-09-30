@@ -23,6 +23,7 @@ size_multiple = 16
 max_side = 2048
 max_pixels = 1048576
 image_to_image = true
+inpaint = true
 mlx_cache_limit_bytes = 4000000000
 """
 
@@ -45,6 +46,7 @@ def test_the_shipped_manifest_pins_both_arms_to_one_revision() -> None:
     assert mac.revision == pc.revision
     assert (mac.size_multiple, pc.size_multiple) == (16, 32)
     assert mac.image_to_image and pc.image_to_image
+    assert mac.inpaint and pc.inpaint
     assert mac.mlx_cache_limit_bytes and pc.mlx_cache_limit_bytes is None
     assert manifest.pull_command == "crucible models pull qwen-image-2.1"
 
@@ -66,6 +68,7 @@ def test_a_well_formed_block_parses() -> None:
         (("max_side = 2048", "max_side = 2050"), "multiple of size_multiple"),
         (('revision = "790c92633540aa0cb11d9abf19eb46d861714758"', 'revision = "main"'), "40-character"),
         (("image_to_image = true", "image_to_image = 1"), "image_to_image must be bool"),
+        (("inpaint = true\n", ""), "missing required key(s) ['inpaint']"),
         (("max_pixels = 1048576", "max_pixels = 1048576\nquantize = 8"), "unknown key(s) ['quantize']"),
     ],
 )

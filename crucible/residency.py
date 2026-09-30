@@ -28,6 +28,7 @@ from .cardkinds import (
     KIND_IMAGE,
     KIND_LLM,
     KIND_NOUNS,
+    KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "ResidentAudio",
     "ResidentImage",
     "ResidentModel",
+    "ResidentSegmenter",
     "ResidentSeparator",
     "ResidentVideo",
     "ResidentVoice",
@@ -304,6 +306,43 @@ class ResidentAudio:
 
 
 @dataclass(frozen=True)
+class ResidentSegmenter:
+    kind = KIND_SEGMENT
+
+    model_id: str
+    backend: str
+    engine: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    versions: dict[str, Any]
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.model_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "segment_model": self.model_id,
+            "backend": self.backend,
+            "engine": self.engine,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "versions": dict(self.versions),
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
+
+@dataclass(frozen=True)
 class ResidentVideo:
     kind = KIND_VIDEO
 
@@ -346,6 +385,7 @@ Resident = (
     | ResidentSeparator
     | ResidentImage
     | ResidentAudio
+    | ResidentSegmenter
     | ResidentVideo
 )
 
@@ -724,6 +764,14 @@ class Residency:
     @property
     def audio_session(self) -> "WorkerSession | None":
         return None if self.resident_audio is None else self._session
+
+    @property
+    def resident_segmenter(self) -> ResidentSegmenter | None:
+        return self._resident if isinstance(self._resident, ResidentSegmenter) else None
+
+    @property
+    def segment_session(self) -> "WorkerSession | None":
+        return None if self.resident_segmenter is None else self._session
 
     @property
     def resident_video(self) -> ResidentVideo | None:

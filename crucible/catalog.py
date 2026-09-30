@@ -16,6 +16,7 @@ from .cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
 )
@@ -26,6 +27,7 @@ from .imagemodels import load_all_image_manifests
 from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
+from .segmentmodels import load_all_segment_manifests
 from .videomodels import load_all_video_manifests
 from .voicecatalog import (
     declared_voice_backends,
@@ -47,6 +49,7 @@ _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "denoise": KIND_DENOISE,
     "image": KIND_IMAGE,
     "audio": KIND_AUDIO,
+    "segment": KIND_SEGMENT,
     "video": KIND_VIDEO,
 }
 
@@ -92,6 +95,7 @@ def _model_subjects(config: Config, backend: Backend) -> list[Subject]:
         ("asr", load_all_asr_manifests()),
         ("align", load_all_align_manifests()),
         ("image", load_all_image_manifests()),
+        ("segment", load_all_segment_manifests()),
     ):
         for manifest in loaded.values():
             if manifest.supports(backend.kind):
@@ -403,6 +407,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_align_manifests(),
                 *load_all_image_manifests(),
                 *load_all_audio_manifests(),
+                *load_all_segment_manifests(),
                 *load_all_video_manifests(),
             }
         ),
@@ -434,6 +439,7 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
             load_all_align_manifests,
             load_all_image_manifests,
             load_all_audio_manifests,
+            load_all_segment_manifests,
             load_all_video_manifests,
         )
     if kind == "voice":

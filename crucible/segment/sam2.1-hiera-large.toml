@@ -1,0 +1,44 @@
+[model]
+id = "sam2.1-hiera-large"
+family = "sam2.1"
+display = "SAM 2.1 Hiera Large"
+kind = "select"
+licence = "Apache-2.0: the model card at the pinned revision declares `license: apache-2.0`; the Hugging Face repo carries no LICENSE file, and Meta's code repo (facebookresearch/sam2) carries the Apache 2.0 text"
+licence_url = "https://github.com/facebookresearch/sam2/blob/main/LICENSE"
+commercial_use = "free, commercial use included, under the Apache 2.0 terms (keep the licence and notices; no trademark grant)"
+
+[backends.cuda-linux]
+engine = "sam2"
+hf_repo = "facebook/sam2.1-hiera-large"
+revision = "665f8e2ad61cf5f53d65644ff27c8ee525124610"
+dtype = "float32"
+memory_bytes_estimate = 4000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files, not measured through Crucible: model.safetensors is 898 MB of float32 weights (224 M parameters, the transformers-format copy Meta added at this revision), run in float32. Every picture is resized to 1024x1024 for the Hiera image encoder, whose windowed attention keeps the activations to a few hundred MB, and the mask decoder is small; the upscaled masks are made on the CPU. 4 GB leaves the CUDA context and allocator slack, and it is also this worker's hard cap on the card"
+files = [
+  "config.json",
+  "model.safetensors",
+  "preprocessor_config.json",
+  "processor_config.json",
+  "video_preprocessor_config.json",
+]
+working_side = 1024
+max_pixels = 40000000
+
+[backends.mlx-darwin]
+engine = "sam2"
+hf_repo = "facebook/sam2.1-hiera-large"
+revision = "665f8e2ad61cf5f53d65644ff27c8ee525124610"
+dtype = "float32"
+memory_bytes_estimate = 6000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files, not measured through Crucible: the same 898 MB of float32 weights on Metal (MPS), the 1024x1024 encoder pass in float32, the torch process and the full-size masks upscaled on the CPU, all in the one unified pool; 6 GB is the CUDA figure plus the Metal driver's own slack"
+files = [
+  "config.json",
+  "model.safetensors",
+  "preprocessor_config.json",
+  "processor_config.json",
+  "video_preprocessor_config.json",
+]
+working_side = 1024
+max_pixels = 40000000

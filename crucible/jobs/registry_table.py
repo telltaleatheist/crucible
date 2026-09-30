@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..jobtypes import JOB_TYPE_SPECS
-from . import align, asr, audio, denoise, echo, image, llm, rvc, tts, video
+from . import align, asr, audio, denoise, echo, image, llm, rvc, segment, tts, video
 from .alignlongform import jobtype as alignlongform
 from .binding import JobTypeBinding
 
@@ -16,6 +16,7 @@ REGISTRY_TABLE: tuple[JobTypeBinding, ...] = (
     *denoise.JOB_TYPES,
     *image.JOB_TYPES,
     *audio.JOB_TYPES,
+    *segment.JOB_TYPES,
     *video.JOB_TYPES,
 )
 

@@ -35,7 +35,9 @@ model.
 | `steps` | 40 | 1 to 100; fewer is faster and rougher |
 | `guidance` | 1.0 | 1.0 to 10.0; above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt` |
 | `negative_prompt` | none | only with `guidance` above 1.0 |
-| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))`. Useful range 0.03 to 0.3; see Image-to-image below |
+| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))`. Useful range 0.03 to 0.3; see Image-to-image below. With `mask` it is optional and applies to the masked region only |
+| `mask` | none | inpainting and outpainting: the name of the input that carries the mask, for example `"mask.png"`. The job then carries exactly two inputs, the image and the mask; see Inpainting and outpainting below |
+| `mask_blur` | 8 when `mask` is sent | 0 to 256 pixels, only with `mask` (`invalid_params` without one): how far inside the mask's edge the new picture fades into the kept one. Nothing outside the mask ever changes |
 | `lease` | none | `{"act": "image", "ttl_seconds": 30..3600}`: hold the model on the card from the moment it is loaded, for a batch (below). `act` must be `image` (`lease_act_mismatch`); an unknown act is `unknown_act`, a ttl out of range `invalid_ttl` |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
@@ -43,8 +45,9 @@ Unknown params are refused, never ignored. Every refusal names the param and wha
 ## Image-to-image
 
 Send one picture as an input and `image_strength` with a new prompt, and the model redraws
-the picture toward the prompt. The whole picture is redrawn: there is no mask, no selected
-region, no extending past the edges, and no instructions like "remove the lamp".
+the picture toward the prompt. The whole picture is redrawn. To redraw one region, or to extend
+the picture past its edges, send a mask as well (Inpainting and outpainting, below). The model
+does not take instructions like "remove the lamp": describe the picture you want instead.
 
 ```json
 {"type": "image",
@@ -73,6 +76,79 @@ Put the whole scene in the prompt, not only what should change. Keep the width a
 the input's aspect ratio: the input is stretched to fit. The PC and the Mac agree on how
 strength behaves, but, as with text-to-image, one seed gives different pictures on each.
 
+## Inpainting and outpainting
+
+Send a picture, a mask and a prompt, and only the region the mask marks is regenerated. Every
+pixel outside the mask comes back exactly as it was sent. This works like Photoshop's Generative
+Fill: select a region, then describe the picture you want.
+
+```json
+{"type": "image",
+ "model": "qwen-image-2.1",
+ "params": {"prompt": "An ordinary documentary photograph of a kitchen table with a blue ceramic vase of white tulips on it, natural window light, muted colours. No text.",
+            "width": 1024, "height": 768, "steps": 40, "seed": 3,
+            "mask": "mask.png"},
+ "inputs": {"photo.png": {"inline_base64": "…"},
+            "mask.png": {"inline_base64": "…"}}}
+```
+
+- **The mask** is a picture exactly the size of the image (`mask_size_mismatch` names both
+  sizes otherwise). It is read as grey: 128 and brighter is regenerated, darker is kept. Paint
+  white on black. An 8-bit grey PNG with 255 for the selection (what a `segment` job returns)
+  works as it is. Transparency is ignored. PNG is best; JPEG and WebP are read too. A mask with
+  no white is refused `mask_empty`.
+- **Name the mask input in `mask`.** The other input is the image, whatever its name. A job
+  with `mask` carries exactly those two inputs (`invalid_inputs` otherwise, naming what it
+  found).
+- **Send the image at its own size.** `width` and `height` are the size of the result, and the
+  image and mask are stretched to them. Pixels come back exactly as sent only when width x
+  height is the image's own size, so the canvas must follow the size rules above: a multiple
+  of 16 (32 on the CUDA arm), and at most 1,048,576 pixels. Resize or pad the canvas in the
+  app first if it does not.
+- **`image_strength` is optional.** Leave it out, and the masked region starts from pure noise:
+  new content, drawn to fit what surrounds it. Use this to add, replace or remove something.
+  Send it, and the masked region starts from the image at that strength, on the same curve as
+  image-to-image (0.03 to 0.3). Use this to change how a region looks while keeping its layout.
+- **`mask_blur`** (default 8 pixels) is how far inside the mask's edge the new pixels fade into
+  the old ones. `0` gives a hard edge. Use a larger value (24 to 64) for soft areas like sky.
+  Make a selection a little larger than the object (8 to 16 pixels), so the fade lands on
+  background rather than on the object's edge.
+- **Describe the whole picture**, including what is new, not only what goes in the region.
+
+How it works: both arms denoise the whole picture, but after every step everything outside the
+mask is replaced by the original, noised to that step. The new region is drawn to fit the
+original instead of beside it. The mask is widened to the model's 16-pixel grid for this, and
+at the end the original pixels are pasted back outside the mask (with the `mask_blur` fade just
+inside its edge). The time and memory are those of a picture of the same size, plus one VAE
+encode of the input, the same as image-to-image.
+
+### Outpainting
+
+To extend a picture past its edges, the app makes the canvas bigger and masks the new border:
+
+1. Make the larger canvas and put the picture where it belongs in it. For example, a 768x768
+   photo centred on a 1024x768 canvas leaves a 128-pixel strip at each side.
+2. Fill the new strips with the picture's own edge pixels stretched outward (edge replicate).
+   A flat mid-grey also works. Without `image_strength` the fill is replaced entirely, so it
+   hardly matters. Avoid black or transparency if you send `image_strength`, because the
+   region then starts from what you filled it with.
+3. Make the mask the canvas size: white over the new strips, black over the photo. Let the white
+   reach 8 to 16 pixels into the photo so the seam falls inside the fade.
+4. Send the canvas as the image, the mask, and a prompt describing the whole wider scene:
+
+```json
+{"type": "image",
+ "model": "qwen-image-2.1",
+ "params": {"prompt": "A wide documentary photograph of a mountain lake at dawn, pine forest on both shores, mist on the water. No text.",
+            "width": 1024, "height": 768, "steps": 40, "seed": 5,
+            "mask": "border.png", "mask_blur": 16},
+ "inputs": {"canvas.png": {"inline_base64": "…"},
+            "border.png": {"inline_base64": "…"}}}
+```
+
+Extend a picture a strip at a time (a quarter of the width or less). A narrow strip has a lot
+of original around it to match, and a very wide one is close to making a new picture.
+
 ## The result
 
 The job publishes one artifact, `image.png`. Its `done` event carries `image`, the effective
@@ -85,6 +161,7 @@ parameters, so a picture can be made again:
            "backend": "mlx-darwin", "engine": "mflux", "dtype": "bfloat16",
            "prompt": "…", "negative_prompt": null, "width": 1024, "height": 1024,
            "seed": 1, "steps": 2, "guidance": 1.0, "image_strength": null, "input": null,
+           "mask": null, "mask_blur": null, "mask_coverage": null,
            "seconds": 28.83,
            "stage_seconds": {"encoding": 3.89, "denoising": 16.29, "decoding": 8.56, "saving": 0.08},
            "peak_bytes": 16441695780,
@@ -96,6 +173,9 @@ parameters, so a picture can be made again:
 ```
 
 `lease_id` is the lease the job opened or renewed when it was sent `lease`, else `null`.
+`input` is the image input's name, `mask` the mask input's, `mask_blur` the fade used, and
+`mask_coverage` the share of the picture the mask selected (0 to 1). The last three are `null`
+without a mask.
 `prompt_cache` is `"hit"` when this prompt (and negative prompt) was encoded by an earlier
 picture on the same loaded model, so the text encoder was skipped, else `"miss"`.
 

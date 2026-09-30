@@ -207,6 +207,7 @@ def check_config(host: Host) -> Section:
             f"enable_{job_type}": getattr(config, f"enable_{job_type}")
             for job_type in (
                 "echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image", "audio",
+                "segment",
                 "video",
             )
         },

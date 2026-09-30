@@ -21,6 +21,15 @@ def _load_real_worker():
 
 worker = _load_real_worker()
 
+# The mask code imports numpy and Pillow on first use, which in the real worker is after
+# workerio.serve's stdin thread is blocked in a read. On Windows, where only this fake runs,
+# loading numpy's DLLs then hangs on the busy stdin handle (the real engines run on Linux and
+# macOS only), so the fake imports them before serving.
+import numpy  # noqa: E402,F401
+import PIL.Image  # noqa: E402,F401
+import PIL.ImageFilter  # noqa: E402,F401
+import PIL.ImageOps  # noqa: E402,F401
+
 
 def _chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -62,7 +71,18 @@ class FakeEngine:
 
     def generate(self, job, progress, cached):
         encodes = cached is None
-        _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "encoded": encodes})
+        _transcribe(
+            {
+                "op": "generate",
+                "request_id": job.request_id,
+                "seed": job.seed,
+                "encoded": encodes,
+                "image_strength": job.image_strength,
+                "start_step": job.start_step,
+                "mask_blur": job.mask_blur,
+                "masked": job.mask is not None,
+            }
+        )
         pause = float(os.environ.get("CRUCIBLE_FAKE_IMAGE_STEP_S") or 0)
         encode_pause = float(os.environ.get("CRUCIBLE_FAKE_IMAGE_ENCODE_S") or 0)
         progress.enter("encoding")
@@ -74,7 +94,16 @@ class FakeEngine:
             time.sleep(pause)
             progress.stepped()
         progress.enter("decoding")
-        return TinyPng(job.width, job.height), {"encoding": 3, "denoising": 5, "decoding": 2}, cached
+        return _made(job), {"encoding": 3, "denoising": 5, "decoding": 2}, cached
+
+
+def _made(job):
+    """A masked job gets a solid blue picture, so the paste-back can be seen in the artifact."""
+    if job.mask is None:
+        return TinyPng(job.width, job.height)
+    from PIL import Image
+
+    return Image.new("RGB", (job.width, job.height), (0, 0, 255))
 
 
 worker.ENGINES["mflux"] = FakeEngine

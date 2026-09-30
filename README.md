@@ -929,6 +929,28 @@ crucible models pull stable-audio-3-small-sfx # gated: accept the licence on Hug
  "params": {"prompt": "TrackType: SFX. A heavy oak door creaks open slowly, close mic", "duration_s": 4}}
 ```
 
+### `segment`
+
+Masks for apps (`docs/SEGMENT.md`, `docs/internals/segment.md`): BiRefNet cuts the main subject
+out of a picture by itself, SAM 2.1 Hiera Large selects the object under the caller's points or
+inside a box, both on a CUDA card and on the Mac (Metal). One picture in; `mask.png` (8-bit, 255 =
+selected) and `cutout.png` (the picture with the mask as alpha) out, at the input's size, and
+`done.segment` carries every effective parameter.
+
+```bash
+crucible init --enable-segment
+crucible install segment                # one env for both models
+crucible models pull birefnet
+crucible models pull sam2.1-hiera-large
+```
+
+```json
+{"type": "segment",
+ "model": "sam2.1-hiera-large",
+ "params": {"points": [{"x": 412, "y": 300, "label": 1}]},
+ "inputs": {"photo.jpg": {"inline_base64": "…"}}}
+```
+
 ### `video`
 
 Video clips with synchronized sound (`docs/VIDEO.md`, `docs/internals/video.md`): LTX-2.5

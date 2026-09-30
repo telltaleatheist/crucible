@@ -35,10 +35,10 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
 
 ## Backends
 
-| backend | engine | weights | size multiple | image-to-image |
-| --- | --- | --- | --- | --- |
-| `mlx-darwin` | mflux 0.20.0 (`QwenImage21`, MLX) | `Qwen/Qwen-Image-2.1` bf16 | 16 | yes (`image_strength`) |
-| `cuda-linux` | diffusers at `5ff8e59f` (`QwenImage21Pipeline`) | the same repo and revision, bf16 | 32 | not yet |
+| backend | engine | weights | size multiple | image-to-image | inpaint |
+| --- | --- | --- | --- | --- | --- |
+| `mlx-darwin` | mflux 0.20.0 (`QwenImage21`, MLX) | `Qwen/Qwen-Image-2.1` bf16 | 16 | yes (`image_strength`) | yes (`mask`) |
+| `cuda-linux` | diffusers at `5ff8e59f` (`QwenImage21Pipeline`) | the same repo and revision, bf16 | 32 | yes (`image_strength`) | yes (`mask`) |
 
 Windows (`llama-windows`) is never an image backend: the class answers the one `NEEDS_WSL`
 sentence there, and `crucible install image` refuses it `needs_wsl`.
@@ -58,6 +58,8 @@ sentence there, and `crucible install image` refuses it `needs_wsl`.
   resolution shift and terminal stretch are per-sigma, so the tail shifts to the tail of the
   full schedule), and blends input and seeded noise at the first shifted sigma, read from a
   copy of the scheduler set the same way. Both blocks say `image_to_image = true`.
+- **Inpainting.** Below, in its own section. Both blocks say `inpaint = true`, a required key
+  like `image_to_image`; an arm without it refuses `mask` with `inpaint_unsupported`.
 - **Guidance.** Both pipelines sample Qwen-Image 2.1 without guidance (1.0). A negative prompt
   is read only when guidance is above 1.0, and guidance above 1.0 does nothing without a
   negative prompt, so each without the other is refused (`invalid_params`) rather than
@@ -266,6 +268,93 @@ not. The embeddings it produces are small, so `worker.py` keeps them:
 - **Not measured on hardware.** The saving (the whole encoder stage on a hit) is shown by the
   fake worker's stage report only; a PC run of two same-prompt pictures is owed, and must go
   through the installed Crucible, never a scratch worker beside it.
+
+## Inpainting and outpainting (`mask`)
+
+Owen, 2026-09-29: Crucible supplies the tools and the apps build the features. ContentStudio
+lets a user brush or lasso a region, or takes a mask from a `segment` job, and regenerates only
+that region from a prompt; outpainting is the app padding the canvas and masking the border.
+Cropping, running image-to-image and compositing in the app leaves seams, so the image job
+takes the mask itself.
+
+**The request.** `params.mask` names the input that carries the mask. The job then carries
+exactly two inputs, the mask and the image (the other one, whatever its name). A one-input
+`image_strength` request, which apps already send, is unchanged. `image_strength` is optional
+with a mask. Without it the job starts at step 0 (sigma 1, pure noise), which regenerates the
+region fully: that is the usual inpainting and the default. With it the job starts at mflux's
+`init_time_step` as image-to-image does, so a region can be restyled while it keeps its layout.
+`mask_blur` (0 to 256, default 8 with a mask) is refused without `mask`.
+
+**Refusals, before the model loads where possible.** `input_pictures` in `jobs/image/__init__.py`
+checks at run time, before `_worker` loads anything: the named input is there
+(`invalid_inputs`), there are exactly two inputs, both are PNG, JPEG or WebP, and the two
+headers give the same size (`mask_size_mismatch`, from `inpaint.picture_size`, a plain-Python
+header reader, since the controller has no Pillow). The worker checks the size again after
+applying EXIF orientation, and refuses a mask that selects nothing (`mask_empty`). It cannot
+know that without decoding the pixels. A refusal from the worker is a `result` carrying
+`refused: {code, message}` followed by `done`, not an exception, so the loaded model survives.
+The controller raises it as a `JobError` with that code.
+
+**Shared code, `jobs/image/inpaint.py`** (numpy and Pillow, loaded beside the worker with
+`workerio.load_sibling`):
+
+- `region_of`: the mask as grey, stretched to width x height (bilinear), 128 and up is the
+  region.
+- `feathered`: the paste-back weight, `clip(2 * gaussian(region, blur / 2) - 1, 0, 1) * region`.
+  It is 1 deep inside, falls to 0 at the edge over about `mask_blur` pixels, and is exactly 0
+  outside, so a kept pixel is never touched (the fade is inward, unlike diffusers'
+  `blur_factor`, which is centred on the edge and would change kept pixels).
+- `latent_grid`: the region on the latent grid by max over each 16x16 tile (2.1's VAE scale
+  factor is 16 and its latents are unpatched). This is max, not diffusers' nearest
+  `interpolate`, so a thin stroke still reaches its latent. `packed` flattens it row-major to
+  `(1, h*w, 1)`, the layout both engines pack 2.1 latents in (diffusers' `_pack_latents` is
+  `view(B, C, H*W).transpose(1, 2)`; mflux's `Qwen21LatentCreator.pack_latents` transposes to
+  channels-last and reshapes). A test checks both.
+- `blend_step(latents, clean, noise, mask, sigma)`:
+  `mask * latents + (1 - mask) * ((1 - sigma) * clean + sigma * noise)`. It is plain arithmetic,
+  so it works on torch tensors, MLX arrays and numpy.
+- `paste_back`: `feather * generated + (1 - feather) * original`, with the original
+  EXIF-oriented, RGB and stretched to the job's size. It runs in the worker's `_run` for both
+  engines, inside the `saving` stage.
+
+**CUDA (diffusers).** The loop is `QwenImageInpaintPipeline`'s (`pipelines/qwenimage/
+pipeline_qwenimage_inpaint.py` at `5ff8e59f`): after `scheduler.step`, the input latents are
+noised with `scheduler.scale_noise` to the next timestep and blended in with
+`(1 - init_mask) * init_latents_proper + init_mask * latents`. Under `set_begin_index(0)`,
+`scale_noise` reads `sigmas[step_index]`, and after step `i` that is `sigmas[i + 1]`, the
+appended 0 after the last step. `QwenImage21Pipeline` is not forked: `callback_on_step_end`
+receives `latents` after the scheduler step and the pipeline reads them back
+(`callback_outputs.pop("latents", latents)`), so `_DiffusersRepaint` reads
+`pipeline.scheduler.sigmas[index + 1]` and returns the blend. The clean latents and the noise
+are the ones `_encode_start_image` and `_start_schedule` already made for image-to-image
+(`_start_schedule` now also returns the noise and starts at `Job.start_step`, 0 without a
+strength). The start image is now EXIF-oriented before encoding, as mflux does.
+
+**Mac (mflux 0.20.0).** mflux has no inpainting for Qwen-Image 2.1. Its fill (`flux/variants/
+fill`) is the separate FLUX.1 Fill model, and `Config.masked_image_path` is read only by that
+model. Its `QwenImage21.generate_image` loop calls `ctx.in_loop(t, latents)` after each
+`scheduler.step` and reads nothing back. MLX item assignment updates an array in place, and
+every name bound to it sees the change (MLX's indexing docs, "In Place Updates"). So
+`_MfluxRepaint` writes the blend into `latents[...]` from `call_in_loop`, and the next step and
+the worker's `mx.eval(latents)` read it. The sigma is `config.scheduler.sigmas[t + 1]`
+(`LinearScheduler`'s shifted schedule, with a 0 appended). The clean latents are built as
+mflux's own image-to-image builds them (`LatentCreator.encode_image`, then
+`Qwen21LatentCreator.pack_latents`) during the encoding stage. The noise is
+`Qwen21LatentCreator.create_noise(seed, ...)`, the same array `generate_image` starts from. With
+a mask and no strength the worker passes `image_path=None`, so mflux starts from that noise.
+With a strength, mflux encodes the input a second time for its own start.
+
+**Owed on hardware.** This was built and tested with fake engines only. Owed on each machine,
+through the installed Crucible: one inpaint (a centre box, no strength) and one outpaint (a
+1024x768 canvas from a centred 768x768) at 512 to 1024 pixels, checking by eye that the region
+fits its surroundings with no seam and that the pixels outside the mask match the input
+(`done.image.mask_coverage` is reported). Then one masked job at 1,048,576 pixels, reading
+`stage_peak_bytes`: the extra VAE encode runs in the encoding stage on the Mac (in the
+transformer stage's setup on the PC, before the transformer loads), and neither was measured.
+On the Mac, the one thing that can break is the in-place write: if an MLX release stopped
+updating the caller's array, the region would be drawn without regard to its surroundings (the
+paste-back would still keep the outside exact, but there would be a seam at the edge). The
+check is the seam.
 
 ## Cancel between steps
 

@@ -16,6 +16,7 @@ from crucible.asrmodels import load_all_asr_manifests
 from crucible.errors import CrucibleError
 from crucible.manifests import load_all_manifests
 from crucible.rvcmodels import load_all_rvc_manifests
+from crucible.segmentmodels import load_all_segment_manifests
 from crucible.voicecatalog import load_all_voices
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -90,6 +91,8 @@ def test_the_model_rows_are_the_three_manifest_directories(
         **{m.id: "image" for m in load_all_image_manifests().values()
            if m.supports(FAKE_BACKEND.kind)},
         **{m.id: "audio" for m in load_all_audio_manifests().values()
+           if m.supports(FAKE_BACKEND.kind)},
+        **{m.id: "segment" for m in load_all_segment_manifests().values()
            if m.supports(FAKE_BACKEND.kind)},
         **{m.id: "video" for m in load_all_video_manifests().values()
            if m.supports(FAKE_BACKEND.kind)},
@@ -195,7 +198,8 @@ def _supports(kind: str, subject_id: str, backend_kind: str) -> bool:
     if kind == "model":
         for loader in (load_all_manifests, load_all_asr_manifests,
                        load_all_align_manifests, load_all_image_manifests,
-                       load_all_audio_manifests, load_all_video_manifests):
+                       load_all_audio_manifests, load_all_segment_manifests,
+                       load_all_video_manifests):
             found = loader().get(subject_id)
             if found is not None:
                 return found.supports(backend_kind)

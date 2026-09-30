@@ -5,6 +5,7 @@ export {
   readAudioResult,
   readImageResult,
   readRenderResult,
+  readSegmentResult,
   readVideoResult,
 } from './client.js';
 export type {
@@ -120,6 +121,9 @@ export type {
   ImageResult,
   AudioOptions,
   AudioResult,
+  SegmentOptions,
+  SegmentPoint,
+  SegmentResult,
   VideoOptions,
   VideoResult,
   AlignWindow,
@@ -178,6 +182,7 @@ export type {
   LeaseOnLoad,
   LoadImageOptions,
   LoadAudioOptions,
+  LoadSegmentOptions,
   LoadVideoOptions,
   LoadModelOptions,
   LoadVoiceOptions,

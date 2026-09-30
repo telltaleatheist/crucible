@@ -76,7 +76,11 @@ WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
     ("rvc", MLX_DARWIN): "ultimate-rvc",
     ("image", CUDA_LINUX): "diffusers",
     ("image", MLX_DARWIN): "mflux",
+    ("segment", CUDA_LINUX): "transformers",
+    ("segment", MLX_DARWIN): "transformers",
 }
+
+SEGMENT_SMOKE_IMPORT = "transformers.models.sam2, timm, kornia, einops, torchvision"
 
 JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
     env.name: tuple(family.name for family in FAMILIES if family.env == env)
@@ -109,6 +113,10 @@ SMOKE_IMPORT: dict[str, dict[str, str]] = {
             if worker == job_type
         }
         for job_type in WORKER_JOB_TYPES
+    },
+    "segment": {
+        CUDA_LINUX: SEGMENT_SMOKE_IMPORT,
+        MLX_DARWIN: SEGMENT_SMOKE_IMPORT,
     },
     "tts-higgs-v3": {CUDA_LINUX: NARRATOR_PACKAGE},
     "tts": {MLX_DARWIN: NARRATOR_PACKAGE},

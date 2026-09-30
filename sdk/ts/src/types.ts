@@ -1321,9 +1321,17 @@ export interface ImageOptions {
   readonly seed?: number;
   readonly steps?: number;
   readonly guidance?: number;
+  /** Image-to-image: how much of the input survives, 0 to 1 exclusive (higher keeps more). With `mask`, optional: left out, the masked region is regenerated from scratch. */
   readonly imageStrength?: number | null;
   readonly image?: JobInput | null;
+  /** The input name the picture is sent under; default `input.png`. */
   readonly imageName?: string;
+  /** Inpainting and outpainting: a picture the size of `image`, white where to regenerate, black where to keep. Needs `image`. */
+  readonly mask?: JobInput | null;
+  /** The input name the mask is sent under (it becomes `params.mask`); default `mask.png`. */
+  readonly maskName?: string;
+  /** How many pixels inside the mask's edge the new picture fades into the kept one; 0 to 256, the server's default 8. Only with `mask`. */
+  readonly maskBlur?: number;
   /** Hold the model from the moment it is loaded, for a batch; `act` must be `image`. */
   readonly lease?: LeaseOnLoad;
 }
@@ -1351,6 +1359,12 @@ export interface ImageResult {
   readonly guidance: number;
   readonly imageStrength: number | null;
   readonly input: string | null;
+  /** The mask input's name for an inpainting job, else null (and null from a server without masks). */
+  readonly mask: string | null;
+  /** The feather the mask was pasted back with, in pixels; null without a mask. */
+  readonly maskBlur: number | null;
+  /** The share of the picture the mask selected, 0 to 1; null without a mask. */
+  readonly maskCoverage: number | null;
   readonly seconds: number | null;
   readonly stageSeconds: Readonly<Record<string, number>>;
   readonly peakBytes: number | null;
@@ -1410,6 +1424,75 @@ export interface AudioResult {
   readonly audioSeconds: number | null;
   readonly sampleRate: number | null;
   readonly channels: number | null;
+  readonly seconds: number | null;
+  readonly stageSeconds: Readonly<Record<string, number>>;
+  readonly peakBytes: number | null;
+  readonly stagePeakBytes: Readonly<Record<string, number>>;
+  readonly memoryBytesEstimate: number;
+  readonly memoryBasis: string;
+  readonly artifacts: readonly string[];
+  /** The lease this job opened or renewed from `lease`, else null. */
+  readonly leaseId: string | null;
+}
+
+/** One click for a `select` model, in the input's own pixels from its top-left corner. */
+export interface SegmentPoint {
+  readonly x: number;
+  readonly y: number;
+  /** 1 keeps what is under the point; 0 leaves it out. */
+  readonly label: 0 | 1;
+}
+
+/**
+ * What a `segment` job cuts out of one picture. `birefnet` (class `cutout`) finds the main
+ * subject by itself and takes no `points` or `box`; `sam2.1-hiera-large` (class `select`) needs
+ * `points`, `box` or both.
+ */
+export interface SegmentOptions {
+  readonly model: string;
+  /** The picture: a PNG, JPEG or WebP, inline, an uploaded blob, or another job's artifact. */
+  readonly image: JobInput;
+  /** The input's name on the job (and in `SegmentResult.input`); default `input.png`. */
+  readonly imageName?: string;
+  readonly points?: readonly SegmentPoint[];
+  /** `[x0, y0, x1, y1]` in input pixels, top-left corner first. */
+  readonly box?: readonly [number, number, number, number];
+  /** Hold the model from the moment it is loaded; `act` is the model's class: `cutout` or `select`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** Options for {@link CrucibleClient.loadSegment}. */
+export interface LoadSegmentOptions {
+  /** Hold the model from the moment it is loaded; `act` is the model's class: `cutout` or `select`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** A `segment` job's effective parameters and measurements, read by {@link readSegmentResult}. */
+export interface SegmentResult {
+  readonly model: string;
+  readonly kind: 'cutout' | 'select';
+  readonly hfRepo: string;
+  readonly revision: string;
+  readonly backend: string;
+  readonly engine: string;
+  readonly dtype: string;
+  /** The input's name on the job. */
+  readonly input: string;
+  /** The input's size, which is also the mask's and the cutout's. */
+  readonly width: number;
+  readonly height: number;
+  readonly points: readonly SegmentPoint[] | null;
+  readonly box: readonly number[] | null;
+  /** `mask.png`: 8-bit greyscale, 255 selected, 0 not. */
+  readonly mask: string;
+  /** `cutout.png`: the input as RGBA with the mask as its alpha. */
+  readonly cutout: string;
+  /** SAM's predicted IoU of the mask it returned, 0 to 1; null for a `cutout` model. */
+  readonly score: number | null;
+  /** True when one point and no box made SAM choose the best of three; null for a `cutout` model. */
+  readonly multimask: boolean | null;
+  /** The mask's mean, 0 to 1: the share of the picture selected. Near 0 means nothing was found. */
+  readonly coverage: number | null;
   readonly seconds: number | null;
   readonly stageSeconds: Readonly<Record<string, number>>;
   readonly peakBytes: number | null;
