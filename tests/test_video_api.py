@@ -661,3 +661,110 @@ def test_the_desktop_table_fills_defaults_and_ignores_bad_values(tmp_path: Path)
     assert video_job.desktop_environment(None) == {}
     (tmp_path / "plain.toml").write_text("[video_trial]\nmax_frames = 481\n", encoding="utf-8")
     assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "plain.toml")) is None
+
+
+@pytest.fixture(autouse=True)
+def no_gpu_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here reads the machine's real GPU; the ones that want samples script them."""
+    from crucible import gpubusy
+
+    monkeypatch.setattr(gpubusy, "reader_for", lambda backend_kind: (None, None))
+
+
+def _scripted_probe(monkeypatch: pytest.MonkeyPatch, values: list[float | None]) -> None:
+    from crucible import gpubusy
+
+    queue = list(values)
+
+    def read() -> float | None:
+        return queue.pop(0) if queue else values[-1]
+
+    monkeypatch.setattr(gpubusy, "reader_for", lambda backend_kind: (read, "scripted"))
+    monkeypatch.setattr(gpubusy, "INTERVAL_S", 0.01)
+
+
+def test_a_run_without_a_gpu_probe_reports_null_busy_fields_and_still_finishes(
+    mac: TestClient, auth: dict[str, str]
+) -> None:
+    _, events = run_job(mac, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert (video["gpu_busy_mean_pct"], video["gpu_busy_max_pct"], video["gpu_busy_samples"]) == (None, None, 0)
+    assert video["gpu_busy_source"] is None and video["gpu_busy_stages"] == {}
+    assert (video["gpu_busy_target_pct"], video["gpu_busy_target_met"]) == (90.0, None)
+
+
+def test_the_mac_records_gpu_busy_per_stage_and_judges_it_against_the_target(
+    mac: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _scripted_probe(monkeypatch, [60.0, 70.0, 80.0])
+    monkeypatch.setenv("CRUCIBLE_FAKE_VIDEO_STEP_S", "0.03")
+    _, events = run_job(mac, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert video["gpu_busy_samples"] >= 3 and video["gpu_busy_source"] == "scripted"
+    assert video["gpu_busy_max_pct"] == 80.0 and 60.0 <= video["gpu_busy_mean_pct"] <= 80.0
+    assert video["gpu_busy_pinned_samples"] == 0
+    assert "denoising" in video["gpu_busy_stages"]
+    assert video["gpu_busy_stages"]["denoising"]["samples"] >= 1
+    assert (video["gpu_busy_target_pct"], video["gpu_busy_target_met"]) == (90.0, True)
+
+
+def test_a_pinned_gpu_misses_the_target_the_table_sets(
+    mac: TestClient, auth: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _add_to_config(home, "\n[video_desktop]\ngpu_busy_target_pct = 75\n")
+    _scripted_probe(monkeypatch, [100.0])
+    monkeypatch.setenv("CRUCIBLE_FAKE_VIDEO_STEP_S", "0.03")
+    _, events = run_job(mac, auth)
+    video = events[-1]["data"]["video"]
+    assert video["gpu_busy_mean_pct"] == 100.0 and video["gpu_busy_pinned_samples"] == video["gpu_busy_samples"]
+    assert (video["gpu_busy_target_pct"], video["gpu_busy_target_met"]) == (75.0, False)
+
+
+def test_a_probe_that_keeps_failing_gives_up_without_failing_the_job(
+    mac: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible import gpubusy
+
+    calls: list[int] = []
+
+    def broken() -> float:
+        calls.append(1)
+        raise OSError("ioreg vanished")
+
+    monkeypatch.setattr(gpubusy, "reader_for", lambda backend_kind: (broken, "broken"))
+    monkeypatch.setattr(gpubusy, "INTERVAL_S", 0.01)
+    monkeypatch.setenv("CRUCIBLE_FAKE_VIDEO_STEP_S", "0.03")
+    _, events = run_job(mac, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert video["gpu_busy_samples"] == 0 and video["gpu_busy_mean_pct"] is None
+    assert len(calls) == gpubusy.FAILURES_BEFORE_GIVING_UP
+
+
+def test_the_pc_has_no_busy_target_by_default(ready: TestClient, auth: dict[str, str]) -> None:
+    _, events = run_job(ready, auth)
+    video = events[-1]["data"]["video"]
+    assert (video["gpu_busy_target_pct"], video["gpu_busy_target_met"]) == (None, None)
+
+
+def test_the_probes_parse_what_ioreg_and_nvidia_smi_print() -> None:
+    from crucible import gpubusy
+
+    ioreg = (
+        '+-o AGXAcceleratorG13X  <class AGXAcceleratorG13X, id 0x1000003a1, registered>\n'
+        '    {\n'
+        '      "PerformanceStatistics" = {"In use system memory"=123,"Tiler Utilization %"=31,'
+        '"Renderer Utilization %"=44,"Device Utilization %"=57,"Alloc system memory"=9}\n'
+        '    }\n'
+        '+-o AGXAcceleratorG13X  <class AGXAcceleratorG13X>\n'
+        '      "PerformanceStatistics" = {"Device Utilization %"=12}\n'
+    )
+    assert gpubusy.parse_ioreg(ioreg) == 57.0
+    assert gpubusy.parse_ioreg("no accelerator here") is None
+    assert gpubusy.parse_nvidia_smi("97\n") == 97.0
+    assert gpubusy.parse_nvidia_smi("[N/A]\n") is None
+    assert gpubusy.verdict({"gpu_busy_mean_pct": 90.0}, 90.0) is True
+    assert gpubusy.verdict({"gpu_busy_mean_pct": None}, 90.0) is None
+    assert gpubusy.verdict({"gpu_busy_mean_pct": 50.0}, None) is None

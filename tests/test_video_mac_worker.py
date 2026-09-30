@@ -144,7 +144,11 @@ DISTILLED = textwrap.dedent(
             ]])
 
         def _steps(self, stage, steps, dims):
+            from ltx_core_mlx.model.transformer import model as dit
+
             self._tiles(stage)
+            for block in range(2):
+                dit._mx_eval(numpy.zeros(1), numpy.zeros(1))
             on_step = self.stepwise.bind(
                 latent_frames=dims[0], latent_height=dims[1], latent_width=dims[2],
                 decoder_block=self.video_decoder_block, patchifier=self.video_patchifier,
@@ -239,7 +243,18 @@ TILING = textwrap.dedent(
 DESKTOP = {
     "max_tile_tokens": 40, "tile_spatial": 1, "tile_overlap": 0, "dit_eval_every": 1,
     "low_ram": True, "mlx_max_ops_per_buffer": 20, "mlx_max_mb_per_buffer": 40,
+    "gpu_duty_pct": 50,
 }
+
+DIT_MODEL = textwrap.dedent(
+    """
+    evaluated = []
+
+
+    def _mx_eval(*arrays):
+        evaluated.append(len(arrays))
+    """
+)
 
 PLANNED = {
     "twenty seconds at 1280x704, full size": [[61, 22, 40], {}],
@@ -321,8 +336,17 @@ GLUE = textwrap.dedent(
                                 "mlx_cache_limit_bytes": 4000000000,
                                 "desktop": json.loads(sys.argv[5])})
     clip, peaks, extra = desk.generate(job(4, None), videocore.Progress("r4", desk.spans))
+    from ltx_core_mlx.model.transformer import model as dit
+
     report["desktop"] = {"calls": calls[before:], "report": extra["desktop"],
-                         "after": desk._pipe._tile_count, "count": clip.count}
+                         "after": desk._pipe._tile_count, "count": clip.count,
+                         "patched": type(dit._mx_eval).__name__, "evaluated": len(dit.evaluated)}
+    ticks = iter([0.0, 2.0, 10.0, 10.5])
+    slept = []
+    duty = worker.DutyCycle(lambda *a: None, 80, clock=lambda: next(ticks), sleep=slept.append)
+    duty("x")
+    duty("y")
+    report["duty"] = [slept, duty.busy_s, duty.paused_s]
     print(json.dumps(report), file=sys.stderr)
     """
 )
@@ -341,6 +365,8 @@ def _stubs(root: Path) -> None:
         "ltx_core_mlx/model/video_vae/__init__.py": "",
         "ltx_core_mlx/model/video_vae/video_vae.py": VIDEO_VAE,
         "ltx_core_mlx/model/video_vae/tiling.py": TILING,
+        "ltx_core_mlx/model/transformer/__init__.py": "",
+        "ltx_core_mlx/model/transformer/model.py": DIT_MODEL,
     }
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -537,7 +563,14 @@ def test_a_desktop_table_streams_blocks_and_tiles_the_pass_that_needs_it(ran) ->
         "MLX_MAX_OPS_PER_BUFFER": "20", "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1",
     }
     assert said["mlx_cache_limit_bytes"] == 0
+    assert desktop["patched"] == "DutyCycle" and desktop["evaluated"] >= 4
+    assert said["synced_s"] is not None and said["paused_s"] is not None
     assert said["passes"] == [
         {"size": "half", "tiles": [1, 1, 1], "tile_tokens": 24},
         {"size": "full", "tiles": [3, 1, 1], "tile_tokens": 32},
     ]
+
+
+def test_the_duty_cycle_pauses_a_share_of_each_sync(ran) -> None:
+    slept, busy, paused = ran[0]["duty"]
+    assert slept == [0.5, 0.125] and busy == 2.5 and paused == 0.625

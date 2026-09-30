@@ -187,6 +187,43 @@ def tile_config(plan: dict, overlap: int):
     )
 
 
+class DutyCycle:
+    """An mx.eval that, after the GPU finishes, leaves it idle for a share of that time.
+
+    ltx-2-mlx syncs through the module-level `_mx_eval` of
+    ltx_core_mlx/model/transformer/model.py after every Nth transformer block
+    (LTX2_DIT_EVAL_EVERY) and after every block when streaming. The worker replaces that name
+    with this, so each sync is followed by a pause of busy x (100 - duty) / duty: at 85 the
+    GPU is left idle about 15% of the time in short, regular gaps, which is what lets the
+    desktop's own GPU work in and keeps the GPU off 100%. `busy` is the time the eval waited,
+    which is the GPU's time for those blocks less whatever it had already finished.
+    """
+
+    def __init__(self, evaluate, duty_pct: int, clock=None, sleep=None) -> None:
+        import time
+
+        self._evaluate = evaluate
+        self._duty = duty_pct
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        self.busy_s = 0.0
+        self.paused_s = 0.0
+
+    def reset(self) -> None:
+        self.busy_s = 0.0
+        self.paused_s = 0.0
+
+    def __call__(self, *arrays) -> None:
+        started = self._clock()
+        self._evaluate(*arrays)
+        busy = self._clock() - started
+        self.busy_s += busy
+        if self._duty < 100:
+            pause = busy * (100 - self._duty) / self._duty
+            self._sleep(pause)
+            self.paused_s += pause
+
+
 def stepping_pipeline(base):
     """`base` (DistilledPipeline) with the prompt's embeddings handed in.
 
@@ -220,13 +257,14 @@ class StepReport:
     step reported is the step done, and a cancel lands between steps.
     """
 
-    def __init__(self, mx, progress) -> None:
+    def __init__(self, mx, progress, evaluate=None) -> None:
         self._mx = mx
         self._progress = progress
+        self._evaluate = evaluate or mx.eval
 
     def bind(self, **_geometry):
         def on_step(step_index, _steps, video_x0, _sigma) -> None:
-            self._mx.eval(video_x0)
+            self._evaluate(video_x0)
             self._progress.reached(step_index + 1)
 
         return on_step
@@ -261,6 +299,13 @@ class LtxMlxEngine:
             self._model_dir, low_memory=True, low_ram_streaming=low_ram
         )
         self._cache_limit = 0 if low_ram else require(request, "mlx_cache_limit_bytes", int)
+        self._duty = None
+        duty = int(self._desktop.get("gpu_duty_pct", 100)) if self._desktop else 100
+        if duty < 100:
+            from ltx_core_mlx.model.transformer import model as dit
+
+            self._duty = DutyCycle(dit._mx_eval, duty)
+            dit._mx_eval = self._duty
         if not self._pipe._is_25:
             raise RuntimeError(
                 f"{self._model_dir} is not an LTX-2.5 pack (its embedded_config.json does "
@@ -448,6 +493,8 @@ class LtxMlxEngine:
             tile_plan((latent_frames, job.height // 64, job.width // 64), self._desktop),
             tile_plan((latent_frames, job.height // 32, job.width // 32), self._desktop),
         ]
+        if self._duty is not None:
+            self._duty.reset()
         self._release()
         embeds = self._recall(job)
         cache = "miss" if embeds is None else "hit"
@@ -458,7 +505,7 @@ class LtxMlxEngine:
                 peaks["encoding"] = self._close("encoding")
                 self._remember(job, embeds)
             pipe.embeds = embeds
-            pipe.stepwise = StepReport(self._mx, progress)
+            pipe.stepwise = StepReport(self._mx, progress, self._duty)
             images, prepared = self._start_images(job)
             progress.enter("denoising", job.steps)
             self._tile(plans[0])
@@ -521,6 +568,8 @@ class LtxMlxEngine:
             **self._desktop,
             "environment": {name: os.environ.get(name) for name in DESKTOP_ENVIRONMENT},
             "mlx_cache_limit_bytes": self._cache_limit,
+            "synced_s": None if self._duty is None else round(self._duty.busy_s, 2),
+            "paused_s": None if self._duty is None else round(self._duty.paused_s, 2),
             "passes": [{"size": size, **plan} for size, plan in zip(("half", "full"), plans)],
         }
 
