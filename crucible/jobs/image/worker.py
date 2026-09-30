@@ -190,21 +190,23 @@ class MfluxEngine:
             model.prompt_cache.update(cached)
             model.text_encoder = None
         try:
-            repaint = None if job.mask is None else self._repaint(model, job)
-            model.callbacks.register(_MfluxStages(self, model, progress, peaks, encoded, repaint))
-            generated = model.generate_image(
-                seed=job.seed,
-                prompt=job.prompt,
-                negative_prompt=job.negative_prompt,
-                width=job.width,
-                height=job.height,
-                num_inference_steps=job.steps,
-                guidance=job.guidance,
-                image_path=None if job.image_strength is None else job.image_path,
-                image_strength=job.image_strength,
-            )
+            model.callbacks.register(_MfluxStages(self, model, progress, peaks, encoded))
+            if job.mask is None:
+                picture = model.generate_image(
+                    seed=job.seed,
+                    prompt=job.prompt,
+                    negative_prompt=job.negative_prompt,
+                    width=job.width,
+                    height=job.height,
+                    num_inference_steps=job.steps,
+                    guidance=job.guidance,
+                    image_path=job.image_path,
+                    image_strength=job.image_strength,
+                ).image
+            else:
+                picture = _mflux_generate(model, job, self._repaint(model, job))
             peaks["decoding"] = self.peak_bytes()
-            return generated.image, peaks, encoded
+            return picture, peaks, encoded
         finally:
             del model
             self._release()
@@ -232,23 +234,129 @@ class MfluxEngine:
 
 
 class _MfluxRepaint:
-    """The latent blend on mflux, from its in-loop callback.
-
-    mflux 0.20.0's loop (`QwenImage21.generate_image`) hands the callback the latents after
-    each scheduler step and reads nothing back. MLX updates an array in place on item
-    assignment (every name bound to it sees the change: the "In Place Updates" section of
-    MLX's indexing docs), so writing the blend into `latents[...]` is what the next step reads.
-    """
+    """The latent blend on mflux: takes the latents a scheduler step made and returns the
+    ones the next step reads. After the step at `t` they are at `sigmas[t + 1]` (the shifted
+    schedule with a 0 appended, so the last step puts the input back clean)."""
 
     def __init__(self, clean, noise, mask) -> None:
-        self._clean = clean
-        self._noise = noise
-        self._mask = mask
+        self.clean = clean
+        self.noise = noise
+        self.mask = mask
 
-    def __call__(self, latents, step: int, config) -> None:
+    def __call__(self, latents, step: int, config):
         sigma = float(config.scheduler.sigmas[step + 1].item())
-        blended = inpaint.blend_step(latents, self._clean, self._noise, self._mask, sigma)
-        latents[...] = blended.astype(latents.dtype)
+        blended = inpaint.blend_step(latents, self.clean, self.noise, self.mask, sigma)
+        return blended.astype(latents.dtype)
+
+
+def _mflux_denoise(latents, config, predict, ctx, evaluate, blend=None):
+    """The denoising loop of mflux 0.20.0's `QwenImage21.generate_image`, step for step,
+    with the blend applied to the value the loop carries into the next step.
+
+    mflux's own loop hands the in-loop callback its latents and reads nothing back, so a
+    blend there cannot reach the next step (an in-place write did not, on the Mac,
+    2026-09-29). Here the blend's return value is what the next step reads.
+    """
+    for t in config.time_steps:
+        latents = config.scheduler.scale_model_input(latents, t)
+        noise = predict(t, latents)
+        latents = config.scheduler.step(noise=noise, timestep=t, latents=latents)
+        if blend is not None:
+            latents = blend(latents, t, config)
+        ctx.in_loop(t, latents)
+        evaluate(latents)
+    return latents
+
+
+def _mflux_parts():
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+    from mflux.models.common.config import ModelConfig
+    from mflux.models.common.config.config import Config
+    from mflux.models.common.latent_creator.latent_creator import LatentCreator
+    from mflux.models.common.vae.vae_util import VAEUtil
+    from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
+    from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder import Qwen21PromptEncoder
+    from mflux.utils.image_util import ImageUtil
+
+    return SimpleNamespace(
+        mx=mx,
+        ModelConfig=ModelConfig,
+        Config=Config,
+        LatentCreator=LatentCreator,
+        VAEUtil=VAEUtil,
+        Qwen21LatentCreator=Qwen21LatentCreator,
+        Qwen21PromptEncoder=Qwen21PromptEncoder,
+        ImageUtil=ImageUtil,
+    )
+
+
+def _mflux_generate(model, job: Job, blend, parts=None):
+    """mflux 0.20.0's `QwenImage21.generate_image` for a masked job: the same config, start
+    latents, prompt encoding, callbacks, loop and decode, with `blend` inside the loop.
+    Returns the PIL picture. Unmasked jobs still call mflux's own `generate_image`."""
+    parts = parts or _mflux_parts()
+    config = parts.Config(
+        width=job.width,
+        height=job.height,
+        guidance=job.guidance,
+        scheduler="linear",
+        image_path=job.image_path if job.image_strength is not None else None,
+        image_strength=job.image_strength,
+        model_config=model.model_config,
+        num_inference_steps=job.steps,
+    )
+    # LatentCreator.create_for_txt2img_or_img2img, from the clean latents and the noise the
+    # blend already holds (built the same way), so the input is VAE-encoded once
+    if config.init_time_step == 0:
+        latents = blend.noise
+    else:
+        sigma = config.scheduler.sigmas[config.init_time_step]
+        latents = parts.LatentCreator.add_noise_by_interpolation(clean=blend.clean, noise=blend.noise, sigma=sigma)
+    latents = latents.astype(parts.ModelConfig.precision)
+    encode = parts.Qwen21PromptEncoder.encode_prompt
+    prompt_embeds, prompt_mask = encode(
+        prompt=job.prompt,
+        prompt_cache=model.prompt_cache,
+        tokenizer=model.tokenizers["qwen21"],
+        text_encoder=model.text_encoder,
+    )
+    do_true_cfg = config.guidance > 1.0 and bool(job.negative_prompt)
+    if do_true_cfg:
+        negative_embeds, negative_mask = encode(
+            prompt=job.negative_prompt,
+            prompt_cache=model.prompt_cache,
+            tokenizer=model.tokenizers["qwen21"],
+            text_encoder=model.text_encoder,
+        )
+
+    def predict(t, hidden):
+        noise = model.transformer(
+            t=t,
+            config=config,
+            hidden_states=hidden,
+            encoder_hidden_states=prompt_embeds,
+            encoder_hidden_states_mask=prompt_mask,
+        )
+        if do_true_cfg:
+            negative = model.transformer(
+                t=t,
+                config=config,
+                hidden_states=hidden,
+                encoder_hidden_states=negative_embeds,
+                encoder_hidden_states_mask=negative_mask,
+            )
+            noise = negative + config.guidance * (noise - negative)
+        return noise
+
+    ctx = model.callbacks.start(seed=job.seed, prompt=job.prompt, config=config)
+    ctx.before_loop(latents)
+    latents = _mflux_denoise(latents, config, predict, ctx, parts.mx.eval, blend)
+    ctx.after_loop(latents)
+    latents = parts.Qwen21LatentCreator.unpack_latents(latents=latents, height=config.height, width=config.width)
+    decoded = parts.VAEUtil.decode(vae=model.vae, latent=latents, tiling_config=model.tiling_config)
+    return parts.ImageUtil.to_pil(decoded)
 
 
 def _cached_embeddings(model) -> list:
@@ -256,15 +364,12 @@ def _cached_embeddings(model) -> list:
 
 
 class _MfluxStages:
-    def __init__(
-        self, engine: MfluxEngine, model, progress: Progress, peaks: dict, encoded: dict, repaint=None
-    ) -> None:
+    def __init__(self, engine: MfluxEngine, model, progress: Progress, peaks: dict, encoded: dict) -> None:
         self._engine = engine
         self._model = model
         self._progress = progress
         self._peaks = peaks
         self._encoded = encoded
-        self._repaint = repaint
 
     def _close_stage(self, name: str) -> None:
         self._peaks[name] = self._engine.peak_bytes()
@@ -278,9 +383,7 @@ class _MfluxStages:
         self._close_stage("encoding")
         self._progress.enter("denoising")
 
-    def call_in_loop(self, latents, t=None, config=None, **_: object) -> None:
-        if self._repaint is not None:
-            self._repaint(latents, t, config)
+    def call_in_loop(self, latents, **_: object) -> None:
         self._engine._mx.eval(latents)
         self._progress.stepped()
 

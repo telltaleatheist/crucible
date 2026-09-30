@@ -147,7 +147,10 @@ To extend a picture past its edges, the app makes the canvas bigger and masks th
 ```
 
 Extend a picture a strip at a time (a quarter of the width or less). A narrow strip has a lot
-of original around it to match, and a very wide one is close to making a new picture.
+of original around it to match, and a very wide one is close to making a new picture. Busy
+edges such as trees sometimes fail to line up on one side and match on the other, and which
+side fails changes with the seed. If a seam shows, try another seed, or a wider `mask_blur`
+(24 to 32) with the white reaching 24 to 32 pixels into the photo.
 
 ## The result
 
