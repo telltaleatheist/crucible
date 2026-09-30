@@ -578,6 +578,7 @@ def apply(
         advertise=config.advertise,
         tailscale_advertise=resolved.tailscale_advertise,
         lan_advertise=resolved.lan_advertise,
+        open_pairing=config.open_pairing,
     )
     config.adopt(load_config(config.home))
 

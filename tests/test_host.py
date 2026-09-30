@@ -3997,3 +3997,60 @@ def test_a_missing_console_cmd_names_the_install_one_liner_and_a_silent_child_na
     silent = host._start_host_mode(Distro.ABSENT)
     assert silent.engine is Engine.FAILED
     assert str(paths.log_path(env)) in silent.detail
+
+
+def _write_minimal(home: Path, **extra):
+    from crucible.config import write_config
+
+    return write_config(
+        home,
+        name="crucible@box",
+        host="127.0.0.1",
+        port=7100,
+        token="t",
+        backend_kind="cuda-linux",
+        enable_echo=True,
+        enable_llm=False,
+        enable_asr=False,
+        enable_tts=False,
+        enable_align=False,
+        enable_rvc=False,
+        desktop_allowance_bytes=1,
+        enable_denoise=False,
+        retention_days=7,
+        desktop_allowance_basis="stated",
+        desktop_allowance_note="",
+        **extra,
+    )
+
+
+def test_a_rewrite_keeps_the_hf_token_and_any_table_it_does_not_own(tmp_path: Path) -> None:
+    # 2026-09-30: `crucible install video` rewrote the config and dropped [hf], and the
+    # gated LTX-2.5 pull was refused for want of the token that had been there.
+    import tomllib
+
+    path = _write_minimal(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '\n[hf]\ntoken = "hf_x"\n\n[a_table_from_the_future]\nkept = 1\n',
+        encoding="utf-8",
+    )
+    _write_minimal(tmp_path, enable_video=True)
+    document = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert document["hf"] == {"token": "hf_x"}
+    assert document["a_table_from_the_future"] == {"kept": 1}
+    assert document["jobs"]["enable_video"] is True
+
+
+def test_the_capability_rewrite_keeps_local_models_and_open_pairing(tmp_path: Path) -> None:
+    from crucible import capabilitystore
+    from crucible.config import load_config
+
+    from .conftest import FAKE_BACKEND
+
+    _write_minimal(tmp_path, open_pairing=False)
+    before = load_config(tmp_path)
+    capabilitystore.write_capability(before, FAKE_BACKEND, (), {})
+    after = load_config(tmp_path)
+    assert after.open_pairing is False
+    assert after.local_models == before.local_models

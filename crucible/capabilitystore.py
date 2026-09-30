@@ -89,6 +89,8 @@ def write_capability(
         ),
         routes=config.routes,
         upstreams=config.upstreams,
+        local_models=config.local_models,
+        open_pairing=config.open_pairing,
         advertise=config.advertise,
         tailscale_advertise=config.tailscale_advertise,
         lan_advertise=config.lan_advertise,

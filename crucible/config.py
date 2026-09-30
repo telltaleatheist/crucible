@@ -797,6 +797,43 @@ def load_config(
     )
 
 
+WRITER_OWNED_TABLES = frozenset(
+    {
+        "server",
+        "auth",
+        "backend",
+        "jobs",
+        "accelerator",
+        "capability",
+        "routes",
+        "tts",
+        "local_models",
+        "upstreams",
+    }
+)
+
+
+def _unowned_tables(path: Path) -> dict[str, Any]:
+    """Tables in the file on disk that write_config does not produce, kept as they are.
+
+    [hf] token is the one that mattered: every `crucible install <type>` rewrites the
+    config through write_config, and until 1.0.68 that dropped [hf], so the next gated
+    pull (LTX-2.5 on 2026-09-30) was refused for want of a token that had been there.
+    Anything a person or another version added survives the same way.
+    """
+    import tomllib
+
+    try:
+        existing = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return {
+        name: table
+        for name, table in existing.items()
+        if name not in WRITER_OWNED_TABLES and isinstance(table, dict)
+    }
+
+
 def write_config(
     home: Path,
     *,
@@ -911,6 +948,8 @@ def write_config(
             )
             for entry in upstreams
         }
+    for table_name, table in _unowned_tables(path).items():
+        document[table_name] = table
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
