@@ -35,10 +35,43 @@ model.
 | `steps` | 40 | 1 to 100; fewer is faster and rougher |
 | `guidance` | 1.0 | 1.0 to 10.0; above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt` |
 | `negative_prompt` | none | only with `guidance` above 1.0 |
-| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))` |
+| `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))`. Useful range 0.03 to 0.3; see Image-to-image below |
 | `lease` | none | `{"act": "image", "ttl_seconds": 30..3600}`: hold the model on the card from the moment it is loaded, for a batch (below). `act` must be `image` (`lease_act_mismatch`); an unknown act is `unknown_act`, a ttl out of range `invalid_ttl` |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
+
+## Image-to-image
+
+Send one picture as an input and `image_strength` with a new prompt, and the model redraws
+the picture toward the prompt. The whole picture is redrawn: there is no mask, no selected
+region, no extending past the edges, and no instructions like "remove the lamp".
+
+```json
+{"type": "image",
+ "model": "qwen-image-2.1",
+ "params": {"prompt": "A cozy log cabin beside a frozen mountain lake on a snowy winter night, snow on the pine trees, warm light in the windows, stars, photographic. No text.",
+            "width": 768, "height": 768, "steps": 30, "seed": 11, "image_strength": 0.1},
+ "inputs": {"start.png": {"inline_base64": "…"}}}
+```
+
+A higher `image_strength` keeps more of the input. The useful range is narrow and near the
+bottom, because the schedule is front-loaded: most of what a picture becomes is decided in the
+first few steps. Measured on both machines (2026-09-29), a sunny summer cabin sent with the
+winter-night prompt above, 30 steps, 768x768:
+
+| `image_strength` | what came back |
+| --- | --- |
+| 0.05 | a snowy night: new sky, lit windows, snow everywhere; the cabin, trees and framing roughly where they were |
+| 0.3 | the original with a few specks of snow |
+| 0.6 | the original, near enough pixel for pixel |
+
+- **A real change** (new season, time of day, style): 0.03 to 0.15.
+- **A touch-up** (texture, colour, small details): 0.15 to 0.3.
+- **Above 0.3** comes back close to a copy.
+
+Put the whole scene in the prompt, not only what should change. Keep the width and height at
+the input's aspect ratio: the input is stretched to fit. The PC and the Mac agree on how
+strength behaves, but, as with text-to-image, one seed gives different pictures on each.
 
 ## The result
 
