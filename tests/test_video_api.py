@@ -572,3 +572,32 @@ def test_a_fresh_box_without_ffmpeg_still_installs_on_submit(
         error = refusal(submit(client, auth))
     assert error["code"] == "installing", error
     assert "installing the video environment" in error["message"]
+
+
+def test_a_video_trial_table_lifts_the_limits_for_measuring(
+    ready: TestClient, auth: dict[str, str], home: Path, transcript: Path
+) -> None:
+    long_clip = {"prompt": PROMPT, "width": 768, "height": 512, "duration_s": 10}
+    assert refusal(submit(ready, auth, params=long_clip))["code"] == "video_too_long"
+    config = home / "config.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8")
+        + "\n[video_trial]\nmax_frames = 481\nmax_video_tokens = 60000\nsilence_timeout_s = 7200\n",
+        encoding="utf-8",
+    )
+    _, events = run_job(ready, auth, params=long_clip)
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["video"]["num_frames"] == 241
+
+
+def test_the_trial_table_reads_only_positive_limits(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[video_trial]\nmax_side = 1920\nmax_frames = -1\nmax_pixels = "lots"\nsilence_timeout_s = 900\n',
+        encoding="utf-8",
+    )
+    found = video_job.trial_settings(SimpleNamespace(path=config))
+    assert found == {"max_side": 1920, "silence_timeout_s": 900.0}
+    assert video_job.trial_settings(SimpleNamespace(path=tmp_path / "missing.toml")) == {}

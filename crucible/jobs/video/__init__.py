@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -310,6 +310,51 @@ def _require_block(manifest: VideoManifest, model_id: str, backend_kind: str) ->
     return worker_type.require_block(manifest, model_id, backend_kind, "video model")
 
 
+TRIAL_TABLE = "video_trial"
+
+TRIAL_LIMITS = (
+    "max_side",
+    "max_pixels",
+    "max_frames",
+    "max_video_tokens",
+    "max_video_tokens_image_to_video",
+)
+
+
+def trial_settings(config: Config) -> dict[str, Any]:
+    """The operator's [video_trial] table, or {} when it is absent (the default).
+
+    A measurement knob, not a setting: it lifts this machine's declared clip limits so
+    an operator can step up and measure what the hardware really holds, the way the
+    shipped limits were meant to be replaced by measured ones. Admission still books the
+    declared estimate, so the operator owns the memory risk while it is set; remove the
+    table when the measuring is done.
+    """
+    import tomllib
+
+    try:
+        document = tomllib.loads(Path(config.path).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    table = document.get(TRIAL_TABLE)
+    if not isinstance(table, dict):
+        return {}
+    found: dict[str, Any] = {}
+    for key in TRIAL_LIMITS:
+        value = table.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            found[key] = value
+    silence = table.get("silence_timeout_s")
+    if isinstance(silence, (int, float)) and not isinstance(silence, bool) and silence > 0:
+        found["silence_timeout_s"] = float(silence)
+    return found
+
+
+def with_trial(spec: VideoBackendSpec, trial: dict[str, Any]) -> VideoBackendSpec:
+    limits = {key: value for key, value in trial.items() if key in TRIAL_LIMITS}
+    return replace(spec, **limits) if limits else spec
+
+
 class VideoJobType(ResidentWorker):
 
     name = JOB_TYPE
@@ -373,14 +418,16 @@ class VideoJobType(ResidentWorker):
     def loadable(self, model_id: str) -> Needs:
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
-        spec = _require_block(manifest, model_id, backend_kind)
+        spec = with_trial(_require_block(manifest, model_id, backend_kind), trial_settings(self._config))
         worker_type.refuse_if_larger_than_host(self._backend, model_id, spec.memory_bytes_estimate)
         python = require_video_python(self._config, spec, model_id)
         return Needs(manifest, spec, python, require_video_weights(self._config, manifest, spec))
 
     def requirements(self, model_id: str, params: VideoParams) -> Needs:
         manifest = MANIFESTS.known(model_id)
-        spec = _require_block(manifest, model_id, self._backend.kind)
+        spec = with_trial(
+            _require_block(manifest, model_id, self._backend.kind), trial_settings(self._config)
+        )
         settle(params, model_id, spec, 0)
         needs = self.loadable(model_id)
         hosttools.require_ffmpeg(JOB_TYPE, FFMPEG_WHY)
@@ -420,7 +467,9 @@ class VideoJobType(ResidentWorker):
         try:
             outcome = session.send(
                 request,
-                ready_silence_timeout=READY_SILENCE_TIMEOUT_SECONDS,
+                ready_silence_timeout=trial_settings(self._config).get(
+                    "silence_timeout_s", READY_SILENCE_TIMEOUT_SECONDS
+                ),
                 on_progress=_Generation(ctx).progress,
                 cancelled=lambda: ctx.cancelled,
                 cancel_request={"op": "cancel", "request_id": request["request_id"]},

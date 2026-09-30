@@ -465,3 +465,25 @@ owens-mac-studio through the installed Crucible, with nothing else resident:
    image-to-video after the CRF 18 round trip, the sound (48 kHz stereo), and that
    h264_videotoolbox's file plays in a browser with the sound in sync. Check the encoder opens
    from Crucible's launchd session; `-allow_sw 1` falls back to Apple's software encoder if not.
+
+## Measuring past the declared limits: `[video_trial]`
+
+The shipped clip limits are declared, and meant to be replaced by measured ones. To measure,
+an operator adds a `[video_trial]` table to that machine's `config.toml`:
+
+```toml
+[video_trial]
+max_side = 1920
+max_pixels = 2088960
+max_frames = 481
+max_video_tokens = 130000
+max_video_tokens_image_to_video = 60000
+silence_timeout_s = 7200   # a single step at a large size can take longer than the 30-minute default
+```
+
+Any key present and positive replaces the manifest's value on that machine; the rest keep the
+manifest's. Admission still books the declared memory estimate, so while the table is set the
+operator owns the memory risk: step up gradually, read each clip's `stage_peak_bytes`, and
+stop before the extrapolated next step passes what the machine can hold. The table is
+absent by default, survives config rewrites (unowned tables are carried), and should be
+removed when the measuring is done.
