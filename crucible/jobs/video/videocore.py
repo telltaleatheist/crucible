@@ -258,9 +258,11 @@ def mux(ffmpeg: str, clip: Clip, output_path: str) -> str:
         try:
             for frame in clip.frames:
                 process.stdin.write(frame)
-            process.stdin.close()
         except BrokenPipeError:
             pass
+        # communicate() flushes and closes stdin itself. Closing it here first made
+        # CPython's POSIX communicate() raise "flush of closed file" after every stage
+        # of the first real video had finished (PC, 2026-09-30).
         _, said = process.communicate(timeout=MUX_TIMEOUT_SECONDS)
         if process.returncode != 0:
             tail = said.decode("utf-8", "replace").strip()[-600:]

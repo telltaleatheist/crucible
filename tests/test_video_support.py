@@ -328,3 +328,51 @@ def test_the_catalog_lists_the_video_model_on_the_pc_only(home: Path) -> None:
 
 def test_the_desktop_packages_screen_has_words_for_video() -> None:
     assert JOB_TYPE_WORDS["video"][0] == "Video generation"
+
+
+class _PosixLikeProcess:
+    """A Popen stand-in with CPython's POSIX communicate(): it flushes stdin before
+    reading, so a stdin the caller already closed raises "flush of closed file".
+    The first real run on the PC (2026-09-30) died exactly there, after every stage
+    had finished; Windows' communicate() does not flush, so no test here saw it."""
+
+    def __init__(self, command, stdin=None, stderr=None) -> None:
+        import io
+
+        self.command = command
+        self.stdin = io.BytesIO()
+        self.written = b""
+        self.returncode = None
+        output = command[-1]
+        self._output = output
+
+    def communicate(self, timeout=None):
+        if self.stdin is not None:
+            if not self.stdin.closed:
+                self.written = self.stdin.getvalue()
+            self.stdin.flush()
+            self.stdin.close()
+        with open(self._output, "wb") as handle:
+            handle.write(b"\0\0\0\x18ftypisom")
+        self.returncode = 0
+        return None, b""
+
+
+def test_mux_hands_stdin_to_communicate_as_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    videocore = _sibling("videocore")
+    made = []
+
+    def popen(command, **kwargs):
+        made.append(_PosixLikeProcess(command, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(videocore, "pick_encoder", lambda ffmpeg: "libopenh264")
+    monkeypatch.setattr(videocore.subprocess, "Popen", popen)
+    output = tmp_path / "video.mp4"
+    clip = _clip(videocore, b"\0\0" * 2 * 48000)
+    assert videocore.mux("ffmpeg", clip, str(output)) == "libopenh264"
+    assert made[0].written == b"".join(clip.frames)
+    assert output.read_bytes()[4:8] == b"ftyp"
+    assert not (tmp_path / "video.mp4.audio.wav").exists()
