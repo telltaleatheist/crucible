@@ -1365,6 +1365,10 @@ export interface ImageResult {
   readonly maskBlur: number | null;
   /** The share of the picture the mask selected, 0 to 1; null without a mask. */
   readonly maskCoverage: number | null;
+  /** How many denoising steps put the input back outside the mask; null without a mask or from an older server. */
+  readonly maskBlendSteps: number | null;
+  /** Mean absolute difference, 0 to 255, between the model's picture and the input outside the mask before the paste-back: a few units when the blend held; null without a mask or from an older server. */
+  readonly maskOutsideDrift: number | null;
   readonly seconds: number | null;
   readonly stageSeconds: Readonly<Record<string, number>>;
   readonly peakBytes: number | null;

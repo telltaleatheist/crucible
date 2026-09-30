@@ -101,6 +101,7 @@ def _made(job):
     """A masked job gets a solid blue picture, so the paste-back can be seen in the artifact."""
     if job.mask is None:
         return TinyPng(job.width, job.height)
+    job.blend_steps = job.steps - job.start_step
     from PIL import Image
 
     return Image.new("RGB", (job.width, job.height), (0, 0, 255))

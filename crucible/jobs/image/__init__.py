@@ -82,6 +82,8 @@ MAX_GUIDANCE = 10.0
 
 ARTIFACT_NAME = "image.png"
 
+GENERATED_NAME = "generated.png"
+
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
 
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
@@ -617,6 +619,9 @@ class ImageJobType(ResidentWorker):
         if refused:
             raise JobError(str(refused["code"]), str(refused["message"]))
         ctx.artifact(ARTIFACT_NAME, output)
+        generated = output.parent / GENERATED_NAME
+        if pictures.mask is not None and generated.is_file():
+            ctx.artifact(GENERATED_NAME, generated)
         ctx.progress(1.0, f"{result['width']}x{result['height']} image made", stage="done")
         ctx.done_extra(
             image=effective_params(params, seed, needs, result, pictures),
@@ -646,6 +651,8 @@ def effective_params(
         "mask": params.mask,
         "mask_blur": params.effective_mask_blur,
         "mask_coverage": result.get("mask_coverage"),
+        "mask_outside_drift": result.get("mask_outside_drift"),
+        "mask_blend_steps": result.get("mask_blend_steps"),
         "seconds": result.get("seconds"),
         "stage_seconds": result.get("stage_seconds"),
         "peak_bytes": result.get("peak_bytes"),

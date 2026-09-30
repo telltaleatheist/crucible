@@ -20,6 +20,8 @@ inpaint = workerio.load_sibling("inpaint", __file__)
 
 LABEL = "image"
 
+GENERATED_NAME = "generated.png"
+
 WHY_REQUIRED = "every parameter is required because each one changes the picture"
 
 _STATE: dict = {"engine": None}
@@ -138,6 +140,7 @@ class Job:
         self.mask_path = optional(request, "mask_path", str)
         self.mask_blur = optional(request, "mask_blur", int)
         self.mask = None
+        self.blend_steps = None
         self.output_path = require(request, "output_path", str)
         self.revision = require(request, "revision", str)
         self.backend = require(request, "backend", str)
@@ -204,7 +207,9 @@ class MfluxEngine:
                     image_strength=job.image_strength,
                 ).image
             else:
-                picture = _mflux_generate(model, job, self._repaint(model, job))
+                repaint = self._repaint(model, job)
+                picture = _mflux_generate(model, job, repaint)
+                job.blend_steps = repaint.calls
             peaks["decoding"] = self.peak_bytes()
             return picture, peaks, encoded
         finally:
@@ -228,7 +233,13 @@ class MfluxEngine:
         )
         clean = Qwen21LatentCreator.pack_latents(encoded, job.height, job.width)
         noise = Qwen21LatentCreator.create_noise(job.seed, job.height, job.width)
-        mask = mx.array(job.mask.latent).astype(clean.dtype)
+        # the mask packed by mflux's own pack_latents, spread over the channels as the clean
+        # latents are, so its token order is theirs whatever that order is
+        channels = clean.shape[-1]
+        height, width = job.mask.grid.shape
+        spread = mx.broadcast_to(mx.array(job.mask.grid)[None, None], (1, channels, height, width))
+        mask = Qwen21LatentCreator.pack_latents(spread, job.height, job.width, channels)[:, :, :1]
+        mask = mask.astype(clean.dtype)
         mx.eval(clean, noise, mask)
         return _MfluxRepaint(clean, noise, mask)
 
@@ -242,8 +253,10 @@ class _MfluxRepaint:
         self.clean = clean
         self.noise = noise
         self.mask = mask
+        self.calls = 0
 
     def __call__(self, latents, step: int, config):
+        self.calls += 1
         sigma = float(config.scheduler.sigmas[step + 1].item())
         blended = inpaint.blend_step(latents, self.clean, self.noise, self.mask, sigma)
         return blended.astype(latents.dtype)
@@ -561,7 +574,7 @@ class DiffusersEngine:
             return tensors
 
         try:
-            return pipe(
+            made = pipe(
                 **encoded,
                 **start,
                 true_cfg_scale=job.guidance,
@@ -572,6 +585,8 @@ class DiffusersEngine:
                 output_type="latent",
                 callback_on_step_end=on_step,
             ).images
+            job.blend_steps = None if repaint is None else repaint.calls
+            return made
         finally:
             pipe.transformer = None
 
@@ -629,8 +644,10 @@ class _DiffusersRepaint:
         self._clean = clean
         self._noise = noise
         self._mask = mask
+        self.calls = 0
 
     def __call__(self, pipeline, index: int, latents):
+        self.calls += 1
         sigma = float(pipeline.scheduler.sigmas[index + 1])
         blended = inpaint.blend_step(latents, self._clean, self._noise, self._mask, sigma)
         return blended.to(latents.dtype)
@@ -697,7 +714,10 @@ def _run(engine, job: Job) -> dict:
     if cached is None and encoded:
         _PROMPTS.put(job.prompt_key, encoded, engine.nbytes(encoded))
     progress.enter("saving")
+    drift = None
     if job.mask is not None:
+        image.save(os.path.join(os.path.dirname(job.output_path), GENERATED_NAME), format="PNG")
+        drift = inpaint.outside_drift(image, job.mask.original, job.mask.region)
         image = inpaint.paste_back(image, job.mask.original, job.mask.feather)
     image.save(job.output_path, format="PNG")
     width, height = image.size
@@ -712,6 +732,8 @@ def _run(engine, job: Job) -> dict:
         "prompt_cache": "miss" if cached is None else "hit",
         "prompt_cache_bytes": _PROMPTS.bytes,
         "mask_coverage": None if job.mask is None else round(job.mask.coverage, 4),
+        "mask_outside_drift": None if drift is None else round(drift, 2),
+        "mask_blend_steps": job.blend_steps,
     }
 
 

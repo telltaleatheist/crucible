@@ -162,12 +162,36 @@ def paste_back(generated, original, feather):
     return Image.fromarray(np.clip(np.rint(mixed), 0, 255).astype(np.uint8), mode="RGB")
 
 
+def outside_drift(generated, original, region) -> float:
+    """How far the generated picture strayed from the input where the mask keeps it: the mean
+    absolute difference, 0 to 255, over the kept pixels, before the paste-back hides it.
+
+    The last denoising step puts the input's own latents back outside the mask, so a blend
+    that held leaves only the VAE's round trip here (a few units). A picture made without
+    regard to the input differs by tens.
+    """
+    import numpy as np
+    from PIL import Image
+
+    width, height = generated.size
+    source = original.convert("RGB")
+    if source.size != (width, height):
+        source = source.resize((width, height), Image.LANCZOS)
+    kept = region == 0
+    if not kept.any():
+        return 0.0
+    made = np.asarray(generated.convert("RGB"), dtype=np.float32)
+    difference = np.abs(made - np.asarray(source, dtype=np.float32))
+    return float(difference[kept].mean())
+
+
 @dataclass(frozen=True)
 class Mask:
     region: Any
     feather: Any
     latent: Any
     original: Any
+    grid: Any = None
 
     @property
     def coverage(self) -> float:
@@ -190,9 +214,11 @@ def load_mask(mask_path: str, image_path: str, width: int, height: int, blur: in
             "the mask selects nothing (no pixel is 128 or brighter); white marks what to "
             "regenerate, black what to keep",
         )
+    grid = latent_grid(region)
     return Mask(
         region=region,
         feather=feathered(region, blur),
-        latent=packed(latent_grid(region)),
+        latent=packed(grid),
         original=original,
+        grid=grid,
     )

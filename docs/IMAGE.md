@@ -154,8 +154,8 @@ side fails changes with the seed. If a seam shows, try another seed, or a wider 
 
 ## The result
 
-The job publishes one artifact, `image.png`. Its `done` event carries `image`, the effective
-parameters, so a picture can be made again:
+The job publishes `image.png` (and, with a mask, `generated.png`). Its `done` event carries
+`image`, the effective parameters, so a picture can be made again:
 
 ```json
 {"artifacts": ["image.png"],
@@ -165,6 +165,7 @@ parameters, so a picture can be made again:
            "prompt": "…", "negative_prompt": null, "width": 1024, "height": 1024,
            "seed": 1, "steps": 2, "guidance": 1.0, "image_strength": null, "input": null,
            "mask": null, "mask_blur": null, "mask_coverage": null,
+           "mask_outside_drift": null, "mask_blend_steps": null,
            "seconds": 28.83,
            "stage_seconds": {"encoding": 3.89, "denoising": 16.29, "decoding": 8.56, "saving": 0.08},
            "peak_bytes": 16441695780,
@@ -177,8 +178,19 @@ parameters, so a picture can be made again:
 
 `lease_id` is the lease the job opened or renewed when it was sent `lease`, else `null`.
 `input` is the image input's name, `mask` the mask input's, `mask_blur` the fade used, and
-`mask_coverage` the share of the picture the mask selected (0 to 1). The last three are `null`
-without a mask.
+`mask_coverage` the share of the picture the mask selected (0 to 1).
+
+A masked job also reports two health numbers and publishes a second artifact:
+
+- `mask_blend_steps`: how many denoising steps put the input back outside the mask. It should
+  equal the steps run (`steps`, or fewer with `image_strength`).
+- `mask_outside_drift`: how far the model's own picture strayed from the input outside the
+  mask, before the paste-back (mean absolute difference, 0 to 255). A healthy blend leaves only
+  the VAE's round trip, a few units. Tens mean the region was drawn without regard to what
+  surrounds it.
+- `generated.png` is the model's picture before the paste-back.
+
+The mask fields are `null` without a mask.
 `prompt_cache` is `"hit"` when this prompt (and negative prompt) was encoded by an earlier
 picture on the same loaded model, so the text encoder was skipped, else `"miss"`.
 
