@@ -1543,8 +1543,11 @@ export interface VideoResult {
   readonly model: string;
   readonly hfRepo: string;
   readonly revision: string;
-  /** The quantized transformer that ran: its repo, revision, file and sha256. */
-  readonly transformer: Readonly<Record<string, string>>;
+  /**
+   * The quantized transformer that ran, when it came from its own repo (the PC's GGUF): its
+   * repo, revision, file and sha256. Null on the Mac, whose transformer is in `hfRepo` itself.
+   */
+  readonly transformer: Readonly<Record<string, string>> | null;
   readonly backend: string;
   readonly engine: string;
   readonly dtype: string;
@@ -1560,6 +1563,8 @@ export interface VideoResult {
   readonly videoTokens: number;
   readonly seed: number;
   readonly steps: number;
+  /** The full-size refining pass's steps after the half-size pass (the Mac's arm); else null. */
+  readonly refineSteps: number | null;
   readonly audio: boolean;
   readonly audioSeconds: number | null;
   readonly audioSampleRate: number | null;

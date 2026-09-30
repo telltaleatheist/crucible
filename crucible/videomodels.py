@@ -5,8 +5,9 @@ ceiling, the frame rates the model was run at, a token budget per mode (the
 number that sizes the denoising stage's memory), the fixed step count of a
 distilled schedule, a declared memory figure per stage, and companion files
 pulled from a second repo and verified by sha256 (the same `Companion` an
-audio manifest declares). docs/internals/video.md says why each number is
-what it is.
+audio manifest declares; the PC's arm has one, the Mac's none). The Mac's arm
+adds its MLX cache limit and the steps of its full-size refining pass.
+docs/internals/video.md says why each number is what it is.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .audiomodels import Companion, CompanionFile
-from .backend import CUDA_LINUX
+from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .manifests import MODELS_PULL_COMMAND
 from .tomltable import (
@@ -33,12 +34,21 @@ VIDEO_DIR_ENV = "CRUCIBLE_VIDEO_DIR"
 
 LTX = "ltx"
 
+LTX_2_MLX = "ltx-2-mlx"
+
 VIDEO_BACKEND_ENGINES: dict[str, frozenset[str]] = {
     CUDA_LINUX: frozenset({LTX}),
+    MLX_DARWIN: frozenset({LTX_2_MLX}),
 }
 
 ENGINE_DEVICE: dict[tuple[str, str], str] = {
     (LTX, CUDA_LINUX): "cuda",
+    (LTX_2_MLX, MLX_DARWIN): "metal",
+}
+
+ENGINE_TRANSFORMER_COMPANION: dict[str, bool] = {
+    LTX: True,
+    LTX_2_MLX: False,
 }
 
 MEMORY_BASES = frozenset({"measured", "declared"})
@@ -46,6 +56,8 @@ MEMORY_BASES = frozenset({"measured", "declared"})
 DTYPES = frozenset({"bfloat16", "float16", "float32"})
 
 FRAME_STRIDE = 8
+
+LATENT_SCALE = 32
 
 TEXT_TO_VIDEO = "text-to-video"
 
@@ -58,6 +70,7 @@ STAGES: tuple[str, ...] = (
     "connecting",
     "conditioning",
     "denoising",
+    "refining",
     "decoding",
     "audio_decoding",
 )
@@ -96,11 +109,13 @@ _BACKEND_REQUIRED: dict[str, Any] = {
     "steps": int,
     "audio_sample_rate": int,
     "stage_memory_bytes": dict,
-    "companions": list,
 }
 _BACKEND_OPTIONAL: dict[str, Any] = {
     "max_video_tokens_image_to_video": int,
     "not_taken": dict,
+    "companions": list,
+    "mlx_cache_limit_bytes": int,
+    "refine_steps": int,
 }
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
@@ -128,6 +143,12 @@ def frames_for(duration_s: float, fps: int) -> int:
 
 def latent_frames(num_frames: int) -> int:
     return (num_frames - 1) // FRAME_STRIDE + 1
+
+
+def video_tokens(width: int, height: int, num_frames: int) -> int:
+    """Latent cells the transformer denoises at full size: the VAE packs 32x32 pixels
+    and 8 frames (after the first) into one, whatever grid a backend's sizes keep to."""
+    return latent_frames(num_frames) * (width // LATENT_SCALE) * (height // LATENT_SCALE)
 
 
 @dataclass(frozen=True)
@@ -160,6 +181,8 @@ class VideoBackendSpec:
     companions: tuple[Companion, ...]
     max_video_tokens_image_to_video: int | None = None
     not_taken: tuple[tuple[str, str], ...] = ()
+    mlx_cache_limit_bytes: int | None = None
+    refine_steps: int | None = None
 
     @property
     def device(self) -> str:
@@ -170,11 +193,13 @@ class VideoBackendSpec:
         return self.max_video_tokens_image_to_video is not None
 
     @property
-    def transformer_companion(self) -> Companion:
-        return self.companions[0]
+    def transformer_companion(self) -> Companion | None:
+        return self.companions[0] if self.companions else None
 
-    def transformer_path(self, model_dir: Path) -> Path:
+    def transformer_path(self, model_dir: Path) -> Path | None:
         companion = self.transformer_companion
+        if companion is None:
+            return None
         return model_dir / companion.name / companion.files[0].target
 
     def token_ceiling(self, mode: str) -> int:
@@ -183,11 +208,7 @@ class VideoBackendSpec:
         return self.max_video_tokens
 
     def video_tokens(self, width: int, height: int, num_frames: int) -> int:
-        return (
-            latent_frames(num_frames)
-            * (width // self.size_multiple)
-            * (height // self.size_multiple)
-        )
+        return video_tokens(width, height, num_frames)
 
     def why_not(self, param: str) -> str | None:
         return dict(self.not_taken).get(param)
@@ -220,6 +241,8 @@ class VideoBackendSpec:
             "audio_sample_rate": self.audio_sample_rate,
             "stage_memory_bytes": dict(self.stage_memory_bytes),
             "companions": [companion.to_dict() for companion in self.companions],
+            "mlx_cache_limit_bytes": self.mlx_cache_limit_bytes,
+            "refine_steps": self.refine_steps,
         }
 
 
@@ -332,7 +355,7 @@ def _check_backend(where: str, kind: str) -> None:
     if kind not in VIDEO_BACKEND_ENGINES:
         raise VideoManifestError(
             f"{where}: {kind!r} is not a video backend; the video backends are "
-            f"{sorted(VIDEO_BACKEND_ENGINES)}. The Mac and Windows are not "
+            f"{sorted(VIDEO_BACKEND_ENGINES)}. Windows is not "
             "(docs/internals/video.md, \"Backends\")"
         )
 
@@ -348,6 +371,25 @@ def _check_engine(where: str, kind: str, block: dict[str, Any]) -> None:
         raise VideoManifestError(
             f"{where}: dtype {block['dtype']!r} is not one of {sorted(DTYPES)}"
         )
+
+
+def _check_mlx(where: str, kind: str, block: dict[str, Any]) -> None:
+    stated = "mlx_cache_limit_bytes" in block
+    if kind == MLX_DARWIN and not stated:
+        raise VideoManifestError(
+            f"{where}: mlx_cache_limit_bytes is required on {MLX_DARWIN}; without "
+            "it MLX keeps every freed buffer and the process grows past the "
+            "declared stage memory"
+        )
+    if kind != MLX_DARWIN and stated:
+        raise VideoManifestError(
+            f"{where}: mlx_cache_limit_bytes is an MLX setting and {kind} does not "
+            "run MLX"
+        )
+    if stated and block["mlx_cache_limit_bytes"] <= 0:
+        raise VideoManifestError(f"{where}: mlx_cache_limit_bytes must be positive")
+    if "refine_steps" in block and block["refine_steps"] <= 0:
+        raise VideoManifestError(f"{where}: refine_steps must be positive")
 
 
 def _stage_memory(where: str, block: dict[str, Any]) -> tuple[tuple[str, int], ...]:
@@ -391,8 +433,11 @@ def _check_memory(where: str, block: dict[str, Any]) -> None:
 
 def _check_sizes(where: str, block: dict[str, Any]) -> None:
     multiple = block["size_multiple"]
-    if multiple <= 0:
-        raise VideoManifestError(f"{where}: size_multiple must be positive")
+    if multiple <= 0 or multiple % LATENT_SCALE:
+        raise VideoManifestError(
+            f"{where}: size_multiple {multiple} must be a positive multiple of the "
+            f"VAE's {LATENT_SCALE}-pixel cell"
+        )
     for key in ("min_side", "max_side", "default_width", "default_height"):
         if block[key] <= 0 or block[key] % multiple:
             raise VideoManifestError(
@@ -448,17 +493,17 @@ def _check_tokens(where: str, block: dict[str, Any]) -> None:
     ceilings = [block["max_video_tokens"]]
     if "max_video_tokens_image_to_video" in block:
         ceilings.append(block["max_video_tokens_image_to_video"])
-    smallest = latent_frames(FRAME_STRIDE + 1) * (block["min_side"] // block["size_multiple"]) ** 2
+    smallest = latent_frames(FRAME_STRIDE + 1) * (block["min_side"] // LATENT_SCALE) ** 2
     for ceiling in ceilings:
         if ceiling < smallest:
             raise VideoManifestError(
                 f"{where}: a token ceiling of {ceiling} admits no clip at all "
                 f"(the smallest clip is {smallest} tokens)"
             )
-    default_tokens = (
-        latent_frames(frames_for(float(block["default_duration_s"]), block["default_fps"]))
-        * (block["default_width"] // block["size_multiple"])
-        * (block["default_height"] // block["size_multiple"])
+    default_tokens = video_tokens(
+        block["default_width"],
+        block["default_height"],
+        frames_for(float(block["default_duration_s"]), block["default_fps"]),
     )
     if default_tokens > block["max_video_tokens"]:
         raise VideoManifestError(
@@ -512,8 +557,15 @@ def _companion(where: str, entry: Any) -> Companion:
 def _companions(where: str, block: dict[str, Any]) -> tuple[Companion, ...]:
     companions = tuple(
         _companion(f"{where} companions[{index}]", entry)
-        for index, entry in enumerate(block["companions"])
+        for index, entry in enumerate(block.get("companions", []))
     )
+    if not ENGINE_TRANSFORMER_COMPANION[block["engine"]]:
+        if companions:
+            raise VideoManifestError(
+                f"{where}: engine {block['engine']!r} reads its transformer from "
+                f"{block['hf_repo']} itself; a companion would be pulled and never read"
+            )
+        return ()
     if len(companions) != 1 or len(companions[0].files) != 1:
         raise VideoManifestError(
             f"{where}: a video block declares exactly one companion with exactly "
@@ -534,6 +586,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         raise VideoManifestError(f"{where}: must be a table")
     check_table(where, block, _BACKEND_REQUIRED, _BACKEND_OPTIONAL, error=VideoManifestError)
     _check_engine(where, kind, block)
+    _check_mlx(where, kind, block)
     _check_memory(where, block)
     stages = _stage_memory(where, block)
     _check_sizes(where, block)
@@ -567,6 +620,8 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         companions=_companions(where, block),
         max_video_tokens_image_to_video=block.get("max_video_tokens_image_to_video"),
         not_taken=_not_taken(where, block),
+        mlx_cache_limit_bytes=block.get("mlx_cache_limit_bytes"),
+        refine_steps=block.get("refine_steps"),
     )
 
 
@@ -628,7 +683,9 @@ def engines_on(backend_kind: str) -> tuple[str, ...]:
 __all__ = [
     "FRAME_STRIDE",
     "IMAGE_TO_VIDEO",
+    "LATENT_SCALE",
     "LTX",
+    "LTX_2_MLX",
     "MODES",
     "STAGES",
     "TEXT_TO_VIDEO",
@@ -644,4 +701,5 @@ __all__ = [
     "load_video_manifest",
     "parse_video_manifest",
     "video_manifests_dir",
+    "video_tokens",
 ]

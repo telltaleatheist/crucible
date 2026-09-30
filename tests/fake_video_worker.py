@@ -1,4 +1,5 @@
-"""A stand-in for crucible/jobs/video/ltx_worker.py: videocore's own Worker,
+"""A stand-in for crucible/jobs/video/ltx_worker.py (engine `ltx`, the PC) and
+ltx2mlx_worker.py (engine `ltx-2-mlx`, the Mac, with its refining pass): videocore's own Worker,
 Progress, Job and Clip, with a fake engine and a mux that writes a small MP4
 box structure instead of calling ffmpeg. Runs no model and needs no GPU.
 """
@@ -51,25 +52,35 @@ class FakeEngine:
         self.device = request["device"]
         self.versions = {"fake": "1.0", "engine": request["engine"]}
         self._seen: set = set()
+        self._two_pass = request["engine"] == "ltx-2-mlx"
+        if self._two_pass:
+            self.spans = videocore.TWO_PASS_SPANS
+
+    def _steps(self, stage: str, steps: int, pause: float, progress) -> None:
+        progress.enter(stage, steps)
+        for step in range(1, steps + 1):
+            time.sleep(pause)
+            progress.reached(step)
 
     def generate(self, job, progress):
         _transcribe({
             "op": "generate", "request_id": job.request_id, "seed": job.seed, "mode": job.mode,
             "image_path": job.image_path, "num_frames": job.num_frames, "audio": job.audio,
-            "ffmpeg": job.ffmpeg,
+            "ffmpeg": job.ffmpeg, "steps": job.steps, "refine_steps": job.refine_steps,
+            "width": job.width, "height": job.height,
         })
         pause = float(os.environ.get("CRUCIBLE_FAKE_VIDEO_STEP_S") or 0)
         hit = job.prompt_key in self._seen
         if not hit:
             progress.enter("encoding")
-            progress.enter("connecting")
+            if not self._two_pass:
+                progress.enter("connecting")
             self._seen.add(job.prompt_key)
-        if job.image_path is not None:
+        if job.image_path is not None and not self._two_pass:
             progress.enter("conditioning")
-        progress.enter("denoising", job.steps)
-        for step in range(1, job.steps + 1):
-            time.sleep(pause)
-            progress.reached(step)
+        self._steps("denoising", job.steps, pause, progress)
+        if self._two_pass:
+            self._steps("refining", job.refine_steps, pause, progress)
         progress.enter("decoding")
         frame = bytes(3 * 4 * 4)
         pcm = None
@@ -81,8 +92,15 @@ class FakeEngine:
             job.num_frames, pcm=pcm, channels=2 if pcm else 0, sample_rate=SAMPLE_RATE if pcm else 0,
         )
         peaks = {"denoising": 19, "decoding": 8}
-        return clip, peaks, {"prompt_cache": "hit" if hit else "miss", "quantization": {"fake": True}}
+        if self._two_pass:
+            peaks["refining"] = 23
+        return clip, peaks, {
+            "prompt_cache": "hit" if hit else "miss",
+            "quantization": {"fake": True},
+            "sampling": {"passes": ["half", "full"] if self._two_pass else ["full"]},
+        }
 
 
 if __name__ == "__main__":
-    sys.exit(videocore.Worker("fake video", {"ltx": FakeEngine}, mux_with=fake_mux).serve())
+    engines = {"ltx": FakeEngine, "ltx-2-mlx": FakeEngine}
+    sys.exit(videocore.Worker("fake video", engines, mux_with=fake_mux).serve())

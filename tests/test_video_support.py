@@ -47,7 +47,7 @@ def test_the_manifest_pins_the_lightricks_snapshot_and_the_gguf() -> None:
     manifests = load_all_video_manifests()
     assert sorted(manifests) == [MODEL]
     manifest = manifests[MODEL]
-    assert not manifest.supports("mlx-darwin") and manifest.supports("cuda-linux")
+    assert manifest.supports("mlx-darwin") and manifest.supports("cuda-linux")
     spec = manifest.spec("cuda-linux")
     assert (spec.hf_repo, spec.revision, spec.gated) == (
         "Lightricks/LTX-2.5-Diffusers", "426936f8b22dc28e4def61e515478b0b7e4a53cc", True
@@ -66,6 +66,41 @@ def test_the_manifest_pins_the_lightricks_snapshot_and_the_gguf() -> None:
     )
     assert "LTX-2.x Community License" in manifest.licence
     assert "US$10,000,000" in manifest.commercial_use
+
+
+def test_the_mac_block_pins_the_int8_mlx_pack_and_pulls_only_the_distilled_path() -> None:
+    manifest = load_video_manifest(MODEL)
+    spec = manifest.spec("mlx-darwin")
+    assert (spec.engine, spec.device, spec.hf_repo, spec.revision, spec.gated) == (
+        "ltx-2-mlx", "metal", "dgrauet/ltx-2.5-mlx-q8",
+        "746ca9aacb697d2c739f544d68b584214dedcc75", True,
+    )
+    assert spec.companions == () and spec.transformer_companion is None
+    assert spec.transformer_path(Path("anywhere")) is None
+    assert "transformer-distilled.safetensors" in spec.files
+    assert "spatial_upscaler_x2_v1_0.safetensors" in spec.files
+    assert "text_encoder.safetensors" in spec.files and "connector.safetensors" in spec.files
+    left_out = (
+        "transformer-dev.safetensors", "ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+        "temporal_upscaler_x2_v1_0.safetensors", "vae_decoder_av.safetensors",
+        "vae_encoder_av.safetensors",
+    )
+    assert not set(left_out) & set(spec.files) and len(spec.files) == 20
+    assert spec.mlx_cache_limit_bytes == 4_000_000_000 and spec.refine_steps == 3
+    assert dict(spec.stage_memory_bytes) == {
+        "encoding": 23_000_000_000, "denoising": 26_000_000_000, "refining": 29_000_000_000,
+        "decoding": 16_000_000_000, "audio_decoding": 3_000_000_000,
+    }
+    assert spec.memory_basis == "declared" and spec.memory_bytes_estimate == 29_000_000_000
+    assert spec.why_not("negative_prompt")
+
+
+def test_the_mac_limits_keep_the_pc_s_frame_but_a_64_pixel_grid() -> None:
+    spec = load_video_manifest(MODEL).spec("mlx-darwin")
+    assert (spec.size_multiple, spec.min_side, spec.max_side, spec.max_pixels) == (64, 256, 1280, 1280 * 704)
+    assert (spec.max_frames, spec.fps, spec.steps) == (145, (24, 25), 8)
+    assert spec.video_tokens(1280, 704, 145) == spec.max_video_tokens == 16_720
+    assert spec.token_ceiling("image-to-video") == 14_080 == spec.video_tokens(1280, 704, 121)
 
 
 def test_the_declared_limits_are_the_ones_the_docs_state() -> None:
@@ -97,10 +132,18 @@ def _manifest_with(old: str, new: str) -> str:
         ("max_frames = 145", "max_frames = 144", "frame grid"),
         ("default_fps = 24", "default_fps = 30", "not one of fps"),
         ('revision = "426936f8b22dc28e4def61e515478b0b7e4a53cc"', 'revision = "main"', "40-character"),
-        ("[backends.cuda-linux]", "[backends.mlx-darwin]", "not a video backend"),
+        ("[backends.cuda-linux]", "[backends.llama-windows]", "not a video backend"),
         ('target = "LTX-2.5-Distilled-Q6_K.gguf"', 'target = "transformer.bin"', ".gguf"),
         ("max_video_tokens = 16720", "max_video_tokens = 10000", "the default clip is"),
         ("decoding = 9000000000", "sorting = 9000000000", "the stages are"),
+        ("mlx_cache_limit_bytes = 4000000000", "", "mlx_cache_limit_bytes is required"),
+        ('audio_sample_rate = 48000\n\n[backends.cuda-linux.stage_memory_bytes]',
+         'audio_sample_rate = 48000\nmlx_cache_limit_bytes = 1\n\n[backends.cuda-linux.stage_memory_bytes]',
+         "does not run MLX"),
+        ('engine = "ltx-2-mlx"', 'engine = "ltx"', "does not run on mlx-darwin"),
+        ("size_multiple = 64", "size_multiple = 48", "VAE's 32-pixel cell"),
+        ("refine_steps = 3", "refine_steps = 0", "refine_steps must be positive"),
+        ("refining = 29000000000", "refining = 30000000000", "largest stage"),
     ],
 )
 def test_a_manifest_that_contradicts_itself_is_refused(old: str, new: str, words: str) -> None:
@@ -109,19 +152,33 @@ def test_a_manifest_that_contradicts_itself_is_refused(old: str, new: str, words
     assert words in str(caught.value)
 
 
+def test_a_companion_on_the_mac_block_is_refused() -> None:
+    text = MANIFEST.read_text(encoding="utf-8") + (
+        '\n[[backends.mlx-darwin.companions]]\nname = "extra"\nhf_repo = "a/b"\n'
+        'revision = "7b0c2025441f1bf12c18eac375ad21f5e3d3c9e0"\n\n'
+        '[[backends.mlx-darwin.companions.files]]\nsource = "x.gguf"\ntarget = "x.gguf"\n'
+        'sha256 = "ee8835ff8f11e4f59fa4be7bf31b1200172659364e724de444d790ddf4869a58"\nbytes = 1\n'
+    )
+    with pytest.raises(VideoManifestError) as caught:
+        parse_video_manifest(text, MANIFEST, MODEL)
+    assert "pulled and never read" in str(caught.value)
+
+
 @pytest.mark.parametrize(
-    ("backend_kind", "total", "enabled", "summary"),
+    ("backend_kind", "total", "allowance", "enabled", "summary"),
     [
-        ("cuda-linux", 24 * GIB, True, f"can make video, using {MODEL}"),
-        ("cuda-linux", 16 * GIB, False, "cannot make video"),
-        ("mlx-darwin", 64 * GIB, False, "cannot make video"),
+        ("cuda-linux", 24 * GIB, 3 * GIB, True, f"can make video, using {MODEL}"),
+        ("cuda-linux", 16 * GIB, 3 * GIB, False, "cannot make video"),
+        ("mlx-darwin", 64 * GIB, 16 * GIB, True, f"can make video, using {MODEL}"),
+        ("mlx-darwin", 48 * GIB, 16 * GIB, True, f"can make video, using {MODEL}"),
+        ("mlx-darwin", 32 * GIB, 16 * GIB, False, "cannot make video"),
     ],
 )
 def test_the_capability_row_says_where_video_can_be_made(
-    backend_kind: str, total: int, enabled: bool, summary: str
+    backend_kind: str, total: int, allowance: int, enabled: bool, summary: str
 ) -> None:
     decided = verdict.decide(
-        BY_NAME["video"], backend_kind, total_bytes=total, desktop_allowance_bytes=3 * GIB,
+        BY_NAME["video"], backend_kind, total_bytes=total, desktop_allowance_bytes=allowance,
         gpu_vendor="nvidia" if backend_kind == "cuda-linux" else "apple", chosen=None,
     )
     assert decided.enabled is enabled, decided.reason
@@ -129,11 +186,28 @@ def test_the_capability_row_says_where_video_can_be_made(
     assert decided.reason
 
 
-def test_the_mac_has_no_video_env_and_says_why() -> None:
+def test_the_mac_video_env_pins_ltx_2_mlx_and_the_image_env_s_mlx() -> None:
     assert [spec.key for spec in jobenv.video_envs("cuda-linux")] == ["video-ltx"]
+    (mac,) = jobenv.video_envs("mlx-darwin")
+    assert (mac.key, mac.headline) == ("video-ltx-2-mlx", "ltx-pipelines-mlx")
+    recipe = jobenv.recipe_for(mac)
+    assert recipe.name == "ltx-2-mlx-mlx-darwin.txt"
+    commit = "1724ca673d59f023a8a95efee06e5d36d61c2765"
+    assert jobenv.recipe_direct_references(recipe) == {
+        "ltx-core-mlx": commit, "ltx-pipelines-mlx": commit,
+    }
+    pins = jobenv.recipe_pins(recipe)
+    image = jobenv.recipe_pins(jobenv.recipe_for(jobenv.worker_env("image", "mlx-darwin")))
+    assert pins["mlx"] == pins["mlx-metal"] == image["mlx"] == "0.32.2"
+    assert (pins["mlx-arsenal"], pins["transformers"], pins["av"]) == ("0.2.4", "5.17.0", "18.1.0")
+    assert "torch" not in pins
+    assert 100_000_000 < jobenv.recipe_archive_bytes(recipe) < 200_000_000
+    assert jobenv.SMOKE_IMPORT["video-ltx-2-mlx"] == {
+        "mlx-darwin": "ltx_pipelines_mlx, ltx_core_mlx, mlx_arsenal, transformers, av"
+    }
     with pytest.raises(jobenv.EnvError) as caught:
-        jobenv.video_envs("mlx-darwin")
-    assert "cuda-linux" in str(caught.value) and "only" in str(caught.value)
+        jobenv.video_envs("llama-windows")
+    assert "cuda-linux" in str(caught.value) and "mlx-darwin" in str(caught.value)
 
 
 def test_the_recipe_pins_the_diffusers_commit_and_the_quantization_libraries() -> None:
@@ -316,14 +390,39 @@ def test_the_model_is_installed_only_with_its_gguf_and_the_pull_fetches_both(
     assert spec.transformer_path(found.path).is_file()
 
 
-def test_the_catalog_lists_the_video_model_on_the_pc_only(home: Path) -> None:
+def test_the_catalog_lists_the_video_model_on_both_backends(home: Path) -> None:
     configure_box(home, enable_video=True)
     config = load_config(home)
     rows = {s.id: s for s in catalog.subjects(config, FAKE_BACKEND) if s.job_type == "video"}
     assert sorted(rows) == [MODEL]
     assert rows[MODEL].kind == "model" and rows[MODEL].installed() is None
-    assert not [s for s in catalog.subjects(config, FAKE_MAC_BACKEND) if s.job_type == "video"]
-    assert catalog.backends_declaring("model", MODEL) == ["cuda-linux"]
+    mac = {s.id: s for s in catalog.subjects(config, FAKE_MAC_BACKEND) if s.job_type == "video"}
+    assert sorted(mac) == [MODEL] and mac[MODEL].source == "hf:dgrauet/ltx-2.5-mlx-q8"
+    assert catalog.backends_declaring("model", MODEL) == ["cuda-linux", "mlx-darwin"]
+
+
+def test_the_mac_pack_is_installed_by_its_one_repo_with_no_companion(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_fake_token_for_tests")
+    configure_box(home, enable_video=True)
+    config = load_config(home)
+    manifest = load_video_manifest(MODEL)
+    spec = manifest.spec("mlx-darwin")
+    pulled: list[str] = []
+
+    def main_pull(config: Any, manifest: Any, spec: Any, **_: Any) -> weights.InstalledWeights:
+        pulled.append(spec.hf_repo)
+        _stamp_main(config, manifest, spec)
+        return weights.installed(config, manifest, spec)
+
+    monkeypatch.setattr(weights, "pull", main_pull)
+    monkeypatch.setattr(weights, "pull_files", lambda *a, **k: pulled.append("companion"))
+    assert videoweights.installed(config, manifest, spec) is None
+    found = videoweights.pull(config, manifest, spec)
+    assert pulled == ["dgrauet/ltx-2.5-mlx-q8"]
+    assert videoweights.missing_companions(config, manifest, spec) == []
+    assert (found.path / "transformer-distilled.safetensors").is_file()
 
 
 def test_the_desktop_packages_screen_has_words_for_video() -> None:
@@ -376,3 +475,30 @@ def test_mux_hands_stdin_to_communicate_as_on_linux(
     assert made[0].written == b"".join(clip.frames)
     assert output.read_bytes()[4:8] == b"ftyp"
     assert not (tmp_path / "video.mp4.audio.wav").exists()
+
+
+def test_the_mac_ffmpeg_s_videotoolbox_encoder_is_picked_and_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    videocore = _sibling("videocore")
+    listing = (
+        "Encoders:\n V..... = Video\n ------\n V....D h264_videotoolbox    VideoToolbox H.264 Encoder\n"
+        " V....D hevc_videotoolbox    VideoToolbox H.265 Encoder\n A....D aac                  AAC\n"
+    )
+    monkeypatch.setattr(
+        videocore.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=listing, stderr=""),
+    )
+    assert videocore.pick_encoder("ffmpeg") == "h264_videotoolbox"
+    options = videocore.video_options("h264_videotoolbox", 1280, 704, 24)
+    assert options[:4] == ["-c:v", "h264_videotoolbox", "-b:v", str(round(1280 * 704 * 24 * 0.4))]
+    assert "-allow_sw" in options and options[-2:] == ["-pix_fmt", "yuv420p"]
+    joined = " ".join(videocore.mux_command("ffmpeg", "h264_videotoolbox", _clip(videocore, b"\0\0" * 4), "a.wav", "v.mp4"))
+    assert "-c:v h264_videotoolbox" in joined and "-c:a aac" in joined
+
+
+def test_the_two_pass_spans_cover_the_mac_stages_in_order() -> None:
+    videocore = _sibling("videocore")
+    names = [name for name, _ in videocore.TWO_PASS_SPANS]
+    assert names == ["encoding", "denoising", "refining", "decoding", "audio_decoding", "muxing"]
+    assert abs(sum(share for _, share in videocore.TWO_PASS_SPANS) - 1.0) < 1e-9
+    assert abs(sum(share for _, share in videocore.SPANS) - 1.0) < 1e-9
+

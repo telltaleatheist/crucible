@@ -365,8 +365,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     init.add_argument(
         "--enable-video",
         action="store_true",
-        help="register the video (LTX-2.5 text- and image-to-video with sound, "
-        "cuda-linux only), load-video and unload-video job types ([jobs] enable_video)",
+        help="register the video (LTX-2.5 text- and image-to-video with sound; a "
+        "24 GB CUDA card, or a Mac with 48 GB or more), load-video and unload-video "
+        "job types ([jobs] enable_video)",
     )
     init.add_argument(
         "--desktop-allowance-bytes",

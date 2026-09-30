@@ -163,11 +163,30 @@ test('readVideoResult reads what the clip can be made again from', () => {
   const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: DONE_CLIP, lease_id: 'lease-3' } });
   assert.deepEqual([result.mode, result.input, result.numFrames, result.fps], ['image-to-video', 'start.png', 73, 24]);
   assert.deepEqual([result.seed, result.steps, result.videoTokens, result.audio], [11, 8, 8800, true]);
-  assert.equal(result.transformer.file, 'LTX-2.5-Distilled-Q6_K.gguf');
+  assert.equal(result.transformer?.file, 'LTX-2.5-Distilled-Q6_K.gguf');
+  assert.equal(result.refineSteps, null);
   assert.equal(result.stageMemoryBytes.denoising, 20_500_000_000);
   assert.equal(result.stageSeconds.conditioning, 3.3);
   assert.deepEqual([result.encoder, result.promptCache, result.leaseId], ['libopenh264', 'miss', 'lease-3']);
   assert.deepEqual(result.artifacts, ['video.mp4']);
+});
+
+test('readVideoResult reads a Mac clip: no separate transformer, a refining pass', () => {
+  const mac = {
+    ...DONE_CLIP,
+    hf_repo: 'dgrauet/ltx-2.5-mlx-q8',
+    revision: '746ca9aacb697d2c739f544d68b584214dedcc75',
+    transformer: null,
+    backend: 'mlx-darwin',
+    engine: 'ltx-2-mlx',
+    refine_steps: 3,
+    encoder: 'h264_videotoolbox',
+    stage_peak_bytes: { denoising: 23_000_000_000, refining: 25_000_000_000 },
+  };
+  const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: mac } });
+  assert.equal(result.transformer, null);
+  assert.deepEqual([result.engine, result.steps, result.refineSteps], ['ltx-2-mlx', 8, 3]);
+  assert.equal(result.stagePeakBytes.refining, 25_000_000_000);
 });
 
 test('readVideoResult refuses a missing video block and a mode it does not know', () => {

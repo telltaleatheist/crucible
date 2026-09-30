@@ -48,15 +48,38 @@ def test_install_video_builds_the_env_and_places_ffmpeg(
     assert "video engine: ltx" in capsys.readouterr().out
 
 
-def test_install_video_on_the_mac_says_it_is_cuda_only(
+def test_install_video_on_the_mac_builds_the_ltx_2_mlx_env(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
     assert cli.main(["init", "--enable-video"]) == 0
     capsys.readouterr()
-    assert cli.main(["install", "video"]) == 1
-    said = capsys.readouterr().err
-    assert "video has no engine on 'mlx-darwin'" in said and "cuda-linux" in said
+    built: list[tuple[str, str]] = []
+
+    def install_env(home_dir: Path, spec: jobenv.EnvSpec, backend_kind: str, **_: object):
+        built.append((spec.key, jobenv.recipe_for(spec).name))
+        return jobenv.EnvStatus(True, home_dir, f"{spec.key} ok", "3.11.16", {spec.headline: "0.15.12"})
+
+    monkeypatch.setattr(jobenv, "install_env", install_env)
+    monkeypatch.setattr(cli.install, "_smoke_import", lambda *_: None)
+    monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: 0)
+    assert cli.main(["install", "video"]) == 0
+    assert built == [("video-ltx-2-mlx", "ltx-2-mlx-mlx-darwin.txt")]
+    assert "video engine: ltx-2-mlx" in capsys.readouterr().out
+
+
+def test_models_list_on_the_mac_shows_the_mlx_pack(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_MAC_BACKEND)
+    assert cli.main(["init", "--enable-video"]) == 0
+    capsys.readouterr()
+    assert cli.main(["models", "list", "--json"]) == 0
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["ltx-2.5-distilled"]["hf_repo"] == "dgrauet/ltx-2.5-mlx-q8"
 
 
 def test_install_video_refuses_a_narrator_engine(

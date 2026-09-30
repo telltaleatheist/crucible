@@ -2,21 +2,23 @@
 
 Words in, a video clip with its own sound out; or a picture and words in, the picture brought to
 life. One job type, `video`, with one model, `ltx-2.5-distilled` (Lightricks' LTX-2.5, the
-distilled checkpoint, 8 steps). How it runs on a 24 GB card and why every limit is what it is
-is [internals/video.md](internals/video.md); this page is what a caller sends, what comes back,
-and how to write a prompt.
+distilled checkpoint, 8 steps). How it runs on a 24 GB card and on a Mac, and why every limit
+is what it is, is [internals/video.md](internals/video.md); this page is what a caller sends,
+what comes back, and how to write a prompt.
 
 | model | makes | class | PC (cuda-linux) | Mac (mlx-darwin) | longest | licence |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ltx-2.5-distilled` | video with synchronized sound (speech, effects, ambience, music) from a prompt, or from a prompt and a start picture | `video` | yes | **no** | 6.04 s at 1280x704 (text), 3.04 s at 1280x704 (from a picture) | LTX-2.x Community License (gated) |
+| `ltx-2.5-distilled` | video with synchronized sound (speech, effects, ambience, music) from a prompt, or from a prompt and a start picture | `video` | yes (24 GB card) | yes (48 GB or more) | 6.04 s at 1280x704 from text on both; from a picture 3.04 s on the PC, 5.04 s on the Mac | LTX-2.x Community License (gated) |
 
 `GET /v1/capability` has a `video` row: "can make video, using ltx-2.5-distilled" on a CUDA card
-with room for its largest stage, and "cannot make video" on a Mac or a smaller card, with the
-reason.
+with room for its largest stage and on a Mac with 48 GB or more of memory, and "cannot make
+video" on a smaller card or a smaller Mac, with the reason.
 
-**Not on the Mac.** The model is a 22B-parameter transformer that fits one 24 GB NVIDIA card
-only quantized and one component at a time; there is no Apple arm. A Mac asked for it answers
-`400 backend_unsupported` naming `cuda-linux`; send video jobs to the PC.
+**The same job on either machine.** The PC runs the model through diffusers, quantized and one
+component on the card at a time. The Mac runs Lightricks' own distilled recipe through
+ltx-2-mlx, a pure-MLX port: 8 steps at half the size, a 2x latent upscale, then 3 steps at full
+size. The params, the artifact and the `done.video` fields are the same; what differs is below,
+under "The Mac". A seed reproduces a clip on the machine that made it, not across the two.
 
 ## Turning it on
 
@@ -27,8 +29,8 @@ crucible models pull ltx-2.5-distilled
 ```
 
 None of these is needed by hand: a job for a missing env or model starts the install and answers
-`409 installing`, like every other type. The pull is about 50.7 GB. The one step Crucible cannot
-take for you is accepting the licence.
+`409 installing`, like every other type. The pull is about 50.7 GB on the PC and 43.5 GB on the
+Mac. The one step Crucible cannot take for you is accepting the licence.
 
 ### The model is gated
 
@@ -45,6 +47,11 @@ LTX-2.x Community License (and Lightricks' privacy policy). Until then a job or 
 
 The transformer itself comes from a second repo, `Abiray/LTX-2.5-Distilled-GGUF` (not gated),
 which the same pull fetches and checks by sha256.
+
+On the Mac the repo is `dgrauet/ltx-2.5-mlx-q8` (the same weights converted to MLX at int8,
+under the same licence), gated with automatic approval: open
+https://huggingface.co/dgrauet/ltx-2.5-mlx-q8, accept, and the same token works. The refusal
+names that page.
 
 ## The request
 
@@ -71,12 +78,12 @@ first frame, cropped to the clip's shape (never stretched) and resized:
 | param | default | what it does |
 | --- | --- | --- |
 | `prompt` | required | the shot, the motion, the light and the sound, in one paragraph (below) |
-| `width`, `height` | 1280 x 704 | multiples of 32, each side 256 to 1280, at most 901,120 pixels; send both or neither |
+| `width`, `height` | 1280 x 704 | multiples of 32 (64 on the Mac), each side 256 to 1280, at most 901,120 pixels; send both or neither |
 | `duration_s` | 5 | seconds; rounded to the model's frame grid (8k+1 frames): 5 s at 24 fps is 121 frames, 5.04 s |
 | `num_frames` | from `duration_s` | the exact count instead of `duration_s` (not both); must be 8k+1, for example 49, 97, 121, 145 |
 | `fps` | 24 | 24 or 25 |
 | `seed` | chosen and reported | 0 to 2^32-1; the same seed and params give the same clip |
-| `steps` | 8 | the distilled checkpoint runs its own fixed 8-step schedule; any other value is refused |
+| `steps` | 8 | the distilled checkpoint runs its own fixed 8-step schedule; any other value is refused (the Mac then refines in 3 more at full size, reported as `refine_steps`) |
 | `audio` | `true` | `false` makes a silent clip (the model still generates sound with the picture; it is not decoded) |
 | `lease` | none | keep the model resident across a batch (below) |
 
@@ -86,7 +93,8 @@ would never be read.
 ### The limits
 
 Every limit is refused by name before anything loads, and each is the size the model's memory
-was sized at (declared, not yet measured on the PC):
+was sized at (declared, not yet measured). The PC's figures; the Mac's differences follow the
+list:
 
 - `video_size_not_supported`: a side not a multiple of 32, or under 256.
 - `video_too_large`: more than 901,120 pixels or a side over 1280; or more than 16,720 video
@@ -99,6 +107,18 @@ was sized at (declared, not yet measured on the PC):
 - `video_param_unsupported`: `negative_prompt`, a `steps` other than 8, an `fps` other than 24
   or 25.
 - `ffmpeg_missing`: the server has no ffmpeg (every `crucible install` places one).
+
+### The Mac
+
+- Width and height are multiples of **64**, not 32: the first pass runs at half the size, and
+  half must still sit on the VAE's 32-pixel grid. 1280x704, 768x512 and 512x512 are fine;
+  1280x720 and 768x544 are refused `video_size_not_supported`.
+- From a picture the ceiling is **14,080** video tokens: 1280x704 x 121 frames (5.04 s), where
+  the PC stops at 73 frames. From text it is the same 16,720 (145 frames, 6.04 s).
+- It needs 29 GB for its largest stage on top of the 16 GB desktop allowance: a Mac with 48 GB
+  or more. A smaller one answers `409 insufficient_memory` naming 29,000,000,000 bytes.
+- There is no `conditioning` stage (the picture is encoded while the transformer loads) and
+  there is a `refining` stage with steps 1 to 3 after `denoising`.
 
 ## The result
 
@@ -127,14 +147,26 @@ so a browser plays it as it downloads. `done.video` carries every effective para
  "prompt_cache": "miss", "versions": {"diffusers": "…", "torch": "2.14.0", "…": "…"}}
 ```
 
-(The timings above are placeholders, not measurements.) Progress events name the stage
-(`encoding`, `connecting`, `conditioning` for a start picture, `denoising` with steps 1 to 8,
-`decoding`, `audio_decoding`, `muxing`), and a cancel lands between denoising steps.
+(The timings above are placeholders, not measurements.) `refine_steps` is null and `sampling`
+names the one full-size pass. Progress events name the stage (`encoding`, `connecting`,
+`conditioning` for a start picture, `denoising` with steps 1 to 8, `decoding`,
+`audio_decoding`, `muxing`), and a cancel lands between denoising steps.
+
+A Mac clip's `done.video` has the same fields with these values: `hf_repo`
+`dgrauet/ltx-2.5-mlx-q8` and its revision, `transformer` null (the transformer is in that repo),
+`backend` `mlx-darwin`, `engine` `ltx-2-mlx`, `quantization` MLX int8 for the text encoder and
+the transformer, `refine_steps` 3, `sampling` with a half-size pass (8 steps, Euler ancestral)
+and a full-size one (3 steps, Euler, after the 2x upscale), `encoder` `h264_videotoolbox`,
+`stage_peak_bytes` from MLX's own peak with a `refining` entry and no `connecting` or
+`conditioning`, and `memory_bytes_estimate` 29,000,000,000. Its progress runs `encoding`,
+`denoising` 1 to 8, `refining` 1 to 3, `decoding`, `audio_decoding`, `muxing`; a cancel lands
+between steps of either pass.
 
 ## Many clips in a row
 
 Every clip loads the text encoder, the connectors and the transformer from disk one after
-another (about 50 GB of reads). A batch should hold the model with a lease, like `image`:
+another (about 50 GB of reads on the PC, 37 GB on the Mac). A batch should hold the model with a
+lease, like `image`:
 
 ```json
 {"type": "load-video", "model": "ltx-2.5-distilled", "params": {"lease": {"act": "video", "ttl_seconds": 600}}}
@@ -165,6 +197,7 @@ The LTX-2.x Community License Agreement (licence date 2026-08-11). Free, commerc
 production use included, for an entity whose annual revenue (counted with its affiliates) is
 under US$10 million; above that a paid licence from Lightricks is needed except for narrow
 non-commercial uses. Lightricks claims no rights in the videos you make, and the licence asks
-that any provenance or watermark the model applies be kept. The GGUF quantization is
-redistributed under the same licence. Details in [internals/video.md](internals/video.md),
+that any provenance or watermark the model applies be kept. The GGUF quantization (PC) and the
+MLX int8 conversion (Mac) are redistributed under the same licence; ltx-2-mlx, the library the
+Mac runs them with, is MIT. Details in [internals/video.md](internals/video.md),
 "Licence".

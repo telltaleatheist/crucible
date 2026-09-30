@@ -393,9 +393,12 @@ install.
   transformers 5.17.0, timm, kornia, einops): see [segment.md](segment.md), "Envs". `uv pip
   compile` locks for Python 3.11 on each platform, not yet freezes of a working env; the
   headers are the wheels summed from PyPI (3.08 GB cuda-linux, 0.19 GB mlx-darwin).
-- **video** (`ltx-cuda-linux.txt`, env key `video-ltx`, cuda-linux only): see
-  [video.md](video.md), "Env". The image recipe's resolution plus `gguf`, `torchao` and `av`;
-  `jobenv.video_envs` refuses the Mac by name, so nothing iterates a Mac video env.
+- **video**: see [video.md](video.md), "Env". cuda-linux is `ltx-cuda-linux.txt` (env key
+  `video-ltx`): the image recipe's resolution plus `gguf`, `torchao` and `av`. mlx-darwin is
+  `ltx-2-mlx-mlx-darwin.txt` (env key `video-ltx-2-mlx`): ltx-2-mlx's two workspace packages
+  as `git+…@<commit>#subdirectory=packages/<name>` references, mlx 0.32.2 as in the image env,
+  `av`, no torch. The recipe is named `<engine>-<backend>`, and the Mac's engine is the
+  library's own name, hence the doubled `mlx`.
 - **tts cuda-linux** (`higgs-v3-sgl` extra, Python 3.12): this is the working
   BookForge `sglomni` env (Owen: *"mirror it. it should be exact"*). `uv` is kept
   because it is part of that env. `flashinfer-jit-cache` comes from flashinfer's own

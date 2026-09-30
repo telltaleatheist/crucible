@@ -16,10 +16,11 @@ from ...errors import ApiError
 from ...videomodels import (
     FRAME_STRIDE,
     IMAGE_TO_VIDEO,
+    LATENT_SCALE,
     TEXT_TO_VIDEO,
     VideoBackendSpec,
     frames_for,
-    latent_frames,
+    video_tokens,
 )
 from ..leaseonload import LeaseOnLoad
 
@@ -127,10 +128,13 @@ def _refuse_size(width: int, height: int, model: str, spec: VideoBackendSpec) ->
     details = {"width": width, "height": height}
     multiple = spec.size_multiple
     if width % multiple or height % multiple:
+        why = f"its VAE works in {LATENT_SCALE}-pixel blocks"
+        if multiple != LATENT_SCALE:
+            why += f", and on {spec.backend} its first pass runs at half the size"
         raise _refusal(
             "video_size_not_supported",
-            f"{model} needs width and height in multiples of {multiple} (its VAE "
-            f"works in {multiple}-pixel blocks); {width}x{height} is not. Round each "
+            f"{model} on {spec.backend} needs width and height in multiples of "
+            f"{multiple} ({why}); {width}x{height} is not. Round each "
             f"side to a multiple of {multiple}, for example 1280x704 for 16:9",
             model, spec, size_multiple=multiple, **details,
         )
@@ -187,7 +191,7 @@ def refuse_tokens(settled: Settled, model: str, spec: VideoBackendSpec) -> None:
     ceiling = spec.token_ceiling(settled.mode)
     if settled.video_tokens <= ceiling:
         return
-    per_frame = (settled.width // spec.size_multiple) * (settled.height // spec.size_multiple)
+    per_frame = (settled.width // LATENT_SCALE) * (settled.height // LATENT_SCALE)
     most_latents = ceiling // per_frame
     most_frames = max(0, (most_latents - 1) * FRAME_STRIDE + 1) if most_latents else 0
     longest = (
@@ -238,7 +242,7 @@ def settle(
         fps=fps,
         steps=spec.steps,
         seed=seed,
-        video_tokens=latent_frames(frames) * (width // spec.size_multiple) * (height // spec.size_multiple),
+        video_tokens=video_tokens(width, height, frames),
     )
     refuse_tokens(settled, model, spec)
     return settled

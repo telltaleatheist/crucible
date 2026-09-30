@@ -954,14 +954,16 @@ crucible models pull sam2.1-hiera-large
 ### `video`
 
 Video clips with synchronized sound (`docs/VIDEO.md`, `docs/internals/video.md`): LTX-2.5
-distilled on a CUDA card only, from a prompt or from a prompt and a start picture, up to 6 s at
-1280x704 (3 s from a picture). The 22B model fits a 24 GB card one component at a time: the
-Gemma 4 text encoder in torchao int8, the transformer as GGUF Q6_K. One `video.mp4` (H.264 and
-AAC) out, and `done.video` carries every effective parameter and each stage's memory peak.
+distilled, from a prompt or from a prompt and a start picture, up to 6 s at 1280x704 (from a
+picture 3 s on the PC, 5 s on the Mac). On the PC the 22B model fits a 24 GB card one
+component at a time: the Gemma 4 text encoder in torchao int8, the transformer as GGUF Q6_K.
+On a Mac with 48 GB or more it runs through ltx-2-mlx on the MLX int8 pack, 8 steps at half
+size then 3 at full size. One `video.mp4` (H.264 and AAC) out, and `done.video` carries every
+effective parameter and each stage's memory peak.
 
 ```bash
 crucible init --enable-video
-crucible install video                        # cuda-linux only
+crucible install video                        # diffusers on the PC, ltx-2-mlx on the Mac
 crucible models pull ltx-2.5-distilled        # gated: accept the licence on Hugging Face first
 ```
 

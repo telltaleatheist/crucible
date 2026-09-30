@@ -21,9 +21,11 @@ from workerio import send
 
 WHY_REQUIRED = "every parameter is required because each one changes the video"
 
-H264_ENCODERS: tuple[str, ...] = ("libx264", "libopenh264", "h264_nvenc")
+H264_ENCODERS: tuple[str, ...] = ("libx264", "libopenh264", "h264_nvenc", "h264_videotoolbox")
 
 OPENH264_BITS_PER_PIXEL = 0.3
+
+VIDEOTOOLBOX_BITS_PER_PIXEL = 0.4
 
 MIN_BITRATE = 2_000_000
 
@@ -35,6 +37,17 @@ SPANS: tuple[tuple[str, float], ...] = (
     ("conditioning", 0.03),
     ("denoising", 0.58),
     ("decoding", 0.17),
+    ("audio_decoding", 0.03),
+    ("muxing", 0.07),
+)
+
+# The Mac's arm (ltx2mlx_worker.py): the text encoder and connector are one stage, the start
+# picture is encoded inside denoising, and a full-size refining pass follows the half-size one.
+TWO_PASS_SPANS: tuple[tuple[str, float], ...] = (
+    ("encoding", 0.08),
+    ("denoising", 0.30),
+    ("refining", 0.40),
+    ("decoding", 0.12),
     ("audio_decoding", 0.03),
     ("muxing", 0.07),
 )
@@ -136,6 +149,7 @@ class Job:
         self.fps = required("fps", int)
         self.seed = required("seed", int)
         self.steps = required("steps", int)
+        self.refine_steps = nullable("refine_steps", int)
         self.audio = required("audio", bool)
         self.image_path = nullable("image_path", str)
         self.output_path = required("output_path", str)
@@ -207,8 +221,8 @@ def pick_encoder(ffmpeg: str) -> str:
             return name
     raise RuntimeError(
         f"{ffmpeg} has no H.264 encoder (looked for {', '.join(H264_ENCODERS)}); "
-        "Crucible's own ffmpeg carries libopenh264, so this is some other ffmpeg "
-        "ahead of it on PATH"
+        "Crucible's own ffmpeg carries libopenh264 on Linux and h264_videotoolbox "
+        "on the Mac, so this is some other ffmpeg ahead of it on PATH"
     )
 
 
@@ -220,6 +234,15 @@ def video_options(encoder: str, width: int, height: int, fps: int) -> list:
         options = ["-c:v", "libopenh264", "-b:v", str(bitrate)]
     elif encoder == "h264_nvenc":
         options = ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "19", "-b:v", "0"]
+    elif encoder == "h264_videotoolbox":
+        # The Mac's own ffmpeg (hosttools, LGPL) has no x264 or openh264; VideoToolbox is
+        # the H.264 encoder it carries. -allow_sw lets it fall back to Apple's software
+        # encoder when no hardware session can be opened (a background launchd job).
+        bitrate = max(MIN_BITRATE, round(width * height * fps * VIDEOTOOLBOX_BITS_PER_PIXEL))
+        options = [
+            "-c:v", "h264_videotoolbox", "-b:v", str(bitrate), "-profile:v", "high",
+            "-allow_sw", "1",
+        ]
     else:
         raise RuntimeError(f"no settings for encoder {encoder!r}; this worker knows {list(H264_ENCODERS)}")
     return options + ["-pix_fmt", "yuv420p"]
@@ -303,7 +326,7 @@ class Worker:
         send("done")
 
     def _run(self, job: Job) -> dict:
-        progress = Progress(job.request_id)
+        progress = Progress(job.request_id, getattr(self.engine, "spans", SPANS))
         started = time.time()
         clip, peaks, extra = self.engine.generate(job, progress)
         progress.enter("muxing")

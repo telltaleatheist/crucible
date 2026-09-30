@@ -59,10 +59,12 @@ VIDEO_JOB_TYPE = "video"
 
 VIDEO_ENGINE_HEADLINE: dict[str, str] = {
     "ltx": "diffusers",
+    "ltx-2-mlx": "ltx-pipelines-mlx",
 }
 
 VIDEO_ENGINE_MODULES: dict[str, str] = {
     "ltx": "diffusers, gguf, torchao, av",
+    "ltx-2-mlx": "ltx_pipelines_mlx, ltx_core_mlx, mlx_arsenal, transformers, av",
 }
 
 WORKER_JOB_TYPES: tuple[str, ...] = tuple(env.name for env in ENVS if env.worker)
@@ -268,7 +270,7 @@ def video_envs(backend_kind: str) -> tuple[EnvSpec, ...]:
         raise EnvError(
             f"video has no engine on {backend_kind!r}; it runs on "
             f"{sorted(k for k in (CUDA_LINUX, MLX_DARWIN) if video_engines_on(k))} "
-            "only (LTX-2.5 needs a CUDA card; docs/internals/video.md, \"Backends\")"
+            "only (docs/internals/video.md, \"Backends\")"
         )
     return tuple(video_env(engine, backend_kind) for engine in engines)
 

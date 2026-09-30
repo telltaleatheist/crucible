@@ -355,15 +355,149 @@ def test_no_ffmpeg_is_refused_at_submit(
     assert rows(transcript, "load") == []
 
 
-def test_the_mac_has_no_video_arm(
-    make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch, ffmpeg: None,
-) -> None:
+@pytest.fixture
+def mac(
+    make_client: Callable[..., TestClient],
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ffmpeg: None,
+    transcript: Path,
+) -> Iterator[TestClient]:
+    monkeypatch.setenv("HF_TOKEN", "hf_fake_token_for_tests")
     monkeypatch.setattr(accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB))
+    _envs(home, FAKE_MAC_BACKEND.kind, monkeypatch)
+    _weights(home, FAKE_MAC_BACKEND.kind)
+    with make_client(enable_video=True, backend=FAKE_MAC_BACKEND, desktop_allowance_bytes=16 * GIB) as client:
+        yield client
+
+
+def _in_order(events: list[dict]) -> list[str]:
+    stages: list[str] = []
+    for event in events:
+        stage = event["data"].get("stage") if event["event"] == "progress" else None
+        if stage is not None and stage not in stages[-1:]:
+            stages.append(stage)
+    return stages
+
+
+def test_the_mac_makes_a_clip_in_a_half_size_and_a_full_size_pass(
+    mac: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    _, events = run_job(mac, auth, params={
+        "prompt": PROMPT, "width": 768, "height": 512, "duration_s": 2, "seed": 5,
+    })
+    assert events[-1]["event"] == "done", events[-1]
+    assert _in_order(events) == [
+        "encoding", "denoising", "refining", "decoding", "audio_decoding", "muxing", "done",
+    ]
+    steps = {
+        stage: [e["data"]["step"] for e in events if e["event"] == "progress" and e["data"].get("stage") == stage]
+        for stage in ("denoising", "refining")
+    }
+    assert steps["denoising"][-8:] == list(range(1, 9)) and steps["refining"][-3:] == [1, 2, 3]
+    fractions = [e["data"]["fraction"] for e in events if e["event"] == "progress"]
+    assert fractions == sorted(fractions)
+    video = events[-1]["data"]["video"]
+    spec = load_video_manifest(MODEL).spec(FAKE_MAC_BACKEND.kind)
+    assert (video["engine"], video["backend"], video["hf_repo"], video["revision"]) == (
+        "ltx-2-mlx", "mlx-darwin", "dgrauet/ltx-2.5-mlx-q8", spec.revision,
+    )
+    assert video["transformer"] is None
+    assert (video["steps"], video["refine_steps"], video["seed"]) == (8, 3, 5)
+    assert (video["width"], video["height"], video["num_frames"], video["video_tokens"]) == (768, 512, 49, 7 * 24 * 16)
+    assert video["stage_peak_bytes"] == {"denoising": 19, "refining": 23, "decoding": 8}
+    assert video["memory_bytes_estimate"] == 29_000_000_000 == video["stage_memory_bytes"]["refining"]
+    assert video["memory_basis"] == "declared" and video["sampling"] == {"passes": ["half", "full"]}
+    assert (video["audio_sample_rate"], video["audio_channels"]) == (48000, 2)
+    load = rows(transcript, "load")[0]
+    assert (load["engine"], load["device"], load["transformer_path"]) == ("ltx-2-mlx", "metal", None)
+    assert (load["mlx_cache_limit_bytes"], load["memory_cap_bytes"]) == (4_000_000_000, None)
+    made = rows(transcript, "generate")[0]
+    assert (made["steps"], made["refine_steps"], made["ffmpeg"]) == (8, 3, FFMPEG)
+
+
+def test_the_pc_sends_no_refining_pass(ready: TestClient, auth: dict[str, str], transcript: Path) -> None:
+    _, events = run_job(ready, auth)
+    video = events[-1]["data"]["video"]
+    assert video["refine_steps"] is None and "refining" not in _in_order(events)
+    assert rows(transcript, "load")[0]["mlx_cache_limit_bytes"] is None
+
+
+@pytest.mark.parametrize(
+    ("params", "has_picture", "code", "words"),
+    [
+        ({"prompt": PROMPT, "width": 768, "height": 544}, False, "video_size_not_supported",
+         "multiples of 64"),
+        ({"prompt": PROMPT, "width": 1280, "height": 704, "duration_s": 6}, True, "video_too_large",
+         "14,080"),
+        ({"prompt": PROMPT, "negative_prompt": "blurry"}, False, "video_param_unsupported",
+         "without classifier-free guidance"),
+    ],
+)
+def test_the_mac_refuses_by_its_own_limits_before_the_worker(
+    mac: TestClient, auth: dict[str, str], transcript: Path,
+    params: dict, has_picture: bool, code: str, words: str,
+) -> None:
+    inputs = {"start.png": {"inline_base64": PNG}} if has_picture else {}
+    response = submit(mac, auth, params=params, inputs=inputs)
+    if response.status_code == 202:
+        error = events_of(mac, auth, response.json()["job_id"])[-1]["data"]["error"]
+    else:
+        error = refusal(response)
+    assert error["code"] == code, error
+    assert words in error["message"], error["message"]
+    assert "mlx-darwin" in error["message"]
+    assert rows(transcript, "load") == []
+
+
+def test_the_mac_starts_a_5_s_clip_from_a_picture_which_the_pc_would_refuse(
+    mac: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    _, events = run_job(
+        mac, auth,
+        params={"prompt": PROMPT, "width": 1280, "height": 704, "duration_s": 5},
+        inputs={"start.png": {"inline_base64": PNG}},
+    )
+    assert events[-1]["event"] == "done", events[-1]
+    video = events[-1]["data"]["video"]
+    assert (video["mode"], video["input"], video["num_frames"], video["video_tokens"]) == (
+        "image-to-video", "start.png", 121, 14_080,
+    )
+    assert "conditioning" not in _in_order(events)
+    assert rows(transcript, "generate")[0]["image_path"].endswith("start.png")
+
+
+def test_a_mac_too_small_for_the_refining_pass_is_refused_before_the_worker(
+    make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch, ffmpeg: None, transcript: Path,
+) -> None:
+    small = FAKE_MAC_BACKEND.__class__(
+        **{**FAKE_MAC_BACKEND.__dict__, "gpu": FAKE_MAC_BACKEND.gpu.__class__(
+            vendor="apple", name="Apple M2 Max", vram_bytes=32 * GIB
+        )}
+    )
+    monkeypatch.setenv("HF_TOKEN", "hf_fake_token_for_tests")
+    monkeypatch.setattr(accelerator, "probe_unified_memory", lambda: (20 * GIB, 32 * GIB))
+    _envs(home, small.kind, monkeypatch)
+    _weights(home, small.kind)
+    with make_client(enable_video=True, backend=small, desktop_allowance_bytes=16 * GIB) as client:
+        error = refusal(submit(client, auth))
+    assert error["code"] == "insufficient_memory", error
+    assert error["details"]["needed_bytes"] == 29_000_000_000
+    assert rows(transcript, "load") == []
+
+
+def test_the_mac_pack_is_gated_and_the_refusal_names_its_page(
+    make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
+    ffmpeg: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(accelerator, "probe_unified_memory", lambda: (40 * GIB, 64 * GIB))
+    _envs(home, FAKE_MAC_BACKEND.kind, monkeypatch)
     with make_client(enable_video=True, backend=FAKE_MAC_BACKEND, desktop_allowance_bytes=16 * GIB) as client:
         error = refusal(submit(client, auth))
-    assert error["code"] == "backend_unsupported"
-    assert error["details"]["declared"] == ["cuda-linux"]
+    assert error["code"] == "model_gated"
+    assert error["details"]["accept_url"] == "https://huggingface.co/dgrauet/ltx-2.5-mlx-q8"
 
 
 def test_a_gated_model_without_a_token_is_refused_with_the_page_to_accept(

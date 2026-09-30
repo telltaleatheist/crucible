@@ -25,6 +25,7 @@ from ...residency import (
 from ...videomodels import (
     IMAGE_TO_VIDEO,
     LTX,
+    LTX_2_MLX,
     TEXT_TO_VIDEO,
     VideoBackendSpec,
     VideoManifest,
@@ -74,6 +75,7 @@ HERE = Path(__file__).resolve().parent
 
 WORKER_SCRIPTS: dict[str, Path] = {
     LTX: HERE / "ltx_worker.py",
+    LTX_2_MLX: HERE / "ltx2mlx_worker.py",
 }
 
 WORKER_ENVIRONMENT = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
@@ -177,6 +179,7 @@ def start_video_session(
 ) -> workers.WorkerSession:
     spec = needs.spec
     script = worker_script(spec.engine)
+    transformer = spec.transformer_path(needs.weights_dir)
     session = workers.WorkerSession(
         python=python,
         script=script,
@@ -192,10 +195,11 @@ def start_video_session(
             "op": "load",
             "engine": spec.engine,
             "model_dir": str(needs.weights_dir),
-            "transformer_path": str(spec.transformer_path(needs.weights_dir)),
+            "transformer_path": None if transformer is None else str(transformer),
             "hf_repo": spec.hf_repo,
             "device": spec.device,
             "dtype": spec.dtype,
+            "mlx_cache_limit_bytes": spec.mlx_cache_limit_bytes,
             "memory_cap_bytes": workers.torch_memory_cap(
                 spec.backend, spec.memory_bytes_estimate
             ),
@@ -495,6 +499,7 @@ def generate_request(
         "fps": settled.fps,
         "seed": settled.seed,
         "steps": settled.steps,
+        "refine_steps": needs.spec.refine_steps,
         "audio": params.audio,
         "image_path": None if source is None else str(source),
         "output_path": str(output),
@@ -517,7 +522,7 @@ def effective_params(
         "model": needs.manifest.id,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,
-        "transformer": {
+        "transformer": None if transformer is None else {
             "hf_repo": transformer.hf_repo,
             "revision": transformer.revision,
             "file": transformer.files[0].target,
@@ -527,6 +532,7 @@ def effective_params(
         "engine": spec.engine,
         "dtype": spec.dtype,
         "quantization": result.get("quantization"),
+        "sampling": result.get("sampling"),
         "mode": settled.mode,
         "prompt": params.prompt,
         "input": None if source is None else source.name,
@@ -538,6 +544,7 @@ def effective_params(
         "video_tokens": settled.video_tokens,
         "seed": settled.seed,
         "steps": settled.steps,
+        "refine_steps": spec.refine_steps,
         "audio": params.audio,
         "audio_seconds": result.get("audio_seconds"),
         "audio_sample_rate": result.get("audio_sample_rate"),

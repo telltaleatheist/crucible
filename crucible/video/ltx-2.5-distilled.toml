@@ -2,7 +2,7 @@
 id = "ltx-2.5-distilled"
 family = "ltx-2.5"
 display = "LTX-2.5 Distilled"
-licence = "LTX-2.x Community License Agreement (licence date 2026-08-11), which covers both the Lightricks weights and the community GGUF quantization of them"
+licence = "LTX-2.x Community License Agreement (licence date 2026-08-11), which covers the Lightricks weights and both community derivatives Crucible pulls: the GGUF quantization (PC) and the MLX int8 conversion (Mac)"
 licence_url = "https://github.com/Lightricks/LTX-2/blob/a95ab856bf29407b6b066ede0abe1846050db56c/LICENSE-2_x"
 commercial_use = "free, commercial and production use included, for an entity whose annual revenue (with its affiliates) is under US$10,000,000; at or above that, a paid Commercial Use Agreement from Lightricks (ltxv-licensing@lightricks.com) except for the licence's narrow non-commercial purposes. Lightricks claims no rights in the videos you make; keep any provenance or watermark the model puts in them"
 
@@ -78,3 +78,61 @@ source = "LTX-2.5-Distilled-Q6_K.gguf"
 target = "LTX-2.5-Distilled-Q6_K.gguf"
 sha256 = "ee8835ff8f11e4f59fa4be7bf31b1200172659364e724de444d790ddf4869a58"
 bytes = 18624033216
+
+[backends.mlx-darwin]
+engine = "ltx-2-mlx"
+hf_repo = "dgrauet/ltx-2.5-mlx-q8"
+revision = "746ca9aacb697d2c739f544d68b584214dedcc75"
+gated = true
+dtype = "bfloat16"
+memory_bytes_estimate = 29000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-30 from the pinned pack's file sizes and the ltx-2-mlx source at 1724ca673d59f023a8a95efee06e5d36d61c2765, not measured through Crucible: one stage in unified memory at a time, MLX peak per stage (mx.get_peak_memory). The largest is refining, the full-size pass: the distilled transformer at int8 (20.6 GB file, all of it in memory, no block streaming) plus about 150 KB of activations per video token (the widest block's feed-forward, the attention inputs, per-token modulation for image-to-video), 23 GB at 1280x704 x 145 frames (16,720 tokens), declared 29 GB. The Gemma 4 text encoder at int8 (16.0 GB) and the connector (4.0 GB) are the encoding stage; see stage_memory_bytes. Needs a Mac with 29 GB left after the 16 GB desktop allowance: 48 GB or more"
+files = [
+  "LICENSE",
+  "README.md",
+  "embedded_config.json",
+  "quantize_config.json",
+  "generation_config.json",
+  "processor_config.json",
+  "chat_template.jinja",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "text_encoder_config.json",
+  "text_encoder.safetensors",
+  "connector.safetensors",
+  "duration_head.safetensors",
+  "transformer-distilled.safetensors",
+  "spatial_upscaler_x2_v1_0.safetensors",
+  "spatial_upscaler_x2_v1_0_config.json",
+  "vae_encoder_conv.safetensors",
+  "vae_decoder_conv.safetensors",
+  "audio_vae.safetensors",
+  "vocoder.safetensors",
+]
+size_multiple = 64
+min_side = 256
+max_side = 1280
+max_pixels = 901120
+fps = [24, 25]
+default_fps = 24
+default_width = 1280
+default_height = 704
+default_duration_s = 5.0
+max_frames = 145
+max_video_tokens = 16720
+max_video_tokens_image_to_video = 14080
+steps = 8
+refine_steps = 3
+audio_sample_rate = 48000
+mlx_cache_limit_bytes = 4000000000
+
+[backends.mlx-darwin.stage_memory_bytes]
+encoding = 23000000000
+denoising = 26000000000
+refining = 29000000000
+decoding = 16000000000
+audio_decoding = 3000000000
+
+[backends.mlx-darwin.not_taken]
+negative_prompt = "the distilled pipeline runs without classifier-free guidance, so it never reads a negative prompt (ltx-2-mlx refuses one itself); describe what you want in the prompt instead"

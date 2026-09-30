@@ -231,8 +231,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "holds the torch it wants). 'audio' builds one env per audio engine "
             "this backend runs (Stable Audio 3; YuE2 on cuda-linux). 'segment' "
             "builds one env that runs both segment models (BiRefNet and SAM 2.1). "
-            "'video' builds the LTX-2.5 env (cuda-linux only) and places the ffmpeg "
-            "that muxes its clips"
+            "'video' builds the LTX-2.5 env (diffusers on cuda-linux, ltx-2-mlx on "
+            "mlx-darwin) and places the ffmpeg that muxes its clips"
         ),
     )
     install.add_argument(

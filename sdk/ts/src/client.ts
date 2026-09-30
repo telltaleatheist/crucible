@@ -2357,17 +2357,20 @@ export function readVideoResult(done: DoneData): VideoResult {
   const where = 'the video done event';
   const video = objectField(done.extra as Json, 'video', where);
   const at = `${where}.video`;
-  const transformer = objectField(video, 'transformer', at);
+  const transformer = nullableObject(video, 'transformer', at);
   return {
     model: str(video, 'model', at),
     hfRepo: str(video, 'hf_repo', at),
     revision: str(video, 'revision', at),
-    transformer: {
-      hfRepo: str(transformer, 'hf_repo', `${at}.transformer`),
-      revision: str(transformer, 'revision', `${at}.transformer`),
-      file: str(transformer, 'file', `${at}.transformer`),
-      sha256: str(transformer, 'sha256', `${at}.transformer`),
-    },
+    transformer:
+      transformer === null
+        ? null
+        : {
+            hfRepo: str(transformer, 'hf_repo', `${at}.transformer`),
+            revision: str(transformer, 'revision', `${at}.transformer`),
+            file: str(transformer, 'file', `${at}.transformer`),
+            sha256: str(transformer, 'sha256', `${at}.transformer`),
+          },
     backend: str(video, 'backend', at),
     engine: str(video, 'engine', at),
     dtype: str(video, 'dtype', at),
@@ -2382,6 +2385,7 @@ export function readVideoResult(done: DoneData): VideoResult {
     videoTokens: num(video, 'video_tokens', at),
     seed: num(video, 'seed', at),
     steps: num(video, 'steps', at),
+    refineSteps: optNum(video, 'refine_steps', at),
     audio: bool(video, 'audio', at),
     audioSeconds: nullableNum(video, 'audio_seconds', at),
     audioSampleRate: nullableNum(video, 'audio_sample_rate', at),

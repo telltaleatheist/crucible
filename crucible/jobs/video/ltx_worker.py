@@ -444,6 +444,12 @@ class LtxEngine:
         )
         return clip, peaks, {
             "prompt_cache": cache,
+            "sampling": {
+                "passes": [
+                    {"size": "full", "steps": job.steps,
+                     "sampler": "euler, the distilled sigma schedule, unguided"},
+                ],
+            },
             "quantization": {
                 "text_encoder": "torchao int8 weight-only (per row), bfloat16 activations",
                 "transformer": "GGUF Q6_K, dequantized per layer to bfloat16",
