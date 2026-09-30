@@ -333,28 +333,58 @@ strength). The start image is now EXIF-oriented before encoding, as mflux does.
 **Mac (mflux 0.20.0).** mflux has no inpainting for Qwen-Image 2.1. Its fill (`flux/variants/
 fill`) is the separate FLUX.1 Fill model, and `Config.masked_image_path` is read only by that
 model. Its `QwenImage21.generate_image` loop calls `ctx.in_loop(t, latents)` after each
-`scheduler.step` and reads nothing back. MLX item assignment updates an array in place, and
-every name bound to it sees the change (MLX's indexing docs, "In Place Updates"). So
-`_MfluxRepaint` writes the blend into `latents[...]` from `call_in_loop`, and the next step and
-the worker's `mx.eval(latents)` read it. The sigma is `config.scheduler.sigmas[t + 1]`
-(`LinearScheduler`'s shifted schedule, with a 0 appended). The clean latents are built as
-mflux's own image-to-image builds them (`LatentCreator.encode_image`, then
-`Qwen21LatentCreator.pack_latents`) during the encoding stage. The noise is
-`Qwen21LatentCreator.create_noise(seed, ...)`, the same array `generate_image` starts from. With
-a mask and no strength the worker passes `image_path=None`, so mflux starts from that noise.
-With a strength, mflux encodes the input a second time for its own start.
+`scheduler.step` and reads nothing back.
 
-**Owed on hardware.** This was built and tested with fake engines only. Owed on each machine,
-through the installed Crucible: one inpaint (a centre box, no strength) and one outpaint (a
-1024x768 canvas from a centred 768x768) at 512 to 1024 pixels, checking by eye that the region
-fits its surroundings with no seam and that the pixels outside the mask match the input
-(`done.image.mask_coverage` is reported). Then one masked job at 1,048,576 pixels, reading
+The first version (1.0.64) wrote the blend into the loop's array from that callback
+(`latents[...] = blended`), relying on MLX item assignment updating the array in place. On the
+Mac Studio (2026-09-29) it did not reach the loop. An inpainted box came back as a separate
+little scene with a hard seam on every side, and both outpaint strips were unrelated
+landscapes. The paste-back still kept every pixel outside the mask exact.
+
+So a masked job no longer goes through `generate_image`. `_mflux_generate` is that method's
+body for 0.20.0, step for step: the same `Config` (linear scheduler), prompt encoding through
+`Qwen21PromptEncoder` and the model's prompt cache, true CFG, the `callbacks.start` context
+with `before_loop`, `in_loop` and `after_loop` (so the worker's stage, memory and progress
+callbacks run as before), the unpack, and `VAEUtil.decode`. The loop, `_mflux_denoise`, is
+mflux's own: `scale_model_input`, the transformer, `scheduler.step`. The one difference is that
+the blend's return value is what the loop carries into the next step. The start latents are
+`LatentCreator.create_for_txt2img_or_img2img`'s, built from the clean latents and the noise
+the blend already holds (built the same way): the noise at `init_time_step` 0, else
+`add_noise_by_interpolation` at `sigmas[init_time_step]`. So the input is VAE-encoded once
+even with a strength. `ImageUtil.to_pil` makes the picture (`to_image`'s metadata is not
+used). Unmasked jobs still call mflux's `generate_image`, the path measured above.
+`test_the_mac_loop_feeds_each_blend_to_the_next_step` runs both functions against stubs that
+record what each step receives.
+
+The sigma is `config.scheduler.sigmas[t + 1]` (`LinearScheduler`'s shifted schedule, with a 0
+appended). The clean latents are built as mflux's own image-to-image builds them
+(`LatentCreator.encode_image`, then `Qwen21LatentCreator.pack_latents`) during the encoding
+stage. The noise is `Qwen21LatentCreator.create_noise(seed, ...)`, the array mflux's txt2img
+starts from.
+
+**A seam on one side of an outpaint (PC, 2026-09-29).** A 768x768 photo centred on 1024x768
+came back with the left strip continuing the scene and a hard vertical seam on the right,
+where the generated trees did not line up with the photo's. The mask handling is symmetric.
+The mask was white over x < 140 and x >= 884. The latent grid regenerates tiles 0 to 8
+(x < 144) and 55 to 63 (x >= 880): 4 pixels past the mask on each side, both pasted back from
+the original. The inward feather is the same on both edges.
+`test_the_mask_is_handled_the_same_on_the_left_and_the_right` checks that region, feather
+and grid are mirror images.
+
+Stopping the blend over the last steps would not help. The last step already blends at sigma
+0, so it puts back the un-noised input, which is what diffusers' inpaint pipeline ends with.
+Where the trees go is decided in the first, high-noise steps, and freeing the kept side at the
+end would only let the model change pixels that the paste-back then replaces. What is left is
+the model: a model that was not trained for inpainting sometimes continues a busy edge (trees)
+badly on one side and well on the other, differently for each seed. The remedies are the
+caller's: another seed, a wider `mask_blur` (24 to 32) with the white reaching further into
+the photo (24 to 32 pixels), and narrower strips.
+
+**Owed on hardware.** Owed on each machine, through the installed Crucible: the inpaint (a
+centre box, no strength) and the outpaint (a 1024x768 canvas from a centred 768x768) again on
+the Mac with the rewritten loop. Then one masked job at 1,048,576 pixels, reading
 `stage_peak_bytes`: the extra VAE encode runs in the encoding stage on the Mac (in the
 transformer stage's setup on the PC, before the transformer loads), and neither was measured.
-On the Mac, the one thing that can break is the in-place write: if an MLX release stopped
-updating the caller's array, the region would be drawn without regard to its surroundings (the
-paste-back would still keep the outside exact, but there would be a seam at the edge). The
-check is the seam.
 
 ## Cancel between steps
 
