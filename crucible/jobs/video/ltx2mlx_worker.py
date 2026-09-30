@@ -10,14 +10,18 @@ a leased batch can skip the text stage for a prompt it has read, and the frames 
 come back to videocore's mux like the PC's:
 
 - encoding: the pack's Gemma 4 text encoder (int8) and its connector; freed after.
-- denoising: the distilled transformer (int8, all of it in memory: no block streaming), the
-  VAE encoder and the upscaler load; the start picture of an image-to-video job is encoded
-  here; 8 steps at half the size.
+- denoising: the distilled transformer (int8, all of it in memory unless the machine's
+  [video_desktop] table asks for block streaming), the VAE encoder and the upscaler load; the
+  start picture of an image-to-video job is encoded here; 8 steps at half the size.
 - refining: the 2x latent upscale, then 3 steps at full size; the transformer is freed after.
 - decoding: the conv VAE decoder, tiled to DECODE_BUDGET_BYTES, into 8-bit RGB frames.
 - audio_decoding: the audio VAE and the vocoder with bandwidth extension, 48 kHz stereo.
 
-docs/internals/video.md, "The Mac arm", has the memory arithmetic behind each stage.
+With a [video_desktop] table the job also sends a `desktop` dict: block streaming, and a
+temporal (and optional spatial) tiling of each pass through the port's modality tiling, so
+no single kernel spans the whole clip. The MLX and ltx-2-mlx env knobs of the same table
+arrive in the environment. docs/internals/video.md, "The Mac arm", has the memory arithmetic
+behind each stage, and "Keeping the desktop responsive: [video_desktop]" the knobs.
 """
 
 from __future__ import annotations
@@ -50,6 +54,8 @@ IMAGE_CRF = 18
 AUDIO_SAMPLE_RATE = 48000
 
 DEFAULT_REFINE_STEPS = 3
+
+DESKTOP_ENVIRONMENT: tuple = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER", "LTX2_DIT_EVAL_EVERY")
 
 REQUIRED_FILES: tuple = (
     "embedded_config.json",
@@ -124,6 +130,100 @@ def prepare_start_image(image_path: str, out_path: str, crf: int = IMAGE_CRF) ->
     Image.fromarray(decoded[:height, :width]).save(out_path, format="PNG")
 
 
+def _tile_fits(size: int, tiles: int, overlap: int) -> bool:
+    """Whether ltx-2-mlx's split_by_count accepts `tiles` tiles over `size` latent cells.
+
+    It raises when there are more tiles than cells or when a tile is no longer than the
+    overlap (ltx_core_mlx/model/video_vae/tiling.py, split_by_count), so a count that
+    would not fit is lowered instead of failing the job.
+    """
+    return tiles <= 1 or (tiles <= size and (size + overlap * (tiles - 1)) // tiles > overlap)
+
+
+def _tile_size(size: int, tiles: int, overlap: int) -> int:
+    if tiles <= 1:
+        return size
+    return -(-(size + overlap * (tiles - 1)) // tiles)
+
+
+def tile_plan(latent: tuple, desktop) -> dict:
+    """How one denoising pass over a (frames, height, width) latent grid is tiled.
+
+    Temporal tiles are chosen so each tile's video tokens stay near max_tile_tokens (the
+    size of one attention or feed-forward kernel is what holds the GPU); spatial tiles are
+    the table's fixed count per axis. None of it applies without a [video_desktop] table.
+    """
+    frames, height, width = latent
+    if desktop is None:
+        return {"tiles": [1, 1, 1], "tile_tokens": frames * height * width}
+    overlap = int(desktop["tile_overlap"])
+    rows = cols = int(desktop["tile_spatial"])
+    while rows > 1 and not _tile_fits(height, rows, overlap):
+        rows -= 1
+    while cols > 1 and not _tile_fits(width, cols, overlap):
+        cols -= 1
+    tile_rows, tile_cols = _tile_size(height, rows, overlap), _tile_size(width, cols, overlap)
+    spans = 1
+    ceiling = int(desktop["max_tile_tokens"])
+    if ceiling > 0 and frames * tile_rows * tile_cols > ceiling:
+        spans = -(-(frames * tile_rows * tile_cols) // ceiling)
+        while spans > 1 and not _tile_fits(frames, spans, overlap):
+            spans -= 1
+    tokens = _tile_size(frames, spans, overlap) * tile_rows * tile_cols
+    return {"tiles": [spans, rows, cols], "tile_tokens": tokens}
+
+
+def tile_config(plan: dict, overlap: int):
+    """The TileCountConfig ltx-2-mlx's pipelines take as `tile_count` (None: untiled)."""
+    if plan["tiles"] == [1, 1, 1]:
+        return None
+    from ltx_core_mlx.model.video_vae.tiling import DimensionTilingConfig, TileCountConfig
+
+    frames, rows, cols = plan["tiles"]
+    return TileCountConfig(
+        frames=DimensionTilingConfig(num_tiles=frames, overlap=overlap if frames > 1 else 0),
+        height=DimensionTilingConfig(num_tiles=rows, overlap=overlap if rows > 1 else 0),
+        width=DimensionTilingConfig(num_tiles=cols, overlap=overlap if cols > 1 else 0),
+    )
+
+
+class DutyCycle:
+    """An mx.eval that, after the GPU finishes, leaves it idle for a share of that time.
+
+    ltx-2-mlx syncs through the module-level `_mx_eval` of
+    ltx_core_mlx/model/transformer/model.py after every Nth transformer block
+    (LTX2_DIT_EVAL_EVERY) and after every block when streaming. The worker replaces that name
+    with this, so each sync is followed by a pause of busy x (100 - duty) / duty: at 85 the
+    GPU is left idle about 15% of the time in short, regular gaps, which is what lets the
+    desktop's own GPU work in and keeps the GPU off 100%. `busy` is the time the eval waited,
+    which is the GPU's time for those blocks less whatever it had already finished.
+    """
+
+    def __init__(self, evaluate, duty_pct: int, clock=None, sleep=None) -> None:
+        import time
+
+        self._evaluate = evaluate
+        self._duty = duty_pct
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
+        self.busy_s = 0.0
+        self.paused_s = 0.0
+
+    def reset(self) -> None:
+        self.busy_s = 0.0
+        self.paused_s = 0.0
+
+    def __call__(self, *arrays) -> None:
+        started = self._clock()
+        self._evaluate(*arrays)
+        busy = self._clock() - started
+        self.busy_s += busy
+        if self._duty < 100:
+            pause = busy * (100 - self._duty) / self._duty
+            self._sleep(pause)
+            self.paused_s += pause
+
+
 def stepping_pipeline(base):
     """`base` (DistilledPipeline) with the prompt's embeddings handed in.
 
@@ -157,13 +257,14 @@ class StepReport:
     step reported is the step done, and a cancel lands between steps.
     """
 
-    def __init__(self, mx, progress) -> None:
+    def __init__(self, mx, progress, evaluate=None) -> None:
         self._mx = mx
         self._progress = progress
+        self._evaluate = evaluate or mx.eval
 
     def bind(self, **_geometry):
         def on_step(step_index, _steps, video_x0, _sigma) -> None:
-            self._mx.eval(video_x0)
+            self._evaluate(video_x0)
             self._progress.reached(step_index + 1)
 
         return on_step
@@ -188,7 +289,23 @@ class LtxMlxEngine:
                 "missing. Run `crucible models pull ltx-2.5-distilled`; it fetches only "
                 "what is missing"
             )
-        self._pipe = stepping_pipeline(DistilledPipeline)(self._model_dir, low_memory=True)
+        desktop = request.get("desktop")
+        self._desktop = dict(desktop) if isinstance(desktop, dict) else None
+        low_ram = bool(self._desktop and self._desktop.get("low_ram"))
+        # low_ram_streaming: the transformer's 48 blocks are read one at a time from the
+        # mmap'd file with an mx.eval after each; the pipeline also sets MLX's cache limit
+        # to 0 before anything loads (ltx_pipelines_mlx/_base.py, BasePipeline.__init__).
+        self._pipe = stepping_pipeline(DistilledPipeline)(
+            self._model_dir, low_memory=True, low_ram_streaming=low_ram
+        )
+        self._cache_limit = 0 if low_ram else require(request, "mlx_cache_limit_bytes", int)
+        self._duty = None
+        duty = int(self._desktop.get("gpu_duty_pct", 100)) if self._desktop else 100
+        if duty < 100:
+            from ltx_core_mlx.model.transformer import model as dit
+
+            self._duty = DutyCycle(dit._mx_eval, duty)
+            dit._mx_eval = self._duty
         if not self._pipe._is_25:
             raise RuntimeError(
                 f"{self._model_dir} is not an LTX-2.5 pack (its embedded_config.json does "
@@ -231,6 +348,7 @@ class LtxMlxEngine:
         pipe.dit = None
         pipe.upsampler = None
         pipe._loaded = False
+        pipe._tile_count = None
         pipe.prompt_encoder.free()
         pipe.image_conditioner.free()
         pipe.video_decoder_block.free()
@@ -370,6 +488,13 @@ class LtxMlxEngine:
         peaks: dict = {}
         refine_steps = job.refine_steps if job.refine_steps is not None else DEFAULT_REFINE_STEPS
         prepared = None
+        latent_frames = (job.num_frames - 1) // 8 + 1
+        plans = [
+            tile_plan((latent_frames, job.height // 64, job.width // 64), self._desktop),
+            tile_plan((latent_frames, job.height // 32, job.width // 32), self._desktop),
+        ]
+        if self._duty is not None:
+            self._duty.reset()
         self._release()
         embeds = self._recall(job)
         cache = "miss" if embeds is None else "hit"
@@ -380,12 +505,14 @@ class LtxMlxEngine:
                 peaks["encoding"] = self._close("encoding")
                 self._remember(job, embeds)
             pipe.embeds = embeds
-            pipe.stepwise = StepReport(self._mx, progress)
+            pipe.stepwise = StepReport(self._mx, progress, self._duty)
             images, prepared = self._start_images(job)
             progress.enter("denoising", job.steps)
+            self._tile(plans[0])
             stage1 = self._half_size(job, images)
             peaks["denoising"] = self._close("denoising")
             progress.enter("refining", refine_steps)
+            self._tile(plans[1])
             video, audio = self._full_size(job, stage1, refine_steps)
             del stage1
             pipe.dit = None
@@ -425,6 +552,25 @@ class LtxMlxEngine:
                 "text_encoder": "MLX int8 (group size 64), bfloat16 activations",
                 "transformer": "MLX int8 (group size 64), bfloat16 activations",
             },
+            "desktop": self._desktop_report(plans),
+        }
+
+    def _tile(self, plan: dict) -> None:
+        # _stage1 and _stage2 each read `_tile_count` when they build their model and wrap
+        # the transformer in TiledLTXModel when it is set (ltx_pipelines_mlx/distilled.py).
+        overlap = int(self._desktop["tile_overlap"]) if self._desktop else 0
+        self._pipe._tile_count = tile_config(plan, overlap)
+
+    def _desktop_report(self, plans: list) -> dict | None:
+        if self._desktop is None:
+            return None
+        return {
+            **self._desktop,
+            "environment": {name: os.environ.get(name) for name in DESKTOP_ENVIRONMENT},
+            "mlx_cache_limit_bytes": self._cache_limit,
+            "synced_s": None if self._duty is None else round(self._duty.busy_s, 2),
+            "paused_s": None if self._duty is None else round(self._duty.paused_s, 2),
+            "passes": [{"size": size, **plan} for size, plan in zip(("half", "full"), plans)],
         }
 
 

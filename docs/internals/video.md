@@ -487,3 +487,194 @@ operator owns the memory risk: step up gradually, read each clip's `stage_peak_b
 stop before the extrapolated next step passes what the machine can hold. The table is
 absent by default, survives config rewrites (unowned tables are carried), and should be
 removed when the measuring is done.
+
+## Keeping the desktop responsive: `[video_desktop]`
+
+Measured on the Mac Studio (M1 Ultra, 2026-09-30): during a 20 s 1280x704 render (53,680 video
+tokens in the full-size pass, allowed there by `[video_trial]`), the refining stage holds the
+GPU at 100% active residency with no idle time. The cursor freezes now and then, because
+WindowServer draws on the same GPU and has to wait for the kernel or command buffer in front of
+it. The memory compressor also grew from 6.5 to 25 GB (about 16,000 decompressions a second),
+with 14 GB wired. These knobs trade speed for a desktop that stays usable. They are not clip
+limits (those are `[video_trial]`), and only the Mac's engine reads them. The PC ignores the
+table.
+
+```toml
+[video_desktop]          # present: the defaults below apply to every key left out
+max_tile_tokens = 16000  # cut a denoising pass into temporal tiles of about this many tokens
+tile_spatial = 1         # spatial tiles per axis on top of that (2 = 2x2)
+tile_overlap = 2         # latent cells shared by neighbouring tiles
+dit_eval_every = 1       # wait for the GPU after every transformer block
+low_ram = true           # stream the transformer's blocks from disk
+mlx_max_ops_per_buffer = 20
+mlx_max_mb_per_buffer = 40
+gpu_duty_pct = 85        # after each sync, leave the GPU idle for 15% of the time it just ran
+gpu_busy_target_pct = 90 # judge only: the mean GPU busy a run should stay at or under
+```
+
+**No table means none of this**: no env vars are set, nothing is tiled or streamed, and the
+worker runs exactly as before. When the table is present, a key left out takes the value shown
+above, and a value of the wrong type or out of range is ignored rather than guessed at. The
+table is read when the worker starts, so a change applies from the next load, not to a worker
+already resident under a lease. Every clip records what it ran with in `done.video.desktop`:
+the settings, the env vars the worker actually saw, the MLX cache limit, and each pass's
+`tiles` ([frames, rows, columns]) and `tile_tokens`. It is null without the table.
+
+How each knob maps onto the libraries (mlx 0.32.2, tag `v0.32.2` = `1f8e74e3`; ltx-2-mlx at
+`1724ca67`):
+
+- **`mlx_max_ops_per_buffer`, `mlx_max_mb_per_buffer`** become the worker's
+  `MLX_MAX_OPS_PER_BUFFER` and `MLX_MAX_MB_PER_BUFFER`. `mlx/utils.h` lines 182-192
+  (`env::max_ops_per_buffer`, `env::max_mb_per_buffer`) read them once per process.
+  `mlx/backend/metal/device.cpp` 603-626 picks per-chip defaults from the GPU architecture's
+  last letter: an Ultra (`d`) is 50 ops and 50 MB, a base or Pro (`g`) 40 and 40, a phone 20
+  and 40. The env overrides them. The encoder counts one op per dispatch (`device.cpp` 412,
+  420) and adds each distinct input buffer's size (`device.cpp` 350). `needs_commit`
+  (`device.cpp` 511-513) is true past either limit, and `eval.cpp` 59 then commits the command
+  buffer after the current primitive. So these limits bound how much work sits in one command
+  buffer, giving the GPU scheduler more points to switch to WindowServer between buffers. **They
+  never split a kernel.** At these sizes every int8 linear's weight is 16 to 64 MB, so the
+  MB limit already commits nearly every large matmul by itself; the knob mostly affects runs
+  of small element-wise kernels. `MLX_SDPA_BLOCKS` (`scaled_dot_product_attention.cpp` 519)
+  applies only to the vector path (query length 8 or less), not to the full self-attention
+  this model runs (`sdpa_full_self_attention_metal`, one dispatch over all queries and keys).
+  No MLX setting splits that.
+- **`dit_eval_every`** becomes `LTX2_DIT_EVAL_EVERY`, read once at import by
+  `ltx_core_mlx/model/transformer/model.py` 33-41 (port default 8). At 943-951, `LTXModel`
+  calls `mx.eval` after every Nth block. `mx.eval` is a blocking sync: the CPU waits for the
+  GPU to finish the blocks so far, and until it has encoded the next block the GPU queue is
+  empty. That gap, 48 times a forward at 1, is where WindowServer gets the GPU cleanly. With
+  `low_ram` the model already evaluates after every block (the streaming branch at 943), so
+  this knob then changes nothing. The text encoder already syncs per layer
+  (`LTX2_GEMMA_EVAL_EVERY`, default 1: `text_encoders/gemma/encoders/base_encoder.py` 165,
+  `embeddings_connector.py` 351).
+- **`max_tile_tokens`, `tile_spatial`, `tile_overlap`** become the port's modality tiling, the
+  same `TileCountConfig` its CLI builds from `--tile-frames`, `--tile-spatial` and
+  `--tile-overlap` (`ltx_pipelines_mlx/cli.py` 148-164). `DistilledPipeline` reads
+  `self._tile_count` when each pass builds its model and wraps the transformer in
+  `TiledLTXModel` (`distilled.py` 465-469 for the half-size pass, 634-638 for the full-size
+  one). `TiledLTXModel` (`ltx_core_mlx/components/modality_tiling.py` 390-458) runs the
+  transformer once per tile on that tile's video tokens plus all the audio, blends the video
+  back with trapezoid weights over the overlap, and averages the audio. The worker sets
+  `_tile_count` before each pass. Each pass gets as many temporal tiles as keep a tile near
+  `max_tile_tokens` (0 turns it off), times the fixed spatial count. A count
+  `split_by_count` would refuse (more tiles than cells, or a tile no longer than the overlap:
+  `ltx_core_mlx/model/video_vae/tiling.py` 683-697) is lowered instead of failing the clip.
+  **This is the one knob that bounds a single kernel:** attention is one dispatch over all of
+  a tile's tokens, and its work grows with their square.
+- **`low_ram`** constructs the pipeline with `low_ram_streaming=True`, the port's `--low-ram`.
+  `load_transformer` (`utils/_orchestration.py` 93-122) keeps block 0 and wraps the model in
+  `StreamingLTXModel` (`ltx_core_mlx/loader/block_streaming.py` 286-345). That streams each
+  block's weights from the mmap'd file into one shared, `mx.compile`d block, evaluating after
+  each. `BasePipeline.__init__` also sets MLX's cache limit to 0 (`_base.py` 138), which
+  overrides the manifest's 4 GB and returns freed buffers at once. The transformer then holds
+  about one block (the port measured about 2.8 GB peak Metal instead of 10 to 12, on LTX-2.3 q8)
+  instead of 20.6 GB. This is the knob for the memory pressure, not for the stalls.
+
+- **`gpu_duty_pct`** is the one knob that lowers how busy the GPU is. The others shorten
+  the waits but leave the queue full, so the GPU stays near 100%. The worker replaces the port's
+  module-level `_mx_eval` (`ltx_core_mlx/model/transformer/model.py` 42, called at 947 and 951
+  after every block or every Nth one) and the per-step eval of its own step hook with a
+  `DutyCycle`. Each sync waits for the GPU as before, then sleeps
+  `busy x (100 - duty) / duty`, where `busy` is how long that sync waited. At 85 the GPU is
+  left idle about 15% of the transformer's time, in gaps the size of a block's work (tens of
+  milliseconds to a few seconds at these sizes) rather than one long pause. The gaps only come
+  where the port syncs: with `dit_eval_every = 0` and no `low_ram` there is one sync per step,
+  and the idle time arrives in one lump per step. 100 turns it off. The text encoder and the VAE
+  decode are not throttled: they are short, and their loops are not the port's `_mx_eval`.
+  `done.video.desktop` reports `synced_s` (time spent waiting in those syncs) and `paused_s`.
+
+A fixed few-millisecond pause between denoising steps is not included. A step at these sizes
+takes tens of seconds to minutes, so one gap per step gives WindowServer nothing. The duty
+cycle is that idea done where it helps: proportional to the work, at every block sync.
+
+**Expected cost**, not measured, with the 20 s clip's full-size pass as the example:
+
+- `max_tile_tokens = 16000` cuts that pass (61 latent frames x 22 x 40) into 4 temporal tiles
+  of 17 frames, 14,960 tokens each. The linear layers do 11% more work (the overlap) and the
+  audio path runs 4 times, but attention drops from 53,680² to 4 x 14,960² (about a third).
+  At 53k tokens attention dominates, so that pass may well get *faster*. Clips of 16,000
+  tokens or fewer (the 5 s default is 14,080) are not tiled at all and cost nothing. The real
+  cost is coherence: tokens attend across tiles only through the overlap, and the port lists
+  modality tiling as validated on LTX-2.3 only, so look for seams or drift at the tile
+  boundaries.
+- `dit_eval_every = 1`: 48 syncs a forward instead of 6, a few milliseconds each. That is
+  under 1% of a forward that takes tens of seconds, a few percent on small clips.
+- 20 ops and 40 MB per command buffer: more commits, each costing microseconds; a few percent
+  at most.
+- `gpu_duty_pct = 85`: the transformer passes take 100/85, about 18% longer; the whole clip a
+  little less, since encoding and decoding are not throttled. This is the price of the GPU not
+  being pinned, and it is paid in exact proportion: 90 costs 11%, 75 costs 33%.
+- `low_ram = true`: the port measured about 5% more time per step (M2 Pro, q8). With tiling it
+  streams the whole transformer once per tile per step, 4 x 20.6 GB per step in the example.
+  That is fast while the file stays in the page cache; the memory it frees is what keeps it
+  there. From the SSD it could add a few seconds per tile-forward.
+
+**Suggested start for "responsive while Owen works" on the M1 Ultra** is the table as shown
+(the defaults: tiles near 16,000 tokens, a sync after every block, block streaming, 20 ops and
+40 MB per command buffer, duty 85, target 90). Render the same 20 s clip, watch the cursor and `sudo powermetrics --samplers
+gpu_power` residency, and read `done.video.desktop.passes` and `stage_seconds`. If the cursor
+still hitches, lower `max_tile_tokens` to 8,000 (attention per kernel then drops to about a
+fortieth of the untiled 53k pass) before touching anything else. If the clip shows seams, raise
+`tile_overlap` to 4. If the render is too slow and memory is fine, set `low_ram = false`
+first. The declared stage memory is unchanged: these knobs only lower the real peaks.
+
+## GPU headroom: measuring how busy a render keeps the GPU
+
+Owen: *"we also need to make sure the gpu isnt pinned to 100%. thats just as important as
+memory."* So a video run is judged on two headrooms, and a clip size or a `[video_desktop]`
+setting is only **safe** on a machine when it passes both:
+
+1. **Memory**: the run's `stage_peak_bytes` (and the process footprint the probe reads) fits
+   what the machine leaves after its desktop allowance, with room to spare. This is the
+   measurement the declared `stage_memory_bytes` are replaced with.
+2. **GPU**: the run's mean GPU busy stays at or under the machine's target,
+   `done.video.gpu_busy_target_met` is true, and the cursor does not freeze while it runs.
+
+**Sampling lives in the server** (`crucible/gpubusy.py`), so every job type can use it later.
+The video job starts a sampler when it sends the generate request and stops it when the worker
+answers. The sampler takes one reading a second on a daemon thread and attributes each to the
+stage the worker last reported. On the Mac it reads `ioreg -r -d 1 -c IOAccelerator`, the
+driver's "Device Utilization %" in each accelerator's PerformanceStatistics (the busiest
+accelerator counts; no sudo; a call costs about 20 ms). On the PC it reads `nvidia-smi
+--query-gpu=utilization.gpu`. It reads the whole GPU, the desktop's own drawing included,
+because that is what the person at the machine feels. It fails soft: a missing, slow (over
+5 s) or unparseable tool gives no sample, three failures in a row stop it, and the fields are
+then null. A job never fails because of it.
+
+`done.video` carries:
+
+| field | what |
+| --- | --- |
+| `gpu_busy_mean_pct`, `gpu_busy_max_pct` | over every sample of the run; null with none |
+| `gpu_busy_samples` | how many readings there were (about one a second) |
+| `gpu_busy_pinned_samples` | how many were at 98% or more |
+| `gpu_busy_stages` | per stage: `mean_pct`, `max_pct`, `samples` |
+| `gpu_busy_source` | what was read (`ioreg …` or `nvidia-smi …`); null with no samples |
+| `gpu_busy_target_pct` | the machine's target: `[video_desktop] gpu_busy_target_pct`, else 90 on the Mac and none on the PC |
+| `gpu_busy_target_met` | mean at or under the target; null when either is unknown |
+
+**Why 90 on the Mac.** "Device Utilization %" is the share of the driver's sampling window in
+which the GPU had work. At 100% nothing else can start without waiting, and that is when the
+cursor froze. The display refreshes every 16.7 ms and WindowServer needs a few milliseconds of
+GPU in each frame. A mean of 90% leaves about 100 ms a second idle. That is enough only if it
+comes as frequent gaps rather than one lump, which is what `gpu_duty_pct` and the per-block
+syncs arrange. The target is a mean so one busy second does not fail a clip;
+`gpu_busy_pinned_samples` and the per-stage figures show where it was pinned. The default duty
+of 85 sits under the target, because the unthrottled stages (text encoding, VAE decode) run
+near 100% and pull the whole-clip mean up. The PC has no default target: it renders headless
+in WSL, and a pinned card there costs nobody a cursor. Set `gpu_busy_target_pct` in its table
+if that changes.
+
+**The measuring procedure** for a size or a knob setting, on the Mac, with Owen at the desktop:
+
+1. Render at the size in question with the current table. Read `stage_peak_bytes`, the worker
+   log's `crucible memory` lines and the process footprint for memory; read
+   `gpu_busy_mean_pct`, `gpu_busy_pinned_samples` and `gpu_busy_stages` for the GPU; and
+   watch the cursor.
+2. It is safe when memory fits with headroom **and** `gpu_busy_target_met` is true **and** the
+   cursor never froze. Failing memory: lower the size, or turn `low_ram` on. Failing the GPU:
+   lower `gpu_duty_pct` (and, if the cursor still hitches with the mean under target, lower
+   `max_tile_tokens`: the mean is fine but single kernels are too long).
+3. Record the passing size and table with the clip's `done.video`: `desktop`, the busy fields
+   and `stage_seconds` together say what the setting costs.

@@ -117,6 +117,7 @@ DISTILLED = textwrap.dedent(
         def __init__(self, model_dir, gemma_model_id="unused", low_memory=True,
                      low_ram_streaming=False, tile_count=None):
             calls.append(["init", low_memory, low_ram_streaming])
+            self._tile_count = tile_count
             self._is_25 = True
             self.dit = None
             self.upsampler = None
@@ -134,7 +135,20 @@ DISTILLED = textwrap.dedent(
         def _encode_text(self, prompt):
             raise AssertionError("the stub's own encoder ran")
 
+        def _tiles(self, stage):
+            config = self._tile_count
+            calls.append(["tiles", stage, None if config is None else [
+                [config.frames.num_tiles, config.frames.overlap],
+                [config.height.num_tiles, config.height.overlap],
+                [config.width.num_tiles, config.width.overlap],
+            ]])
+
         def _steps(self, stage, steps, dims):
+            from ltx_core_mlx.model.transformer import model as dit
+
+            self._tiles(stage)
+            for block in range(2):
+                dit._mx_eval(numpy.zeros(1), numpy.zeros(1))
             on_step = self.stepwise.bind(
                 latent_frames=dims[0], latent_height=dims[1], latent_width=dims[2],
                 decoder_block=self.video_decoder_block, patchifier=self.video_patchifier,
@@ -207,6 +221,50 @@ VIDEO_VAE = textwrap.dedent(
     """
 )
 
+TILING = textwrap.dedent(
+    """
+    from dataclasses import dataclass, field
+
+
+    @dataclass(frozen=True)
+    class DimensionTilingConfig:
+        num_tiles: int = 1
+        overlap: int = 0
+
+
+    @dataclass(frozen=True)
+    class TileCountConfig:
+        frames: DimensionTilingConfig = field(default_factory=DimensionTilingConfig)
+        height: DimensionTilingConfig = field(default_factory=DimensionTilingConfig)
+        width: DimensionTilingConfig = field(default_factory=DimensionTilingConfig)
+    """
+)
+
+DESKTOP = {
+    "max_tile_tokens": 40, "tile_spatial": 1, "tile_overlap": 0, "dit_eval_every": 1,
+    "low_ram": True, "mlx_max_ops_per_buffer": 20, "mlx_max_mb_per_buffer": 40,
+    "gpu_duty_pct": 50,
+}
+
+DIT_MODEL = textwrap.dedent(
+    """
+    evaluated = []
+
+
+    def _mx_eval(*arrays):
+        evaluated.append(len(arrays))
+    """
+)
+
+PLANNED = {
+    "twenty seconds at 1280x704, full size": [[61, 22, 40], {}],
+    "twenty seconds at 1280x704, half size": [[61, 11, 20], {}],
+    "five seconds at 1280x704, full size": [[16, 22, 40], {}],
+    "spatial 2x2 on five seconds": [[16, 22, 40], {"tile_spatial": 2}],
+    "too short to cut": [[2, 4, 4], {"max_tile_tokens": 10}],
+    "no ceiling": [[61, 22, 40], {"max_tile_tokens": 0}],
+}
+
 GLUE = textwrap.dedent(
     """
     import importlib.util, json, os, sys
@@ -265,6 +323,30 @@ GLUE = textwrap.dedent(
         report["cancel"] = "not raised"
     except videocore.Cancelled as stopped:
         report["cancel"] = [stopped.stage, stopped.step, freed()]
+
+    defaults = {"max_tile_tokens": 16000, "tile_spatial": 1, "tile_overlap": 2}
+    report["plans"] = {
+        name: worker.tile_plan(tuple(shape), {**defaults, **changes})
+        for name, (shape, changes) in json.loads(sys.argv[6]).items()
+    }
+    report["plans"]["no table"] = worker.tile_plan((61, 22, 40), None)
+    report["plain_desktop"] = report["runs"][0]["extra"]["desktop"]
+    before = len(calls)
+    desk = worker.LtxMlxEngine({"model_dir": model_dir, "device": "metal",
+                                "mlx_cache_limit_bytes": 4000000000,
+                                "desktop": json.loads(sys.argv[5])})
+    clip, peaks, extra = desk.generate(job(4, None), videocore.Progress("r4", desk.spans))
+    from ltx_core_mlx.model.transformer import model as dit
+
+    report["desktop"] = {"calls": calls[before:], "report": extra["desktop"],
+                         "after": desk._pipe._tile_count, "count": clip.count,
+                         "patched": type(dit._mx_eval).__name__, "evaluated": len(dit.evaluated)}
+    ticks = iter([0.0, 2.0, 10.0, 10.5])
+    slept = []
+    duty = worker.DutyCycle(lambda *a: None, 80, clock=lambda: next(ticks), sleep=slept.append)
+    duty("x")
+    duty("y")
+    report["duty"] = [slept, duty.busy_s, duty.paused_s]
     print(json.dumps(report), file=sys.stderr)
     """
 )
@@ -282,6 +364,9 @@ def _stubs(root: Path) -> None:
         "ltx_core_mlx/model/__init__.py": "",
         "ltx_core_mlx/model/video_vae/__init__.py": "",
         "ltx_core_mlx/model/video_vae/video_vae.py": VIDEO_VAE,
+        "ltx_core_mlx/model/video_vae/tiling.py": TILING,
+        "ltx_core_mlx/model/transformer/__init__.py": "",
+        "ltx_core_mlx/model/transformer/model.py": DIT_MODEL,
     }
     for name, text in files.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -313,8 +398,9 @@ def _run(tmp_path: Path, picture: Path | None) -> tuple[dict, list[dict]]:
     out_dir.mkdir()
     done = subprocess.run(
         [sys.executable, "-c", GLUE, str(WORKER), str(model_dir), str(out_dir),
-         "" if picture is None else str(picture)],
-        env={**__import__("os").environ, "PYTHONPATH": str(stubs)},
+         "" if picture is None else str(picture), json.dumps(DESKTOP), json.dumps(PLANNED)],
+        env={**__import__("os").environ, "PYTHONPATH": str(stubs), "MLX_MAX_OPS_PER_BUFFER": "20",
+             "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1"},
         capture_output=True, text=True, timeout=120,
     )
     assert done.returncode == 0, done.stderr[-3000:]
@@ -444,3 +530,47 @@ def test_what_the_worker_needs_is_what_the_manifest_pulls_and_declares() -> None
     assert _constant("IMAGE_CRF") == 18
     assert "DECODE_BUDGET_BYTES = 12 * 1024**3" in WORKER.read_text(encoding="utf-8")
     assert 12 * 1024**3 < dict(spec.stage_memory_bytes)["decoding"]
+
+
+def test_without_a_desktop_table_nothing_is_tiled_or_streamed(ran) -> None:
+    report, _, _ = ran
+    first = report["runs"][0]["calls"]
+    assert [call for call in first if call[0] == "tiles"] == [["tiles", 1, None], ["tiles", 2, None]]
+    assert report["plain_desktop"] is None and report["cache_limit"] == 4_000_000_000
+
+
+def test_the_plan_cuts_a_long_full_size_pass_into_temporal_tiles(ran) -> None:
+    plans = ran[0]["plans"]
+    assert plans["twenty seconds at 1280x704, full size"] == {"tiles": [4, 1, 1], "tile_tokens": 17 * 22 * 40}
+    assert plans["twenty seconds at 1280x704, half size"] == {"tiles": [1, 1, 1], "tile_tokens": 61 * 11 * 20}
+    assert plans["five seconds at 1280x704, full size"] == {"tiles": [1, 1, 1], "tile_tokens": 14_080}
+    assert plans["spatial 2x2 on five seconds"] == {"tiles": [1, 2, 2], "tile_tokens": 16 * 12 * 21}
+    assert plans["too short to cut"]["tiles"] == [1, 1, 1]
+    assert plans["no ceiling"]["tiles"] == [1, 1, 1]
+    assert plans["no table"] == {"tiles": [1, 1, 1], "tile_tokens": 53_680}
+
+
+def test_a_desktop_table_streams_blocks_and_tiles_the_pass_that_needs_it(ran) -> None:
+    desktop = ran[0]["desktop"]
+    calls = desktop["calls"]
+    assert ["init", True, True] in calls
+    tiles = [call for call in calls if call[0] == "tiles"]
+    assert tiles == [["tiles", 1, None], ["tiles", 2, [[3, 0], [1, 0], [1, 0]]]]
+    assert desktop["after"] is None and desktop["count"] == 17
+    said = desktop["report"]
+    assert {key: said[key] for key in DESKTOP} == DESKTOP
+    assert said["environment"] == {
+        "MLX_MAX_OPS_PER_BUFFER": "20", "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1",
+    }
+    assert said["mlx_cache_limit_bytes"] == 0
+    assert desktop["patched"] == "DutyCycle" and desktop["evaluated"] >= 4
+    assert said["synced_s"] is not None and said["paused_s"] is not None
+    assert said["passes"] == [
+        {"size": "half", "tiles": [1, 1, 1], "tile_tokens": 24},
+        {"size": "full", "tiles": [3, 1, 1], "tile_tokens": 32},
+    ]
+
+
+def test_the_duty_cycle_pauses_a_share_of_each_sync(ran) -> None:
+    slept, busy, paused = ran[0]["duty"]
+    assert slept == [0.5, 0.125] and busy == 2.5 and paused == 0.625

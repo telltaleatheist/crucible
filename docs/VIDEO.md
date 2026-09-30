@@ -119,6 +119,10 @@ list:
   or more. A smaller one answers `409 insufficient_memory` naming 29,000,000,000 bytes.
 - There is no `conditioning` stage (the picture is encoded while the transformer loads) and
   there is a `refining` stage with steps 1 to 3 after `denoising`.
+- A Mac somebody is working on can keep its desktop responsive during long clips with a
+  `[video_desktop]` table in its config (tiling, block streaming, smaller GPU batches, at some
+  cost in speed); `done.video.desktop` then says how the clip was split. See
+  [internals/video.md](internals/video.md), "Keeping the desktop responsive".
 
 ## The result
 

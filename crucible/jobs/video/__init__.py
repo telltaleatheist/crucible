@@ -8,7 +8,8 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from ... import hosttools, jobenv, videoweights, weights, workers
+from ... import gpubusy, hosttools, jobenv, videoweights, weights, workers
+from ...backend import MLX_DARWIN
 from ...cardkinds import KIND_VIDEO
 from ...clock import utcnow
 from ...config import Config
@@ -188,6 +189,7 @@ def start_video_session(
             **workers.worker_environment(python.parent.parent),
             **workers.torch_allocator_environment(spec.backend),
             **WORKER_ENVIRONMENT,
+            **desktop_environment(needs.desktop),
         },
     )
     outcome = session.start(
@@ -200,6 +202,7 @@ def start_video_session(
             "device": spec.device,
             "dtype": spec.dtype,
             "mlx_cache_limit_bytes": spec.mlx_cache_limit_bytes,
+            "desktop": needs.desktop,
             "memory_cap_bytes": workers.torch_memory_cap(
                 spec.backend, spec.memory_bytes_estimate
             ),
@@ -276,16 +279,20 @@ class Needs:
     spec: VideoBackendSpec
     python: Path
     weights_dir: Path
+    desktop: dict[str, Any] | None = None
 
 
 class _Generation:
-    def __init__(self, ctx: JobContext) -> None:
+    def __init__(self, ctx: JobContext, sampler: gpubusy.GpuBusySampler | None = None) -> None:
         self._ctx = ctx
+        self._sampler = sampler
 
     def progress(self, message: dict[str, Any]) -> None:
         stage = str(message.get("stage"))
         if stage == "cancelled":
             return
+        if self._sampler is not None:
+            self._sampler.mark(stage)
         step, steps = message.get("step"), message.get("steps")
         fraction = min(1.0, max(0.0, float(message.get("fraction") or 0.0)))
         words = f"{stage}: step {step} of {steps}" if steps else stage.replace("_", " ")
@@ -355,6 +362,110 @@ def with_trial(spec: VideoBackendSpec, trial: dict[str, Any]) -> VideoBackendSpe
     return replace(spec, **limits) if limits else spec
 
 
+DESKTOP_TABLE = "video_desktop"
+
+# What a [video_desktop] table means when it is present but a key is not: the values
+# for "responsive while somebody works" on an M1 Ultra (docs/internals/video.md,
+# "Keeping the desktop responsive: [video_desktop]"). No table at all means none of
+# this: the worker runs exactly as it did before the table existed.
+DESKTOP_DEFAULTS: dict[str, Any] = {
+    "max_tile_tokens": 16000,
+    "tile_spatial": 1,
+    "tile_overlap": 2,
+    "dit_eval_every": 1,
+    "low_ram": True,
+    "mlx_max_ops_per_buffer": 20,
+    "mlx_max_mb_per_buffer": 40,
+    "gpu_duty_pct": 85,
+}
+
+DESKTOP_MAXIMUM: dict[str, int] = {"gpu_duty_pct": 100}
+
+DESKTOP_MINIMUM: dict[str, int] = {
+    "gpu_duty_pct": 10,
+    "max_tile_tokens": 0,
+    "tile_spatial": 1,
+    "tile_overlap": 0,
+    "dit_eval_every": 0,
+    "mlx_max_ops_per_buffer": 1,
+    "mlx_max_mb_per_buffer": 1,
+}
+
+DESKTOP_ENVIRONMENT: dict[str, str] = {
+    "mlx_max_ops_per_buffer": "MLX_MAX_OPS_PER_BUFFER",
+    "mlx_max_mb_per_buffer": "MLX_MAX_MB_PER_BUFFER",
+    "dit_eval_every": "LTX2_DIT_EVAL_EVERY",
+}
+
+
+def desktop_settings(config: Config) -> dict[str, Any] | None:
+    """The machine's [video_desktop] table with its defaults filled in, or None when absent.
+
+    These knobs trade speed for a desktop that stays responsive while the Mac renders: they
+    cut the GPU work into smaller pieces (smaller Metal command buffers, a sync after every
+    transformer block, the full-size pass tiled so no one attention or feed-forward kernel
+    spans the whole clip) and stream the transformer's blocks from disk instead of holding
+    all 20.6 GB. They are not clip limits (that is [video_trial]). Only the Mac's engine
+    reads them; a value of the wrong type or out of range is ignored, not guessed at.
+    """
+    import tomllib
+
+    try:
+        document = tomllib.loads(Path(config.path).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    table = document.get(DESKTOP_TABLE)
+    if not isinstance(table, dict):
+        return None
+    found = dict(DESKTOP_DEFAULTS)
+    for key, least in DESKTOP_MINIMUM.items():
+        value = table.get(key)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and least <= value <= DESKTOP_MAXIMUM.get(key, value)
+        ):
+            found[key] = value
+    if isinstance(table.get("low_ram"), bool):
+        found["low_ram"] = table["low_ram"]
+    return found
+
+
+GPU_BUSY_TARGET_DEFAULTS: dict[str, float] = {
+    MLX_DARWIN: 90.0,
+}
+
+
+def gpu_busy_target(config: Config, backend_kind: str) -> float | None:
+    """The mean GPU busy (percent) a render on this machine should stay at or under.
+
+    `[video_desktop] gpu_busy_target_pct` when set (1 to 100), else the backend's default:
+    90 on the Mac, where the person's desktop draws on the same GPU, and none on the PC, which
+    renders headless in WSL. It only judges a run (done.video.gpu_busy_target_met); what
+    brings the number down is the table's `gpu_duty_pct`.
+    """
+    import tomllib
+
+    try:
+        document = tomllib.loads(Path(config.path).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        document = {}
+    table = document.get(DESKTOP_TABLE)
+    if isinstance(table, dict):
+        value = table.get("gpu_busy_target_pct")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 100:
+            return float(value)
+    return GPU_BUSY_TARGET_DEFAULTS.get(backend_kind)
+
+
+def desktop_environment(settings: dict[str, Any] | None) -> dict[str, str]:
+    """The env vars MLX (mlx/utils.h) and ltx-2-mlx (model/transformer/model.py) read once,
+    at import, so they are set on the worker before it starts."""
+    if settings is None:
+        return {}
+    return {name: str(settings[key]) for key, name in DESKTOP_ENVIRONMENT.items()}
+
+
 class VideoJobType(ResidentWorker):
 
     name = JOB_TYPE
@@ -421,7 +532,10 @@ class VideoJobType(ResidentWorker):
         spec = with_trial(_require_block(manifest, model_id, backend_kind), trial_settings(self._config))
         worker_type.refuse_if_larger_than_host(self._backend, model_id, spec.memory_bytes_estimate)
         python = require_video_python(self._config, spec, model_id)
-        return Needs(manifest, spec, python, require_video_weights(self._config, manifest, spec))
+        desktop = desktop_settings(self._config) if spec.engine == LTX_2_MLX else None
+        return Needs(
+            manifest, spec, python, require_video_weights(self._config, manifest, spec), desktop
+        )
 
     def requirements(self, model_id: str, params: VideoParams) -> Needs:
         manifest = MANIFESTS.known(model_id)
@@ -462,7 +576,12 @@ class VideoJobType(ResidentWorker):
         )
 
     def _generate(
-        self, ctx: JobContext, model: str, session: workers.WorkerSession, request: dict[str, Any]
+        self,
+        ctx: JobContext,
+        model: str,
+        session: workers.WorkerSession,
+        request: dict[str, Any],
+        sampler: gpubusy.GpuBusySampler | None = None,
     ) -> dict[str, Any]:
         try:
             outcome = session.send(
@@ -470,7 +589,7 @@ class VideoJobType(ResidentWorker):
                 ready_silence_timeout=trial_settings(self._config).get(
                     "silence_timeout_s", READY_SILENCE_TIMEOUT_SECONDS
                 ),
-                on_progress=_Generation(ctx).progress,
+                on_progress=_Generation(ctx, sampler).progress,
                 cancelled=lambda: ctx.cancelled,
                 cancel_request={"op": "cancel", "request_id": request["request_id"]},
             )
@@ -515,7 +634,17 @@ class VideoJobType(ResidentWorker):
     ) -> None:
         output = ctx.scratch / ARTIFACT_NAME
         request = generate_request(params, needs, settled, source, output, ffmpeg)
-        result = self._generate(ctx, model, session, request)
+        sampler = gpubusy.start(self._backend.kind)
+        try:
+            result = self._generate(ctx, model, session, request, sampler)
+        finally:
+            busy = sampler.stop()
+        target = gpu_busy_target(self._config, self._backend.kind)
+        busy = {
+            **busy,
+            "gpu_busy_target_pct": target,
+            "gpu_busy_target_met": gpubusy.verdict(busy, target),
+        }
         check_video_file(output)
         ctx.artifact(ARTIFACT_NAME, output)
         ctx.progress(
@@ -524,7 +653,7 @@ class VideoJobType(ResidentWorker):
             stage="done",
         )
         ctx.done_extra(
-            video=effective_params(params, needs, settled, result, source),
+            video={**effective_params(params, needs, settled, result, source), **busy},
             resident=self._residency.resident_id,
         )
 
@@ -582,6 +711,7 @@ def effective_params(
         "dtype": spec.dtype,
         "quantization": result.get("quantization"),
         "sampling": result.get("sampling"),
+        "desktop": result.get("desktop"),
         "mode": settled.mode,
         "prompt": params.prompt,
         "input": None if source is None else source.name,
