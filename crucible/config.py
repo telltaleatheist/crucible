@@ -33,6 +33,7 @@ DEFAULT_ENABLE_IMAGE = False
 DEFAULT_ENABLE_AUDIO = False
 
 DEFAULT_ENABLE_SEGMENT = False
+DEFAULT_ENABLE_VIDEO = False
 
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
@@ -114,6 +115,7 @@ class Config:
     enable_image: bool = DEFAULT_ENABLE_IMAGE
     enable_audio: bool = DEFAULT_ENABLE_AUDIO
     enable_segment: bool = DEFAULT_ENABLE_SEGMENT
+    enable_video: bool = DEFAULT_ENABLE_VIDEO
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
@@ -344,6 +346,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_image",
     "enable_audio",
     "enable_segment",
+    "enable_video",
 )
 
 
@@ -777,6 +780,7 @@ def load_config(
         enable_image=_optional_jobs_flag(table, "enable_image", DEFAULT_ENABLE_IMAGE),
         enable_audio=_optional_jobs_flag(table, "enable_audio", DEFAULT_ENABLE_AUDIO),
         enable_segment=_optional_jobs_flag(table, "enable_segment", DEFAULT_ENABLE_SEGMENT),
+        enable_video=_optional_jobs_flag(table, "enable_video", DEFAULT_ENABLE_VIDEO),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         desktop_allowance_bytes=_require(
@@ -816,6 +820,7 @@ def write_config(
     enable_image: bool | None = None,
     enable_audio: bool | None = None,
     enable_segment: bool | None = None,
+    enable_video: bool | None = None,
     capability: CapabilityRecord | None = None,
     routes: tuple[RouteRecord, ...] = (),
     local_models: tuple[LocalModelRecord, ...] = (),
@@ -856,6 +861,11 @@ def write_config(
                 _kept_jobs_flag(home, "enable_segment", DEFAULT_ENABLE_SEGMENT)
                 if enable_segment is None
                 else enable_segment
+            ),
+            "enable_video": (
+                _kept_jobs_flag(home, "enable_video", DEFAULT_ENABLE_VIDEO)
+                if enable_video is None
+                else enable_video
             ),
             "install_on_submit": (
                 _kept_jobs_flag(home, "install_on_submit", DEFAULT_INSTALL_ON_SUBMIT)

@@ -560,6 +560,7 @@ def apply(
         enable_image=config.enable_image,
         enable_audio=config.enable_audio,
         enable_segment=config.enable_segment,
+        enable_video=config.enable_video,
         retention_days=config.retention_days,
         tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,

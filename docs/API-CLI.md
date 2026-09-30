@@ -369,7 +369,7 @@ BookForge's `crucible` provider follows).
 | `echo` | — | `{"delay_ms": 25}` | any; each is copied to an artifact of the same name |
 | `tts` | voice id | `{"language","take","chunks":[{"index","text"}]}` | none |
 | `load-voice` | voice id | `{"timeout_s": …}`, plus `reference` for a `zeroshot` voice | none |
-| `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` / `unload-image` / `unload-audio` / `unload-segment` | id | `{}` | none |
+| `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` / `unload-image` / `unload-audio` / `unload-segment` / `unload-video` | id | `{}` | none |
 | `load-model` | model id | `{"timeout_s": …, "context": …, "lease": {"act": …, "ttl_seconds": …}}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
 | `asr` | asr id | `{"language","vad_filter","word_timestamps"[, "initial_prompt","context","piece_s","overlap_s","speech_only","speech_threshold","speech_pad_s","speech_min_gap_s"]}` | exactly one audio file; `"auto"` is a language (whisper only); `initial_prompt` is whisper's, `context`/`piece_s`/`overlap_s` Qwen3-ASR's; `speech_only` (default false, 2026-09-27) takes stretches without speech out first and lists them in the transcript's `removed`; its three knobs default to 0.3 / 0.3 s / 2 s and are refused without it |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
@@ -382,6 +382,8 @@ BookForge's `crucible` provider follows).
 | `load-audio` | audio model id | `{"lease": {"act": "sfx" \| "music" \| "song", "ttl_seconds": …}}` — optional; the act is the model's own class | none |
 | `segment` | segment model id | `{}` for `birefnet` (the subject, by itself); `{"points": [{"x","y","label"}], "box": [x0,y0,x1,y1]}` (either or both) for `sam2.1-hiera-large`; `"lease"` optional — see docs/SEGMENT.md | exactly one PNG, JPEG or WebP; out come `mask.png` and `cutout.png` at its size |
 | `load-segment` | segment model id | `{"lease": {"act": "cutout" \| "select", "ttl_seconds": …}}` — optional; the act is the model's own class | none |
+| `video` | video model id | `{"prompt"[, "width","height","duration_s" or "num_frames","fps","seed","steps","audio","lease"]}` — every limit is refused by name; see docs/VIDEO.md | none (text-to-video) or exactly one PNG/JPEG/WebP (image-to-video, its first frame) |
+| `load-video` | video model id | `{"lease": {"act": "video", "ttl_seconds": …}}` — optional | none |
 
 **`denoise` returns WAV, always.** Every stem is a `.wav`, fixed by this server for every separator
 and not chosen per manifest, because a client slices the stem at sample offsets and a lossy

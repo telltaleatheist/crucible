@@ -67,7 +67,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; "
         "the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; "
         "the `segment` job's (subject cutouts and point-and-box selections, as masks) "
-        "are in docs/SEGMENT.md.",
+        "are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a "
+        "start picture) are in docs/VIDEO.md.",
     ),
     (
         "/resumable",
@@ -163,6 +164,7 @@ def build_app() -> Any:
         enable_image=True,
         enable_audio=True,
         enable_segment=True,
+        enable_video=True,
         desktop_allowance_bytes=3 * 1024 ** 3,
         retention_days=7,
         desktop_allowance_basis="stated",

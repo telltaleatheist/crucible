@@ -18,6 +18,7 @@ from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
 from .jobtypes import ENVS, FAMILIES, LLM_ENV
 from .narratorengines import HIGGS_V3
+from .videomodels import engines_on as video_engines_on
 
 RECIPES_DIR_ENV = "CRUCIBLE_RECIPES_DIR"
 
@@ -52,6 +53,16 @@ AUDIO_ENGINE_MODULE: dict[str, str] = {
 
 AUDIO_CUDA_EXTRA_MODULE: dict[str, str] = {
     "stable-audio-3": "flash_attn",
+}
+
+VIDEO_JOB_TYPE = "video"
+
+VIDEO_ENGINE_HEADLINE: dict[str, str] = {
+    "ltx": "diffusers",
+}
+
+VIDEO_ENGINE_MODULES: dict[str, str] = {
+    "ltx": "diffusers, gguf, torchao, av",
 }
 
 WORKER_JOB_TYPES: tuple[str, ...] = tuple(env.name for env in ENVS if env.worker)
@@ -121,6 +132,14 @@ SMOKE_IMPORT: dict[str, dict[str, str]] = {
             if engine in audio_engines_on(backend_kind)
         }
         for engine, module in AUDIO_ENGINE_MODULE.items()
+    },
+    **{
+        f"{VIDEO_JOB_TYPE}-{engine}": {
+            backend_kind: modules
+            for backend_kind in (CUDA_LINUX, MLX_DARWIN)
+            if engine in video_engines_on(backend_kind)
+        }
+        for engine, modules in VIDEO_ENGINE_MODULES.items()
     },
 }
 
@@ -225,6 +244,33 @@ def audio_envs(backend_kind: str) -> tuple[EnvSpec, ...]:
             f"{sorted(k for k in (CUDA_LINUX, MLX_DARWIN) if audio_engines_on(k))}"
         )
     return tuple(audio_env(engine, backend_kind) for engine in engines)
+
+
+def video_env(engine: str, backend_kind: str) -> EnvSpec:
+    if engine not in video_engines_on(backend_kind):
+        raise EnvError(
+            f"no video engine {engine!r} on {backend_kind!r}; the video engines "
+            f"there are {list(video_engines_on(backend_kind))}"
+        )
+    recipe_name = f"{engine}-{backend_kind}"
+    return EnvSpec(
+        job_type=VIDEO_JOB_TYPE,
+        key=f"{VIDEO_JOB_TYPE}-{engine}",
+        recipe_name=recipe_name,
+        headline=VIDEO_ENGINE_HEADLINE[engine],
+        python_version=RECIPE_PYTHON.get(recipe_name),
+    )
+
+
+def video_envs(backend_kind: str) -> tuple[EnvSpec, ...]:
+    engines = video_engines_on(backend_kind)
+    if not engines:
+        raise EnvError(
+            f"video has no engine on {backend_kind!r}; it runs on "
+            f"{sorted(k for k in (CUDA_LINUX, MLX_DARWIN) if video_engines_on(k))} "
+            "only (LTX-2.5 needs a CUDA card; docs/internals/video.md, \"Backends\")"
+        )
+    return tuple(video_env(engine, backend_kind) for engine in engines)
 
 
 def worker_env(job_type: str, backend_kind: str) -> EnvSpec:

@@ -10,6 +10,7 @@ from .cardkinds import (
     KIND_LLM,
     KIND_SEGMENT,
     KIND_TTS,
+    KIND_VIDEO,
 )
 from .classnames import AUDIO_CLASSES, CLASS_NAMES, ROUTABLE_CLASSES, SEGMENT_CLASSES
 
@@ -35,6 +36,7 @@ RVC_ENV = Env("rvc", worker=True)
 IMAGE_ENV = Env("image", worker=True)
 AUDIO_ENV = Env("audio", worker=False)
 SEGMENT_ENV = Env("segment", worker=True)
+VIDEO_ENV = Env("video", worker=False)
 
 ENVS: tuple[Env, ...] = (
     LLM_ENV,
@@ -45,6 +47,7 @@ ENVS: tuple[Env, ...] = (
     IMAGE_ENV,
     AUDIO_ENV,
     SEGMENT_ENV,
+    VIDEO_ENV,
 )
 
 
@@ -113,6 +116,13 @@ SEGMENT = Family(
     "segment",
     SEGMENT_ENV,
     SEGMENT_CLASSES,
+    frozenset({"model_not_installed"}),
+    catalog_is_complete=True,
+)
+VIDEO = Family(
+    "video",
+    VIDEO_ENV,
+    ("video",),
     frozenset({"model_not_installed"}),
     catalog_is_complete=True,
 )
@@ -194,6 +204,16 @@ LOAD_SEGMENT = JobTypeSpec(
     CardEffect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True),
     leaves_it_resident=True,
 )
+VIDEO_JOB = JobTypeSpec(
+    "video", VIDEO, CardEffect(makes_resident=KIND_VIDEO, reuses_what_it_names=True)
+)
+UNLOAD_VIDEO = JobTypeSpec("unload-video", VIDEO, CardEffect(takes_off=KIND_VIDEO))
+LOAD_VIDEO = JobTypeSpec(
+    "load-video",
+    VIDEO,
+    CardEffect(makes_resident=KIND_VIDEO, reuses_what_it_names=True),
+    leaves_it_resident=True,
+)
 
 JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     ECHO_JOB,
@@ -218,6 +238,9 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     SEGMENT_JOB,
     UNLOAD_SEGMENT,
     LOAD_SEGMENT,
+    VIDEO_JOB,
+    UNLOAD_VIDEO,
+    LOAD_VIDEO,
 )
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
@@ -292,6 +315,11 @@ __all__ = [
     "UNLOAD_IMAGE",
     "UNLOAD_MODEL",
     "UNLOAD_SEGMENT",
+    "UNLOAD_VIDEO",
     "UNLOAD_VOICE",
+    "VIDEO",
+    "VIDEO_ENV",
+    "VIDEO_JOB",
+    "LOAD_VIDEO",
     "spec_of",
 ]

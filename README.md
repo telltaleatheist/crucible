@@ -951,6 +951,26 @@ crucible models pull sam2.1-hiera-large
  "inputs": {"photo.jpg": {"inline_base64": "…"}}}
 ```
 
+### `video`
+
+Video clips with synchronized sound (`docs/VIDEO.md`, `docs/internals/video.md`): LTX-2.5
+distilled on a CUDA card only, from a prompt or from a prompt and a start picture, up to 6 s at
+1280x704 (3 s from a picture). The 22B model fits a 24 GB card one component at a time: the
+Gemma 4 text encoder in torchao int8, the transformer as GGUF Q6_K. One `video.mp4` (H.264 and
+AAC) out, and `done.video` carries every effective parameter and each stage's memory peak.
+
+```bash
+crucible init --enable-video
+crucible install video                        # cuda-linux only
+crucible models pull ltx-2.5-distilled        # gated: accept the licence on Hugging Face first
+```
+
+```json
+{"type": "video",
+ "model": "ltx-2.5-distilled",
+ "params": {"prompt": "A red fox trots through fresh snow at dawn, the camera tracking alongside; low golden light, snow crunching underfoot, a crow calling", "duration_s": 5}}
+```
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS

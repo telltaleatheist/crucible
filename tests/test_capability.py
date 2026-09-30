@@ -561,7 +561,7 @@ def test_the_capability_route_answers_every_class_and_its_reason(
     assert names == {
         "align", "analysis", "asr", "clean", "cutout", "decide", "denoise", "echo",
         "generate", "image", "music", "pages", "rvc", "select", "sfx", "simplify",
-        "song", "translate", "tts",
+        "song", "translate", "tts", "video",
     }
     picked = {row["capability"]: row["selected"] for row in record["classes"]}
     assert picked["translate"] == picked["simplify"] == picked["analysis"], picked

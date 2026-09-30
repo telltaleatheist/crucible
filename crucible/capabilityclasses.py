@@ -25,6 +25,7 @@ from .segmentmodels import (
     load_select_manifests,
     segment_manifests_dir,
 )
+from .videomodels import load_all_video_manifests, video_manifests_dir
 from .voicecatalog import load_all_voices
 
 CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
@@ -39,6 +40,7 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_song_manifests: audio_manifests_dir,
     load_cutout_manifests: segment_manifests_dir,
     load_select_manifests: segment_manifests_dir,
+    load_all_video_manifests: video_manifests_dir,
 }
 
 
@@ -324,6 +326,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="select what is pointed at in a picture",
         noun="selection models",
         candidates=_from_catalog(load_select_manifests),
+    ),
+    CapabilityClass(
+        name="video",
+        job_type="video",
+        purpose="video clips with synchronized sound from a text prompt or a start image",
+        plainly="make video",
+        noun="video models",
+        candidates=_from_catalog(load_all_video_manifests),
     ),
 )
 

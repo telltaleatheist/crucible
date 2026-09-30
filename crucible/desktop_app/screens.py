@@ -25,6 +25,7 @@ JOB_TYPE_WORDS = {
     "image": ("Image generation", "Make pictures from a text prompt"),
     "audio": ("Audio generation", "Make sound effects, music and songs from words"),
     "segment": ("Cutouts and selections", "Cut a subject out of a picture, or select what you click"),
+    "video": ("Video generation", "Make video clips with sound from words or a picture"),
 }
 
 HIDDEN_JOB_TYPES = frozenset({"echo"})

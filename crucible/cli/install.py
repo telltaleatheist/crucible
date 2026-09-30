@@ -52,6 +52,8 @@ def cmd_install(args: argparse.Namespace) -> int:
         return _install_llama_windows(config, backend, args)
     if args.job_type == jobenv.AUDIO_JOB_TYPE:
         return _install_audio(config, backend, args)
+    if args.job_type == jobenv.VIDEO_JOB_TYPE:
+        return _install_video(config, backend, args)
     try:
         spec = _env_spec(args.job_type, args.narrator_engine, backend.kind)
     except jobenv.EnvError as exc:
@@ -131,6 +133,28 @@ def _install_audio(config: Config, backend: Backend, args: argparse.Namespace) -
     return _capability_step(config, backend, jobenv.AUDIO_JOB_TYPE)
 
 
+def _install_video(config: Config, backend: Backend, args: argparse.Namespace) -> int:
+    if args.narrator_engine is not None:
+        return _fail(
+            "--narrator-engine names which tts env to build and means nothing for "
+            "'video'; run `crucible install video` without it"
+        )
+    try:
+        specs = jobenv.video_envs(backend.kind)
+    except jobenv.EnvError as exc:
+        return _fail(str(exc))
+    for spec in specs:
+        print(f"video engine: {spec.key.removeprefix('video-')}")
+        refusal = _build_env(config, backend, spec, args)
+        if refusal is not None:
+            return _fail(refusal)
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
+    _measure_step(config, backend, gpu=not args.no_gpu_measure)
+    return _capability_step(config, backend, jobenv.VIDEO_JOB_TYPE)
+
+
 def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
     try:
         print(
@@ -206,7 +230,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "shares its env (audio-separator is torch, and the rvc env already "
             "holds the torch it wants). 'audio' builds one env per audio engine "
             "this backend runs (Stable Audio 3; YuE2 on cuda-linux). 'segment' "
-            "builds one env that runs both segment models (BiRefNet and SAM 2.1)"
+            "builds one env that runs both segment models (BiRefNet and SAM 2.1). "
+            "'video' builds the LTX-2.5 env (cuda-linux only) and places the ffmpeg "
+            "that muxes its clips"
         ),
     )
     install.add_argument(

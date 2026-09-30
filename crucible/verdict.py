@@ -38,7 +38,7 @@ CPU_VENDOR = "cpu"
 CPU_POOL_NAME = "system memory"
 
 WSL_ONLY_JOB_TYPES: frozenset[str] = frozenset(
-    {"tts", "asr", "align", "rvc", "denoise", "image", "audio", "segment"}
+    {"tts", "asr", "align", "rvc", "denoise", "image", "audio", "segment", "video"}
 )
 
 

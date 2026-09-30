@@ -32,6 +32,7 @@ from .registry_table import REGISTRY_TABLE
 from .rvc import RvcJobType
 from .segment import SegmentJobType, UnloadSegmentJobType
 from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
+from .video import UnloadVideoJobType, VideoJobType
 
 if TYPE_CHECKING:
     from ..backend import Backend
@@ -279,7 +280,9 @@ __all__ = [
     "UnloadImageJobType",
     "UnloadModelJobType",
     "UnloadSegmentJobType",
+    "UnloadVideoJobType",
     "UnloadVoiceJobType",
+    "VideoJobType",
     "build_registry",
     "disabled_error",
     "model_rows",

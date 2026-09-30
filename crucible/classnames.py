@@ -24,6 +24,7 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
     "image",
     *AUDIO_CLASSES,
     *SEGMENT_CLASSES,
+    "video",
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)
