@@ -316,7 +316,8 @@ class DiffusersEngine:
         """The input picture as packed, normalised latents at the job's size.
 
         Stretched to width x height like mflux's scale_to_dimensions, so both arms
-        start from the same framing.
+        start from the same framing. RGBA, as the pipeline itself converts its
+        condition images: the 2.1 VAE's first convolution takes four channels.
         """
         from PIL import Image
 
@@ -325,7 +326,7 @@ class DiffusersEngine:
         pipe.vae = vae
         try:
             with Image.open(job.image_path) as opened:
-                picture = opened.convert("RGB")
+                picture = opened.convert("RGBA")
             pixels = pipe.image_processor.preprocess(picture, height=job.height, width=job.width)
             pixels = pixels.unsqueeze(2).to(device=self.device, dtype=vae.dtype)
             with self._torch.no_grad():
