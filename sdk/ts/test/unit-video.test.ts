@@ -113,6 +113,7 @@ test('video() posts one video job with snake_case params and only what the calle
       audio: false,
     },
     inputs: {},
+    queue: {},
   });
 });
 
@@ -154,6 +155,7 @@ test('loadVideo() queues a load-video job, with or without a lease', async () =>
     model: 'ltx-2.5-distilled',
     params: { lease: { act: 'video', ttl_seconds: 300 } },
     inputs: {},
+    queue: {},
   });
   await client().loadVideo('ltx-2.5-distilled');
   assert.deepEqual(JSON.parse(lastBody).params, {});

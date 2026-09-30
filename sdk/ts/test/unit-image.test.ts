@@ -90,6 +90,7 @@ test('image() posts one image job with snake_case params and only what the calle
     model: 'qwen-image-2.1',
     params: { prompt: 'a kitchen table with one red apple', width: 1280, height: 720, seed: 1 },
     inputs: {},
+    queue: {},
   });
 });
 
@@ -114,6 +115,7 @@ test('image-to-image sends the picture as one input beside image_strength', asyn
       image_strength: 0.6,
     },
     inputs: { 'room.jpg': { blob_id: 'abc' } },
+    queue: {},
   });
 });
 
@@ -151,6 +153,7 @@ test('inpainting sends the picture and the mask as two inputs and names the mask
       mask: 'mask.png',
     },
     inputs: { 'photo.png': { blob_id: 'photo' }, 'mask.png': { blob_id: 'selection' } },
+    queue: {},
   });
   await client().image({
     model: 'qwen-image-2.1',
@@ -250,6 +253,7 @@ test('loadImage() queues a load-image job, with or without a lease', async () =>
     model: 'qwen-image-2.1',
     params: { lease: { act: 'image', ttl_seconds: 120 } },
     inputs: {},
+    queue: {},
   });
   await client().loadImage('qwen-image-2.1');
   assert.deepEqual(JSON.parse(lastBody).params, {});

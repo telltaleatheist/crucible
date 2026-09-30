@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from crucible import VERSION, protocol
 from crucible.api.responses import VoiceInfo
+from crucible.api.sse import TERMINAL_EVENTS
 from crucible.cli import build_parser
 from crucible.jobs.base import TERMINAL_STATES as JOB_TERMINAL_STATES
 from crucible.jobs.tts.common import VOICE_ROW_FIELDS, voice_row
@@ -150,7 +151,7 @@ def test_the_sdk_spells_the_same_terminal_states() -> None:
         return set(re.findall(r"'([a-z]+)'", found.group(1)))
 
     assert spelled(r"TASK_TERMINAL_STATES = \[([^\]]*)\]") == set(TASK_TERMINAL_STATES)
-    assert spelled(r"TERMINAL_EVENTS = \[([^\]]*)\]") == set(TASK_TERMINAL_STATES)
+    assert spelled(r"TERMINAL_EVENTS = \[([^\]]*)\]") == set(TERMINAL_EVENTS)
     job_states = spelled(r"export type JobState = ([^;]*);")
     assert set(JOB_TERMINAL_STATES) <= job_states
 

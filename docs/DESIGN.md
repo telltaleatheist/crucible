@@ -210,8 +210,10 @@ they contend for is memory, which `accelerator.guard` already refuses by name. (
 joined that list on 2026-09-15, when the separator became the fourth resident kind.)
 
 `crucible/jobs/queue.py` keeps the lane, the deque, `position`, `queue_depth`, cancel,
-events and provenance. One policy decision changed, at admission; `queue_depth` is now
-honestly 0 or 1, and restoring queueing is the same one line.
+events and provenance. One policy decision changed, at admission. Since 2026-09-30 a client
+may ask to wait instead (`"queue": {...}` on the submit): the job joins a server-side
+waiting line and meets the same admission at its front, and `queue_depth` counts the lane
+plus that line (docs/ARCHITECTURE.md section 3.3, docs/QUEUE.md).
 
 Two clients, one server: the first to ask gets it and the second is told who has it.
 Two servers, one client: **one job, one server**. A book is never split across backends

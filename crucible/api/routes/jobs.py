@@ -38,6 +38,7 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "chunk_at",
         "resume_id",
         "resumed",
+        "removal",
     }
 )
 
@@ -64,6 +65,7 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "chunk_at": job.chunk_at,
         "resume_id": job.resume_id,
         "resumed": job.resumed,
+        "removal": job.removal,
         **{k: v for k, v in job.done_extra.items() if k not in _JOB_STATE_KEYS},
     }
 
@@ -86,8 +88,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
         """Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a
         missing environment or model is installed while the job is refused `409
-        installing`. `params.resume` set to a `resume_id` continues a journaled job;
-        without it the job starts fresh.
+        installing`. With `queue` a busy lane queues the job instead: it waits with
+        status `queued` and its events say where it stands. `params.resume` set to a
+        `resume_id` continues a journaled job; without it the job starts fresh.
         """
         outcome = await admit(
             JobRequest(
@@ -98,6 +101,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 client=client_agent(request),
                 client_ref=body.client_ref,
                 hold=body.hold,
+                queue=None if body.queue is None else body.queue.max_wait_s,
             ),
             ctx.admission(),
         )
@@ -113,10 +117,15 @@ def register(routers: Routers, ctx: AppContext) -> None:
     )
     async def get_job(job_id: str) -> dict[str, Any]:
         store = ctx.store
-        return _job_state(store, store.get(job_id))
+        job = store.get(job_id)
+        ctx.line.touch(job_id=job.id)
+        return _job_state(store, job)
 
     @private.delete("/jobs/{job_id}")
     async def cancel_job(job_id: str) -> dict[str, str]:
+        """Cancel a job; a job still waiting in the queue is removed (reason
+        `client`) and answers `status: removed`.
+        """
         store = ctx.store
         job = store.get(job_id)
         return {"job_id": job.id, "status": store.cancel(job)}
@@ -125,6 +134,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def job_events(request: Request, job_id: str) -> StreamingResponse:
         store = ctx.store
         job = store.get(job_id)
+        ctx.line.touch(job_id=job.id)
         return sse.job_events(request, store, job, sse.last_event_id(request))
 
     @private.post("/jobs/{job_id}/hold")

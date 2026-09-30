@@ -175,6 +175,17 @@ cmd_task_get = cmd_emit("GET", "/v1/tasks/{task_id}")
 cmd_task_cancel = cmd_emit("DELETE", "/v1/tasks/{task_id}")
 cmd_stream_close = cmd_emit("DELETE", "/v1/tts/stream/{session_id}")
 cmd_lease_heartbeat = cmd_emit("POST", "/v1/leases/{lease_id}/heartbeat")
+cmd_queue_remove = cmd_emit("DELETE", "/v1/queue/{job_id}")
+cmd_queue_heartbeat = cmd_emit("POST", "/v1/queue/{job_id}/heartbeat")
+
+
+def cmd_queue_events(connection: Connection, args: argparse.Namespace) -> int:
+    with contextlib.suppress(KeyboardInterrupt):
+        for event in follow(connection, "/v1/queue/events"):
+            emit_line(event)
+    return EXIT_OK
+
+
 cmd_pairing_requests = cmd_get("/v1/pairing/requests")
 
 
@@ -442,6 +453,9 @@ def job_body(args: argparse.Namespace) -> dict[str, Any]:
                 f"resume {params['resume']!r} name two journals; send one"
             )
         params["resume"] = args.resume
+    queue = getattr(args, "queue", None)
+    if queue is not None:
+        body["queue"] = {} if queue == 0 else {"max_wait_s": queue}
     return body
 
 
@@ -790,6 +804,12 @@ JOB_VERBS = (
             help="continue the journal a job answered with (params.resume); without "
                  "it the job starts fresh. `crucible api resumable list` shows them",
         ),
+        arg(
+            "--queue", type=int, nargs="?", const=0, default=None, metavar="MAX_WAIT_S",
+            help="wait in the server's queue while it is busy instead of being refused "
+                 "server_busy; optionally for at most MAX_WAIT_S seconds (10..86400, "
+                 "default an hour)",
+        ),
         arg("--follow", action="store_true", help="watch the event stream until the job ends"),
         arg(
             "--artifacts-dir", default=None,
@@ -818,6 +838,22 @@ JOB_VERBS = (
         arg("name"),
         arg("--out", default="-", help="where to write it; `-` (the default) means stdout"),
     )),
+)
+
+QUEUE_VERBS = (
+    Verb("list", "GET /v1/queue — the jobs waiting for the lane, in order", cmd_get("/v1/queue")),
+    Verb(
+        "remove", "DELETE /v1/queue/{id} — take a waiting job out (reason operator)",
+        cmd_queue_remove, (arg("job_id"),),
+    ),
+    Verb(
+        "heartbeat", "POST /v1/queue/{id}/heartbeat — the client that queued it is still here",
+        cmd_queue_heartbeat, (arg("job_id"),),
+    ),
+    Verb(
+        "events", "follow GET /v1/queue/events — a snapshot, then every change; Ctrl-C ends it",
+        cmd_queue_events,
+    ),
 )
 
 RESUMABLE_VERBS = (
@@ -1031,6 +1067,7 @@ API_VERBS = (
     ),
     Verb("upload", "put a file on the server and get its blob_id", cmd_upload, (arg("path"),)),
     Verb("job", "submit, watch, cancel and read back one unit of work", verbs=JOB_VERBS),
+    Verb("queue", "the jobs waiting for the lane: list, remove, follow", verbs=QUEUE_VERBS),
     Verb(
         "resumable", "the resume journals: what can be resumed, and discarding one",
         verbs=RESUMABLE_VERBS,

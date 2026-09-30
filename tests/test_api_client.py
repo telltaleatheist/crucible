@@ -170,6 +170,29 @@ def test_follow_streams_the_events_then_the_final_state(
     )
 
 
+def test_submit_with_queue_says_whether_it_waited_and_the_queue_lists_it(
+    base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "in.txt"
+    source.write_text("a page", encoding="utf-8")
+    assert run(base, "job", "submit", "--type", "echo", "--queue", "600",
+               "--input", f"page.txt={source}") == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert set(receipt) == {"job_id", "resume_id", "queued", "position"}
+    assert run(base, "queue", "list") == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert set(listed) == {"items", "depth", "limits"}
+
+
+def test_the_queue_flag_takes_the_default_or_a_number() -> None:
+    def body(queue: Any) -> dict[str, Any]:
+        return api_cmd.job_body(argparse.Namespace(
+            type="echo", model=None, params=None, resume=None, queue=queue))
+    assert "queue" not in body(None)
+    assert body(0)["queue"] == {}
+    assert body(600)["queue"] == {"max_wait_s": 600}
+
+
 def test_a_failed_job_exits_nonzero_even_though_every_request_succeeded(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -740,6 +763,10 @@ COVERED: dict[str, str] = {
     "POST /v1/models/{subject_id}/lease": "api lease open",
     "POST /v1/leases/{lease_id}/heartbeat": "api lease heartbeat",
     "DELETE /v1/leases/{lease_id}": "api lease release",
+    "GET /v1/queue": "api queue list",
+    "DELETE /v1/queue/{job_id}": "api queue remove",
+    "POST /v1/queue/{job_id}/heartbeat": "api queue heartbeat",
+    "GET /v1/queue/events": "api queue events",
 }
 
 EXCLUDED: dict[str, str] = {

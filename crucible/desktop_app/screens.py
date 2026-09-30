@@ -169,12 +169,62 @@ def chat_progress(activity: Mapping[str, Any]) -> list[Progress]:
     return rows
 
 
+def waiting_in_queue(job: Mapping[str, Any]) -> bool:
+    return job.get("waited_s") is not None
+
+
 def activity_work(activity: Mapping[str, Any] | None) -> tuple[Progress, ...]:
     if not activity:
         return ()
     jobs = [job_progress(job) for job in activity.get("running") or []]
-    jobs += [job_progress(job) for job in activity.get("queued") or []]
+    jobs += [job_progress(job) for job in activity.get("queued") or [] if not waiting_in_queue(job)]
     return tuple(jobs + chat_progress(activity))
+
+
+def waited_text(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)) or seconds < 0:
+        return ""
+    if seconds < 60:
+        return f"{round(seconds)} s"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60} min"
+
+
+@dataclass(frozen=True)
+class QueueLine:
+    job_id: str
+    position: int | None
+    title: str
+    detail: str
+    waited: str
+
+
+def queue_lines(activity: Any) -> tuple[QueueLine, ...]:
+    rows = activity.get("queued") if isinstance(activity, Mapping) else None
+    lines = []
+    for job in rows or []:
+        if not waiting_in_queue(job):
+            continue
+        model = f" with {job['model']}" if job.get("model") else ""
+        position = job.get("position")
+        client = job.get("client") or "an app that did not say its name"
+        lines.append(QueueLine(
+            job_id=str(job.get("job_id")),
+            position=position if isinstance(position, int) else None,
+            title=(f"{position}. " if isinstance(position, int) else "") + f"{job.get('type')}{model}",
+            detail=f"From {client}",
+            waited=f"waited {waited_text(job.get('waited_s'))}",
+        ))
+    return tuple(lines)
+
+
+def queue_fact(activity: Mapping[str, Any]) -> Fact:
+    waiting = len(queue_lines(activity))
+    if not waiting:
+        return Fact("Queue", "")
+    return Fact("Queue", f"{waiting} job{'s' if waiting != 1 else ''} waiting; see Activity")
 
 
 def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
@@ -190,6 +240,7 @@ def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
         facts += memory_facts(info, capability if isinstance(capability, Mapping) else None)
     if isinstance(activity, Mapping):
         facts.append(resident_fact(activity))
+        facts.append(queue_fact(activity))
     work = activity_work(activity if isinstance(activity, Mapping) else None)
     detail = "Working" if work else "Ready, and nothing is running"
     return HomeView(headline="Crucible is running", tone=OK, detail=detail,
@@ -411,6 +462,7 @@ class ActivityView:
     loaded: Fact
     lease: str
     tasks: tuple[TaskLine, ...]
+    queue: tuple[QueueLine, ...] = ()
 
 
 def activity_view(activity: Any, tasks: Any, watch: Progress | None) -> ActivityView:
@@ -422,7 +474,7 @@ def activity_view(activity: Any, tasks: Any, watch: Progress | None) -> Activity
     return ActivityView(
         work=((watch,) if watch is not None else ()) + work,
         loaded=resident_fact(activity if isinstance(activity, Mapping) else None),
-        lease=lease_text, tasks=task_lines(tasks),
+        lease=lease_text, tasks=task_lines(tasks), queue=queue_lines(activity),
     )
 
 

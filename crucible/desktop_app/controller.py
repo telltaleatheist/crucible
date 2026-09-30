@@ -230,6 +230,13 @@ class Controller:
                 self.api.send("DELETE", "/v1/jobs/" + quoted(ident))
         self.act(f"cancel:{ident}", work)
 
+    def remove_queued(self, job_id: str) -> None:
+        def work() -> None:
+            if self.ask("Remove this job from the queue? It will not run, and the app that "
+                        "sent it will be told it was removed."):
+                self.api.send("DELETE", "/v1/queue/" + quoted(job_id))
+        self.act(f"queue:{job_id}", work)
+
     def reset_voice(self, voice_id: str) -> None:
         def work() -> None:
             if self.ask(f"Go back to the version of {voice_id} that came with Crucible?"):

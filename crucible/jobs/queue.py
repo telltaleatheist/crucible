@@ -25,6 +25,7 @@ from .base import (
     FAILED,
     INTERRUPTED,
     QUEUED,
+    REMOVED,
     RUNNING,
     TERMINAL_STATES,
     Job,
@@ -57,6 +58,27 @@ def _params_for_artifact(params: dict[str, Any], index: int | None) -> dict[str,
 def _params_sha256(params: dict[str, Any]) -> str:
     canonical = json.dumps(params, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _removed_by_restart(waiting: Any, at: str) -> dict[str, Any]:
+    submitted = waiting.get("submitted") if isinstance(waiting, dict) else None
+    waited: float | None = None
+    if isinstance(submitted, str):
+        try:
+            waited = round(
+                (datetime.fromisoformat(at) - datetime.fromisoformat(submitted))
+                .total_seconds(), 3,
+            )
+        except ValueError:
+            waited = None
+    return {
+        "reason": "server_restart",
+        "message": "the server restarted while this job waited in its queue; a "
+        "queued job is not run hours later by a server that has forgotten who "
+        "asked for it. Submit it again",
+        "waited_s": waited,
+        "at": at,
+    }
 
 
 class ReapReason(str, Enum):
@@ -159,6 +181,8 @@ class JobStore:
         self._interrupted_by_stop: set[str] = set()
         self._lane_idle = asyncio.Event()
         self._lane_idle.set()
+        self._line: Any | None = None
+        self._on_idle: Any = lambda: None
         home = getattr(config, "home", None)
         self._journals = Journals(
             None if home is None else Path(home) / "journals",
@@ -219,6 +243,30 @@ class JobStore:
     def attach_settlement(self, settlement: Any) -> None:
         self._settlement = settlement
 
+    def attach_line(self, line: Any) -> None:
+        self._line = line
+
+    @property
+    def line(self) -> Any | None:
+        return self._line
+
+    def when_idle(self, callback: Any) -> None:
+        self._on_idle = callback
+
+    def _idle(self) -> None:
+        self._lane_idle.set()
+        try:
+            self._on_idle()
+        except Exception as exc:
+            print(
+                f"crucible: could not wake the queue: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    @property
+    def lane_free(self) -> bool:
+        return self._running_id is None and self._admitted.job_id is None
+
     @property
     def registry(self) -> dict[str, JobType]:
         return self._registry
@@ -242,7 +290,8 @@ class JobStore:
 
     @property
     def queue_depth(self) -> int:
-        return int(self._admitted.job_id is not None or self._running_id is not None)
+        on_lane = int(self._admitted.job_id is not None or self._running_id is not None)
+        return on_lane + (0 if self._line is None else len(self._line))
 
     @property
     def running_id(self) -> str | None:
@@ -264,7 +313,13 @@ class JobStore:
 
     def queued(self) -> list[Job]:
         admitted = self._admitted.job_id
-        return [] if admitted is None else [self._jobs[admitted]]
+        waiting = [] if self._line is None else [w.job for w in self._line.ordered()]
+        return ([] if admitted is None else [self._jobs[admitted]]) + waiting
+
+    def followed(self) -> tuple[set[str], set[str | None]]:
+        jobs = {job_id for job_id, waiters in self._subscribers.items() if waiters}
+        clients = {self._jobs[job_id].client for job_id in jobs if job_id in self._jobs}
+        return jobs, clients
 
     def get(self, job_id: str) -> Job:
         job = self._jobs.get(job_id)
@@ -283,6 +338,8 @@ class JobStore:
     def position(self, job: Job) -> int | None:
         if job.status == RUNNING:
             return 0
+        if job.waiting is not None and self._line is not None:
+            return self._line.position(job.id)
         if job.status == QUEUED and job.id == self._admitted.job_id:
             return 1
         return None
@@ -305,9 +362,10 @@ class JobStore:
             f"this server is busy with job {holder.id} ({what}), {holder.status} "
             f"since {busy.since}, submitted by {who}, "
             f"{holder.progress:.0%} done"
-            f"{doing}. Crucible admits one job at a time and does not queue: the "
-            "client owns the queue, the server owns admission (ARCHITECTURE.md "
-            "section 3). Read GET /v1/activity to see when it is finished.",
+            f"{doing}. Crucible admits one job at a time. Submit with "
+            '"queue": {} to wait in the queue on this server instead of being refused '
+            "(ARCHITECTURE.md section 3), or read GET /v1/activity to see when it "
+            "is finished.",
             busy.to_dict(),
         )
 
@@ -341,12 +399,41 @@ class JobStore:
         self._persist(job)
         return job
 
-    def enqueue(self, job: Job) -> None:
+    def enqueue(self, job: Job, *, announce: bool = True) -> None:
         self.refuse_if_busy()
         with self._lane_lock:
             self._admitted.admit(job.id)
-        self.append_event(job, "queued", {"position": self.position(job)})
+        if announce:
+            self.append_event(job, "queued", {"position": self.position(job)})
         self._wake.set()
+
+    def mark_waiting(self, job: Job, waiting: dict[str, Any] | None) -> None:
+        job.waiting = waiting
+        self._persist(job)
+
+    def end_waiting(
+        self,
+        item: Any,
+        *,
+        failure: JobFailure | None = None,
+        removal: dict[str, Any] | None = None,
+    ) -> None:
+        job = item.job
+        if item.fresh_journal is not None:
+            self._journals.forget_new(item.fresh_journal)
+            job.resume_id = None
+        if failure is not None:
+            self._finish(job, FAILED, failure)
+            return
+        assert removal is not None
+        job.status = REMOVED
+        job.finished = utcnow()
+        job.removal = {**removal, "at": job.finished}
+        self._persist(job)
+        if job.resume_id is not None:
+            self._journals.ended(job.resume_id, job.id, REMOVED)
+        shutil.rmtree(job.inputs_dir, ignore_errors=True)
+        self.append_event(job, "removed", job.removal)
 
     def discard(self, job: Job) -> None:
         if job.id == self._admitted.job_id:
@@ -638,6 +725,10 @@ class JobStore:
             recovered.append(job.id)
             if job.resume_id is not None and job.status == INTERRUPTED:
                 self._journals.ended(job.resume_id, job.id, INTERRUPTED)
+            if document.get("waiting") and job.status == REMOVED:
+                shutil.rmtree(job.inputs_dir, ignore_errors=True)
+                if job.resume_id is not None:
+                    self._journals.ended(job.resume_id, job.id, REMOVED)
         if recovered:
             print(
                 f"crucible: recovered {len(recovered)} job(s) from disk; "
@@ -653,6 +744,10 @@ class JobStore:
         status = str(document.get("status") or QUEUED)
         interrupted_at = document.get("interrupted_at")
         finished = document.get("finished")
+        removal = document.get("removal")
+        if status not in TERMINAL_STATES and document.get("waiting"):
+            status, finished = REMOVED, utcnow()
+            removal = _removed_by_restart(document["waiting"], finished)
         if status not in TERMINAL_STATES:
             status = INTERRUPTED
         if status == INTERRUPTED:
@@ -685,7 +780,10 @@ class JobStore:
             held_since=document.get("held_since"),
             resume_id=document.get("resume_id"),
             resumed=bool(document.get("resumed")),
+            removal=removal if isinstance(removal, dict) else None,
         )
+        if status == REMOVED and job.removal is not None:
+            self.append_event(job, "removed", job.removal)
         return job
 
 
@@ -729,6 +827,8 @@ class JobStore:
             "held_since": job.held_since,
             "resume_id": job.resume_id,
             "resumed": job.resumed,
+            "waiting": job.waiting,
+            "removal": job.removal,
         }
 
     def provenance(
@@ -762,6 +862,13 @@ class JobStore:
                 "job_not_cancellable",
                 f"job {job.id} is already {job.status}",
             )
+        if job.waiting is not None and self._line is not None:
+            self._line.remove(
+                job.id,
+                "client",
+                "the client that queued it cancelled it (DELETE /v1/jobs/{id})",
+            )
+            return REMOVED
         job.cancel_requested = True
         if job.status == QUEUED:
             with self._lane_lock:
@@ -843,7 +950,7 @@ class JobStore:
         finally:
             self._finish(job, status, error)
             self._running_id = None
-            self._lane_idle.set()
+            self._idle()
 
     def _journal_started(self, job: Job) -> None:
         assert job.resume_id is not None
@@ -921,7 +1028,7 @@ class JobStore:
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, FAILED)
         self._running_id = None
-        self._lane_idle.set()
+        self._idle()
 
     def _finish(self, job: Job, status: str, error: JobFailure | None = None) -> None:
         job.status = status

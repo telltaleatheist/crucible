@@ -214,6 +214,10 @@ export interface ActivityJob {
   readonly started: string | null;
   /** The submitting User-Agent. */
   readonly client: string | null;
+  /** Seconds this job has waited in the server's queue; `null` unless it is waiting there. */
+  readonly waitedS: number | null;
+  /** How long it may wait before it is removed `expired`; `null` unless it is waiting. */
+  readonly maxWaitS: number | null;
 }
 
 /** An open TTS streaming session, as a bench reads it. */
@@ -373,13 +377,42 @@ export interface JobRequest {
    * CrucibleClient.artifactRef}.
    */
   readonly hold?: boolean;
+  /**
+   * Wait in the server's queue while it is busy instead of being refused `server_busy`. `true`
+   * (or `{}`) takes the server's default wait; `false` or leaving it out refuses as before.
+   * {@link CrucibleClient.submit} leaves it off unless you set it; the high-level helpers
+   * (`render`, `asr`, `image`, `loadModel`, …) turn it on — see `CrucibleClientOptions.queue`.
+   */
+  readonly queue?: QueueChoice;
 }
 
 /**
- * A job's lifecycle state; `interrupted` means the server stopped mid-job, not that the work
- * failed.
+ * Whether and how long a job may wait in the server's queue. `maxWaitS` is 10..86400 seconds; the
+ * server's default is an hour.
  */
-export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+export type QueueChoice = boolean | { readonly maxWaitS?: number };
+
+/**
+ * A job's lifecycle state; `interrupted` means the server stopped mid-job, not that the work
+ * failed. `removed` means the job left the server's queue without running (an operator removed
+ * it, you cancelled it, it waited too long, or the server restarted) — not a failure: show it
+ * and offer to submit again.
+ */
+export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | 'removed';
+
+/** Why a job left the server's queue without running. */
+export type RemovalReason = 'operator' | 'client' | 'expired' | 'server_restart';
+
+/** The `removed` event's payload, and {@link JobStatus.removal}. */
+export interface RemovedData {
+  /** One of {@link RemovalReason}; a newer server may name another. */
+  readonly reason: string;
+  /** A sentence a person reads. */
+  readonly message: string;
+  /** How long it waited, or `null` where the server could not say (after a crash). */
+  readonly waitedS: number | null;
+  readonly at: string;
+}
 
 /** The server's named refusal or failure, as carried on a job and in events. */
 export interface JobFailure {
@@ -427,6 +460,8 @@ export interface JobStatus {
   readonly resumeId: string | null;
   /** True when this job was itself a resume of an earlier job's journal. */
   readonly resumed: boolean;
+  /** Why the job left the queue without running, when `status` is `removed`; otherwise null. */
+  readonly removal: RemovedData | null;
 }
 
 /** One journal, as `GET /v1/resumable` lists it; reading it resumes nothing. */
@@ -468,12 +503,15 @@ export interface ResumableDiscarded {
 /** `DELETE /v1/jobs/{id}`. */
 export interface CancelResult {
   readonly jobId: string;
-  readonly status: 'cancelled' | 'cancelling';
+  /** `removed` when the job was still waiting in the server's queue. */
+  readonly status: 'cancelled' | 'cancelling' | 'removed';
 }
 
 /** One SSE event from `GET /v1/jobs/{id}/events`. */
 export type JobEvent =
   | { readonly id: number; readonly event: 'queued'; readonly data: QueuedData }
+  | { readonly id: number; readonly event: 'started'; readonly data: StartedData }
+  | { readonly id: number; readonly event: 'removed'; readonly data: RemovedData }
   | { readonly id: number; readonly event: 'warming'; readonly data: WarmingData }
   | { readonly id: number; readonly event: 'progress'; readonly data: ProgressData }
   | { readonly id: number; readonly event: 'chunk'; readonly data: ChunkData }
@@ -490,8 +528,20 @@ export interface UnknownEvent {
   readonly data: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * Where the job stands: 1 is next. A job waiting in the server's queue gets one of these when it
+ * joins and again whenever its place changes.
+ */
 export interface QueuedData {
   readonly position: number;
+  /** How many jobs are waiting in the queue, or `null` on a job that never waited. */
+  readonly of: number | null;
+}
+
+/** A job submitted with `queue` was admitted to the lane. */
+export interface StartedData {
+  /** Seconds it waited in the queue; 0 when the server was free. */
+  readonly waitedS: number;
 }
 
 /**
@@ -558,7 +608,61 @@ export interface CancelledData {
 }
 
 /** The event names that end a stream. */
-export const TERMINAL_EVENTS = ['done', 'failed', 'cancelled'] as const;
+export const TERMINAL_EVENTS = ['done', 'failed', 'cancelled', 'removed'] as const;
+
+/** One job waiting in the server's queue, as `GET /v1/queue` lists it. */
+export interface QueueItem {
+  /** 1 is next. */
+  readonly position: number;
+  readonly jobId: string;
+  readonly type: string;
+  readonly model: string | null;
+  /** Who queued it (its User-Agent or `X-Crucible-Client`), or null when it did not say. */
+  readonly client: string | null;
+  readonly clientRef: string | null;
+  readonly submitted: string;
+  readonly waitedS: number;
+  readonly maxWaitS: number;
+  /** When it is removed `expired` if it has not started. */
+  readonly expiresAt: string;
+  /** True for the open lease's holder, whose jobs go ahead of the line. */
+  readonly leaseHolder: boolean;
+}
+
+/** `GET /v1/queue`. */
+export interface QueueList {
+  readonly items: readonly QueueItem[];
+  readonly depth: number;
+  readonly limits: {
+    readonly perClient: number;
+    readonly total: number;
+    readonly maxWaitS: { readonly default: number; readonly min: number; readonly max: number };
+    readonly abandonAfterS: number;
+  };
+}
+
+/** `DELETE /v1/queue/{id}`. */
+export interface QueueRemoved {
+  readonly jobId: string;
+  readonly status: 'removed';
+  readonly reason: 'operator';
+}
+
+/**
+ * One event from `GET /v1/queue/events`: a `snapshot` first, then every change. `depth` is how
+ * many jobs wait after the change.
+ */
+export type QueueEvent =
+  | { readonly id: number; readonly event: 'snapshot'; readonly items: readonly QueueItem[]; readonly depth: number }
+  | {
+      readonly id: number;
+      readonly event: 'added' | 'moved' | 'started' | 'removed';
+      readonly jobId: string;
+      readonly depth: number;
+      /** Every other key the server put on the frame (`position`, `reason`, `waited_s`, …). */
+      readonly data: Readonly<Record<string, unknown>>;
+    }
+  | UnknownEvent;
 
 export type TerminalEventName = (typeof TERMINAL_EVENTS)[number];
 

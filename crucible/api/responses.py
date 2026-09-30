@@ -82,6 +82,15 @@ class JobFailure(_Open):
     message: str
 
 
+class JobRemoval(_Open):
+    """Why a job left the queue without running: `removed` is not `failed`."""
+
+    reason: Literal["operator", "client", "expired", "server_restart"]
+    message: str
+    waited_s: Number | None
+    at: str
+
+
 class JobStatus(_Open):
     """`GET /v1/jobs/{id}`. A job type adds its own `done_extra` keys beside these."""
 
@@ -107,6 +116,39 @@ class JobStatus(_Open):
     resumed: bool
     lease_id: str | None = None
     sampling: dict[str, Any] | None = None
+    removal: JobRemoval | None = None
+
+
+class QueueItem(_Open):
+    """One job waiting in the server's queue."""
+
+    position: int
+    job_id: str
+    type: str
+    model: str | None
+    client: str | None
+    client_ref: str | None
+    submitted: str
+    waited_s: Number
+    max_wait_s: int
+    expires_at: str
+    lease_holder: bool
+
+
+class QueueList(_Open):
+    """`GET /v1/queue`: the waiting jobs in order, and the queue's limits."""
+
+    items: list[QueueItem]
+    depth: int
+    limits: dict[str, Any]
+
+
+class QueueRemoved(_Open):
+    """`DELETE /v1/queue/{job_id}`: the job left the queue."""
+
+    job_id: str
+    status: Literal["removed"]
+    reason: Literal["operator"]
 
 
 class VoiceInfo(_Open):
@@ -246,7 +288,9 @@ class ActivityChat(_Open):
 
 
 class ActivitySlot(_Open):
-    """The one accelerated lane."""
+    """The one accelerated lane. `queue_depth` counts the job on the lane (admitted or
+    running) plus every job waiting in the server's queue.
+    """
 
     busy: int
     of: int
@@ -273,6 +317,8 @@ class ActivityJob(_Open):
     created: str
     started: str | None
     client: str | None
+    waited_s: Number | None = None
+    max_wait_s: int | None = None
 
 
 class ActivitySettings(_Open):

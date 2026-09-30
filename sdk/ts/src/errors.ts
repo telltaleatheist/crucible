@@ -101,7 +101,10 @@ export class CrucibleRefused extends CrucibleError {
 /** The server's code for "one job at a time, and it is not yours". */
 export const SERVER_BUSY = 'server_busy';
 
-/** 409 `server_busy`: Crucible admits one job at a time and **does not queue**. */
+/**
+ * 409 `server_busy`: Crucible admits one job at a time. A job submitted with `queue` waits in the
+ * server's queue instead of meeting this; one submitted without it is refused.
+ */
 export class CrucibleBusy extends CrucibleRefused {
   /** The busy job's `client` (its recorded User-Agent), or null when it did not say. */
   readonly holder: string | null;

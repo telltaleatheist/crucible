@@ -10,11 +10,12 @@ from fastapi.responses import StreamingResponse
 
 from ..errors import ApiError
 from ..jobs.base import Job
+from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
 from ..tasks import Task, TaskStore
 from ..ttsstream import StreamSession
 
-TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
+TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled", "removed"})
 SESSION_END = frozenset({"closed"})
 KEEPALIVE_SECONDS = 15.0
 SSE_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
@@ -118,6 +119,33 @@ def _session_feed(session: StreamSession, delivered: int) -> Feed:
         moved=moved,
         close=lambda: session.detach(reader),
     )
+
+
+def _queue_feed(line: WaitingLine) -> Feed:
+    waiter = line.subscribe()
+    opened = line.last_event_id
+    snapshot: list[tuple[int, dict[str, Any]]] = [
+        (opened, {"id": opened, "event": "snapshot",
+                  "data": {"items": line.rows(), "depth": len(line)}})
+    ]
+
+    def after(cursor: int) -> list[tuple[int, dict[str, Any]]]:
+        first = snapshot if cursor < opened else []
+        return first + [
+            (event["id"], event) for event in line.events_after(max(cursor, opened))
+        ]
+
+    return Feed(
+        after=after,
+        waiter=waiter,
+        ends=frozenset(),
+        moved=lambda _: None,
+        close=lambda: line.unsubscribe(waiter),
+    )
+
+
+def queue_events(request: Request, line: WaitingLine) -> StreamingResponse:
+    return event_response(events_after(request, lambda: _queue_feed(line), 0))
 
 
 def event_response(stream: AsyncIterator[str]) -> StreamingResponse:

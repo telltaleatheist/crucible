@@ -92,7 +92,8 @@ audiences are different, and "stop logging" is not the instruction.
 
 ### R5. Queues belong to clients. Admission belongs to the server.
 
-Section 3.
+Section 3. Since 2026-09-30 the server also keeps an opt-in queue between clients (3.3);
+admission is still the server's one check, and a queued job meets it at the front.
 
 ### R6. Partial work survives failure, always.
 
@@ -104,6 +105,12 @@ output.
 ---
 
 ## 3. The queue ruling
+
+> **Superseded in part, 2026-09-30 — see 3.3.** The server now queues **on request**: a
+> submit carrying `"queue": {...}` waits in a server-side FIFO instead of being refused.
+> A submit without it is refused `409 server_busy` exactly as below. The client still owns
+> ordering *within its own work* (which chapter next, the pin, the priority); the server
+> owns fairness *between clients*, which no client can see.
 
 **Owen, 2026-09-13:** *"i think all queuing logic should exist in the clients, not the
 server. if the server is busy, it cant receive a new job. if its not busy, it receives the
@@ -226,6 +233,43 @@ now explicitly documented as a display and a preflight, never admission. The ref
 carries `progress`, which is enough to back off for roughly as long as the holder has left,
 so the polling this avoids is the tight kind rather than the periodic kind.
 
+### 3.3 BUILT, 2026-09-30 — the server queues on request
+
+**Owen, 2026-09-30:** *"we should be able to list the queue and remove them at will via
+the api. and the ui should list the queue and be able to remove items from it."* Five or
+six clients (BookForge, ContentStudio, Briefcase, game agents, scripts) had each written
+the retry loop 3 said the SDK owed, and polling rewards whoever asks at the luckiest
+moment. The ruling in 3 was right that a server FIFO cannot know a client's priorities; it
+missed that no client can know the *other* clients'. So the queue is opt-in and simple:
+
+- **Opt-in per request.** `POST /v1/jobs` with `"queue": {"max_wait_s": N}` (10..86400,
+  default 3600). Without it, nothing changed. The SDK's high-level helpers opt in by
+  default; its raw `submit` does not.
+- **A queued job is a normal job** (`status: queued`, holding its inputs), in the waiting
+  line (`crucible/jobs/line.py`), first come first served, except that the client holding
+  the open lease goes ahead of the line: a lease exists to keep the model for its holder's
+  batch.
+- **Admission is unchanged and happens at the front.** `crucible/queuepump.py` offers the
+  front of the line to `admission.admit_waiting`, the same checks as a fresh submit, when
+  the lane goes idle (and every second). `server_busy`, `leased` and `engine_in_use` mean
+  "not yet"; any other refusal ends the job `failed` with that refusal, never re-queued. A
+  job refused `leased` does not hold up the jobs behind it that the lease allows.
+- **`removed` is a terminal state, distinct from `failed`**, with a reason: `operator`
+  (`DELETE /v1/queue/{id}`, the desktop app), `client` (`DELETE /v1/jobs/{id}`),
+  `expired` (`max_wait_s`, or nobody following it for five minutes: no event stream on it
+  or on another job of the same client, no `GET /v1/jobs/{id}`, no
+  `POST /v1/queue/{id}/heartbeat`), `server_restart` (the queue is never run hours later
+  by a server that restarted; the record says why after the restart too).
+- **Caps**, refused `409 queue_full` by name: 50 waiting per client, 200 in all.
+- **Nobody jumps the line.** While anything waits, a plain submit is refused
+  `server_busy` (with `details.queue_depth`) even in the instant the lane is free.
+- **Seen from outside:** `GET /v1/queue`, `GET /v1/queue/events` (a snapshot, then every
+  change), `GET /v1/activity`'s `queued` and `queue_depth`, the desktop app's Queue
+  section, and `scripts/deploy.sh`, which counts a waiting job as busy.
+
+App-author guidance is docs/QUEUE.md. 3.2's edge signal is still deferred: a queued job
+*is* the edge signal for the clients that want one.
+
 ---
 
 ## 4. Where each thing lives
@@ -234,7 +278,8 @@ The settled ownership, for reference:
 
 | Concern | Owner | Notes |
 |---|---|---|
-| the queue, ordering, priority, pins | **the client** | section 3 |
+| ordering, priority and pins within one client's work | **the client** | section 3 |
+| fairness between clients: the opt-in queue | **the server** | section 3.3 |
 | admission ("is there room now") | **the server** | only it can answer |
 | the guard and the retake decision | **the model + its inference** | Owen, 2026-09-13; PHASE6 |
 | chunking and the order of work | **the client** | docs/history/PHASE3-TTS.md section 1 |

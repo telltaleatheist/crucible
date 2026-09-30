@@ -16,6 +16,7 @@ from ..connect import PairingRequests
 from ..errors import ApiError
 from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
+from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
 from ..leases import Leases
 from ..residency import Residency
@@ -36,6 +37,7 @@ class Routers:
 class Services:
     leases: Leases
     store: JobStore
+    line: WaitingLine
     streams: StreamManager
     inflight: InFlight
     ollama_contexts: upstreams.OllamaContexts
@@ -63,6 +65,10 @@ class AppContext:
     @property
     def store(self) -> JobStore:
         return self.app.state.store
+
+    @property
+    def line(self) -> WaitingLine:
+        return self.app.state.line
 
     @property
     def tasks(self) -> TaskStore:

@@ -27,7 +27,9 @@ from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
 from ..jobs import build_registry, disabled_error
 from ..jobs.queue import JobStore
+from ..jobs.line import WaitingLine
 from ..leases import Leases
+from ..queuepump import QueuePump
 from ..residency import Residency
 from ..settle import Settlement
 from ..tasks import TaskStore
@@ -61,6 +63,7 @@ from .routes import (
 )
 from .routes import catalog as catalog_routes
 from .routes import leases as lease_routes
+from .routes import queue as queue_routes
 
 ROUTE_MODULES = (
     pairing,
@@ -71,6 +74,7 @@ ROUTE_MODULES = (
     catalog_routes,
     activity,
     lease_routes,
+    queue_routes,
     voices,
     tts_stream,
     jobs,
@@ -209,6 +213,7 @@ def _services(
     keeper: RegistryKeeper,
 ) -> Services:
     store = JobStore(config, backend, keeper.registry)
+    line = WaitingLine(store, lambda: _lease_client(leases))
     streams = StreamManager(residency)
     inflight = InFlight()
     settlement = Settlement(
@@ -227,6 +232,7 @@ def _services(
     return Services(
         leases=leases,
         store=store,
+        line=line,
         streams=streams,
         inflight=inflight,
         ollama_contexts=upstreams.OllamaContexts(),
@@ -238,6 +244,18 @@ def _services(
         tasks=task_store,
         installs=InstallOnSubmit(config, backend, task_store),
     )
+
+
+def _lease_client(leases: Leases) -> str | None:
+    lease = leases.current()
+    return None if lease is None else lease.client
+
+
+def _attach_queue_pump(app: FastAPI, ctx: AppContext) -> None:
+    pump = QueuePump(app.state.line, ctx.admission)
+    app.state.store.when_idle(pump.wake)
+    app.state.line.when_changed(pump.wake)
+    app.state.queue_pump = pump
 
 
 def _proxy_client() -> httpx.AsyncClient:
@@ -277,6 +295,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         store.restore()
         residency.start_reclaiming()
         store.start()
+        app.state.queue_pump.start()
         if app.state.config.enable_tts:
             _look_up_unresolved_voice_tags(app.state.config.home)
         app.state.http = _proxy_client()
@@ -284,6 +303,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
             yield
         finally:
             await app.state.tasks.stop()
+            await app.state.queue_pump.stop()
             await store.stop()
             await app.state.http.aclose()
             await asyncio.to_thread(app.state.streams.shutdown)
@@ -369,15 +389,14 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
     _answer_refusals(app)
-    _mount_routes(
-        app,
-        AppContext(
-            app=app,
-            config=config,
-            backend=backend,
-            residency=residency,
-            decide_here=_decider(config, backend),
-        ),
+    ctx = AppContext(
+        app=app,
+        config=config,
+        backend=backend,
+        residency=residency,
+        decide_here=_decider(config, backend),
     )
+    _attach_queue_pump(app, ctx)
+    _mount_routes(app, ctx)
     _mount_operator_page(app)
     return app

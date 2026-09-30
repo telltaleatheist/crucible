@@ -201,8 +201,20 @@ ladder or the CLI:
   it is also what
   `POST /v1/tasks` reads through `Settlement.holder()`, which is why `settle` needs no import of
   the queue.
-- `position`, `queue_depth` and cancel are unchanged. Under the admission rule they only take
-  the values 0, 1 or null.
+- `position`, `queue_depth` and cancel are unchanged for a job that did not ask to queue.
+  Under the admission rule they only take the values 0, 1 or null.
+- **The waiting line (2026-09-30).** A submit with `"queue": {...}` that admission refuses
+  only as busy (`server_busy`, `leased`, `engine_in_use`) is created anyway and joins
+  `WaitingLine` (`crucible/jobs/line.py`), attached to the store with `attach_line`. It is
+  a normal job (`queued`, inputs moved in, journal created) whose record carries `waiting`
+  while it waits. `crucible/queuepump.py` runs `admission.admit_waiting` on the front of the
+  line whenever the lane goes idle (`JobStore.when_idle`) and every second, and expires what
+  waited `max_wait_s` or was abandoned. `queue_depth` is the lane (0 or 1) plus the line;
+  `position()` of a waiting job is its place in the line; `queued()` is the admitted job and
+  then the line in order. `cancel` of a waiting job removes it (`removed`, reason `client`)
+  instead of cancelling. `removed` is a terminal state with `Job.removal`; `restore()` turns a
+  record left `waiting` into `removed` / `server_restart` and replays its `removed` event.
+  App-facing contract: docs/QUEUE.md.
 - `discard` forgets a created job that was never admitted. A leftover record would sit at
   `queued` forever, with no position.
 - `_lane_lock` guards the admitted slot and `_running_id` together, because the settlement reads the

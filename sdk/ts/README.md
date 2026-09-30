@@ -109,6 +109,10 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `tasks()` | `GET /v1/tasks` | `TaskStatus[]`, newest first |
 | `taskEvents(id, {lastEventId?})` | `GET /v1/tasks/{id}/events` | `AsyncIterable<TaskEvent>` |
 | `cancelTask(id)` | `DELETE /v1/tasks/{id}` | `TaskCancelResult` |
+| `queue()` | `GET /v1/queue` | `QueueList` — the jobs waiting, in order |
+| `removeFromQueue(id)` | `DELETE /v1/queue/{id}` | `QueueRemoved` |
+| `queueHeartbeat(id)` | `POST /v1/queue/{id}/heartbeat` | `{position, expiresAt}` |
+| `queueEvents()` | `GET /v1/queue/events` | `AsyncIterable<QueueEvent>`: a snapshot, then every change |
 | `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |
 
 Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-Api: 1`.
@@ -123,13 +127,27 @@ shape. `jobTypes` is what you may **post**, and it is not the same list: `llm` i
 and is not a job type, while `load-model` and `unload-model` are job types and are not
 capabilities.
 
+### The queue
+
+The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video` and
+every load and unload) submit with `queue`: while the server is busy the job waits in its
+queue instead of being refused `CrucibleBusy`. `new CrucibleClient({..., queue: false})`
+turns that off and `queue: {maxWaitS: 600}` changes the wait (the server's default is an
+hour). `submit()` queues only when its request says `queue: true` or `{maxWaitS}`. A server
+older than the queue is asked again without it, so the app sees `CrucibleBusy` as before.
+
+A queued job that never runs ends `removed {reason, message, waitedS, at}`: `operator`,
+`client`, `expired` or `server_restart`. **It is not a failure**: show it and offer to send
+the job again. docs/QUEUE.md in the Crucible repo is the whole contract.
+
 ### Events
 
 `events()` yields typed events with the server's monotonic `id`:
-`queued {position}`, `warming {message}`, `progress {fraction, message, extra}`,
+`queued {position, of}`, `started {waitedS}`, `warming {message}`,
+`progress {fraction, message, extra}`,
 `chunk {index, seconds, chars, charsPerSec, tokens, capped, take, guard}`, `artifact {name}`,
-`done`, `failed {error}`, `cancelled {status}`. The iterator ends after the first terminal
-event (`done`, `failed`, `cancelled`).
+`done`, `failed {error}`, `cancelled {status}`, `removed {reason, message, waitedS, at}`.
+The iterator ends after the first terminal event (`done`, `failed`, `cancelled`, `removed`).
 
 `progress.extra` is every other key the job type put on that frame, verbatim — server
 spelling, server types. A job type may send its own measurements beside the fraction

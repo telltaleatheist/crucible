@@ -101,6 +101,7 @@ test('segment() posts one segment job: the picture as its input, points and box 
       lease: { act: 'select', ttl_seconds: 300 },
     },
     inputs: { 'photo.jpg': { blob_id: 'blob-7' } },
+    queue: {},
   });
 });
 
@@ -142,6 +143,7 @@ test('loadSegment() queues a load-segment job, with or without a lease', async (
     model: 'sam2.1-hiera-large',
     params: { lease: { act: 'select', ttl_seconds: 120 } },
     inputs: {},
+    queue: {},
   });
   await client().loadSegment('birefnet');
   assert.deepEqual(JSON.parse(lastBody).params, {});

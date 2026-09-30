@@ -117,7 +117,8 @@ crucible api pairing-decide --id … --code … --allow|--deny
 ```
 crucible api job submit --type <t> [--model <m>] [--params <json|@file>]
                         [--input NAME=PATH]... [--input-blob NAME=BLOB]...
-                        [--resume RESUME_ID] [--follow] [--artifacts-dir DIR]
+                        [--resume RESUME_ID] [--queue [MAX_WAIT_S]]
+                        [--follow] [--artifacts-dir DIR]
 crucible api job get <job-id>
 crucible api job events <job-id> [--since <event-id>]
 crucible api job cancel <job-id>
@@ -141,6 +142,18 @@ is audio.
 `--artifacts-dir` **requires `--follow`** and is refused without it
 (`artifacts_need_follow`). Downloading artifacts means waiting, and a flag that
 silently decides whether a command blocks for twenty minutes is a surprise.
+
+`--queue` asks the server to hold the job in its queue while it is busy instead of
+refusing `server_busy` (docs/QUEUE.md); with a number, for at most that many seconds.
+
+### The queue (2026-09-30)
+
+```
+crucible api queue list                        → {"items": [...], "depth", "limits"}, in order
+crucible api queue remove <job-id>             the job ends removed, reason operator
+crucible api queue heartbeat <job-id>          the client that queued it is still here
+crucible api queue events                      a snapshot, then every change; Ctrl-C ends it
+```
 
 ### Resumable jobs — the journals (2026-09-27)
 

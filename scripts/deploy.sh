@@ -251,8 +251,9 @@ for row in d.get("running") or []:
     busy.append("job %s (%s) %d%% done" % (row.get("job_id"), row.get("type"),
                                            round((row.get("progress") or 0) * 100)))
 queued = len(d.get("queued") or [])
-if queued:
-    busy.append("%d queued" % queued)
+depth = ((d.get("slots") or {}).get("accelerated") or {}).get("queue_depth") or 0
+if queued or (depth and not d.get("running")):
+    busy.append("%d job(s) waiting in the queue (queue depth %d)" % (queued, depth))
 if d.get("streaming"):
     busy.append("a streaming session")
 chat = (d.get("chat") or {}).get("in_flight") or 0

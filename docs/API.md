@@ -231,7 +231,7 @@ The work. Every job type is created, polled and cancelled through the same route
 
 ### `POST /v1/jobs`
 
-Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh.
+Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. With `queue` a busy lane queues the job instead: it waits with status `queued` and its events say where it stands. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -245,6 +245,7 @@ Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missin
 | `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
+| `queue` | QueueRequest or null | no | — | Opt in to the server's queue: while the lane is busy the job waits (status `queued`) instead of being refused `409 server_busy`. Without it, a busy server refuses as it always has. |
 
 *Answers:* `202`, `409` ServerBusy, `422` HTTPValidationError
 
@@ -286,10 +287,11 @@ Get Job
 | `resumed` | boolean | yes | — |  |
 | `lease_id` | string or null | no | — |  |
 | `sampling` | object or null | no | — |  |
+| `removal` | JobRemoval or null | no | — |  |
 
 ### `DELETE /v1/jobs/{job_id}`
 
-Cancel Job
+Cancel a job; a job still waiting in the queue is removed (reason `client`) and answers `status: removed`.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -347,6 +349,66 @@ The chain is complete: release the hold and remove the job now.
 | `job_id` | path | yes | string |  |
 
 *Answers:* `204`, `422` HTTPValidationError
+
+## Queue
+
+Jobs submitted with `queue` while the lane is busy wait here, in order: list them, remove one, keep one alive, or follow every change. How an app should use it is docs/QUEUE.md.
+
+### `GET /v1/queue`
+
+The jobs waiting for the lane, in the order they will be offered to it: the lease holder's first while its lease is open, then first come, first served.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200` QueueList
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `items` | array of QueueItem | yes | — |  |
+| `depth` | integer | yes | — |  |
+| `limits` | object | yes | — |  |
+
+### `GET /v1/queue/events`
+
+Every change to the queue, for a dashboard: a `snapshot` first, then `added`, `moved`, `started` and `removed` as they happen.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
+### `DELETE /v1/queue/{job_id}`
+
+Take a waiting job out of the queue. It ends `removed` with reason `operator`; a job that has started is cancelled with DELETE /v1/jobs/{id}.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | path | yes | string |  |
+
+*Answers:* `200` QueueRemoved, `404` ErrorEnvelope, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `status` | `'removed'` | yes | — |  |
+| `reason` | `'operator'` | yes | — |  |
+
+### `POST /v1/queue/{job_id}/heartbeat`
+
+Say the client that queued this job is still there. Only needed by a client that neither follows the job's events nor polls it.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | path | yes | string |  |
+
+*Answers:* `200`, `404` ErrorEnvelope, `422` HTTPValidationError
 
 ## Resumable jobs
 
@@ -901,6 +963,8 @@ A running or queued job, as `GET /v1/activity` shows it.
 | `created` | string | yes | — |  |
 | `started` | string or null | yes | — |  |
 | `client` | string or null | yes | — |  |
+| `waited_s` | integer or number or null | no | — |  |
+| `max_wait_s` | integer or null | no | — |  |
 
 ### `ActivityLease`
 
@@ -952,7 +1016,7 @@ Recent writes through `PUT /v1/settings`.
 
 ### `ActivitySlot`
 
-The one accelerated lane.
+The one accelerated lane. `queue_depth` counts the job on the lane (admitted or running) plus every job waiting in the server's queue.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
@@ -967,7 +1031,7 @@ Every lane this server admits work through.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `accelerated` | ActivitySlot | yes | — | The one accelerated lane. |
+| `accelerated` | ActivitySlot | yes | — | The one accelerated lane. `queue_depth` counts the job on the lane (admitted or running) plus every job waiting in the server's queue. |
 
 ### `ArtifactRef`
 
@@ -1189,6 +1253,7 @@ How big the items form's prompts were.
 | `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
+| `queue` | QueueRequest or null | no | — | Opt in to the server's queue: while the lane is busy the job waits (status `queued`) instead of being refused `409 server_busy`. Without it, a busy server refuses as it always has. |
 
 ### `JobFailure`
 
@@ -1208,6 +1273,17 @@ One named input: an uploaded blob, inline base64 bytes, or a previous job's arti
 | `blob_id` | string or null | no | — |  |
 | `inline_base64` | string or null | no | — |  |
 | `artifact` | ArtifactRef or null | no | — |  |
+
+### `JobRemoval`
+
+Why a job left the queue without running: `removed` is not `failed`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `reason` | `'operator'` or `'client'` or `'expired'` or `'server_restart'` | yes | — |  |
+| `message` | string | yes | — |  |
+| `waited_s` | integer or number or null | yes | — |  |
+| `at` | string | yes | — |  |
 
 ### `JobStatus`
 
@@ -1237,6 +1313,7 @@ One named input: an uploaded blob, inline base64 bytes, or a previous job's arti
 | `resumed` | boolean | yes | — |  |
 | `lease_id` | string or null | no | — |  |
 | `sampling` | object or null | no | — |  |
+| `removal` | JobRemoval or null | no | — |  |
 
 ### `LeaseOpen`
 
@@ -1274,6 +1351,52 @@ The weights that made the decision, as an artifact sidecar names them.
 | --- | --- | --- | --- | --- |
 | `id` | string | yes | — |  |
 | `device_code` | string | yes | — |  |
+
+### `QueueItem`
+
+One job waiting in the server's queue.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `position` | integer | yes | — |  |
+| `job_id` | string | yes | — |  |
+| `type` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `client_ref` | string or null | yes | — |  |
+| `submitted` | string | yes | — |  |
+| `waited_s` | integer or number | yes | — |  |
+| `max_wait_s` | integer | yes | — |  |
+| `expires_at` | string | yes | — |  |
+| `lease_holder` | boolean | yes | — |  |
+
+### `QueueList`
+
+`GET /v1/queue`: the waiting jobs in order, and the queue's limits.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `items` | array of QueueItem | yes | — |  |
+| `depth` | integer | yes | — |  |
+| `limits` | object | yes | — |  |
+
+### `QueueRemoved`
+
+`DELETE /v1/queue/{job_id}`: the job left the queue.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `job_id` | string | yes | — |  |
+| `status` | `'removed'` | yes | — |  |
+| `reason` | `'operator'` | yes | — |  |
+
+### `QueueRequest`
+
+Wait in the server's queue instead of being refused `409 server_busy`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `max_wait_s` | integer | no | `3600` | How long the job may wait for the lane before it is removed `expired`. |
 
 ### `ScoreAnswer`
 

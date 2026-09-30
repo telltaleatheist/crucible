@@ -29,7 +29,10 @@ def test_task_states_are_the_job_states_and_a_task_is_never_interrupted() -> Non
     assert (states.RUNNING, states.DONE, states.FAILED, states.CANCELLED) == (
         job_states.RUNNING, job_states.DONE, job_states.FAILED, job_states.CANCELLED,
     )
-    assert states.TERMINAL_STATES == job_states.TERMINAL_STATES - {job_states.INTERRUPTED}
+    # A task is never interrupted, and never waits in the job queue, so it is never removed.
+    assert states.TERMINAL_STATES == job_states.TERMINAL_STATES - {
+        job_states.INTERRUPTED, job_states.REMOVED,
+    }
 
 
 def test_the_host_door_variable_has_one_owner() -> None:

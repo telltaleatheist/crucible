@@ -71,6 +71,13 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "start picture) are in docs/VIDEO.md.",
     ),
     (
+        "/queue",
+        "Queue",
+        "Jobs submitted with `queue` while the lane is busy wait here, in order: list them, "
+        "remove one, keep one alive, or follow every change. How an app should use it is "
+        "docs/QUEUE.md.",
+    ),
+    (
         "/resumable",
         "Resumable jobs",
         "The resume journals: every job type that keeps one writes its finished work to "

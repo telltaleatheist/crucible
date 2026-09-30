@@ -125,6 +125,12 @@ import {
   type PagesEngine,
   type Ping,
   type ProgressData,
+  type QueueChoice,
+  type QueueEvent,
+  type QueueItem,
+  type QueueList,
+  type QueueRemoved,
+  type RemovedData,
   type Provenance,
   type RenderChunk,
   type RenderFailure,
@@ -166,12 +172,16 @@ import { SDK_VERSION } from './version.js';
 const API_HEADER = 'X-Crucible-Api';
 const CLIENT_NAME_HEADER = 'X-Crucible-Client';
 const JOB_STATES: readonly JobState[] = [
-  'queued', 'running', 'done', 'failed', 'cancelled', 'interrupted',
+  'queued', 'running', 'done', 'failed', 'cancelled', 'interrupted', 'removed',
 ];
+const MIN_MAX_WAIT_S = 10;
+const MAX_MAX_WAIT_S = 86_400;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
 const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
   'queued',
+  'started',
+  'removed',
   'warming',
   'progress',
   'chunk',
@@ -193,6 +203,14 @@ export interface CrucibleClientOptions {
   clientName: string;
   /** A deadline on every call, in milliseconds; a per-call `signal` replaces it. */
   timeoutMs?: number;
+  /**
+   * Whether the high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`,
+   * `video` and every load/unload) wait in the server's queue while it is busy. On by default
+   * (`true`, the server's default wait of an hour); `false` makes them refuse `server_busy` as
+   * before. A request's own `queue` wins. {@link CrucibleClient.submit} never queues unless its
+   * request says so.
+   */
+  queue?: QueueChoice;
 }
 
 /** Options for {@link CrucibleClient.events}. */
@@ -246,6 +264,7 @@ export class CrucibleClient {
   readonly #userAgent: string;
   readonly #clientName: string;
   readonly #timeoutMs: number | null;
+  readonly #helperQueue: QueueChoice;
 
   constructor(options: CrucibleClientOptions) {
     const given = options as Partial<CrucibleClientOptions> | undefined;
@@ -257,6 +276,8 @@ export class CrucibleClient {
     const clientName = requireText(given.clientName, 'clientName');
     this.#userAgent = `${clientName} crucible-client/${SDK_VERSION}`;
     this.#clientName = clientName;
+    this.#helperQueue = given.queue === undefined ? true : given.queue;
+    queuePayload(this.#helperQueue);
     if (given.timeoutMs !== undefined) {
       if (!Number.isFinite(given.timeoutMs) || given.timeoutMs <= 0) {
         throw new CrucibleConfigError(
@@ -609,15 +630,102 @@ export class CrucibleClient {
     if (request.model !== undefined) payload['model'] = request.model;
     if (request.clientRef !== undefined) payload['client_ref'] = request.clientRef;
     if (request.hold !== undefined) payload['hold'] = requireBool(request.hold, 'hold');
+    const queue = queuePayload(request.queue);
+    if (queue !== null) payload['queue'] = queue;
 
-    const init: RequestInit = {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+    const post = async (document: Record<string, unknown>): Promise<string> => {
+      const init: RequestInit = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(document),
+      };
+      if (options.signal !== undefined) init.signal = options.signal;
+      const body = await this.#json('/v1/jobs', init, 'submit');
+      return str(body, 'job_id', 'submit');
     };
-    if (options.signal !== undefined) init.signal = options.signal;
-    const body = await this.#json('/v1/jobs', init, 'submit');
-    return str(body, 'job_id', 'submit');
+    try {
+      return await post(payload);
+    } catch (error) {
+      if (queue === null || !refusedTheQueueField(error)) throw error;
+      // A server older than the queue refuses the field it does not know. Ask the way it
+      // understands: it answers server_busy while busy, exactly as it always has.
+      const { queue: _unknown, ...plain } = payload;
+      return post(plain);
+    }
+  }
+
+  /** What the high-level helpers submit through: {@link submit}, queued unless told not to. */
+  #submitHelper(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
+    const queued = request.queue === undefined ? { ...request, queue: this.#helperQueue } : request;
+    return this.submit(queued, options);
+  }
+
+  /** `GET /v1/queue` — the jobs waiting for the lane, in the order they will get it. */
+  async queue(): Promise<QueueList> {
+    const body = await this.#json('/v1/queue', { method: 'GET' }, 'queue');
+    const limits = objectField(body, 'limits', 'queue');
+    const wait = objectField(limits, 'max_wait_s', 'queue.limits');
+    return {
+      items: arrayField(body, 'items', 'queue').map((row, index) =>
+        readQueueItem(asObject(row, `queue.items[${index}]`), `queue.items[${index}]`),
+      ),
+      depth: num(body, 'depth', 'queue'),
+      limits: {
+        perClient: num(limits, 'per_client', 'queue.limits'),
+        total: num(limits, 'total', 'queue.limits'),
+        maxWaitS: {
+          default: num(wait, 'default', 'queue.limits.max_wait_s'),
+          min: num(wait, 'min', 'queue.limits.max_wait_s'),
+          max: num(wait, 'max', 'queue.limits.max_wait_s'),
+        },
+        abandonAfterS: num(limits, 'abandon_after_s', 'queue.limits'),
+      },
+    };
+  }
+
+  /**
+   * `DELETE /v1/queue/{id}` — take a waiting job out of the queue (reason `operator`). A job that
+   * has started is cancelled with {@link cancel} instead.
+   */
+  async removeFromQueue(jobId: string): Promise<QueueRemoved> {
+    const id = requireText(jobId, 'jobId');
+    const body = await this.#json(
+      `/v1/queue/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+      'removeFromQueue',
+    );
+    return {
+      jobId: str(body, 'job_id', 'removeFromQueue'),
+      status: oneOf(str(body, 'status', 'removeFromQueue'), ['removed'], 'removeFromQueue.status'),
+      reason: oneOf(str(body, 'reason', 'removeFromQueue'), ['operator'], 'removeFromQueue.reason'),
+    };
+  }
+
+  /**
+   * `POST /v1/queue/{id}/heartbeat` — I am still waiting for this job. Only needed while you
+   * neither follow its {@link events} (or another job's) nor poll {@link job}: the server removes
+   * a queued job nobody has asked about for five minutes.
+   */
+  async queueHeartbeat(jobId: string): Promise<{ position: number | null; expiresAt: string }> {
+    const id = requireText(jobId, 'jobId');
+    const body = await this.#json(
+      `/v1/queue/${encodeURIComponent(id)}/heartbeat`,
+      { method: 'POST' },
+      'queueHeartbeat',
+    );
+    return {
+      position: nullableNum(body, 'position', 'queueHeartbeat'),
+      expiresAt: str(body, 'expires_at', 'queueHeartbeat'),
+    };
+  }
+
+  /**
+   * `GET /v1/queue/events` — every change to the server's queue, for a dashboard: a `snapshot`
+   * first, then `added`, `moved`, `started` and `removed`. It never ends by itself; break out of
+   * the loop to stop.
+   */
+  async *queueEvents(): AsyncGenerator<QueueEvent, void, undefined> {
+    yield* this.#follow('/v1/queue/events', 'the queue', {}, readQueueEvent, []);
   }
 
   /** `GET /v1/jobs/{id}`. */
@@ -646,6 +754,7 @@ export class CrucibleClient {
       chunkAt: nullableStr(body, 'chunk_at', 'job'),
       resumeId: nullableStr(body, 'resume_id', 'job'),
       resumed: bool(body, 'resumed', 'job'),
+      removal: readRemovalOrNull(optObject(body, 'removal', 'job'), 'job.removal'),
     };
   }
 
@@ -783,7 +892,11 @@ export class CrucibleClient {
     );
     return {
       jobId: str(body, 'job_id', 'cancel'),
-      status: oneOf(str(body, 'status', 'cancel'), ['cancelled', 'cancelling'], 'cancel.status'),
+      status: oneOf(
+        str(body, 'status', 'cancel'),
+        ['cancelled', 'cancelling', 'removed'],
+        'cancel.status',
+      ),
     };
   }
 
@@ -801,7 +914,7 @@ export class CrucibleClient {
 
   /** Queue a `load-model` job and return its id. */
   async loadModel(model: string, options?: LoadModelOptions): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-model',
       model: requireText(model, 'model'),
       params: {
@@ -814,7 +927,7 @@ export class CrucibleClient {
 
   /** Queue an `unload-model` job and return its id. */
   async unloadModel(model: string): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'unload-model',
       model: requireText(model, 'model'),
       params: {},
@@ -1009,7 +1122,7 @@ export class CrucibleClient {
   /** Queue a `load-voice` job and return its id. */
   async loadVoice(voice: string, options?: LoadVoiceOptions): Promise<string> {
     const reference = options?.reference;
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-voice',
       model: requireText(voice, 'voice'),
       params: {
@@ -1028,7 +1141,7 @@ export class CrucibleClient {
 
   /** Queue an `unload-voice` job and return its id. */
   async unloadVoice(voice: string): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'unload-voice',
       model: requireText(voice, 'voice'),
       params: {},
@@ -1047,7 +1160,7 @@ export class CrucibleClient {
     }
     const submission: { signal?: AbortSignal } = {};
     if (given.signal !== undefined) submission.signal = given.signal;
-    return this.submit(
+    return this.#submitHelper(
       {
         type: 'tts',
         model: requireText(given.voice, 'voice'),
@@ -1198,7 +1311,7 @@ export class CrucibleClient {
     if (audio === undefined || audio === null) {
       throw new CrucibleConfigError('audio', 'is required and was not given');
     }
-    return this.submit({
+    return this.#submitHelper({
       type: 'asr',
       model: requireText(given.model, 'model'),
       params: {
@@ -1284,7 +1397,7 @@ export class CrucibleClient {
       chunks.push({ index, text: requireText(window.text, `${where}.text`) });
       inputs[name] = window.audio;
     });
-    return this.submit({
+    return this.#submitHelper({
       type: 'align',
       model: requireText(given.model, 'model'),
       params: { language: requireText(given.language, 'language'), chunks },
@@ -1340,7 +1453,7 @@ export class CrucibleClient {
       params.mask = maskName;
       inputs[maskName] = mask;
     }
-    return this.submit({
+    return this.#submitHelper({
       type: 'image',
       model: requireText(given.model, 'model'),
       params: { ...params, ...leaseParams(given.lease) },
@@ -1350,7 +1463,7 @@ export class CrucibleClient {
 
   /** Queue a `load-image` job (warm the image model up before the first prompt) and return its id. */
   async loadImage(model: string, options?: LoadImageOptions): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-image',
       model: requireText(model, 'model'),
       params: leaseParams(options?.lease),
@@ -1386,7 +1499,7 @@ export class CrucibleClient {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
     }
-    return this.submit({
+    return this.#submitHelper({
       type: 'audio',
       model: requireText(given.model, 'model'),
       params: { ...params, ...leaseParams(given.lease) },
@@ -1396,7 +1509,7 @@ export class CrucibleClient {
 
   /** Queue a `load-audio` job (warm an audio model up before the first request) and return its id. */
   async loadAudio(model: string, options?: LoadAudioOptions): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-audio',
       model: requireText(model, 'model'),
       params: leaseParams(options?.lease),
@@ -1424,7 +1537,7 @@ export class CrucibleClient {
     if (given.box !== undefined && given.box !== null) {
       params.box = [...given.box];
     }
-    return this.submit({
+    return this.#submitHelper({
       type: 'segment',
       model: requireText(given.model, 'model'),
       params: { ...params, ...leaseParams(given.lease) },
@@ -1434,7 +1547,7 @@ export class CrucibleClient {
 
   /** Queue a `load-segment` job (warm a segment model up, e.g. when a selection tool opens) and return its id. */
   async loadSegment(model: string, options?: LoadSegmentOptions): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-segment',
       model: requireText(model, 'model'),
       params: leaseParams(options?.lease),
@@ -1473,7 +1586,7 @@ export class CrucibleClient {
       if (value !== undefined && value !== null) params[wire] = value;
     }
     const picture = given.image ?? null;
-    return this.submit({
+    return this.#submitHelper({
       type: 'video',
       model: requireText(given.model, 'model'),
       params: { ...params, ...leaseParams(given.lease) },
@@ -1483,7 +1596,7 @@ export class CrucibleClient {
 
   /** Queue a `load-video` job (warm the video model up before a batch) and return its id. */
   async loadVideo(model: string, options?: LoadVideoOptions): Promise<string> {
-    return this.submit({
+    return this.#submitHelper({
       type: 'load-video',
       model: requireText(model, 'model'),
       params: leaseParams(options?.lease),
@@ -2059,6 +2172,93 @@ function readFailureOrNull(value: unknown, where: string): JobFailure | null {
   return value === null ? null : readFailure(value, where);
 }
 
+function readRemoval(entry: Json, where: string): RemovedData {
+  return {
+    reason: str(entry, 'reason', where),
+    message: str(entry, 'message', where),
+    waitedS: optNum(entry, 'waited_s', where),
+    at: optStr(entry, 'at', where) ?? '',
+  };
+}
+
+function readRemovalOrNull(entry: Json | null, where: string): RemovedData | null {
+  return entry === null ? null : readRemoval(entry, where);
+}
+
+function readQueueItem(row: Json, where: string): QueueItem {
+  return {
+    position: num(row, 'position', where),
+    jobId: str(row, 'job_id', where),
+    type: str(row, 'type', where),
+    model: nullableStr(row, 'model', where),
+    client: nullableStr(row, 'client', where),
+    clientRef: nullableStr(row, 'client_ref', where),
+    submitted: str(row, 'submitted', where),
+    waitedS: num(row, 'waited_s', where),
+    maxWaitS: num(row, 'max_wait_s', where),
+    expiresAt: str(row, 'expires_at', where),
+    leaseHolder: bool(row, 'lease_holder', where),
+  };
+}
+
+function readQueueEvent(rawId: string | null, rawName: string | null, rawData: string): QueueEvent {
+  const id = Number(rawId);
+  if (rawId === null || !Number.isInteger(id) || id < 1) {
+    throw new CrucibleProtocolError(`a queue event carried no usable id: ${JSON.stringify(rawId)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawData);
+  } catch {
+    throw new CrucibleProtocolError(`queue event ${id} has non-JSON data: ${excerpt(rawData)}`);
+  }
+  const where = `queue event ${id} (${String(rawName)})`;
+  const data = asObject(parsed, where);
+  if (rawName === 'snapshot') {
+    return {
+      id,
+      event: 'snapshot',
+      items: arrayField(data, 'items', where).map((row, index) =>
+        readQueueItem(asObject(row, `${where}.items[${index}]`), `${where}.items[${index}]`),
+      ),
+      depth: num(data, 'depth', where),
+    };
+  }
+  if (rawName === 'added' || rawName === 'moved' || rawName === 'started' || rawName === 'removed') {
+    return { id, event: rawName, jobId: str(data, 'job_id', where), depth: num(data, 'depth', where), data };
+  }
+  return { id, event: 'unknown', kind: String(rawName), data };
+}
+
+function queuePayload(choice: QueueChoice | undefined): Record<string, number> | null {
+  if (choice === undefined || choice === false) return null;
+  if (choice === true) return {};
+  if (typeof choice !== 'object' || choice === null) {
+    throw new CrucibleConfigError('queue', 'must be true, false or {maxWaitS}');
+  }
+  if (choice.maxWaitS === undefined) return {};
+  const wait = choice.maxWaitS;
+  if (!Number.isInteger(wait) || wait < MIN_MAX_WAIT_S || wait > MAX_MAX_WAIT_S) {
+    throw new CrucibleConfigError(
+      'queue.maxWaitS',
+      `is ${String(wait)}; a queued job waits a whole number of seconds from ` +
+        `${MIN_MAX_WAIT_S} to ${MAX_MAX_WAIT_S}. Leave it out for the server's default (an hour).`,
+    );
+  }
+  return { max_wait_s: wait };
+}
+
+/** True when the server refused `queue` as a field it does not know: a server older than the queue. */
+function refusedTheQueueField(error: unknown): boolean {
+  if (!(error instanceof CrucibleRefused) || error.code !== 'invalid_request') return false;
+  const details = error.details as { problems?: unknown } | null;
+  const problems = Array.isArray(details?.problems) ? details.problems : [];
+  return problems.some((problem: unknown) => {
+    const location = (problem as { location?: unknown } | null)?.location;
+    return Array.isArray(location) && location[0] === 'body' && location[1] === 'queue';
+  });
+}
+
 function readChunksDone(body: Json): number[] {
   return arrayField(body, 'chunks_done', 'job').map((entry, index) => {
     if (typeof entry !== 'number' || !Number.isInteger(entry)) {
@@ -2129,7 +2329,15 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
 
   switch (known) {
     case 'queued':
-      return { id, event: 'queued', data: { position: num(data, 'position', where) } };
+      return {
+        id,
+        event: 'queued',
+        data: { position: num(data, 'position', where), of: optNum(data, 'of', where) },
+      };
+    case 'started':
+      return { id, event: 'started', data: { waitedS: num(data, 'waited_s', where) } };
+    case 'removed':
+      return { id, event: 'removed', data: readRemoval(data, where) };
     case 'warming':
       return { id, event: 'warming', data: { message: str(data, 'message', where) } };
     case 'progress':
@@ -3492,6 +3700,8 @@ function readActivityJob(data: Json, where: string): ActivityJob {
     created: str(data, 'created', where),
     started: nullableStr(data, 'started', where),
     client: nullableStr(data, 'client', where),
+    waitedS: optNum(data, 'waited_s', where),
+    maxWaitS: optNum(data, 'max_wait_s', where),
   };
 }
 

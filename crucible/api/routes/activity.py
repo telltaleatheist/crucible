@@ -4,7 +4,7 @@ import asyncio
 import time
 from typing import Any
 
-from ... import VERSION, accelerator
+from ... import VERSION, accelerator, clock
 from ...backend import CUDA_LINUX
 from ...errors import ApiError
 from ...jobs.queue import JobStore
@@ -15,6 +15,16 @@ from ..responses import Activity
 
 
 def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
+    row = _lane_row(store, job)
+    line = store.line
+    waiting = None if line is None else line.get(job.id)
+    if waiting is not None:
+        row["waited_s"] = waiting.waited_s(clock.now())
+        row["max_wait_s"] = waiting.max_wait_s
+    return row
+
+
+def _lane_row(store: JobStore, job: Any) -> dict[str, Any]:
     return {
         "job_id": job.id,
         "type": job.type,
@@ -158,7 +168,11 @@ def _slots_section(ctx: AppContext) -> dict[str, Any]:
             "busy": 0 if running is None else 1,
             "of": 1,
             "queue_depth": store.queue_depth,
-            "accepts_work": running is None and ctx.residency.claimed_by is None,
+            "accepts_work": (
+                running is None
+                and ctx.residency.claimed_by is None
+                and len(ctx.line) == 0
+            ),
         },
     }
 

@@ -20,7 +20,8 @@ DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
-TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED, INTERRUPTED})
+REMOVED = "removed"
+TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED, INTERRUPTED, REMOVED})
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,8 @@ class Job:
     held_since: str | None = None
     resume_id: str | None = None
     resumed: bool = False
+    waiting: dict[str, Any] | None = None
+    removal: dict[str, Any] | None = None
 
     @property
     def error(self) -> dict[str, str] | None:

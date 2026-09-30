@@ -133,6 +133,7 @@ def draw_activity(page: Page, view: screens.ActivityView, actions: Actions) -> N
     for place, text in actions.c.notices.items():
         if place.startswith("cancel:"):
             page.notice(box, text)
+    draw_queue(page, view, actions)
     memory = page.section("Memory")
     page.facts(memory, (view.loaded,) + ((screens.Fact("Kept by", view.lease),) if view.lease else ()))
     history = page.section("Recent downloads and installs")
@@ -141,6 +142,19 @@ def draw_activity(page: Page, view: screens.ActivityView, actions: Actions) -> N
     for line in view.tasks:
         _left, right, _below = page.row(history, line.title, line.detail)
         page.tag(right, line.state.capitalize(), line.tone)
+
+
+def draw_queue(page: Page, view: screens.ActivityView, actions: Actions) -> None:
+    box = page.section("Queue")
+    if not view.queue:
+        page.empty(box, "Nothing is waiting. Jobs that apps send while Crucible is busy wait here.")
+    for line in view.queue:
+        _left, right, below = page.row(box, line.title, line.detail)
+        place = f"queue:{line.job_id}"
+        page.button(right, "Remove", lambda job=line.job_id: actions.c.remove_queued(job),
+                    kind="danger", enabled=place not in actions.c.busy)
+        page.tag(right, line.waited, screens.IDLE)
+        notice_for(page, below, actions, place)
 
 
 def entry(page: Page, parent: tk.Misc, value: str = "", secret: bool = False, width: int = 28) -> tk.Entry:

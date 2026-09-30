@@ -4,6 +4,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..jobs.line import DEFAULT_MAX_WAIT_S, MAX_MAX_WAIT_S, MIN_MAX_WAIT_S
 from ..tasks import TASK_TYPES
 
 
@@ -41,6 +42,20 @@ class JobInput(BaseModel):
         return self
 
 
+class QueueRequest(BaseModel):
+    """Wait in the server's queue instead of being refused `409 server_busy`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_wait_s: int = Field(
+        default=DEFAULT_MAX_WAIT_S,
+        ge=MIN_MAX_WAIT_S,
+        le=MAX_MAX_WAIT_S,
+        description="How long the job may wait for the lane before it is removed "
+        "`expired`.",
+    )
+
+
 class JobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -59,6 +74,12 @@ class JobCreate(BaseModel):
         default=False,
         description="Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, "
         "so its artifacts outlive being fetched.",
+    )
+    queue: QueueRequest | None = Field(
+        default=None,
+        description="Opt in to the server's queue: while the lane is busy the job "
+        "waits (status `queued`) instead of being refused `409 server_busy`. "
+        "Without it, a busy server refuses as it always has.",
     )
 
 

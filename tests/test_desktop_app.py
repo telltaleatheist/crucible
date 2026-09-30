@@ -47,7 +47,10 @@ ACTIVITY = {
     "running": [{"job_id": "j1", "type": "asr", "model": "whisper", "status": "running", "position": None,
                  "progress": 0.66, "message": "transcribing 2775s of 4196s", "client": "bookforge"}],
     "queued": [{"job_id": "j2", "type": "tts", "model": None, "status": "queued", "position": 1,
-                "progress": 0, "message": None, "client": None}],
+                "progress": 0, "message": None, "client": None},
+               {"job_id": "j3", "type": "tts", "model": "sigma", "status": "queued", "position": 1,
+                "progress": 0, "message": None, "client": "briefcase", "waited_s": 125.0,
+                "max_wait_s": 3600}],
     "chat": {"rows": []},
     "lease": {"client": "bookforge", "kind": "llm", "act": "decide"},
 }
@@ -372,6 +375,31 @@ def test_a_running_task_found_on_refresh_is_followed_once() -> None:
     assert view.work[0].title == "Installing asr" and view.work[0].detail == "Collecting torch"
     assert view.work[0].target == "task" and view.work[0].cancel == "t5"
     assert view.lease == "bookforge is keeping llm loaded for decide"
+
+
+def test_the_queue_is_listed_apart_from_the_work_and_each_job_can_be_removed() -> None:
+    asked: list[str] = []
+    api = FakeApi()
+    c = controller(api, answers=[False, True], asked=asked)
+    c.refresh_now("activity")
+    view = c.view("activity")
+    assert [work.cancel for work in view.work] == ["j1", "j2"]
+    (line,) = view.queue
+    assert (line.job_id, line.title, line.detail, line.waited) == (
+        "j3", "1. tts with sigma", "From briefcase", "waited 2 min")
+    c.refresh_now("home")
+    home = {fact.label: fact.value for fact in c.view("home").facts}
+    assert home["Queue"] == "1 job waiting; see Activity"
+    c.remove_queued("j3")
+    assert api.sent == []
+    c.remove_queued("j3")
+    assert api.sent == [("DELETE", "/v1/queue/j3", None)]
+    assert len(asked) == 2 and "queue" in asked[0]
+
+
+def test_waited_reads_like_a_person_says_it() -> None:
+    assert [screens.waited_text(s) for s in (4.2, 59, 60, 3000, 3599, 5400, None)] == [
+        "4 s", "59 s", "1 min", "50 min", "1 h 0 min", "1 h 30 min", ""]
 
 
 def test_cancelling_a_job_asks_first_and_a_task_does_not() -> None:

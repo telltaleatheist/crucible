@@ -433,6 +433,7 @@ test('loadModel submits a load-model job with the model and no inputs', async ()
     params: {},
     inputs: {},
     model: 'qwen3.5-9b',
+    queue: {},
   });
 });
 
@@ -447,6 +448,7 @@ test('loadModel sends a stated context as params.context, beside a lease', async
     params: { lease: { act: 'generate', ttl_seconds: 600 }, context: 65536 },
     inputs: {},
     model: 'qwen3.5-9b',
+    queue: {},
   });
 });
 
@@ -465,6 +467,7 @@ test('unloadModel submits an unload-model job the same way', async () => {
     params: {},
     inputs: {},
     model: 'qwen3.5-9b',
+    queue: {},
   });
 });
 
