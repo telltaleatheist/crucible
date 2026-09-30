@@ -1,0 +1,80 @@
+[model]
+id = "ltx-2.5-distilled"
+family = "ltx-2.5"
+display = "LTX-2.5 Distilled"
+licence = "LTX-2.x Community License Agreement (licence date 2026-08-11), which covers both the Lightricks weights and the community GGUF quantization of them"
+licence_url = "https://github.com/Lightricks/LTX-2/blob/a95ab856bf29407b6b066ede0abe1846050db56c/LICENSE-2_x"
+commercial_use = "free, commercial and production use included, for an entity whose annual revenue (with its affiliates) is under US$10,000,000; at or above that, a paid Commercial Use Agreement from Lightricks (ltxv-licensing@lightricks.com) except for the licence's narrow non-commercial purposes. Lightricks claims no rights in the videos you make; keep any provenance or watermark the model puts in them"
+
+[backends.cuda-linux]
+engine = "ltx"
+hf_repo = "Lightricks/LTX-2.5-Diffusers"
+revision = "426936f8b22dc28e4def61e515478b0b7e4a53cc"
+gated = true
+dtype = "bfloat16"
+memory_bytes_estimate = 20500000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files and the diffusers source, not measured through Crucible: one stage on the card at a time. The largest is denoising: the distilled transformer as GGUF Q6_K (18.99 B parameters, 16.09 GB on the card with its float tensors in bfloat16, dequantized one layer at a time) plus about 130 KB of activations per video token (RoPE tables, the widest block's feed-forward) and 1.2 GB of dequant scratch and allocator slack, 19.5 GB at 1280x704 x 145 frames (16,720 tokens), plus the CUDA context. Image-to-video carries a per-token timestep (about 150 KB more per token), so its token ceiling is lower. The text encoder (Gemma 4 12B, torchao int8 weight-only) is about 13 GB of weights and 16 GB at peak; see stage_memory_bytes. Fits a 24 GB card with a 3 GB desktop allowance only one stage at a time"
+files = [
+  "model_index.json",
+  "README.md",
+  "scheduler/scheduler_config.json",
+  "tokenizer/tokenizer.json",
+  "tokenizer/tokenizer_config.json",
+  "tokenizer/chat_template.jinja",
+  "text_encoder/config.json",
+  "text_encoder/generation_config.json",
+  "text_encoder/model.safetensors.index.json",
+  "text_encoder/model-00001-of-00005.safetensors",
+  "text_encoder/model-00002-of-00005.safetensors",
+  "text_encoder/model-00003-of-00005.safetensors",
+  "text_encoder/model-00004-of-00005.safetensors",
+  "text_encoder/model-00005-of-00005.safetensors",
+  "connectors/config.json",
+  "connectors/diffusion_pytorch_model.safetensors.index.json",
+  "connectors/diffusion_pytorch_model-00001-of-00002.safetensors",
+  "connectors/diffusion_pytorch_model-00002-of-00002.safetensors",
+  "transformer/config.json",
+  "vae/config.json",
+  "vae/diffusion_pytorch_model.safetensors",
+  "audio_vae/config.json",
+  "audio_vae/diffusion_pytorch_model.safetensors",
+  "vocoder/config.json",
+  "vocoder/diffusion_pytorch_model.safetensors",
+]
+size_multiple = 32
+min_side = 256
+max_side = 1280
+max_pixels = 901120
+fps = [24, 25]
+default_fps = 24
+default_width = 1280
+default_height = 704
+default_duration_s = 5.0
+max_frames = 145
+max_video_tokens = 16720
+max_video_tokens_image_to_video = 8800
+steps = 8
+audio_sample_rate = 48000
+
+[backends.cuda-linux.stage_memory_bytes]
+encoding = 16000000000
+connecting = 8000000000
+conditioning = 4000000000
+denoising = 20500000000
+decoding = 9000000000
+audio_decoding = 2000000000
+
+[backends.cuda-linux.not_taken]
+negative_prompt = "the distilled checkpoint runs unguided (guidance 1.0 in its fixed 8-sigma schedule), so the pipeline never encodes a negative prompt; describe what you want in the prompt instead"
+
+[[backends.cuda-linux.companions]]
+name = "transformer-gguf"
+hf_repo = "Abiray/LTX-2.5-Distilled-GGUF"
+revision = "7b0c2025441f1bf12c18eac375ad21f5e3d3c9e0"
+
+[[backends.cuda-linux.companions.files]]
+source = "LTX-2.5-Distilled-Q6_K.gguf"
+target = "LTX-2.5-Distilled-Q6_K.gguf"
+sha256 = "ee8835ff8f11e4f59fa4be7bf31b1200172659364e724de444d790ddf4869a58"
+bytes = 18624033216

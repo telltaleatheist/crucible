@@ -24,6 +24,7 @@ JOB_TYPE_WORDS = {
     "denoise": ("Noise removal", "Clean audio and split vocals from music"),
     "image": ("Image generation", "Make pictures from a text prompt"),
     "audio": ("Audio generation", "Make sound effects, music and songs from words"),
+    "video": ("Video generation", "Make video clips with sound from words or a picture"),
 }
 
 HIDDEN_JOB_TYPES = frozenset({"echo"})

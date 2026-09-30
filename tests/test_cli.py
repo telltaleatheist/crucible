@@ -430,6 +430,11 @@ def test_every_installable_name_has_a_smoke_import() -> None:
                 keys = [jobenv.llm_env(backend_kind).key]
             elif job_type == jobenv.AUDIO_JOB_TYPE:
                 keys = [spec.key for spec in jobenv.audio_envs(backend_kind)]
+            elif job_type == jobenv.VIDEO_JOB_TYPE:
+                try:
+                    keys = [spec.key for spec in jobenv.video_envs(backend_kind)]
+                except jobenv.EnvError:
+                    continue
             else:
                 keys = sorted(
                     {

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import audioweights, denoisemodels, lineup, llamacpp, rvcbase, weights
+from . import audioweights, denoisemodels, lineup, llamacpp, rvcbase, videoweights, weights
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .audiomodels import load_all_audio_manifests
@@ -17,6 +17,7 @@ from .cardkinds import (
     KIND_IMAGE,
     KIND_LLM,
     KIND_TTS,
+    KIND_VIDEO,
 )
 from .clock import utcnow
 from .config import Config
@@ -25,6 +26,7 @@ from .imagemodels import load_all_image_manifests
 from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
+from .videomodels import load_all_video_manifests
 from .voicecatalog import (
     declared_voice_backends,
     declared_voice_ids,
@@ -45,6 +47,7 @@ _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "denoise": KIND_DENOISE,
     "image": KIND_IMAGE,
     "audio": KIND_AUDIO,
+    "video": KIND_VIDEO,
 }
 
 
@@ -73,6 +76,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
     return [
         *_model_subjects(config, backend),
         *_audio_subjects(config, backend),
+        *_video_subjects(config, backend),
         *_voice_subjects(config, backend),
         *_rvc_subjects(config, backend),
         _rvc_base_subject(config),
@@ -115,6 +119,29 @@ def _audio_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         installed=lambda: audioweights.installed(config, manifest, spec),
         pull=lambda **kwargs: audioweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: audioweights.remove(config, manifest, spec),
+    )
+
+
+def _video_subjects(config: Config, backend: Backend) -> list[Subject]:
+    return [
+        _video_subject(config, manifest, manifest.spec(backend.kind))
+        for manifest in load_all_video_manifests().values()
+        if manifest.supports(backend.kind)
+    ]
+
+
+def _video_subject(config: Config, manifest: Any, spec: Any) -> Subject:
+    return Subject(
+        kind="model",
+        id=manifest.id,
+        name=manifest.display,
+        job_type="video",
+        expected_bytes=None,
+        source=f"hf:{spec.hf_repo}",
+        pull_command=manifest.pull_command,
+        installed=lambda: videoweights.installed(config, manifest, spec),
+        pull=lambda **kwargs: videoweights.pull(config, manifest, spec, **kwargs),
+        remove=lambda: videoweights.remove(config, manifest, spec),
     )
 
 
@@ -376,6 +403,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_align_manifests(),
                 *load_all_image_manifests(),
                 *load_all_audio_manifests(),
+                *load_all_video_manifests(),
             }
         ),
         "voice": sorted(declared_voice_ids()),
@@ -406,6 +434,7 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
             load_all_align_manifests,
             load_all_image_manifests,
             load_all_audio_manifests,
+            load_all_video_manifests,
         )
     if kind == "voice":
         return declared_voice_backends(subject_id)

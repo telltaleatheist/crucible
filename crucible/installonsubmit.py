@@ -537,6 +537,11 @@ def _env_bytes(installer: str, engine: str | None, backend_kind: str) -> int | N
                 jobenv.recipe_archive_bytes(jobenv.recipe_for(spec))
                 for spec in jobenv.audio_envs(backend_kind)
             )
+        if installer == jobenv.VIDEO_JOB_TYPE:
+            return sum(
+                jobenv.recipe_archive_bytes(jobenv.recipe_for(spec))
+                for spec in jobenv.video_envs(backend_kind)
+            )
         if installer in jobenv.WORKER_JOB_TYPES:
             recipe = jobenv.recipe_for(jobenv.worker_env(installer, backend_kind))
         elif installer == "tts":

@@ -78,6 +78,11 @@ def env_installed(config: Config, backend: Backend, job_type: str, engine: str |
                 jobenv.env_status(config.home, spec, backend.kind).installed
                 for spec in jobenv.audio_envs(backend.kind)
             )
+        if job_type == jobenv.VIDEO_JOB_TYPE:
+            return all(
+                jobenv.env_status(config.home, spec, backend.kind).installed
+                for spec in jobenv.video_envs(backend.kind)
+            )
         if job_type in jobenv.WORKER_JOB_TYPES:
             spec = jobenv.worker_env(job_type, backend.kind)
         else:

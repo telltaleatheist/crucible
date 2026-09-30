@@ -1421,6 +1421,80 @@ export interface AudioResult {
   readonly leaseId: string | null;
 }
 
+/** What a `video` job makes: a clip with sound from `prompt`, or from `prompt` and a start `image`. */
+export interface VideoOptions {
+  readonly model: string;
+  readonly prompt: string;
+  /** Send both or neither; multiples of 32. The model's default is 1280x704. */
+  readonly width?: number;
+  readonly height?: number;
+  /** Seconds, rounded to the model's 8k+1 frame grid. Send this or `numFrames`, not both. */
+  readonly durationS?: number;
+  /** An exact frame count on the 8k+1 grid (49, 97, 121, 145, …). */
+  readonly numFrames?: number;
+  readonly fps?: number;
+  readonly seed?: number;
+  /** The distilled model runs exactly 8; any other value is refused. */
+  readonly steps?: number;
+  /** `false` makes a silent clip. Default true. */
+  readonly audio?: boolean;
+  /** The first frame, for image-to-video: a PNG, JPEG or WebP. */
+  readonly image?: JobInput | null;
+  readonly imageName?: string;
+  /** Hold the model from the moment it is loaded, for a batch; `act` must be `video`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** Options for {@link CrucibleClient.loadVideo}. */
+export interface LoadVideoOptions {
+  /** Hold the model from the moment it is loaded; `act` must be `video`. */
+  readonly lease?: LeaseOnLoad;
+}
+
+/** A `video` job's effective parameters and measurements, read by {@link readVideoResult}. */
+export interface VideoResult {
+  readonly model: string;
+  readonly hfRepo: string;
+  readonly revision: string;
+  /** The quantized transformer that ran: its repo, revision, file and sha256. */
+  readonly transformer: Readonly<Record<string, string>>;
+  readonly backend: string;
+  readonly engine: string;
+  readonly dtype: string;
+  readonly mode: 'text-to-video' | 'image-to-video';
+  readonly prompt: string;
+  /** The start picture's input name, for image-to-video; else null. */
+  readonly input: string | null;
+  readonly width: number;
+  readonly height: number;
+  readonly numFrames: number;
+  readonly fps: number;
+  readonly durationS: number;
+  readonly videoTokens: number;
+  readonly seed: number;
+  readonly steps: number;
+  readonly audio: boolean;
+  readonly audioSeconds: number | null;
+  readonly audioSampleRate: number | null;
+  readonly audioChannels: number | null;
+  /** The artifact's name, `video.mp4`. */
+  readonly artifact: string;
+  readonly bytes: number | null;
+  /** The H.264 encoder ffmpeg used, e.g. `libopenh264`. */
+  readonly encoder: string | null;
+  readonly seconds: number | null;
+  readonly stageSeconds: Readonly<Record<string, number>>;
+  readonly peakBytes: number | null;
+  readonly stagePeakBytes: Readonly<Record<string, number>>;
+  readonly memoryBytesEstimate: number;
+  readonly memoryBasis: string;
+  readonly stageMemoryBytes: Readonly<Record<string, number>>;
+  readonly promptCache: 'hit' | 'miss' | null;
+  readonly artifacts: readonly string[];
+  /** The lease this job opened or renewed from `lease`, else null. */
+  readonly leaseId: string | null;
+}
+
 /** `GET /v1/setup` — everything an app needs to be pointed at this server, token included. */
 export interface ServerSetup {
   /** The server's name, e.g. `crucible@mac-studio`. */

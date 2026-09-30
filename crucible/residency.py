@@ -29,6 +29,7 @@ from .cardkinds import (
     KIND_LLM,
     KIND_NOUNS,
     KIND_TTS,
+    KIND_VIDEO,
 )
 from .clock import utcnow
 from .config import Config
@@ -56,6 +57,7 @@ __all__ = [
     "ResidentImage",
     "ResidentModel",
     "ResidentSeparator",
+    "ResidentVideo",
     "ResidentVoice",
     "describe_resident",
     "resident_record_path",
@@ -301,6 +303,42 @@ class ResidentAudio:
         }
 
 
+@dataclass(frozen=True)
+class ResidentVideo:
+    kind = KIND_VIDEO
+
+    model_id: str
+    backend: str
+    engine: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    versions: dict[str, Any]
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+
+    @property
+    def id(self) -> str:
+        return self.model_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "video_model": self.model_id,
+            "backend": self.backend,
+            "engine": self.engine,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "versions": dict(self.versions),
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
 Resident = (
     ResidentModel
     | ResidentVoice
@@ -308,6 +346,7 @@ Resident = (
     | ResidentSeparator
     | ResidentImage
     | ResidentAudio
+    | ResidentVideo
 )
 
 
@@ -685,6 +724,14 @@ class Residency:
     @property
     def audio_session(self) -> "WorkerSession | None":
         return None if self.resident_audio is None else self._session
+
+    @property
+    def resident_video(self) -> ResidentVideo | None:
+        return self._resident if isinstance(self._resident, ResidentVideo) else None
+
+    @property
+    def video_session(self) -> "WorkerSession | None":
+        return None if self.resident_video is None else self._session
 
     @property
     def warming(self) -> str | None:

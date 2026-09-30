@@ -6,7 +6,7 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
-from .. import audioweights, catalog, denoisemodels, rvcbase, weights
+from .. import audioweights, catalog, denoisemodels, rvcbase, videoweights, weights
 from ..alignmodels import AlignManifest, AlignManifestError, load_all_align_manifests
 from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from ..audiomodels import AudioManifest, AudioManifestError, load_all_audio_manifests
@@ -16,14 +16,18 @@ from ..errors import CrucibleError
 from ..imagemodels import ImageManifest, ImageManifestError, load_all_image_manifests
 from ..manifests import ManifestError, ModelManifest, load_all_manifests
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
+from ..videomodels import VideoManifest, VideoManifestError, load_all_video_manifests
 from . import common
 from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
-AnyManifest = ModelManifest | AsrManifest | AlignManifest | ImageManifest | AudioManifest
+AnyManifest = (
+    ModelManifest | AsrManifest | AlignManifest | ImageManifest | AudioManifest | VideoManifest
+)
 
 MANIFEST_ERRORS = (
     ManifestError, AsrManifestError, AlignManifestError, ImageManifestError, AudioManifestError,
+    VideoManifestError,
 )
 
 
@@ -34,6 +38,7 @@ def _all_manifests() -> dict[str, AnyManifest]:
         load_all_align_manifests(),
         load_all_image_manifests(),
         load_all_audio_manifests(),
+        load_all_video_manifests(),
     ):
         for model_id, manifest in extra.items():
             if model_id in merged:
@@ -48,6 +53,8 @@ def _all_manifests() -> dict[str, AnyManifest]:
 def _installed(config: Any, manifest: AnyManifest, spec: Any) -> weights.InstalledWeights | None:
     if isinstance(manifest, AudioManifest):
         return audioweights.installed(config, manifest, spec)
+    if isinstance(manifest, VideoManifest):
+        return videoweights.installed(config, manifest, spec)
     return weights.installed(config, manifest, spec)
 
 
@@ -190,7 +197,11 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     spec = manifest.spec(backend.kind)
     print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
     try:
-        pull = audioweights.pull if isinstance(manifest, AudioManifest) else weights.pull
+        pull = (
+            audioweights.pull if isinstance(manifest, AudioManifest)
+            else videoweights.pull if isinstance(manifest, VideoManifest)
+            else weights.pull
+        )
         result = pull(
             config, manifest, spec, force=args.force,
             on_line=lambda line: print(f"  {line}"),

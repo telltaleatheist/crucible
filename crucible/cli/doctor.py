@@ -95,6 +95,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("worker_envs", list),
     ("tts_envs", dict),
     ("audio_envs", dict),
+    ("video_envs", dict),
     ("cuda_toolkit_links", list),
     ("llm_patches", list),
     ("capability", lambda: None),
@@ -206,6 +207,7 @@ def check_config(host: Host) -> Section:
             f"enable_{job_type}": getattr(config, f"enable_{job_type}")
             for job_type in (
                 "echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image", "audio",
+                "video",
             )
         },
         "desktop_allowance_bytes": config.desktop_allowance_bytes,
@@ -480,6 +482,27 @@ def check_audio_envs(host: Host) -> Section:
     return Section("audio_envs", {"audio_envs": envs}, tuple(findings))
 
 
+def check_video_envs(host: Host) -> Section:
+    config, backend = host.config, host.backend
+    if config is None or backend is None or not config.enable_video:
+        return Section("video_envs", {})
+    install = "crucible install video"
+    try:
+        specs = jobenv.video_envs(backend.kind)
+    except jobenv.EnvError as exc:
+        return Section(
+            "video_envs", {"video_envs": {}}, (Finding.run("video_env", str(exc), install),)
+        )
+    envs: dict[str, Any] = {}
+    findings: list[Finding] = []
+    for spec in specs:
+        envs[spec.key], found = _env_report(
+            f"video_env[{spec.key}]", config.home, spec, backend.kind, install
+        )
+        findings.extend(found)
+    return Section("video_envs", {"video_envs": envs}, tuple(findings))
+
+
 def check_llm_patches(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None or not config.enable_llm:
@@ -598,6 +621,7 @@ CHECKS: tuple[Check, ...] = (
     check_worker_envs,
     check_tts_envs,
     check_audio_envs,
+    check_video_envs,
     check_llm_patches,
     check_job_types,
     check_desktop_reserve,
@@ -735,6 +759,8 @@ def lines_envs(report: dict[str, Any]) -> Iterator[str]:
         yield from _env_lines(f"tts env ({engine})", entry)
     for key, entry in sorted(report["audio_envs"].items()):
         yield from _env_lines(f"audio env ({key.removeprefix('audio-')})", entry)
+    for key, entry in sorted(report["video_envs"].items()):
+        yield from _env_lines(f"video env ({key.removeprefix('video-')})", entry)
 
 
 def lines_patches(report: dict[str, Any]) -> Iterator[str]:

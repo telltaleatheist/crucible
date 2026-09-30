@@ -6,6 +6,7 @@ KIND_ALIGN = "align"
 KIND_DENOISE = "denoise"
 KIND_IMAGE = "image"
 KIND_AUDIO = "audio"
+KIND_VIDEO = "video"
 
 KIND_NOUNS: dict[str, str] = {
     KIND_LLM: "model",
@@ -14,6 +15,7 @@ KIND_NOUNS: dict[str, str] = {
     KIND_DENOISE: "separator",
     KIND_IMAGE: "generator",
     KIND_AUDIO: "audio generator",
+    KIND_VIDEO: "video generator",
 }
 
 __all__ = [
@@ -24,4 +26,5 @@ __all__ = [
     "KIND_LLM",
     "KIND_NOUNS",
     "KIND_TTS",
+    "KIND_VIDEO",
 ]

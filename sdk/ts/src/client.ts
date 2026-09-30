@@ -71,6 +71,8 @@ import {
   type ImageResult,
   type AudioOptions,
   type AudioResult,
+  type VideoOptions,
+  type VideoResult,
   type AlignWindowResult,
   type JobInput,
   type ArtifactHold,
@@ -111,6 +113,7 @@ import {
   type LeaseOnLoad,
   type LoadImageOptions,
   type LoadAudioOptions,
+  type LoadVideoOptions,
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
@@ -1377,6 +1380,55 @@ export class CrucibleClient {
     });
   }
 
+  /** Queue a `video` job (one `video.mp4`, H.264 with AAC sound) and return its id. */
+  async video(options: VideoOptions): Promise<string> {
+    const given = options as Partial<VideoOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'video(...) needs {model, prompt}');
+    }
+    if (given.durationS !== undefined && given.numFrames !== undefined) {
+      throw new CrucibleConfigError('numFrames', 'video(...) takes durationS or numFrames, not both');
+    }
+    if ((given.width === undefined) !== (given.height === undefined)) {
+      throw new CrucibleConfigError(
+        given.width === undefined ? 'width' : 'height',
+        'video(...) takes width and height together, or neither for the default size',
+      );
+    }
+    const params: Record<string, unknown> = { prompt: requireText(given.prompt, 'prompt') };
+    const optional: [keyof VideoOptions, string][] = [
+      ['width', 'width'],
+      ['height', 'height'],
+      ['durationS', 'duration_s'],
+      ['numFrames', 'num_frames'],
+      ['fps', 'fps'],
+      ['seed', 'seed'],
+      ['steps', 'steps'],
+      ['audio', 'audio'],
+    ];
+    for (const [key, wire] of optional) {
+      const value = given[key];
+      if (value !== undefined && value !== null) params[wire] = value;
+    }
+    const picture = given.image ?? null;
+    return this.submit({
+      type: 'video',
+      model: requireText(given.model, 'model'),
+      params: { ...params, ...leaseParams(given.lease) },
+      inputs: picture === null ? {} : { [given.imageName ?? 'start.png']: picture },
+    });
+  }
+
+  /** Queue a `load-video` job (warm the video model up before a batch) and return its id. */
+  async loadVideo(model: string, options?: LoadVideoOptions): Promise<string> {
+    return this.submit({
+      type: 'load-video',
+      model: requireText(model, 'model'),
+      params: leaseParams(options?.lease),
+      inputs: {},
+    });
+  }
+
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
     return asObject(await this.#jsonValue(path, init, where), where);
   }
@@ -2194,6 +2246,56 @@ export function readAudioResult(done: DoneData): AudioResult {
     stagePeakBytes: numberMap(nullableObject(audio, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
     memoryBytesEstimate: num(audio, 'memory_bytes_estimate', at),
     memoryBasis: str(audio, 'memory_basis', at),
+    artifacts: done.artifacts ?? [],
+    leaseId: optStr(done.extra as Json, 'lease_id', where),
+  };
+}
+
+/** A finished `video` job's effective parameters, read out of its `done` frame so the clip can be made again. */
+export function readVideoResult(done: DoneData): VideoResult {
+  const where = 'the video done event';
+  const video = objectField(done.extra as Json, 'video', where);
+  const at = `${where}.video`;
+  const transformer = objectField(video, 'transformer', at);
+  return {
+    model: str(video, 'model', at),
+    hfRepo: str(video, 'hf_repo', at),
+    revision: str(video, 'revision', at),
+    transformer: {
+      hfRepo: str(transformer, 'hf_repo', `${at}.transformer`),
+      revision: str(transformer, 'revision', `${at}.transformer`),
+      file: str(transformer, 'file', `${at}.transformer`),
+      sha256: str(transformer, 'sha256', `${at}.transformer`),
+    },
+    backend: str(video, 'backend', at),
+    engine: str(video, 'engine', at),
+    dtype: str(video, 'dtype', at),
+    mode: oneOf(str(video, 'mode', at), ['text-to-video', 'image-to-video'] as const, `${at}.mode`),
+    prompt: str(video, 'prompt', at),
+    input: nullableStr(video, 'input', at),
+    width: num(video, 'width', at),
+    height: num(video, 'height', at),
+    numFrames: num(video, 'num_frames', at),
+    fps: num(video, 'fps', at),
+    durationS: num(video, 'duration_s', at),
+    videoTokens: num(video, 'video_tokens', at),
+    seed: num(video, 'seed', at),
+    steps: num(video, 'steps', at),
+    audio: bool(video, 'audio', at),
+    audioSeconds: nullableNum(video, 'audio_seconds', at),
+    audioSampleRate: nullableNum(video, 'audio_sample_rate', at),
+    audioChannels: nullableNum(video, 'audio_channels', at),
+    artifact: str(video, 'artifact', at),
+    bytes: nullableNum(video, 'bytes', at),
+    encoder: nullableStr(video, 'encoder', at),
+    seconds: nullableNum(video, 'seconds', at),
+    stageSeconds: numberMap(nullableObject(video, 'stage_seconds', at), `${at}.stage_seconds`),
+    peakBytes: nullableNum(video, 'peak_bytes', at),
+    stagePeakBytes: numberMap(nullableObject(video, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
+    memoryBytesEstimate: num(video, 'memory_bytes_estimate', at),
+    memoryBasis: str(video, 'memory_basis', at),
+    stageMemoryBytes: numberMap(nullableObject(video, 'stage_memory_bytes', at), `${at}.stage_memory_bytes`),
+    promptCache: readPromptCache(video, at),
     artifacts: done.artifacts ?? [],
     leaseId: optStr(done.extra as Json, 'lease_id', where),
   };

@@ -20,6 +20,7 @@ from .imagemodels import image_manifests_dir, load_all_image_manifests
 from .manifests import BACKEND_ENGINES, load_all_manifests, manifests_dir
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests, rvc_manifests_dir
+from .videomodels import load_all_video_manifests, video_manifests_dir
 from .voicecatalog import load_all_voices
 
 CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
@@ -32,6 +33,7 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_sfx_manifests: audio_manifests_dir,
     load_music_manifests: audio_manifests_dir,
     load_song_manifests: audio_manifests_dir,
+    load_all_video_manifests: video_manifests_dir,
 }
 
 
@@ -301,6 +303,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="make songs with vocals",
         noun="song models",
         candidates=_from_catalog(load_song_manifests),
+    ),
+    CapabilityClass(
+        name="video",
+        job_type="video",
+        purpose="video clips with synchronized sound from a text prompt or a start image",
+        plainly="make video",
+        noun="video models",
+        candidates=_from_catalog(load_all_video_manifests),
     ),
 )
 

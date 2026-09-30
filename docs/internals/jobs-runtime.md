@@ -104,7 +104,8 @@ which imports `residency` and every job package. A table there could be read by 
 - `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
   The kind comes from `spec.unloads`, the noun from `cardkinds.KIND_NOUNS`, and the codes stay
   `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`, since 2026-09-28
-  `generator` for `unload-image`, and since 2026-09-29 `audio_generator` for `unload-audio`: a
+  `generator` for `unload-image`, and since 2026-09-29 `audio_generator` for `unload-audio`
+  and `video_generator` for `unload-video`: a
   space in the noun becomes an underscore in the code). The four copies had drifted;
   the rulings (2026-09-27):
   - progress is reported only after `await_clearance` returns (llm reported `unloading` before

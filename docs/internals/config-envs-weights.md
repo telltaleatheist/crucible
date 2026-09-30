@@ -68,7 +68,7 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   (`_kept_jobs_flag`), so an older rewriter cannot turn an operator's `false` back to
   true, nor a rewriter written before `image` existed turn the image type off. A config
   with no `enable_image` key (every config before 2026-09-28) reads it as false.
-  `enable_audio` (2026-09-29) follows the same rule.
+  `enable_audio` (2026-09-29) and `enable_video` (2026-09-29) follow the same rule.
 - `carried_tables` (used only by `crucible init --config-from`) copies whole tables
   unchanged, so keys this build does not know are preserved. A table that is both
   typed and carried is refused.
@@ -389,6 +389,9 @@ install.
   Stable Audio recipe installs the flash-attn wheel from its GitHub release by URL, pinned by a
   `#sha256=` fragment: a direct reference is pinned by `@<commit>` or, for a wheel URL, by its
   digest, and `installed_direct_references` reads either back from pip's `direct_url.json`.
+- **video** (`ltx-cuda-linux.txt`, env key `video-ltx`, cuda-linux only): see
+  [video.md](video.md), "Env". The image recipe's resolution plus `gguf`, `torchao` and `av`;
+  `jobenv.video_envs` refuses the Mac by name, so nothing iterates a Mac video env.
 - **tts cuda-linux** (`higgs-v3-sgl` extra, Python 3.12): this is the working
   BookForge `sglomni` env (Owen: *"mirror it. it should be exact"*). `uv` is kept
   because it is part of that env. `flashinfer-jit-cache` comes from flashinfer's own
@@ -497,11 +500,12 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
 - **Gated repos.** A `GatedRepoError`, from a snapshot or a single-file download, becomes
   `gated_message`: the repo's page to accept the licence on, the token page, where the token goes
   (`$HF_TOKEN` or `[hf] token`), and the pull command to run again. Nothing is downloaded around
-  a gate. An audio arm that declares `gated = true` refuses before the first request when there
-  is no token at all (audio.md, "Weights").
-- **Companions** (audio only, `audioweights.py`): a second repo an arm needs (YuE2's decoder)
-  is a `pull_files` set in a subdirectory of the model's folder, with its own stamp; the model
-  counts as installed only with every companion.
+  a gate. An audio or video arm that declares `gated = true` refuses before the first request
+  when there is no token at all (audio.md, "Weights").
+- **Companions** (`audioweights.py`, `videoweights.py`): a second repo an arm needs (YuE2's
+  decoder, LTX-2.5's GGUF transformer) is a `pull_files` set in a subdirectory of the model's
+  folder, with its own stamp and sha256s; the model counts as installed only with every
+  companion.
 - `resolve_revision` resolves a repo to its current head in the engine, which
   already holds the HF token, so apps do not need a copy.
 - `stranded` reports directories that no manifest declares. It never deletes them.
