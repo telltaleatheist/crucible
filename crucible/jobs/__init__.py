@@ -30,6 +30,7 @@ from .image import ImageJobType, UnloadImageJobType
 from .llm import LoadModelJobType, UnloadModelJobType, model_rows
 from .registry_table import REGISTRY_TABLE
 from .rvc import RvcJobType
+from .segment import SegmentJobType, UnloadSegmentJobType
 from .tts import LoadVoiceJobType, TtsJobType, UnloadVoiceJobType, voice_rows
 
 if TYPE_CHECKING:
@@ -271,11 +272,13 @@ __all__ = [
     "TtsJobType",
     "Residency",
     "RvcJobType",
+    "SegmentJobType",
     "UnloadAlignerJobType",
     "UnloadAudioJobType",
     "UnloadDenoiserJobType",
     "UnloadImageJobType",
     "UnloadModelJobType",
+    "UnloadSegmentJobType",
     "UnloadVoiceJobType",
     "build_registry",
     "disabled_error",

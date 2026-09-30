@@ -227,7 +227,7 @@ Hold whatever is resident (model, voice or aligner) on the card for a run; jobs 
 
 ## Jobs
 
-The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md.
+The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md.
 
 ### `POST /v1/jobs`
 

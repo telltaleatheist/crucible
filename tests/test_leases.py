@@ -21,6 +21,7 @@ from crucible.cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SEGMENT,
     KIND_TTS,
 )
 
@@ -458,7 +459,8 @@ def test_every_job_type_this_build_knows_is_ruled_on() -> None:
         assert not (effect.reuses_what_it_names and effect.makes_resident is None)
         for kind in (effect.makes_resident, effect.takes_off):
             assert kind in (
-                None, KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_AUDIO
+                None, KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_AUDIO,
+                KIND_SEGMENT,
             ), job_type
 
 
@@ -509,8 +511,10 @@ def test_a_lease_refuses_the_unloader_of_its_own_kind_and_no_other() -> None:
         for job_type, effect in CARD_EFFECTS.items()
         if effect.takes_off is not None
     }
-    assert len(unloaders) == 6, unloaders
-    for kind in (KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_AUDIO):
+    assert len(unloaders) == 7, unloaders
+    for kind in (
+        KIND_LLM, KIND_TTS, KIND_ALIGN, KIND_DENOISE, KIND_IMAGE, KIND_AUDIO, KIND_SEGMENT,
+    ):
         blocked = {
             job_type
             for job_type in unloaders
@@ -559,5 +563,5 @@ def test_a_model_lease_still_refuses_exactly_what_it_refused_before() -> None:
     }
     assert blocked == {
         "load-model", "unload-model", "load-voice", "tts", "align", "denoise", "image",
-        "load-image", "audio", "load-audio",
+        "load-image", "audio", "load-audio", "segment", "load-segment",
     }

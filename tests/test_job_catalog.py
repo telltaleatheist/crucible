@@ -17,6 +17,7 @@ from crucible.cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SEGMENT,
     KIND_TTS,
 )
 from crucible.config import load_config, write_config
@@ -64,6 +65,9 @@ THE_JOB_TYPES = {
     "audio": "audio",
     "unload-audio": "audio",
     "load-audio": "audio",
+    "segment": "segment",
+    "unload-segment": "segment",
+    "load-segment": "segment",
 }
 
 
@@ -90,6 +94,9 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
         "audio": effect(makes_resident=KIND_AUDIO, reuses_what_it_names=True),
         "unload-audio": effect(takes_off=KIND_AUDIO),
         "load-audio": effect(makes_resident=KIND_AUDIO, reuses_what_it_names=True),
+        "segment": effect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True),
+        "unload-segment": effect(takes_off=KIND_SEGMENT),
+        "load-segment": effect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True),
         "echo": effect(),
         "asr": effect(),
         "rvc": effect(),
@@ -99,7 +106,7 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
 
 def test_the_settlement_leaves_resident_only_what_a_load_put_there() -> None:
     assert settle.LEAVES_IT_RESIDENT == frozenset(
-        {"load-model", "load-voice", "load-image", "load-audio"}
+        {"load-model", "load-voice", "load-image", "load-audio", "load-segment"}
     )
 
 
@@ -114,7 +121,7 @@ def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
         }
     )
     assert installonsubmit.CATALOG_IS_COMPLETE == frozenset(
-        {"rvc", "denoise", "asr", "align", "image", "audio"}
+        {"rvc", "denoise", "asr", "align", "image", "audio", "segment"}
     )
     installable = {
         name for name in ALL_JOB_TYPES if installonsubmit.InstallOnSubmit.installable(name)
@@ -132,20 +139,23 @@ def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
         "load-image",
         "audio",
         "load-audio",
+        "segment",
+        "load-segment",
     }
     assert not installonsubmit.InstallOnSubmit.installable("sorcery")
 
 
 def test_the_installer_tables_are_derived_and_unchanged() -> None:
-    assert jobenv.WORKER_JOB_TYPES == ("align", "asr", "rvc", "image")
+    assert jobenv.WORKER_JOB_TYPES == ("align", "asr", "rvc", "image", "segment")
     assert jobenv.INSTALLABLE_JOB_TYPES == (
-        "llm", "tts", "align", "asr", "rvc", "image", "audio",
+        "llm", "tts", "align", "asr", "rvc", "image", "audio", "segment",
     )
     assert jobenv.JOB_TYPES_SERVED_BY_ENV == {
         "align": ("align",),
         "asr": ("asr",),
         "rvc": ("rvc", "denoise"),
         "image": ("image",),
+        "segment": ("segment",),
     }
     assert jobenv.INSTALLER_FOR == {
         "llm": "llm",
@@ -156,6 +166,7 @@ def test_the_installer_tables_are_derived_and_unchanged() -> None:
         "denoise": "rvc",
         "image": "image",
         "audio": "audio",
+        "segment": "segment",
         "pages": "llm",
     }
 
@@ -187,6 +198,7 @@ def _config(home: Path, **flags: bool) -> Any:
         enable_denoise=flags.get("denoise", False),
         enable_image=flags.get("image", False),
         enable_audio=flags.get("audio", False),
+        enable_segment=flags.get("segment", False),
         desktop_allowance_bytes=3 * 1024**3,
         retention_days=7,
         desktop_allowance_basis="stated",
@@ -617,6 +629,7 @@ def test_each_one_shot_worker_reads_its_request_through_workerio(
         ("image/worker.py", "image", ["generate", "load"]),
         ("audio/stable_audio_worker.py", "stable audio", ["generate", "load"]),
         ("audio/yue2_worker.py", "yue2", ["generate", "load"]),
+        ("segment/worker.py", "segment", ["load", "segment"]),
         ("asr/qwen_worker.py", "qwen asr", ["load", "split", "transcribe"]),
     ],
 )

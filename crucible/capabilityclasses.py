@@ -20,6 +20,11 @@ from .imagemodels import image_manifests_dir, load_all_image_manifests
 from .manifests import BACKEND_ENGINES, load_all_manifests, manifests_dir
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests, rvc_manifests_dir
+from .segmentmodels import (
+    load_cutout_manifests,
+    load_select_manifests,
+    segment_manifests_dir,
+)
 from .voicecatalog import load_all_voices
 
 CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
@@ -32,6 +37,8 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_sfx_manifests: audio_manifests_dir,
     load_music_manifests: audio_manifests_dir,
     load_song_manifests: audio_manifests_dir,
+    load_cutout_manifests: segment_manifests_dir,
+    load_select_manifests: segment_manifests_dir,
 }
 
 
@@ -301,6 +308,22 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="make songs with vocals",
         noun="song models",
         candidates=_from_catalog(load_song_manifests),
+    ),
+    CapabilityClass(
+        name="cutout",
+        job_type="segment",
+        purpose="the main subject's mask and cutout from a picture (background removal)",
+        plainly="cut out a picture's subject",
+        noun="cutout models",
+        candidates=_from_catalog(load_cutout_manifests),
+    ),
+    CapabilityClass(
+        name="select",
+        job_type="segment",
+        purpose="the mask of the object a caller points at with points or a box",
+        plainly="select what is pointed at in a picture",
+        noun="selection models",
+        candidates=_from_catalog(load_select_manifests),
     ),
 )
 

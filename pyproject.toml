@@ -50,6 +50,7 @@ crucible = [
   "asr/*.toml",
   "image/*.toml",
   "audio/*.toml",
+  "segment/*.toml",
   "envs/**/*",
   "desktop_app/assets/*",
 ]
