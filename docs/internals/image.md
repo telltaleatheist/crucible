@@ -29,7 +29,8 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
   `cancel`) held by `Residency` as the resident. Settlement unloads it when the job ends
   unless a lease holds it (jobs-runtime.md section 6). A batch sends `params.lease` on its
   first picture (below).
-- One artifact per job, `image.png`, and `done.image` holding every effective parameter
+- One artifact per job, `image.png` (a masked job adds `generated.png`, the picture before the
+  paste-back), and `done.image` holding every effective parameter
   (seed included, chosen by the server when the caller sent none), the revision, the engine,
   the per-stage seconds and peak bytes, and the estimate with its basis.
 
@@ -337,9 +338,9 @@ model. Its `QwenImage21.generate_image` loop calls `ctx.in_loop(t, latents)` aft
 
 The first version (1.0.64) wrote the blend into the loop's array from that callback
 (`latents[...] = blended`), relying on MLX item assignment updating the array in place. On the
-Mac Studio (2026-09-29) it did not reach the loop. An inpainted box came back as a separate
-little scene with a hard seam on every side, and both outpaint strips were unrelated
-landscapes. The paste-back still kept every pixel outside the mask exact.
+Mac Studio (2026-09-29) an inpainted box came back as a separate little scene with a hard seam
+on every side, and both outpaint strips were unrelated landscapes. The paste-back still kept
+every pixel outside the mask exact. That was taken for the write not reaching the loop.
 
 So a masked job no longer goes through `generate_image`. `_mflux_generate` is that method's
 body for 0.20.0, step for step: the same `Config` (linear scheduler), prompt encoding through
@@ -362,6 +363,49 @@ appended). The clean latents are built as mflux's own image-to-image builds them
 stage. The noise is `Qwen21LatentCreator.create_noise(seed, ...)`, the array mflux's txt2img
 starts from.
 
+**1.0.66 on the Mac was bit-identical to 1.0.64 (2026-09-30), and the Mac fault is still
+open.** The rewritten loop produced the same pixels, so the in-place write had reached the
+loop after all, and the fault is somewhere else. The coordinator's candidates were each
+checked against mflux 0.20.0's own code, not against a reading of it.
+`tests/mflux_pinned_check.py` runs the vendored mflux files (`tests/fixtures/mflux_0_20_0`:
+`config.py`, `linear_scheduler.py`, `qwen21_latent_creator.py`, `latent_creator.py`, MIT)
+on a numpy stand-in for `mlx.core`, with a stub VAE whose latents encode their own channel,
+row and column. The test is a non-square 160x96 picture with an off-centre box.
+
+- **Token order.** `_repaint`'s clean latents put the encode's `(c, y, x)` at token
+  `y * w + x`, channel `c`. The mask token at `y * w + x` is the grid's `(y, x)`.
+  `Qwen21LatentCreator.unpack_latents` returns the encode exactly. 2.1 latents are unpatched:
+  `pack_latents` reshapes to `(1, 64, H/16, W/16)`, transposes to channels-last and flattens,
+  and `Qwen21VAE` has `spatial_scale = 16` and `latent_channels = 64`.
+- **Sigma.** At every step the kept tokens the transformer receives equal
+  `(1 - s) * clean + s * noise`, where `s` is `config.scheduler.sigmas[t]`, the sigma
+  `Qwen21Transformer._compute_timestep` gives it for that step. That holds from `t = 0`
+  (pure noise) and from `init_time_step = 4` with strength 0.4. The kept tokens decode to the
+  encode exactly after the last step.
+- **Noise and start.** The blend's noise is `create_noise(seed, ...)`, and the first step's
+  input equals mflux's own `create_for_txt2img_or_img2img`, with and without a strength.
+- **Scale.** `Qwen21VAE.encode` returns `(x - LATENTS_MEAN) / LATENTS_STD`, and `decode`
+  applies `x * LATENTS_STD + LATENTS_MEAN` first. The loop's latents are the normalised ones,
+  as mflux's own image-to-image relies on.
+
+The mask is now also packed by mflux's own `pack_latents` (the grid spread over the 64
+channels like the clean latents), so its token order is the clean latents' by construction,
+whatever mflux's packing is. What the vendored files cannot see is the real encoder and
+transformer. So a masked job now reports what the next run needs to place the fault:
+`mask_blend_steps` (the blend ran on every step) and `mask_outside_drift` (how far the
+decoded picture differs from the input outside the mask before the paste-back). It also
+publishes `generated.png`, the picture before the paste-back. The last step puts the clean
+latents back outside the mask, so:
+
+- **Drift of a few units, seams still there:** the kept latents decode to the input, and the
+  transformer draws the region without regard to them. The fault is in the model port or the
+  schedule, not in the mask code.
+- **Drift of tens with `mask_blend_steps` equal to the steps:** the blend held, but the kept
+  latents are not the input's. The fault is in the encode (`LatentCreator.encode_image` on the
+  real VAE) as the worker calls it.
+- **`mask_blend_steps` missing or 0:** the blend never ran in that process. Check the worker
+  log's first line, which names the `worker.py` the server started.
+
 **A seam on one side of an outpaint (PC, 2026-09-29).** A 768x768 photo centred on 1024x768
 came back with the left strip continuing the scene and a hard vertical seam on the right,
 where the generated trees did not line up with the photo's. The mask handling is symmetric.
@@ -381,8 +425,9 @@ caller's: another seed, a wider `mask_blur` (24 to 32) with the white reaching f
 the photo (24 to 32 pixels), and narrower strips.
 
 **Owed on hardware.** Owed on each machine, through the installed Crucible: the inpaint (a
-centre box, no strength) and the outpaint (a 1024x768 canvas from a centred 768x768) again on
-the Mac with the rewritten loop. Then one masked job at 1,048,576 pixels, reading
+centre box, no strength) and the outpaint (a 1024x768 canvas from a centred 768x768), reading
+`mask_blend_steps`, `mask_outside_drift` and `generated.png` on both. The PC's drift is the
+healthy baseline. Then one masked job at 1,048,576 pixels, reading
 `stage_peak_bytes`: the extra VAE encode runs in the encoding stage on the Mac (in the
 transformer stage's setup on the PC, before the transformer loads), and neither was measured.
 

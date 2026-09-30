@@ -378,3 +378,45 @@ def test_the_mask_is_handled_the_same_on_the_left_and_the_right(tmp_path: Path) 
     grid = mask.latent.reshape(768 // 16, 1024 // 16)
     assert np.array_equal(grid, grid[:, ::-1])
     assert grid[0, :9].min() == 1.0 and grid[0, 9:55].max() == 0.0 and grid[0, 55:].min() == 1.0
+
+
+PINNED = Path(__file__).resolve().parent / "mflux_pinned_check.py"
+
+
+def test_the_mac_mask_matches_mflux_0_20_0s_own_latent_code() -> None:
+    """Candidates for a Mac-only blend fault, each checked against mflux's own source
+    (vendored in fixtures/mflux_0_20_0): token order of the clean latents and the mask on a
+    non-square picture with an off-centre box (Qwen21LatentCreator.pack_latents), the noise
+    (create_noise), the start (create_for_txt2img_or_img2img, init_time_step), and the sigma
+    the kept tokens are at against the sigma the transformer is told (Config, LinearScheduler).
+    """
+    ran = subprocess.run([sys.executable, str(PINNED)], capture_output=True, text=True, timeout=300)
+    assert ran.returncode == 0, ran.stderr
+    line = json.loads(ran.stdout.strip().splitlines()[-1])
+    for name in (
+        "clean_token_is_its_place",
+        "mask_token_is_its_place",
+        "noise_is_mfluxs_start",
+        "clean_unpacks_to_the_encode",
+        "noise_start_is_mfluxs",
+        "noise_kept_at_the_told_sigma",
+        "noise_kept_decodes_to_the_encode",
+        "strength_start_is_mfluxs",
+        "strength_kept_at_the_told_sigma",
+        "strength_kept_decodes_to_the_encode",
+    ):
+        assert line[name] is True, (name, line)
+    assert (line["noise_first_step"], line["noise_steps"]) == (0, 10)
+    assert (line["strength_first_step"], line["strength_steps"]) == (4, 6)
+
+
+def test_the_outside_drift_is_zero_for_the_input_and_large_for_another_picture() -> None:
+    rng = np.random.default_rng(4)
+    original = Image.fromarray(rng.integers(0, 256, size=(32, 48, 3), dtype=np.uint8), mode="RGB")
+    region = np.zeros((32, 48), dtype=np.float32)
+    region[8:24, 16:32] = 1.0
+    changed = np.asarray(original).copy()
+    changed[8:24, 16:32] = 0
+    assert inpaint.outside_drift(Image.fromarray(changed), original, region) == 0.0
+    other = Image.new("RGB", (48, 32), (0, 0, 0))
+    assert inpaint.outside_drift(other, original, region) > 50

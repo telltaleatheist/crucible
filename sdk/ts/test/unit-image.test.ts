@@ -190,11 +190,25 @@ test('a mask without an image, a maskBlur without a mask, or one name for both i
 test('readImageResult reads the mask fields, and null from an older server', () => {
   const masked = readImageResult({
     artifacts: ['image.png'],
-    extra: { image: { ...DONE_IMAGE, input: 'photo.png', mask: 'mask.png', mask_blur: 8, mask_coverage: 0.25 } },
+    extra: {
+      image: {
+        ...DONE_IMAGE,
+        input: 'photo.png',
+        mask: 'mask.png',
+        mask_blur: 8,
+        mask_coverage: 0.25,
+        mask_blend_steps: 30,
+        mask_outside_drift: 2.5,
+      },
+    },
   });
   assert.deepEqual([masked.input, masked.mask, masked.maskBlur, masked.maskCoverage], ['photo.png', 'mask.png', 8, 0.25]);
+  assert.deepEqual([masked.maskBlendSteps, masked.maskOutsideDrift], [30, 2.5]);
   const older = readImageResult({ artifacts: ['image.png'], extra: { image: DONE_IMAGE } });
-  assert.deepEqual([older.mask, older.maskBlur, older.maskCoverage], [null, null, null]);
+  assert.deepEqual(
+    [older.mask, older.maskBlur, older.maskCoverage, older.maskBlendSteps, older.maskOutsideDrift],
+    [null, null, null, null, null],
+  );
 });
 
 test('readImageResult reads the effective parameters a picture can be made again from', () => {

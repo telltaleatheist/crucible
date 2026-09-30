@@ -2267,6 +2267,8 @@ export function readImageResult(done: DoneData): ImageResult {
     mask: optStr(image, 'mask', at),
     maskBlur: optNum(image, 'mask_blur', at),
     maskCoverage: optNum(image, 'mask_coverage', at),
+    maskBlendSteps: optNum(image, 'mask_blend_steps', at),
+    maskOutsideDrift: optNum(image, 'mask_outside_drift', at),
     seconds: nullableNum(image, 'seconds', at),
     stageSeconds: numberMap(nullableObject(image, 'stage_seconds', at), `${at}.stage_seconds`),
     peakBytes: nullableNum(image, 'peak_bytes', at),

@@ -477,6 +477,11 @@ def test_a_mask_regenerates_only_its_region_and_keeps_every_other_pixel(
         "photo.png", "mask.png", 8, None
     )
     assert image["mask_coverage"] == 0.5
+    assert image["mask_blend_steps"] == 4
+    assert image["mask_outside_drift"] == round((200 + 0 + 255) / 3, 2)
+    assert events[-1]["data"]["artifacts"] == ["image.png", "generated.png"]
+    raw = ready.get(f"/v1/jobs/{job_id}/artifacts/generated.png", headers=auth).content
+    assert (np.asarray(Image.open(BytesIO(raw)).convert("RGB")) == [0, 0, 255]).all()
     made = generates(transcript)[-1]
     assert (made["masked"], made["start_step"], made["mask_blur"]) == (True, 0, 8)
     png = ready.get(f"/v1/jobs/{job_id}/artifacts/image.png", headers=auth).content
