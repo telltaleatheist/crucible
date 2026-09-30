@@ -68,7 +68,7 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   (`_kept_jobs_flag`), so an older rewriter cannot turn an operator's `false` back to
   true, nor a rewriter written before `image` existed turn the image type off. A config
   with no `enable_image` key (every config before 2026-09-28) reads it as false.
-  `enable_audio` (2026-09-29) follows the same rule.
+  `enable_audio` (2026-09-29) and `enable_segment` (2026-09-29) follow the same rule.
 - `carried_tables` (used only by `crucible init --config-from`) copies whole tables
   unchanged, so keys this build does not know are preserved. A table that is both
   typed and carried is refused.
@@ -389,6 +389,10 @@ install.
   Stable Audio recipe installs the flash-attn wheel from its GitHub release by URL, pinned by a
   `#sha256=` fragment: a direct reference is pinned by `@<commit>` or, for a wheel URL, by its
   digest, and `installed_direct_references` reads either back from pip's `direct_url.json`.
+- **segment** (`envs/segment`, one worker env for BiRefNet and SAM 2.1: torch 2.14,
+  transformers 5.17.0, timm, kornia, einops): see [segment.md](segment.md), "Envs". `uv pip
+  compile` locks for Python 3.11 on each platform, not yet freezes of a working env; the
+  headers are the wheels summed from PyPI (3.08 GB cuda-linux, 0.19 GB mlx-darwin).
 - **tts cuda-linux** (`higgs-v3-sgl` extra, Python 3.12): this is the working
   BookForge `sglomni` env (Owen: *"mirror it. it should be exact"*). `uv` is kept
   because it is part of that env. `flashinfer-jit-cache` comes from flashinfer's own

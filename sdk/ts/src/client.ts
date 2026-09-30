@@ -71,6 +71,9 @@ import {
   type ImageResult,
   type AudioOptions,
   type AudioResult,
+  type SegmentOptions,
+  type SegmentPoint,
+  type SegmentResult,
   type AlignWindowResult,
   type JobInput,
   type ArtifactHold,
@@ -111,6 +114,7 @@ import {
   type LeaseOnLoad,
   type LoadImageOptions,
   type LoadAudioOptions,
+  type LoadSegmentOptions,
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
@@ -1377,6 +1381,44 @@ export class CrucibleClient {
     });
   }
 
+  /**
+   * Queue a `segment` job (`mask.png` and `cutout.png`, both at the picture's size) and return
+   * its id. `birefnet` cuts out the main subject by itself; `sam2.1-hiera-large` selects what
+   * `points` and/or `box` point at.
+   */
+  async segment(options: SegmentOptions): Promise<string> {
+    const given = options as Partial<SegmentOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'segment(...) needs {model, image}');
+    }
+    if (given.image === undefined || given.image === null) {
+      throw new CrucibleConfigError('image', 'segment(...) needs the picture to cut from, as image');
+    }
+    const params: Record<string, unknown> = {};
+    if (given.points !== undefined && given.points !== null) {
+      params.points = given.points.map((point) => ({ x: point.x, y: point.y, label: point.label }));
+    }
+    if (given.box !== undefined && given.box !== null) {
+      params.box = [...given.box];
+    }
+    return this.submit({
+      type: 'segment',
+      model: requireText(given.model, 'model'),
+      params: { ...params, ...leaseParams(given.lease) },
+      inputs: { [given.imageName ?? 'input.png']: given.image },
+    });
+  }
+
+  /** Queue a `load-segment` job (warm a segment model up, e.g. when a selection tool opens) and return its id. */
+  async loadSegment(model: string, options?: LoadSegmentOptions): Promise<string> {
+    return this.submit({
+      type: 'load-segment',
+      model: requireText(model, 'model'),
+      params: leaseParams(options?.lease),
+      inputs: {},
+    });
+  }
+
   async #json(path: string, init: RequestInit, where: string): Promise<Json> {
     return asObject(await this.#jsonValue(path, init, where), where);
   }
@@ -2197,6 +2239,63 @@ export function readAudioResult(done: DoneData): AudioResult {
     artifacts: done.artifacts ?? [],
     leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
+}
+
+/** A finished `segment` job's effective parameters, read out of its `done` frame. */
+export function readSegmentResult(done: DoneData): SegmentResult {
+  const where = 'the segment done event';
+  const segment = objectField(done.extra as Json, 'segment', where);
+  const at = `${where}.segment`;
+  return {
+    model: str(segment, 'model', at),
+    kind: oneOf(str(segment, 'kind', at), ['cutout', 'select'] as const, `${at}.kind`),
+    hfRepo: str(segment, 'hf_repo', at),
+    revision: str(segment, 'revision', at),
+    backend: str(segment, 'backend', at),
+    engine: str(segment, 'engine', at),
+    dtype: str(segment, 'dtype', at),
+    input: str(segment, 'input', at),
+    width: num(segment, 'width', at),
+    height: num(segment, 'height', at),
+    points: readSegmentPoints(nullableArray(segment, 'points', at), `${at}.points`),
+    box: readNumbers(nullableArray(segment, 'box', at), `${at}.box`),
+    mask: str(segment, 'mask', at),
+    cutout: str(segment, 'cutout', at),
+    score: nullableNum(segment, 'score', at),
+    multimask: nullableBool(segment, 'multimask', at),
+    coverage: nullableNum(segment, 'coverage', at),
+    seconds: nullableNum(segment, 'seconds', at),
+    stageSeconds: numberMap(nullableObject(segment, 'stage_seconds', at), `${at}.stage_seconds`),
+    peakBytes: nullableNum(segment, 'peak_bytes', at),
+    stagePeakBytes: numberMap(nullableObject(segment, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
+    memoryBytesEstimate: num(segment, 'memory_bytes_estimate', at),
+    memoryBasis: str(segment, 'memory_basis', at),
+    artifacts: done.artifacts ?? [],
+    leaseId: optStr(done.extra as Json, 'lease_id', where),
+  };
+}
+
+function readSegmentPoints(entries: unknown[] | null, where: string): SegmentPoint[] | null {
+  if (entries === null) return null;
+  return entries.map((entry, index) => {
+    const at = `${where}[${index}]`;
+    const point = asObject(entry, at);
+    const label = num(point, 'label', at);
+    if (label !== 0 && label !== 1) {
+      throw new CrucibleProtocolError(`${at}.label is ${label}, not 0 or 1`);
+    }
+    return { x: num(point, 'x', at), y: num(point, 'y', at), label: label as 0 | 1 };
+  });
+}
+
+function readNumbers(entries: unknown[] | null, where: string): number[] | null {
+  if (entries === null) return null;
+  return entries.map((entry, index) => {
+    if (typeof entry !== 'number' || !Number.isFinite(entry)) {
+      throw new CrucibleProtocolError(`${where}[${index}] is not a number`);
+    }
+    return entry;
+  });
 }
 
 function readPromptCache(image: Json, where: string): 'hit' | 'miss' | null {

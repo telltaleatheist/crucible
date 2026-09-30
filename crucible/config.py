@@ -32,6 +32,8 @@ DEFAULT_ENABLE_IMAGE = False
 
 DEFAULT_ENABLE_AUDIO = False
 
+DEFAULT_ENABLE_SEGMENT = False
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -111,6 +113,7 @@ class Config:
     desktop_allowance_basis: str
     enable_image: bool = DEFAULT_ENABLE_IMAGE
     enable_audio: bool = DEFAULT_ENABLE_AUDIO
+    enable_segment: bool = DEFAULT_ENABLE_SEGMENT
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
@@ -340,6 +343,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_denoise",
     "enable_image",
     "enable_audio",
+    "enable_segment",
 )
 
 
@@ -772,6 +776,7 @@ def load_config(
         enable_denoise=_require(table, "jobs", "enable_denoise", bool),
         enable_image=_optional_jobs_flag(table, "enable_image", DEFAULT_ENABLE_IMAGE),
         enable_audio=_optional_jobs_flag(table, "enable_audio", DEFAULT_ENABLE_AUDIO),
+        enable_segment=_optional_jobs_flag(table, "enable_segment", DEFAULT_ENABLE_SEGMENT),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         desktop_allowance_bytes=_require(
@@ -810,6 +815,7 @@ def write_config(
     install_on_submit: bool | None = None,
     enable_image: bool | None = None,
     enable_audio: bool | None = None,
+    enable_segment: bool | None = None,
     capability: CapabilityRecord | None = None,
     routes: tuple[RouteRecord, ...] = (),
     local_models: tuple[LocalModelRecord, ...] = (),
@@ -845,6 +851,11 @@ def write_config(
                 _kept_jobs_flag(home, "enable_audio", DEFAULT_ENABLE_AUDIO)
                 if enable_audio is None
                 else enable_audio
+            ),
+            "enable_segment": (
+                _kept_jobs_flag(home, "enable_segment", DEFAULT_ENABLE_SEGMENT)
+                if enable_segment is None
+                else enable_segment
             ),
             "install_on_submit": (
                 _kept_jobs_flag(home, "install_on_submit", DEFAULT_INSTALL_ON_SUBMIT)

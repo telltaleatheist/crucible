@@ -16,14 +16,22 @@ from ..errors import CrucibleError
 from ..imagemodels import ImageManifest, ImageManifestError, load_all_image_manifests
 from ..manifests import ManifestError, ModelManifest, load_all_manifests
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
+from ..segmentmodels import SegmentManifest, SegmentManifestError, load_all_segment_manifests
 from . import common
 from .api_cmd import report_http_error
 from .common import EXIT_OK, _fail
 
-AnyManifest = ModelManifest | AsrManifest | AlignManifest | ImageManifest | AudioManifest
+AnyManifest = (
+    ModelManifest | AsrManifest | AlignManifest | ImageManifest | AudioManifest | SegmentManifest
+)
 
 MANIFEST_ERRORS = (
-    ManifestError, AsrManifestError, AlignManifestError, ImageManifestError, AudioManifestError,
+    ManifestError,
+    AsrManifestError,
+    AlignManifestError,
+    ImageManifestError,
+    AudioManifestError,
+    SegmentManifestError,
 )
 
 
@@ -34,6 +42,7 @@ def _all_manifests() -> dict[str, AnyManifest]:
         load_all_align_manifests(),
         load_all_image_manifests(),
         load_all_audio_manifests(),
+        load_all_segment_manifests(),
     ):
         for model_id, manifest in extra.items():
             if model_id in merged:

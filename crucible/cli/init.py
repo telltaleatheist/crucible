@@ -209,6 +209,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_denoise=args.enable_denoise,
         enable_image=args.enable_image,
         enable_audio=args.enable_audio,
+        enable_segment=args.enable_segment,
         desktop_allowance_bytes=desktop_allowance_bytes,
         retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
@@ -228,6 +229,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"denoise:  {'enabled' if args.enable_denoise else 'disabled'}")
     print(f"image:    {'enabled' if args.enable_image else 'disabled'}")
     print(f"audio:    {'enabled' if args.enable_audio else 'disabled'}")
+    print(f"segment:  {'enabled' if args.enable_segment else 'disabled'}")
     for footprint in declared_tts_footprints(backend.kind):
         print(
             f"tts {footprint.engine}: "
@@ -350,6 +352,13 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="register the audio (sound effects, music and songs: Stable Audio 3, "
         "YuE2), load-audio and unload-audio job types ([jobs] enable_audio)",
+    )
+    init.add_argument(
+        "--enable-segment",
+        action="store_true",
+        help="register the segment (subject cutout with BiRefNet, point-and-box "
+        "selection with SAM 2.1), load-segment and unload-segment job types "
+        "([jobs] enable_segment)",
     )
     init.add_argument(
         "--desktop-allowance-bytes",

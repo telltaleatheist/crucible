@@ -10,6 +10,8 @@ ROUTABLE_CLASSES: tuple[str, ...] = (
 
 AUDIO_CLASSES: tuple[str, ...] = ("sfx", "music", "song")
 
+SEGMENT_CLASSES: tuple[str, ...] = ("cutout", "select")
+
 SELECTABLE_CLASSES: tuple[str, ...] = (
     *ROUTABLE_CLASSES,
     "decide",
@@ -21,6 +23,7 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
     "denoise",
     "image",
     *AUDIO_CLASSES,
+    *SEGMENT_CLASSES,
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)

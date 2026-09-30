@@ -5,6 +5,7 @@ export {
   readAudioResult,
   readImageResult,
   readRenderResult,
+  readSegmentResult,
 } from './client.js';
 export type {
   CrucibleClientOptions,
@@ -119,6 +120,9 @@ export type {
   ImageResult,
   AudioOptions,
   AudioResult,
+  SegmentOptions,
+  SegmentPoint,
+  SegmentResult,
   AlignWindow,
   AlignWindowResult,
   AsrOptions,
@@ -175,6 +179,7 @@ export type {
   LeaseOnLoad,
   LoadImageOptions,
   LoadAudioOptions,
+  LoadSegmentOptions,
   LoadModelOptions,
   LoadVoiceOptions,
   CrucibleRole,

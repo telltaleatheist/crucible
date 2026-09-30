@@ -1,0 +1,42 @@
+[model]
+id = "birefnet"
+family = "birefnet"
+display = "BiRefNet"
+kind = "cutout"
+licence = "MIT: the model card at the pinned revision declares `license: mit`; the Hugging Face repo carries no LICENSE file, and the code's GitHub repo (ZhengPeng7/BiRefNet) carries the MIT text"
+licence_url = "https://github.com/ZhengPeng7/BiRefNet/blob/main/LICENSE"
+commercial_use = "free, commercial use included, keeping the MIT copyright notice (Copyright (c) 2024 ZhengPeng). The datasets it was trained on carry their own terms, which the MIT grant does not restate"
+
+[backends.cuda-linux]
+engine = "birefnet"
+hf_repo = "ZhengPeng7/BiRefNet"
+revision = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
+dtype = "float16"
+memory_bytes_estimate = 4500000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files and the author's table, not measured through Crucible: model.safetensors is 444 MB of float16 weights (a Swin-L backbone, about 220 M parameters); the BiRefNet README's efficiency table gives 3.5 GB of GPU memory for inference at 1024x1024 in FP16 (4.8 GB in FP32). Every picture is resized to 1024x1024 before the model sees it, so the peak does not grow with the input; 4.5 GB leaves the CUDA context and allocator slack, and it is also this worker's hard cap on the card"
+files = [
+  "config.json",
+  "BiRefNet_config.py",
+  "birefnet.py",
+  "model.safetensors",
+]
+working_side = 1024
+max_pixels = 40000000
+
+[backends.mlx-darwin]
+engine = "birefnet"
+hf_repo = "ZhengPeng7/BiRefNet"
+revision = "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"
+dtype = "float32"
+memory_bytes_estimate = 7000000000
+memory_basis = "declared"
+memory_note = "declared 2026-09-29 from the files and the author's table, not measured through Crucible: on the Mac the float16 weights are cast to float32 (0.89 GB) and run on Metal (MPS); the author's FP32 figure is 4.8 GB at 1024x1024 on CUDA. torchvision's deform_conv2d has no MPS kernel, so the worker sets PYTORCH_ENABLE_MPS_FALLBACK=1 and those layers run on the CPU, copying their tensors across the one unified pool; 7 GB covers that, the torch process and the full-size mask and cutout"
+files = [
+  "config.json",
+  "BiRefNet_config.py",
+  "birefnet.py",
+  "model.safetensors",
+]
+working_side = 1024
+max_pixels = 40000000
