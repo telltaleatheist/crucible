@@ -683,3 +683,20 @@ if that changes.
    `max_tile_tokens`: the mean is fine but single kernels are too long).
 3. Record the passing size and table with the clip's `done.video`: `desktop`, the busy fields
    and `stage_seconds` together say what the setting costs.
+
+**Measured 2026-09-30 (M1 Ultra, 512x320, through Crucible): the duty cycle does not move the
+reading on long clips.**
+
+| clip | `gpu_duty_pct` | `max_tile_tokens` | seconds | synced / paused (s) | mean busy | denoising / refining |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5 s (2,560 tokens) | 65 | 8000 | 131 | n/a | 62.2% | 69.2 / 55.9% |
+| 20 s (9,760 tokens) | 65 | 8000 | 404 | 207 / 112 | 92.5% | 94.7 / 95.6% |
+| 20 s (9,760 tokens) | 50 | 8000 | 502 | 207 / 207 | 92.6% | 93.5 / 95.0% |
+
+At 50 the worker left the GPU nothing to do for 207 s of the transformer's 414 s, yet the
+driver read 93 to 95% through both passes; idle, with nothing rendering, it reads 0 to 5%.
+ltx-2-mlx queues no work outside `_mx_eval` (no `async_eval`), so the GPU is busy with
+something during the pauses that this worker does not account for. The cause is open. Until it
+is found, the default stays at 85: lower values cost 25 to 50% in speed and buy nothing on
+this reading. The memory side is settled: with tiling on, every clip up to 20 s at 1280x704
+peaked at 21.7 GB (the text encoder), which is why the tiled limits exist.
