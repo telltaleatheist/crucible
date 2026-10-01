@@ -188,6 +188,25 @@ crucible api decide --model qwen3.5-9b --state @ticket.txt \
 One binary, two kinds of verb; the full command list, the job-type bodies and what a
 fine-tuning script calls are in `docs/API-CLI.md`.
 
+### The web console and the playground
+
+Every server serves its own web console at `http://<host>:<port>/` (127.0.0.1:7100 by
+default). The easy way in: right-click the Crucible icon in the tray (the menu bar on a
+Mac) and choose **Open web console**; the browser opens already signed in. `crucible local
+open-console` does the same from a terminal.
+
+The console's **Playground** button (or **Open playground** in the tray, or `crucible local
+playground`) opens one page per image, video and audio model: Qwen-Image, LTX-2.5, Stable
+Audio 3 sound effects and music, YuE2 songs, and whatever model a later build declares. Type
+a prompt, press **Generate**, and the picture, clip or sound plays on the page with a
+download link. A job sent while the server is busy waits its turn in the queue, and the
+page shows its place in line and then its progress. A model this server does not have yet
+is still offered: the first Generate downloads its engine and weights (the page shows the
+download's progress) and then sends the job by itself. Only a model this machine cannot run
+(no build for its backend, a card too small, a gated model with no Hugging Face token) is
+listed with the reason instead. The page is for trying a model out, with the few settings
+each one takes; editing, inpainting and voices stay in the apps.
+
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
 **new** token, which every client then needs). It refuses outright if no backend is
 viable, naming the reason.

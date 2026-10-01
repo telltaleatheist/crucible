@@ -63,6 +63,7 @@ from .routes import (
 )
 from .routes import catalog as catalog_routes
 from .routes import leases as lease_routes
+from .routes import playground as playground_routes
 from .routes import queue as queue_routes
 
 ROUTE_MODULES = (
@@ -78,6 +79,7 @@ ROUTE_MODULES = (
     voices,
     tts_stream,
     jobs,
+    playground_routes,
     resumable,
     tasks,
     openai,
@@ -353,7 +355,7 @@ def _mount_routes(app: FastAPI, ctx: AppContext) -> None:
 
 def _mount_operator_page(app: FastAPI) -> None:
     @app.get("/", include_in_schema=False)
-    async def operator_page() -> Response:
+    async def operator_page(request: Request) -> Response:
         index = UI_DIR / "index.html"
         if not index.is_file():
             raise ApiError(
@@ -363,7 +365,8 @@ def _mount_operator_page(app: FastAPI) -> None:
                 "page ships as package data (`crucible/ui/`); a wheel built "
                 "without it serves the API and nothing else",
             )
-        return RedirectResponse("/ui/", status_code=307)
+        query = request.url.query
+        return RedirectResponse("/ui/" + ("?" + query if query else ""), status_code=307)
 
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")

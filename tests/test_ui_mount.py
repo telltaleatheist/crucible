@@ -87,7 +87,7 @@ def test_the_page_asks_for_exactly_its_own_two_files_by_relative_name() -> None:
     assert 'href="app.css"' in html
     assert 'src="app.js"' in html
     referenced = set(re.findall(r'(?:src|href)="([^"]+)"', html))
-    assert referenced == {"app.css", "app.js", "#main"}, referenced
+    assert referenced == {"app.css", "app.js", "#main", "playground.html"}, referenced
     for value in referenced:
         assert not value.startswith("/"), value
 

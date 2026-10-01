@@ -93,6 +93,12 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     ("/activity", "Activity", "What the server is doing right now, in one read."),
     ("/health", "Health", "Is this process alive. Cheaper than /v1/activity and says less."),
     (
+        "/playground",
+        "Playground",
+        "The pages the operator page's playground draws: one per image, video and audio "
+        "model, with the params its form shows and whether this server can run it now.",
+    ),
+    (
         "/catalog",
         "Catalog",
         "Everything this build can serve, of every kind, and what is on disk. Removing "

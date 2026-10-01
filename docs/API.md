@@ -561,6 +561,18 @@ Health
 
 *Answers:* `200`
 
+## Playground
+
+The pages the operator page's playground draws: one per image, video and audio model, with the params its form shows and whether this server can run it now.
+
+### `GET /v1/playground`
+
+One page per image, video and audio model this build declares: the params its form shows, with defaults and limits from its manifest, and its `standing`: `ready`; `download`, which its first job fetches by itself (409 `installing` names the task; `download_bytes` when the size is known); or `unavailable`, with `reason` saying why.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
 ## Catalog
 
 Everything this build can serve, of every kind, and what is on disk. Removing a subject here is how weights are reclaimed.

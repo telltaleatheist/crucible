@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crucible — playground</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to the playground</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="identity">
+          <span class="wordmark">Crucible</span>
+          <span class="server-name" id="bar-name">playground</span>
+        </div>
+        <nav class="bar-state bar-links" aria-label="Pages">
+          <a href="playground.html">All models</a>
+          <a href="./">Console</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="gate" id="gate" hidden>
+        <h1>This server wants its token</h1>
+        <p class="gate-lead">
+          The playground sends jobs through the same <code>/v1</code> routes as
+          every app, so it needs the server's bearer token. The page keeps it in
+          this browser, for this address only.
+        </p>
+        <form class="gate-form" id="gate-form">
+          <label class="field">
+            <span class="field-label">Bearer token</span>
+            <input
+              type="password"
+              id="gate-token"
+              name="token"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <button class="button primary" type="submit">Sign in</button>
+        </form>
+        <div class="gate-refusal" id="gate-refusal"></div>
+        <p class="gate-hint">
+          The easy way: right-click the Crucible icon in the tray (the menu bar
+          on a Mac) and choose Open playground. That signs this page in.
+        </p>
+      </section>
+
+      <div class="console" id="playground" hidden>
+        <section class="panel" id="panel-models" aria-labelledby="h-models">
+          <div class="panel-head">
+            <h2 id="h-models">Playground</h2>
+            <div class="panel-tools">
+              <span class="stamp" id="models-stamp"></span>
+            </div>
+          </div>
+          <div class="panel-body" id="models-body"></div>
+        </section>
+      </div>
+    </main>
+
+    <script src="playground.js"></script>
+  </body>
+</html>

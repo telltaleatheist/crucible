@@ -778,6 +778,7 @@ EXCLUDED: dict[str, str] = {
     "DELETE /v1/peer/claim": "PHASE17: the orchestrator's relation, not a client's",
     "GET /v1/capability/plan": "the operator page's install modal reads its sentences",
     "GET /v1/voices/{voice_id}/manifest": "the operator page's voice editor reads it",
+    "GET /v1/playground": "the operator page's playground reads its forms",
 }
 
 
