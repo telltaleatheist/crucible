@@ -221,7 +221,7 @@ test('cancelling a waiting job answers removed', async () => {
 const ROW = {
   position: 1, job_id: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
   client_ref: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waited_s: 12.5,
-  max_wait_s: 3600, expires_at: '2026-09-30T11:00:00+00:00', lease_holder: false,
+  max_wait_s: 3600, expires_at: '2026-09-30T11:00:00+00:00', lease_holder: false, kind: 'job',
 };
 
 test('queue() lists the waiting jobs in order, and removeFromQueue() removes one', async () => {
@@ -246,7 +246,7 @@ test('queue() lists the waiting jobs in order, and removeFromQueue() removes one
   assert.deepEqual(listed.items[0], {
     position: 1, jobId: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
     clientRef: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waitedS: 12.5,
-    maxWaitS: 3600, expiresAt: '2026-09-30T11:00:00+00:00', leaseHolder: false,
+    maxWaitS: 3600, expiresAt: '2026-09-30T11:00:00+00:00', leaseHolder: false, kind: 'job',
   });
   assert.equal(listed.limits.maxWaitS.default, 3600);
   assert.deepEqual(await client().removeFromQueue('j1'), {
@@ -274,4 +274,72 @@ test('queueEvents() opens with a snapshot and then names every change', async ()
   assert.ok(added?.event === 'added');
   assert.equal(added.jobId, 'j2');
   assert.equal(added.data['position'], 2);
+});
+
+const COMPLETION = {
+  id: 'chatcmpl-q',
+  model: 'qwen3.5-9b',
+  choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+};
+
+const REVISION = '4d1b2f0c9e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c';
+
+const DECISION = {
+  model: { id: 'qwen3.5-9b', revision: REVISION, fingerprint: `qwen3.5-9b@${REVISION}` },
+  engine: 'vllm',
+  answers: { urgent: { type: 'yesno', p: 0.8, logprob: -0.22, label_mass: 0.99 } },
+  timing_ms: {
+    total: 10,
+    per_question: { urgent: { wall_ms: 5, prompt_tokens: 10, cached_tokens: null } },
+    prime: { wall_ms: 5, prompt_tokens: 10, cached_tokens: null },
+  },
+  tokens: { per_question: { urgent: 12 }, images: 0 },
+};
+
+const URGENT = {
+  model: 'qwen3.5-9b',
+  state: 'Now, please.',
+  questions: { urgent: { type: 'yesno', instructions: 'The message conveys urgency' } },
+} as const;
+
+test('chat() waits in the queue by default, and not when told not to', async () => {
+  handler = (request, body, response) => {
+    posted.push(JSON.parse(body));
+    json(response, 200, COMPLETION);
+  };
+  const messages = [{ role: 'user', content: 'hi' }] as const;
+  await client().chat({ model: 'qwen3.5-9b', messages });
+  await client().chat({ model: 'qwen3.5-9b', messages, queue: { maxWaitS: 120 } });
+  await client().chat({ model: 'qwen3.5-9b', messages, queue: false });
+  await client({ queue: false }).chat({ model: 'qwen3.5-9b', messages });
+  assert.deepEqual(
+    posted.map((body) => (body as { queue?: unknown }).queue),
+    [{}, { max_wait_s: 120 }, undefined, undefined],
+  );
+});
+
+test('decide() waits in the queue by default, and asks an older server again without it', async () => {
+  handler = (request, body, response) => {
+    const document = JSON.parse(body) as Record<string, unknown>;
+    posted.push(document);
+    if ('queue' in document) {
+      json(response, 422, {
+        error: {
+          code: 'invalid_request',
+          message: 'queue: Extra inputs are not permitted',
+          details: {
+            problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
+          },
+        },
+      });
+      return;
+    }
+    json(response, 200, DECISION);
+  };
+  const answer = await client().decide(URGENT);
+  assert.equal(answer.answers['urgent']?.type, 'yesno');
+  assert.equal(posted.length, 2);
+  assert.deepEqual((posted[0] as { queue?: unknown }).queue, {});
+  assert.ok(!('queue' in (posted[1] as object)));
 });

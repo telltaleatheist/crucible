@@ -69,6 +69,10 @@ class InFlight:
         self._entries: dict[int, Entry] = {}
         self._ids = itertools.count(1)
         self._recent: list[float] = []
+        self._on_close: Any = lambda: None
+
+    def when_closed(self, callback: Any) -> None:
+        self._on_close = callback
 
     def open(self, *, act: str | None, model: str, client: str | None) -> Entry:
         entry = Entry(
@@ -89,6 +93,8 @@ class InFlight:
             if removed is not None and removed.started > 0.0:
                 self._recent.append(time.monotonic() - removed.started)
                 del self._recent[:-RECENT_DURATIONS]
+        if removed is not None:
+            self._on_close()
 
     @contextmanager
     def tracked(

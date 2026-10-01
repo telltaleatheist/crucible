@@ -71,8 +71,10 @@ class Settlement:
         store: Any,
         leases: "Leases",
         inflight: "InFlight",
+        waiting_calls: Callable[[], dict[str, int]] = dict,
         log: Callable[[str], None] = _to_stderr,
     ) -> None:
+        self._waiting_calls = waiting_calls
         self._residency = residency
         self._store = store
         self._leases = leases
@@ -136,6 +138,15 @@ class Settlement:
         if chats:
             return Held(
                 "a chat", f"{chats} completion(s) in flight", {"in_flight": chats}
+            )
+        models = self._waiting_calls()
+        resident = None if not models else self._residency.resident
+        waiting = 0 if resident is None else models.get(resident.id, 0)
+        if waiting:
+            return Held(
+                "a queued call",
+                f"{waiting} chat(s) or decision(s) waiting for it in the queue",
+                {"waiting": waiting},
             )
         return None
 

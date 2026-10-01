@@ -627,6 +627,8 @@ export interface QueueItem {
   readonly expiresAt: string;
   /** True for the open lease's holder, whose jobs go ahead of the line. */
   readonly leaseHolder: boolean;
+  /** `call` for a queued chat or decision (its `jobId` is `call-…` and has no job record). */
+  readonly kind: 'job' | 'call';
 }
 
 /** `GET /v1/queue`. */
@@ -760,6 +762,12 @@ export interface ChatOptions {
    * header is sent.
    */
   readonly act?: string;
+  /**
+   * Wait in the server's queue instead of being refused while the model is not resident or
+   * every slot on its engine is taken; the server loads the model when the chat's turn comes.
+   * Omitted: the client's own `queue` (on by default). `false`: refused as before.
+   */
+  readonly queue?: QueueChoice;
   /** Aborts the request. */
   readonly signal?: AbortSignal;
 }
@@ -830,6 +838,8 @@ export type DecideMissing = 'refuse' | 'report';
 export interface DecideOptions {
   /** What this decision is, sent as `X-Crucible-Act` exactly as {@link ChatOptions.act}. */
   readonly act?: string;
+  /** Wait in the server's queue for the model, exactly as {@link ChatOptions.queue}. */
+  readonly queue?: QueueChoice;
   /** Aborts the request; the abort surfaces as a DOM `AbortError`. */
   readonly signal?: AbortSignal;
 }

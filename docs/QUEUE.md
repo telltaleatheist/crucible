@@ -91,7 +91,8 @@ its plain submits are not held behind the queue. Everyone else is first come, fi
 ## The whole queue
 
 - `GET /v1/queue`: `{items: [{position, job_id, type, model, client, client_ref, submitted,
-  waited_s, max_wait_s, expires_at, lease_holder}], depth, limits}`.
+  waited_s, max_wait_s, expires_at, lease_holder, kind}], depth, limits}`. `kind` is
+  `"job"` or `"call"` (a queued chat or decision, below).
 - `DELETE /v1/queue/{job_id}`: remove one (reason `operator`).
 - `GET /v1/queue/events`: server-wide SSE for dashboards. A `snapshot {items, depth}`
   first, then `added`, `moved {position}`, `started {waited_s}` and `removed {reason}` with
@@ -104,6 +105,49 @@ its plain submits are not held behind the queue. Everyone else is first come, fi
 While anything waits, a submit without `queue` is refused `409 server_busy` even if the
 lane is momentarily free, with `details.queue_depth`, so an old app cannot jump the line.
 
+## Chats and decisions can wait too
+
+`POST /v1/openai/chat/completions` and `POST /v1/decide` take the same member in their
+body: `"queue": {}` or `"queue": {"max_wait_s": 600}`. Without it they are refused as
+before: `409 model_not_resident` when the model is not loaded, `503 chat_queue_full` when
+every slot on its engine is taken. With it:
+
+- **The model is resident with a free slot, and nothing is waiting:** the request goes
+  straight through, exactly as an unqueued one.
+- **Otherwise** the request is held open and takes a place in the same line as queued jobs.
+  It shows in `GET /v1/queue` with `kind: "call"`, `type: "chat"` or `"decide"`, and a
+  `job_id` of the form `call-…` (there is no job record behind it; `GET /v1/jobs/{id}` does
+  not know it). Job rows carry `kind: "job"`.
+- **At the front, its model not resident:** when the lane is free and no chat is in flight
+  on another model, the server submits a `load-model` job for it (your client name,
+  `client_ref: "for the queued chat call-…"`). Every call behind it for the same model
+  then fills the engine's slots together once it is loaded. A load that fails ends the
+  call `502 queued_load_failed` naming the job.
+- **At the front, every slot taken:** it gets the next slot that frees.
+- The answer is the normal completion (or stream, or decision). Nothing is sent before it,
+  so give the HTTP request a read timeout that covers `max_wait_s` plus the answer.
+
+A queued call leaves the line:
+
+| how | your request gets |
+|---|---|
+| an operator removes it (`DELETE /v1/queue/call-…`, the desktop Queue) | `409 removed_from_queue`, `details.reason: "operator"` |
+| it waits `max_wait_s` | `409 removed_from_queue`, `details.reason: "expired"` |
+| the server stops | `409 removed_from_queue`, `details.reason: "server_restart"` |
+| you close the connection | it is removed (`client`); nothing more is sent |
+
+A call is never abandoned for lack of polling: the open request is its presence. A
+decision is checked for everything it can be refused for (its questions, items and image
+count) before it joins the line, so a malformed one never waits.
+
+Two things change for queued jobs alongside this. A queued job that would change what is
+on the card (any load, unload, or a job that brings its own model) waits while chats are in
+flight instead of taking the model out from under them. And while a call waits for the
+resident model, the server does not unload that model between completions.
+
+Unqueued chats are unchanged: they still go straight to a resident model with a free slot
+even while something waits in the line.
+
 ## In the SDK
 
 ```ts
@@ -115,12 +159,16 @@ for await (const event of crucible.events(id)) {
 }
 ```
 
-- The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video`
-  and every load and unload) queue by default. `new CrucibleClient({..., queue: false})`
+- The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video`,
+  every load and unload, and `chat`, `chatStream`, `decide` and `decideItems`) queue by
+  default. `new CrucibleClient({..., queue: false})`
   turns that off; `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins.
 - `submit()` queues only when its request says `queue: true` or `queue: {maxWaitS}`.
-- Against a server older than the queue, the SDK sends the job again without `queue`, so
-  the app sees `CrucibleBusy` as it always did.
+- Against a server older than the queue, the SDK sends the job (or decision) again
+  without `queue`, so the app sees `CrucibleBusy` as it always did. An older server passes
+  a chat's `queue` member on to the engine, which ignores it, and refuses as before.
+- A queued chat or decision that is removed throws `CrucibleRefused` with code
+  `removed_from_queue` and `details.reason`.
 - `job()` returns `status: 'removed'` and `removal`; `cancel()` on a waiting job answers
   `status: 'removed'`. `queue()`, `removeFromQueue()`, `queueHeartbeat()` and
   `queueEvents()` cover the routes above.

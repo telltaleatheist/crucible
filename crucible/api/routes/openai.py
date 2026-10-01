@@ -3,11 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import json
+
 import httpx
 from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from ... import upstreamrecord
+from ...callqueue import queue_of, take_a_turn
 from ...engines import chat_admission
 from ...errors import ApiError
 from ...inflight import read_act
@@ -83,36 +86,58 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "a chat request must name a model; this server proxies only to the "
                 "model that is resident",
             )
+        queued: int | None = None
+        if "queue" in body:
+            queued = queue_of(body.pop("queue"))
+            raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
-        async with residency.settled_for("a chat request"):
-            resident = residency.resident_model
-            if resident is None or resident.model_id != requested:
-                raise model_not_resident(requested, resident, "a chat request")
-            refuse_an_exited_engine(residency, resident)
-
-            applied = apply_defaults(body, resident.defaults)
-            sampling_headers = {SAMPLING_HEADER: applied.header()}
-            forwarded = forward_body(raw, applied, resident)
-            url = f"{resident.base_url}/v1/chat/completions"
-            client = ctx.http
-            inflight = ctx.inflight
-            act = read_act(request.headers)
-
-            chat_over = settle_after_chat(ctx.settlement)
-
-            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
-            if limit is not None and len(inflight) >= limit:
-                wait = inflight.retry_after()
-                return chat_queue_full(
-                    resident=resident, limit=limit, basis=limit_basis, wait=wait
-                )
-
-            entry = inflight.open(
-                act=act, model=resident.model_id, client=client_agent(request)
+        inflight = ctx.inflight
+        act = read_act(request.headers)
+        chat_over = settle_after_chat(ctx.settlement)
+        turn: Any = None
+        if queued is not None:
+            turn = await take_a_turn(
+                request, line=ctx.line, residency=residency, inflight=inflight,
+                settle=chat_over, kind="chat", model=requested, act=act,
+                client=client_agent(request), max_wait_s=queued,
             )
+            if isinstance(turn, Response):
+                return turn
+        try:
+            async with residency.settled_for("a chat request"):
+                resident = residency.resident_model
+                if resident is None or resident.model_id != requested:
+                    raise model_not_resident(requested, resident, "a chat request")
+                refuse_an_exited_engine(residency, resident)
+
+                applied = apply_defaults(body, resident.defaults)
+                sampling_headers = {SAMPLING_HEADER: applied.header()}
+                forwarded = forward_body(raw, applied, resident)
+                url = f"{resident.base_url}/v1/chat/completions"
+                client = ctx.http
+
+                if turn is not None:
+                    entry = turn
+                else:
+                    limit, limit_basis = chat_admission(
+                        resident.engine, resident.engine_args
+                    )
+                    if limit is not None and len(inflight) >= limit:
+                        wait = inflight.retry_after()
+                        return chat_queue_full(
+                            resident=resident, limit=limit, basis=limit_basis, wait=wait
+                        )
+                    entry = inflight.open(
+                        act=act, model=resident.model_id, client=client_agent(request)
+                    )
+        except BaseException:
+            if turn is not None:
+                inflight.close(turn)
+                await chat_over()
+            raise
         try:
             if body.get("stream") is True:
                 return await proxy_stream(

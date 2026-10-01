@@ -2,17 +2,20 @@
 
 A queued job is a normal job (status ``queued``) that holds its inputs and waits here
 until the queue pump (crucible/queuepump.py) walks the line and admits it through the
-same admission path a fresh submit takes. This module is the line's state and its
+same admission path a fresh submit takes. A queued chat or decision is a *call*: no job
+record, just a ticket whose HTTP request is held open until the pump gives it a slot
+on the resident model (crucible/callqueue.py). This module is the line's state and its
 announcements; it never admits anything itself.
 """
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 from .. import clock
 from ..errors import ApiError
@@ -38,6 +41,9 @@ REMOVAL_REASONS = (OPERATOR, CLIENT, EXPIRED, SERVER_RESTART)
 
 UNNAMED = "an unnamed client"
 
+CALL_PREFIX = "call-"
+ADMITTED = "admitted"
+
 
 def limits() -> dict[str, Any]:
     return {
@@ -53,7 +59,26 @@ def limits() -> dict[str, Any]:
 
 
 @dataclass
+class Call:
+    """What a queued chat or decision shows in the line where a job shows its record."""
+
+    type: str
+    model: str
+    client: str | None
+    act: str | None = None
+    client_ref: str | None = None
+    id: str = field(default_factory=lambda: CALL_PREFIX + uuid.uuid4().hex)
+    status: str = "queued"
+
+    def busy_details(self) -> dict[str, Any]:
+        return {"call_id": self.id, "type": self.type, "model": self.model,
+                "client": self.client}
+
+
+@dataclass
 class Waiting:
+    is_call: ClassVar[bool] = False
+
     job: Job
     request: Any
     max_wait_s: int
@@ -84,7 +109,26 @@ class Waiting:
             "max_wait_s": self.max_wait_s,
             "expires_at": self.expires_at.isoformat(),
             "lease_holder": holder is not None and job.client == holder,
+            "kind": "call" if self.is_call else "job",
         }
+
+
+@dataclass
+class WaitingCall(Waiting):
+    """A held-open chat or decision. ``outcome`` resolves once: ``(ADMITTED, entry)``
+    with the in-flight slot the pump opened for it, or ``(status, ApiError)`` when it
+    left the line any other way. ``load_job`` is the load-model job the pump started
+    for it when its model was not resident."""
+
+    is_call: ClassVar[bool] = True
+
+    outcome: "asyncio.Future[tuple[str, Any]] | None" = None
+    load_job: str | None = None
+    loads: int = 0
+
+    def settle(self, status: str, value: Any) -> None:
+        if self.outcome is not None and not self.outcome.done():
+            self.outcome.set_result((status, value))
 
 
 class WaitingLine:
@@ -116,6 +160,14 @@ class WaitingLine:
             return list(self._items)
         first = [item for item in self._items if item.job.client == holder]
         return first + [item for item in self._items if item.job.client != holder]
+
+    def calls_waiting(self) -> dict[str, int]:
+        """How many calls wait for each model."""
+        counts: dict[str, int] = {}
+        for item in self._items:
+            if item.is_call:
+                counts[item.job.model] = counts.get(item.job.model, 0) + 1
+        return counts
 
     def get(self, job_id: str) -> Waiting | None:
         for item in self._items:
@@ -170,6 +222,19 @@ class WaitingLine:
         self._wake()
         return item
 
+    def join_call(self, call: Call, max_wait_s: int) -> WaitingCall:
+        self.refuse_if_full(call.client)
+        now = clock.now()
+        item = WaitingCall(
+            job=call,  # type: ignore[arg-type]
+            request=None, max_wait_s=max_wait_s, submitted=now, seen=now,
+            outcome=asyncio.get_running_loop().create_future(),
+        )
+        self._items.append(item)
+        self.reorder(announce_new=item)
+        self._wake()
+        return item
+
 
     def reorder(self, announce_new: Waiting | None = None) -> None:
         depth = len(self._items)
@@ -181,7 +246,8 @@ class WaitingLine:
             if item is announce_new:
                 data.update(max_wait_s=item.max_wait_s,
                             expires_at=item.expires_at.isoformat())
-            self._store.append_event(item.job, "queued", data)
+            if not item.is_call:
+                self._store.append_event(item.job, "queued", data)
             if item is announce_new:
                 self._announce("added", item, **self._added(item))
             elif was is not None:
@@ -203,19 +269,28 @@ class WaitingLine:
         if item in self._items:
             self._items.remove(item)
         item.gone = True
-        self._store.mark_waiting(item.job, None)
+        if not item.is_call:
+            self._store.mark_waiting(item.job, None)
 
-    def started(self, item: Waiting) -> None:
+    def started(self, item: Waiting, entry: Any = None) -> None:
         waited = item.waited_s(clock.now())
         self._take(item)
-        self._store.append_event(item.job, "started", {"waited_s": waited})
+        if isinstance(item, WaitingCall):
+            item.job.status = "running"
+            item.settle(ADMITTED, entry)
+        else:
+            self._store.append_event(item.job, "started", {"waited_s": waited})
         self._announce("started", item, waited_s=waited)
         self.reorder()
 
     def fail(self, item: Waiting, refusal: ApiError) -> None:
         self._take(item)
         failure = JobFailure(refusal.code, refusal.message)
-        self._store.end_waiting(item, failure=failure)
+        if isinstance(item, WaitingCall):
+            item.job.status = "failed"
+            item.settle("failed", refusal)
+        else:
+            self._store.end_waiting(item, failure=failure)
         self._announce("removed", item, reason=REFUSED, error=failure.to_dict())
         self.reorder()
 
@@ -226,13 +301,25 @@ class WaitingLine:
         waited = item.waited_s(clock.now())
         self._take(item)
         removal = {"reason": reason, "message": message, "waited_s": waited}
-        self._store.end_waiting(item, removal=removal)
+        if isinstance(item, WaitingCall):
+            item.job.status = "removed"
+            item.settle("removed", removed_call(item.job, removal))
+        else:
+            self._store.end_waiting(item, removal=removal)
         self._announce("removed", item, reason=reason, message=message)
         self.reorder()
         self._wake()
         return item
 
     def not_waiting(self, job_id: str) -> ApiError:
+        if job_id.startswith(CALL_PREFIX):
+            return ApiError(
+                409,
+                "not_queued",
+                f"{job_id} is not waiting in this server's queue: the chat or "
+                "decision it named has been answered, is being answered, or has left",
+                {"job_id": job_id, "status": None},
+            )
         job = self._store.get(job_id)
         return ApiError(
             409,
@@ -278,6 +365,8 @@ class WaitingLine:
                 f"it waited its whole max_wait_s ({item.max_wait_s} s) without "
                 "reaching the lane"
             )
+        if item.is_call:
+            return None
         job = item.job
         if job.id in followed_jobs:
             return None
@@ -318,3 +407,15 @@ class WaitingLine:
     def unsubscribe(self, waiter: asyncio.Event) -> None:
         if waiter in self._waiters:
             self._waiters.remove(waiter)
+
+
+def removed_call(call: Call, removal: dict[str, Any]) -> ApiError:
+    reason = removal["reason"]
+    return ApiError(
+        409,
+        "removed_from_queue",
+        f"this {call.type} waited {removal['waited_s']} s in the server's queue for "
+        f"{call.model!r} and was removed ({reason}): {removal['message']}. Nothing "
+        "was sent to the engine",
+        {"call_id": call.id, "reason": reason, "waited_s": removal["waited_s"]},
+    )

@@ -217,7 +217,8 @@ def _services(
     streams = StreamManager(residency)
     inflight = InFlight()
     settlement = Settlement(
-        residency=residency, store=store, leases=leases, inflight=inflight
+        residency=residency, store=store, leases=leases, inflight=inflight,
+        waiting_calls=line.calls_waiting,
     )
     store.attach_settlement(settlement)
     streams.when_closed(settlement.settle_quietly)
@@ -252,7 +253,8 @@ def _lease_client(leases: Leases) -> str | None:
 
 
 def _attach_queue_pump(app: FastAPI, ctx: AppContext) -> None:
-    pump = QueuePump(app.state.line, ctx.admission)
+    pump = QueuePump(app.state.line, ctx.admission, app.state.inflight)
+    app.state.inflight.when_closed(pump.wake)
     app.state.store.when_idle(pump.wake)
     app.state.line.when_changed(pump.wake)
     app.state.queue_pump = pump

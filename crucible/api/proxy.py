@@ -146,7 +146,8 @@ def model_not_resident(requested: str, resident: Any, answering: str) -> ApiErro
         f"{requested!r} is not resident on this server; "
         + (f"{resident.model_id!r} is. " if resident is not None else "no model is. ")
         + f"Crucible never loads a model to answer {answering} — submit "
-        'a {"type": "load-model"} job first.',
+        'a {"type": "load-model"} job first, or send it again with "queue": {} '
+        "to wait while the server loads it (docs/QUEUE.md).",
         {"requested": requested, "resident": None if resident is None
          else resident.model_id},
     )
@@ -371,7 +372,7 @@ def chat_queue_full(
         "another: "
         + (basis or "no basis stated")
         + ". Nothing was sent to the engine, so this request cost nothing and "
-        "can be made again"
+        'can be made again, or sent with "queue": {} to wait for a slot'
         + ("" if wait is None else f"; about {wait}s is what completions on this "
            "engine have recently been taking"),
         {

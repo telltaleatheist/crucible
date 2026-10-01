@@ -576,6 +576,7 @@ test('chat posts the OpenAI body and reads the completion down to what it promis
       { role: 'user', content: 'Light it.' },
     ],
     stream: false,
+    queue: {},
     temperature: 0.2,
     top_p: 0.9,
     max_tokens: 64,
@@ -598,6 +599,7 @@ test('the optional sampling knobs are omitted entirely when not given', async ()
     model: 'qwen3.5-9b',
     messages: [{ role: 'user', content: 'hi' }],
     stream: false,
+    queue: {},
   });
 });
 
@@ -613,6 +615,7 @@ test('thinking: false sends the template kwarg that turns a reasoning model off'
     model: 'qwen3.5-9b',
     messages: [{ role: 'user', content: 'hi' }],
     stream: false,
+    queue: {},
     max_tokens: 64,
     chat_template_kwargs: { enable_thinking: false },
   });
@@ -807,6 +810,7 @@ test('responseFormat and seed reach the wire under OpenAI\'s own names', async (
     model: 'qwen3.5-9b',
     messages: [{ role: 'user', content: 'Does the passage support the claim?' }],
     stream: false,
+    queue: {},
     temperature: 0,
     max_tokens: 128,
     seed: 1729,

@@ -34,6 +34,7 @@ class JobRequest:
     client_ref: str | None = None
     hold: bool = False
     queue: int | None = None
+    from_the_line: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class AdmissionContext:
     leases: Leases
     installs: InstallOnSubmit
     decide_here: Callable[[str], ApiError]
+    chats_in_flight: Callable[[], int] = lambda: 0
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,17 @@ def refuse_if_line_ahead(request: JobRequest, ctx: AdmissionContext) -> None:
     )
 
 
+def chats_hold_the_card(job_type: str, chats_in_flight: int) -> bool:
+    """A job that would change what is on the card, while completions are in flight
+    on what is there now."""
+    if chats_in_flight == 0:
+        return False
+    effect = CARD_EFFECTS.get(job_type)
+    return effect is None or (
+        effect.makes_resident is not None or effect.takes_off is not None
+    )
+
+
 def _waiting_instead(request: JobRequest, refusal: ApiError) -> bool:
     return request.queue is not None and refusal.code in KEEPS_WAITING
 
@@ -178,11 +191,16 @@ def _refuse_if_busy(request: JobRequest, ctx: AdmissionContext, model: str | Non
     try:
         ctx.leases.refuse_if_leased(request.type, model)
         ctx.store.refuse_if_busy()
-        refuse_if_line_ahead(request, ctx)
+        if not request.from_the_line:
+            refuse_if_line_ahead(request, ctx)
     except ApiError as busy:
         if not _waiting_instead(request, busy):
             raise
         raise _JoinTheLine() from busy
+    if request.queue is not None and chats_hold_the_card(
+        request.type, ctx.chats_in_flight()
+    ):
+        raise _JoinTheLine()
 
 
 def _preflight_or_wait(
