@@ -28,6 +28,8 @@ SHARING_UNOWNED = "sharing_unowned"
 TRAY_ERRORS = (OSError, ValueError, RuntimeError, CrucibleError)
 
 OPEN_LABEL = "Open Crucible"
+CONSOLE_LABEL = "Open web console"
+PLAYGROUND_LABEL = "Open playground"
 QUIT_LABEL = "Quit"
 WINDOW_STAYED_OPEN = (
     "app_close_failed: the Crucible window did not close, so the tray stayed. Answer any "
@@ -227,6 +229,8 @@ class TrayIcon:
             item(OPEN_LABEL, lambda *_: self.open_app(), default=True),
             item(self.notice["message"] or self.state["detail"], None, enabled=False),
             *_move_items(self.home, self.retrying.is_set(), self.try_again),
+            item(CONSOLE_LABEL, lambda *_: self.action("open-console")),
+            item(PLAYGROUND_LABEL, lambda *_: self.action("playground")),
             item("Connect an app…", lambda *_: self.action("connect")),
             item("Start Crucible", lambda *_: self.action("start"), enabled=not running),
             item("Stop Crucible", lambda *_: self.action("stop"), enabled=running),
@@ -266,6 +270,8 @@ class TrayIcon:
         try:
             if verb == "sharing":
                 self._toggle_sharing()
+            elif verb in local.BROWSER_VERBS:
+                local.run_engine_verb(verb, self.home)
             else:
                 self._run_engine_verb(verb)
         except TRAY_ERRORS as exc:

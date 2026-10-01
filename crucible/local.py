@@ -23,7 +23,13 @@ from .protocol import API_VERSION, DOOR_PORT
 
 TRAY_VERBS = ("tray", "install-desktop", "remove-desktop")
 
-BROWSER_VERBS = ("open-console", "connect")
+BROWSER_PAGES = {
+    "open-console": ("/", "Crucible's console"),
+    "connect": ("/?section=connect", "Crucible's console"),
+    "playground": ("/ui/playground.html", "Crucible's playground"),
+}
+
+BROWSER_VERBS = tuple(BROWSER_PAGES)
 
 INFO_TIMEOUT = 15.0
 
@@ -160,10 +166,10 @@ def _wait_for_pairing(home: Path, timeout: float) -> None:
 
 
 def _open_console(action: str, url: str, name: str, token: str) -> dict:
-    section = "?section=connect" if action == "connect" else ""
-    webbrowser.open(url + "/" + section + "#token=" + quote(token, safe=""))
+    page, what = BROWSER_PAGES[action]
+    webbrowser.open(url + page + "#token=" + quote(token, safe=""))
     return {"schema_version": 1, "state": "opened", "name": name, "url": url,
-            "detail": "Opened Crucible's console"}
+            "detail": "Opened " + what}
 
 
 def _ask_controller(action: str, home: Path, token: str, timeout: float) -> None:
@@ -379,7 +385,7 @@ def command(args: argparse.Namespace, tray_verbs: Callable[[str], None] = _no_tr
 def add_parser(subparsers, tray_verbs: Callable[[str], None] | None = None) -> None:
     parser = subparsers.add_parser("local", help="Local installation and service lifecycle")
     parser.add_argument("local_action", choices=["register", "status", "start", "stop",
-                                                "open-console", "connect", "tray", "install-cli", "install-desktop", "remove-desktop", "close-tray", "shutdown"])
+                                                "open-console", "connect", "playground", "tray", "install-cli", "install-desktop", "remove-desktop", "close-tray", "shutdown"])
     parser.add_argument("--json", action="store_true", help="Structured output (always enabled)")
     if tray_verbs is None:
         parser.set_defaults(func=command)

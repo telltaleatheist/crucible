@@ -21,6 +21,8 @@ its identity and authenticated info checked. A timeout alone never means stopped
 
 The Windows controller runs independently with `orchestrator --headless`.
 The desktop shortcut starts `local tray`, which ensures the controller exists.
+The tray's menu opens the desktop window, the web console (`local open-console`) and its
+playground (`local playground`), each signed in through the URL fragment.
 Closing that icon leaves the controller, native child or WSL hold, and work intact.
 Explicit Stop records the operator's intent and the watch does not recover it.
 Start clears that intent. Authenticated controller `/local/start`, `/local/stop`,
