@@ -99,10 +99,14 @@ class Subscriber:
         self.wake()
 
     def wake(self) -> None:
-        if _on(self.loop):
-            self.waiter.set()
-        elif not self.loop.is_closed():
-            self.loop.call_soon_threadsafe(self.waiter.set)
+        _wake(self.loop, self.waiter)
+
+
+def _wake(loop: asyncio.AbstractEventLoop, waiter: asyncio.Event) -> None:
+    if _on(loop):
+        waiter.set()
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(waiter.set)
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,8 @@ class EventHub:
         self._throttles: dict[str, _Throttle] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stopped = False
+        self._reason: str | None = None
+        self._watchers: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = []
 
     def bind(self, loop: asyncio.AbstractEventLoop) -> None:
         """The loop the server runs on; a throttled event's trailing send is timed on it."""
@@ -276,9 +282,31 @@ class EventHub:
                 return
             self._append(SERVER, STOPPING, {"reason": reason})
             self._stopped = True
+            self._reason = reason
             subscribers, self._subscribers = self._subscribers, []
+            watchers, self._watchers = self._watchers, []
         for subscriber in subscribers:
             subscriber.wake()
+        for loop, waiter in watchers:
+            _wake(loop, waiter)
+
+    @property
+    def stop_reason(self) -> str | None:
+        return self._reason
+
+    def watch_stop(self, waiter: asyncio.Event) -> bool:
+        """Have `stop` set `waiter`, for a stream that is not a subscriber (a job's, a
+        task's, the queue's, a narration session's), so it too ends when the server
+        stops. False when the hub has stopped already: end now."""
+        with self._lock:
+            if self._stopped:
+                return False
+            self._watchers.append((asyncio.get_running_loop(), waiter))
+            return True
+
+    def unwatch_stop(self, waiter: asyncio.Event) -> None:
+        with self._lock:
+            self._watchers = [pair for pair in self._watchers if pair[1] is not waiter]
 
 
 __all__ = [

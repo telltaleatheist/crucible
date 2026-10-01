@@ -132,6 +132,11 @@ as `activity.settings.writes` lists them. Read `GET /v1/settings` for the new va
 ends after it. Reconnect with backoff; a new stream is refused `503 server_stopping`
 until the server is back.
 
+Every other SSE stream ends the same way: a job's (`/v1/jobs/{id}/events`), a task's,
+the queue's (`/v1/queue/events`) and a narration session's each end with one
+`server.stopping {reason}` frame. That frame has no `id`, so the stream's Last-Event-ID
+stays on its last real event and a reconnect after the restart resumes from there.
+
 ## Resuming
 
 Browsers' `EventSource` sends `Last-Event-ID` by itself when it reconnects; any other

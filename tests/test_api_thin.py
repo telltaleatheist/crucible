@@ -13,13 +13,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from crucible import uploads, voicerepo
 from crucible import decide as decide_core
+from crucible import uploads, voicerepo
 from crucible.admission import AdmissionContext, AdmittedJob, JobRequest, Refusal, admit
 from crucible.api import context as context_module
 from crucible.api import sse
 from crucible.api.schemas import JobInput
 from crucible.errors import ApiError
+from crucible.events import EventHub
 from crucible.jobs import disabled_error
 
 API_DIR = Path(__file__).resolve().parent.parent / "crucible" / "api"
@@ -305,8 +306,10 @@ def test_one_events_after_loop_serves_a_job_and_ends_at_its_terminal_event() -> 
         close=lambda: closed.append(True),
     )
 
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(events=EventHub())))
+
     async def collect() -> list[str]:
-        return [frame async for frame in sse.events_after(None, lambda: feed, 0)]
+        return [frame async for frame in sse.events_after(request, lambda: feed, 0)]
 
     frames = asyncio.run(collect())
     assert frames == [sse.format_event(events[0]), sse.format_event(events[1])]

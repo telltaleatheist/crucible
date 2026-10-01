@@ -37,11 +37,11 @@ class Reader:
     """GET /v1/events read on a thread, the way an app holds it open."""
 
     def __init__(self, base: str, auth: dict[str, str], query: str = "",
-                 last_event_id: int | None = None) -> None:
+                 last_event_id: int | None = None, path: str = "/v1/events") -> None:
         headers = dict(auth)
         if last_event_id is not None:
             headers["Last-Event-ID"] = str(last_event_id)
-        self._url = f"{base}/v1/events{query}"
+        self._url = f"{base}{path}{query}"
         self._headers = headers
         self.events: list[dict[str, Any]] = []
         self.status: int | None = None
@@ -394,6 +394,48 @@ def test_features_are_listed_in_info(client: TestClient, auth: dict[str, str]) -
 
 
 # --- the wire, through a live server ------------------------------------------------------
+
+
+def test_open_job_and_queue_streams_do_not_hold_the_server_s_stop(
+    make_app: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    app = make_app()
+    hub: EventHub = app.state.events
+    with serve(app) as base:
+        answer = httpx.post(f"{base}/v1/jobs", headers=auth, json=body(delay_ms=60_000))
+        assert answer.status_code == 202, answer.text
+        job_id = answer.json()["job_id"]
+        job_stream = Reader(base, auth, path=f"/v1/jobs/{job_id}/events")
+        queue_stream = Reader(base, auth, path="/v1/queue/events")
+        job_stream.wait_for(lambda seen: "progress" in [e["event"] for e in seen],
+                            "the job running")
+        queue_stream.wait_for(lambda seen: bool(seen), "the queue snapshot")
+        stopped_at = time.monotonic()
+    assert time.monotonic() - stopped_at < 15.0, "the stop waited out a stream"
+    for stream in (job_stream, queue_stream):
+        assert stream.ended.wait(SEEN_TIMEOUT), "a stream held the server's stop open"
+        last = stream.seen()[-1]
+        assert last["event"] == "server.stopping"
+        assert "id" not in last, "the stopping frame leaves Last-Event-ID where it was"
+        assert last["data"]["reason"] == "the server was asked to stop"
+    assert hub.stopped
+
+
+def test_a_stream_opened_after_the_stop_ends_at_once() -> None:
+    async def run() -> None:
+        hub = EventHub()
+        hub.stop("a test stopped it")
+        waiter = asyncio.Event()
+        assert hub.watch_stop(waiter) is False
+
+        fresh = EventHub()
+        watched = asyncio.Event()
+        assert fresh.watch_stop(watched) is True
+        fresh.stop("a test stopped it")
+        assert watched.is_set()
+        fresh.unwatch_stop(watched)
+
+    asyncio.run(run())
 
 
 def test_the_cli_follows_the_stream_until_the_server_stops(

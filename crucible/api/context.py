@@ -56,6 +56,11 @@ class Services:
             setattr(app.state, one.name, getattr(self, one.name))
 
 
+def hub_of(app: FastAPI) -> EventHub:
+    """The event hub, for the stream helpers that hold only the request's app."""
+    return app.state.events
+
+
 @dataclass(frozen=True)
 class AppContext:
     app: FastAPI

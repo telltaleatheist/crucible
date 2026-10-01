@@ -5,7 +5,9 @@ uvicorn waits for every open response to finish before it runs the app's shutdow
 an SSE stream never finishes by itself: an app holding GET /v1/events open would hold
 the server's stop open with it until someone pressed Ctrl+C twice. So the moment uvicorn
 is asked to exit — a signal, the controller pipe closing, a test setting `should_exit` —
-the hub says `server.stopping` and ends every stream, and the shutdown goes on.
+the hub says `server.stopping` and ends every stream, and the shutdown goes on. That is
+every SSE stream, not only GET /v1/events: each runs in `sse.events_after`, which
+watches the hub's stop and ends with a `server.stopping` frame.
 """
 
 from __future__ import annotations
