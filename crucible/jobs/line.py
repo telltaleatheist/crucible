@@ -43,6 +43,7 @@ UNNAMED = "an unnamed client"
 
 CALL_PREFIX = "call-"
 ADMITTED = "admitted"
+LEASE = "lease"
 
 
 def limits() -> dict[str, Any]:
@@ -67,6 +68,7 @@ class Call:
     client: str | None
     act: str | None = None
     client_ref: str | None = None
+    ttl_seconds: int | None = None
     id: str = field(default_factory=lambda: CALL_PREFIX + uuid.uuid4().hex)
     status: str = "queued"
 
@@ -109,7 +111,9 @@ class Waiting:
             "max_wait_s": self.max_wait_s,
             "expires_at": self.expires_at.isoformat(),
             "lease_holder": holder is not None and job.client == holder,
-            "kind": "call" if self.is_call else "job",
+            "kind": (
+                ("lease" if job.type == LEASE else "call") if self.is_call else "job"
+            ),
         }
 
 

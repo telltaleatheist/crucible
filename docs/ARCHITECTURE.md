@@ -281,6 +281,13 @@ the caller asked to wait. Two rules keep calls and jobs from hurting each other:
 job that changes what is on the card waits while chats are in flight, and the settlement
 counts a call waiting for the resident model as holding it. Unqueued chats are unchanged.
 
+**Leases, 2026-09-30.** Owen: *"we should definitely make leases cooperate with the queue."*
+`POST /v1/models/{id}/lease` with `"queue"` waits as a call of type `lease`: granted at the
+front when its subject is resident and unleased, or loaded with the lease (load-model with
+`params.lease`) when the subject is a model that is not resident. A lease waiting for the
+resident model holds it against the settlement, so a lease that ends hands the model to the
+next lease in line instead of unloading it.
+
 ---
 
 ## 4. Where each thing lives

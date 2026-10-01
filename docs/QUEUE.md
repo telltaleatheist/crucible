@@ -92,7 +92,7 @@ its plain submits are not held behind the queue. Everyone else is first come, fi
 
 - `GET /v1/queue`: `{items: [{position, job_id, type, model, client, client_ref, submitted,
   waited_s, max_wait_s, expires_at, lease_holder, kind}], depth, limits}`. `kind` is
-  `"job"` or `"call"` (a queued chat or decision, below).
+  `"job"`, `"call"` (a queued chat or decision) or `"lease"` (a queued lease), below.
 - `DELETE /v1/queue/{job_id}`: remove one (reason `operator`).
 - `GET /v1/queue/events`: server-wide SSE for dashboards. A `snapshot {items, depth}`
   first, then `added`, `moved {position}`, `started {waited_s}` and `removed {reason}` with
@@ -148,6 +148,30 @@ resident model, the server does not unload that model between completions.
 Unqueued chats are unchanged: they still go straight to a resident model with a free slot
 even while something waits in the line.
 
+## Leases can wait too
+
+`POST /v1/models/{id}/lease` takes the same member: `{"act": …, "ttl_seconds": …, "queue":
+{}}`. Without it a lease is refused as before (`409 not_resident`, `leased`, `server_busy`).
+With it the request is held open like a queued chat and answers `201` with the lease receipt
+when its turn comes:
+
+- **Free now:** the subject is resident, nobody else holds a lease and nothing waits, so it
+  is granted at once.
+- **Another client's lease holds the card:** it waits in the line (`kind: "lease"` in
+  `GET /v1/queue`), and items behind it that lease does not refuse may go past. While it
+  waits for the resident model, the server will not unload that model, so when the other
+  lease ends the model is still there and the lease is granted on it.
+- **The model is not resident:** at the front, when the lane is free and no chat is in flight,
+  the server loads it with an ordinary `load-model` job carrying `params.lease`, so the lease
+  is opened with the load and nothing can come between them. Only models are loaded this way;
+  a voice or an aligner that is not resident ends the request `409 not_resident`.
+- **A busy lane** (another client's job running): it waits its turn.
+
+It leaves the line exactly like a queued chat: `409 removed_from_queue` with
+`details.reason` (`operator`, `expired`, `server_restart`), or the caller closing the
+connection (reason `client`; a lease granted at that same moment is released). Once granted,
+the holder's own queued jobs, chats and decisions go ahead of the line as before.
+
 ## In the SDK
 
 ```ts
@@ -160,7 +184,7 @@ for await (const event of crucible.events(id)) {
 ```
 
 - The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video`,
-  every load and unload, and `chat`, `chatStream`, `decide` and `decideItems`) queue by
+  every load and unload, `chat`, `chatStream`, `decide`, `decideItems` and `lease`) queue by
   default. `new CrucibleClient({..., queue: false})`
   turns that off; `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins.
 - `submit()` queues only when its request says `queue: true` or `queue: {maxWaitS}`.

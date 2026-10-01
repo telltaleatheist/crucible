@@ -133,7 +133,7 @@ class QueueItem(_Open):
     max_wait_s: int
     expires_at: str
     lease_holder: bool
-    kind: Literal["job", "call"]
+    kind: Literal["job", "call", "lease"]
 
 
 class QueueList(_Open):

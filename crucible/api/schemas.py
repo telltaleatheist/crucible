@@ -149,6 +149,13 @@ class LeaseOpen(BaseModel):
 
     act: str = Field(min_length=1)
     ttl_seconds: int
+    queue: QueueRequest | None = Field(
+        default=None,
+        description="Wait in the server's queue for the lease instead of being refused "
+        "while the card is busy, leased by another client, or holding something else. At "
+        "the front of the line the lease is granted, loading the model with it when it is "
+        "not resident (models only). Without it, refused as before.",
+    )
 
 
 class StreamOp(BaseModel):
