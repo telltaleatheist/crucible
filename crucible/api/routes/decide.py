@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
 from typing import Any
 
 import httpx
@@ -146,6 +148,22 @@ def _refuse_a_malformed_decision(body: DecideRequest, backend_kind: str) -> None
         decide_core.plan_all(body)
 
 
+def _log_timing(
+    body: DecideRequest, client: str | None, arrived: float, started: float
+) -> None:
+    finished = time.monotonic()
+    asked = (
+        f"{len(body.items)} item(s)" if body.items is not None
+        else f"{len(body.questions or {})} question(s)"
+    )
+    print(
+        f"crucible: decide on {body.model!r} for {client or 'an unnamed client'}: "
+        f"{asked}, waited {(started - arrived) * 1000:.0f} ms, "
+        f"answered in {(finished - started) * 1000:.0f} ms",
+        file=sys.stderr,
+    )
+
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
     backend, residency = ctx.backend, ctx.residency
@@ -160,6 +178,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         next-token logprobs; with `items`, one choice answer per item in one request.
         Every refusal a caller can cause is made before anything is decided.
         """
+        arrived = time.monotonic()
         act = read_act(request.headers)
         _refuse_an_upstream(body.model)
         inflight = ctx.inflight
@@ -232,11 +251,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 await chat_over()
             raise
         try:
+            started = time.monotonic()
             answered = await unless_the_caller_leaves(work, request)
             if answered is None:
                 response: Response = caller_gone(resident)
             else:
                 response = JSONResponse(content=answered.model_dump(mode="json"))
+                _log_timing(body, client_agent(request), arrived, started)
             inflight.close(entry)
             response.background = BackgroundTask(chat_over)
             return response
