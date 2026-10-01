@@ -93,7 +93,6 @@ A song:
 | `negative_prompt` | nobody yet | | refused by name: the post-trained Stable Audio checkpoints ignore it (only Stability's `-base` checkpoints read it) and YuE2 has none |
 | `seed` | all | chosen and reported | 0 to 4294967295; the same seed and params on the same model and machine give the same sound |
 | `format` | all | `flac` | `flac` (24-bit) or `wav` (24-bit PCM) |
-| `lease` | all | none | `{"act": "<the model's class>", "ttl_seconds": 30..3600}`: `sfx`, `music` or `song`. Any other act is `lease_act_mismatch` |
 
 Unknown params are refused, never ignored. A param the named model does not take is refused
 `audio_param_unsupported` with the reason and the list of what it does take; a missing one is
@@ -121,8 +120,7 @@ effective parameter, so a sound can be made again:
            "stage_peak_bytes": {"scoring": 9000000000, "composing": 12000000000, "synthesizing": 11000000000, "decoding": 3000000000},
            "memory_bytes_estimate": 16000000000, "memory_basis": "declared",
            "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"}},
- "resident": "yue2-3b",
- "lease_id": null}
+ "resident": "yue2-3b"}
 ```
 
 (The numbers above show the shape; no audio model has been measured through Crucible yet.)
@@ -130,23 +128,22 @@ effective parameter, so a sound can be made again:
 reports stages `encoding`, `denoising` (one progress event per step), `decoding`, `saving`;
 YuE2 reports `scoring` and `composing` (every 64 tokens), `synthesizing`, `decoding`, `saving`.
 Every progress event carries `fraction`. `DELETE /v1/jobs/{id}` stops the job between two
-steps or tokens; the model stays loaded if a lease holds it.
+steps or tokens; the model stays loaded if a queue session holds it.
 
 ## Many sounds in a row
 
 The model comes off the card when the job that loaded it ends, unless something holds it. For a
-batch, send `lease` on the first job (or warm up first with `load-audio`):
+batch, open a queue session first (`POST /v1/queue/sessions` with `{"act": "sfx"}`; see
+[QUEUE.md](QUEUE.md)), optionally warm up with `load-audio`:
 
 ```json
-{"type": "load-audio", "model": "stable-audio-3-small-sfx",
- "params": {"lease": {"act": "sfx", "ttl_seconds": 300}}}
+{"type": "load-audio", "model": "stable-audio-3-small-sfx"}
 ```
 
-Then send the batch as ordinary `audio` jobs (sending the same `lease` again renews it and
-returns the same `lease_id`), heartbeat `POST /v1/leases/{lease_id}/heartbeat` within each
-`ttl_seconds`, and `DELETE /v1/leases/{lease_id}` at the end. `unload-audio` takes the model off
-at once when nothing holds it. The `image` job's page, [IMAGE.md](IMAGE.md), walks through the
-same lease flow in more detail.
+then send the batch as ordinary `audio` jobs and `DELETE /v1/queue/sessions/{id}` at the end;
+the session keeps the model loaded between them and nothing from another app comes in between.
+`unload-audio` takes the model off at once when nothing holds it. The `image` job's page,
+[IMAGE.md](IMAGE.md), walks through the same flow in more detail.
 
 ## Writing a prompt
 

@@ -174,7 +174,9 @@ cmd_resumable_discard = cmd_emit("DELETE", "/v1/resumable/{resume_id}")
 cmd_task_get = cmd_emit("GET", "/v1/tasks/{task_id}")
 cmd_task_cancel = cmd_emit("DELETE", "/v1/tasks/{task_id}")
 cmd_stream_close = cmd_emit("DELETE", "/v1/tts/stream/{session_id}")
-cmd_lease_heartbeat = cmd_emit("POST", "/v1/leases/{lease_id}/heartbeat")
+cmd_session_get = cmd_emit("GET", "/v1/queue/sessions/{session_id}")
+cmd_session_touch = cmd_emit("POST", "/v1/queue/sessions/{session_id}/touch")
+cmd_session_close = cmd_emit("DELETE", "/v1/queue/sessions/{session_id}")
 cmd_queue_remove = cmd_emit("DELETE", "/v1/queue/{job_id}")
 cmd_queue_heartbeat = cmd_emit("POST", "/v1/queue/{job_id}/heartbeat")
 
@@ -666,22 +668,29 @@ def cmd_stream_events(connection: Connection, args: argparse.Namespace) -> int:
     return heard.exit_code
 
 
-def cmd_lease_open(connection: Connection, args: argparse.Namespace) -> int:
-    emit(call(connection, "POST", f"/v1/models/{args.subject_id}/lease", json_body={
-        "act": args.act, "ttl_seconds": args.ttl,
-    }))
+def cmd_session_open(connection: Connection, args: argparse.Namespace) -> int:
+    body: dict[str, Any] = {"act": args.act}
+    for key in ("model", "idle_s", "max_wait_s"):
+        value = getattr(args, key)
+        if value is not None:
+            body[key] = value
+    emit(call(connection, "POST", "/v1/queue/sessions", json_body=body))
+    return EXIT_OK
+
+
+def cmd_session_events(connection: Connection, args: argparse.Namespace) -> int:
+    with contextlib.suppress(KeyboardInterrupt):
+        for event in follow(
+            connection, f"/v1/queue/sessions/{args.session_id}/events",
+            last_event_id=args.since,
+        ):
+            emit_line(event)
     return EXIT_OK
 
 
 def cmd_job_release(connection: Connection, args: argparse.Namespace) -> int:
     call(connection, "DELETE", f"/v1/jobs/{args.job_id}/hold")
     emit({"released": args.job_id})
-    return EXIT_OK
-
-
-def cmd_lease_release(connection: Connection, args: argparse.Namespace) -> int:
-    call(connection, "DELETE", f"/v1/leases/{args.lease_id}")
-    emit({"released": args.lease_id})
     return EXIT_OK
 
 
@@ -931,14 +940,28 @@ STREAM_VERBS = (
     Verb("close", "DELETE /v1/tts/stream/{id}", cmd_stream_close, (arg("session_id"),)),
 )
 
-LEASE_VERBS = (
-    Verb("open", "POST /v1/models/{id}/lease", cmd_lease_open, (
-        arg("subject_id", help="the resident model, voice or aligner"),
+SESSION_VERBS = (
+    Verb("open", "POST /v1/queue/sessions — ask for the server for a run", cmd_session_open, (
         arg("--act", required=True, help="the capability class this run is"),
-        arg("--ttl", type=int, required=True, metavar="SECONDS"),
+        arg("--model", default=None, help="a model to have resident when it opens"),
+        arg(
+            "--idle", dest="idle_s", type=int, default=None, metavar="SECONDS",
+            help="close it after this long with nothing in flight and no item or touch",
+        ),
+        arg(
+            "--max-wait", dest="max_wait_s", type=int, default=None, metavar="SECONDS",
+            help="how long it may wait in the line to open",
+        ),
     )),
-    Verb("heartbeat", "push the deadline out", cmd_lease_heartbeat, (arg("lease_id"),)),
-    Verb("release", "give the card back", cmd_lease_release, (arg("lease_id"),)),
+    Verb("get", "GET /v1/queue/sessions/{id}", cmd_session_get, (arg("session_id"),)),
+    Verb(
+        "events", "follow the session's SSE stream; Ctrl-C ends it", cmd_session_events,
+        (arg("session_id"), SINCE),
+    ),
+    Verb("touch", "still here, for a long gap with nothing in flight", cmd_session_touch,
+         (arg("session_id"),)),
+    Verb("close", "DELETE /v1/queue/sessions/{id} — end it; the card is settled",
+         cmd_session_close, (arg("session_id"),)),
 )
 
 DECIDE_ARGS = (
@@ -1097,7 +1120,10 @@ API_VERBS = (
     ),
     Verb("task", "work done TO the server: pulls, installs, engine restarts", verbs=TASK_VERBS),
     Verb("stream", "serialized tts: one session, one row at a time", verbs=STREAM_VERBS),
-    Verb("lease", "say you are mid-run on what is resident", verbs=LEASE_VERBS),
+    Verb(
+        "session", "a queue session: the server held for one client's run",
+        verbs=SESSION_VERBS,
+    ),
 )
 
 API_DESCRIPTION = (

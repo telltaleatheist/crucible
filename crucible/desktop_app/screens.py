@@ -457,24 +457,48 @@ def task_lines(tasks: Any) -> tuple[TaskLine, ...]:
 
 
 @dataclass(frozen=True)
+class SessionLine:
+    """The open queue session: one app holding Crucible for a run. Not a TTS stream."""
+
+    session_id: str
+    title: str
+    detail: str
+
+
+def session_line(activity: Any) -> SessionLine | None:
+    session = activity.get("session") if isinstance(activity, Mapping) else None
+    if not isinstance(session, Mapping) or not session.get("session_id"):
+        return None
+    client = session.get("client") or "An app"
+    items = session.get("items_run") or 0
+    busy = len(session.get("in_flight") or [])
+    parts = [f"{items} request{'s' if items != 1 else ''} so far"]
+    parts.append(f"{busy} in progress" if busy else "nothing in progress")
+    stream = session.get("stream_session")
+    if isinstance(stream, Mapping):
+        parts.append(f"streaming narration in {stream.get('voice')}")
+    return SessionLine(
+        session_id=str(session["session_id"]),
+        title=f"{client} has Crucible to itself for {session.get('act')}",
+        detail="; ".join(parts) + ". Other apps wait until it ends.",
+    )
+
+
+@dataclass(frozen=True)
 class ActivityView:
     work: tuple[Progress, ...]
     loaded: Fact
-    lease: str
+    session: SessionLine | None
     tasks: tuple[TaskLine, ...]
     queue: tuple[QueueLine, ...] = ()
 
 
 def activity_view(activity: Any, tasks: Any, watch: Progress | None) -> ActivityView:
-    lease = (activity or {}).get("lease") if isinstance(activity, Mapping) else None
-    lease_text = ""
-    if lease:
-        lease_text = f"{lease.get('client') or 'An app'} is keeping {lease.get('kind')} loaded for {lease.get('act')}"
     work = activity_work(activity if isinstance(activity, Mapping) else None)
     return ActivityView(
         work=((watch,) if watch is not None else ()) + work,
         loaded=resident_fact(activity if isinstance(activity, Mapping) else None),
-        lease=lease_text, tasks=task_lines(tasks), queue=queue_lines(activity),
+        session=session_line(activity), tasks=task_lines(tasks), queue=queue_lines(activity),
     )
 
 

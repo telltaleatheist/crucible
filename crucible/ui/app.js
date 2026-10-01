@@ -615,12 +615,18 @@
         rows.push(['a job', text]);
       }
     }
-    if (activity.lease) {
-      var lease = activity.lease;
-      var line = 'held by ' + lease.client + ' — ' + lease.act;
-      line += ', the resident ' + lease.kind;
-      line += ', until ' + clockText(lease.expires_at);
-      rows.push(['a lease', line]);
+    if (activity.session) {
+      var held = activity.session;
+      var line = 'held by ' + (held.client || 'an unnamed client') + ' — ' + held.act;
+      line += ', open since ' + clockText(held.opened_at);
+      line += ', ' + held.items_run + ' request(s) run, ' + held.in_flight.length + ' in flight';
+      if (held.stream_session) {
+        line += ', streaming narration in ' + held.stream_session.voice;
+      }
+      if (held.idle_deadline) {
+        line += ', idle at ' + clockText(held.idle_deadline);
+      }
+      rows.push(['a queue session', line]);
     }
     if (activity.claim) {
       rows.push(['the claim', 'held by ' + activity.claim.held_by]);

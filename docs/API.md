@@ -207,33 +207,13 @@ Every model this build has a manifest for, and where it stands here.
 
 *Answers:* `200`
 
-### `POST /v1/models/{subject_id}/lease`
-
-Hold whatever is resident (model, voice or aligner) on the card for a run; jobs that would move it are refused `409 leased`. Without `queue` a lease never loads anything; with it, the request waits in the server's queue and a model that is not resident is loaded with the lease when its turn comes.
-
-*Door:* token + `X-Crucible-Api: 1`
-
-| parameter | in | required | type | what it is |
-| --- | --- | --- | --- | --- |
-| `subject_id` | path | yes | string |  |
-
-**Body** (`application/json`)
-
-| field | type | required | default | what it is |
-| --- | --- | --- | --- | --- |
-| `act` | string | yes | — |  |
-| `ttl_seconds` | integer | yes | — |  |
-| `queue` | QueueRequest or null | no | — | Wait in the server's queue for the lease instead of being refused while the card is busy, leased by another client, or holding something else. At the front of the line the lease is granted, loading the model with it when it is not resident (models only). Without it, refused as before. |
-
-*Answers:* `201`, `422` HTTPValidationError
-
 ## Jobs
 
 The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md.
 
 ### `POST /v1/jobs`
 
-Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. With `queue` a busy lane queues the job instead: it waits with status `queued` and its events say where it stands. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh.
+Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. With `queue` a busy lane queues the job instead: it waits with status `queued` and its events say where it stands. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh. An item of the open queue session (named in the session header, or any submit from the client holding it) goes ahead of everything waiting, and waits only behind the session's own jobs.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -287,7 +267,6 @@ Get Job
 | `chunk_at` | string or null | yes | — |  |
 | `resume_id` | string or null | yes | — |  |
 | `resumed` | boolean | yes | — |  |
-| `lease_id` | string or null | no | — |  |
 | `sampling` | object or null | no | — |  |
 | `removal` | JobRemoval or null | no | — |  |
 
@@ -354,11 +333,11 @@ The chain is complete: release the hold and remove the job now.
 
 ## Queue
 
-Jobs submitted with `queue` while the lane is busy wait here, in order: list them, remove one, keep one alive, or follow every change. How an app should use it is docs/QUEUE.md.
+Jobs, calls and queue sessions submitted with `queue` while the lane is busy wait here, in order: list them, remove one, keep one alive, or follow every change. How an app should use it is docs/QUEUE.md.
 
 ### `GET /v1/queue`
 
-The jobs waiting for the lane, in the order they will be offered to it: the lease holder's first while its lease is open, then first come, first served.
+What waits for the lane, in the order it will be offered it: the open queue session's items first, then first come, first served. A queue session waiting to open is a row of kind `session`.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -382,7 +361,7 @@ Every change to the queue, for a dashboard: a `snapshot` first, then `added`, `m
 
 ### `DELETE /v1/queue/{job_id}`
 
-Take a waiting job out of the queue. It ends `removed` with reason `operator`; a job that has started is cancelled with DELETE /v1/jobs/{id}.
+Take a waiting job, call or queue session out of the queue (reason `operator`), or end the open queue session; a job that has started is cancelled with DELETE /v1/jobs/{id}.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -397,7 +376,7 @@ Take a waiting job out of the queue. It ends `removed` with reason `operator`; a
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `job_id` | string | yes | — |  |
-| `status` | `'removed'` | yes | — |  |
+| `status` | `'removed'` or `'closed'` | yes | — |  |
 | `reason` | `'operator'` | yes | — |  |
 
 ### `POST /v1/queue/{job_id}/heartbeat`
@@ -545,7 +524,7 @@ What this server is doing and how far along, in one read with no job id. A displ
 | `chat` | ActivityChat | yes | — | Chat completions in flight and the engine's admission limit. |
 | `settings` | ActivitySettings | yes | — | Recent writes through `PUT /v1/settings`. |
 | `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
-| `lease` | ActivityLease or null | yes | — |  |
+| `session` | SessionState or null | yes | — |  |
 | `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
 | `running` | array of ActivityJob | yes | — |  |
 | `queued` | array of ActivityJob | yes | — |  |
@@ -605,7 +584,7 @@ Every subject this backend can hold, installed or not.
 
 ### `DELETE /v1/catalog/{kind}/{subject_id}`
 
-Delete an installed subject's files. Refused while the subject is resident, leased or named by a running task.
+Delete an installed subject's files. Refused while the subject is resident or named by a running task.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -720,7 +699,7 @@ A long-lived session that takes text and gives audio back over SSE, instead of o
 
 ### `POST /v1/tts/stream`
 
-Open the one streaming session this server will hold at a time.
+Open the one streaming session this server will hold at a time, inside a queue session: the client's own (the session header, or the open one it holds), else one opened for the stream, which waits in the line like any session and closes with the stream. Answers once that session is open and the voice is resident (loaded in the session when it is not).
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -730,12 +709,14 @@ Open the one streaming session this server will hold at a time.
 | --- | --- | --- | --- | --- |
 | `voice` | string | yes | — |  |
 | `language` | string | yes | — |  |
+| `idle_s` | integer | no | `900` | When the client holds no queue session, the stream opens one for itself with this idle_s: no row being said, no op and no touch for this long closes the session and the stream with it. Ignored inside the client's own session. |
+| `queue` | QueueRequest or `False` | no | — | How long the stream's queue session may wait in the line to open (`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
 
 *Answers:* `201`, `422` HTTPValidationError
 
 ### `POST /v1/tts/stream/{session_id}`
 
-One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row id; the audio arrives on the stream.
+One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row id; the audio arrives on the stream. Every op is activity of the queue session the stream runs in.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -756,7 +737,7 @@ One op: `say`, `cancel`, `cancel_all` or `close`. `say` answers with the row id;
 
 ### `DELETE /v1/tts/stream/{session_id}`
 
-The same as `{"op": "close"}`, for a client that only has verbs.
+The same as `{"op": "close"}`, for a client that only has verbs. A queue session opened for the stream closes with it; one the client opened itself stays open.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -796,33 +777,132 @@ Upload
 
 *Answers:* `201`, `422` HTTPValidationError
 
-## Leases
+## Queue sessions
 
-A client saying it intends a run, so the card is not taken out from under it mid-chapter.
+One client holding the server for a run of requests it cannot know in advance: it waits in the line, opens, runs its items back to back with nothing from anyone else in between, and closes. Not a TTS stream session. docs/QUEUE.md says how an app uses one.
 
-### `DELETE /v1/leases/{lease_id}`
+### `POST /v1/queue/sessions`
 
-Release the lease; if nothing else holds the card, it is cleared before this answers.
+Ask for the server for a run of requests you cannot know in advance. It waits in the line like any queued item and answers at once with a ticket; follow `GET /v1/queue/sessions/{id}/events` for `opened`. While it is open, nothing from any other client runs.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `act` | string | yes | — | The capability class the run is for, as the act header names it. |
+| `model` | string or null | no | — | A model to have resident when the session opens; it is loaded for the session (a load-model job attributed to it) when it is not. |
+| `idle_s` | integer | no | `300` | Close the session after this long with nothing in flight, no item and no touch. A running job or an answer in flight always counts as activity. |
+| `max_wait_s` | integer | no | `3600` | How long it may wait in the line to open before it is removed `expired`. |
+
+*Answers:* `202` SessionTicket, `422` HTTPValidationError
+
+**Answer `202`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | string | yes | — |  |
+| `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
+| `position` | integer or null | yes | — |  |
+
+### `GET /v1/queue/sessions/{session_id}`
+
+Where the session stands: queued (and where), open (what it has run and has in flight, when it would go idle), or closed and why.
 
 *Door:* token + `X-Crucible-Api: 1`
 
 | parameter | in | required | type | what it is |
 | --- | --- | --- | --- | --- |
-| `lease_id` | path | yes | string |  |
+| `session_id` | path | yes | string |  |
 
-*Answers:* `204`, `422` HTTPValidationError
+*Answers:* `200` SessionState, `404` ErrorEnvelope, `422` HTTPValidationError
 
-### `POST /v1/leases/{lease_id}/heartbeat`
+**Answer `200`** (`application/json`), the body:
 
-Push the lease's deadline out by its own ttl. A 404 means the lease was released or expired and the run is no longer protected.
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | string | yes | — |  |
+| `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
+| `act` | string | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `idle_s` | integer | yes | — |  |
+| `max_wait_s` | integer | yes | — |  |
+| `created` | string | yes | — |  |
+| `opened_at` | string or null | yes | — |  |
+| `idle_deadline` | string or null | yes | — |  |
+| `max_hold_deadline` | string or null | yes | — |  |
+| `items_run` | integer | yes | — |  |
+| `in_flight` | array of object | yes | — |  |
+| `stream_session` | object or null | yes | — |  |
+| `load_job` | string or null | yes | — |  |
+| `closed_at` | string or null | yes | — |  |
+| `reason` | string or null | yes | — |  |
+| `message` | string or null | yes | — |  |
+| `error` | object or null | yes | — |  |
+
+### `DELETE /v1/queue/sessions/{session_id}`
+
+End your session (reason `client`): an open one closes and the card is settled before this answers; a queued one leaves the line. A session already closed answers as it is.
 
 *Door:* token + `X-Crucible-Api: 1`
 
 | parameter | in | required | type | what it is |
 | --- | --- | --- | --- | --- |
-| `lease_id` | path | yes | string |  |
+| `session_id` | path | yes | string |  |
 
-*Answers:* `200`, `422` HTTPValidationError
+*Answers:* `200` SessionState, `404` ErrorEnvelope, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | string | yes | — |  |
+| `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
+| `act` | string | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `idle_s` | integer | yes | — |  |
+| `max_wait_s` | integer | yes | — |  |
+| `created` | string | yes | — |  |
+| `opened_at` | string or null | yes | — |  |
+| `idle_deadline` | string or null | yes | — |  |
+| `max_hold_deadline` | string or null | yes | — |  |
+| `items_run` | integer | yes | — |  |
+| `in_flight` | array of object | yes | — |  |
+| `stream_session` | object or null | yes | — |  |
+| `load_job` | string or null | yes | — |  |
+| `closed_at` | string or null | yes | — |  |
+| `reason` | string or null | yes | — |  |
+| `message` | string or null | yes | — |  |
+| `error` | object or null | yes | — |  |
+
+### `GET /v1/queue/sessions/{session_id}/events`
+
+The session's own stream: `queued {position, of}` and `moved`, then `opened`, then `closed {reason}`; `removed {reason}` in place of `closed` when it never opened.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | path | yes | string |  |
+
+*Answers:* `200`, `404` ErrorEnvelope, `422` HTTPValidationError
+
+### `POST /v1/queue/sessions/{session_id}/touch`
+
+"Still here", for a long gap on the client's side with nothing in flight. Cheap: a timestamp in memory.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | path | yes | string |  |
+
+*Answers:* `200`, `404` ErrorEnvelope, `422` HTTPValidationError
 
 ## OpenAI-compatible
 
@@ -940,6 +1020,7 @@ One answer distribution per question, read off the resident model's next-token l
 | `queue.calls` | `queue` on a chat or a decision: the request is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
 | `queue.events` | GET /v1/queue/events: the waiting line's own SSE stream. |
 | `queue.jobs` | `queue` on POST /v1/jobs: a busy server queues the job instead of refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md). |
+| `queue.sessions` | /v1/queue/sessions: an app's session holds the machine for a run of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md). |
 | `rvc` | The `rvc` job: voice conversion. |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
 | `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
@@ -969,7 +1050,7 @@ Every request and answer schema the routes above refer to, for a reader followin
 | `chat` | ActivityChat | yes | — | Chat completions in flight and the engine's admission limit. |
 | `settings` | ActivitySettings | yes | — | Recent writes through `PUT /v1/settings`. |
 | `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
-| `lease` | ActivityLease or null | yes | — |  |
+| `session` | SessionState or null | yes | — |  |
 | `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
 | `running` | array of ActivityJob | yes | — |  |
 | `queued` | array of ActivityJob | yes | — |  |
@@ -1034,19 +1115,6 @@ A running or queued job, as `GET /v1/activity` shows it.
 | `client` | string or null | yes | — |  |
 | `waited_s` | integer or number or null | no | — |  |
 | `max_wait_s` | integer or null | no | — |  |
-
-### `ActivityLease`
-
-The open lease.
-
-| field | type | required | default | what it is |
-| --- | --- | --- | --- | --- |
-| `lease_id` | string | yes | — |  |
-| `kind` | string | yes | — |  |
-| `client` | string or null | yes | — |  |
-| `act` | string | yes | — |  |
-| `since` | string | yes | — |  |
-| `expires_at` | string | yes | — |  |
 
 ### `ActivityResident`
 
@@ -1351,7 +1419,7 @@ Why a job left the queue without running: `removed` is not `failed`.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `reason` | `'operator'` or `'client'` or `'expired'` or `'server_restart'` | yes | — |  |
+| `reason` | `'operator'` or `'client'` or `'expired'` or `'server_restart'` or `'session_closed'` | yes | — |  |
 | `message` | string | yes | — |  |
 | `waited_s` | integer or number or null | yes | — |  |
 | `at` | string | yes | — |  |
@@ -1382,19 +1450,8 @@ Why a job left the queue without running: `removed` is not `failed`.
 | `chunk_at` | string or null | yes | — |  |
 | `resume_id` | string or null | yes | — |  |
 | `resumed` | boolean | yes | — |  |
-| `lease_id` | string or null | no | — |  |
 | `sampling` | object or null | no | — |  |
 | `removal` | JobRemoval or null | no | — |  |
-
-### `LeaseOpen`
-
-`POST /v1/models/{id}/lease`: the act the lease is for and how long it lasts; neither has a default.
-
-| field | type | required | default | what it is |
-| --- | --- | --- | --- | --- |
-| `act` | string | yes | — |  |
-| `ttl_seconds` | integer | yes | — |  |
-| `queue` | QueueRequest or null | no | — | Wait in the server's queue for the lease instead of being refused while the card is busy, leased by another client, or holding something else. At the front of the line the lease is granted, loading the model with it when it is not resident (models only). Without it, refused as before. |
 
 ### `ModelProvenance`
 
@@ -1440,8 +1497,8 @@ One job waiting in the server's queue.
 | `waited_s` | integer or number | yes | — |  |
 | `max_wait_s` | integer | yes | — |  |
 | `expires_at` | string | yes | — |  |
-| `lease_holder` | boolean | yes | — |  |
-| `kind` | `'job'` or `'call'` or `'lease'` | yes | — |  |
+| `session` | string or null | yes | — |  |
+| `kind` | `'job'` or `'call'` or `'session'` | yes | — |  |
 
 ### `QueueList`
 
@@ -1460,7 +1517,7 @@ One job waiting in the server's queue.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `job_id` | string | yes | — |  |
-| `status` | `'removed'` | yes | — |  |
+| `status` | `'removed'` or `'closed'` | yes | — |  |
 | `reason` | `'operator'` | yes | — |  |
 
 ### `QueueRequest`
@@ -1512,7 +1569,7 @@ A `409 server_busy` refusal; `details.door` says which door refused.
 | --- | --- | --- | --- | --- |
 | `code` | `'server_busy'` | yes | — |  |
 | `message` | string | yes | — |  |
-| `details` | JobBusyDetails or CardHeldDetails | yes | — |  |
+| `details` | JobBusyDetails or CardHeldDetails or SessionBusyDetails | yes | — |  |
 
 ### `ServiceCommand`
 
@@ -1522,6 +1579,69 @@ A command, typed on the server itself, that runs it as a machine service.
 | --- | --- | --- | --- | --- |
 | `command` | string | yes | — |  |
 | `does` | string | yes | — |  |
+
+### `SessionBusyDetails`
+
+`server_busy` (or `session_open`) because a queue session holds the server: nothing but its own items runs until it closes.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `door` | `'session'` | yes | — |  |
+| `holder` | string or null | yes | — |  |
+| `session_id` | string | yes | — |  |
+| `type` | `'session'` | yes | — |  |
+| `act` | string | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `status` | string | yes | — |  |
+| `since` | string | yes | — |  |
+
+### `SessionOpen`
+
+`POST /v1/queue/sessions`: ask for the server for a run of requests. `act` has no default.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `act` | string | yes | — | The capability class the run is for, as the act header names it. |
+| `model` | string or null | no | — | A model to have resident when the session opens; it is loaded for the session (a load-model job attributed to it) when it is not. |
+| `idle_s` | integer | no | `300` | Close the session after this long with nothing in flight, no item and no touch. A running job or an answer in flight always counts as activity. |
+| `max_wait_s` | integer | no | `3600` | How long it may wait in the line to open before it is removed `expired`. |
+
+### `SessionState`
+
+A queue session: one client's claim on the server for a run of requests. Not a TTS stream session.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | string | yes | — |  |
+| `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
+| `act` | string | yes | — |  |
+| `client` | string or null | yes | — |  |
+| `model` | string or null | yes | — |  |
+| `position` | integer or null | yes | — |  |
+| `idle_s` | integer | yes | — |  |
+| `max_wait_s` | integer | yes | — |  |
+| `created` | string | yes | — |  |
+| `opened_at` | string or null | yes | — |  |
+| `idle_deadline` | string or null | yes | — |  |
+| `max_hold_deadline` | string or null | yes | — |  |
+| `items_run` | integer | yes | — |  |
+| `in_flight` | array of object | yes | — |  |
+| `stream_session` | object or null | yes | — |  |
+| `load_job` | string or null | yes | — |  |
+| `closed_at` | string or null | yes | — |  |
+| `reason` | string or null | yes | — |  |
+| `message` | string or null | yes | — |  |
+| `error` | object or null | yes | — |  |
+
+### `SessionTicket`
+
+`POST /v1/queue/sessions`: the session asked for, and where it stands.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `session_id` | string | yes | — |  |
+| `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
+| `position` | integer or null | yes | — |  |
 
 ### `StartPairing`
 
@@ -1548,6 +1668,8 @@ A command, typed on the server itself, that runs it as a machine service.
 | --- | --- | --- | --- | --- |
 | `voice` | string | yes | — |  |
 | `language` | string | yes | — |  |
+| `idle_s` | integer | no | `900` | When the client holds no queue session, the stream opens one for itself with this idle_s: no row being said, no op and no touch for this long closes the session and the stream with it. Ignored inside the client's own session. |
+| `queue` | QueueRequest or `False` | no | — | How long the stream's queue session may wait in the line to open (`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
 
 ### `TaskCreate`
 

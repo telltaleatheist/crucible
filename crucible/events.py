@@ -40,7 +40,8 @@ CHAT = "chat"
 TASK = "task"
 SETTINGS = "settings"
 SERVER = "server"
-TOPICS: tuple[str, ...] = (JOB, QUEUE, CARD, CHAT, TASK, SETTINGS, SERVER)
+SESSION = "session"
+TOPICS: tuple[str, ...] = (JOB, QUEUE, SESSION, CARD, CHAT, TASK, SETTINGS, SERVER)
 ALWAYS = frozenset({SERVER})
 
 SNAPSHOT = "snapshot"

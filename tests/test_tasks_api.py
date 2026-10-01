@@ -582,27 +582,24 @@ def test_an_install_is_refused_while_any_of_the_four_facts_holds_the_card(
         assert body["details"]["in_flight"] == 1
 
 
-def test_a_lease_refusal_carries_the_lease_s_own_fields(
+def test_a_session_refusal_carries_the_session_s_own_fields(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
     with make_client(enable_echo=True) as client:
-        client.app.state.leases.open(
-            kind="llm",
-            subject="qwen3.8-27b-4bit",
-            act="translate",
-            client="foundry/owens-pc",
-            ttl_seconds=600,
+        opened = client.post(
+            "/v1/queue/sessions",
+            headers={**auth, "X-Crucible-Client": "foundry/owens-pc"},
+            json={"act": "translate"},
         )
+        assert opened.status_code == 202, opened.text
         response = post(client, auth, {"type": "install", "job_type": "llm"})
     assert response.status_code == 409
     details = response.json()["error"]["details"]
     assert details["door"] == "operator"
-    assert details["fact"] == "a lease"
-    assert details["client"] == "foundry/owens-pc"
+    assert details["fact"] == "a session"
+    assert details["holder"] == "foundry/owens-pc"
     assert details["act"] == "translate"
-    assert details["subject"] == "qwen3.8-27b-4bit"
-    assert details["kind"] == "llm"
-    assert "expires_at" in details and "lease_id" in details
+    assert details["session_id"] == opened.json()["session_id"]
 
 
 def test_the_install_command_is_named_when_there_is_none(
@@ -655,16 +652,15 @@ def test_the_swap_refuses_while_a_job_is_on_the_lane(
             parse_sse(line for line in stream.iter_lines())
 
 
-def test_the_swap_refuses_while_a_lease_is_open(
-    make_client: Callable[..., TestClient],
+def test_the_swap_refuses_while_a_session_is_open(
+    make_client: Callable[..., TestClient], auth: dict[str, str]
 ) -> None:
     with make_client(enable_echo=True) as client:
-        client.app.state.leases.open(
-            kind="llm", subject="m", act="clean", client=None, ttl_seconds=60
-        )
+        opened = client.post("/v1/queue/sessions", headers=auth, json={"act": "clean"})
+        assert opened.status_code == 202, opened.text
         with pytest.raises(ReloadRefused) as caught:
             reload_of(client)()
-        assert caught.value.held.fact == "a lease"
+        assert caught.value.held.fact == "a session"
 
 
 def test_the_swap_refuses_while_a_stream_claims_the_card(

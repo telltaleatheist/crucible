@@ -86,6 +86,7 @@ default. Values of the wrong type are refused, not coerced; for example,
 | `[auth] open_pairing` | true | Owen 2026-09-17: *"ollama allows anybody to connect if they can reach it. make that the case with crucible servers as well"* |
 | `[jobs] retention_days` | 7 | Owen 2026-09-18. This is a backstop: a job is reaped as soon as its artifacts are fetched. 0 and negative values are refused, because retention cannot be turned off. |
 | `[jobs] install_on_submit` | true | Owen 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*. `POST /v1/jobs` reads it on every request. |
+| `[queue] max_session_hold_s` | absent (no limit) | Owen 2026-10-01: some runs take a day, so a queue session stays open as long as its client keeps using it. Set it to end any session open longer than this many seconds (reason `max_hold`); 0 is no limit, a negative value is refused. Read live. `write_config` does not own `[queue]`, so a rewrite keeps it. |
 
 Always-written keys (`install_on_submit`, `retention_days`,
 `desktop_allowance_basis`) are written so an operator can find them in the file.
@@ -717,7 +718,7 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
 - `locate_installed` and `remove_subject` are the door's questions in the door's
   order (unknown kind, unknown id, not installed, held), each a `RemoveRefused` with
   the route's status and code. `remove_subject` takes a `holder` callback so the
-  server can answer "resident, leased or named by a task" and the CLI, with no
+  server can answer "resident or named by a task" and the CLI, with no
   server, can answer "nobody". The `subject_unknown` text points at
   `crucible api catalog` (there is no top-level `crucible catalog`).
 

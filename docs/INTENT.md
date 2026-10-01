@@ -66,7 +66,7 @@ older servers.
 - **Every key the server always sends is required.** A missing key is a
   `CrucibleProtocolError` naming the field. A value the server may honestly send
   as `null` is typed nullable; nothing else is.
-- **A key the server sends only in some cases** (a job's `lease_id`, a model
+- **A key the server sends only in some cases** (a job's `removal`, a model
   row's `reason`, a relayed chat's `id`/`model`/`usage`) reads as `null` when
   absent, and must still be the right type when present.
 - **A present field of the wrong type is refused.**
@@ -122,7 +122,7 @@ think to take is a step that does not exist.
 | Normal settings and setup interface | The app |
 | Downloading, verifying, storing and removing managed model files | Crucible |
 | Backend-compatible model format and runtime preparation | Crucible, satisfying the app's requested capability |
-| Loading models, inference, device admission and resource leases | Crucible |
+| Loading models, inference, device admission and queue sessions | Crucible |
 | Application work queues and choosing the next job | The app |
 | Native/WSL service lifecycle and migration | Crucible's Windows controller |
 | Provider connections and inference routes | Configured through the app; executed and managed by Crucible |

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from crucible import classnames, installonsubmit, jobenv, jobtypes, leases, settle
+from crucible import classnames, installonsubmit, jobenv, jobtypes, settle
 from crucible.cardkinds import (
     KIND_ALIGN,
     KIND_AUDIO,
@@ -82,7 +82,7 @@ def test_the_job_type_names_and_families_are_the_ones_clients_send() -> None:
 
 def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
     effect = jobtypes.CardEffect
-    assert leases.CARD_EFFECTS == {
+    assert jobtypes.CARD_EFFECTS == {
         "load-model": effect(makes_resident=KIND_LLM),
         "load-voice": effect(makes_resident=KIND_TTS),
         "tts": effect(makes_resident=KIND_TTS, reuses_what_it_names=True),
@@ -233,8 +233,8 @@ def test_build_registry_takes_up_exactly_the_families_turned_on(
     assert list(only_denoise) == ["denoise", "unload-denoiser"]
 
 
-def test_leases_import_neither_the_jobs_package_nor_residency() -> None:
-    probe = "import sys, crucible.leases; print(sorted(sys.modules))"
+def test_queue_sessions_import_neither_the_jobs_package_nor_residency() -> None:
+    probe = "import sys, crucible.queuesessions; print(sorted(sys.modules))"
     out = subprocess.run(
         [sys.executable, "-c", probe], cwd=REPO, capture_output=True, text=True, check=True
     ).stdout

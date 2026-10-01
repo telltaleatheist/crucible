@@ -15,7 +15,14 @@ from crucible.jobs import video as video_job
 from crucible.memorybudget import GIB
 from crucible.videomodels import load_video_manifest
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, stamp_env
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    close_queue_session,
+    open_queue_session,
+    parse_sse,
+    stamp_env,
+)
 
 MODEL = "ltx-2.5-distilled"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_video_worker.py"
@@ -212,11 +219,11 @@ def test_defaults_come_from_the_arm_and_audio_can_be_left_off(
     assert "audio_decoding" not in stages
 
 
-def test_the_same_prompt_twice_in_a_leased_batch_skips_the_text_stages(
+def test_the_same_prompt_twice_in_a_queue_session_skips_the_text_stages(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    params = {"prompt": PROMPT, "width": 768, "height": 512, "duration_s": 2,
-              "lease": {"act": "video", "ttl_seconds": 60}}
+    open_queue_session(ready, auth, act="video")
+    params = {"prompt": PROMPT, "width": 768, "height": 512, "duration_s": 2}
     first = run_job(ready, auth, params=params)[1][-1]["data"]["video"]
     _, events = run_job(ready, auth, params={**params, "seed": 9})
     second = events[-1]["data"]["video"]
@@ -276,38 +283,31 @@ def test_a_bad_start_image_is_refused_before_the_worker(
     assert rows(transcript, "load") == []
 
 
-def test_load_video_leases_the_model_and_the_batch_reuses_it(
+def test_load_video_in_a_queue_session_and_the_batch_reuses_it(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
-    lease = {"act": "video", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-video", "model": MODEL, "params": {"lease": lease}})
+    session_id = open_queue_session(ready, auth, act="video")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-video", "model": MODEL})
     assert loaded.status_code == 202, loaded.json()
     done = events_of(ready, auth, loaded.json()["job_id"])[-1]
     assert done["event"] == "done", done
-    lease_id = done["data"]["lease_id"]
-    assert done["data"]["resident"] == MODEL and lease_id
+    assert done["data"]["resident"] == MODEL
     for _ in range(2):
         _, events = run_job(ready, auth, params={"prompt": PROMPT, "width": 512, "height": 512,
-                                                 "num_frames": 17, "lease": lease})
-        assert events[-1]["data"]["lease_id"] == lease_id
+                                                 "num_frames": 17})
+        assert events[-1]["event"] == "done"
     assert len(rows(transcript, "load")) == 1
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "video"
-    assert ready.delete(f"/v1/leases/{lease_id}", headers=auth).status_code == 204
+    close_queue_session(ready, auth, session_id)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
-
-
-def test_a_lease_must_name_the_video_act(ready: TestClient, auth: dict[str, str]) -> None:
-    error = refusal(submit(ready, auth, params={"prompt": PROMPT, "lease": {"act": "image", "ttl_seconds": 60}}))
-    assert error["code"] == "lease_act_mismatch"
-    assert '"act": "video"' in error["message"]
 
 
 def test_a_cancel_stops_between_steps_and_keeps_the_model(
     ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_VIDEO_STEP_S", "0.4")
-    lease = {"act": "video", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-video", "model": MODEL, "params": {"lease": lease}})
+    open_queue_session(ready, auth, act="video")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-video", "model": MODEL})
     assert events_of(ready, auth, loaded.json()["job_id"])[-1]["event"] == "done"
     job_id = submit(ready, auth).json()["job_id"]
     wait_until_running(ready, auth, job_id)

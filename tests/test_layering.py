@@ -46,8 +46,8 @@ def test_the_server_side_never_imports_the_cli(module: str) -> None:
     assert not reached, f"importing {module} pulled in {reached}"
 
 
-def test_leases_do_not_import_residency() -> None:
-    assert "crucible.residency" not in _modules_after_importing("crucible.leases")
+def test_queue_sessions_do_not_import_residency() -> None:
+    assert "crucible.residency" not in _modules_after_importing("crucible.queuesessions")
 
 
 def test_every_job_capability_has_an_installer_that_is_installable() -> None:

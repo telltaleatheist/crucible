@@ -13,6 +13,7 @@ from ..events import ENDS, OVERFLOW, SNAPSHOT, STOPPING, EventHub
 from ..jobs.base import Job
 from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
+from ..queuesessions import ENDING_EVENTS, QueueSession, QueueSessions
 from ..tasks import Task, TaskStore
 from ..ttsstream import StreamSession
 from .context import hub_of
@@ -161,6 +162,31 @@ def _queue_feed(line: WaitingLine) -> Feed:
         ends=frozenset(),
         moved=lambda _: None,
         close=lambda: line.unsubscribe(waiter),
+    )
+
+
+def _queue_session_feed(sessions: QueueSessions, session: QueueSession) -> Feed:
+    waiter = sessions.subscribe(session)
+
+    def after(cursor: int) -> list[tuple[int, dict[str, Any]]]:
+        return [(event["id"], event) for event in session.events if event["id"] > cursor]
+
+    return Feed(
+        after=after,
+        waiter=waiter,
+        ends=ENDING_EVENTS,
+        moved=lambda _: None,
+        close=lambda: sessions.unsubscribe(session, waiter),
+    )
+
+
+def queue_session_events(
+    request: Request, sessions: QueueSessions, session: QueueSession, delivered: int
+) -> StreamingResponse:
+    """A queue session's own stream: `queued` and `moved`, then `opened`, then
+    `closed`; `removed` in place of `closed` when it never opened."""
+    return event_response(
+        events_after(request, lambda: _queue_session_feed(sessions, session), delivered)
     )
 
 

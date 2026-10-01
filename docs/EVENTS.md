@@ -82,7 +82,7 @@ job's detail matters.
 
 The waiting line's own announcements, the same as `GET /v1/queue/events`. Each carries
 `job_id`, `depth` (how many wait after this change) and `kind`: `"job"`, `"call"` (a
-queued chat or decision) or `"lease"`.
+queued chat or decision) or `"session"` (an app's session waiting for its turn).
 
 | event | also carries |
 | --- | --- |
@@ -90,6 +90,20 @@ queued chat or decision) or `"lease"`.
 | `queue.moved` | `position`. |
 | `queue.started` | `waited_s`: it left the line for the lane or for a chat slot. |
 | `queue.removed` | `reason` and `message`; a job refused at the front has `reason: "refused"` and `error` instead of `message`. |
+
+### Sessions
+
+Every change to a queue session (docs/QUEUE.md), the same events its own
+`GET /v1/queue/sessions/{id}/events` stream sends, named `session.<event>`. Each carries
+`session_id`, `client` and `act`.
+
+| event | also carries |
+| --- | --- |
+| `session.queued` | `position`, `of`: it waits for its turn. |
+| `session.moved` | `position`, `of`. |
+| `session.opened` | The session holds the machine. |
+| `session.closed` | `reason` (`client`, `idle`, `operator`, `max_hold`, `server_restart`), `message`, `items_run`, `held_s`. |
+| `session.removed` | `reason`, `message`, `error`: it left the line without opening. |
 
 ### The card
 

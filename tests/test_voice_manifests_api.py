@@ -479,7 +479,7 @@ def test_a_local_voice_nothing_holds_reads_orphan_true(
     assert CUSTOM in {row["id"] for row in tts_client.get("/v1/voices", headers=auth).json()}
 
 
-def test_a_lease_or_a_queued_job_on_a_local_voice_is_not_an_orphan(
+def test_a_queued_job_on_a_local_voice_is_not_an_orphan(
     tts_client: TestClient, auth: dict[str, str], tmp_path: Path
 ) -> None:
     put = tts_client.put(f"/v1/voices/{CUSTOM}", json=a_local_voice(tmp_path), headers=auth)
@@ -489,21 +489,6 @@ def test_a_lease_or_a_queued_job_on_a_local_voice_is_not_an_orphan(
         rows = {row["id"]: row for row in tts_client.get("/v1/voices", headers=auth).json()}
         return rows[CUSTOM]["orphan"]
 
-    assert orphan() is True
-
-    class _Lease:
-        subject = CUSTOM
-
-    class _Leases:
-        def current(self) -> Any:
-            return _Lease()
-
-    real_leases = tts_client.app.state.leases
-    tts_client.app.state.leases = _Leases()
-    try:
-        assert orphan() is False, "a lease naming the voice holds it"
-    finally:
-        tts_client.app.state.leases = real_leases
     assert orphan() is True
 
     store = tts_client.app.state.store

@@ -94,6 +94,7 @@ class StreamSession:
 
         self._wake = threading.Event()
         self._closing: str | None = None
+        self._cause: dict[str, Any] | None = None
         self._closed = threading.Event()
 
         self._worker = threading.Thread(
@@ -220,10 +221,13 @@ class StreamSession:
         self._wake.set()
         return len(live)
 
-    def begin_close(self, reason: str) -> None:
+    def begin_close(self, reason: str, cause: dict[str, Any] | None = None) -> None:
+        """``cause`` rides on the `closed` frame: why, by name, when it was not the
+        client's own close (its queue session ending, say)."""
         with self._state:
             if self._closing is None:
                 self._closing = reason
+                self._cause = cause
             for row in self._rows.values():
                 if not row.retired:
                     row.cancel_requested = True
@@ -257,7 +261,9 @@ class StreamSession:
             )
         finally:
             self._retire_everything_left(reason)
-            self._emit("closed", {"reason": reason})
+            with self._state:
+                cause = self._cause
+            self._emit("closed", {"reason": reason, **(cause or {})})
             try:
                 self._residency.release(f"tts stream {self.id}")
             except JobError:

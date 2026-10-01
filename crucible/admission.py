@@ -16,12 +16,13 @@ from .installonsubmit import INSTALLABLE_REFUSALS, InstallOnSubmit
 from .jobs import resolve, resolve_model
 from .jobs.base import Job
 from .jobs.queue import JobStore
+from .jobtypes import CARD_EFFECTS
 from .journal import InputDigest
-from .leases import CARD_EFFECTS, Leases
+from .queuesessions import QueueSessions
 from .residency import Residency
 from .upstreamrecord import split_model
 
-KEEPS_WAITING = frozenset({"server_busy", "leased", "engine_in_use"})
+KEEPS_WAITING = frozenset({"server_busy", "engine_in_use"})
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class JobRequest:
     hold: bool = False
     queue: int | None = None
     from_the_line: bool = False
+    session: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,11 +44,11 @@ class AdmissionContext:
     config: Config
     store: JobStore
     residency: Residency
-    leases: Leases
+    sessions: QueueSessions
     installs: InstallOnSubmit
     decide_here: Callable[[str], ApiError]
     chats_in_flight: Callable[[], int] = lambda: 0
-    lease_granted: Callable[[], None] = lambda: None
+    streaming: Callable[[], bool] = lambda: False
 
 
 @dataclass(frozen=True)
@@ -79,12 +81,12 @@ async def admit(request: JobRequest, ctx: AdmissionContext) -> AdmittedJob | Ref
     )
 
 
-def refuse_lease_on_an_upstream(subject_id: str) -> None:
+def refuse_an_upstream_model(subject_id: str) -> None:
     if split_model(subject_id) is None:
         return
     raise ApiError(
         409,
-        "lease_not_needed",
+        "upstream_never_resident",
         "an upstream model is never resident; send the chat",
         {"model": subject_id},
     )
@@ -148,21 +150,19 @@ def _install_for(
     return ctx.installs.start(need)
 
 
-def _lease_holder(ctx: AdmissionContext) -> str | None:
-    lease = ctx.leases.current()
-    return None if lease is None else lease.client
-
-
 def refuse_if_line_ahead(request: JobRequest, ctx: AdmissionContext) -> None:
-    """Jobs already waiting in the queue go first; only the lease holder's go ahead."""
+    """Jobs already waiting in the queue go first. An item of the open session waits only
+    behind the session's own items."""
     line = ctx.store.line
     if line is None or len(line) == 0:
         return
-    holder = _lease_holder(ctx)
-    if holder is not None and request.client == holder:
-        return
-    front = line.ordered()[0].job
-    depth = len(line)
+    ahead = line.ordered()
+    if request.session is not None:
+        ahead = [item for item in ahead if item.session == request.session]
+        if not ahead:
+            return
+    front = ahead[0].job
+    depth = len(ahead)
     raise ApiError(
         409,
         "server_busy",
@@ -190,7 +190,7 @@ def _waiting_instead(request: JobRequest, refusal: ApiError) -> bool:
 
 def _refuse_if_busy(request: JobRequest, ctx: AdmissionContext, model: str | None) -> None:
     try:
-        ctx.leases.refuse_if_leased(request.type, model)
+        ctx.sessions.refuse_if_held(request.session, f"a {request.type} job")
         ctx.store.refuse_if_busy()
         if not request.from_the_line:
             refuse_if_line_ahead(request, ctx)
@@ -218,7 +218,7 @@ def _preflight_or_wait(
 async def _admit(request: JobRequest, ctx: AdmissionContext) -> Job:
     plugin = _resolved_plugin(request, ctx)
     if request.model is not None:
-        refuse_lease_on_an_upstream(request.model)
+        refuse_an_upstream_model(request.model)
     model = resolve_model(plugin, request.model)
     refuse_resume_without_a_journal(plugin, request.type, request.params)
     try:
@@ -253,7 +253,7 @@ async def admit_waiting(waiting: Any, ctx: AdmissionContext) -> ApiError | None:
             f"a queued {request.type} job",
             same_intent=_unloads_what_is_being_cleared(request, ctx, model),
         ):
-            ctx.leases.refuse_if_leased(request.type, model)
+            ctx.sessions.refuse_if_held(request.session, f"a queued {request.type} job")
             ctx.store.refuse_if_busy()
             not_installed = _preflight(request, ctx, plugin, model)
             if not_installed is None:
@@ -304,7 +304,10 @@ def _created(
     job = store.create(
         request.type, model, request.params,
         client=request.client, client_ref=request.client_ref, hold=request.hold,
+        session=request.session,
     )
+    if request.session is not None:
+        ctx.sessions.adopt_job(request.session, job.id)
     fresh: Any = None
     try:
         materialise_inputs(ctx.config, store, job, request.inputs)

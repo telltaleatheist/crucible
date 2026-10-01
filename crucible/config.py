@@ -35,6 +35,8 @@ DEFAULT_ENABLE_AUDIO = False
 DEFAULT_ENABLE_SEGMENT = False
 DEFAULT_ENABLE_VIDEO = False
 
+DEFAULT_MAX_SESSION_HOLD_S = 0
+
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
@@ -128,6 +130,7 @@ class Config:
     upstreams: tuple[UpstreamRecord, ...] = ()
     local_models: tuple[LocalModelRecord, ...] = ()
     tts_engines: tuple[EngineFootprint, ...] = ()
+    max_session_hold_s: int = DEFAULT_MAX_SESSION_HOLD_S
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -247,6 +250,21 @@ def _desktop_note(table: dict[str, Any]) -> str:
     if "desktop_allowance_note" not in section:
         return ""
     return _require(table, "accelerator", "desktop_allowance_note", str)
+
+
+def _max_session_hold_s(table: dict[str, Any]) -> int:
+    """`[queue] max_session_hold_s`: how long one queue session may hold the server.
+    Absent or 0 is no limit; a session stays open while its client keeps using it."""
+    section = table.get("queue")
+    if section is None or "max_session_hold_s" not in section:
+        return DEFAULT_MAX_SESSION_HOLD_S
+    value = _require(table, "queue", "max_session_hold_s", int)
+    if value < 0:
+        raise ConfigError(
+            f"config [queue] max_session_hold_s: must be 0 (no limit) or a number of "
+            f"seconds, got {value}"
+        )
+    return value
 
 
 def _install_on_submit(table: dict[str, Any]) -> bool:
@@ -793,6 +811,7 @@ def load_config(
         local_models=_local_model_records(table),
         upstreams=upstreams,
         tts_engines=_tts_engine_records(table),
+        max_session_hold_s=_max_session_hold_s(table),
         stamp=stamp,
     )
 

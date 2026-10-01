@@ -33,13 +33,6 @@ from ...residency import (
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
-from ..leaseonload import (
-    HeldForLoad,
-    LeaseOnLoad,
-    hold_for_load,
-    let_go_of,
-    require_lease_request,
-)
 from ..template import (
     ManifestCatalog,
     ResidentWorker,
@@ -300,12 +293,11 @@ class AudioJobType(ResidentWorker):
     resident_kind = KIND_AUDIO
 
     def __init__(
-        self, config: Config, backend: Any, residency: Residency, leases: Any | None = None
+        self, config: Config, backend: Any, residency: Residency
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -363,22 +355,13 @@ class AudioJobType(ResidentWorker):
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parsed = parse_params(AudioParams, params, self.name)
-        self._admit(model, self.requirements(model, parsed), parsed.lease, "making audio with")
+        self._admit(model, self.requirements(model, parsed), "making audio with")
 
-    def _admit(self, model: str, needs: Needs, lease: LeaseOnLoad | None, doing: str) -> None:
-        if lease is not None:
-            require_lease_request(lease, act=needs.manifest.kind)
+    def _admit(self, model: str, needs: Needs, doing: str) -> None:
         self._residency.refuse_if_claimed(f"{doing} {model!r}")
         if self._residency.is_resident(KIND_AUDIO, model):
             return
         self._guard(model, needs.spec.memory_bytes_estimate)
-
-    def _hold(self, job: Job, model: str, lease: LeaseOnLoad | None) -> HeldForLoad | None:
-        if lease is None:
-            return None
-        return hold_for_load(
-            self._leases, kind=KIND_AUDIO, subject=model, request=lease, client=job.client
-        )
 
     def _worker(self, ctx: JobContext, model: str, needs: Needs) -> workers.WorkerSession:
         return self._session(
@@ -416,13 +399,7 @@ class AudioJobType(ResidentWorker):
         refuse_input_files(ctx)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
         session = self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
-        try:
-            self._make(ctx, model, session, params, needs, settle(params, needs.spec, seed))
-        except BaseException:
-            let_go_of(self._leases, held)
-            raise
-        ctx.done_extra(lease_id=None if held is None else held.lease_id)
+        self._make(ctx, model, session, params, needs, settle(params, needs.spec, seed))
 
     def _make(
         self,
@@ -519,11 +496,10 @@ def effective_params(
 
 
 class LoadAudioParams(BaseModel):
-    """`params` for a load-audio job: warm the audio model up, optionally leased."""
+    """`params` for a load-audio job: warm the audio model up."""
 
     model_config = ConfigDict(extra="forbid")
 
-    lease: LeaseOnLoad | None = None
 
 
 class LoadAudioJobType(AudioJobType):
@@ -532,21 +508,17 @@ class LoadAudioJobType(AudioJobType):
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
-        parsed = parse_params(LoadAudioParams, params, self.name)
-        self._admit(model, self.loadable(model), parsed.lease, "loading")
+        parse_params(LoadAudioParams, params, self.name)
+        self._admit(model, self.loadable(model), "loading")
 
     def run(self, job: Job, ctx: JobContext) -> None:
-        params = LoadAudioParams.model_validate(job.params)
+        LoadAudioParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.loadable, model)
         ctx.progress(0.0, f"loading {model}")
         self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
         ctx.progress(1.0, f"{model} is resident")
-        ctx.done_extra(
-            resident=self._residency.resident_id,
-            lease_id=None if held is None else held.lease_id,
-        )
+        ctx.done_extra(resident=self._residency.resident_id)
 
 
 class UnloadAudioJobType(UnloadJobType):
@@ -562,7 +534,7 @@ class UnloadAudioJobType(UnloadJobType):
 JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         AUDIO_JOB,
-        lambda wiring: AudioJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: AudioJobType(wiring.config, wiring.backend, wiring.residency),
     ),
     JobTypeBinding(
         UNLOAD_AUDIO,
@@ -570,6 +542,6 @@ JOB_TYPES: tuple[JobTypeBinding, ...] = (
     ),
     JobTypeBinding(
         LOAD_AUDIO,
-        lambda wiring: LoadAudioJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: LoadAudioJobType(wiring.config, wiring.backend, wiring.residency),
     ),
 )

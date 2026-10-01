@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ...errors import ApiError, JobError
 from ...segmentmodels import KIND_WORDS, SegmentBackendSpec, SegmentManifest
-from ..leaseonload import LeaseOnLoad
 
 MAX_POINTS = 64
 
@@ -30,7 +29,6 @@ class SegmentParams(BaseModel):
 
     points: list[SegmentPoint] | None = Field(default=None, min_length=1, max_length=MAX_POINTS)
     box: list[float] | None = Field(default=None, min_length=4, max_length=4)
-    lease: LeaseOnLoad | None = None
 
     @field_validator("box")
     @classmethod
@@ -67,7 +65,7 @@ def _refusal(code: str, message: str, manifest: SegmentManifest, spec: SegmentBa
 
 
 def takes(manifest: SegmentManifest) -> list[str]:
-    return [*(PROMPT_PARAMS if manifest.prompted else ()), "lease"]
+    return [*(PROMPT_PARAMS if manifest.prompted else ())]
 
 
 def _other_model(manifest: SegmentManifest, others: dict[str, SegmentManifest]) -> str:

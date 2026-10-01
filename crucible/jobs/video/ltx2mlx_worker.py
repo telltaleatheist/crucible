@@ -6,8 +6,8 @@ the distilled checkpoint's 8 steps at half the size (on a 2.5 pack the ancestral
 the latent upscaled 2x by the pack's spatial upscaler, then 3 deterministic steps at full size.
 Its own `generate_and_save` runs all of that and writes an mp4 through the ffmpeg on PATH; this
 worker drives the same methods one stage at a time instead, so each stage has its own MLX peak,
-a leased batch can skip the text stage for a prompt it has read, and the frames and the sound
-come back to videocore's mux like the PC's:
+a batch that keeps it resident can skip the text stage for a prompt it has read, and the sound
+and the frames come back to videocore's mux like the PC's:
 
 - encoding: the pack's Gemma 4 text encoder (int8) and its connector; freed after.
 - denoising: the distilled transformer (int8, all of it in memory unless the machine's

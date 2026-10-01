@@ -14,6 +14,7 @@ from crucible.api.routes import openai as openai_routes
 from crucible.events import EventHub
 from crucible.inflight import InFlight
 from crucible.jobs.line import Call, WaitingLine
+from crucible.queuesessions import QueueSessions
 from crucible.settle import Settlement
 
 from .fake_engine import FakeEngine
@@ -289,17 +290,12 @@ class _NoJobs:
         return None
 
 
-class _NoLease:
-    def current(self) -> None:
-        return None
-
-
 def test_a_call_waiting_for_the_resident_model_holds_it() -> None:
     waiting = {MODEL: 2}
     settlement = Settlement(
         residency=_Residency(MODEL),  # type: ignore[arg-type]
         store=_NoJobs(),
-        leases=_NoLease(),  # type: ignore[arg-type]
+        sessions=QueueSessions(),
         inflight=InFlight(),
         waiting_calls=lambda: waiting,
     )
@@ -325,7 +321,7 @@ def test_calls_in_the_line_show_as_calls_and_count_by_model() -> None:
 
 
 async def _calls_in_the_line() -> None:
-    line = WaitingLine(_Store(), lambda: None)  # type: ignore[arg-type]
+    line = WaitingLine(_Store(), QueueSessions())  # type: ignore[arg-type]
     first = line.join_call(Call(type="chat", model=MODEL, client="a"), 60)
     line.join_call(Call(type="decide", model=MODEL, client="b"), 60)
     line.join_call(Call(type="chat", model="other", client="c"), 60)
@@ -365,83 +361,3 @@ def test_a_queued_job_that_changes_the_card_waits_for_chats_in_flight(
             .json()["status"] == "done",
             "the unload run once the chat was answered",
         )
-
-
-def _lease(base: str, headers: dict[str, str], queue: dict[str, Any] | None = None,
-           timeout: float = 60.0) -> httpx.Response:
-    body: dict[str, Any] = {"act": "translate", "ttl_seconds": 120}
-    if queue is not None:
-        body["queue"] = queue
-    return httpx.post(f"{base}/v1/models/{MODEL}/lease", headers=headers, json=body,
-                      timeout=timeout)
-
-
-def test_a_queued_lease_loads_its_model_with_the_lease(
-    chat_server: Callable[..., Any], auth: dict[str, str]
-) -> None:
-    engines, server = chat_server()
-    with server as base:
-        refused = _lease(base, auth)
-        assert refused.status_code == 409
-        assert refused.json()["error"]["code"] == "not_resident"
-
-        granted = _lease(base, _as(auth, "briefcase"), queue={})
-        assert granted.status_code == 201, granted.text
-        receipt = granted.json()
-        assert receipt["subject"] == MODEL and receipt["client"] == "briefcase"
-        assert len(engines) == 1
-        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
-        assert activity["lease"]["lease_id"] == receipt["lease_id"]
-        assert _queue(base, auth)["depth"] == 0
-
-
-def test_a_queued_lease_waits_for_another_client_s_lease_then_holds_the_model(
-    chat_server: Callable[..., Any], auth: dict[str, str]
-) -> None:
-    _, server = chat_server()
-    with server as base:
-        run_job(base, auth, type="load-model", model=MODEL)
-        first = _lease(base, _as(auth, "bookforge"))
-        assert first.status_code == 201, first.text
-
-        plain = _lease(base, _as(auth, "briefcase"))
-        assert plain.status_code == 409 and plain.json()["error"]["code"] == "leased"
-
-        waiting, out = _in_background(
-            lambda: _lease(base, _as(auth, "briefcase"), queue={"max_wait_s": 60})
-        )
-        _wait_for(lambda: _queue(base, auth)["depth"] == 1, "the lease in the queue")
-        row = _queue(base, auth)["items"][0]
-        assert row["kind"] == "lease" and row["type"] == "lease"
-        assert row["model"] == MODEL and row["client"] == "briefcase"
-
-        released = httpx.delete(
-            f"{base}/v1/leases/{first.json()['lease_id']}", headers=auth, timeout=30.0
-        )
-        assert released.status_code == 204
-        waiting.join(SEEN_TIMEOUT)
-        assert out[0].status_code == 201, out[0].text
-        assert out[0].json()["client"] == "briefcase"
-        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
-        assert activity["resident"]["id"] == MODEL, "the model stayed for the waiting lease"
-        assert activity["lease"]["client"] == "briefcase"
-
-
-def test_an_operator_removes_a_waiting_lease(
-    chat_server: Callable[..., Any], auth: dict[str, str]
-) -> None:
-    _, server = chat_server()
-    with server as base:
-        run_job(base, auth, type="load-model", model=MODEL)
-        assert _lease(base, _as(auth, "bookforge")).status_code == 201
-        waiting, out = _in_background(lambda: _lease(base, _as(auth, "briefcase"), queue={}))
-        _wait_for(lambda: _queue(base, auth)["depth"] == 1, "the lease in the queue")
-        call_id = _queue(base, auth)["items"][0]["job_id"]
-        assert httpx.delete(f"{base}/v1/queue/{call_id}", headers=auth,
-                            timeout=30.0).status_code == 200
-        waiting.join(SEEN_TIMEOUT)
-        assert out[0].status_code == 409
-        assert out[0].json()["error"]["code"] == "removed_from_queue"
-        assert out[0].json()["error"]["details"]["reason"] == "operator"
-        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
-        assert activity["lease"]["client"] == "bookforge"

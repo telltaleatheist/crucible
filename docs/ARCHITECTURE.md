@@ -246,14 +246,12 @@ missed that no client can know the *other* clients'. So the queue is opt-in and 
   default 3600). Without it, nothing changed. The SDK's high-level helpers opt in by
   default; its raw `submit` does not.
 - **A queued job is a normal job** (`status: queued`, holding its inputs), in the waiting
-  line (`crucible/jobs/line.py`), first come first served, except that the client holding
-  the open lease goes ahead of the line: a lease exists to keep the model for its holder's
-  batch.
+  line (`crucible/jobs/line.py`), first come first served, except that the items of the
+  open queue session go ahead of the line (below).
 - **Admission is unchanged and happens at the front.** `crucible/queuepump.py` offers the
   front of the line to `admission.admit_waiting`, the same checks as a fresh submit, when
-  the lane goes idle (and every second). `server_busy`, `leased` and `engine_in_use` mean
-  "not yet"; any other refusal ends the job `failed` with that refusal, never re-queued. A
-  job refused `leased` does not hold up the jobs behind it that the lease allows.
+  the lane goes idle (and every second). `server_busy` and `engine_in_use` mean "not yet";
+  any other refusal ends the job `failed` with that refusal, never re-queued.
 - **`removed` is a terminal state, distinct from `failed`**, with a reason: `operator`
   (`DELETE /v1/queue/{id}`, the desktop app), `client` (`DELETE /v1/jobs/{id}`),
   `expired` (`max_wait_s`, or nobody following it for five minutes: no event stream on it
@@ -281,12 +279,26 @@ the caller asked to wait. Two rules keep calls and jobs from hurting each other:
 job that changes what is on the card waits while chats are in flight, and the settlement
 counts a call waiting for the resident model as holding it. Unqueued chats are unchanged.
 
-**Leases, 2026-09-30.** Owen: *"we should definitely make leases cooperate with the queue."*
-`POST /v1/models/{id}/lease` with `"queue"` waits as a call of type `lease`: granted at the
-front when its subject is resident and unleased, or loaded with the lease (load-model with
-`params.lease`) when the subject is a model that is not resident. A lease waiting for the
-resident model holds it against the settlement, so a lease that ends hands the model to the
-next lease in line instead of unloading it.
+**Queue sessions replace leases, 2026-10-01.** History: a client used to keep the card
+between its requests with a *lease* (`POST /v1/models/{id}/lease`, heartbeat, TTL, `409
+leased`), which on 2026-09-30 learned to wait in the line too. It pinned one subject and sat
+beside the queue. Owen: *"we might be able to get rid of leases if we have the queue"*, then
+*"we dont need to worry about legacy anything"*. Leases are gone.
+
+A **queue session** (`POST /v1/queue/sessions`) is one client's claim on the server for a
+run of requests it cannot know in advance. It waits in the line (kind `session`), opens at
+the front (loading its `model` first when it names one), and while it is open its items
+(`X-Crucible-Session`, or any request from the same client) run back to back ahead of the
+line with nothing from anyone else in between: other clients' unqueued jobs are refused
+`server_busy` naming it, their unqueued chats and decisions `session_open`, their queued
+work and other sessions wait. One is open at a time. The settlement treats it as a holder,
+so what its items leave on the card stays. It ends when its client deletes it, after
+`idle_s` with nothing in flight (anything in flight is presence; no maximum hold unless
+`[queue] max_session_hold_s` sets one), when an operator ends it, or when the server
+stops; then its waiting items leave the line and the card is settled. TTS streams run
+inside a session with no priority of their own: a stream opened by a client with no session
+opens one for itself. App guidance: docs/QUEUE.md; how it is built:
+docs/internals/queue-sessions.md.
 
 ---
 

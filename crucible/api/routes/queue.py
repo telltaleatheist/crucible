@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from ... import clock
 from ...jobs.line import OPERATOR, limits
+from ...queuesessions import OPEN, is_session_id
 from .. import sse
 from ..caller import client_agent
 from ..context import AppContext, Routers
@@ -18,8 +19,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/queue", response_model=QueueList)
     async def list_queue(request: Request) -> dict[str, Any]:
-        """The jobs waiting for the lane, in the order they will be offered to it: the
-        lease holder's first while its lease is open, then first come, first served.
+        """What waits for the lane, in the order it will be offered it: the open queue
+        session's items first, then first come, first served. A queue session waiting
+        to open is a row of kind `session`.
         """
         line = ctx.line
         line.touch(client=client_agent(request))
@@ -27,9 +29,19 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.delete("/queue/{job_id}", response_model=QueueRemoved, responses=NOT_FOUND)
     async def remove_from_queue(job_id: str) -> dict[str, Any]:
-        """Take a waiting job out of the queue. It ends `removed` with reason
-        `operator`; a job that has started is cancelled with DELETE /v1/jobs/{id}.
+        """Take a waiting job, call or queue session out of the queue (reason
+        `operator`), or end the open queue session; a job that has started is cancelled
+        with DELETE /v1/jobs/{id}.
         """
+        if is_session_id(job_id):
+            session = ctx.sessions.get(job_id)
+            if session.status == OPEN:
+                await ctx.session_closer.end(
+                    session, OPERATOR,
+                    "an operator ended it (DELETE /v1/queue/{id}, or the desktop Queue)",
+                )
+                return {"job_id": session.id, "status": session.status,
+                        "reason": OPERATOR}
         item = ctx.line.remove(
             job_id, OPERATOR, "an operator removed it from the queue (DELETE /v1/queue)"
         )

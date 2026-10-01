@@ -73,7 +73,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/queue",
         "Queue",
-        "Jobs submitted with `queue` while the lane is busy wait here, in order: list them, "
+        "Jobs, calls and queue sessions submitted with `queue` while the lane is busy wait "
+        "here, in order: list them, "
         "remove one, keep one alive, or follow every change. How an app should use it is "
         "docs/QUEUE.md.",
     ),
@@ -129,10 +130,12 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "input then names.",
     ),
     (
-        "/leases",
-        "Leases",
-        "A client saying it intends a run, so the card is not taken out from under it "
-        "mid-chapter.",
+        "/queue/sessions",
+        "Queue sessions",
+        "One client holding the server for a run of requests it cannot know in advance: "
+        "it waits in the line, opens, runs its items back to back with nothing from anyone "
+        "else in between, and closes. Not a TTS stream session. docs/QUEUE.md says how an "
+        "app uses one.",
     ),
     (
         "/openai",

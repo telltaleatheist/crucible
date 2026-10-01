@@ -16,7 +16,14 @@ from crucible.jobs import segment as segment_job
 from crucible.memorybudget import GIB
 from crucible.segmentmodels import load_segment_manifest
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, stamp_env
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    close_queue_session,
+    open_queue_session,
+    parse_sse,
+    stamp_env,
+)
 
 Image = pytest.importorskip("PIL.Image")
 
@@ -291,7 +298,7 @@ def test_a_picture_past_the_pixel_limit_is_refused(
     assert events[-1]["data"]["error"]["code"] == "image_too_large"
 
 
-def test_without_a_lease_the_model_is_unloaded_when_the_job_ends(
+def test_outside_a_session_the_model_is_unloaded_when_the_job_ends(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
     assert run_job(ready, auth)[1][-1]["event"] == "done"
@@ -300,40 +307,31 @@ def test_without_a_lease_the_model_is_unloaded_when_the_job_ends(
     assert len(rows(transcript, "load")) == 2
 
 
-def test_load_segment_leases_the_model_and_every_click_reuses_it(
+def test_load_segment_in_a_queue_session_and_every_click_reuses_it(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
-    lease = {"act": "select", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-segment", "model": SELECT, "params": {"lease": lease}})
+    session_id = open_queue_session(ready, auth, act="select")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-segment", "model": SELECT})
     assert loaded.status_code == 202, loaded.json()
     done = events_of(ready, auth, loaded.json()["job_id"])[-1]
     assert done["event"] == "done", done
-    lease_id = done["data"]["lease_id"]
-    assert done["data"]["resident"] == SELECT and lease_id
+    assert done["data"]["resident"] == SELECT
     for x in (10, 20, 30):
-        params = {"points": [{"x": x, "y": 10, "label": 1}], "lease": lease}
+        params = {"points": [{"x": x, "y": 10, "label": 1}]}
         _, events = run_job(ready, auth, model=SELECT, params=params)
-        assert events[-1]["data"]["lease_id"] == lease_id
+        assert events[-1]["event"] == "done"
     assert len(rows(transcript, "load")) == 1
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "segment"
-    assert ready.delete(f"/v1/leases/{lease_id}", headers=auth).status_code == 204
+    close_queue_session(ready, auth, session_id)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
-
-
-def test_a_lease_must_name_the_models_own_class(ready: TestClient, auth: dict[str, str]) -> None:
-    error = refusal(submit(ready, auth, model=CUTOUT, params={"lease": {"act": "select", "ttl_seconds": 60}}))
-    assert error["code"] == "lease_act_mismatch"
-    assert '"act": "cutout"' in error["message"]
-    error = refusal(submit(ready, auth, params={"lease": {"act": "segment", "ttl_seconds": 60}}))
-    assert error["code"] == "unknown_act"
 
 
 def test_a_cancel_stops_the_job_and_keeps_the_model(
     ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_SEGMENT_PAUSE_S", "20")
-    lease = {"act": "cutout", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-segment", "model": CUTOUT, "params": {"lease": lease}})
+    open_queue_session(ready, auth, act="cutout")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-segment", "model": CUTOUT})
     assert events_of(ready, auth, loaded.json()["job_id"])[-1]["event"] == "done"
     job_id = submit(ready, auth).json()["job_id"]
     wait_until_running(ready, auth, job_id)

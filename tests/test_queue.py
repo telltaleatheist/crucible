@@ -158,27 +158,6 @@ def test_an_operator_and_a_client_can_each_remove_a_waiting_job(
     free_the_lane(client, auth, holder)
 
 
-def test_the_lease_holder_goes_ahead_of_the_line(
-    client: TestClient, auth: dict[str, str]
-) -> None:
-    line = client.app.state.line
-    holder = occupy_the_lane(client, auth)
-    early = queue_up(client, as_client(auth, "briefcase"))["job_id"]
-    line._lease_holder = lambda: "bookforge"
-    late = queue_up(client, as_client(auth, "bookforge"))
-    assert late["position"] == 1
-    assert [row["job_id"] for row in client.get("/v1/queue", headers=auth).json()["items"]] == [
-        late["job_id"], early
-    ]
-    assert client.get("/v1/queue", headers=auth).json()["items"][0]["lease_holder"] is True
-    free_the_lane(client, auth, holder)
-    wait_for(lambda: status(client, auth, late["job_id"]) == "done", "the holder's job")
-    line._lease_holder = lambda: None
-    wait_for(lambda: status(client, auth, early) == "done", "the other job")
-    started = client.app.state.store.get(late["job_id"]).started
-    assert started < client.app.state.store.get(early).started
-
-
 def test_a_plain_submit_does_not_jump_a_waiting_line(
     client: TestClient, auth: dict[str, str]
 ) -> None:

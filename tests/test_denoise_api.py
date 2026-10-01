@@ -14,7 +14,14 @@ from crucible.memorybudget import GIB
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
 
-from .conftest import FAKE_BACKEND, holding_the_card, parse_sse, write_env_stamp
+from .conftest import (
+    FAKE_BACKEND,
+    close_queue_session,
+    holding_the_card,
+    open_queue_session,
+    parse_sse,
+    write_env_stamp,
+)
 from crucible.cardkinds import KIND_DENOISE
 from crucible.residency import Residency
 
@@ -643,17 +650,8 @@ def test_a_book_denoised_block_by_block_pays_one_load(
 ) -> None:
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
-    with holding_the_card(ready):
-        run_job(ready, auth)
-        opened = ready.post(
-            f"/v1/models/{MODEL}/lease",
-            headers=auth,
-            json={"act": "denoise", "ttl_seconds": 60},
-        )
-    assert opened.status_code == 201, opened.text
-    lease = opened.json()
-    assert lease["subject"] == MODEL
-    assert lease["kind"] == KIND_DENOISE
+    session_id = open_queue_session(ready, auth, act="denoise")
+    run_job(ready, auth)
 
     second = run_job(ready, auth)
     third = run_job(ready, auth)
@@ -666,9 +664,7 @@ def test_a_book_denoised_block_by_block_pays_one_load(
     assert terminal(second)["data"]["load_seconds"] == 0.0
     assert terminal(third)["data"]["load_seconds"] == 0.0
 
-    assert ready.delete(
-        f"/v1/leases/{lease['lease_id']}", headers=auth
-    ).status_code == 204
+    close_queue_session(ready, auth, session_id)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
     ops = [
@@ -679,24 +675,18 @@ def test_a_book_denoised_block_by_block_pays_one_load(
     assert ops == ["load", "separate", "separate", "separate"]
 
 
-def test_a_denoise_lease_refuses_what_would_evict_it_and_admits_its_own_work(
+def test_a_queue_session_refuses_another_client_s_eviction_and_admits_its_own_work(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
-    with holding_the_card(ready):
-        run_job(ready, auth)
-        opened = ready.post(
-            f"/v1/models/{MODEL}/lease",
-            headers=auth,
-            json={"act": "denoise", "ttl_seconds": 60},
-        )
-    assert opened.status_code == 201, opened.text
+    session_id = open_queue_session(ready, auth, act="denoise")
+    run_job(ready, auth)
 
-    refused = submit(ready, auth, type="unload-denoiser", model=MODEL, params={})
+    other = {**auth, "X-Crucible-Client": "briefcase"}
+    refused = submit(ready, other, type="unload-denoiser", model=MODEL, params={})
     assert refused.status_code == 409, refused.text
     error = refused.json()["error"]
-    assert error["code"] == "leased"
-    assert error["details"]["kind"] == KIND_DENOISE
-    assert "the resident separator" in error["message"]
+    assert error["code"] == "server_busy"
+    assert error["details"]["session_id"] == session_id
 
     assert submit(ready, auth).status_code == 202
 

@@ -20,7 +20,7 @@ from ...engines.items_forward import ITEMS_PATH
 from ...errors import ApiError
 from ...inflight import read_act
 from ...manifests import load_manifest
-from ..caller import client_agent
+from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..proxy import (
     JSON_HEADERS,
@@ -183,6 +183,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         _refuse_an_upstream(body.model)
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)
+        session = queue_session(request, ctx.sessions)
+        session_id = None if session is None else session.id
         turn: Any = None
         if body.queue is not None:
             _refuse_a_malformed_decision(body, backend.kind)
@@ -190,9 +192,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 request, line=ctx.line, residency=residency, inflight=inflight,
                 settle=chat_over, kind="decide", model=body.model, act=act,
                 client=client_agent(request), max_wait_s=body.queue.max_wait_s,
+                session=session,
             )
             if isinstance(turn, Response):
                 return turn
+        else:
+            ctx.sessions.refuse_call_if_held(session_id, "a decision")
+        if session is not None:
+            ctx.sessions.item_arrived(session)
         try:
             async with residency.settled_for("a decision"):
                 resident = residency.resident_model
@@ -243,7 +250,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
                         max_logprobs=reading.max_logprobs, concurrency=concurrency,
                     )
                 entry = turn if turn is not None else inflight.open(
-                    act=act, model=resident.model_id, client=client_agent(request)
+                    act=act, model=resident.model_id, client=client_agent(request),
+                    session=session_id,
                 )
         except BaseException:
             if turn is not None:

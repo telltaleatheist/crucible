@@ -180,7 +180,7 @@ per-backend caps.
 
 ## 6. Residency, admission, and the queue
 
-The server owns the accelerator. One exclusive lease per GPU: `tts`, `rvc`, `align`
+The server owns the accelerator. One exclusive turn per GPU: `tts`, `rvc`, `align`
 jobs run one at a time; `llm`/`vlm-pages` run through the engine's own continuous
 batching. Models load on demand and are evicted least-recently-used when a job needs
 VRAM the resident set can't give. Clients never see a lock file; they see `position`

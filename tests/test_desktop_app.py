@@ -52,7 +52,8 @@ ACTIVITY = {
                 "progress": 0, "message": None, "client": "briefcase", "waited_s": 125.0,
                 "max_wait_s": 3600}],
     "chat": {"rows": []},
-    "lease": {"client": "bookforge", "kind": "llm", "act": "decide"},
+    "session": {"session_id": "ses-1", "client": "bookforge", "act": "decide", "items_run": 3,
+                "in_flight": [{"kind": "job", "id": "j1"}], "stream_session": None},
 }
 
 CATALOG = {"rows": [
@@ -374,7 +375,22 @@ def test_a_running_task_found_on_refresh_is_followed_once() -> None:
     view = c.view("activity")
     assert view.work[0].title == "Installing asr" and view.work[0].detail == "Collecting torch"
     assert view.work[0].target == "task" and view.work[0].cancel == "t5"
-    assert view.lease == "bookforge is keeping llm loaded for decide"
+    assert view.session is not None and view.session.session_id == "ses-1"
+    assert view.session.title == "bookforge has Crucible to itself for decide"
+    assert view.session.detail.startswith("3 requests so far; 1 in progress")
+
+
+def test_the_open_queue_session_is_shown_and_an_operator_can_end_it() -> None:
+    asked: list[str] = []
+    api = FakeApi()
+    c = controller(api, answers=[False, True], asked=asked)
+    c.refresh_now("activity")
+    assert c.view("activity").session.session_id == "ses-1"
+    c.end_session("ses-1")
+    assert api.sent == []
+    c.end_session("ses-1")
+    assert api.sent == [("DELETE", "/v1/queue/ses-1", None)]
+    assert len(asked) == 2 and "session" in asked[0]
 
 
 def test_the_queue_is_listed_apart_from_the_work_and_each_job_can_be_removed() -> None:

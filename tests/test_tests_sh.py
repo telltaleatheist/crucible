@@ -16,9 +16,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 INVENTED = {
-    "tests/test_leases.py": "leases",
-    "tests/test_settle.py": "leases",
-    "tests/test_api_client.py": "leases",
+    "tests/test_widgets.py": "widgets",
+    "tests/test_settle.py": "widgets",
+    "tests/test_api_client.py": "widgets",
     "tests/test_release_bits.py": "crucible/__init__.py",
     "tests/test_keepers.py": "scripts/keeper-tts-live.sh",
     "tests/test_alpha.py": "alpha",
@@ -51,7 +51,7 @@ def work(tmp_path: Path) -> Path:
     (repo / "scripts/tests.sh").chmod(0o755)
     (repo / "scripts/keeper-tts-live.sh").write_text("#!/bin/bash\n: live\n", encoding="utf-8")
     (repo / "crucible/__init__.py").write_text('VERSION = "1.0.2"\n', encoding="utf-8")
-    (repo / "crucible/leases.py").write_text("def hold():\n    return 1\n", encoding="utf-8")
+    (repo / "crucible/widgets.py").write_text("def hold():\n    return 1\n", encoding="utf-8")
     (repo / "crucible/envs/llm/cuda-linux.txt").write_text("vllm==0.9.0\n", encoding="utf-8")
     (repo / ".github/workflows/ci.yml").write_text("name: ci\n", encoding="utf-8")
     (repo / "docs/x.md").write_text("# x\n", encoding="utf-8")
@@ -106,23 +106,23 @@ def test_a_version_bump_selects_nothing(work: Path) -> None:
 
 
 def test_a_real_change_to_a_module_selects_the_tests_that_name_it(work: Path) -> None:
-    (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
+    (work / "crucible/widgets.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
-    assert would == {"tests/test_leases.py", "tests/test_settle.py", "tests/test_api_client.py"}, out
+    assert would == {"tests/test_widgets.py", "tests/test_settle.py", "tests/test_api_client.py"}, out
 
 
 def test_a_version_bump_beside_a_real_change_still_selects_the_real_change(work: Path) -> None:
     (work / "crucible/__init__.py").write_text('VERSION = "1.0.3"\n', encoding="utf-8")
-    (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
+    (work / "crucible/widgets.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
-    assert would == {"tests/test_leases.py", "tests/test_settle.py", "tests/test_api_client.py"}, out
+    assert would == {"tests/test_widgets.py", "tests/test_settle.py", "tests/test_api_client.py"}, out
 
 
 @pytest.mark.parametrize(
     "path, body",
     [
         (".github/workflows/ci.yml", "name: ci\njobs: {}\n"),
-        ("docs/x.md", "# x\n\nsomething about leases\n"),
+        ("docs/x.md", "# x\n\nsomething about widgets\n"),
         ("crucible/envs/llm/cuda-linux.txt", "vllm==0.9.1\n"),
     ],
 )
@@ -143,7 +143,7 @@ def test_no_live_keeper_is_ever_selected(work: Path) -> None:
 
 
 def test_the_listing_gives_one_reason_per_selected_file(work: Path) -> None:
-    (work / "crucible/leases.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
+    (work / "crucible/widgets.py").write_text("def hold():\n    return 2\n", encoding="utf-8")
     out, would = listing(work)
     reasons = {}
     for line in out.splitlines():
@@ -152,7 +152,7 @@ def test_the_listing_gives_one_reason_per_selected_file(work: Path) -> None:
             assert path not in reasons, "two reasons printed for %s" % path
             reasons[path] = reason
     assert set(reasons) == would, (reasons, would)
-    assert all("leases" in reason for reason in reasons.values()), reasons
+    assert all("widgets" in reason for reason in reasons.values()), reasons
 
 
 def test_all_is_still_there_and_says_what_it_is_for() -> None:

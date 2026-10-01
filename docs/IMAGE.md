@@ -38,7 +38,6 @@ model.
 | `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))`. Useful range 0.03 to 0.3; see Image-to-image below. With `mask` it is optional and applies to the masked region only |
 | `mask` | none | inpainting and outpainting: the name of the input that carries the mask, for example `"mask.png"`. The job then carries exactly two inputs, the image and the mask; see Inpainting and outpainting below |
 | `mask_blur` | 8 when `mask` is sent | 0 to 256 pixels, only with `mask` (`invalid_params` without one): how far inside the mask's edge the new picture fades into the kept one. Nothing outside the mask ever changes |
-| `lease` | none | `{"act": "image", "ttl_seconds": 30..3600}`: hold the model on the card from the moment it is loaded, for a batch (below). `act` must be `image` (`lease_act_mismatch`); an unknown act is `unknown_act`, a ttl out of range `invalid_ttl` |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
 
@@ -172,11 +171,9 @@ The job publishes `image.png` (and, with a mask, `generated.png`). Its `done` ev
            "stage_peak_bytes": {"encoding": 2414314312, "denoising": 15502140544, "decoding": 16441695780},
            "memory_bytes_estimate": 17200000000, "memory_basis": "measured",
            "prompt_cache": "miss"},
- "resident": "qwen-image-2.1",
- "lease_id": null}
+ "resident": "qwen-image-2.1"}
 ```
 
-`lease_id` is the lease the job opened or renewed when it was sent `lease`, else `null`.
 `input` is the image input's name, `mask` the mask input's, `mask_blur` the fade used, and
 `mask_coverage` the share of the picture the mask selected (0 to 1).
 
@@ -199,43 +196,45 @@ different engines with different samplers, so one seed does not give one picture
 
 Progress arrives per step: `{"stage": "denoising", "step": 12, "steps": 40}` with `fraction`
 12/40, after `encoding` and before `decoding` and `saving`. `DELETE /v1/jobs/{id}` stops the
-job between two steps; the model stays loaded if a lease holds it.
+job between two steps; the model stays loaded if a queue session holds it.
 
 ## Many pictures in a row
 
 Like every other resident, the model comes off the card when the job that loaded it ends, unless
-something holds it. To make a batch without reloading between pictures:
+something holds it. To make a batch without reloading between pictures, hold the server with a
+queue session ([QUEUE.md](QUEUE.md)):
 
-1. Send `lease` on the **first** picture:
+1. Open one:
 
    ```json
-   {"type": "image", "model": "qwen-image-2.1",
-    "params": {"prompt": "…", "seed": 1, "lease": {"act": "image", "ttl_seconds": 300}}}
+   POST /v1/queue/sessions
+   {"act": "image"}
    ```
 
-   The lease opens the moment the model is loaded, before the picture is made, so nothing can
-   take the model off the card in between. The `done` event carries `lease_id`.
-2. Send the rest of the batch as ordinary `image` jobs (sending `lease` again is harmless: the
-   lease you already hold is renewed and the same `lease_id` comes back, never a second lease).
-   The loaded model is reused; nothing reloads.
-3. While you work, `POST /v1/leases/{lease_id}/heartbeat` at least once per `ttl_seconds`.
-4. At the end, `DELETE /v1/leases/{lease_id}`. The model comes off the card before that answers.
+   It answers `{"session_id": "ses-…", "status": "open"}` at once when the server is free; if
+   another app holds it, `status: "queued"` and `GET /v1/queue/sessions/{id}/events` says
+   `opened` when your turn comes.
+2. Send the batch as ordinary `image` jobs. Every request from your client is an item of your
+   session (or name it with `X-Crucible-Session`): the first loads the model, the rest reuse it,
+   and nothing from another app runs in between. A job sent while the previous one runs waits
+   inside the session, ahead of everyone else.
+3. For a long pause on your side with nothing running (a person choosing), send
+   `POST /v1/queue/sessions/{id}/touch`; otherwise the session closes after `idle_s`.
+4. At the end, `DELETE /v1/queue/sessions/{id}`. The model comes off the card before that
+   answers.
 
-If your program stops or crashes without releasing, the lease runs out `ttl_seconds` after the
-last heartbeat and the model is unloaded then. If the first picture fails or is cancelled, the
-lease it opened is given back at once (you never got its id). While the lease is open a job that
-would load something else (an LLM, a voice) is refused `409 leased`.
+If your program stops or crashes without closing it, the session closes `idle_s` after the
+last thing it did, and the model is unloaded then.
 
-**Warming up before the first prompt.** A UI can load the model while the user is still typing:
+**Warming up before the first prompt.** A UI can load the model while the user is still typing,
+inside its session:
 
 ```json
-{"type": "load-image", "model": "qwen-image-2.1",
- "params": {"lease": {"act": "image", "ttl_seconds": 300}}}
+{"type": "load-image", "model": "qwen-image-2.1"}
 ```
 
-Its `done` event carries `resident` and `lease_id`; the first picture then starts at once. Sent
-with the same `lease`, that picture renews the same lease. Without `lease`, `load-image` leaves
-the model loaded until the next picture ends.
+Its `done` event carries `resident`; the first picture then starts at once. Outside a session,
+`load-image` leaves the model loaded until the next picture ends.
 
 **Same prompt, different seeds is fastest.** Turning a prompt into embeddings needs the 17.5 GB
 text encoder, loaded and freed per picture (17 to 25 s on the PC). The loaded model remembers the
@@ -253,8 +252,7 @@ next is read. The estimate the guard and capability use is the peak of the large
 largest size, not the sum. On the Mac that peak was measured (`memory_basis: "measured"`); on the
 PC it is declared until measured. A card without that much room is refused before anything
 loads, by name and with the numbers (`insufficient_memory`); on the Mac, where one model runs at
-a time, a resident LLM or voice is unloaded first, unless a lease holds it, in which case the job
-is refused `409 leased`.
+a time, a resident LLM or voice is unloaded first.
 
 ## Writing a prompt (Owen, 2026-09-28)
 

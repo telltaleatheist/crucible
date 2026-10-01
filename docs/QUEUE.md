@@ -67,8 +67,11 @@ by yourself on `operator` (a person removed it on purpose). On `expired` or
 When the job reaches the front of the queue, it goes through exactly the checks a fresh
 submit meets. If one of them refuses it (not enough memory, a model missing), the job ends
 `failed` with that refusal as its error, as if it had been refused at submit. It is not
-queued again. Only "busy" refusals (`server_busy`, `leased`, `engine_in_use`) mean "not
-yet", and the job keeps its place.
+queued again. Only "busy" refusals (`server_busy`, `engine_in_use`) mean "not yet", and
+the job keeps its place.
+
+`removed` has a fifth reason for a job that was an item of a queue session (below):
+`session_closed`, when its session ended before the job reached the lane.
 
 ## Stay present
 
@@ -82,18 +85,19 @@ minutes. Any of these count as asking:
 
 The client is who the job was submitted as (`X-Crucible-Client`, else `User-Agent`).
 
-## The lease holder goes first
+## The open session goes first
 
-A client holding the open lease (`POST /v1/models/{id}/lease`) is running a batch on the
-resident model. Its queued jobs go ahead of everyone else's while the lease is open, and
-its plain submits are not held behind the queue. Everyone else is first come, first served.
+While a queue session is open (below), its items go ahead of everything waiting and
+nothing from anyone else runs. Everyone else is first come, first served.
 
 ## The whole queue
 
 - `GET /v1/queue`: `{items: [{position, job_id, type, model, client, client_ref, submitted,
-  waited_s, max_wait_s, expires_at, lease_holder, kind}], depth, limits}`. `kind` is
-  `"job"`, `"call"` (a queued chat or decision) or `"lease"` (a queued lease), below.
-- `DELETE /v1/queue/{job_id}`: remove one (reason `operator`).
+  waited_s, max_wait_s, expires_at, session, kind}], depth, limits}`. `kind` is `"job"`,
+  `"call"` (a queued chat or decision) or `"session"` (a queue session waiting to open,
+  `job_id` `ses-…`). `session` names the queue session an item belongs to, or is null.
+- `DELETE /v1/queue/{job_id}`: remove one (reason `operator`). Given the open session's
+  id, it ends that session (reason `operator`).
 - `GET /v1/queue/events`: server-wide SSE for dashboards. A `snapshot {items, depth}`
   first, then `added`, `moved {position}`, `started {waited_s}` and `removed {reason}` with
   `job_id` and `depth` on every event. A job refused at the front shows here as `removed`
@@ -149,32 +153,143 @@ on the card (any load, unload, or a job that brings its own model) waits while c
 flight instead of taking the model out from under them. And while a call waits for the
 resident model, the server does not unload that model between completions.
 
-Unqueued chats are unchanged: they still go straight to a resident model with a free slot
-even while something waits in the line.
+Unqueued chats go straight to a resident model with a free slot even while something waits
+in the line, unless another client's queue session is open (below): then they are refused
+`409 session_open`.
 
-## Leases can wait too
+## Queue sessions: the server to yourself for a run
 
-`POST /v1/models/{id}/lease` takes the same member: `{"act": …, "ttl_seconds": …, "queue":
-{}}`. Without it a lease is refused as before (`409 not_resident`, `leased`, `server_busy`).
-With it the request is held open like a queued chat and answers `201` with the lease receipt
-when its turn comes:
+A **queue session** is one client's claim on the server for a run of requests it cannot know
+in advance: a Briefcase video analysis (ASR, then many chats and decisions), a BookForge
+chapter loop, a ContentStudio render beside its editor's own calls. While the session is
+open its items run back to back, nothing from any other client runs in between, and what
+they leave on the card stays there for the next item. One session is open at a time.
 
-- **Free now:** the subject is resident, nobody else holds a lease and nothing waits, so it
-  is granted at once.
-- **Another client's lease holds the card:** it waits in the line (`kind: "lease"` in
-  `GET /v1/queue`), and items behind it that lease does not refuse may go past. While it
-  waits for the resident model, the server will not unload that model, so when the other
-  lease ends the model is still there and the lease is granted on it.
-- **The model is not resident:** at the front, when the lane is free and no chat is in flight,
-  the server loads it with an ordinary `load-model` job carrying `params.lease`, so the lease
-  is opened with the load and nothing can come between them. Only models are loaded this way;
-  a voice or an aligner that is not resident ends the request `409 not_resident`.
-- **A busy lane** (another client's job running): it waits its turn.
+(Not to be confused with a TTS *stream* session, `POST /v1/tts/stream`, which runs inside
+a queue session; see "Streams run inside a session" below.)
 
-It leaves the line exactly like a queued chat: `409 removed_from_queue` with
-`details.reason` (`operator`, `expired`, `server_restart`), or the caller closing the
-connection (reason `client`; a lease granted at that same moment is released). Once granted,
-the holder's own queued jobs, chats and decisions go ahead of the line as before.
+### Ask for one
+
+```json
+POST /v1/queue/sessions
+{"act": "analysis", "model": "qwen3.5-9b", "idle_s": 300, "max_wait_s": 3600}
+```
+
+- `act` (required): the capability class the run is for, as `X-Crucible-Act` names it.
+- `model`: a model to have resident when the session opens. If it is not resident, the
+  server loads it for the session (a `load-model` job with your client name and
+  `client_ref: "opening session ses-…"`) and reports the session open only once the load
+  is done. A load that fails ends the session (`removed`, reason `load_failed`, with the
+  error). Leave it out to open on whatever is resident. An upstream model is refused
+  `409 upstream_never_resident`; an unknown one `404 unknown_model`.
+- `idle_s` (default 300, 10 to 86400): see "How a session ends".
+- `max_wait_s` (as the queue's): how long it may wait in the line to open.
+
+It answers `202` at once, never blocking:
+
+```json
+{"session_id": "ses-5f0c…", "status": "open", "position": null}
+{"session_id": "ses-5f0c…", "status": "queued", "position": 2}
+```
+
+A queued session waits in the same line as everything else (`kind: "session"` in
+`GET /v1/queue`) and opens at the front, once the lane is free. It is presence-checked
+like a queued job: follow its events, read it, or touch it at least every five minutes,
+or it is removed `expired`.
+
+### Follow it
+
+`GET /v1/queue/sessions/{id}/events` is its own SSE stream:
+
+| event | data | means |
+|---|---|---|
+| `queued` | `{position, of}` | it joined the line |
+| `moved` | `{position, of}` | its place changed |
+| `opened` | `{opened_at, model, load_job}` | it is open; send its items |
+| `closed` | `{reason, message, items_run, held_s}` | it ended; **terminal** |
+| `removed` | `{reason, message, error?}` | it ended without ever opening; **terminal** |
+
+`GET /v1/queue/sessions/{id}` reads it: `status` (`queued`, `open`, `closed`), `position`,
+`opened_at`, `items_run`, `in_flight` (what it has running or waiting: jobs, chats,
+queued calls, stream rows being said), `stream_session` (the TTS stream open in it, if any),
+`idle_deadline` (null while anything is in flight), `max_hold_deadline` (null unless the
+server sets a maximum), `load_job`, and `reason`/`message`/`error` once it is closed.
+
+### Send its items
+
+Every request from the client that holds the open session is one of its items. Name it
+explicitly with the header `X-Crucible-Session: ses-…`, or let your client name
+(`X-Crucible-Client`, else `User-Agent`) say it: a request from the same client is an
+**implicit item**, header or not. That is so an app can make standalone calls beside its
+own long run (an editor's title, a frame check) without them waiting behind itself.
+
+- `POST /v1/jobs`: admitted ahead of everything waiting. Items still run one at a time on
+  the lane: an item submitted while another of the session's jobs runs waits *inside* the
+  session, first come first served, ahead of everyone else (it answers `queued: true`
+  with its position; it waits up to a day unless its own `queue` says otherwise).
+- `POST /v1/openai/chat/completions` (and `/openai/v1/...`), `POST /v1/decide`: as usual.
+  With `"queue": {}` one that must wait (its model not resident, every slot taken) waits
+  ahead of the line, and its model is loaded for it with the session's priority.
+- `POST /v1/tts/stream`: see below.
+
+A header naming a session that is not open is refused by name: `404
+unknown_queue_session`, `409 session_not_open` (still waiting; send its items after
+`opened`), `409 session_closed` (with `details.reason`). A header naming another client's
+session is `409 session_not_yours`.
+
+### What everyone else sees while it is open
+
+Nothing from any other client runs:
+
+| their request | gets |
+|---|---|
+| a job without `queue` | `409 server_busy`, `details.door: "session"`, naming the holder |
+| a job, chat or decision with `queue` | waits in the line until the session closes |
+| a chat or decision without `queue` | `409 session_open`, naming the holder and the session |
+| another queue session | waits in the line |
+| a TTS stream | waits in the line (or `409 session_open` with `"queue": false`) |
+
+There is no pre-emption. A person who wants the server back ends the session (the desktop
+app's Queue, or `DELETE /v1/queue/{id}`).
+
+### How a session ends
+
+| reason | when |
+|---|---|
+| `client` | its client sends `DELETE /v1/queue/sessions/{id}` (a queued one leaves the line) |
+| `idle` | `idle_s` passes with no item arriving, nothing in flight, no running job and no touch |
+| `operator` | an operator ends it: `DELETE /v1/queue/{id}`, or the desktop Queue's End |
+| `max_hold` | only if the server sets `[queue] max_session_hold_s` in config.toml; none by default |
+| `server_restart` | the server stops |
+
+Anything in flight is presence: a session running a day-long job never idles out. For a
+long gap on your side with nothing in flight (a NAS copy between two steps), send
+`POST /v1/queue/sessions/{id}/touch`; it is a timestamp in memory, so every 30 s is fine.
+
+When a session closes, its items still waiting leave the line (`removed`, reason
+`session_closed`), a TTS stream open in it closes, and the card is settled: unloaded
+unless something else holds it. What is already running finishes.
+
+### Streams run inside a session
+
+A TTS stream (`POST /v1/tts/stream`) has no claim of its own and no priority. It opens
+inside a queue session held by its client: the one its `X-Crucible-Session` names, or the
+open one its client holds. A client that holds none gets one opened for the stream
+(`act: "tts"`, the stream-open's `idle_s`, default 900), which waits in the line behind
+other sessions like any other.
+
+The stream-open is a held-open request, like a queued chat: it answers `201` once the
+session is open and the voice is resident (a voice that is not is loaded by a `load-voice`
+job inside the session), with `queue_session_id` and `queue_session_opened_for_stream`
+beside the stream's own fields. `"queue": false` refuses instead of waiting (`409
+session_open`, or `server_busy`). A session that ends before it opens answers `409
+session_closed` with `details.reason`.
+
+Every stream op (`say`, `cancel`, `cancel_all`, attaching the events) is activity of its
+session; an open stream with no row being said is not, so `idle_s` runs out and closes
+the session and the stream with it. The stream's `closed` frame then carries `code:
+"session_closed"`, `session_reason` (e.g. `idle`) and `queue_session_id`. Closing the
+stream closes a session that was opened for it, but never one the client opened itself.
 
 ## In the SDK
 
@@ -188,7 +303,7 @@ for await (const event of crucible.events(id)) {
 ```
 
 - The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video`,
-  every load and unload, `chat`, `chatStream`, `decide`, `decideItems` and `lease`) queue by
+  every load and unload, `chat`, `chatStream`, `decide` and `decideItems`) queue by
   default. `new CrucibleClient({..., queue: false})`
   turns that off; `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins.
 - `submit()` queues only when its request says `queue: true` or `queue: {maxWaitS}`.
@@ -200,3 +315,5 @@ for await (const event of crucible.events(id)) {
 - `job()` returns `status: 'removed'` and `removal`; `cancel()` on a waiting job answers
   `status: 'removed'`. `queue()`, `removeFromQueue()`, `queueHeartbeat()` and
   `queueEvents()` cover the routes above.
+- Queue sessions replace the SDK's old `lease()`; the session helpers arrive with the SDK
+  release that follows this server change. Until then, call the routes above directly.

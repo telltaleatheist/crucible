@@ -369,17 +369,17 @@ def test_a_streamed_rejection_comes_back_before_any_frames(
     assert body.json()["error"]["code"] == "upstream_rejected"
 
 
-def test_a_lease_on_an_upstream_model_is_refused_lease_not_needed(
+def test_a_queue_session_on_an_upstream_model_is_refused_upstream_never_resident(
     routed, auth
 ) -> None:
     body = routed.post(
-        "/v1/models/anthropic/claude-sonnet-5/lease",
+        "/v1/queue/sessions",
         headers=auth,
-        json={"ttl_seconds": 60, "act": "translate"},
+        json={"act": "translate", "model": "anthropic/claude-sonnet-5"},
     )
     assert body.status_code == 409
     error = body.json()["error"]
-    assert error["code"] == "lease_not_needed"
+    assert error["code"] == "upstream_never_resident"
     assert error["message"] == "an upstream model is never resident; send the chat"
 
 
@@ -392,7 +392,7 @@ def test_load_model_naming_an_upstream_model_is_refused_the_same_way(
         json={"type": "load-model", "model": "anthropic/claude-sonnet-5"},
     )
     assert body.status_code == 409
-    assert body.json()["error"]["code"] == "lease_not_needed"
+    assert body.json()["error"]["code"] == "upstream_never_resident"
 
 
 def test_openai_models_lists_the_routed_upstream_models_and_no_catalog(
@@ -486,7 +486,7 @@ def test_a_forwarded_chat_takes_no_lane_and_settles_nothing(routed, auth) -> Non
         Settlement.settle_quietly = saved
     assert settled == []
     assert after["slots"] == before["slots"]
-    assert after["lease"] is None
+    assert after["session"] is None
 
 
 def _chats(upstream: FakeUpstream) -> list[dict[str, Any]]:

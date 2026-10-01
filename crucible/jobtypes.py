@@ -245,6 +245,8 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
 
+CARD_EFFECTS: dict[str, CardEffect] = {spec.name: spec.card for spec in JOB_TYPE_SPECS}
+
 FAMILIES: tuple[Family, ...] = tuple(dict.fromkeys(spec.family for spec in JOB_TYPE_SPECS))
 
 
@@ -268,6 +270,7 @@ if _UNNAMED_CLASSES:
     )
 
 __all__ = [
+    "CARD_EFFECTS",
     "ALIGN",
     "ALIGN_ENV",
     "ALIGN_JOB",

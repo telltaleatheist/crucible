@@ -56,23 +56,6 @@ def _resident_holder(residency: Any, subject: catalog.Subject, readers: Any) -> 
     }
 
 
-def _lease_holder(leases: Any, subject: catalog.Subject, readers: Any) -> dict | None:
-    lease = leases.current()
-    if lease is None or lease.subject not in readers:
-        return None
-    return {
-        "kind": subject.kind,
-        "id": subject.id,
-        "who": (
-            f"{lease.client or 'a client'} holds a lease on it"
-            f"{_through(subject, lease.subject)} "
-            f"until {lease.expires_at.isoformat()}"
-        ),
-        "fact": "lease",
-        **lease.receipt(),
-    }
-
-
 def _task_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dict | None:
     running = ctx.tasks.running
     if running is None:
@@ -88,15 +71,12 @@ def _task_holder(ctx: AppContext, subject: catalog.Subject, readers: Any) -> dic
     }
 
 
-def held_on_card(residency: Any, leases: Any, subject: catalog.Subject) -> dict | None:
-    readers = catalog.ids_reading(subject)
-    return _resident_holder(residency, subject, readers) or _lease_holder(
-        leases, subject, readers
-    )
+def held_on_card(residency: Any, subject: catalog.Subject) -> dict | None:
+    return _resident_holder(residency, subject, catalog.ids_reading(subject))
 
 
 def _subject_holder(ctx: AppContext, subject: catalog.Subject) -> dict | None:
-    return held_on_card(ctx.residency, ctx.leases, subject) or _task_holder(
+    return held_on_card(ctx.residency, subject) or _task_holder(
         ctx, subject, catalog.ids_reading(subject)
     )
 
@@ -184,8 +164,8 @@ def _catalog_remove_handler(ctx: AppContext):
     async def catalog_remove(
         request: Request, kind: str, subject_id: str
     ) -> Response:
-        """Delete an installed subject's files. Refused while the subject is resident,
-        leased or named by a running task.
+        """Delete an installed subject's files. Refused while the subject is resident
+        or named by a running task.
         """
         subject, found = _installed_subject(ctx, kind, subject_id)
         _refuse_if_held(ctx, subject, kind, subject_id)

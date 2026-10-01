@@ -122,16 +122,13 @@ def describe_voices(config: Config, residency: Residency) -> list[ModelDescripto
 
 def _orphan(
     voice_id: str, source: str | None, residency: Residency,
-    *, leases: Any | None, store: Any | None,
+    *, store: Any | None,
 ) -> bool | None:
-    if leases is None or store is None:
+    if store is None:
         return None
     if source != "local":
         return False
     if residency.is_resident(KIND_TTS, voice_id):
-        return False
-    lease = leases.current()
-    if lease is not None and lease.subject == voice_id:
         return False
     running = store.running
     if running is not None and running.model == voice_id:
@@ -237,7 +234,7 @@ def _arm_facts(spec: VoiceBackendSpec) -> dict[str, Any]:
 
 def _served_voice_row(
     config: Config, backend: Any, residency: Residency, manifest: VoiceManifest,
-    *, leases: Any | None, store: Any | None,
+    *, store: Any | None,
 ) -> dict[str, Any]:
     on_backend = _backend_fields(config, backend, manifest)
     return voice_row(
@@ -248,7 +245,7 @@ def _served_voice_row(
         narrator_engine=manifest.narrator_engine,
         resident=residency.is_resident(KIND_TTS, manifest.id),
         orphan=_orphan(
-            manifest.id, on_backend.get("source"), residency, leases=leases, store=store
+            manifest.id, on_backend.get("source"), residency, store=store
         ),
         serving=None if manifest.serving is None else manifest.serving.to_dict(),
         pace_basis=manifest.pace_basis,
@@ -266,13 +263,13 @@ def _served_voice_row(
 
 def voice_rows(
     config: Config, backend: Any, residency: Residency,
-    *, leases: Any | None = None, store: Any | None = None,
+    *, store: Any | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for manifest in load_voices().values():
         rows.append(
             _served_voice_row(
-                config, backend, residency, manifest, leases=leases, store=store
+                config, backend, residency, manifest, store=store
             )
         )
     for voice_id, (revision, why) in sorted(unserved_pins().items()):

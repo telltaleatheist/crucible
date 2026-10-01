@@ -25,6 +25,8 @@ FEATURES: dict[str, str] = {
     "queue.calls": "`queue` on a chat or a decision: the request is held open in the "
     "same line until the resident model has a slot (docs/QUEUE.md).",
     "queue.events": "GET /v1/queue/events: the waiting line's own SSE stream.",
+    "queue.sessions": "/v1/queue/sessions: an app's session holds the machine for a run "
+    "of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md).",
     "activity": "GET /v1/activity: what the server is doing, in one read.",
     "accelerator": "GET /v1/accelerator: what is on the card and which holders are "
     "Crucible's own.",

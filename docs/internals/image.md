@@ -18,7 +18,7 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
   reads as off and a rewriter that does not name it keeps what the file says). Three types:
   `image` (makes the generator resident and reuses it, like `align`), `load-image` (loads it
   and leaves it resident, like `load-voice`; its card effect reuses what it names, so warming
-  the model a lease already holds is a no-op, not `409 leased`) and `unload-image`
+  the model that is already resident is a no-op) and `unload-image`
   (`UnloadJobType`, `generator_not_resident`). `load-model` stays text-only: its card effect
   makes an LLM resident and its manifests are the LLM catalog.
 - One env per backend, `image`, built by `crucible install image`, installed on submit like
@@ -27,8 +27,8 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
   the directory does not declare is refused, never pulled.
 - The worker is a `WorkerSession` (`workerio.serve`, ops `load` and `generate`, interrupt
   `cancel`) held by `Residency` as the resident. Settlement unloads it when the job ends
-  unless a lease holds it (jobs-runtime.md section 6). A batch sends `params.lease` on its
-  first picture (below).
+  unless a queue session holds it (jobs-runtime.md section 6). A batch runs inside a queue
+  session (below).
 - One artifact per job, `image.png` (a masked job adds `generated.png`, the picture before the
   paste-back), and `done.image` holding every effective parameter
   (seed included, chosen by the server when the caller sent none), the revision, the engine,
@@ -100,7 +100,7 @@ worker with a CUDA OOM instead of spilling into Windows shared memory. A request
 `max_pixels` or `max_side` is refused before anything loads (`image_too_large`).
 
 The price is a read of each component per picture. What stays "resident" between the
-pictures of a leased batch is the worker process (its imports and Metal or CUDA context:
+pictures of a batch inside a queue session is the worker process (its imports and Metal or CUDA context:
 15.4 s cold, 1.8 s warm on the Mac); the weights themselves are read again for each picture,
 from the page cache when the machine has room for it. On the Mac that read is inside the
 measured times below (the encoder stage took 2.9 to 3.9 s including it).
@@ -206,42 +206,24 @@ linked 33,127,036,062 bytes, the pull finished in 6.2 s, and only the ~8 MB mflu
 fetched (`model_index.json`, `scheduler/`, the README, the licence, a 3.3 MB picture) came
 from the network. No second copy on disk. The installed Crucible was not touched.
 
-## The lease on an image job
+## Keeping the model across a batch
 
 Owen, 2026-09-28: *"does crucible have a way to allow a user to retain a lease and keep a model
 loaded if we're generating multiple images? ... if the lease expires or something closes or
 stops, it can release the lease and the model from memory."*
 
-Before, a batch had to lease with `POST /v1/models/{id}/lease` after the first picture made the
-model resident and before settlement took it off again: a race the client could lose.
-`image` and `load-image` now take `params.lease` (`jobs/leaseonload.py`'s `LeaseOnLoad`, the
-same block `load-model` and `load-voice` take):
-
-- **Admission.** `preflight` runs `require_lease_request(lease, act="image")`: the act must be
-  a known capability class (`unknown_act`) and exactly `image` (`lease_act_mismatch`), the ttl
-  30 to 3600 (`invalid_ttl`). A bad block is refused at submit, before anything loads.
-- **The moment.** `run` gets the resident worker (`ResidentWorker._session`: the loaded one,
-  or a load), then `hold_for_load` opens the lease, then the picture is made. Settlement runs
-  only when the job ends, and by then the lease holds the card, so a long first picture cannot
-  race it.
-- **No second lease.** `hold_for_load` first looks at the open lease: if it holds the same kind
-  and subject for the same client, it is heartbeated and its id returned (`opened=False`)
-  instead of `Leases.open` refusing `409 leased`. `open_lease_for_load` (load-model,
-  load-voice) goes through the same rule. A lease held by someone else is still `leased`.
-- **Failure.** A picture that fails or is cancelled after its job *opened* the lease releases
-  it (`let_go_of`): the caller never received the id, so nothing would heartbeat or release
-  it, and settlement then clears the card as for any failed job. A renewed lease is left
-  alone.
-- **The end.** `done` carries `lease_id` (null without `lease`). Heartbeat and release are the
-  ordinary lease routes; an unrenewed lease lapses and the lane's idle pass
-  (`settle_for_lapsed_lease`) unloads the model, a released one is cleared before
-  `DELETE /v1/leases/{id}` answers.
+History: this was first answered with `params.lease` on `image` and `load-image` (a lease
+opened the moment the model loaded). Since 2026-10-01 a batch runs inside a **queue session**
+(docs/internals/queue-sessions.md) instead: opened before the first picture, the session holds
+the card from the start, so there is no moment between a load and a hold for settlement to
+win, and nothing from another client runs between two pictures. Closing the session (or its
+`idle_s` running out) settles the card; the image jobs themselves carry nothing about it.
 
 ## The prompt-embedding cache
 
 Measured on owens-pc (3090 Ti, bf16, staged): every picture spent 17 to 25 s in `encoding`,
 because the diffusers arm loads the 17.5 GB text encoder, encodes, frees it and only then
-loads the transformer. The worker process survives between leased pictures; the encoder did
+loads the transformer. The worker process survives between pictures of a session; the encoder did
 not. The embeddings it produces are small, so `worker.py` keeps them:
 
 - **Key** (`Job.prompt_key`): prompt, negative prompt, whether guidance is above 1.0 (only
@@ -262,7 +244,7 @@ not. The embeddings it produces are small, so `worker.py` keeps them:
 - **Bounds.** `PromptCache`: least recently used first out, at most 32 entries
   (`PROMPT_CACHE_ENTRIES`) and 256 MiB (`PROMPT_CACHE_BYTES`); an entry larger than the byte
   cap is not kept. It lives in the worker process, is emptied on `load`, and goes when the
-  worker stops (unload, settlement, lease lapse, crash).
+  worker stops (unload, settlement, crash).
 - **Report.** The worker's result says `prompt_cache: "hit" | "miss"` and the controller copies
   it into `done.image`. A hit still enters the `encoding` stage (to move the tensors back), so
   `stage_seconds.encoding` is present and near 0.

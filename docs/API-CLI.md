@@ -280,17 +280,19 @@ aligner loads once and a window that fails is reported alone. A window is at mos
 of `{text, start, end}` in seconds from that window's start, or `error`) and needs
 `--follow`.
 
-### Leases
+### Queue sessions
 
 ```
-crucible api lease open <subject-id> --act clean --ttl 600
-crucible api lease heartbeat <lease-id>
-crucible api lease release <lease-id>
+crucible api session open --act clean [--model qwen3.5-9b] [--idle 600] [--max-wait 3600]
+crucible api session get <session-id>
+crucible api session events <session-id> [--since EVENT_ID]
+crucible api session touch <session-id>
+crucible api session close <session-id>
 ```
 
-The path says `models` and the id may name a model, a voice or an aligner: the
-server reads the kind off `Residency.resident`, so there is nothing to
-disambiguate.
+`open` answers the ticket at once (`status` `open`, or `queued` with a `position`); `events`
+follows the session until `opened`, then `closed` (or `removed`). While it is open every
+other `crucible api` verb this client sends is one of its items. docs/QUEUE.md has the rules.
 
 ## What a fine-tuning script calls
 
@@ -393,20 +395,20 @@ BookForge's `crucible` provider follows).
 | `tts` | voice id | `{"language","take","chunks":[{"index","text"}]}` | none |
 | `load-voice` | voice id | `{"timeout_s": …}`, plus `reference` for a `zeroshot` voice | none |
 | `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` / `unload-image` / `unload-audio` / `unload-segment` / `unload-video` | id | `{}` | none |
-| `load-model` | model id | `{"timeout_s": …, "context": …, "lease": {"act": …, "ttl_seconds": …}}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
+| `load-model` | model id | `{"timeout_s": …, "context": …}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
 | `asr` | asr id | `{"language","vad_filter","word_timestamps"[, "initial_prompt","context","piece_s","overlap_s","speech_only","speech_threshold","speech_pad_s","speech_min_gap_s"]}` | exactly one audio file; `"auto"` is a language (whisper only); `initial_prompt` is whisper's, `context`/`piece_s`/`overlap_s` Qwen3-ASR's; `speech_only` (default false, 2026-09-27) takes stretches without speech out first and lists them in the transcript's `removed`; its three knobs default to 0.3 / 0.3 s / 2 s and are refused without it |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
 | `denoise` | separator id | `{}` — and that is the contract | exactly one audio file |
-| `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur","lease"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
-| `load-image` | image model id | `{"lease": {"act": "image", "ttl_seconds": …}}` — optional; warms the model up before the first prompt | none |
-| `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs)`[, "duration_s","steps","cfg","seed","format","lease"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
-| `load-audio` | audio model id | `{"lease": {"act": "sfx" \| "music" \| "song", "ttl_seconds": …}}` — optional; the act is the model's own class | none |
-| `segment` | segment model id | `{}` for `birefnet` (the subject, by itself); `{"points": [{"x","y","label"}], "box": [x0,y0,x1,y1]}` (either or both) for `sam2.1-hiera-large`; `"lease"` optional — see docs/SEGMENT.md | exactly one PNG, JPEG or WebP; out come `mask.png` and `cutout.png` at its size |
-| `load-segment` | segment model id | `{"lease": {"act": "cutout" \| "select", "ttl_seconds": …}}` — optional; the act is the model's own class | none |
-| `video` | video model id | `{"prompt"[, "width","height","duration_s" or "num_frames","fps","seed","steps","audio","lease"]}` — every limit is refused by name; see docs/VIDEO.md | none (text-to-video) or exactly one PNG/JPEG/WebP (image-to-video, its first frame) |
-| `load-video` | video model id | `{"lease": {"act": "video", "ttl_seconds": …}}` — optional | none |
+| `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
+| `load-image` | image model id | `{}` — warms the model up before the first prompt | none |
+| `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs)`[, "duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
+| `load-audio` | audio model id | `{}` — warms the model up | none |
+| `segment` | segment model id | `{}` for `birefnet` (the subject, by itself); `{"points": [{"x","y","label"}], "box": [x0,y0,x1,y1]}` (either or both) for `sam2.1-hiera-large` — see docs/SEGMENT.md | exactly one PNG, JPEG or WebP; out come `mask.png` and `cutout.png` at its size |
+| `load-segment` | segment model id | `{}` — warms the model up | none |
+| `video` | video model id | `{"prompt"[, "width","height","duration_s" or "num_frames","fps","seed","steps","audio"]}` — every limit is refused by name; see docs/VIDEO.md | none (text-to-video) or exactly one PNG/JPEG/WebP (image-to-video, its first frame) |
+| `load-video` | video model id | `{}` — warms the model up | none |
 
 **`denoise` returns WAV, always.** Every stem is a `.wav`, fixed by this server for every separator
 and not chosen per manifest, because a client slices the stem at sample offsets and a lossy

@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import threading
 import time
-from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -16,7 +15,6 @@ from crucible.settle import LEAVES_IT_RESIDENT, Settlement
 from .fake_engine import FakeEngine
 
 MODEL = "qwen3.5-9b"
-TTL = 60
 
 
 @pytest.fixture
@@ -83,14 +81,16 @@ def is_resident(client: TestClient, auth: dict[str, str]) -> bool:
     return body["resident"] is not None
 
 
-def a_lease(client: TestClient, auth: dict[str, str]) -> str:
-    response = client.post(
-        f"/v1/models/{MODEL}/lease",
-        headers=auth,
-        json={"act": "clean", "ttl_seconds": TTL},
-    )
-    assert response.status_code == 201, response.text
-    return str(response.json()["lease_id"])
+def a_session(client: TestClient, auth: dict[str, str]) -> str:
+    response = client.post("/v1/queue/sessions", headers=auth, json={"act": "clean"})
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "open", response.text
+    return str(response.json()["session_id"])
+
+
+def close(client: TestClient, auth: dict[str, str], session_id: str) -> None:
+    response = client.delete(f"/v1/queue/sessions/{session_id}", headers=auth)
+    assert response.status_code == 200, response.text
 
 
 def a_chat(client: TestClient, auth: dict[str, str]) -> Any:
@@ -120,16 +120,17 @@ def test_a_job_on_the_lane_holds_it_and_its_end_is_what_clears_it(
     assert not is_resident(resident, auth)
 
 
-def test_an_open_lease_holds_it_and_releasing_is_what_clears_it(
+def test_an_open_session_holds_it_and_closing_is_what_clears_it(
     resident: TestClient, auth: dict[str, str]
 ) -> None:
-    lease_id = a_lease(resident, auth)
+    session_id = a_session(resident, auth)
     echoed(resident, auth)
     held = settlement_of(resident).holder()
-    assert held is not None and held.fact == "a lease"
-    assert is_resident(resident, auth), "a job that ends under a lease keeps it"
+    assert held is not None and held.fact == "a session"
+    assert held.details["session_id"] == session_id
+    assert is_resident(resident, auth), "a job that ends inside a session keeps it"
 
-    assert resident.delete(f"/v1/leases/{lease_id}", headers=auth).status_code == 204
+    close(resident, auth, session_id)
     assert not is_resident(resident, auth)
 
 
@@ -163,7 +164,7 @@ def test_a_chat_in_flight_holds_it_and_the_last_one_returning_clears_it(
     assert not is_resident(resident, auth)
 
 
-def test_a_real_chat_run_without_a_lease_reloads_its_model(
+def test_a_real_chat_run_outside_a_session_reloads_its_model(
     resident: TestClient, auth: dict[str, str], engines: list[FakeEngine]
 ) -> None:
     first = a_chat(resident, auth)
@@ -176,16 +177,16 @@ def test_a_real_chat_run_without_a_lease_reloads_its_model(
     assert len(engines) == 1
 
 
-def test_a_lease_turns_two_jobs_back_to_back_into_one_load(
+def test_a_session_turns_two_jobs_back_to_back_into_one_load(
     resident: TestClient, auth: dict[str, str], engines: list[FakeEngine]
 ) -> None:
-    lease_id = a_lease(resident, auth)
+    session_id = a_session(resident, auth)
     echoed(resident, auth)
     echoed(resident, auth)
     assert is_resident(resident, auth)
     assert len(engines) == 1
 
-    resident.delete(f"/v1/leases/{lease_id}", headers=auth)
+    close(resident, auth, session_id)
     assert not is_resident(resident, auth)
     assert len(engines) == 1
 
@@ -211,12 +212,12 @@ def test_the_unload_is_said_on_the_job_that_triggered_it_and_in_the_log(
 def test_a_settlement_with_no_job_behind_it_still_says_so_in_the_log(
     resident: TestClient, auth: dict[str, str], capfd: pytest.CaptureFixture[str]
 ) -> None:
-    lease_id = a_lease(resident, auth)
+    session_id = a_session(resident, auth)
     capfd.readouterr()
-    resident.delete(f"/v1/leases/{lease_id}", headers=auth)
+    close(resident, auth, session_id)
     said = capfd.readouterr().err
     assert f"unloaded {MODEL}" in said
-    assert "the lease was released" in said
+    assert f"session {session_id} closed (client)" in said
 
 
 def test_a_load_is_not_a_holder_letting_go(
@@ -277,7 +278,7 @@ def test_every_exempt_name_is_a_job_type_this_build_knows() -> None:
 
 
 def test_the_exempt_names_are_the_ones_whose_whole_content_is_being_resident() -> None:
-    from crucible.leases import CARD_EFFECTS
+    from crucible.jobtypes import CARD_EFFECTS
 
     for name in LEAVES_IT_RESIDENT:
         assert CARD_EFFECTS[name].makes_resident is not None, name
@@ -356,53 +357,35 @@ def test_a_card_that_will_not_be_cleared_does_not_fail_the_job(
     assert "could not clear the card" in capfd.readouterr().err
 
 
-def test_a_lease_that_expires_unheld_clears_the_card_on_its_own_deadline(
+def test_a_session_that_goes_idle_clears_the_card_when_it_closes(
     resident: TestClient, auth: dict[str, str]
 ) -> None:
-    resident.post(
-        f"/v1/models/{MODEL}/lease",
-        headers=auth,
-        json={"act": "clean", "ttl_seconds": 30},
-    )
-    settlement = settlement_of(resident)
-    leases = resident.app.state.leases
-    leases._lease = replace(leases._lease, expires_at=leases._lease.since)
-    assert leases.current() is None, "the lease is past its deadline"
-    assert settlement.holder() is None
-    assert settlement.settle("the lease expired and was not renewed") is not None
-    assert not is_resident(resident, auth)
-
-
-def test_the_deadline_is_rearmed_by_a_heartbeat_rather_than_fixed_at_the_open(
-    resident: TestClient, auth: dict[str, str]
-) -> None:
-    lease_id = a_lease(resident, auth)
-    settlement = settlement_of(resident)
-    first = settlement._deadline
-    assert first is not None
-    beat = resident.post(f"/v1/leases/{lease_id}/heartbeat", headers=auth)
-    assert beat.status_code == 200, beat.text
-    assert settlement._deadline is not None
-    assert settlement._deadline is not first
-
-    assert resident.delete(f"/v1/leases/{lease_id}", headers=auth).status_code == 204
-    assert settlement._deadline is None
+    session_id = a_session(resident, auth)
+    sessions = resident.app.state.sessions
+    echoed(resident, auth)
+    assert is_resident(resident, auth)
+    sessions.get(session_id).idle_s = 1
+    deadline = time.monotonic() + 20.0
+    while is_resident(resident, auth) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not is_resident(resident, auth), "the idle close settled the card"
+    assert sessions.get(session_id).reason == "idle"
 
 
 def test_the_facts_are_read_in_a_fixed_order_so_a_refusal_names_the_same_one(
     resident: TestClient, auth: dict[str, str]
 ) -> None:
     residency = resident.app.state.residency
-    a_lease(resident, auth)
+    a_session(resident, auth)
     residency.claim("tts stream abc123", may_mutate=False)
     with resident.app.state.inflight.tracked(act="clean", model=MODEL, client=None):
         job_id = submit_echo(resident, auth, delay_ms=200)
         held = settlement_of(resident).holder()
         assert held is not None and held.fact == "a job"
         finish(resident, auth, job_id)
-        assert settlement_of(resident).holder().fact == "a lease"
+        assert settlement_of(resident).holder().fact == "a session"
     residency.release("tts stream abc123")
-    assert settlement_of(resident).holder().fact == "a lease"
+    assert settlement_of(resident).holder().fact == "a session"
     assert is_resident(resident, auth)
 
 

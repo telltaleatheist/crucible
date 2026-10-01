@@ -1960,7 +1960,7 @@ def test_an_interrupted_move_resumes_from_the_two_catalogs(tmp_path: Path) -> No
 
 def test_subject_in_use_is_WAITED_OUT_and_never_skipped(tmp_path: Path) -> None:
     windows = FakeCatalog("windows", [("model", "qwen3.5-9b")])
-    windows.in_use[("model", "qwen3.5-9b")] = "a lease held by bookforge"
+    windows.in_use[("model", "qwen3.5-9b")] = "a queue session held by bookforge"
     windows.release_after[("model", "qwen3.5-9b")] = 3
     guest = FakeCatalog("guest", [("model", "qwen3.5-9b")])
     events: list[installer.Event] = []
@@ -1972,7 +1972,7 @@ def test_subject_in_use_is_WAITED_OUT_and_never_skipped(tmp_path: Path) -> None:
         for event in events
         if event.event == "line" and "held by" in str(event.data.get("text"))
     ]
-    assert held and "a lease held by bookforge" in held[0]
+    assert held and "a queue session held by bookforge" in held[0]
 
 
 def test_a_subject_held_forever_FAILS_THE_STEP_by_name_and_names_who(
@@ -2054,13 +2054,13 @@ def test_the_servers_refusal_code_survives_verbatim_with_its_holder() -> None:
             "error": {
                 "code": "subject_in_use",
                 "message": "qwen3.5-9b is resident",
-                "details": {"who": "a lease held by foundry"},
+                "details": {"who": "a queue session held by foundry"},
             }
         }
     ).encode()
     refusal = catalog_module.refusal_from(body, 409, "the Windows engine", "DELETE /x")
     assert refusal.code == "subject_in_use"
-    assert refusal.who == "a lease held by foundry"
+    assert refusal.who == "a queue session held by foundry"
 
 
 def test_a_refusal_that_is_not_the_error_envelope_keeps_the_status_and_the_text() -> None:

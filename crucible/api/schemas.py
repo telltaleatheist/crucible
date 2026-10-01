@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..jobs.line import DEFAULT_MAX_WAIT_S, MAX_MAX_WAIT_S, MIN_MAX_WAIT_S
 from ..queuerequest import QueueRequest
+from ..queuesessions import DEFAULT_IDLE_S, MAX_IDLE_S, MIN_IDLE_S, STREAM_IDLE_S
 from ..tasks import TASK_TYPES
 
 
@@ -78,6 +80,21 @@ class StreamOpen(BaseModel):
 
     voice: str = Field(min_length=1)
     language: str = Field(min_length=1)
+    idle_s: int = Field(
+        default=STREAM_IDLE_S,
+        ge=MIN_IDLE_S,
+        le=MAX_IDLE_S,
+        description="When the client holds no queue session, the stream opens one for "
+        "itself with this idle_s: no row being said, no op and no touch for this long "
+        "closes the session and the stream with it. Ignored inside the client's own "
+        "session.",
+    )
+    queue: QueueRequest | Literal[False] = Field(
+        default_factory=QueueRequest,
+        description="How long the stream's queue session may wait in the line to open "
+        "(`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than "
+        "wait when the server is not free now.",
+    )
 
 
 class TaskCreate(BaseModel):
@@ -140,21 +157,34 @@ class TaskCreate(BaseModel):
         }
 
 
-class LeaseOpen(BaseModel):
-    """`POST /v1/models/{id}/lease`: the act the lease is for and how long it lasts;
-    neither has a default.
-    """
+class SessionOpen(BaseModel):
+    """`POST /v1/queue/sessions`: ask for the server for a run of requests. `act` has no
+    default."""
 
     model_config = ConfigDict(extra="forbid")
 
-    act: str = Field(min_length=1)
-    ttl_seconds: int
-    queue: QueueRequest | None = Field(
+    act: str = Field(
+        min_length=1,
+        description="The capability class the run is for, as the act header names it.",
+    )
+    model: str | None = Field(
         default=None,
-        description="Wait in the server's queue for the lease instead of being refused "
-        "while the card is busy, leased by another client, or holding something else. At "
-        "the front of the line the lease is granted, loading the model with it when it is "
-        "not resident (models only). Without it, refused as before.",
+        description="A model to have resident when the session opens; it is loaded for "
+        "the session (a load-model job attributed to it) when it is not.",
+    )
+    idle_s: int = Field(
+        default=DEFAULT_IDLE_S,
+        ge=MIN_IDLE_S,
+        le=MAX_IDLE_S,
+        description="Close the session after this long with nothing in flight, no item "
+        "and no touch. A running job or an answer in flight always counts as activity.",
+    )
+    max_wait_s: int = Field(
+        default=DEFAULT_MAX_WAIT_S,
+        ge=MIN_MAX_WAIT_S,
+        le=MAX_MAX_WAIT_S,
+        description="How long it may wait in the line to open before it is removed "
+        "`expired`.",
     )
 
 

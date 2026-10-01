@@ -23,15 +23,17 @@ from ..capabilitystore import decide_for, write_capability
 from ..config import Config, load_config
 from ..connect import PairingRequests
 from ..errors import ApiError, ConfigError
-from ..events import EventHub
+from ..events import SESSION, EventHub
 from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
 from ..jobs import build_registry, disabled_error
-from ..jobs.queue import JobStore
+from ..jobs.base import TERMINAL_STATES
 from ..jobs.line import WaitingLine
-from ..leases import Leases
+from ..jobs.queue import JobStore
 from ..queuepump import QueuePump
+from ..queuesessions import QueueSession, QueueSessions
 from ..residency import Residency
+from ..sessionqueue import SessionCloser
 from ..settle import Settlement
 from ..tasks import TaskStore
 from ..tasks.states import ReloadRefused
@@ -51,7 +53,6 @@ from .routes import (
     activity,
     capability,
     decide,
-    events as event_routes,
     info,
     jobs,
     openai,
@@ -64,9 +65,12 @@ from .routes import (
     voices,
 )
 from .routes import catalog as catalog_routes
-from .routes import leases as lease_routes
+from .routes import (
+    events as event_routes,
+)
 from .routes import playground as playground_routes
 from .routes import queue as queue_routes
+from .routes import sessions as session_routes
 
 ROUTE_MODULES = (
     pairing,
@@ -77,7 +81,7 @@ ROUTE_MODULES = (
     catalog_routes,
     activity,
     event_routes,
-    lease_routes,
+    session_routes,
     queue_routes,
     voices,
     tts_stream,
@@ -134,17 +138,14 @@ def _http_refusal(exc: StarletteHTTPException) -> ApiError:
 
 
 class RegistryKeeper:
-    def __init__(
-        self, config: Config, backend: Backend, residency: Residency, leases: Leases
-    ) -> None:
+    def __init__(self, config: Config, backend: Backend, residency: Residency) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
         self.registry = self._built(config)
 
     def _built(self, config: Config) -> dict[str, Any]:
-        return build_registry(config, self._backend, self._residency, self._leases)
+        return build_registry(config, self._backend, self._residency)
 
     def take_up_enabled_types(self, live: Config) -> None:
         try:
@@ -214,34 +215,41 @@ def _services(
     config: Config,
     backend: Backend,
     residency: Residency,
-    leases: Leases,
     keeper: RegistryKeeper,
 ) -> Services:
     events = EventHub()
     store = JobStore(config, backend, keeper.registry)
-    line = WaitingLine(store, lambda: _lease_client(leases))
+    sessions = QueueSessions(lambda: config.max_session_hold_s)
+    line = WaitingLine(store, sessions)
+    sessions.when_said(
+        lambda event, data: events.publish(SESSION, f"session.{event}", data)
+    )
     streams = StreamManager(residency)
     inflight = InFlight()
     settings_history = settings_module.History()
+    sessions.watch(
+        _session_in_flight(store, line, inflight, streams),
+        lambda session: _stream_session_of(streams, session),
+    )
     settlement = Settlement(
-        residency=residency, store=store, leases=leases, inflight=inflight,
+        residency=residency, store=store, sessions=sessions, inflight=inflight,
         waiting_calls=line.calls_waiting,
     )
     store.attach_settlement(settlement)
-    streams.when_closed(settlement.settle_quietly)
     task_store = TaskStore(
         config,
         backend,
         reload=lambda: keeper.reload(settlement.holder),
         holder=settlement.holder,
         take_up=keeper.take_up_installed,
-        in_use=lambda subject: catalog_routes.held_on_card(residency, leases, subject),
+        in_use=lambda subject: catalog_routes.held_on_card(residency, subject),
     )
     for owner in (store, residency, inflight, task_store, settings_history):
         owner.events = events
     return Services(
         events=events,
-        leases=leases,
+        sessions=sessions,
+        session_closer=SessionCloser(sessions, line, settlement, streams),
         store=store,
         line=line,
         streams=streams,
@@ -257,13 +265,63 @@ def _services(
     )
 
 
-def _lease_client(leases: Leases) -> str | None:
-    lease = leases.current()
-    return None if lease is None else lease.client
+def _session_in_flight(
+    store: JobStore, line: WaitingLine, inflight: InFlight, streams: StreamManager
+) -> Callable[[QueueSession], list[dict[str, Any]]]:
+    """What a queue session has in flight: anything here is presence, so a session
+    running a day-long job never goes idle."""
+
+    def in_flight(session: QueueSession) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        live: list[str] = []
+        for job_id in session.jobs:
+            try:
+                job = store.get(job_id)
+            except ApiError:
+                continue
+            if job.status in TERMINAL_STATES:
+                continue
+            live.append(job_id)
+            rows.append({"kind": "job", "id": job.id, "type": job.type,
+                         "model": job.model, "status": job.status})
+        session.jobs[:] = live
+        for entry in inflight.of_session(session.id):
+            rows.append({"kind": "chat", "id": str(entry.id), "model": entry.model,
+                         "act": entry.act, "since": entry.since})
+        for item in line.items_of(session.id):
+            if item.is_call:
+                rows.append({"kind": "call", "id": item.job.id, "type": item.job.type,
+                             "model": item.job.model, "status": "queued"})
+        stream = _stream_session_of(streams, session)
+        if stream is not None and stream["in_flight"]:
+            rows.append({"kind": "stream_rows", "id": stream["session_id"],
+                         "voice": stream["voice"], "rows": stream["in_flight"]})
+        return rows
+
+    return in_flight
+
+
+def _stream_session_of(
+    streams: StreamManager, session: QueueSession
+) -> dict[str, Any] | None:
+    """The TTS stream session open inside this queue session. An open stream with no
+    row being said is not activity: its queue session's idle_s still runs out."""
+    stream = streams.session
+    if stream is None or stream.id not in session.stream_sessions:
+        return None
+    return {
+        "session_id": stream.id,
+        "voice": stream.voice,
+        "since": stream.opened_at,
+        "opened_the_queue_session": session.opened_for_stream == stream.id,
+        **stream.progress_report(),
+    }
 
 
 def _attach_queue_pump(app: FastAPI, ctx: AppContext) -> None:
-    pump = QueuePump(app.state.line, ctx.admission, app.state.inflight)
+    pump = QueuePump(
+        app.state.line, ctx.admission, app.state.inflight, app.state.session_closer
+    )
     app.state.inflight.when_closed(pump.wake)
     app.state.store.when_idle(pump.wake)
     app.state.line.when_changed(pump.wake)
@@ -385,8 +443,7 @@ def _mount_operator_page(app: FastAPI) -> None:
 
 def create_app(config: Config, backend: Backend) -> FastAPI:
     residency = Residency(config)
-    leases = Leases()
-    keeper = RegistryKeeper(config, backend, residency, leases)
+    keeper = RegistryKeeper(config, backend, residency)
     app = FastAPI(
         title="Crucible",
         version=VERSION,
@@ -401,7 +458,7 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.bind_host = config.host
     app.state.bind_port = config.port
     app.add_middleware(BeforeEveryRequest, step=ConfigFollower(config, keeper))
-    _services(config, backend, residency, leases, keeper).publish(app)
+    _services(config, backend, residency, keeper).publish(app)
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
     Path(config.uploads_dir).mkdir(parents=True, exist_ok=True)
     _answer_refusals(app)

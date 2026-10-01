@@ -126,6 +126,7 @@ class Job:
     resumed: bool = False
     waiting: dict[str, Any] | None = None
     removal: dict[str, Any] | None = None
+    session: str | None = None
 
     @property
     def error(self) -> dict[str, str] | None:

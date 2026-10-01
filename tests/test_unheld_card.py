@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
 
 from crucible.jobs.base import Job
+from crucible.queuesessions import QueueSession
 from crucible.settle import Held, Settlement
 
 
@@ -17,21 +18,12 @@ class _FakeStore:
         return self.job
 
 
-class _FakeLeases:
-    def __init__(self, current: Any = None, lapsed: datetime | None = None) -> None:
+class _FakeSessions:
+    def __init__(self, current: Any = None) -> None:
         self._current = current
-        self._lapsed = lapsed
-        self.forgotten = 0
 
     def current(self) -> Any:
         return self._current
-
-    def lapsed_at(self) -> datetime | None:
-        return self._lapsed
-
-    def forget_lapse(self) -> None:
-        self.forgotten += 1
-        self._lapsed = None
 
 
 class _FakeResidency:
@@ -82,14 +74,13 @@ def _settlement(
     *,
     resident: Any = "a-model",
     job: Any = None,
-    lease: Any = None,
-    lapsed: datetime | None = None,
+    session: Any = None,
     chats: int = 0,
 ) -> Settlement:
     return Settlement(
         residency=_FakeResidency(resident),
         store=_FakeStore(job),
-        leases=_FakeLeases(lease, lapsed),
+        sessions=_FakeSessions(session),
         inflight=_FakeInFlight(chats),
         log=lambda _line: None,
     )
@@ -138,32 +129,15 @@ def test_an_empty_card_has_nothing_to_date() -> None:
     assert settlement.unheld_since() is None
 
 
-def test_a_lapsed_lease_dates_the_card_from_its_own_expiry() -> None:
-    lapsed = datetime.now(timezone.utc) - timedelta(minutes=4)
-    settlement = _settlement(lapsed=lapsed)
-    assert settlement.unheld_since() == lapsed
-
-
-def test_the_later_of_the_two_moments_wins() -> None:
-    settlement = _settlement()
-    settlement.settle_for_job(_LoadJob(), "done")
-    stamped = settlement.unheld_since()
-    assert stamped is not None
-
-    later = stamped + timedelta(minutes=2)
-    settlement._leases._lapsed = later
-    assert settlement.unheld_since() == later
-
-    earlier = stamped - timedelta(minutes=2)
-    settlement._leases._lapsed = earlier
-    assert settlement.unheld_since() == stamped
-
-
 @pytest.mark.parametrize(
     "kwargs,fact",
     [
         ({"job": _Job()}, "a job"),
         ({"chats": 3}, "a chat"),
+        ({"session": QueueSession(
+            act="clean", client="briefcase", model=None, idle_s=300, max_wait_s=60,
+            created=datetime.now(timezone.utc),
+        )}, "a session"),
     ],
 )
 def test_held_by_reports_the_holding_fact(kwargs: dict[str, Any], fact: str) -> None:
@@ -189,57 +163,3 @@ def test_the_readers_do_not_take_the_settlement_lock() -> None:
     with settlement._lock:
         assert settlement.held_by() is None
         assert settlement.unheld_since() is None
-
-
-class _Resident:
-
-    def __init__(self, ident: str = "a-model") -> None:
-        self.id = ident
-        self.kind = "llm"
-
-
-def test_a_lapsed_lease_clears_the_card() -> None:
-    settlement = _settlement(
-        resident=_Resident(), lapsed=datetime.now(timezone.utc) - timedelta(minutes=1)
-    )
-    settled = settlement.settle_for_lapsed_lease()
-
-    assert settled is not None
-    assert settled.subject_id == "a-model"
-    assert settlement._residency.unloaded == ["a-model"]
-
-
-def test_a_lease_that_has_not_lapsed_clears_nothing() -> None:
-    settlement = _settlement(resident=_Resident(), lapsed=None)
-    assert settlement.settle_for_lapsed_lease() is None
-    assert settlement._residency.unloaded == []
-
-
-def test_a_lapse_is_spent_once_even_when_it_cleared_nothing() -> None:
-    settlement = _settlement(
-        resident=None, lapsed=datetime.now(timezone.utc) - timedelta(minutes=1)
-    )
-    assert settlement.settle_for_lapsed_lease() is None
-    assert settlement._leases.forgotten == 1
-
-    settlement._residency.resident = _Resident("a-later-model")
-    assert settlement.settle_for_lapsed_lease() is None
-    assert settlement._residency.unloaded == []
-
-
-def test_a_settlement_that_raises_still_spends_the_lapse() -> None:
-
-    class _Exploding(_FakeResidency):
-        def unload(self, subject_id: str) -> None:
-            raise RuntimeError("the engine would not stop")
-
-    settlement = Settlement(
-        residency=_Exploding(_Resident()),
-        store=_FakeStore(None),
-        leases=_FakeLeases(None, datetime.now(timezone.utc) - timedelta(minutes=1)),
-        inflight=_FakeInFlight(0),
-        log=lambda _line: None,
-    )
-    with pytest.raises(RuntimeError):
-        settlement.settle_for_lapsed_lease()
-    assert settlement._leases.forgotten == 1
