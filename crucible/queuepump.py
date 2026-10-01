@@ -8,35 +8,65 @@ refusal that only says "busy" (``server_busy``, ``leased``, ``engine_in_use``) l
 the job waiting in its place; any other refusal ends the job ``failed`` with that
 refusal as its error. A job refused ``leased`` does not block the jobs behind it that
 the lease does not refuse.
+
+A queued chat or decision (a *call*, crucible/callqueue.py) is offered its model
+instead of the lane: a free slot on the resident model admits it, and a model that is
+not resident is loaded for it when the lane is free. A queued job that would change
+what is on the card waits while any chat is in flight, so the pump never takes a model
+out from under a completion it let in.
 """
 
 from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Callable
+from typing import Any, Callable
 
-from .admission import KEEPS_WAITING, AdmissionContext, admit_waiting
+from .admission import (
+    KEEPS_WAITING,
+    AdmissionContext,
+    admit_waiting,
+    chats_hold_the_card,
+)
+from .callqueue import IN, LEASED, WAIT, admit_call
+from .inflight import InFlight
 from .jobs.line import SERVER_RESTART, WaitingLine
 
 TICK_SECONDS = 1.0
 
 
 class QueuePump:
-    def __init__(self, line: WaitingLine, admission: Callable[[], AdmissionContext]) -> None:
+    def __init__(
+        self,
+        line: WaitingLine,
+        admission: Callable[[], AdmissionContext],
+        inflight: InFlight | None = None,
+    ) -> None:
         self._line = line
         self._admission = admission
+        self._inflight = InFlight() if inflight is None else inflight
         self._wake: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task[None] | None = None
 
     def wake(self) -> None:
-        if self._wake is not None:
-            self._wake.set()
+        wake, loop = self._wake, self._loop
+        if wake is None or loop is None:
+            return
+        try:
+            here = asyncio.get_running_loop()
+        except RuntimeError:
+            here = None
+        if here is loop:
+            wake.set()
+        elif not loop.is_closed():
+            loop.call_soon_threadsafe(wake.set)
 
     def start(self) -> None:
         if self._task is not None:
             raise RuntimeError("the queue pump is already running")
         self._wake = asyncio.Event()
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run(), name="crucible-queue-pump")
 
     async def stop(self) -> None:
@@ -80,7 +110,18 @@ class QueuePump:
             return
         ctx = self._admission()
         for waiting in line.ordered():
+            if waiting.is_call:
+                verdict: Any = await admit_call(waiting, ctx, self._inflight)
+                if verdict in (IN, LEASED):
+                    continue
+                if verdict == WAIT:
+                    return
+                if not waiting.gone:
+                    line.fail(waiting, verdict)
+                continue
             if not ctx.store.lane_free:
+                return
+            if chats_hold_the_card(waiting.job.type, len(self._inflight)):
                 return
             refusal = await admit_waiting(waiting, ctx)
             if refusal is None:
@@ -91,6 +132,7 @@ class QueuePump:
                 return
             if not waiting.gone:
                 line.fail(waiting, refusal)
+
 
 
 def _say(line: str) -> None:

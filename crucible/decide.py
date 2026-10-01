@@ -21,6 +21,7 @@ from pydantic import (
 )
 
 from .errors import ApiError
+from .queuerequest import QueueRequest
 
 LETTERS: tuple[str, ...] = tuple(string.ascii_uppercase)
 
@@ -167,6 +168,11 @@ class DecideRequest(_Strict):
     and `label_mass` run over the letters actually returned. A question whose
     EVERY label is missing is refused in both modes: there is no answer to
     report."""
+    queue: QueueRequest | None = None
+    """Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`.
+    While the model is not resident, or every slot on its engine is taken, the
+    request is held open in the server's queue (docs/QUEUE.md) and the model is
+    loaded for it when its turn comes. Absent: refused as before."""
 
     @field_validator("state")
     @classmethod

@@ -22,7 +22,7 @@ let server: Server;
 let base = '';
 
 function client(): CrucibleClient {
-  return new CrucibleClient({ url: base, token: 'the-token', clientName: 'unit-decide-items' });
+  return new CrucibleClient({ url: base, token: 'the-token', clientName: 'unit-decide-items', queue: false });
 }
 
 function json(response: ServerResponse, status: number, body: unknown): void {

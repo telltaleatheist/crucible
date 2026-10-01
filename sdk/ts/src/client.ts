@@ -205,10 +205,10 @@ export interface CrucibleClientOptions {
   timeoutMs?: number;
   /**
    * Whether the high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`,
-   * `video` and every load/unload) wait in the server's queue while it is busy. On by default
-   * (`true`, the server's default wait of an hour); `false` makes them refuse `server_busy` as
-   * before. A request's own `queue` wins. {@link CrucibleClient.submit} never queues unless its
-   * request says so.
+   * `video`, every load/unload, `chat`, `chatStream`, `decide` and `decideItems`) wait in the
+   * server's queue while it is busy. On by default (`true`, the server's default wait of an
+   * hour); `false` makes them refuse as before. A request's own `queue` wins.
+   * {@link CrucibleClient.submit} never queues unless its request says so.
    */
   queue?: QueueChoice;
 }
@@ -942,6 +942,37 @@ export class CrucibleClient {
     return readChatResponse(body);
   }
 
+  /** The `queue` member a chat or decision sends: its own choice, else the client's. */
+  #callQueue(choice: QueueChoice | undefined): Record<string, number> | null {
+    return queuePayload(choice === undefined ? this.#helperQueue : choice);
+  }
+
+  /**
+   * `POST /v1/decide`, asked again without `queue` when the server is older than the queue
+   * and refuses the field it does not know.
+   */
+  async #postDecide(
+    payload: Record<string, unknown>,
+    options: DecideOptions,
+    what: string,
+  ): Promise<Json> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
+    const send = (body: Record<string, unknown>): Promise<Json> => {
+      const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(body) };
+      if (options.signal !== undefined) init.signal = options.signal;
+      return this.#json('/v1/decide', init, what);
+    };
+    const queue = this.#callQueue(options.queue);
+    if (queue === null) return send(payload);
+    try {
+      return await send({ ...payload, queue });
+    } catch (error) {
+      if (!refusedTheQueueField(error)) throw error;
+      return send(payload);
+    }
+  }
+
   /** The same completion as {@link chat}, streamed as content deltas. */
   async *chatStream(options: ChatOptions): AsyncGenerator<string, void, undefined> {
     const init = this.#chatRequest(options, true);
@@ -1012,6 +1043,8 @@ export class CrucibleClient {
       }
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
     }
+    const queue = this.#callQueue(given.queue);
+    if (queue !== null) payload['queue'] = queue;
     if (given.contextTokens !== undefined) {
       const contextTokens = requireFinite(given.contextTokens, 'contextTokens');
       if (!Number.isInteger(contextTokens) || contextTokens < 1) {
@@ -1068,12 +1101,7 @@ export class CrucibleClient {
       report = given.missing === 'report';
     }
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
-    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(payload) };
-    if (options.signal !== undefined) init.signal = options.signal;
-
-    const body = await this.#json('/v1/decide', init, 'decide');
+    const body = await this.#postDecide(payload, options, 'decide');
     return readDecideResponse(body, questions, report);
   }
 
@@ -1098,12 +1126,7 @@ export class CrucibleClient {
     payload['items'] = items.map((item) => (item.own ? { text: item.text, options: item.options } : { text: item.text }));
     const report = readMissingMode(given.missing, payload);
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
-    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(payload) };
-    if (options.signal !== undefined) init.signal = options.signal;
-
-    const body = await this.#json('/v1/decide', init, 'decideItems');
+    const body = await this.#postDecide(payload, options, 'decideItems');
     return readDecideItemsResponse(body, items, report);
   }
 
@@ -2198,6 +2221,7 @@ function readQueueItem(row: Json, where: string): QueueItem {
     maxWaitS: num(row, 'max_wait_s', where),
     expiresAt: str(row, 'expires_at', where),
     leaseHolder: bool(row, 'lease_holder', where),
+    kind: oneOf(str(row, 'kind', where), ['job', 'call'] as const, `${where}.kind`),
   };
 }
 

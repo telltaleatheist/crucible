@@ -878,6 +878,7 @@ One answer distribution per question, read off the resident model's next-token l
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
+| `queue` | QueueRequest or null | no | — | Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`. While the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) and the model is loaded for it when its turn comes. Absent: refused as before. |
 
 *Answers:* `200`, `422` HTTPValidationError
 
@@ -1125,6 +1126,7 @@ An items-form decision: one choice distribution per item, in item order.
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
+| `queue` | QueueRequest or null | no | — | Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`. While the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) and the model is loaded for it when its turn comes. Absent: refused as before. |
 
 ### `DecideResponse`
 
@@ -1369,6 +1371,7 @@ One job waiting in the server's queue.
 | `max_wait_s` | integer | yes | — |  |
 | `expires_at` | string | yes | — |  |
 | `lease_holder` | boolean | yes | — |  |
+| `kind` | `'job'` or `'call'` | yes | — |  |
 
 ### `QueueList`
 

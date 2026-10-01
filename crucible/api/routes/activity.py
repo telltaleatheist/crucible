@@ -15,13 +15,34 @@ from ..responses import Activity
 
 
 def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
-    row = _lane_row(store, job)
     line = store.line
     waiting = None if line is None else line.get(job.id)
+    if waiting is not None and waiting.is_call:
+        return _call_row(waiting)
+    row = _lane_row(store, job)
     if waiting is not None:
         row["waited_s"] = waiting.waited_s(clock.now())
         row["max_wait_s"] = waiting.max_wait_s
     return row
+
+
+def _call_row(waiting: Any) -> dict[str, Any]:
+    call = waiting.job
+    return {
+        "job_id": call.id,
+        "type": call.type,
+        "model": call.model,
+        "status": call.status,
+        "position": waiting.position,
+        "progress": 0.0,
+        "message": None,
+        "created": waiting.submitted.isoformat(),
+        "started": None,
+        "client": call.client,
+        "waited_s": waiting.waited_s(clock.now()),
+        "max_wait_s": waiting.max_wait_s,
+        "kind": "call",
+    }
 
 
 def _lane_row(store: JobStore, job: Any) -> dict[str, Any]:
@@ -181,7 +202,7 @@ def _activity_body(ctx: AppContext) -> dict[str, Any]:
     residency = ctx.residency
     store = ctx.store
     running = store.running
-    queued = store.queued()
+    queued = store.queued(calls=True)
     lease = ctx.leases.current()
     return {
         "server": _server_section(ctx),

@@ -270,6 +270,17 @@ missed that no client can know the *other* clients'. So the queue is opt-in and 
 App-author guidance is docs/QUEUE.md. 3.2's edge signal is still deferred: a queued job
 *is* the edge signal for the clients that want one.
 
+**Chats and decisions, 2026-09-30.** Owen: *"chat and decide dont queue?"* They opt in the
+same way (`"queue": {...}` in the body) and wait in the same line as *calls*
+(`crucible/callqueue.py`): no job record, a `call-…` id, the HTTP request held open. A call
+never takes the lane. At the front it is offered its model: a free slot on the resident
+model admits it (the pump opens its in-flight slot), and a model that is not resident is
+loaded for it by an ordinary `load-model` job when the lane is free and no chat is in
+flight. This is the one place Crucible loads a model to answer a chat, and only because
+the caller asked to wait. Two rules keep calls and jobs from hurting each other: a queued
+job that changes what is on the card waits while chats are in flight, and the settlement
+counts a call waiting for the resident model as holding it. Unqueued chats are unchanged.
+
 ---
 
 ## 4. Where each thing lives

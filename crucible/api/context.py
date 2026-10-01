@@ -138,4 +138,5 @@ class AppContext:
             leases=self.leases,
             installs=self.installs,
             decide_here=self.decide_here,
+            chats_in_flight=lambda: len(self.inflight),
         )

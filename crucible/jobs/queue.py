@@ -311,9 +311,11 @@ class JobStore:
                 return self._jobs[admitted]
             return None
 
-    def queued(self) -> list[Job]:
+    def queued(self, *, calls: bool = False) -> list[Any]:
         admitted = self._admitted.job_id
-        waiting = [] if self._line is None else [w.job for w in self._line.ordered()]
+        waiting = [] if self._line is None else [
+            w.job for w in self._line.ordered() if calls or not w.is_call
+        ]
         return ([] if admitted is None else [self._jobs[admitted]]) + waiting
 
     def followed(self) -> tuple[set[str], set[str | None]]:

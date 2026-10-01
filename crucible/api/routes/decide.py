@@ -10,6 +10,7 @@ from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
 from ... import decide_items, enginespec, upstreamrecord
+from ...callqueue import take_a_turn
 from ...capabilityclasses import BY_NAME
 from ...decide import DecideItemsResponse, DecideRequest, DecideResponse
 from ...engines import chat_admission, decide_items_reading, decide_reading
@@ -124,6 +125,27 @@ def _refuse_an_upstream(model: str) -> None:
     )
 
 
+def _refuse_a_malformed_decision(body: DecideRequest, backend_kind: str) -> None:
+    """What a queued decision would be refused for once its model is resident is
+    refused now, before it waits."""
+    n_images = decide_core.check_image_count(body.images)
+    if n_images:
+        try:
+            manifest = load_manifest(body.model)
+        except Exception:
+            manifest = None
+        if manifest is not None:
+            decide_core.refuse_images_not_served(
+                body.model, manifest, backend_kind, n_images,
+                lambda: _image_models(backend_kind),
+            )
+    if body.items is not None:
+        decide_items.check_item_count(body.items)
+        decide_items.item_plans(body)
+    else:
+        decide_core.plan_all(body)
+
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
     backend, residency = ctx.backend, ctx.residency
@@ -140,55 +162,75 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """
         act = read_act(request.headers)
         _refuse_an_upstream(body.model)
-        async with residency.settled_for("a decision"):
-            resident = residency.resident_model
-            if resident is None or resident.model_id != body.model:
-                raise model_not_resident(body.model, resident, "a decision")
-            refuse_an_exited_engine(residency, resident)
-
-            n_images = decide_core.check_image_count(body.images)
-            if n_images:
-                decide_core.refuse_images_not_served(
-                    resident.model_id,
-                    load_manifest(resident.model_id),
-                    backend.kind,
-                    n_images,
-                    lambda: _image_models(backend.kind),
-                )
-            if body.items is not None:
-                decide_items.check_item_count(body.items)
-                plans = decide_items.item_plans(body)
-            else:
-                plans = decide_core.plan_all(body)
-            reading = decide_reading(resident.engine)
-            decide_core.refuse_unreadable_labels(resident, reading, plans)
-
-            inflight = ctx.inflight
-            limit, limit_basis = chat_admission(resident.engine, resident.engine_args)
-            if limit is not None and len(inflight) >= limit:
-                return chat_queue_full(
-                    resident=resident, limit=limit, basis=limit_basis,
-                    wait=inflight.retry_after(),
-                )
-            concurrency = (
-                limit if limit is not None else enginespec.UNSTATED_ENGINE_CONCURRENCY
+        inflight = ctx.inflight
+        chat_over = settle_after_chat(ctx.settlement)
+        turn: Any = None
+        if body.queue is not None:
+            _refuse_a_malformed_decision(body, backend.kind)
+            turn = await take_a_turn(
+                request, line=ctx.line, residency=residency, inflight=inflight,
+                settle=chat_over, kind="decide", model=body.model, act=act,
+                client=client_agent(request), max_wait_s=body.queue.max_wait_s,
             )
-            chat_over = settle_after_chat(ctx.settlement)
-            if body.items is not None:
-                work = decide_items.decide_items_on_engine(
-                    _engine_call(ctx.http, resident), _engine_post(ctx.http, resident),
-                    resident, body, plans,
-                    batched=decide_items_reading(resident.engine).batched,
-                    max_logprobs=reading.max_logprobs, concurrency=concurrency,
+            if isinstance(turn, Response):
+                return turn
+        try:
+            async with residency.settled_for("a decision"):
+                resident = residency.resident_model
+                if resident is None or resident.model_id != body.model:
+                    raise model_not_resident(body.model, resident, "a decision")
+                refuse_an_exited_engine(residency, resident)
+
+                n_images = decide_core.check_image_count(body.images)
+                if n_images:
+                    decide_core.refuse_images_not_served(
+                        resident.model_id,
+                        load_manifest(resident.model_id),
+                        backend.kind,
+                        n_images,
+                        lambda: _image_models(backend.kind),
+                    )
+                if body.items is not None:
+                    decide_items.check_item_count(body.items)
+                    plans = decide_items.item_plans(body)
+                else:
+                    plans = decide_core.plan_all(body)
+                reading = decide_reading(resident.engine)
+                decide_core.refuse_unreadable_labels(resident, reading, plans)
+
+                limit, limit_basis = chat_admission(
+                    resident.engine, resident.engine_args
                 )
-            else:
-                work = decide_core.decide_on_engine(
-                    _engine_post(ctx.http, resident), resident, body, plans,
-                    max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                if turn is None and limit is not None and len(inflight) >= limit:
+                    return chat_queue_full(
+                        resident=resident, limit=limit, basis=limit_basis,
+                        wait=inflight.retry_after(),
+                    )
+                concurrency = (
+                    limit if limit is not None
+                    else enginespec.UNSTATED_ENGINE_CONCURRENCY
                 )
-            entry = inflight.open(
-                act=act, model=resident.model_id, client=client_agent(request)
-            )
+                if body.items is not None:
+                    work = decide_items.decide_items_on_engine(
+                        _engine_call(ctx.http, resident),
+                        _engine_post(ctx.http, resident),
+                        resident, body, plans,
+                        batched=decide_items_reading(resident.engine).batched,
+                        max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                    )
+                else:
+                    work = decide_core.decide_on_engine(
+                        _engine_post(ctx.http, resident), resident, body, plans,
+                        max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                    )
+                entry = turn if turn is not None else inflight.open(
+                    act=act, model=resident.model_id, client=client_agent(request)
+                )
+        except BaseException:
+            if turn is not None:
+                inflight.close(turn)
+                await chat_over()
+            raise
         try:
             answered = await unless_the_caller_leaves(work, request)
             if answered is None:
