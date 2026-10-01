@@ -362,12 +362,35 @@ def with_trial(spec: VideoBackendSpec, trial: dict[str, Any]) -> VideoBackendSpe
     return replace(spec, **limits) if limits else spec
 
 
+def tiled(spec: VideoBackendSpec, desktop: dict[str, Any] | None) -> VideoBackendSpec:
+    """The longer clip limits a block declares for when the full-size pass is tiled.
+
+    Tiling bounds the refine pass's memory by the tile, not the clip, so the clip can run
+    to the length that was measured with it; with tiling off (`max_tile_tokens = 0` or the
+    table disabled) the untiled limits stand, which the declared memory covers.
+    """
+    if spec.tiled_max_frames is None or spec.tiled_max_video_tokens is None:
+        return spec
+    if desktop is None or int(desktop.get("max_tile_tokens", 0)) <= 0:
+        return spec
+    return replace(
+        spec, max_frames=spec.tiled_max_frames, max_video_tokens=spec.tiled_max_video_tokens
+    )
+
+
+def machine_spec(config: Config, spec: VideoBackendSpec) -> VideoBackendSpec:
+    """The block as this machine runs it: tiled limits when its engine tiles, then any
+    [video_trial] lift."""
+    desktop = desktop_settings(config) if spec.engine == LTX_2_MLX else None
+    return with_trial(tiled(spec, desktop), trial_settings(config))
+
+
 DESKTOP_TABLE = "video_desktop"
 
-# What a [video_desktop] table means when it is present but a key is not: the values
+# What the Mac's engine runs with when [video_desktop] does not say otherwise: the values
 # for "responsive while somebody works" on an M1 Ultra (docs/internals/video.md,
-# "Keeping the desktop responsive: [video_desktop]"). No table at all means none of
-# this: the worker runs exactly as it did before the table existed.
+# "Keeping the desktop responsive: [video_desktop]"). They are on by default; only
+# `enabled = false` in the table turns them off.
 DESKTOP_DEFAULTS: dict[str, Any] = {
     "max_tile_tokens": 16000,
     "tile_spatial": 1,
@@ -413,9 +436,11 @@ def desktop_settings(config: Config) -> dict[str, Any] | None:
     try:
         document = tomllib.loads(Path(config.path).read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
-        return None
+        return dict(DESKTOP_DEFAULTS)
     table = document.get(DESKTOP_TABLE)
     if not isinstance(table, dict):
+        return dict(DESKTOP_DEFAULTS)
+    if table.get("enabled") is False:
         return None
     found = dict(DESKTOP_DEFAULTS)
     for key, least in DESKTOP_MINIMUM.items():
@@ -529,7 +554,7 @@ class VideoJobType(ResidentWorker):
     def loadable(self, model_id: str) -> Needs:
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
-        spec = with_trial(_require_block(manifest, model_id, backend_kind), trial_settings(self._config))
+        spec = machine_spec(self._config, _require_block(manifest, model_id, backend_kind))
         worker_type.refuse_if_larger_than_host(self._backend, model_id, spec.memory_bytes_estimate)
         python = require_video_python(self._config, spec, model_id)
         desktop = desktop_settings(self._config) if spec.engine == LTX_2_MLX else None
@@ -539,8 +564,8 @@ class VideoJobType(ResidentWorker):
 
     def requirements(self, model_id: str, params: VideoParams) -> Needs:
         manifest = MANIFESTS.known(model_id)
-        spec = with_trial(
-            _require_block(manifest, model_id, self._backend.kind), trial_settings(self._config)
+        spec = machine_spec(
+            self._config, _require_block(manifest, model_id, self._backend.kind)
         )
         settle(params, model_id, spec, 0)
         needs = self.loadable(model_id)

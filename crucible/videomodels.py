@@ -116,6 +116,8 @@ _BACKEND_OPTIONAL: dict[str, Any] = {
     "companions": list,
     "mlx_cache_limit_bytes": int,
     "refine_steps": int,
+    "tiled_max_frames": int,
+    "tiled_max_video_tokens": int,
 }
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
@@ -183,6 +185,8 @@ class VideoBackendSpec:
     not_taken: tuple[tuple[str, str], ...] = ()
     mlx_cache_limit_bytes: int | None = None
     refine_steps: int | None = None
+    tiled_max_frames: int | None = None
+    tiled_max_video_tokens: int | None = None
 
     @property
     def device(self) -> str:
@@ -243,6 +247,8 @@ class VideoBackendSpec:
             "companions": [companion.to_dict() for companion in self.companions],
             "mlx_cache_limit_bytes": self.mlx_cache_limit_bytes,
             "refine_steps": self.refine_steps,
+            "tiled_max_frames": self.tiled_max_frames,
+            "tiled_max_video_tokens": self.tiled_max_video_tokens,
         }
 
 
@@ -512,6 +518,32 @@ def _check_tokens(where: str, block: dict[str, Any]) -> None:
         )
 
 
+def _check_tiled(where: str, kind: str, block: dict[str, Any]) -> None:
+    named = [key for key in ("tiled_max_frames", "tiled_max_video_tokens") if key in block]
+    if not named:
+        return
+    if len(named) != 2:
+        raise VideoManifestError(
+            f"{where}: tiled_max_frames and tiled_max_video_tokens come as a pair; "
+            f"only {named[0]} is declared"
+        )
+    if block["engine"] != "ltx-2-mlx":
+        raise VideoManifestError(
+            f"{where}: tiled limits apply only where the full-size pass is tiled "
+            "(the ltx-2-mlx engine)"
+        )
+    if block["tiled_max_frames"] < block["max_frames"] or (
+        block["tiled_max_video_tokens"] < block["max_video_tokens"]
+    ):
+        raise VideoManifestError(
+            f"{where}: tiled limits must be at least the untiled ones"
+        )
+    if (block["tiled_max_frames"] - 1) % FRAME_STRIDE:
+        raise VideoManifestError(
+            f"{where}: tiled_max_frames must be {FRAME_STRIDE}k+1"
+        )
+
+
 def _strings(where: str, key: str, values: list[Any]) -> tuple[str, ...]:
     if not values or not all(isinstance(v, str) and v.strip() for v in values):
         raise VideoManifestError(f"{where}: {key} must be a non-empty list of strings")
@@ -592,6 +624,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
     _check_sizes(where, block)
     rates = _check_time(where, block)
     _check_tokens(where, block)
+    _check_tiled(where, kind, block)
     return VideoBackendSpec(
         backend=kind,
         engine=block["engine"],
@@ -622,6 +655,8 @@ def _parse_backend(path: Path, kind: str, block: Any) -> VideoBackendSpec:
         not_taken=_not_taken(where, block),
         mlx_cache_limit_bytes=block.get("mlx_cache_limit_bytes"),
         refine_steps=block.get("refine_steps"),
+        tiled_max_frames=block.get("tiled_max_frames"),
+        tiled_max_video_tokens=block.get("tiled_max_video_tokens"),
     )
 
 
