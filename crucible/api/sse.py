@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from ..errors import ApiError
+from ..events import ENDS, OVERFLOW, SNAPSHOT, EventHub
 from ..jobs.base import Job
 from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
@@ -146,6 +147,71 @@ def _queue_feed(line: WaitingLine) -> Feed:
 
 def queue_events(request: Request, line: WaitingLine) -> StreamingResponse:
     return event_response(events_after(request, lambda: _queue_feed(line), 0))
+
+
+def resume_from(request: Request) -> int | None:
+    """The Last-Event-ID a reconnecting client sent, or None from a first connect."""
+    if request.headers.get("last-event-id") is None:
+        return None
+    return last_event_id(request)
+
+
+def _hub_feed(
+    hub: EventHub,
+    topics: frozenset[str],
+    after: int | None,
+    snapshot: Callable[[], dict[str, Any]],
+) -> Feed:
+    opening = hub.subscribe(topics, after)
+    subscriber = opening.subscriber
+    first: list[tuple[int, dict[str, Any]]] = []
+    if opening.snapshot:
+        first.append((opening.id, {
+            "id": opening.id,
+            "event": SNAPSHOT,
+            "data": {"gap": opening.gap, "topics": sorted(subscriber.topics), **snapshot()},
+        }))
+
+    def after_cursor(cursor: int) -> list[tuple[int, dict[str, Any]]]:
+        if subscriber.overflowed:
+            return [(cursor, {"id": cursor, "event": OVERFLOW, "data": {
+                "last_event_id": cursor,
+                "limit": subscriber.limit,
+                "message": (
+                    f"this stream fell {subscriber.limit} events behind and was dropped "
+                    "so it could not hold the server up. Reconnect with Last-Event-ID: "
+                    f"{cursor} to pick up where it stopped"
+                ),
+            }})]
+        return first + [(event["id"], event) for event in hub.pending(subscriber, cursor)]
+
+    def moved(cursor: int) -> None:
+        first.clear()
+        hub.delivered(subscriber, cursor)
+
+    return Feed(
+        after=after_cursor,
+        waiter=subscriber.waiter,
+        ends=ENDS,
+        moved=moved,
+        close=lambda: hub.unsubscribe(subscriber),
+    )
+
+
+def server_events(
+    request: Request,
+    hub: EventHub,
+    topics: frozenset[str],
+    snapshot: Callable[[], dict[str, Any]],
+) -> StreamingResponse:
+    after = resume_from(request)
+    return event_response(
+        events_after(
+            request,
+            lambda: _hub_feed(hub, topics, after, snapshot),
+            0 if after is None else after,
+        )
+    )
 
 
 def event_response(stream: AsyncIterator[str]) -> StreamingResponse:

@@ -256,6 +256,7 @@ def test_resident_is_the_residency_s_own_answer(
         class _Resident:
             kind = "llm"
             id = "qwen3.5-9b"
+            engine = "no engine; a test placed it"
             log_path = Path("a-resident-no-engine-served.log")
 
         client.app.state.residency._resident = _Resident()
@@ -272,6 +273,7 @@ def test_a_voice_sharing_a_model_s_id_is_not_made_resident_by_it(
         class _Resident:
             kind = "tts"
             id = "sigma"
+            engine = "no engine; a test placed it"
             log_path = Path("a-resident-no-engine-served.log")
 
         client.app.state.residency._resident = _Resident()

@@ -91,6 +91,13 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "model runs.",
     ),
     ("/activity", "Activity", "What the server is doing right now, in one read."),
+    (
+        "/events",
+        "Events",
+        "Every change on the server as one SSE stream, so an app follows it instead of "
+        "polling /v1/activity, /v1/tasks and /v1/health. The event names and payloads, "
+        "resuming, and what a slow reader is told are in docs/EVENTS.md.",
+    ),
     ("/health", "Health", "Is this process alive. Cheaper than /v1/activity and says less."),
     (
         "/playground",
@@ -376,6 +383,25 @@ def group_for(path: str) -> int:
     return best
 
 
+def render_features() -> list[str]:
+    from crucible.features import FEATURES
+
+    out = [
+        "## Features",
+        "",
+        "`GET /v1/info` answers `features`, the names below, so an app checks for what it "
+        "needs instead of comparing versions. A name says the routes and fields exist in "
+        "this build; whether a job type is enabled on this host is `job_types`. Defined "
+        "in `crucible/features.py`.",
+        "",
+        "| feature | what it is |",
+        "| --- | --- |",
+    ]
+    for name in sorted(FEATURES):
+        out.append("| `" + name + "` | " + cell(FEATURES[name]) + " |")
+    return out + [""]
+
+
 def render(app: Any) -> str:
     spec = app.openapi()
     components = spec.get("components", {}).get("schemas", {})
@@ -474,6 +500,8 @@ def render(app: Any) -> str:
                     out += ["**Body**: `" + media + "`", ""]
 
             out += render_answers(operation.get("responses", {}), components)
+
+    out += render_features()
 
     out += [
         "## Models in full",

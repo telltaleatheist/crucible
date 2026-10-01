@@ -17,6 +17,7 @@ from typing import Any
 from .. import VERSION, clock
 from ..clock import utcnow
 from ..errors import ApiError, JobCancelled, JobError
+from ..events import JOB, EventHub
 from ..journal import Journals
 from ..procgroup import STOP_TIMEOUT_SECONDS, stop_budget_seconds
 from .base import (
@@ -79,6 +80,31 @@ def _removed_by_restart(waiting: Any, at: str) -> dict[str, Any]:
         "waited_s": waited,
         "at": at,
     }
+
+
+def _job_change(job: Job, kind: str, data: dict[str, Any]) -> dict[str, Any]:
+    change: dict[str, Any] = {
+        "job_id": job.id,
+        "type": job.type,
+        "model": job.model,
+        "client": job.client,
+        "client_ref": job.client_ref,
+        "status": job.status,
+    }
+    if job.status == QUEUED:
+        change["position"] = data["position"] if kind == "queued" else None
+        change["waiting"] = job.waiting is not None
+    elif job.status == RUNNING:
+        change["started"] = job.started
+    elif job.status == DONE:
+        change["artifacts"] = list(job.artifacts)
+    elif job.status == FAILED:
+        change["error"] = job.error
+    elif job.status == REMOVED:
+        change["removal"] = job.removal
+    elif job.status == INTERRUPTED:
+        change["interrupted_at"] = job.interrupted_at
+    return change
 
 
 class ReapReason(str, Enum):
@@ -183,6 +209,8 @@ class JobStore:
         self._lane_idle.set()
         self._line: Any | None = None
         self._on_idle: Any = lambda: None
+        self.events = EventHub()
+        self._announced: dict[str, str] = {}
         home = getattr(config, "home", None)
         self._journals = Journals(
             None if home is None else Path(home) / "journals",
@@ -443,6 +471,7 @@ class JobStore:
                 f"job {job.id} is on the lane and cannot be discarded; cancel it"
             )
         self._jobs.pop(job.id, None)
+        self._announced.pop(job.id, None)
         shutil.rmtree(job.dir, ignore_errors=True)
 
 
@@ -591,6 +620,7 @@ class JobStore:
             )
             return None
         del self._jobs[job.id]
+        self._announced.pop(job.id, None)
         record = Reaped(job_id=job.id, why=why, when=when, detail=detail)
         self._reaped[job.id] = record
         print(
@@ -659,6 +689,21 @@ class JobStore:
                 job.message = message
         for waiter in self._subscribers.get(job.id, []):
             waiter.set()
+        self._publish(job, kind, data)
+
+    def _publish(self, job: Job, kind: str, data: dict[str, Any]) -> None:
+        """Tell the server-wide stream: `job.<status>` once each time the job's status
+        changes, and `job.progress`, throttled, while it runs (docs/EVENTS.md)."""
+        key = f"job:{job.id}"
+        if self._announced.get(job.id) != job.status:
+            self._announced[job.id] = job.status
+            if job.status in TERMINAL_STATES:
+                self.events.forget(key)
+            self.events.publish(JOB, f"job.{job.status}", _job_change(job, kind, data))
+        elif kind == "progress" and job.status == RUNNING:
+            self.events.publish_throttled(JOB, "job.progress", key, {
+                "job_id": job.id, "fraction": job.progress, "message": job.message,
+            })
 
     def attach_journal(self, job: Job, resume_id: str, *, resumed: bool) -> None:
         job.resume_id = resume_id

@@ -6,8 +6,8 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 import httpx
-import uvicorn
 
+from crucible.api.serving import server_for
 from crucible.engines import find_free_port
 
 STARTUP_TIMEOUT = 20.0
@@ -17,15 +17,7 @@ SHUTDOWN_TIMEOUT = 20.0
 @contextmanager
 def serve(app: Any) -> Iterator[str]:
     port = find_free_port()
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=port,
-            log_level="warning",
-            lifespan="on",
-        )
-    )
+    server = server_for(app, host="127.0.0.1", port=port, log_level="warning")
     thread = threading.Thread(target=server.run, name="crucible-test-server", daemon=True)
     thread.start()
     deadline = time.monotonic() + STARTUP_TIMEOUT

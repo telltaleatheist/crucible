@@ -6,22 +6,12 @@ import sys
 import threading
 from typing import Any
 
-from .. import KEEP_ALIVE_SECONDS
-
 
 def run_owned_server(app: Any, *, host: str, port: int, log_level: str) -> None:
-    import uvicorn
+    from ..api.serving import server_for
 
     descriptor = sys.stdin.fileno()
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host=host,
-            port=port,
-            log_level=log_level,
-            timeout_keep_alive=KEEP_ALIVE_SECONDS,
-        )
-    )
+    server = server_for(app, host=host, port=port, log_level=log_level)
     finished = threading.Event()
 
     def watch_controller() -> None:

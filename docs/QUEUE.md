@@ -101,6 +101,10 @@ its plain submits are not held behind the queue. Everyone else is first come, fi
 - `GET /v1/activity`: `queued` lists the waiting jobs in order (with `waited_s` and
   `max_wait_s`), and `slots.accelerated.queue_depth` counts the job on the lane plus every
   waiting job.
+- `GET /v1/events`: the same four announcements as `queue.added`, `queue.moved`,
+  `queue.started` and `queue.removed`, each with its `kind`, on the one stream that also
+  carries jobs, the card, chats, tasks and settings. A dashboard that would otherwise poll
+  `/v1/queue`, `/v1/activity` and `/v1/tasks` follows that instead (docs/EVENTS.md).
 
 While anything waits, a submit without `queue` is refused `409 server_busy` even if the
 lane is momentarily free, with `details.queue_depth`, so an old app cannot jump the line.

@@ -16,8 +16,9 @@ constraints, the measured numbers and the owner's rulings behind them.
 - `CLIENT_HEADER` exists because browsers cannot set `User-Agent`. It is a
   forbidden header, so a browser client would otherwise be recorded as a
   `Mozilla/5.0 ...` string.
-- `KEEP_ALIVE_SECONDS = 75` is shared by both uvicorn entry points
-  (`cli.cmd_serve`, `host/child_lifecycle.run_owned_server`). The server must hold an
+- `KEEP_ALIVE_SECONDS = 75` is set by the one uvicorn door, `api.serving.server_for`,
+  which both entry points use (`cli.cmd_serve`, `host/child_lifecycle.run_owned_server`).
+  The server must hold an
   idle connection longer than the client pool does. uvicorn's default is 5 s and
   undici keeps idle sockets about 4 s. With those two defaults, align's first request
   after a render sometimes got `ECONNRESET` (measured 2026-09-18 to 09-20). 75 s is

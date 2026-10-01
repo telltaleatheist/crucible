@@ -767,6 +767,7 @@ COVERED: dict[str, str] = {
     "DELETE /v1/queue/{job_id}": "api queue remove",
     "POST /v1/queue/{job_id}/heartbeat": "api queue heartbeat",
     "GET /v1/queue/events": "api queue events",
+    "GET /v1/events": "api events",
 }
 
 EXCLUDED: dict[str, str] = {

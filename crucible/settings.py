@@ -10,6 +10,7 @@ from .clock import utcnow
 from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .config import Config, LocalModelRecord, RouteRecord, _advertised, load_config, write_config
 from .errors import ApiError, ConfigError
+from .events import SETTINGS, EventHub
 from .upstreamrecord import UPSTREAM_DISPLAY, UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
@@ -31,6 +32,7 @@ class History:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._rows: list[dict[str, Any]] = []
+        self.events = EventHub()
 
     def record(
         self, *, act: str | None, client: str | None, changed: list[str]
@@ -44,6 +46,7 @@ class History:
         with self._lock:
             self._rows.append(row)
             del self._rows[:-HISTORY_LIMIT]
+        self.events.publish(SETTINGS, "settings.written", row)
 
     def rows(self) -> list[dict[str, Any]]:
         with self._lock:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .. import API_VERSION, KEEP_ALIVE_SECONDS, VERSION, pairing
+from .. import API_VERSION, VERSION, pairing
 from . import common, token
 from .common import EXIT_OK, _fail
 
@@ -39,19 +39,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     else:
         print("bound beyond loopback: the bearer token is the only lock.")
 
-    import uvicorn
-
     if getattr(args, "controller_stdin", False):
         from ..host.child_lifecycle import run_owned_server
         run_owned_server(app, host=host, port=port, log_level=args.log_level)
     else:
-        uvicorn.run(
-            app,
-            host=host,
-            port=port,
-            log_level=args.log_level,
-            timeout_keep_alive=KEEP_ALIVE_SECONDS,
-        )
+        from ..api.serving import server_for
+        server_for(app, host=host, port=port, log_level=args.log_level).run()
     return EXIT_OK
 
 

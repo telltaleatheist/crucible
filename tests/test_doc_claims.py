@@ -123,7 +123,10 @@ def test_every_uvicorn_this_repo_starts_states_the_one_keep_alive() -> None:
                         break
                 index += 1
             found.append((path.relative_to(ROOT), source[match.start() : index + 1]))
-    assert len(found) == 2, f"a uvicorn door was added or removed: {[p for p, _ in found]}"
+    assert [str(p).replace("\\", "/") for p, _ in found] == ["crucible/api/serving.py"], (
+        f"every server is started through api.serving.server_for, the one uvicorn door; "
+        f"found {[p for p, _ in found]}"
+    )
     for path, call in found:
         assert "timeout_keep_alive=KEEP_ALIVE_SECONDS" in call, (
             f"{path} starts a uvicorn on the 5 s default keep-alive; "

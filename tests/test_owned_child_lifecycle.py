@@ -43,6 +43,8 @@ async def lifespan(app):
         worker.wait(timeout=5)
         (root / 'cleaned').write_text('worker exited')
 app = FastAPI(lifespan=lifespan)
+from crucible.events import EventHub
+app.state.events = EventHub()
 from types import SimpleNamespace
 cli.common.load_config = lambda: SimpleNamespace(backend_kind='fixture', host='127.0.0.1', port=0, name='fixture')
 cli.common.detect_backend = lambda: SimpleNamespace(kind='fixture', gpu=SimpleNamespace(name='CPU fixture'))

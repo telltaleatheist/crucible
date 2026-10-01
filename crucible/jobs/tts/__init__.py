@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...cardkinds import KIND_TTS
 from ...config import Config
 from ...engines import EngineError
 from ...errors import JobError
@@ -141,7 +142,7 @@ class LoadVoiceJobType:
     def run(self, job: Job, ctx: JobContext) -> None:
         params = LoadVoiceParams.model_validate(job.params)
         model = run_model(job.model, self.name, "a voice")
-        self._residency.begin_warming(model)
+        self._residency.begin_warming(model, KIND_TTS)
         try:
             self._load(ctx, model, params, job.client)
         finally:
