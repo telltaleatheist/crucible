@@ -474,12 +474,18 @@ def test_stream_open_reaches_the_route_and_is_refused_for_the_servers_own_reason
     assert refusal["error"]["code"] == "job_type_disabled"
 
 
-def test_lease_open_reaches_the_route_with_both_required_fields(
+def test_session_open_reaches_the_route_and_close_ends_it(
     base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(base, "lease", "open", "qwen3.5-9b", "--act", "clean", "--ttl", "600") == 1
-    refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
-    assert refusal["error"]["code"] == "not_resident"
+    assert run(base, "session", "open", "--act", "clean", "--idle", "600") == 0
+    ticket = json.loads(capsys.readouterr().out)
+    assert ticket["status"] == "open"
+    assert run(base, "session", "touch", ticket["session_id"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "open"
+    assert run(base, "session", "get", ticket["session_id"]) == 0
+    assert json.loads(capsys.readouterr().out)["idle_s"] == 600
+    assert run(base, "session", "close", ticket["session_id"]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "client"
 
 
 def test_task_submit_reaches_the_route_with_the_fields_its_type_needs(
@@ -498,9 +504,9 @@ def test_a_post_with_no_body_at_all_reaches_its_route(
     first = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert first["error"]["code"] == "unknown_upstream"
 
-    assert run(base, "lease", "heartbeat", "no-such-lease") == 1
+    assert run(base, "session", "touch", "ses-no-such-session") == 1
     second = json.loads(capsys.readouterr().err.split("\n", 1)[1])
-    assert second["error"]["code"] == "unknown_lease"
+    assert second["error"]["code"] == "unknown_queue_session"
 
 
 @pytest.fixture
@@ -760,9 +766,11 @@ COVERED: dict[str, str] = {
     "POST /v1/tts/stream/{session_id}": "api stream say / cancel / cancel-all",
     "DELETE /v1/tts/stream/{session_id}": "api stream close",
     "GET /v1/tts/stream/{session_id}/events": "api stream events",
-    "POST /v1/models/{subject_id}/lease": "api lease open",
-    "POST /v1/leases/{lease_id}/heartbeat": "api lease heartbeat",
-    "DELETE /v1/leases/{lease_id}": "api lease release",
+    "POST /v1/queue/sessions": "api session open",
+    "GET /v1/queue/sessions/{session_id}": "api session get",
+    "GET /v1/queue/sessions/{session_id}/events": "api session events",
+    "POST /v1/queue/sessions/{session_id}/touch": "api session touch",
+    "DELETE /v1/queue/sessions/{session_id}": "api session close",
     "GET /v1/queue": "api queue list",
     "DELETE /v1/queue/{job_id}": "api queue remove",
     "POST /v1/queue/{job_id}/heartbeat": "api queue heartbeat",

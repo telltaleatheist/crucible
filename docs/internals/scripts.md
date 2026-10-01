@@ -162,7 +162,7 @@ different operator has a different list.
   times, sized from the host's `PRESENCE_SETTLE_CEILING_SECONDS` plus the guest install and
   restart. It returns the moment the record matches.
 - **Busy servers are not restarted.** Before a restart the machine's own `GET /v1/activity` is
-  asked over loopback; `running`, `queued`, `streaming`, a chat in flight or a lease refuses
+  asked over loopback; `running`, `queued`, `streaming`, a chat in flight or an open queue session refuses
   by name, `--interrupt` overrides. A resident model with nothing using it is not busy. A
   deploy on 2026-09-20 restarted the PC six minutes into a 128-chunk render and lost all of it.
 - **The probe reads the machine the way the server does.** Home is `CRUCIBLE_HOME`, else

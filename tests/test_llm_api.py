@@ -943,7 +943,7 @@ def test_unloading_under_a_holder_that_is_using_the_card_is_still_engine_in_use(
     assert engines[0].stopped is False
 
 
-def test_unloading_under_another_client_s_lease_is_still_leased(
+def test_unloading_under_another_client_s_queue_session_is_refused(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
@@ -952,16 +952,17 @@ def test_unloading_under_another_client_s_lease_is_still_leased(
 ) -> None:
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    lease = llm_client.post(
-        f"/v1/models/{MODEL}/lease",
-        headers=auth,
-        json={"act": "clean", "ttl_seconds": 60},
+    opened = llm_client.post(
+        "/v1/queue/sessions",
+        headers={**auth, "X-Crucible-Client": "briefcase"},
+        json={"act": "clean"},
     )
-    assert lease.status_code == 201, lease.text
+    assert opened.status_code == 202 and opened.json()["status"] == "open", opened.text
 
     response = submit(llm_client, auth, type="unload-model", model=MODEL)
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "leased"
+    assert response.json()["error"]["code"] == "server_busy"
+    assert response.json()["error"]["details"]["session_id"] == opened.json()["session_id"]
     assert engines[0].stopped is False
 
 
@@ -1051,7 +1052,7 @@ def test_a_load_submitted_during_a_clearance_waits_it_out_and_ends_done(
     ]
 
 
-def test_a_lease_opened_during_a_clearance_waits_and_is_not_resident(
+def test_a_session_opened_on_a_model_during_a_clearance_waits_and_loads_it_again(
     llm_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
@@ -1066,19 +1067,23 @@ def test_a_lease_opened_during_a_clearance_waits_and_is_not_resident(
 
     response = _sent_during(
         lambda: llm_client.post(
-            f"/v1/models/{MODEL}/lease",
-            headers=auth,
-            json={"act": "clean", "ttl_seconds": 60},
+            "/v1/queue/sessions", headers=auth, json={"act": "clean", "model": MODEL},
         ),
         waiting,
         release,
         clearing,
     )
-    assert response.status_code == 409, response.json()
-    error = response.json()["error"]
-    assert error["code"] == "not_resident"
-    assert error["details"]["resident"] is None
-    assert llm_client.app.state.leases.current() is None
+    assert response.status_code == 202, response.json()
+    session_id = response.json()["session_id"]
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        state = llm_client.get(f"/v1/queue/sessions/{session_id}", headers=auth).json()
+        if state["status"] != "queued":
+            break
+        time.sleep(0.02)
+    assert state["status"] == "open", state
+    assert state["load_job"] is not None, "the clearance took the model; it was loaded again"
+    assert len(engines) == 2 and engines[1].stopped is False
 
 
 def test_a_chat_sent_during_a_clearance_waits_and_is_not_resident(

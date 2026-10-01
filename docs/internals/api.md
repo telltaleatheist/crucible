@@ -35,7 +35,7 @@ Route handlers are closures over `ctx`, attached by `register(routers, ctx)`. In
 (the name is the OpenAPI operationId), and `register` only attaches them; the bodies
 are small module-level helpers (`_activity_body` and its `_*_section` parts,
 `_refuse_if_held` and `_subject_holder` for a removal). Handlers read every
-service through `ctx` (`ctx.store`, `ctx.leases`, `ctx.http`, …) and never touch
+service through `ctx` (`ctx.store`, `ctx.sessions`, `ctx.http`, …) and never touch
 `request.app.state`. `app.state` stays the storage: `crucible serve` writes
 `bind_host`/`bind_port` into it and tests read and swap services there, so each
 `AppContext` property reads `app.state` at request time. A name a route shares
@@ -65,8 +65,10 @@ the `/ui` static mount goes last so nothing it serves can shadow a route.
   records it when a job is submitted, the way `crucible capability --write`
   does; it turns nothing on. Owen, 2026-09-27: *"Yes, it should automatically
   be checked"*.
-- `Leases` is built before the registry because loaders take a lease
-  (`params.lease`); there is exactly one instance.
+- `QueueSessions`, the line, the settlement and the `SessionCloser` are built
+  together in `_services`; there is exactly one of each. `sessions.watch(...)`
+  is given what counts as a session's activity (its jobs, chats, calls and the
+  rows its TTS stream is saying).
 
 ## Middleware: never `@app.middleware("http")`
 
@@ -93,16 +95,17 @@ held.
 
 - Owen, 2026-09-14: *"Models should always be unloaded when we're done with
   them. Every time."* `Settlement` (crucible/settle.py) is the one owner of
-  "what holds the card" (lane, lease, streaming claim, chats in flight).
+  "what holds the card" (lane, open queue session, streaming claim, chats in flight).
 - A chat or decision settles in the response's background task, after the body
   is written; a streamed relay settles when the relay ends. A run of chats with
-  no lease therefore reloads the model between requests; that is intended.
+  no queue session therefore reloads the model between requests; that is intended.
   A settle that fails is logged and never turns a delivered answer into an error.
-- Doors that need the card (chat, decide, lease open, stream open, job create)
+- Doors that need the card (chat, decide, stream open, job create, a session opening)
   wait out a clearance in progress with `residency.settled_for(...)` and then
   check and claim under the card's lock. The body of `settled_for` must be
   synchronous; nothing may await between the check and the claim.
-- Releasing a lease settles before the 204 is written.
+- Closing a queue session (`DELETE /v1/queue/sessions/{id}`, or an operator's
+  `DELETE /v1/queue/{id}`) settles before the answer is written.
 
 ## Engine proxy (`api/proxy.py`)
 
@@ -141,19 +144,20 @@ held.
 
 - A `model` containing `/` goes to an upstream; local ids can never contain one
   (`manifest_model_id_slash`).
-- No lease, lane or settlement (nothing is on the card), but an `InFlight` row is
+- No queue session, lane or settlement (nothing is on the card), but an `InFlight` row is
   opened so `/v1/activity` shows the chat.
 - A 429 is passed back with the upstream's own `Retry-After`; a billed request is
   never re-sent for a rate limit. Every other non-200 is 502
   `upstream_rejected` with `details.upstream_status`.
-- A lease or `load-model` naming an upstream model is 409 `lease_not_needed`.
+- A queue session or `load-model` naming an upstream model is 409
+  `upstream_never_resident`.
 
 ## Job door order (`POST /v1/jobs`)
 
 Cheapest and most specific first, so a typo is never answered "busy":
 resolve type (install-on-submit may answer 409 `installing`) → upstream-model
 check → resolve model → `resume_unsupported` → under `settled_for`:
-`refuse_if_leased` → `refuse_if_busy` → `preflight` → journal verify → create →
+`refuse_if_held` (an open queue session) → `refuse_if_busy` → `preflight` → journal verify → create →
 materialise inputs → `enqueue` (a refusal discards the job and any new
 journal). A missing-weights refusal starts the pull after the lock is released.
 
@@ -220,7 +224,7 @@ a field the SDK deliberately leaves unread is named there with the reason.
   the bound address; an unreadable interface list is 503, never an empty list.
 - `bind_host`/`bind_port` start as the config's and are overwritten by
   `crucible serve --host/--port`.
-- Settings history, catalog removals, the peer claim, leases and tasks are in
+- Settings history, catalog removals, the peer claim, queue sessions and tasks are in
   memory; a restart forgets them. The orchestrator re-asserts its claim.
 
 ## Voices, streams, catalog
@@ -267,7 +271,7 @@ a field the SDK deliberately leaves unread is named there with the reason.
   at `done`/`failed`/`cancelled`; a session feed is its pruned log, writes the
   cursor back onto the reader and ends at `closed`. A feed is opened inside the
   generator, so a response never started never subscribes.
-- Catalog removal refuses request errors first, then state: resident, leased or
+- Catalog removal refuses request errors first, then state: resident or
   named by a running task, counting every alias that reads the same weights.
 
 ## Decisions (`POST /v1/decide`)

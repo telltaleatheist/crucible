@@ -37,7 +37,6 @@ from ...residency import (
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
-from ..leaseonload import LeaseOnLoad, open_lease_for_load
 from ..template import (
     ManifestCatalog,
     as_job_error,
@@ -102,7 +101,6 @@ class LoadParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
-    lease: LeaseOnLoad | None = None
     context: int | None = Field(default=None, ge=MIN_LOAD_CONTEXT, strict=True)
 
 
@@ -344,12 +342,10 @@ class LoadModelJobType:
         config: Config,
         backend: Any,
         residency: Residency,
-        leases: Any | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -419,7 +415,7 @@ class LoadModelJobType:
         model = run_model(job.model, self.name)
         self._residency.begin_warming(model)
         try:
-            self._load(ctx, model, params, job.client)
+            self._load(ctx, model, params)
         finally:
             self._residency.end_warming()
 
@@ -428,7 +424,6 @@ class LoadModelJobType:
         ctx: JobContext,
         model: str,
         params: LoadParams,
-        client: str | None,
     ) -> None:
         ctx.warming(f"checking the accelerator for {model}")
         needs = as_job_error(self.requirements, model, params)
@@ -457,15 +452,6 @@ class LoadModelJobType:
             raise JobError("engine_failed", str(exc)) from None
         ctx.raise_if_cancelled()
         extra: dict[str, Any] = {"resident": resident.model_id}
-        extra["lease_id"] = None
-        if params.lease is not None:
-            extra["lease_id"] = open_lease_for_load(
-                self._leases,
-                kind=resident.kind,
-                subject=resident.model_id,
-                request=params.lease,
-                client=client,
-            )
         ctx.progress(1.0, f"{model} is resident")
         ctx.done_extra(**extra)
 
@@ -534,7 +520,7 @@ JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         LOAD_MODEL,
         lambda wiring: LoadModelJobType(
-            wiring.config, wiring.backend, wiring.residency, wiring.leases
+            wiring.config, wiring.backend, wiring.residency
         ),
     ),
     JobTypeBinding(

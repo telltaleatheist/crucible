@@ -56,8 +56,22 @@ class CardHeldDetails(_Open):
     who: str
 
 
+class SessionBusyDetails(_Open):
+    """`server_busy` (or `session_open`) because a queue session holds the server: nothing
+    but its own items runs until it closes."""
+
+    door: Literal["session"]
+    holder: str | None
+    session_id: str
+    type: Literal["session"]
+    act: str
+    model: str | None
+    status: str
+    since: str
+
+
 ServerBusyDetails = Annotated[
-    Union[JobBusyDetails, CardHeldDetails], Field(discriminator="door")
+    Union[JobBusyDetails, CardHeldDetails, SessionBusyDetails], Field(discriminator="door")
 ]
 
 
@@ -85,7 +99,7 @@ class JobFailure(_Open):
 class JobRemoval(_Open):
     """Why a job left the queue without running: `removed` is not `failed`."""
 
-    reason: Literal["operator", "client", "expired", "server_restart"]
+    reason: Literal["operator", "client", "expired", "server_restart", "session_closed"]
     message: str
     waited_s: Number | None
     at: str
@@ -114,7 +128,6 @@ class JobStatus(_Open):
     chunk_at: str | None
     resume_id: str | None
     resumed: bool
-    lease_id: str | None = None
     sampling: dict[str, Any] | None = None
     removal: JobRemoval | None = None
 
@@ -132,8 +145,8 @@ class QueueItem(_Open):
     waited_s: Number
     max_wait_s: int
     expires_at: str
-    lease_holder: bool
-    kind: Literal["job", "call", "lease"]
+    session: str | None
+    kind: Literal["job", "call", "session"]
 
 
 class QueueList(_Open):
@@ -148,7 +161,7 @@ class QueueRemoved(_Open):
     """`DELETE /v1/queue/{job_id}`: the job left the queue."""
 
     job_id: str
-    status: Literal["removed"]
+    status: Literal["removed", "closed"]
     reason: Literal["operator"]
 
 
@@ -258,15 +271,38 @@ class ActivityResident(_Open):
     unclaimed_since: str | None
 
 
-class ActivityLease(_Open):
-    """The open lease."""
+class SessionTicket(_Open):
+    """`POST /v1/queue/sessions`: the session asked for, and where it stands."""
 
-    lease_id: str
-    kind: str
-    client: str | None
+    session_id: str
+    status: Literal["queued", "open", "closed"]
+    position: int | None
+
+
+class SessionState(_Open):
+    """A queue session: one client's claim on the server for a run of requests. Not a
+    TTS stream session."""
+
+    session_id: str
+    status: Literal["queued", "open", "closed"]
     act: str
-    since: str
-    expires_at: str
+    client: str | None
+    model: str | None
+    position: int | None
+    idle_s: int
+    max_wait_s: int
+    created: str
+    opened_at: str | None
+    idle_deadline: str | None
+    max_hold_deadline: str | None
+    items_run: int
+    in_flight: list[dict[str, Any]]
+    stream_session: dict[str, Any] | None
+    load_job: str | None
+    closed_at: str | None
+    reason: str | None
+    message: str | None
+    error: dict[str, Any] | None
 
 
 class ActivityChatRow(_Open):
@@ -346,7 +382,7 @@ class Activity(_Open):
     chat: ActivityChat
     settings: ActivitySettings
     catalog: ActivityCatalog
-    lease: ActivityLease | None
+    session: SessionState | None
     slots: ActivitySlots
     running: list[ActivityJob]
     queued: list[ActivityJob]

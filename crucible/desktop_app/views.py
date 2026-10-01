@@ -135,7 +135,8 @@ def draw_activity(page: Page, view: screens.ActivityView, actions: Actions) -> N
             page.notice(box, text)
     draw_queue(page, view, actions)
     memory = page.section("Memory")
-    page.facts(memory, (view.loaded,) + ((screens.Fact("Kept by", view.lease),) if view.lease else ()))
+    kept = (screens.Fact("Kept by", view.session.title),) if view.session else ()
+    page.facts(memory, (view.loaded,) + kept)
     history = page.section("Recent downloads and installs")
     if not view.tasks:
         page.empty(history, "None since Crucible last started.")
@@ -146,7 +147,13 @@ def draw_activity(page: Page, view: screens.ActivityView, actions: Actions) -> N
 
 def draw_queue(page: Page, view: screens.ActivityView, actions: Actions) -> None:
     box = page.section("Queue")
-    if not view.queue:
+    if view.session is not None:
+        _left, right, below = page.row(box, view.session.title, view.session.detail)
+        place = f"session:{view.session.session_id}"
+        page.button(right, "End", lambda ident=view.session.session_id: actions.c.end_session(ident),
+                    kind="danger", enabled=place not in actions.c.busy)
+        notice_for(page, below, actions, place)
+    if not view.queue and view.session is None:
         page.empty(box, "Nothing is waiting. Jobs that apps send while Crucible is busy wait here.")
     for line in view.queue:
         _left, right, below = page.row(box, line.title, line.detail)

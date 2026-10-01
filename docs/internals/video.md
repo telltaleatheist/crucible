@@ -21,9 +21,9 @@ The same shape as `image` and `audio`:
   `weights.pull_files`, the way `audioweights.py` pulls YuE2's decoder. The model is installed
   only when both are. The Mac's block has no companion (its transformer is in its one repo),
   so there `weights.pull` is the whole pull.
-- `crucible/jobs/video/` is a `ResidentWorker` with lease-on-load: `video`, `load-video` and
-  `unload-video`, resident kind `video` (noun `video generator`, so the unload refusal is
-  `video_generator_not_resident`), capability class `video`, lease act `video`.
+- `crucible/jobs/video/` is a `ResidentWorker`: `video`, `load-video` and `unload-video`,
+  resident kind `video` (noun `video generator`, so the unload refusal is
+  `video_generator_not_resident`), capability class `video`.
 - The workers (`ltx_worker.py` on the PC, `ltx2mlx_worker.py` on the Mac) are workerio
   sessions. Their engine-independent half (`videocore.py`: the request, stage progress, cancel
   between steps, the mux) needs only the standard library, and `tests/fake_video_worker.py`
@@ -183,8 +183,8 @@ mode), and passes the latent to the image-to-video pipeline with `noise_scale=1.
 the first latent frame clean and makes the rest noise, as the pipeline's own image path does.
 
 The prompt cache holds the connectors' output (about 12 MB a prompt, 16 prompts, 256 MB at
-most) keyed on the prompt, revision and backend. A worker only lives across jobs under a lease,
-so the cache pays off in a leased batch: the second clip of a prompt skips the text encoder and
+most) keyed on the prompt, revision and backend. A worker only lives across jobs inside a queue
+session, so the cache pays off in such a batch: the second clip of a prompt skips the text encoder and
 connectors stages entirely.
 
 ## Limits
@@ -348,7 +348,7 @@ which never holds the score matrix) and, for image-to-video, the per-token modul
 
 Three hooks, all read from the pinned source: stage 1 encodes the prompt through
 `_load_text_encoder` and `_encode_text`, which the subclass answers with the encoding stage's
-output (so the prompt cache works as on the PC: a leased batch skips encoding for a prompt it
+output (so the prompt cache works as on the PC: a batch in a queue session skips encoding for a prompt it
 has read); the per-step progress comes from the only per-step hook the port's loops have, its
 stepwise-preview `bind`, answered by a small object that evaluates the step's prediction (the
 next step needs it anyway) and reports the step, which is also where a cancel lands; and the
@@ -520,7 +520,7 @@ or streamed, and the clip limits drop back to the untiled ones. The longer clip 
 only while `max_tile_tokens` is above 0, because the declared memory covers an untiled refine
 pass only up to 16,720 tokens; tiled, a 20 s 1280x704 clip peaked at 21.7 GB. The
 table is read when the worker starts, so a change applies from the next load, not to a worker
-already resident under a lease. Every clip records what it ran with in `done.video.desktop`:
+already resident inside a queue session. Every clip records what it ran with in `done.video.desktop`:
 the settings, the env vars the worker actually saw, the MLX cache limit, and each pass's
 `tiles` ([frames, rows, columns]) and `tile_tokens`. It is null when the table says
 `enabled = false`.

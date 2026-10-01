@@ -235,16 +235,18 @@ def test_opening_a_session_answers_the_identity_of_what_will_speak(
         assert len(body["session_id"]) == 32
 
 
-def test_the_streaming_door_never_loads_a_voice(
+def test_a_voice_that_is_not_resident_is_loaded_inside_the_stream_s_queue_session(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
     with streaming_server() as base:
-        response = open_session(base, auth, voice=OTHER_VOICE)
-        assert response.status_code == 409, response.text
-        error = response.json()["error"]
-        assert error["code"] == "voice_not_resident"
-        assert VOICE in error["message"]
-        assert "never loads" in error["message"]
+        body = opened(base, auth, voice=OTHER_VOICE)
+        assert body["voice"] == OTHER_VOICE
+        activity = httpx.get(f"{base}/v1/activity", headers=auth, timeout=30.0).json()
+        assert activity["resident"]["id"] == OTHER_VOICE
+        held = activity["session"]
+        assert held["session_id"] == body["queue_session_id"]
+        assert held["items_run"] == 2, "the load-voice job and the stream are its items"
+        assert held["stream_session"]["session_id"] == body["session_id"]
 
 
 def test_a_second_session_is_refused_by_name(
@@ -510,25 +512,38 @@ def test_a_blank_row_is_refused_before_it_reaches_narrator(
         assert response.json()["error"]["code"] == "invalid_request"
 
 
-def test_a_session_holds_the_card_against_every_job_that_wants_it(
+def test_a_stream_s_queue_session_holds_the_card_against_every_job_that_wants_it(
     streaming_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
+    jobs = (
+        {"type": "tts", "model": VOICE,
+         "params": {"language": "en", "take": 0,
+                    "chunks": [{"index": 0, "text": "Rain."}]}},
+        {"type": "load-voice", "model": OTHER_VOICE, "params": {}},
+        {"type": "unload-voice", "model": VOICE, "params": {}},
+    )
+    other = {**auth, "X-Crucible-Client": "briefcase"}
     with streaming_server() as base:
-        opened(base, auth)
-        for body in (
-            {"type": "tts", "model": VOICE,
-             "params": {"language": "en", "take": 0,
-                        "chunks": [{"index": 0, "text": "Rain."}]}},
-            {"type": "load-voice", "model": OTHER_VOICE, "params": {}},
-            {"type": "unload-voice", "model": VOICE, "params": {}},
-        ):
-            response = httpx.post(
-                f"{base}/v1/jobs", headers=auth, json=body, timeout=30.0
-            )
+        stream = opened(base, auth)
+        for body in jobs:
+            response = httpx.post(f"{base}/v1/jobs", headers=other, json=body, timeout=30.0)
             assert response.status_code == 409, (body["type"], response.text)
             error = response.json()["error"]
-            assert error["code"] == "engine_in_use", body["type"]
-            assert "tts stream" in error["details"]["held_by"]
+            assert error["code"] == "server_busy", body["type"]
+            assert error["details"]["session_id"] == stream["queue_session_id"]
+
+        own = httpx.post(f"{base}/v1/jobs", headers=auth, json=jobs[2], timeout=30.0)
+        assert own.status_code == 202, own.text
+        assert own.json()["queued"] is True, (
+            "the stream's own client's job is an item of its session, and waits while "
+            "the stream holds narrator's one conversation"
+        )
+        httpx.delete(f"{base}/v1/tts/stream/{stream['session_id']}", headers=auth,
+                     timeout=30.0)
+        state = httpx.get(f"{base}/v1/jobs/{own.json()['job_id']}", headers=auth,
+                          timeout=30.0).json()
+        assert state["status"] == "removed"
+        assert state["removal"]["reason"] == "session_closed"
 
 
 def test_a_session_opened_during_a_clearance_waits_it_out(
@@ -576,9 +591,12 @@ def test_a_session_opened_during_a_clearance_waits_it_out(
         opener.join(timeout=WAIT)
         assert answers, "the door is still waiting after the clearance"
         response = answers[0]
-        assert response.status_code == 409, response.text
-        assert response.json()["error"]["code"] == "voice_not_resident"
-        assert residency.claimed_by is None
+        assert response.status_code == 201, (
+            "the clearance took the voice off; the stream's queue session loaded it "
+            f"again rather than open on nothing: {response.text}"
+        )
+        assert response.json()["voice"] == VOICE
+        assert residency.claimed_by is not None, "the stream holds narrator's conversation"
 
 
 def test_the_card_is_free_again_once_the_session_closes(
@@ -826,9 +844,12 @@ def test_the_session_closes_when_nobody_comes_back(
                 break
             time.sleep(0.05)
         assert health.json()["resident_kind"] is None, health.text
-        refused = open_session(base, auth)
-        assert refused.status_code == 409, refused.text
-        assert refused.json()["error"]["code"] == "voice_not_resident"
+        held = httpx.get(
+            f"{base}/v1/queue/sessions/{session['queue_session_id']}", headers=auth,
+            timeout=30.0,
+        ).json()
+        assert held["status"] == "closed" and held["reason"] == "client", held
+        assert sid in held["message"]
 
 
 def test_a_resume_the_session_can_no_longer_serve_is_refused_not_skipped(
@@ -1013,16 +1034,18 @@ def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
         assert streaming["finished"] == 0
         assert streaming["in_flight"] == 0
 
+        assert body["session"]["session_id"] == session["queue_session_id"]
+        assert streaming["queue_session_id"] == session["queue_session_id"]
         refused = httpx.post(
             f"{base}/v1/jobs",
-            headers=auth,
+            headers={**auth, "X-Crucible-Client": "briefcase"},
             json={"type": "tts", "model": VOICE,
                   "params": {"language": "en", "take": 0,
                              "chunks": [{"index": 0, "text": "Rain."}]}},
             timeout=30.0,
         )
         assert refused.status_code == 409, refused.text
-        assert refused.json()["error"]["details"]["held_by"] == body["claim"]["held_by"]
+        assert refused.json()["error"]["details"]["session_id"] == session["queue_session_id"]
 
 
 def test_the_bench_counts_what_a_session_has_actually_said(

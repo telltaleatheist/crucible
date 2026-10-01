@@ -32,13 +32,6 @@ from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
 from ..image import IMAGE_MAGIC
-from ..leaseonload import (
-    HeldForLoad,
-    LeaseOnLoad,
-    hold_for_load,
-    let_go_of,
-    require_lease_request,
-)
 from ..template import (
     ManifestCatalog,
     ResidentWorker,
@@ -261,12 +254,11 @@ class SegmentJobType(ResidentWorker):
     resident_kind = KIND_SEGMENT
 
     def __init__(
-        self, config: Config, backend: Any, residency: Residency, leases: Any | None = None
+        self, config: Config, backend: Any, residency: Residency
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -326,22 +318,13 @@ class SegmentJobType(ResidentWorker):
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parsed = parse_params(SegmentParams, params, self.name)
-        self._admit(model, self.requirements(model, parsed), parsed.lease, "segmenting with")
+        self._admit(model, self.requirements(model, parsed), "segmenting with")
 
-    def _admit(self, model: str, needs: Needs, lease: LeaseOnLoad | None, doing: str) -> None:
-        if lease is not None:
-            require_lease_request(lease, act=needs.manifest.kind)
+    def _admit(self, model: str, needs: Needs, doing: str) -> None:
         self._residency.refuse_if_claimed(f"{doing} {model!r}")
         if self._residency.is_resident(KIND_SEGMENT, model):
             return
         self._guard(model, needs.spec.memory_bytes_estimate)
-
-    def _hold(self, job: Job, model: str, lease: LeaseOnLoad | None) -> HeldForLoad | None:
-        if lease is None:
-            return None
-        return hold_for_load(
-            self._leases, kind=KIND_SEGMENT, subject=model, request=lease, client=job.client
-        )
 
     def _worker(self, ctx: JobContext, model: str, needs: Needs) -> workers.WorkerSession:
         return self._session(
@@ -378,13 +361,7 @@ class SegmentJobType(ResidentWorker):
         needs = as_job_error(self.requirements, model, params)
         picture = input_picture(ctx, params, needs.spec)
         session = self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
-        try:
-            self._make(ctx, model, session, params, needs, picture)
-        except BaseException:
-            let_go_of(self._leases, held)
-            raise
-        ctx.done_extra(lease_id=None if held is None else held.lease_id)
+        self._make(ctx, model, session, params, needs, picture)
 
     def _make(
         self,
@@ -472,11 +449,10 @@ def effective_params(
 
 
 class LoadSegmentParams(BaseModel):
-    """`params` for a load-segment job: warm a segment model up, optionally leased."""
+    """`params` for a load-segment job: warm a segment model up."""
 
     model_config = ConfigDict(extra="forbid")
 
-    lease: LeaseOnLoad | None = None
 
 
 class LoadSegmentJobType(SegmentJobType):
@@ -485,21 +461,17 @@ class LoadSegmentJobType(SegmentJobType):
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
-        parsed = parse_params(LoadSegmentParams, params, self.name)
-        self._admit(model, self.loadable(model), parsed.lease, "loading")
+        parse_params(LoadSegmentParams, params, self.name)
+        self._admit(model, self.loadable(model), "loading")
 
     def run(self, job: Job, ctx: JobContext) -> None:
-        params = LoadSegmentParams.model_validate(job.params)
+        LoadSegmentParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.loadable, model)
         ctx.progress(0.0, f"loading {model}")
         self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
         ctx.progress(1.0, f"{model} is resident")
-        ctx.done_extra(
-            resident=self._residency.resident_id,
-            lease_id=None if held is None else held.lease_id,
-        )
+        ctx.done_extra(resident=self._residency.resident_id)
 
 
 class UnloadSegmentJobType(UnloadJobType):
@@ -515,7 +487,7 @@ class UnloadSegmentJobType(UnloadJobType):
 JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         SEGMENT_JOB,
-        lambda wiring: SegmentJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: SegmentJobType(wiring.config, wiring.backend, wiring.residency),
     ),
     JobTypeBinding(
         UNLOAD_SEGMENT,
@@ -523,6 +495,6 @@ JOB_TYPES: tuple[JobTypeBinding, ...] = (
     ),
     JobTypeBinding(
         LOAD_SEGMENT,
-        lambda wiring: LoadSegmentJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: LoadSegmentJobType(wiring.config, wiring.backend, wiring.residency),
     ),
 )

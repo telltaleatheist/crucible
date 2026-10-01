@@ -8,8 +8,6 @@ from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from .. import upstreamrecord, upstreams
-from ..admission import refuse_lease_on_an_upstream
-from ..admission import refuse_lease_on_an_upstream as _refuse_lease_on_an_upstream
 from .. import upstreams
 from ..config import Config
 from ..errors import ApiError

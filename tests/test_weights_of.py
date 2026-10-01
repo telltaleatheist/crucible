@@ -663,20 +663,25 @@ def test_an_alias_holding_the_card_holds_its_base_even_unpulled(
     auth: dict[str, str],
     home: Path,
     hub: FakeHub,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from types import SimpleNamespace
+
     config = _config(home, CUDA_LINUX)
     base = load_manifest(BASE)
     weights.pull(config, base, base.spec(CUDA_LINUX))
     with make_client(enable_llm=True) as client:
-        client.app.state.leases.open(
-            kind="llm", subject=ALIAS, act="decide", client="foundry/1",
-            ttl_seconds=60,
-        )
-        response = client.delete(f"/v1/catalog/model/{BASE}", headers=auth)
+        residency = client.app.state.residency
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                type(residency), "resident",
+                property(lambda self: SimpleNamespace(id=ALIAS, kind="llm")),
+            )
+            response = client.delete(f"/v1/catalog/model/{BASE}", headers=auth)
     assert response.status_code == 409, response.text
     error = response.json()["error"]
     assert error["code"] == "subject_in_use"
-    assert error["details"]["fact"] == "lease"
+    assert error["details"]["fact"] == "resident"
     assert ALIAS in error["details"]["who"]
     assert weights.installed(config, base, base.spec(CUDA_LINUX)) is not None
 

@@ -18,8 +18,10 @@ from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
 from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
-from ..leases import Leases
+from ..queuepump import QueuePump
+from ..queuesessions import QueueSessions
 from ..residency import Residency
+from ..sessionqueue import SessionCloser
 from ..settle import Settlement
 from ..tasks import TaskStore
 from ..ttsstream import StreamManager
@@ -35,7 +37,8 @@ class Routers:
 
 @dataclass(frozen=True)
 class Services:
-    leases: Leases
+    sessions: QueueSessions
+    session_closer: SessionCloser
     store: JobStore
     line: WaitingLine
     streams: StreamManager
@@ -79,8 +82,16 @@ class AppContext:
         return self.app.state.streams
 
     @property
-    def leases(self) -> Leases:
-        return self.app.state.leases
+    def sessions(self) -> QueueSessions:
+        return self.app.state.sessions
+
+    @property
+    def session_closer(self) -> SessionCloser:
+        return self.app.state.session_closer
+
+    @property
+    def queue_pump(self) -> QueuePump:
+        return self.app.state.queue_pump
 
     @property
     def settlement(self) -> Settlement:
@@ -135,9 +146,9 @@ class AppContext:
             config=self.config,
             store=self.store,
             residency=self.residency,
-            leases=self.leases,
+            sessions=self.sessions,
             installs=self.installs,
             decide_here=self.decide_here,
             chats_in_flight=lambda: len(self.inflight),
-            lease_granted=self.settlement.arm_for_lease_expiry,
+            streaming=lambda: self.streams.session is not None,
         )

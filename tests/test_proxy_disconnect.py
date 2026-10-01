@@ -215,20 +215,21 @@ def test_dropping_a_decision_takes_down_its_requests_and_sends_no_more(
         )
 
 
-def test_a_lease_released_mid_decision_is_answered_at_once(
+def test_a_queue_session_closed_mid_decision_is_answered_at_once(
     deciding_server: Any, auth: dict[str, str]
 ) -> None:
     engines, app, server = deciding_server
     with server as base:
         run_job(base, auth, type="load-model", model=MODEL)
         engine = engines[0]
-        lease = httpx.post(
-            f"{base}/v1/models/{MODEL}/lease",
+        session = httpx.post(
+            f"{base}/v1/queue/sessions",
             headers=auth,
-            json={"act": "clean", "ttl_seconds": 600},
+            json={"act": "clean"},
             timeout=30.0,
         )
-        assert lease.status_code == 201, lease.text
+        assert session.status_code == 202, session.text
+        assert session.json()["status"] == "open", session.text
 
         outcome: dict[str, Any] = {}
 
@@ -253,13 +254,13 @@ def test_a_lease_released_mid_decision_is_answered_at_once(
 
             started = time.monotonic()
             released = httpx.delete(
-                f"{base}/v1/leases/{lease.json()['lease_id']}",
+                f"{base}/v1/queue/sessions/{session.json()['session_id']}",
                 headers=auth,
                 timeout=30.0,
             )
             took = time.monotonic() - started
-            assert released.status_code == 204, released.text
-            assert took < 1.0, f"the lease's release took {took:.2f}s to answer"
+            assert released.status_code == 200, released.text
+            assert took < 1.0, f"the session's close took {took:.2f}s to answer"
             assert not engine.stopped
             assert len(app.state.inflight) == 1
         finally:
@@ -268,7 +269,7 @@ def test_a_lease_released_mid_decision_is_answered_at_once(
 
         assert _wait_for(lambda: engine.aborts == GATE, PROMPTLY)
         assert _wait_for(lambda: engine.stopped, PROMPTLY), (
-            "the lease was gone and the caller was gone, and the card was still held"
+            "the session was gone and the caller was gone, and the card was still held"
         )
         assert time.monotonic() - outcome["gave_up"] < PROMPTLY + 0.5
         assert len(engine.requests) == 1 + GATE

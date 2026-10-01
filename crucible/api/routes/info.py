@@ -52,10 +52,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         if config.enable_llm:
             rows_for["llm"] = model_rows(config, backend, residency)
         if config.enable_tts:
-            rows_for["tts"] = voice_rows(
-                config, backend, residency,
-                leases=ctx.leases, store=store,
-            )
+            rows_for["tts"] = voice_rows(config, backend, residency, store=store)
         capabilities = [
             {"job_type": capability, "models": rows}
             for capability, rows in sorted(rows_for.items())

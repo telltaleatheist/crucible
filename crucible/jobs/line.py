@@ -4,7 +4,9 @@ A queued job is a normal job (status ``queued``) that holds its inputs and waits
 until the queue pump (crucible/queuepump.py) walks the line and admits it through the
 same admission path a fresh submit takes. A queued chat or decision is a *call*: no job
 record, just a ticket whose HTTP request is held open until the pump gives it a slot
-on the resident model (crucible/callqueue.py). This module is the line's state and its
+on the resident model (crucible/callqueue.py). A queue session (crucible/queuesessions.py) waits
+here too until the pump opens it (crucible/sessionqueue.py); while one is open its own
+items go ahead of everything else. This module is the line's state and its
 announcements; it never admits anything itself.
 """
 
@@ -19,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 from .. import clock
 from ..errors import ApiError
+from ..queuesessions import LOAD_FAILED, QueueSession, QueueSessions, is_session_id
 from .base import Job, JobFailure
 
 if TYPE_CHECKING:
@@ -37,13 +40,13 @@ CLIENT = "client"
 EXPIRED = "expired"
 SERVER_RESTART = "server_restart"
 REFUSED = "refused"
-REMOVAL_REASONS = (OPERATOR, CLIENT, EXPIRED, SERVER_RESTART)
+SESSION_CLOSED = "session_closed"
+REMOVAL_REASONS = (OPERATOR, CLIENT, EXPIRED, SERVER_RESTART, SESSION_CLOSED)
 
 UNNAMED = "an unnamed client"
 
 CALL_PREFIX = "call-"
 ADMITTED = "admitted"
-LEASE = "lease"
 
 
 def limits() -> dict[str, Any]:
@@ -68,7 +71,7 @@ class Call:
     client: str | None
     act: str | None = None
     client_ref: str | None = None
-    ttl_seconds: int | None = None
+    session: str | None = None
     id: str = field(default_factory=lambda: CALL_PREFIX + uuid.uuid4().hex)
     status: str = "queued"
 
@@ -80,6 +83,7 @@ class Call:
 @dataclass
 class Waiting:
     is_call: ClassVar[bool] = False
+    is_session: ClassVar[bool] = False
 
     job: Job
     request: Any
@@ -94,10 +98,19 @@ class Waiting:
     def expires_at(self) -> datetime:
         return self.submitted + timedelta(seconds=self.max_wait_s)
 
+    @property
+    def session(self) -> str | None:
+        """The session this item belongs to: the open session's items go first."""
+        return getattr(self.job, "session", None)
+
+    @property
+    def kind(self) -> str:
+        return "session" if self.is_session else "call" if self.is_call else "job"
+
     def waited_s(self, now: datetime) -> float:
         return round(max(0.0, (now - self.submitted).total_seconds()), 3)
 
-    def row(self, now: datetime, holder: str | None) -> dict[str, Any]:
+    def row(self, now: datetime) -> dict[str, Any]:
         job = self.job
         return {
             "position": self.position,
@@ -110,10 +123,8 @@ class Waiting:
             "waited_s": self.waited_s(now),
             "max_wait_s": self.max_wait_s,
             "expires_at": self.expires_at.isoformat(),
-            "lease_holder": holder is not None and job.client == holder,
-            "kind": (
-                ("lease" if job.type == LEASE else "call") if self.is_call else "job"
-            ),
+            "session": self.session,
+            "kind": self.kind,
         }
 
 
@@ -135,12 +146,23 @@ class WaitingCall(Waiting):
             self.outcome.set_result((status, value))
 
 
-class WaitingLine:
-    """FIFO, except that the client holding the open lease goes ahead of the line."""
+@dataclass
+class WaitingSession(Waiting):
+    """A queue session waiting to open. ``load_job`` is the load-model job the pump
+    started to open it with its model."""
 
-    def __init__(self, store: "JobStore", lease_holder: Callable[[], str | None]) -> None:
+    is_session: ClassVar[bool] = True
+
+    load_job: str | None = None
+    loads: int = 0
+
+
+class WaitingLine:
+    """FIFO, except that the items of the open queue session go ahead of the line."""
+
+    def __init__(self, store: "JobStore", sessions: QueueSessions) -> None:
         self._store = store
-        self._lease_holder = lease_holder
+        self._sessions = sessions
         self._items: list[Waiting] = []
         self._client_seen: dict[str | None, datetime] = {}
         self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_MEMORY)
@@ -155,21 +177,29 @@ class WaitingLine:
     def __len__(self) -> int:
         return len(self._items)
 
-    def holder(self) -> str | None:
-        return self._lease_holder()
+    @property
+    def sessions(self) -> QueueSessions:
+        return self._sessions
+
+    def open_session(self) -> str | None:
+        session = self._sessions.current()
+        return None if session is None else session.id
 
     def ordered(self) -> list[Waiting]:
-        holder = self.holder()
-        if holder is None:
+        first_id = self.open_session()
+        if first_id is None:
             return list(self._items)
-        first = [item for item in self._items if item.job.client == holder]
-        return first + [item for item in self._items if item.job.client != holder]
+        first = [item for item in self._items if item.session == first_id]
+        return first + [item for item in self._items if item.session != first_id]
+
+    def items_of(self, session_id: str) -> list[Waiting]:
+        return [item for item in self._items if item.session == session_id]
 
     def calls_waiting(self) -> dict[str, int]:
-        """How many calls wait for each model."""
+        """How many calls, and sessions that open on a model, wait for each model."""
         counts: dict[str, int] = {}
         for item in self._items:
-            if item.is_call:
+            if (item.is_call or item.is_session) and item.job.model is not None:
                 counts[item.job.model] = counts.get(item.job.model, 0) + 1
         return counts
 
@@ -185,8 +215,7 @@ class WaitingLine:
 
     def rows(self, now: datetime | None = None) -> list[dict[str, Any]]:
         now = clock.now() if now is None else now
-        holder = self.holder()
-        return [item.row(now, holder) for item in self.ordered()]
+        return [item.row(now) for item in self.ordered()]
 
 
     def refuse_if_full(self, client: str | None) -> None:
@@ -239,6 +268,19 @@ class WaitingLine:
         self._wake()
         return item
 
+    def join_session(self, session: QueueSession) -> WaitingSession:
+        self.refuse_if_full(session.client)
+        now = clock.now()
+        item = WaitingSession(
+            job=session,  # type: ignore[arg-type]
+            request=None, max_wait_s=session.max_wait_s, submitted=now, seen=now,
+        )
+        self._items.append(item)
+        self._client_seen[session.client] = now
+        self.reorder(announce_new=item)
+        self._wake()
+        return item
+
 
     def reorder(self, announce_new: Waiting | None = None) -> None:
         depth = len(self._items)
@@ -250,7 +292,12 @@ class WaitingLine:
             if item is announce_new:
                 data.update(max_wait_s=item.max_wait_s,
                             expires_at=item.expires_at.isoformat())
-            if not item.is_call:
+            if item.is_session:
+                self._sessions.positioned(
+                    item.job, index, depth,  # type: ignore[arg-type]
+                    first=item is announce_new,
+                )
+            elif not item.is_call:
                 self._store.append_event(item.job, "queued", data)
             if item is announce_new:
                 self._announce("added", item, **self._added(item))
@@ -273,7 +320,7 @@ class WaitingLine:
         if item in self._items:
             self._items.remove(item)
         item.gone = True
-        if not item.is_call:
+        if not item.is_call and not item.is_session:
             self._store.mark_waiting(item.job, None)
 
     def started(self, item: Waiting, entry: Any = None) -> None:
@@ -282,6 +329,8 @@ class WaitingLine:
         if isinstance(item, WaitingCall):
             item.job.status = "running"
             item.settle(ADMITTED, entry)
+        elif isinstance(item, WaitingSession):
+            self._sessions.opened(item.job)  # type: ignore[arg-type]
         else:
             self._store.append_event(item.job, "started", {"waited_s": waited})
         self._announce("started", item, waited_s=waited)
@@ -293,6 +342,11 @@ class WaitingLine:
         if isinstance(item, WaitingCall):
             item.job.status = "failed"
             item.settle("failed", refusal)
+        elif isinstance(item, WaitingSession):
+            reason = LOAD_FAILED if refusal.code == "session_load_failed" else REFUSED
+            self._sessions.removed(
+                item.job, reason, refusal.message, failure.to_dict()  # type: ignore[arg-type]
+            )
         else:
             self._store.end_waiting(item, failure=failure)
         self._announce("removed", item, reason=REFUSED, error=failure.to_dict())
@@ -308,6 +362,8 @@ class WaitingLine:
         if isinstance(item, WaitingCall):
             item.job.status = "removed"
             item.settle("removed", removed_call(item.job, removal))
+        elif isinstance(item, WaitingSession):
+            self._sessions.removed(item.job, reason, message)  # type: ignore[arg-type]
         else:
             self._store.end_waiting(item, removal=removal)
         self._announce("removed", item, reason=reason, message=message)
@@ -316,6 +372,16 @@ class WaitingLine:
         return item
 
     def not_waiting(self, job_id: str) -> ApiError:
+        if is_session_id(job_id):
+            session = self._sessions.get(job_id)
+            how = "" if session.reason is None else f" ({session.reason})"
+            return ApiError(
+                409,
+                "not_queued",
+                f"session {job_id} is not waiting in this server's queue; it is "
+                f"{session.status}{how}",
+                {"job_id": job_id, "status": session.status},
+            )
         if job_id.startswith(CALL_PREFIX):
             return ApiError(
                 409,
@@ -332,6 +398,14 @@ class WaitingLine:
             "Cancel a job that has started with DELETE /v1/jobs/{job_id}",
             {"job_id": job_id, "status": job.status},
         )
+
+    def remove_items_of(self, session_id: str, message: str) -> int:
+        """The items a closed session left waiting: nothing runs them as its items any
+        more, so they leave the line rather than wait as anyone else's."""
+        taken = [item.job.id for item in self.items_of(session_id)]
+        for job_id in taken:
+            self.remove(job_id, SESSION_CLOSED, message)
+        return len(taken)
 
     def drain(self, reason: str, message: str) -> int:
         taken = [item.job.id for item in list(self._items)]
@@ -371,6 +445,8 @@ class WaitingLine:
             )
         if item.is_call:
             return None
+        if item.is_session and item.job.followed:  # type: ignore[attr-defined]
+            return None
         job = item.job
         if job.id in followed_jobs:
             return None
@@ -379,6 +455,13 @@ class WaitingLine:
         seen = max(item.seen, self._client_seen.get(job.client, item.seen))
         if (now - seen).total_seconds() < ABANDON_AFTER_S:
             return None
+        if item.is_session:
+            return (
+                f"nobody followed it for {ABANDON_AFTER_S} s: no open event stream on "
+                "it or on a job of the same client, no GET /v1/queue/sessions/{id}, and "
+                "no POST /v1/queue/sessions/{id}/touch, so the client that asked for it "
+                "is gone"
+            )
         return (
             f"nobody followed it for {ABANDON_AFTER_S} s: no open event stream on it "
             "or on another job of the same client, no GET /v1/jobs/{id}, and no "

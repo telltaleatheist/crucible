@@ -96,7 +96,7 @@ CASES: list[tuple[str, str, str, type[BaseModel], dict[str, str]]] = [
     ("function", "readActivityChat", "chat", responses.ActivityChat, {}),
     ("function", "readActivityChat", "row", responses.ActivityChatRow, {}),
     ("function", "readActivityJob", "data", responses.ActivityJob, {}),
-    ("function", "readLease", "data", responses.ActivityLease, {}),
+    ("function", "readQueueSession", "data", responses.SessionState, {}),
     ("method", "queue", "body", responses.QueueList, {}),
     ("function", "readQueueItem", "row", responses.QueueItem, {}),
     ("method", "removeFromQueue", "body", responses.QueueRemoved, {}),

@@ -37,7 +37,6 @@ from .video import UnloadVideoJobType, VideoJobType
 if TYPE_CHECKING:
     from ..backend import Backend
     from ..config import Config
-    from ..leases import Leases
 
 ALL_JOB_TYPES: dict[str, str] = {spec.name: spec.family.name for spec in JOB_TYPE_SPECS}
 
@@ -46,13 +45,11 @@ def build_registry(
     config: "Config",
     backend: "Backend",
     residency: Residency | None = None,
-    leases: "Leases | None" = None,
 ) -> dict[str, JobType]:
     wiring = Wiring(
         config=config,
         backend=backend,
         residency=residency if residency is not None else Residency(config),
-        leases=leases,
     )
     registry: dict[str, JobType] = {
         binding.spec.name: binding.build(wiring)

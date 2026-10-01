@@ -14,7 +14,6 @@ from ...voicereference import VoiceReference
 from ...voices import VoiceManifest
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
-from ..leaseonload import LeaseOnLoad, open_lease_for_load
 from ..template import as_job_error, card_guard, parse_params, require_model, run_model
 from ..unload import UnloadJobType
 from .common import (
@@ -52,7 +51,6 @@ class LoadVoiceParams(BaseModel):
 
     timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
     reference: ReferenceInput | None = None
-    lease: LeaseOnLoad | None = None
 
 
 @dataclass(frozen=True)
@@ -74,12 +72,10 @@ class LoadVoiceJobType:
         config: Config,
         backend: Any,
         residency: Residency,
-        leases: Any | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -143,7 +139,7 @@ class LoadVoiceJobType:
         model = run_model(job.model, self.name, "a voice")
         self._residency.begin_warming(model)
         try:
-            self._load(ctx, model, params, job.client)
+            self._load(ctx, model, params)
         finally:
             self._residency.end_warming()
 
@@ -152,7 +148,6 @@ class LoadVoiceJobType:
         ctx: JobContext,
         model: str,
         params: LoadVoiceParams,
-        client: str | None,
     ) -> None:
         ctx.warming(f"checking the accelerator for {model}")
         needs = as_job_error(self.requirements, model, params.reference)
@@ -181,15 +176,6 @@ class LoadVoiceJobType:
             "fingerprint": resident.fingerprint,
             "reference": resident.reference,
         }
-        extra["lease_id"] = None
-        if params.lease is not None:
-            extra["lease_id"] = open_lease_for_load(
-                self._leases,
-                kind=resident.kind,
-                subject=resident.voice_id,
-                request=params.lease,
-                client=client,
-            )
         ctx.done_extra(**extra)
 
 
@@ -207,7 +193,7 @@ JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         LOAD_VOICE,
         lambda wiring: LoadVoiceJobType(
-            wiring.config, wiring.backend, wiring.residency, wiring.leases
+            wiring.config, wiring.backend, wiring.residency
         ),
     ),
     JobTypeBinding(

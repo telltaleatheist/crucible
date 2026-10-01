@@ -142,31 +142,6 @@ def test_a_resident_model_cannot_be_removed_and_details_say_who(
     assert directory.exists(), "nothing is deleted when the door refuses"
 
 
-def test_a_leased_subject_cannot_be_removed_and_the_receipt_travels(
-    client: TestClient,
-    auth: dict[str, str],
-    home: Path,
-    fake_weights: Callable[[str], Path],
-) -> None:
-    directory = fake_weights("qwen3.5-9b")
-    client.app.state.leases.open(
-        kind="llm",
-        subject="qwen3.5-9b",
-        act="clean",
-        client="foundry/1",
-        ttl_seconds=60,
-    )
-
-    response = client.delete("/v1/catalog/model/qwen3.5-9b", headers=auth)
-    assert response.status_code == 409
-    error = response.json()["error"]
-    assert error["code"] == "subject_in_use"
-    assert error["details"]["fact"] == "lease"
-    assert "foundry/1" in error["details"]["who"]
-    assert error["details"]["subject"] == "qwen3.5-9b"
-    assert error["details"]["act"] == "clean"
-    assert directory.exists(), "nothing is deleted when the door refuses"
-
 
 def test_the_removal_is_recorded_in_activity_with_the_act(
     client: TestClient,

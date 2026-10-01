@@ -107,7 +107,7 @@ and the whole console is redrawn from `state`. Therefore:
   say and the act proceeds; any other refusal is shown and nothing is submitted.
 - **Pull** is greyed on installed subjects (the API would refuse
   `already_installed`). **Remove** is offered on installed rows and refused by
-  name when something holds the subject (resident model, lease, task). It is the
+  name when something holds the subject (resident model, task). It is the
   only irreversible act on the page and gets one `window.confirm` naming the
   bytes; the browser's own dialog, not a custom modal.
 - **Voices** (Owen, 2026-09-26: *"it should be possible to do directly by the

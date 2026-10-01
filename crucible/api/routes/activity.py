@@ -17,7 +17,7 @@ from ..responses import Activity
 def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
     line = store.line
     waiting = None if line is None else line.get(job.id)
-    if waiting is not None and waiting.is_call:
+    if waiting is not None and (waiting.is_call or waiting.is_session):
         return _call_row(waiting)
     row = _lane_row(store, job)
     if waiting is not None:
@@ -41,7 +41,7 @@ def _call_row(waiting: Any) -> dict[str, Any]:
         "client": call.client,
         "waited_s": waiting.waited_s(clock.now()),
         "max_wait_s": waiting.max_wait_s,
-        "kind": "lease" if call.type == "lease" else "call",
+        "kind": waiting.kind,
     }
 
 
@@ -158,6 +158,7 @@ def _streaming_section(ctx: AppContext) -> dict[str, Any] | None:
     session = ctx.streams.session
     if session is None:
         return None
+    owner = ctx.sessions.of_stream_session(session.id)
     return {
         "session_id": session.id,
         "voice": session.voice,
@@ -165,6 +166,7 @@ def _streaming_section(ctx: AppContext) -> dict[str, Any] | None:
         "narrator_engine": session.narrator_engine,
         "since": session.opened_at,
         "client": session.client,
+        "queue_session_id": None if owner is None else owner.id,
         "progress": None,
         **session.progress_report(),
     }
@@ -193,6 +195,7 @@ def _slots_section(ctx: AppContext) -> dict[str, Any]:
                 running is None
                 and ctx.residency.claimed_by is None
                 and len(ctx.line) == 0
+                and ctx.sessions.current() is None
             ),
         },
     }
@@ -203,7 +206,7 @@ def _activity_body(ctx: AppContext) -> dict[str, Any]:
     store = ctx.store
     running = store.running
     queued = store.queued(calls=True)
-    lease = ctx.leases.current()
+    queue_session = ctx.sessions.current()
     return {
         "server": _server_section(ctx),
         "resident": _resident_section(ctx),
@@ -218,7 +221,9 @@ def _activity_body(ctx: AppContext) -> dict[str, Any]:
         "chat": _chat_section(ctx),
         "settings": {"writes": ctx.settings_history.rows()},
         "catalog": {"removals": ctx.removals.rows()},
-        "lease": None if lease is None else lease.to_dict(),
+        "session": (
+            None if queue_session is None else ctx.sessions.state(queue_session)
+        ),
         "slots": _slots_section(ctx),
         "running": [] if running is None else [_activity_row(store, running)],
         "queued": [_activity_row(store, job) for job in queued],

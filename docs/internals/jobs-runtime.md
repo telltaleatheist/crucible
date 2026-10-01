@@ -2,10 +2,10 @@
 
 How the job lane, its records, the card's holders and the worker job types behave, and why.
 Covers `crucible/jobtypes.py` (the job-type catalog), `crucible/jobs/` (registry,
-`registry_table`, `binding`, `template`, `unload`, `leaseonload`, `base`, `queue`, `worker_type`,
+`registry_table`, `binding`, `template`, `unload`, `base`, `queue`, `worker_type`,
 `workerio`, and the `tts`, `rvc`, `denoise`, `llm`, `echo` types), `journal`, `workers`,
 `installonsubmit`, `inflight`,
-`leases`, `settle`, `ttsstream`, `rvcbase`, `rvcmodels`, `denoisemodels`, and the catalog files
+`queuesessions`, `settle`, `ttsstream`, `rvcbase`, `rvcmodels`, `denoisemodels`, and the catalog files
 `crucible/rvc/*.toml`, `crucible/rvcbase/*.toml`, `crucible/denoise/*.toml`.
 
 The resume journal's wire contract is [docs/RESUMABLE-JOBS.md](../RESUMABLE-JOBS.md). Only the
@@ -17,8 +17,10 @@ has its own page: [image.md](image.md).
 - **Admission, not queueing.** Owen, 2026-09-13: *"i think all queuing logic should exist in the
   clients, not the server. if the server is busy, it cant receive a new job. if its not busy, it
   receives the next job requested."* Owen, 2026-09-27: *"Crucible isn't responsible for queuing.
-  The apps that use it are. It grants and releases leases. That's it."* Crucible grants and
-  releases leases. It never queues, never retries, and never resumes anything by itself.
+  The apps that use it are. It grants and releases leases. That's it."* That ruling was revised:
+  since 2026-09-30 the server queues work that asks to wait (docs/QUEUE.md), and since
+  2026-10-01 queue sessions, not leases, hold the card for a client's run. It still never
+  retries and never resumes anything by itself.
 - **Unload when done.** Owen, 2026-09-14: *"Models should always be unloaded when we're done
   with them. Every time."* This overrules the earlier "no idle unload" design. The card is
   not storage (see section 6).
@@ -51,8 +53,7 @@ base subjects it needs, and whether the catalog lists every model it can serve. 
 is an unload, and of what, is `spec.unloads` (the card effect's `takes_off`).
 
 Each job package exports `JOB_TYPES`: a `JobTypeBinding(spec, build)` per type it implements,
-where `build(Wiring)` makes the type from the config, backend, the shared `Residency` and the
-lease register. `crucible/jobs/registry_table.py` lists every package's bindings in one tuple
+where `build(Wiring)` makes the type from the config, backend and the shared `Residency`. `crucible/jobs/registry_table.py` lists every package's bindings in one tuple
 and refuses to load unless they cover `JOB_TYPE_SPECS` exactly, in order. `build_registry` is
 that table filtered by the family flags; it also refuses a type whose `name` is not its spec's
 or whose `journal_identity` disagrees with its spec.
@@ -63,7 +64,7 @@ Every former per-type table is a derivation, under its old name:
 | --- | --- |
 | `jobs.ALL_JOB_TYPES`, `jobs.CAPABILITIES` | spec name to family name |
 | `build_registry`'s `enable_*` mapping | `family.flag` |
-| `leases.CARD_EFFECTS` | `spec.card` |
+| `jobtypes.CARD_EFFECTS` | `spec.card` |
 | `settle.LEAVES_IT_RESIDENT` | `spec.leaves_it_resident` |
 | `installonsubmit.BASE_SUBJECTS` | `family.base_subject_kinds` (ids from `catalog`) |
 | `installonsubmit.PULLABLE_REFUSALS`, `INSTALLABLE_REFUSALS` | `family.pullable_refusals` |
@@ -75,12 +76,12 @@ Every former per-type table is a derivation, under its old name:
 backends, not job types. `INSTALLER_FOR["pages"]` stays a literal there, because `pages` is a
 capability class, not a job family.
 
-The catalog is a leaf outside `crucible/jobs/` on purpose. `crucible.leases` must not import
+The catalog is a leaf outside `crucible/jobs/` on purpose. `crucible.queuesessions` must not import
 `crucible.residency` (`tests/test_layering.py`), and `crucible.jobenv` is imported by
 `residency`. Importing anything under `crucible/jobs/` runs `crucible/jobs/__init__.py`,
 which imports `residency` and every job package. A table there could be read by neither.
 
-### The job template (`crucible/jobs/template.py`, `unload.py`, `leaseonload.py`)
+### The job template (`crucible/jobs/template.py`, `unload.py`)
 
 - `ManifestCatalog[T]` is a manifest loader plus the four questions every type asked of it:
   `all()` (the loader's error becomes `500 <kind>_manifests_unreadable`), `known(id)` (`400
@@ -99,8 +100,6 @@ which imports `residency` and every job package. A table there could be read by 
 - `ResidentWorker` is the `_session`/`_forget` pair align and denoise shared: reuse the resident
   session when its process is alive, forget a dead one, guard, load, and name the job module
   as the bug if its occupant carried no session.
-- `leaseonload.LeaseOnLoad` and `open_lease_for_load` are the `params.lease` of `load-model`
-  and `load-voice`; the job packages import them from there.
 - `UnloadJobType(spec, residency, describe=..., provenance=...)` is all four unload types.
   The kind comes from `spec.unloads`, the noun from `cardkinds.KIND_NOUNS`, and the codes stay
   `<noun>_not_resident` (`model`, `voice`, `aligner`, `separator`, since 2026-09-28
@@ -163,14 +162,14 @@ which imports `residency` and every job package. A table there could be read by 
 ### Layering leaves
 
 These modules import nothing heavier than `backend`, `config` or `errors`, so the lane,
-leases, the journal and the job types can use them without pulling in residency, the
+queue sessions, the journal and the job types can use them without pulling in residency, the
 ladder or the CLI:
 
 - `crucible/clock.py`: `now()` (an aware UTC `datetime`), `utcnow()` (its ISO string) and
-  `utcnow_to_the_second()` (the ladder's record stamps). The lane, the journal and the leases
+  `utcnow_to_the_second()` (the ladder's record stamps). The lane, the journal and the sessions
   call `clock.now()` through the module, so a test that moves time patches `clock.now`.
-- `crucible/cardkinds.py`: the four resident kinds (`KIND_*`) and `KIND_NOUNS`. `leases`
-  and `residency` read them from here, and so does every caller that names a kind.
+- `crucible/cardkinds.py`: the four resident kinds (`KIND_*`) and `KIND_NOUNS`. `residency`
+  reads them from here, and so does every caller that names a kind.
 - `crucible/cardfacts.py`: the ladder record reader (`record_path`, `load_record`,
   `stale_reason`, `card_for`, the rung and outcome names, `RungResult`). The job types read
   `card_for` from here, as do the CLI and the routes; `ladder` keeps the measuring.
@@ -204,7 +203,7 @@ ladder or the CLI:
 - `position`, `queue_depth` and cancel are unchanged for a job that did not ask to queue.
   Under the admission rule they only take the values 0, 1 or null.
 - **The waiting line (2026-09-30).** A submit with `"queue": {...}` that admission refuses
-  only as busy (`server_busy`, `leased`, `engine_in_use`) is created anyway and joins
+  only as busy (`server_busy`, `engine_in_use`) is created anyway and joins
   `WaitingLine` (`crucible/jobs/line.py`), attached to the store with `attach_line`. It is
   a normal job (`queued`, inputs moved in, journal created) whose record carries `waiting`
   while it waits. `crucible/queuepump.py` runs `admission.admit_waiting` on the front of the
@@ -298,7 +297,7 @@ ladder or the CLI:
 
 - The reaper ticks inside the lane coroutine while the lane is idle: once on the way into the
   first wait, then every `REAP_INTERVAL_SECONDS` (60 s). It never competes with a render for the
-  disk. The same tick settles a lapsed lease (section 5).
+  disk.
 - A job is reaped for one of two reasons, and the reason is recorded:
   - **fetched**: `Job.collected()`, meaning every artifact AND every sidecar has been GET.
     Sidecars count because the SDK fetches the artifact and its sidecar in parallel. A job with
@@ -355,29 +354,32 @@ Contract: [RESUMABLE-JOBS.md](../RESUMABLE-JOBS.md). Implementation rules:
 - `_journal_started` puts `resumed: N of M ... done` on a resumed job's stream before the type
   skips anything.
 
-## 6. Holders of the card: leases, chats, settlement
+## 6. Holders of the card: sessions, chats, settlement
 
 ### Four facts, no timer (`crucible/settle.py`)
 
 The card is cleared the moment the last of these goes false:
 
 1. **the lane**: no job running or admitted;
-2. **the lease**: no open lease;
-3. **the claim**: no streaming session holds narrator's wire;
+2. **the session**: no open queue session (`crucible/queuesessions.py`);
+3. **the claim**: no TTS stream holds narrator's wire;
 4. **the chats**: no chat completion in flight.
+
+(A call or a session waiting in the line for the resident model also holds it, so the model is
+not unloaded under the next in line.)
 
 There is no keep-warm window and no config key, because an idle interval is a guess.
 `Residency.warming` is not a fifth fact, since it is a sub-state of the lane. A client that
-does not lease pays a reload between chats or chapters. That is the price of not stating an
-intention, and the fix is a lease on the client side, never an exception here.
+opens no queue session pays a reload between chats or chapters. That is the price of not
+stating an intention, and the fix is a session on the client side, never an exception here.
 
-- `Settlement` is the ONE place that decides. Five moments call it: a job ends, a lease is
-  released, a lease lapses, a streaming session closes, the last chat returns.
+- `Settlement` is the ONE place that decides. Three moments call it: a job ends, a queue
+  session closes (`SessionCloser.end`, whatever closed it), and the last chat returns.
 - **Loads are exempt only when they ended `done`** (`LEAVES_IT_RESIDENT` plus outcome). A
   cancelled or failed load settles like any other job. The outcome is passed in because the
   lane settles before `_finish`, while `job.status` still reads `running`. `tts` and `align`
   are NOT exempt, because a render that left its voice resident would strand it. What holds a
-  voice across chapters is a lease.
+  voice across chapters is a queue session.
 - A load that succeeded leaves the card resident and held by nothing. `unheld_since()` makes
   that visible without deciding anything about it.
 - Settlement never runs on the event loop: `SubprocessEngine.stop()` can wait 180 s. It takes a
@@ -394,44 +396,25 @@ intention, and the fix is a lease on the client side, never an exception here.
   `being_cleared`).
 - The id to unload is read under the claim. `Residency.unload` raises `KeyError` for a stale id
   rather than unloading the wrong engine.
-- Every clearance is logged, because a chat-triggered or lease-triggered unload has no job to
-  carry an event.
+- Every clearance is logged, because a chat-triggered or session-triggered unload has no job
+  to carry an event.
 - `held_by` and `unheld_since` do not take the settlement lock. A bench read must never queue
   behind a 180 s unload.
-- Streaming door gap: nothing holds the card between `load-voice` finishing and
-  `POST /v1/tts/stream` opening. `params.lease` on the load closes that gap.
+- A TTS stream opens only inside a queue session, and loads its voice inside it, so nothing
+  can take the card between the load and the stream.
 
-### Leases (`crucible/leases.py`)
+### Queue sessions (`crucible/queuesessions.py`)
 
-- A lease is a refusal, not a reservation. It admits nothing and reserves no lane. It says only
-  "nothing may take the leased thing off the card". It does not gate chats, because chats are
-  what it protects. `accepts_work` is untouched.
-- There is one lease per server, because there is one card. A second lease is refused
-  `409 leased`, the same code and details a loader gets.
-- A lease names the RESIDENT THING, of any kind. The server reads the kind off
-  `Residency.resident` at open time. The client never sends a kind, because there is only ever
-  one candidate.
-- `CARD_EFFECTS` is what each job type does to the card (`makes_resident`,
-  `reuses_what_it_names`, `takes_off`), derived from each `JobTypeSpec.card` in
-  `crucible/jobtypes.py` (section 2). `Lease.evicted_by` derives every (lease, job) answer from it.
-  Under a voice lease, a `tts` render of the leased voice is ADMITTED (it reuses the voice). A
-  render under a model lease is refused. A type with no row, asked for while a lease is open,
-  is refused `lease_scope_unknown`; the tests require every type to have a row.
-- **Expiry is read, never swept.** A lease past `expires_at` is simply not open. Heartbeats push
-  it out by the ttl it was opened with. The ttl range is `MIN_TTL_SECONDS`–`MAX_TTL_SECONDS`
-  (30 s to 1 h). Below that range a lease expires between heartbeats. Above it, a lease would
-  outlive its holder's crash.
-- A lapse fires nothing by itself. `Settlement` arms a one-shot timer at the lease's own
-  `expires_at`, re-armed on open, heartbeat and release. The idle reaper tick also checks. Each
-  lapse is evaluated ONCE (`forget_lapse`, called in a `finally`). If a lapse stayed on offer, a
-  later unleased load would read it as a holder letting go and be unloaded.
-- Leases live in memory only, and a restart forgets them. A restarted server holds nothing to
-  protect.
-- `params.lease` on `load-model` / `load-voice` holds what the load made resident from the
-  instant it exists. It goes through the same validators as the lease door. It is opened AFTER
-  the load's last cancel check, because a lease opened by a job that then raises
-  `JobCancelled` would strand the card behind its own hold. `done.lease` is present and `null`
-  when none was asked for. An absent key would mean "this server does not speak leases here".
+They replaced leases on 2026-10-01 (history: docs/internals/queue-sessions.md, which also
+describes how they are built). In this runtime's terms:
+
+- An open session is a holder (fact 2) and an admission rule: `refuse_if_held` refuses every
+  job that is not one of its items `server_busy` (a queued one waits), and the pump offers the
+  lane only to its items while it is open.
+- `CARD_EFFECTS` (`crucible/jobtypes.py`) still says what each job type does to the card;
+  `chats_hold_the_card` reads it. Nothing refuses a job for what it would evict: inside a
+  session that is the session's own business, and outside one nothing is held.
+- Sessions live in memory only; a restart closes them (`server_restart`).
 
 ### Chats in flight (`crucible/inflight.py`)
 
@@ -673,7 +656,7 @@ time rather than binding their own copies.
   duration must match the PCM within `DURATION_TOLERANCE_SECONDS`.
 - `stopped` (narrator's cancel acknowledgment) is ignored wherever it arrives. It can arrive
   after `batch_done`. A cancelled render whose engine does not stop within the grace period has
-  its voice unloaded through `Residency.unload`, even under a lease.
+  its voice unloaded through `Residency.unload`, even inside a queue session.
 - `RENDER_SILENCE_TIMEOUT_SECONDS` is 600 s: Owen's standing ceiling for a single Higgs chunk.
 - There is no pace round-trip: narrator's wire has no state for it at the pinned sha.
 
@@ -687,10 +670,19 @@ time rather than binding their own copies.
   sampling or rung numbers, which are engine tuning.
 - The streaming door is SSE plus three POSTs, not a WebSocket. Electron 33 bundles Node 20, which
   has no global `WebSocket`. `Last-Event-ID` gives reattach for free.
-- A session owns one worker thread and holds the residency claim (`may_mutate=False`) for its
-  whole life. The session is built BEFORE the claim is taken, because a claim has no expiry and
-  a refusal after claiming used to hold the card for the life of the process. `open` checks
-  `engine_still_stopping` before `voice_not_resident`. The door never loads a voice.
+- A stream session runs inside a queue session (`crucible/api/streamturn.py`): the client's
+  own, or one opened for the stream (`idle_s` default 900) that closes with it. The open waits
+  for that queue session and loads the voice in it with a `load-voice` job when it is not
+  resident; it checks `engine_still_stopping` before anything else. The queue session is the
+  card's holder: `StreamManager` settles nothing when a stream closes.
+- A stream session owns one worker thread and holds the residency claim (`may_mutate=False`)
+  for its whole life: narrator has one stdin and one stdout, so a render cannot converse with
+  it at the same time (its own client's render waits inside the queue session). The stream
+  session is built BEFORE the claim is taken, because a claim has no expiry and a refusal
+  after claiming used to hold the card for the life of the process.
+- Every op on a stream touches its queue session. An open stream with no row being said is
+  not in flight, so the queue session's `idle_s` still runs out; its close closes the stream
+  with `closed {code: "session_closed", session_reason, queue_session_id}`.
 - Frames: `ready`, `audio`, `restart`, `done`, `error`, `closed`. `gap_sec` is on `done` only,
   relayed verbatim from narrator's `gapSec`. The client inserts the silence. A row that retires
   with audio and no `gapSec` is failed by name, and `null` means cancelled.

@@ -314,7 +314,8 @@ class JobStore:
     def queued(self, *, calls: bool = False) -> list[Any]:
         admitted = self._admitted.job_id
         waiting = [] if self._line is None else [
-            w.job for w in self._line.ordered() if calls or not w.is_call
+            w.job for w in self._line.ordered()
+            if calls or not (w.is_call or w.is_session)
         ]
         return ([] if admitted is None else [self._jobs[admitted]]) + waiting
 
@@ -380,6 +381,7 @@ class JobStore:
         client: str | None = None,
         client_ref: str | None = None,
         hold: bool = False,
+        session: str | None = None,
     ) -> Job:
         job_id = uuid.uuid4().hex
         directory = Path(self._config.jobs_dir) / job_id
@@ -396,6 +398,7 @@ class JobStore:
             client_ref=client_ref,
             held_by=client if hold else None,
             held_since=utcnow() if hold else None,
+            session=session,
         )
         self._jobs[job_id] = job
         self._persist(job)
@@ -783,6 +786,7 @@ class JobStore:
             resume_id=document.get("resume_id"),
             resumed=bool(document.get("resumed")),
             removal=removal if isinstance(removal, dict) else None,
+            session=document.get("session"),
         )
         if status == REMOVED and job.removal is not None:
             self.append_event(job, "removed", job.removal)
@@ -831,6 +835,7 @@ class JobStore:
             "resumed": job.resumed,
             "waiting": job.waiting,
             "removal": job.removal,
+            "session": job.session,
         }
 
     def provenance(
@@ -892,7 +897,6 @@ class JobStore:
                         f"{type(exc).__name__}: {exc}",
                         file=sys.stderr,
                     )
-                await self._settle_lapsed_lease()
                 try:
                     await asyncio.wait_for(
                         self._wake.wait(), timeout=REAP_INTERVAL_SECONDS
@@ -1001,18 +1005,6 @@ class JobStore:
             return
         if settled is not None:
             self.append_event(job, "note", settled.to_dict())
-
-    async def _settle_lapsed_lease(self) -> None:
-        if self._settlement is None:
-            return
-        try:
-            await asyncio.to_thread(self._settlement.settle_for_lapsed_lease)
-        except Exception as exc:
-            print(
-                f"crucible: could not clear the card after a lease lapsed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
 
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         job.status = FAILED

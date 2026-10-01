@@ -237,6 +237,13 @@ class Controller:
                 self.api.send("DELETE", "/v1/queue/" + quoted(job_id))
         self.act(f"queue:{job_id}", work)
 
+    def end_session(self, session_id: str) -> None:
+        def work() -> None:
+            if self.ask("End this app's session? What it is running finishes, nothing more "
+                        "of its runs, and the app is told an operator ended it."):
+                self.api.send("DELETE", "/v1/queue/" + quoted(session_id))
+        self.act(f"session:{session_id}", work)
+
     def reset_voice(self, voice_id: str) -> None:
         def work() -> None:
             if self.ask(f"Go back to the version of {voice_id} that came with Crucible?"):

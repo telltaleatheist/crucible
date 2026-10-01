@@ -8,10 +8,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 from ...admission import JobRequest, Refusal, admit
 from ...errors import ApiError
 from ...jobs.base import Job, validate_member_name
+from ...jobs.line import MAX_MAX_WAIT_S
 from ...jobs.queue import JobStore
 from ...uploads import store_upload
 from .. import sse
-from ..caller import client_agent
+from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..responses import BUSY_RESPONSES, NOT_FOUND, JobStatus
 from ..schemas import JobCreate
@@ -90,8 +91,15 @@ def register(routers: Routers, ctx: AppContext) -> None:
         missing environment or model is installed while the job is refused `409
         installing`. With `queue` a busy lane queues the job instead: it waits with
         status `queued` and its events say where it stands. `params.resume` set to a
-        `resume_id` continues a journaled job; without it the job starts fresh.
+        `resume_id` continues a journaled job; without it the job starts fresh. An item
+        of the open queue session (named in the session header, or any submit from the client
+        holding it) goes ahead of everything waiting, and waits only behind the
+        session's own jobs.
         """
+        session = queue_session(request, ctx.sessions)
+        queue = None if body.queue is None else body.queue.max_wait_s
+        if session is not None and queue is None:
+            queue = MAX_MAX_WAIT_S
         outcome = await admit(
             JobRequest(
                 type=body.type,
@@ -101,12 +109,15 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 client=client_agent(request),
                 client_ref=body.client_ref,
                 hold=body.hold,
-                queue=None if body.queue is None else body.queue.max_wait_s,
+                queue=queue,
+                session=None if session is None else session.id,
             ),
             ctx.admission(),
         )
         if isinstance(outcome, Refusal):
             raise outcome.error
+        if session is not None:
+            ctx.sessions.item_arrived(session)
         return outcome.receipt()
 
     @private.get(

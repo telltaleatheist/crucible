@@ -17,7 +17,15 @@ from crucible.imagemodels import load_image_manifest
 from crucible.jobs import image as image_job
 from crucible.memorybudget import GIB
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, holding_the_card, parse_sse, stamp_env
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    close_queue_session,
+    holding_the_card,
+    open_queue_session,
+    parse_sse,
+    stamp_env,
+)
 
 MODEL = "qwen-image-2.1"
 FAKE_WORKER = Path(__file__).resolve().parent / "fake_image_worker.py"
@@ -115,14 +123,11 @@ def loads(transcript: Path) -> list[dict]:
     return [row for row in rows if row.get("op") == "load"]
 
 
-def leased(client: TestClient, auth: dict[str, str]) -> dict:
-    with holding_the_card(client, act="image"):
-        assert run_job(client, auth)[1][-1]["event"] == "done"
-        opened = client.post(
-            f"/v1/models/{MODEL}/lease", headers=auth, json={"act": "image", "ttl_seconds": 60}
-        )
-    assert opened.status_code == 201, opened.text
-    return opened.json()
+def in_a_session(client: TestClient, auth: dict[str, str]) -> str:
+    """A queue session with the image model loaded by its first job."""
+    session_id = open_queue_session(client, auth, act="image")
+    assert run_job(client, auth)[1][-1]["event"] == "done"
+    return session_id
 
 
 def wait_until_running(client: TestClient, auth: dict[str, str], job_id: str) -> None:
@@ -241,7 +246,7 @@ def test_a_seed_left_out_is_chosen_and_reported(ready: TestClient, auth: dict[st
     assert isinstance(seed, int) and 0 <= seed <= image_job.MAX_SEED
 
 
-def test_without_a_lease_the_model_is_unloaded_when_the_job_ends(
+def test_outside_a_session_the_model_is_unloaded_when_the_job_ends(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
     assert run_job(ready, auth)[1][-1]["event"] == "done"
@@ -250,16 +255,15 @@ def test_without_a_lease_the_model_is_unloaded_when_the_job_ends(
     assert len(loads(transcript)) == 2
 
 
-def test_a_lease_keeps_the_model_loaded_across_a_batch(
+def test_a_queue_session_keeps_the_model_loaded_across_a_batch(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
-    lease = leased(ready, auth)
-    assert (lease["subject"], lease["kind"]) == (MODEL, "image")
+    session_id = in_a_session(ready, auth)
     assert run_job(ready, auth)[1][-1]["event"] == "done"
     assert run_job(ready, auth)[1][-1]["event"] == "done"
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "image"
     assert len(loads(transcript)) == 1
-    assert ready.delete(f"/v1/leases/{lease['lease_id']}", headers=auth).status_code == 204
+    close_queue_session(ready, auth, session_id)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
 
 
@@ -267,7 +271,7 @@ def test_a_cancel_stops_between_steps_and_keeps_the_model(
     ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_IMAGE_STEP_S", "0.3")
-    leased(ready, auth)
+    in_a_session(ready, auth)
     job_id = submit(ready, auth, params={"prompt": PROMPT, "width": 512, "height": 512, "steps": 60}).json()["job_id"]
     wait_until_running(ready, auth, job_id)
     time.sleep(1.0)
@@ -287,8 +291,8 @@ def test_unload_image_takes_the_generator_off_the_card(
 ) -> None:
     error = refusal(ready.post("/v1/jobs", headers=auth, json={"type": "unload-image", "model": MODEL}))
     assert error["code"] == "generator_not_resident"
-    lease = leased(ready, auth)
-    assert ready.delete(f"/v1/leases/{lease['lease_id']}", headers=auth).status_code == 204
+    session_id = in_a_session(ready, auth)
+    close_queue_session(ready, auth, session_id)
     with holding_the_card(ready, act="image"):
         assert run_job(ready, auth)[1][-1]["event"] == "done"
         assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "image"
@@ -551,7 +555,7 @@ def test_an_empty_mask_is_refused_without_losing_the_loaded_model(
 ) -> None:
     from PIL import Image
 
-    leased(ready, auth)
+    in_a_session(ready, auth)
     _, events = run_job(
         ready,
         auth,

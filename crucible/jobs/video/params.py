@@ -22,11 +22,9 @@ from ...videomodels import (
     frames_for,
     video_tokens,
 )
-from ..leaseonload import LeaseOnLoad
 
 MAX_SEED = 2**32 - 1
 
-LEASE_ACT = "video"
 
 
 class VideoParams(BaseModel):
@@ -44,7 +42,6 @@ class VideoParams(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
     steps: int | None = Field(default=None, ge=1, le=1000)
     audio: bool = True
-    lease: LeaseOnLoad | None = None
 
     @field_validator("prompt")
     @classmethod
@@ -250,7 +247,6 @@ def settle(
 
 __all__ = [
     "IMAGE_TO_VIDEO",
-    "LEASE_ACT",
     "MAX_SEED",
     "Settled",
     "TEXT_TO_VIDEO",

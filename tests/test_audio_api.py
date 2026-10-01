@@ -14,7 +14,14 @@ from crucible.audiomodels import load_audio_manifest
 from crucible.jobs import audio as audio_job
 from crucible.memorybudget import GIB
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, stamp_env
+from .conftest import (
+    FAKE_BACKEND,
+    FAKE_MAC_BACKEND,
+    close_queue_session,
+    open_queue_session,
+    parse_sse,
+    stamp_env,
+)
 
 SFX = "stable-audio-3-small-sfx"
 MUSIC = "stable-audio-3-medium"
@@ -245,39 +252,30 @@ def test_input_files_are_refused(ready: TestClient, auth: dict[str, str]) -> Non
     assert events[-1]["data"]["error"]["code"] == "invalid_inputs"
 
 
-def test_load_audio_leases_the_model_and_the_batch_reuses_it(
+def test_load_audio_in_a_queue_session_and_the_batch_reuses_it(
     ready: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
-    lease = {"act": "sfx", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-audio", "model": SFX, "params": {"lease": lease}})
+    session_id = open_queue_session(ready, auth, act="sfx")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-audio", "model": SFX})
     assert loaded.status_code == 202, loaded.json()
     done = events_of(ready, auth, loaded.json()["job_id"])[-1]
     assert done["event"] == "done", done
-    lease_id = done["data"]["lease_id"]
-    assert done["data"]["resident"] == SFX and lease_id
+    assert done["data"]["resident"] == SFX
     for _ in range(2):
-        _, events = run_job(ready, auth, params={"prompt": PROMPT, "duration_s": 2, "steps": 2, "lease": lease})
-        assert events[-1]["data"]["lease_id"] == lease_id
+        _, events = run_job(ready, auth, params={"prompt": PROMPT, "duration_s": 2, "steps": 2})
+        assert events[-1]["event"] == "done"
     assert len(loads(transcript)) == 1
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "audio"
-    assert ready.delete(f"/v1/leases/{lease_id}", headers=auth).status_code == 204
+    close_queue_session(ready, auth, session_id)
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None
-
-
-def test_a_lease_must_name_the_models_own_class(ready: TestClient, auth: dict[str, str]) -> None:
-    error = refusal(submit(ready, auth, model=SONG, params={
-        "tags": TAGS, "lyrics": LYRICS, "lease": {"act": "music", "ttl_seconds": 60},
-    }))
-    assert error["code"] == "lease_act_mismatch"
-    assert '"act": "song"' in error["message"]
 
 
 def test_a_cancel_stops_between_steps_and_keeps_the_model(
     ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_STEP_S", "0.3")
-    lease = {"act": "sfx", "ttl_seconds": 60}
-    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-audio", "model": SFX, "params": {"lease": lease}})
+    open_queue_session(ready, auth, act="sfx")
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-audio", "model": SFX})
     assert events_of(ready, auth, loaded.json()["job_id"])[-1]["event"] == "done"
     job_id = submit(ready, auth, params={"prompt": PROMPT, "steps": 40}).json()["job_id"]
     wait_until_running(ready, auth, job_id)

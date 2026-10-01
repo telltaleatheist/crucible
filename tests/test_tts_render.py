@@ -24,8 +24,10 @@ from crucible.voicecatalog import load_voice
 from . import fake_narrator_engine
 from .conftest import (
     FAKE_BACKEND,
+    close_queue_session,
     configure_box,
     holding_the_card,
+    open_queue_session,
     parse_sse,
     wav_base64,
     wav_bytes,
@@ -908,7 +910,7 @@ def test_an_unheld_render_clears_the_card_and_the_next_one_reloads(
     assert len(narrator) == 2
 
 
-def test_a_voice_lease_turns_a_book_rendered_chapter_by_chapter_into_one_load(
+def test_a_queue_session_turns_a_book_rendered_chapter_by_chapter_into_one_load(
     rendered: Callable[..., list[dict[str, Any]]],
     tts_client: TestClient,
     auth: dict[str, str],
@@ -917,51 +919,35 @@ def test_a_voice_lease_turns_a_book_rendered_chapter_by_chapter_into_one_load(
     narrator: list[Any],
 ) -> None:
     fake_weights(VOICE)
+    session_id = open_queue_session(tts_client, auth, act="tts")
     run_job(tts_client, auth, type="load-voice", model=VOICE)
     assert len(narrator) == 1
-
-    opened = tts_client.post(
-        f"/v1/models/{VOICE}/lease",
-        headers=auth,
-        json={"act": "tts", "ttl_seconds": 60},
-    )
-    assert opened.status_code == 201, opened.text
-    lease = opened.json()
-    assert lease["subject"] == VOICE
-    assert lease["kind"] == KIND_TTS
-    assert tts_client.get("/v1/activity", headers=auth).json()["lease"]["kind"] == (
-        KIND_TTS
-    )
+    assert tts_client.get("/v1/activity", headers=auth).json()["session"]["act"] == "tts"
 
     for _ in range(3):
         assert terminal(rendered())["event"] == "done"
-        assert len(narrator) == 1, "a leased voice is rendered against, not reloaded"
+        assert len(narrator) == 1, "the session's voice is rendered against, not reloaded"
         assert (
             tts_client.get("/v1/health", headers=auth).json()["resident_kind"]
             == KIND_TTS
         )
 
-    released = tts_client.delete(f"/v1/leases/{lease['lease_id']}", headers=auth)
-    assert released.status_code == 204
+    close_queue_session(tts_client, auth, session_id)
     assert tts_client.get("/v1/health", headers=auth).json()["resident_kind"] is None
     assert len(narrator) == 1
 
 
-def test_a_voice_lease_refuses_the_jobs_that_would_evict_it(
+def test_a_queue_session_refuses_every_other_client_s_job(
     tts_client: TestClient,
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
 ) -> None:
     fake_weights(VOICE)
+    session_id = open_queue_session(tts_client, auth, act="tts")
     run_job(tts_client, auth, type="load-voice", model=VOICE)
-    opened = tts_client.post(
-        f"/v1/models/{VOICE}/lease",
-        headers=auth,
-        json={"act": "tts", "ttl_seconds": 60},
-    )
-    assert opened.status_code == 201, opened.text
 
+    other = {**auth, "X-Crucible-Client": "briefcase"}
     for body in (
         {"type": "load-voice", "model": "mistborn"},
         {"type": "load-voice", "model": VOICE},
@@ -972,23 +958,12 @@ def test_a_voice_lease_refuses_the_jobs_that_would_evict_it(
             "params": {"language": "en", "take": 0, "chunks": CHUNKS},
         },
     ):
-        response = tts_client.post("/v1/jobs", headers=auth, json=body)
+        response = tts_client.post("/v1/jobs", headers=other, json=body)
         assert response.status_code == 409, (body, response.text)
         error = response.json()["error"]
-        assert error["code"] == "leased", body
-        assert error["details"]["kind"] == KIND_TTS
-        assert "the resident voice" in error["message"]
-
-    echoed = tts_client.post(
-        "/v1/jobs",
-        headers=auth,
-        json={
-            "type": "echo",
-            "params": {"delay_ms": 0},
-            "inputs": {"x.bin": {"inline_base64": "YQ=="}},
-        },
-    )
-    assert echoed.json().get("error", {}).get("code") != "leased"
+        assert error["code"] == "server_busy", body
+        assert error["details"]["session_id"] == session_id
+        assert error["details"]["door"] == "session"
 
 
 def test_the_load_is_part_of_the_load(

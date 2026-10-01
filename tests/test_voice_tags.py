@@ -235,7 +235,7 @@ def test_a_resident_voice_is_not_swapped_underneath_it(
     monkeypatch.setattr(
         catalog_routes,
         "held_on_card",
-        lambda residency, leases, subject: {
+        lambda residency, subject: {
             "kind": subject.kind, "id": subject.id, "fact": "resident",
             "who": "it is the voice on the card right now; unload it first",
         },
@@ -247,14 +247,13 @@ def test_a_resident_voice_is_not_swapped_underneath_it(
     assert stamped_revision(home) == OLD
 
 
-def test_the_card_guard_names_a_resident_voice_and_a_lease() -> None:
+def test_the_card_guard_names_a_resident_voice() -> None:
     subject = SimpleNamespace(kind="voice", id=VOICE)
     resident = SimpleNamespace(resident=SimpleNamespace(id=VOICE, kind="tts"))
-    nobody = SimpleNamespace(current=lambda: None)
-    held = catalog_routes.held_on_card(resident, nobody, subject)
+    held = catalog_routes.held_on_card(resident, subject)
     assert held is not None and held["fact"] == "resident"
     empty = SimpleNamespace(resident=None)
-    assert catalog_routes.held_on_card(empty, nobody, subject) is None
+    assert catalog_routes.held_on_card(empty, subject) is None
 
 
 def test_the_cli_does_not_move_a_voice_the_server_has_loaded(

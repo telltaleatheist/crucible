@@ -15,7 +15,6 @@ class Wiring:
     config: Any
     backend: Any
     residency: "Residency"
-    leases: Any | None
 
 
 @dataclass(frozen=True)

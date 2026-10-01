@@ -277,6 +277,22 @@ def holding_the_card(client: TestClient, act: str = "clean") -> Iterator[None]:
         yield
 
 
+def open_queue_session(client: TestClient, auth: dict[str, str], act: str = "clean") -> str:
+    """A queue session for this test's client, open now; its jobs are items of it."""
+    answer = client.post("/v1/queue/sessions", headers=auth, json={"act": act})
+    assert answer.status_code == 202, answer.text
+    assert answer.json()["status"] == "open", answer.json()
+    return answer.json()["session_id"]
+
+
+def close_queue_session(
+    client: TestClient, auth: dict[str, str], session_id: str
+) -> dict[str, Any]:
+    answer = client.delete(f"/v1/queue/sessions/{session_id}", headers=auth)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
 def a_clearance_to_hold(engine: FakeEngine) -> tuple[threading.Event, threading.Event]:
     reached, release = threading.Event(), threading.Event()
     stop = engine.stop
@@ -332,12 +348,14 @@ __all__ = [
     "FAKE_BACKEND",
     "FAKE_MAC_BACKEND",
     "TOKEN",
+    "close_queue_session",
     "configure_box",
     "end_process_tree",
     "holding_the_card",
     "installed_as_the_recipe_says",
     "parse_sse",
     "mint_token",
+    "open_queue_session",
     "stamp_env",
     "wav_base64",
     "wav_bytes",

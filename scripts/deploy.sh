@@ -259,11 +259,11 @@ if d.get("streaming"):
 chat = (d.get("chat") or {}).get("in_flight") or 0
 if chat:
     busy.append("%d chat completion(s) in flight" % chat)
-lease = d.get("lease")
-if lease:
-    busy.append("a lease held by %s for %s until %s" % (
-        lease.get("client") or "an unnamed client", lease.get("act"),
-        lease.get("expires_at")))
+held = d.get("session")
+if held:
+    busy.append("a queue session held by %s for %s since %s" % (
+        held.get("client") or "an unnamed client", held.get("act"),
+        held.get("opened_at")))
 print(("busy(" + "; ".join(busy) + ")") if busy else "idle")
 ' 
 PROBE

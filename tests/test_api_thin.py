@@ -31,7 +31,7 @@ def admission_context(app: FastAPI) -> AdmissionContext:
         config=state.config,
         store=state.store,
         residency=state.residency,
-        leases=state.leases,
+        sessions=state.sessions,
         installs=state.installs,
         decide_here=lambda job_type: ApiError(409, "job_type_disabled", job_type),
     )
@@ -64,7 +64,7 @@ def test_admission_refuses_by_name_instead_of_raising(client: TestClient) -> Non
         admit, JobRequest(type="echo", model="openai/gpt-x", inputs=inline(b"x")), ctx
     )
     assert isinstance(upstream, Refusal)
-    assert upstream.error.code == "lease_not_needed"
+    assert upstream.error.code == "upstream_never_resident"
 
 
 def test_a_bad_input_discards_the_job_it_created(client: TestClient) -> None:
@@ -257,14 +257,14 @@ def test_a_service_swapped_on_app_state_is_what_the_routes_see(
         def current(self) -> None:
             return None
 
-    real = client.app.state.leases
-    client.app.state.leases = Nobody()
+    real = client.app.state.sessions
+    client.app.state.sessions = Nobody()
     try:
         response = client.get("/v1/activity", headers=auth)
         assert response.status_code == 200
-        assert response.json()["lease"] is None
+        assert response.json()["session"] is None
     finally:
-        client.app.state.leases = real
+        client.app.state.sessions = real
 
 
 def test_no_header_name_is_spelled_in_the_api_package() -> None:

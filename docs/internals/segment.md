@@ -23,10 +23,9 @@ app can pass it straight back as an input, for example to inpainting.
   reuses it), `load-segment` (loads and leaves it resident; `LEAVES_IT_RESIDENT`) and
   `unload-segment`.
 - One manifest per model in `crucible/segment/`, loaded by `segmentmodels.py`. `[model].kind` is
-  `cutout` or `select` and decides three things: which capability class lists the model, whether
-  the job takes `points` and `box` (`PROMPTED_KINDS`), and the lease act a job must send
-  (`require_lease_request(act=kind)`; an act must be a capability class, so it is the class, not
-  `segment`). `catalog_is_complete`: an undeclared id is refused.
+  `cutout` or `select` and decides two things: which capability class lists the model, and whether
+  the job takes `points` and `box` (`PROMPTED_KINDS`). `catalog_is_complete`: an undeclared id
+  is refused.
 - Each `[backends.<kind>]` arm declares the engine (`birefnet` or `sam2`, and the engine must
   make the model's kind), the pinned repo and revision, dtype, the memory estimate with its basis
   and note, the files to pull, `working_side` (what the model sees: 1024) and `max_pixels` (the
@@ -163,4 +162,4 @@ worker refuses a picture whose decoded size differs from the size the job checke
 against. `cutout_of` puts the mask in the alpha channel, multiplied by the input's own alpha when
 it has one; `coverage_of` is the mask's mean. `tests/fake_segment_worker.py` runs the real worker
 with the two models replaced by drawn masks, so the tests exercise the protocol, Pillow's reading
-and writing, both artifacts, leases and cancel on Windows.
+and writing, both artifacts, queue sessions and cancel on Windows.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -14,7 +13,7 @@ from .jobtypes import JOB_TYPE_SPECS
 
 if TYPE_CHECKING:
     from .inflight import InFlight
-    from .leases import Leases
+    from .queuesessions import QueueSessions
     from .residency import Residency
 
 SETTLEMENT_HOLDER = "the settlement clearing the card"
@@ -69,7 +68,7 @@ class Settlement:
         *,
         residency: "Residency",
         store: Any,
-        leases: "Leases",
+        sessions: "QueueSessions",
         inflight: "InFlight",
         waiting_calls: Callable[[], dict[str, int]] = dict,
         log: Callable[[str], None] = _to_stderr,
@@ -77,44 +76,11 @@ class Settlement:
         self._waiting_calls = waiting_calls
         self._residency = residency
         self._store = store
-        self._leases = leases
+        self._sessions = sessions
         self._inflight = inflight
         self._log = log
         self._unheld_since: datetime | None = None
         self._lock = threading.Lock()
-        self._deadline: asyncio.TimerHandle | None = None
-        self._running: set[asyncio.Task[Any]] = set()
-
-
-    def arm_for_lease_expiry(self) -> None:
-        loop = asyncio.get_running_loop()
-        handle, self._deadline = self._deadline, None
-        if handle is not None:
-            handle.cancel()
-        lease = self._leases.current()
-        if lease is None:
-            return
-        seconds = max(
-            0.0,
-            (lease.expires_at - now()).total_seconds(),
-        )
-        self._deadline = loop.call_later(seconds, self._deadline_passed)
-
-    def _deadline_passed(self) -> None:
-        self._deadline = None
-        loop = asyncio.get_running_loop()
-        task = loop.create_task(
-            asyncio.to_thread(
-                self.settle_quietly, "the lease expired and was not renewed"
-            )
-        )
-        self._running.add(task)
-
-        def finished(done: asyncio.Task[Any]) -> None:
-            self._running.discard(done)
-            self.arm_for_lease_expiry()
-
-        task.add_done_callback(finished)
 
 
     def holder(self, *, excluding_job: str | None = None) -> Held | None:
@@ -123,14 +89,9 @@ class Settlement:
             return Held(
                 "a job", f"{job.type} {job.id} ({job.status})", job.busy_details()
             )
-        lease = self._leases.current()
-        if lease is not None:
-            who = "an unnamed client" if lease.client is None else repr(lease.client)
-            return Held(
-                "a lease",
-                f"{who} for {lease.act!r}, until {lease.expires_at.isoformat()}",
-                lease.receipt(),
-            )
+        session = self._sessions.current()
+        if session is not None:
+            return Held("a session", session.describe(), session.busy_details())
         claim = self._residency.claimed_by
         if claim is not None and claim != SETTLEMENT_HOLDER:
             return Held("the claim", claim, {"held_by": claim})
@@ -145,7 +106,8 @@ class Settlement:
         if waiting:
             return Held(
                 "a queued call",
-                f"{waiting} chat(s) or decision(s) waiting for it in the queue",
+                f"{waiting} chat(s), decision(s) or session(s) waiting for it in the "
+                "queue",
                 {"waiting": waiting},
             )
         return None
@@ -182,24 +144,10 @@ class Settlement:
             return None
         if self._residency.resident is None:
             return None
-        lapsed = self._leases.lapsed_at()
-        stamped = self._unheld_since
-        if lapsed is None:
-            return stamped
-        if stamped is None:
-            return lapsed
-        return max(lapsed, stamped)
+        return self._unheld_since
 
     def held_by(self) -> Held | None:
         return self.holder()
-
-    def settle_for_lapsed_lease(self) -> Settled | None:
-        if self._leases.lapsed_at() is None:
-            return None
-        try:
-            return self.settle("a lease lapsed and nothing heartbeated it")
-        finally:
-            self._leases.forget_lapse()
 
     def settle_quietly(self, trigger: str) -> Settled | None:
         try:

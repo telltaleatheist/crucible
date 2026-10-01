@@ -3,6 +3,11 @@
 What a maintainer of `@crucible/client` needs that the code does not say. The
 public API's own JSDoc is one sentence per member; the reasons live here.
 
+> **Server change, 2026-10-01: leases are gone.** The server replaced them with queue
+> sessions (docs/QUEUE.md, docs/internals/queue-sessions.md): no lease routes, no
+> `params.lease`, no `lease_id` on `done`, no `409 leased`. The lease notes below describe
+> SDK code that predates that change and goes with the SDK's own update.
+
 ## Runtime rules
 
 - **Zero runtime dependencies.** The package runs in Node 20+, bun and the

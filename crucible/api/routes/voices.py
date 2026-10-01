@@ -63,7 +63,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
     tts_on = [tts_enabled(config)]
 
     def rows() -> list[dict[str, Any]]:
-        return voice_rows(config, backend, residency, leases=ctx.leases, store=ctx.store)
+        return voice_rows(config, backend, residency, store=ctx.store)
 
     def written(voice_id: str, path: Any) -> dict[str, Any]:
         found = [row for row in rows() if row.get("id") == voice_id]

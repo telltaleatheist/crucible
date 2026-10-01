@@ -85,7 +85,6 @@ first frame, cropped to the clip's shape (never stretched) and resized:
 | `seed` | chosen and reported | 0 to 2^32-1; the same seed and params give the same clip |
 | `steps` | 8 | the distilled checkpoint runs its own fixed 8-step schedule; any other value is refused (the Mac then refines in 3 more at full size, reported as `refine_steps`) |
 | `audio` | `true` | `false` makes a silent clip (the model still generates sound with the picture; it is not decoded) |
-| `lease` | none | keep the model resident across a batch (below) |
 
 `negative_prompt` is refused by name: the distilled checkpoint runs without guidance, so it
 would never be read.
@@ -178,16 +177,16 @@ between steps of either pass.
 
 Every clip loads the text encoder, the connectors and the transformer from disk one after
 another (about 50 GB of reads on the PC, 37 GB on the Mac). A batch should hold the model with a
-lease, like `image`:
+queue session, like `image` (`POST /v1/queue/sessions` with `{"act": "video"}`; see
+[QUEUE.md](QUEUE.md)), optionally warming up with:
 
 ```json
-{"type": "load-video", "model": "ltx-2.5-distilled", "params": {"lease": {"act": "video", "ttl_seconds": 600}}}
+{"type": "load-video", "model": "ltx-2.5-distilled"}
 ```
 
-then send each `video` job with the same `"lease": {"act": "video", "ttl_seconds": 600}`. Under a
-lease the worker stays up between clips, and a prompt it has already read skips the text
-stages: the second clip of the same prompt (a new seed, say) starts at denoising.
-`unload-video` or letting the lease run out frees the card.
+then send each `video` job as usual. Inside the session the worker stays up between clips, and a
+prompt it has already read skips the text stages: the second clip of the same prompt (a new
+seed, say) starts at denoising. Closing the session (or `unload-video`) frees the card.
 
 ## Writing a prompt
 

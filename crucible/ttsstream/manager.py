@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any
 
 from .. import ttsstream
 from ..cardkinds import KIND_TTS
@@ -18,18 +18,17 @@ CLOSE_JOIN_SECONDS = 30.0
 
 
 class StreamManager:
-    def __init__(
-        self, residency: Residency, on_closed: Callable[[str], Any] | None = None
-    ) -> None:
+    """The one TTS stream session. It opens only inside a queue session
+    (crucible/queuesessions.py), which is what holds the card for it; the residency claim
+    it takes is the narrator's single conversation (one stdin, one stdout), not a hold
+    on the card, so nothing here settles the card when a stream closes."""
+
+    def __init__(self, residency: Residency) -> None:
         self._residency = residency
-        self._on_closed = on_closed
         self._lock = threading.Lock()
         self._session: StreamSession | None = None
         self._watchdog: threading.Thread | None = None
         self._stop_watchdog = threading.Event()
-
-    def when_closed(self, on_closed: Callable[[str], Any]) -> None:
-        self._on_closed = on_closed
 
     @property
     def session(self) -> StreamSession | None:
@@ -109,8 +108,8 @@ class StreamManager:
                 "voice_not_resident",
                 f"{voice!r} is not resident on this server; "
                 + describe_resident(residency, KIND_TTS, "no voice is")
-                + ". The streaming door never loads a voice — post a "
-                "load-voice job first",
+                + ". The stream opens on the resident voice; its queue session "
+                "loads it first (a load-voice job in the session)",
                 {"requested": voice, "resident": residency.resident_id},
             )
         engine = residency.voice_engine
@@ -123,16 +122,16 @@ class StreamManager:
             )
         return resident, engine
 
-    def close(self, session: StreamSession, reason: str) -> bool:
-        session.begin_close(reason)
+    def close(
+        self, session: StreamSession, reason: str, cause: dict[str, Any] | None = None
+    ) -> bool:
+        session.begin_close(reason, cause)
         finished = session.join(CLOSE_JOIN_SECONDS)
         if not finished:
             return False
         with self._lock:
             if self._session is session:
                 self._session = None
-        if self._on_closed is not None:
-            self._on_closed(f"streaming session {session.id} closed")
         return True
 
     def shutdown(self) -> None:

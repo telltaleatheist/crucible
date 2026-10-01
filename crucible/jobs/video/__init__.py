@@ -36,13 +36,6 @@ from ...videomodels import (
 from .. import worker_type
 from ..base import Job, JobContext, JobTypeStatus, ModelDescriptor
 from ..binding import JobTypeBinding
-from ..leaseonload import (
-    HeldForLoad,
-    LeaseOnLoad,
-    hold_for_load,
-    let_go_of,
-    require_lease_request,
-)
 from ..template import (
     ManifestCatalog,
     ResidentWorker,
@@ -52,7 +45,7 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
-from .params import LEASE_ACT, MAX_SEED, Settled, VideoParams, settle
+from .params import MAX_SEED, Settled, VideoParams, settle
 
 __all__ = [
     "JOB_TYPES",
@@ -497,12 +490,11 @@ class VideoJobType(ResidentWorker):
     resident_kind = KIND_VIDEO
 
     def __init__(
-        self, config: Config, backend: Any, residency: Residency, leases: Any | None = None
+        self, config: Config, backend: Any, residency: Residency
     ) -> None:
         self._config = config
         self._backend = backend
         self._residency = residency
-        self._leases = leases
 
     @property
     def residency(self) -> Residency:
@@ -575,22 +567,13 @@ class VideoJobType(ResidentWorker):
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parsed = parse_params(VideoParams, params, self.name)
-        self._admit(model, self.requirements(model, parsed), parsed.lease, "making video with")
+        self._admit(model, self.requirements(model, parsed), "making video with")
 
-    def _admit(self, model: str, needs: Needs, lease: LeaseOnLoad | None, doing: str) -> None:
-        if lease is not None:
-            require_lease_request(lease, act=LEASE_ACT)
+    def _admit(self, model: str, needs: Needs, doing: str) -> None:
         self._residency.refuse_if_claimed(f"{doing} {model!r}")
         if self._residency.is_resident(KIND_VIDEO, model):
             return
         self._guard(model, needs.spec.memory_bytes_estimate)
-
-    def _hold(self, job: Job, model: str, lease: LeaseOnLoad | None) -> HeldForLoad | None:
-        if lease is None:
-            return None
-        return hold_for_load(
-            self._leases, kind=KIND_VIDEO, subject=model, request=lease, client=job.client
-        )
 
     def _worker(self, ctx: JobContext, model: str, needs: Needs) -> workers.WorkerSession:
         return self._session(
@@ -638,13 +621,7 @@ class VideoJobType(ResidentWorker):
         settled = as_job_error(settle, params, model, needs.spec, seed, mode)
         ffmpeg = as_job_error(hosttools.require_ffmpeg, JOB_TYPE, FFMPEG_WHY)
         session = self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
-        try:
-            self._make(ctx, model, session, params, needs, settled, source, ffmpeg)
-        except BaseException:
-            let_go_of(self._leases, held)
-            raise
-        ctx.done_extra(lease_id=None if held is None else held.lease_id)
+        self._make(ctx, model, session, params, needs, settled, source, ffmpeg)
 
     def _make(
         self,
@@ -769,11 +746,10 @@ def effective_params(
 
 
 class LoadVideoParams(BaseModel):
-    """`params` for a load-video job: warm the video model up, optionally leased."""
+    """`params` for a load-video job: warm the video model up."""
 
     model_config = ConfigDict(extra="forbid")
 
-    lease: LeaseOnLoad | None = None
 
 
 class LoadVideoJobType(VideoJobType):
@@ -782,21 +758,17 @@ class LoadVideoJobType(VideoJobType):
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
-        parsed = parse_params(LoadVideoParams, params, self.name)
-        self._admit(model, self.loadable(model), parsed.lease, "loading")
+        parse_params(LoadVideoParams, params, self.name)
+        self._admit(model, self.loadable(model), "loading")
 
     def run(self, job: Job, ctx: JobContext) -> None:
-        params = LoadVideoParams.model_validate(job.params)
+        LoadVideoParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.loadable, model)
         ctx.progress(0.0, f"loading {model}")
         self._worker(ctx, model, needs)
-        held = self._hold(job, model, params.lease)
         ctx.progress(1.0, f"{model} is resident")
-        ctx.done_extra(
-            resident=self._residency.resident_id,
-            lease_id=None if held is None else held.lease_id,
-        )
+        ctx.done_extra(resident=self._residency.resident_id)
 
 
 class UnloadVideoJobType(UnloadJobType):
@@ -812,7 +784,7 @@ class UnloadVideoJobType(UnloadJobType):
 JOB_TYPES: tuple[JobTypeBinding, ...] = (
     JobTypeBinding(
         VIDEO_JOB,
-        lambda wiring: VideoJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: VideoJobType(wiring.config, wiring.backend, wiring.residency),
     ),
     JobTypeBinding(
         UNLOAD_VIDEO,
@@ -820,6 +792,6 @@ JOB_TYPES: tuple[JobTypeBinding, ...] = (
     ),
     JobTypeBinding(
         LOAD_VIDEO,
-        lambda wiring: LoadVideoJobType(wiring.config, wiring.backend, wiring.residency, wiring.leases),
+        lambda wiring: LoadVideoJobType(wiring.config, wiring.backend, wiring.residency),
     ),
 )

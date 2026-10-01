@@ -119,7 +119,7 @@ ref     = "crucible"
 - **A pull moves the box** to the tag's current sha (`voicecatalog.pull_target`),
   fetches that commit's manifest and weights, and records the sha. A pull task
   for an installed voice is admitted only when the cached look-up says it would
-  move. A voice that is resident or leased is not swapped: the task refuses with
+  move. A voice that is resident is not swapped: the task refuses with
   `subject_in_use` (the same `held_on_card` guard `DELETE /v1/catalog` uses), and
   the CLI refuses while the server here has it loaded.
 - **An unreachable Hub** leaves the box on what it has. `voice-refs.json` keeps

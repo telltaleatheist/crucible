@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...audiomodels import KIND_WORDS, OPTIONAL_PARAMS, AudioBackendSpec, AudioManifest
 from ...errors import ApiError
-from ..leaseonload import LeaseOnLoad
 
 MAX_SEED = 2**32 - 1
 
@@ -30,7 +29,6 @@ class AudioParams(BaseModel):
     steps: int | None = Field(default=None, ge=1)
     cfg: float | None = Field(default=None, ge=0)
     format: Literal["flac", "wav"] = "flac"
-    lease: LeaseOnLoad | None = None
 
     @field_validator(*TEXT_FIELDS)
     @classmethod
@@ -51,7 +49,7 @@ def _refusal(code: str, message: str, manifest: AudioManifest, spec: AudioBacken
 
 def _takes(manifest: AudioManifest, spec: AudioBackendSpec) -> list[str]:
     text = [manifest.text_param] + (["lyrics"] if manifest.takes_lyrics else [])
-    return [*text, *spec.takes, "seed", "format", "lease"]
+    return [*text, *spec.takes, "seed", "format"]
 
 
 def _not_taken(param: str, manifest: AudioManifest, spec: AudioBackendSpec) -> ApiError:

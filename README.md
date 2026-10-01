@@ -784,7 +784,7 @@ job; `{"type": "unload-aligner"}` takes it off.
 
 `denoise` is the second, on the same machinery and for the same reason (2026-09-15): a
 book is ~44 blocks, so the separator stays on the card across them and
-`{"type": "unload-denoiser"}` takes it off. **A lease is what keeps either of them there
+`{"type": "unload-denoiser"}` takes it off. **A queue session is what keeps either of them there
 across a run** — this server clears the card the moment nothing holds it, and "one more
 block is coming" is a fact only the client has.
 
@@ -927,7 +927,7 @@ crucible models pull qwen-image-2.1 # ~33 GB; a Mac that already has it in ~/.ca
 
 The model's three parts run one after another and only one is ever loaded, so the memory the
 guard admits is the largest part's peak (measured on the Mac), not the 33 GB download. A
-batch leases the model after its first picture so it is not reloaded for each one.
+batch runs inside a queue session (docs/QUEUE.md) so the model is not reloaded for each picture.
 
 ### `audio`
 

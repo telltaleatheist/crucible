@@ -52,6 +52,7 @@ class Entry:
     client: str | None
     since: str
     started: float = 0.0
+    session: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,7 +75,10 @@ class InFlight:
     def when_closed(self, callback: Any) -> None:
         self._on_close = callback
 
-    def open(self, *, act: str | None, model: str, client: str | None) -> Entry:
+    def open(
+        self, *, act: str | None, model: str, client: str | None,
+        session: str | None = None,
+    ) -> Entry:
         entry = Entry(
             id=next(self._ids),
             act=act,
@@ -82,6 +86,7 @@ class InFlight:
             client=client,
             since=utcnow(),
             started=time.monotonic(),
+            session=session,
         )
         with self._lock:
             self._entries[entry.id] = entry
@@ -105,6 +110,10 @@ class InFlight:
             yield entry
         finally:
             self.close(entry)
+
+    def of_session(self, session_id: str) -> list[Entry]:
+        with self._lock:
+            return [entry for entry in self._entries.values() if entry.session == session_id]
 
     def rows(self) -> list[dict[str, Any]]:
         with self._lock:

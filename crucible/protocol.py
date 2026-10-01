@@ -4,6 +4,7 @@ API_VERSION = 1
 API_HEADER = "X-Crucible-Api"
 ACT_HEADER = "X-Crucible-Act"
 CLIENT_HEADER = "X-Crucible-Client"
+SESSION_HEADER = "X-Crucible-Session"
 HANDOVER_HEADER = "X-Crucible-Handover"
 USER_AGENT_HEADER = "User-Agent"
 

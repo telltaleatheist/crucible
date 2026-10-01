@@ -63,7 +63,6 @@ Select what is inside a dragged box (points can be added to refine it):
 | --- | --- | --- |
 | `points` | `sam2.1-hiera-large` | 1 to 64 clicks, `{"x", "y", "label"}`; `label` 1 keeps what is under the point, 0 leaves it out. At least one label-1 point unless there is a box |
 | `box` | `sam2.1-hiera-large` | `[x0, y0, x1, y1]`, top-left corner first, `x1 > x0` and `y1 > y0` |
-| `lease` | both | `{"act": "<the model's class>", "ttl_seconds": 30..3600}`: `cutout` for `birefnet`, `select` for `sam2.1-hiera-large`. Any other act is refused |
 
 `sam2.1-hiera-large` needs `points`, `box` or both (`segment_param_missing`). `birefnet` takes
 neither: it finds the subject by itself, and a `points` or `box` sent to it is refused
@@ -112,8 +111,7 @@ The `done` event carries `segment`, the effective parameters and measurements:
              "stage_peak_bytes": {"segmenting": 2100000000},
              "memory_bytes_estimate": 4000000000, "memory_basis": "declared",
              "versions": {"torch": "2.14.0", "torchvision": "0.29.0", "transformers": "5.17.0"}},
- "resident": "sam2.1-hiera-large",
- "lease_id": null}
+ "resident": "sam2.1-hiera-large"}
 ```
 
 (The numbers show the shape; neither model has been measured through Crucible yet.)
@@ -127,28 +125,30 @@ The `done` event carries `segment`, the effective parameters and measurements:
   means nothing was found; tell the user rather than showing an empty cutout.
 
 Progress events carry `stage` (`reading`, `segmenting`, `saving`) and `fraction`.
-`DELETE /v1/jobs/{id}` stops the job between stages; the model stays loaded if a lease holds it.
+`DELETE /v1/jobs/{id}` stops the job between stages; the model stays loaded if a queue session
+holds it.
 
 ## Many clicks in a row
 
 A selection tool sends a job per click, and each takes a fraction of a second once the model is
-loaded, so hold the model for the session. Load it when the tool opens:
+loaded, so hold the model for the tool's whole use with a queue session
+(`POST /v1/queue/sessions` with `{"act": "select"}`; see [QUEUE.md](QUEUE.md)). Load it when
+the tool opens:
 
 ```json
-{"type": "load-segment", "model": "sam2.1-hiera-large",
- "params": {"lease": {"act": "select", "ttl_seconds": 300}}}
+{"type": "load-segment", "model": "sam2.1-hiera-large"}
 ```
 
-Then send each click as an ordinary `segment` job with the same `lease` (renewing it; the same
-`lease_id` comes back, never a second lease), send the whole click history each time (all
-points so far, and the box), heartbeat `POST /v1/leases/{lease_id}/heartbeat` within
-`ttl_seconds`, and `DELETE /v1/leases/{lease_id}` when the tool closes. Without a lease the model
-comes off the card when each job ends and the next click loads it again. `unload-segment` takes
+Then send each click as an ordinary `segment` job, with the whole click history each time (all
+points so far, and the box), and `DELETE /v1/queue/sessions/{id}` when the tool closes; a click
+every few minutes keeps the session open (or `POST /v1/queue/sessions/{id}/touch` while the
+user thinks). Outside a session the model comes off the card when each job ends and the next
+click loads it again. `unload-segment` takes
 the model off at once when nothing holds it. The flow is the image job's, walked through in more
 detail in [IMAGE.md](IMAGE.md), "Many pictures in a row".
 
 Only one model is resident at a time: switching from `birefnet` to `sam2.1-hiera-large` swaps
-them (and is refused `409 leased` while a lease holds the other).
+them (and another app's swap waits while your session is open).
 
 ## Licences
 
