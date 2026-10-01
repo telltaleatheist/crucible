@@ -4,11 +4,14 @@ import asyncio
 from typing import Any
 
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 
-from ...admission import refuse_lease_on_an_upstream
+from ...admission import KEEPS_WAITING, refuse_lease_on_an_upstream
+from ...callqueue import wait_in_line
 from ...cardkinds import KIND_NOUNS
 from ...errors import ApiError
 from ...inflight import require_act_name
+from ...jobs.line import LEASE, Call
 from ...leases import require_ttl
 from ..caller import client_agent
 from ..context import AppContext, Routers
@@ -19,16 +22,53 @@ def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
     residency = ctx.residency
 
-    @private.post("/models/{subject_id:path}/lease", status_code=201)
+    @private.post("/models/{subject_id:path}/lease", status_code=201, response_model=None)
     async def open_lease(
         request: Request, subject_id: str, body: LeaseOpen
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | Response:
         """Hold whatever is resident (model, voice or aligner) on the card for a run;
-        jobs that would move it are refused `409 leased`. A lease never loads anything.
+        jobs that would move it are refused `409 leased`. Without `queue` a lease never
+        loads anything; with it, the request waits in the server's queue and a model
+        that is not resident is loaded with the lease when its turn comes.
         """
         refuse_lease_on_an_upstream(subject_id)
         ttl_seconds = require_ttl(body.ttl_seconds)
         act = require_act_name(body.act.strip(), "a lease's `act`")
+        if body.queue is None:
+            return await grant(request, subject_id, act, ttl_seconds)
+        client = client_agent(request)
+        line = ctx.line
+        holder = line.holder()
+        if len(line) == 0 or (holder is not None and client == holder):
+            try:
+                return await grant(request, subject_id, act, ttl_seconds)
+            except ApiError as busy:
+                if busy.code != "not_resident" and busy.code not in KEEPS_WAITING:
+                    raise
+
+        async def give_back(receipt: dict[str, Any]) -> None:
+            try:
+                ctx.leases.release(receipt["lease_id"])
+            except ApiError:
+                return
+            ctx.settlement.arm_for_lease_expiry()
+            await asyncio.to_thread(
+                ctx.settlement.settle_quietly, "a queued lease's caller left"
+            )
+
+        granted = await wait_in_line(
+            request, line,
+            Call(type=LEASE, model=subject_id, client=client, act=act,
+                 ttl_seconds=ttl_seconds),
+            body.queue.max_wait_s, give_back,
+        )
+        if isinstance(granted, Response):
+            return granted
+        return JSONResponse(status_code=201, content=granted)
+
+    async def grant(
+        request: Request, subject_id: str, act: str, ttl_seconds: int
+    ) -> dict[str, Any]:
         async with residency.settled_for(f"a lease on {subject_id!r}"):
             resident = residency.resident
             if resident is None or resident.id != subject_id:

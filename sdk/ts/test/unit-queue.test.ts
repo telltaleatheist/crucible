@@ -343,3 +343,34 @@ test('decide() waits in the queue by default, and asks an older server again wit
   assert.deepEqual((posted[0] as { queue?: unknown }).queue, {});
   assert.ok(!('queue' in (posted[1] as object)));
 });
+
+test('lease() waits in the queue by default, and asks an older server again without it', async () => {
+  handler = (request, body, response) => {
+    const document = JSON.parse(body) as Record<string, unknown>;
+    posted.push(document);
+    if ('queue' in document && posted.length === 1) {
+      json(response, 422, {
+        error: {
+          code: 'invalid_request',
+          message: 'queue: Extra inputs are not permitted',
+          details: {
+            problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
+          },
+        },
+      });
+      return;
+    }
+    json(response, 201, {
+      lease_id: 'l1', kind: 'llm', client: 'queue-test', act: 'translate',
+      since: '2026-09-30T10:00:00+00:00', expires_at: '2026-09-30T10:02:00+00:00',
+      subject: 'qwen3.5-9b',
+    });
+  };
+  const lease = await client().lease('qwen3.5-9b', { act: 'translate', ttlSeconds: 120 });
+  assert.equal(lease.leaseId, 'l1');
+  assert.deepEqual((posted[0] as { queue?: unknown }).queue, {});
+  assert.ok(!('queue' in (posted[1] as object)));
+  posted = [];
+  await client().lease('qwen3.5-9b', { act: 'translate', ttlSeconds: 120, queue: false });
+  assert.ok(!('queue' in (posted[0] as object)));
+});

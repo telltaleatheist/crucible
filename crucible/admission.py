@@ -46,6 +46,7 @@ class AdmissionContext:
     installs: InstallOnSubmit
     decide_here: Callable[[str], ApiError]
     chats_in_flight: Callable[[], int] = lambda: 0
+    lease_granted: Callable[[], None] = lambda: None
 
 
 @dataclass(frozen=True)

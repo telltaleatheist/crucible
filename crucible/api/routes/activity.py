@@ -41,7 +41,7 @@ def _call_row(waiting: Any) -> dict[str, Any]:
         "client": call.client,
         "waited_s": waiting.waited_s(clock.now()),
         "max_wait_s": waiting.max_wait_s,
-        "kind": "call",
+        "kind": "lease" if call.type == "lease" else "call",
     }
 
 

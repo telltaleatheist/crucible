@@ -20,7 +20,7 @@ the request ``409 removed_from_queue``.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from fastapi import Request, Response
 from pydantic import ValidationError
@@ -30,7 +30,7 @@ from .engines import chat_admission
 from .errors import ApiError
 from .inflight import Entry, InFlight
 from .jobs.base import DONE, TERMINAL_STATES
-from .jobs.line import ADMITTED, CLIENT, Call, WaitingCall, WaitingLine
+from .jobs.line import ADMITTED, CLIENT, LEASE, Call, WaitingCall, WaitingLine
 from .queuerequest import QueueRequest
 
 IN = "in"
@@ -93,11 +93,10 @@ def _load_failed(call: Call, job: Any) -> ApiError:
 async def admit_call(
     waiting: WaitingCall, ctx: AdmissionContext, inflight: InFlight
 ) -> str | ApiError:
-    """Offer one waiting call its model. IN: it has a slot. WAIT: it keeps its place
-    and nothing behind it goes. LEASED: it keeps its place, and what the lease does not
-    refuse may go past it. An ApiError ends it with that error."""
+    """Offer one waiting call its model. IN: it has a slot (or, for a lease, the lease).
+    WAIT: it keeps its place and nothing behind it goes. LEASED: it keeps its place, and
+    what the lease does not refuse may go past it. An ApiError ends it with that error."""
     call = waiting.job
-    line = ctx.store.line
     if waiting.load_job is not None:
         ended = _load_ended(ctx, waiting.load_job)
         if ended is None:
@@ -106,23 +105,89 @@ async def admit_call(
         if ended.status != DONE:
             return _load_failed(call, ended)
     try:
-        async with ctx.residency.settled_for(f"a queued {call.type}"):
-            resident = ctx.residency.resident_model
-            if resident is not None and resident.model_id == call.model:
-                if not _slot_free(resident, inflight):
-                    return WAIT
-                entry = inflight.open(act=call.act, model=call.model, client=call.client)
-                if waiting.gone or line is None:
-                    inflight.close(entry)
-                    return IN
-                line.started(waiting, entry)
-                return IN
+        if call.type == LEASE:
+            granted = await _grant_lease(waiting, ctx)
+        else:
+            granted = await _open_slot(waiting, ctx, inflight)
     except ApiError as busy:
+        if busy.code == "leased":
+            return LEASED
         if busy.code in KEEPS_WAITING:
             return WAIT
         raise
+    if granted is not None:
+        return granted
     if not ctx.store.lane_free or len(inflight) > 0:
         return WAIT
+    if ctx.leases.current() is not None:
+        return LEASED
+    return await _load_for(waiting, ctx)
+
+
+async def _open_slot(
+    waiting: WaitingCall, ctx: AdmissionContext, inflight: InFlight
+) -> str | None:
+    call = waiting.job
+    line = ctx.store.line
+    async with ctx.residency.settled_for(f"a queued {call.type}"):
+        resident = ctx.residency.resident_model
+        if resident is None or resident.model_id != call.model:
+            return None
+        if not _slot_free(resident, inflight):
+            return WAIT
+        entry = inflight.open(act=call.act, model=call.model, client=call.client)
+        if waiting.gone or line is None:
+            inflight.close(entry)
+            return IN
+        line.started(waiting, entry)
+        return IN
+
+
+async def _grant_lease(waiting: WaitingCall, ctx: AdmissionContext) -> str | None:
+    """The lease, when what it names is resident and nobody else holds one. A load this
+    call started opened the lease with the model; that one is handed over as it is."""
+    call = waiting.job
+    line = ctx.store.line
+    async with ctx.residency.settled_for(f"a queued lease on {call.model!r}"):
+        resident = ctx.residency.resident
+        if resident is None or resident.id != call.model:
+            return None
+        held = ctx.leases.current()
+        if held is not None:
+            ours = (
+                waiting.loads > 0
+                and held.subject == call.model
+                and held.client == call.client
+            )
+            if not ours:
+                return LEASED
+            lease = held
+        else:
+            assert call.act is not None and call.ttl_seconds is not None
+            lease = ctx.leases.open(
+                kind=resident.kind, subject=call.model, act=call.act,
+                client=call.client, ttl_seconds=call.ttl_seconds,
+            )
+    ctx.lease_granted()
+    if waiting.gone or line is None:
+        ctx.leases.release(lease.id)
+        return IN
+    line.started(waiting, lease.receipt())
+    return IN
+
+
+def _is_a_model(subject: str) -> bool:
+    from .manifests import load_manifest
+
+    try:
+        load_manifest(subject)
+    except Exception:
+        return False
+    return True
+
+
+async def _load_for(waiting: WaitingCall, ctx: AdmissionContext) -> str | ApiError:
+    call = waiting.job
     if waiting.loads >= MAX_LOADS:
         return ApiError(
             409,
@@ -132,10 +197,22 @@ async def admit_call(
             "time before it was answered. Nothing was sent to the engine",
             {"call_id": call.id, "model": call.model},
         )
+    params: dict[str, Any] = {}
+    if call.type == LEASE:
+        if not _is_a_model(call.model):
+            return ApiError(
+                409,
+                "not_resident",
+                f"{call.model!r} is not resident, and a queued lease loads only a "
+                "model (load-model); load a voice or an aligner first, then lease it",
+                {"call_id": call.id, "requested": call.model},
+            )
+        params["lease"] = {"act": call.act, "ttl_seconds": call.ttl_seconds}
     outcome = await admit(
         JobRequest(
             type="load-model",
             model=call.model,
+            params=params,
             client=call.client,
             client_ref=f"for the queued {call.type} {call.id}",
             from_the_line=True,
@@ -157,16 +234,53 @@ async def admit_call(
 def _caller_left(call: Call) -> Response:
     from .api.deps import error_response
 
+    tail = (
+        " and holds no lease" if call.type == LEASE
+        else " and nothing was sent to the engine"
+    )
     return error_response(
         ApiError(
             499,
             "client_disconnected",
             f"the caller closed the connection while its {call.type} for "
-            f"{call.model!r} waited in the queue; it left the queue and nothing was "
-            "sent to the engine",
+            f"{call.model!r} waited in the queue; it left the queue{tail}",
             {"call_id": call.id},
         )
     )
+
+
+async def wait_in_line(
+    request: Request,
+    line: WaitingLine,
+    call: Call,
+    max_wait_s: int,
+    undo: Callable[[Any], Awaitable[None]],
+) -> Any:
+    """Hold this request in the line until the pump admits it: what it was admitted with
+    (a slot, a lease receipt), or a Response when the caller left while it waited.
+    ``undo`` gives back what was admitted when the caller left at the same moment."""
+    from .api.proxy import unless_the_caller_leaves
+
+    item = line.join_call(call, max_wait_s)
+    assert item.outcome is not None
+    try:
+        outcome = await unless_the_caller_leaves(asyncio.shield(item.outcome), request)
+    finally:
+        if not item.gone:
+            line.remove(
+                item.job.id, CLIENT,
+                "the caller closed the connection while it waited",
+            )
+    if outcome is None:
+        if item.outcome.done():
+            status, value = item.outcome.result()
+            if status == ADMITTED and value is not None:
+                await undo(value)
+        return _caller_left(item.job)
+    status, value = outcome
+    if status == ADMITTED:
+        return value
+    raise value
 
 
 async def take_a_turn(
@@ -186,8 +300,6 @@ async def take_a_turn(
     when it must; a Response when the caller left while it waited. Raises the line's
     refusal (``queue_full``) or the call's own ending (``removed_from_queue``, a failed
     load, a refusal of the load)."""
-    from .api.proxy import unless_the_caller_leaves
-
     holder = line.holder()
     if len(line) == 0 or (holder is not None and client == holder):
         async with residency.settled_for(f"a queued {kind}"):
@@ -198,27 +310,17 @@ async def take_a_turn(
                 and _slot_free(resident, inflight)
             ):
                 return inflight.open(act=act, model=model, client=client)
-    item = line.join_call(Call(type=kind, model=model, client=client, act=act), max_wait_s)
-    assert item.outcome is not None
-    try:
-        outcome = await unless_the_caller_leaves(asyncio.shield(item.outcome), request)
-    finally:
-        if not item.gone:
-            line.remove(
-                item.job.id, CLIENT,
-                "the caller closed the connection while it waited",
-            )
-    if outcome is None:
-        if item.outcome.done():
-            status, value = item.outcome.result()
-            if status == ADMITTED and value is not None:
-                inflight.close(value)
-                await settle()
-        return _caller_left(item.job)
-    status, value = outcome
-    if status == ADMITTED:
-        return value
-    raise value
+
+    async def give_back(entry: Entry) -> None:
+        inflight.close(entry)
+        await settle()
+
+    return await wait_in_line(
+        request, line, Call(type=kind, model=model, client=client, act=act),
+        max_wait_s, give_back,
+    )
 
 
-__all__ = ["IN", "LEASED", "WAIT", "admit_call", "queue_of", "take_a_turn"]
+__all__ = [
+    "IN", "LEASED", "WAIT", "admit_call", "queue_of", "take_a_turn", "wait_in_line",
+]

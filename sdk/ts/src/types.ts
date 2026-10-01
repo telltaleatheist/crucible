@@ -627,8 +627,8 @@ export interface QueueItem {
   readonly expiresAt: string;
   /** True for the open lease's holder, whose jobs go ahead of the line. */
   readonly leaseHolder: boolean;
-  /** `call` for a queued chat or decision (its `jobId` is `call-…` and has no job record). */
-  readonly kind: 'job' | 'call';
+  /** `call` for a queued chat or decision, `lease` for a queued lease (both have a `call-…` `jobId` and no job record). */
+  readonly kind: 'job' | 'call' | 'lease';
 }
 
 /** `GET /v1/queue`. */

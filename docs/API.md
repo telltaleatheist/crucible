@@ -208,7 +208,7 @@ Every model this build has a manifest for, and where it stands here.
 
 ### `POST /v1/models/{subject_id}/lease`
 
-Hold whatever is resident (model, voice or aligner) on the card for a run; jobs that would move it are refused `409 leased`. A lease never loads anything.
+Hold whatever is resident (model, voice or aligner) on the card for a run; jobs that would move it are refused `409 leased`. Without `queue` a lease never loads anything; with it, the request waits in the server's queue and a model that is not resident is loaded with the lease when its turn comes.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -222,6 +222,7 @@ Hold whatever is resident (model, voice or aligner) on the card for a run; jobs 
 | --- | --- | --- | --- | --- |
 | `act` | string | yes | — |  |
 | `ttl_seconds` | integer | yes | — |  |
+| `queue` | QueueRequest or null | no | — | Wait in the server's queue for the lease instead of being refused while the card is busy, leased by another client, or holding something else. At the front of the line the lease is granted, loading the model with it when it is not resident (models only). Without it, refused as before. |
 
 *Answers:* `201`, `422` HTTPValidationError
 
@@ -1337,6 +1338,7 @@ Why a job left the queue without running: `removed` is not `failed`.
 | --- | --- | --- | --- | --- |
 | `act` | string | yes | — |  |
 | `ttl_seconds` | integer | yes | — |  |
+| `queue` | QueueRequest or null | no | — | Wait in the server's queue for the lease instead of being refused while the card is busy, leased by another client, or holding something else. At the front of the line the lease is granted, loading the model with it when it is not resident (models only). Without it, refused as before. |
 
 ### `ModelProvenance`
 
@@ -1383,7 +1385,7 @@ One job waiting in the server's queue.
 | `max_wait_s` | integer | yes | — |  |
 | `expires_at` | string | yes | — |  |
 | `lease_holder` | boolean | yes | — |  |
-| `kind` | `'job'` or `'call'` | yes | — |  |
+| `kind` | `'job'` or `'call'` or `'lease'` | yes | — |  |
 
 ### `QueueList`
 

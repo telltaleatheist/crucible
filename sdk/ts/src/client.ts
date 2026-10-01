@@ -525,11 +525,12 @@ export class CrucibleClient {
 
   /**
    * `POST /v1/models/{subject}/lease` — keep the resident model, voice or aligner on the card
-   * during a run.
+   * during a run. Waits in the server's queue by default (the client's `queue`): a busy or
+   * leased card is waited out, and a model that is not resident is loaded with the lease.
    */
   async lease(
     subject: string,
-    options: { act: string; ttlSeconds: number },
+    options: { act: string; ttlSeconds: number; queue?: QueueChoice },
   ): Promise<Lease> {
     const id = requireText(subject, 'subject');
     const act = requireText(options?.act, 'act');
@@ -541,15 +542,29 @@ export class CrucibleClient {
           'its own accepted range if this one is outside it',
       );
     }
-    const body = await this.#json(
-      `/v1/models/${encodeURIComponent(id)}/lease`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ act, ttl_seconds: ttlSeconds }),
-      },
-      'lease',
-    );
+    const send = (payload: Record<string, unknown>): Promise<Json> =>
+      this.#json(
+        `/v1/models/${encodeURIComponent(id)}/lease`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+        'lease',
+      );
+    const plain = { act, ttl_seconds: ttlSeconds };
+    const queue = this.#callQueue(options?.queue);
+    let body: Json;
+    if (queue === null) {
+      body = await send(plain);
+    } else {
+      try {
+        body = await send({ ...plain, queue });
+      } catch (error) {
+        if (!refusedTheQueueField(error)) throw error;
+        body = await send(plain);
+      }
+    }
     return { ...readLease(body, 'lease'), subject: str(body, 'subject', 'lease') };
   }
 
@@ -2221,7 +2236,7 @@ function readQueueItem(row: Json, where: string): QueueItem {
     maxWaitS: num(row, 'max_wait_s', where),
     expiresAt: str(row, 'expires_at', where),
     leaseHolder: bool(row, 'lease_holder', where),
-    kind: oneOf(str(row, 'kind', where), ['job', 'call'] as const, `${where}.kind`),
+    kind: oneOf(str(row, 'kind', where), ['job', 'call', 'lease'] as const, `${where}.kind`),
   };
 }
 
