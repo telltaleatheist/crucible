@@ -417,7 +417,7 @@ class LoadModelJobType:
     def run(self, job: Job, ctx: JobContext) -> None:
         params = LoadParams.model_validate(job.params)
         model = run_model(job.model, self.name)
-        self._residency.begin_warming(model)
+        self._residency.begin_warming(model, KIND_LLM)
         try:
             self._load(ctx, model, params, job.client)
         finally:

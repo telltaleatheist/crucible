@@ -381,6 +381,12 @@ class Info(_Open):
     role: str
     managed_by: dict[str, str] | None
     host: dict[str, Any]
+    features: list[str] = Field(
+        description="What this server's API offers, by name (crucible/features.py; the "
+        "list is in docs/API.md under Features). Check for a name rather than comparing "
+        "versions. It says the routes exist in this build, not that a job type is enabled "
+        "here: `job_types` says that."
+    )
     job_types: list[str]
     capabilities: list[dict[str, Any]]
     pages_engine: dict[str, Any]

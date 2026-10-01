@@ -42,6 +42,7 @@ from .engines import (
     engine_log_path,
 )
 from .errors import ApiError, JobError
+from .events import CARD, EventHub
 from .manifests import NO_DEFAULTS, ModelDefaults, fingerprint
 from .workers import WorkerSession
 
@@ -399,6 +400,7 @@ class DyingResident:
     pids: frozenset[int]
     since: str
     log_path: Path | None = None
+    engine_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -407,6 +409,27 @@ class DyingResident:
             "since": self.since,
             "pids": sorted(self.pids),
         }
+
+    def change(self) -> dict[str, Any]:
+        return {
+            **_card_change(self.subject_id, self.kind, self.engine_name),
+            "since": self.since,
+            "pids": sorted(self.pids),
+        }
+
+
+def engine_name(resident: "Resident") -> str | None:
+    """The engine serving `resident`, by name: an aligner or a separator is a worker
+    session with no named engine, so None."""
+    if isinstance(resident, ResidentVoice):
+        return resident.narrator_engine
+    if isinstance(resident, (ResidentAligner, ResidentSeparator)):
+        return None
+    return resident.engine
+
+
+def _card_change(subject_id: str, kind: str | None, engine: str | None) -> dict[str, Any]:
+    return {"subject": subject_id, "kind": kind, "engine": engine}
 
 
 @dataclass(frozen=True)
@@ -457,6 +480,8 @@ class Residency:
         self._session: WorkerSession | None = None
         self._dying: DyingResident | None = None
         self._warming: str | None = None
+        self._warming_kind: str | None = None
+        self.events = EventHub()
         self._claim: str | None = None
         self._claim_thread: int | None = None
         self._claim_clears = False
@@ -684,6 +709,7 @@ class Residency:
         if self._dying is not dying:
             return
         self._dying = None
+        self.events.publish(CARD, "card.unloaded", dying.change())
         print(
             f"crucible: {dying.subject_id}'s pid(s) {sorted(dying.pids)} have "
             f"exited since the stop at {dying.since}; the card is free again",
@@ -795,11 +821,17 @@ class Residency:
             and self._resident.id == subject_id
         )
 
-    def begin_warming(self, subject_id: str) -> None:
-        self._warming = subject_id
+    def begin_warming(self, subject_id: str, kind: str) -> None:
+        was, self._warming, self._warming_kind = self._warming, subject_id, kind
+        if was != subject_id:
+            self.events.publish(CARD, "card.warming", _card_change(subject_id, kind, None))
 
     def end_warming(self) -> None:
-        self._warming = None
+        was, self._warming = self._warming, None
+        if was is not None:
+            self.events.publish(
+                CARD, "card.warming_ended", _card_change(was, self._warming_kind, None)
+            )
 
     @property
     def stopping(self) -> DyingResident | None:
@@ -849,7 +881,7 @@ class Residency:
         self._refuse_mutation_if_claimed(f"load {subject_id}")
         self.refuse_if_stopping(f"load {subject_id}")
         self._evict(say, subject_id)
-        self.begin_warming(subject_id)
+        self.begin_warming(subject_id, kind)
         try:
             occupant = start()
         finally:
@@ -868,6 +900,11 @@ class Residency:
         at = "" if occupant.base_url is None else f" at {occupant.base_url}"
         say(f"{subject_id} is resident{at}")
         self._record_residents()
+        self.events.publish(CARD, "card.loaded", {
+            **_card_change(resident.id, resident.kind, engine_name(resident)),
+            "memory_bytes_estimate": resident.memory_bytes_estimate,
+            "since": resident.loaded_at,
+        })
         return resident
 
     def unload(self, subject_id: str) -> Resident:
@@ -887,7 +924,9 @@ class Residency:
             pids=leaving.pids,
             since=utcnow(),
             log_path=resident.log_path,
+            engine_name=engine_name(resident),
         )
+        self.events.publish(CARD, "card.unloading", self._dying.change())
         with self._claim_lock:
             self._cleared = subject_id if self._claim_clears else None
         try:
@@ -905,6 +944,7 @@ class Residency:
         if dying.session is not None:
             dying.session.stop()
         self._dying = None
+        self.events.publish(CARD, "card.unloaded", dying.change())
 
     def shutdown(self) -> None:
         try:

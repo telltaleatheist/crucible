@@ -155,6 +155,16 @@ crucible api queue heartbeat <job-id>          the client that queued it is stil
 crucible api queue events                      a snapshot, then every change; Ctrl-C ends it
 ```
 
+### Every change on the server (2026-10-01)
+
+```
+crucible api events [--topics job,card] [--since <event-id>]
+                                               a snapshot, then every change; Ctrl-C ends it
+```
+
+One line per event, from GET /v1/events. The names, payloads and topics are in
+docs/EVENTS.md.
+
 ### Resumable jobs — the journals (2026-09-27)
 
 ```

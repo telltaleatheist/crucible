@@ -11,6 +11,7 @@ from typing import Any, Iterator
 from .capabilityclasses import CLASSES
 from .clock import utcnow
 from .errors import ApiError
+from .events import CHAT, EventHub
 from .protocol import ACT_HEADER
 
 RECENT_DURATIONS = 20
@@ -70,6 +71,7 @@ class InFlight:
         self._ids = itertools.count(1)
         self._recent: list[float] = []
         self._on_close: Any = lambda: None
+        self.events = EventHub()
 
     def when_closed(self, callback: Any) -> None:
         self._on_close = callback
@@ -85,6 +87,7 @@ class InFlight:
         )
         with self._lock:
             self._entries[entry.id] = entry
+        self._publish()
         return entry
 
     def close(self, entry: Entry) -> None:
@@ -94,7 +97,19 @@ class InFlight:
                 self._recent.append(time.monotonic() - removed.started)
                 del self._recent[:-RECENT_DURATIONS]
         if removed is not None:
+            self._publish()
             self._on_close()
+
+    def _publish(self) -> None:
+        """`chat.in_flight`, coalesced: at most one a second, only when the count by
+        model changed, and the latest count always arrives (docs/EVENTS.md)."""
+        with self._lock:
+            by_model: dict[str, int] = {}
+            for entry in self._entries.values():
+                by_model[entry.model] = by_model.get(entry.model, 0) + 1
+            self.events.publish_throttled(CHAT, "chat.in_flight", CHAT, {
+                "in_flight": sum(by_model.values()), "by_model": by_model,
+            })
 
     @contextmanager
     def tracked(

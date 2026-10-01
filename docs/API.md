@@ -123,6 +123,7 @@ Who this server is, what it runs on, what it serves, and the few fixed tables (t
 | `role` | string | yes | — |  |
 | `managed_by` | object of string or null | yes | — |  |
 | `host` | object | yes | — |  |
+| `features` | array of string | yes | — | What this server's API offers, by name (crucible/features.py; the list is in docs/API.md under Features). Check for a name rather than comparing versions. It says the routes exist in this build, not that a job type is enabled here: `job_types` says that. |
 | `job_types` | array of string | yes | — |  |
 | `capabilities` | array of object | yes | — |  |
 | `pages_engine` | object | yes | — |  |
@@ -550,6 +551,22 @@ What this server is doing and how far along, in one read with no job id. A displ
 | `queued` | array of ActivityJob | yes | — |  |
 | `accelerator` | object or null | no | — |  |
 
+## Events
+
+Every change on the server as one SSE stream, so an app follows it instead of polling /v1/activity, /v1/tasks and /v1/health. The event names and payloads, resuming, and what a slow reader is told are in docs/EVENTS.md.
+
+### `GET /v1/events`
+
+Every change on this server as one SSE stream, so an app need not poll: a `snapshot` first, then one event per change (jobs, the queue, the card, chats in flight, tasks, settings, the server stopping). Reconnect with Last-Event-ID to resume; the event names and payloads are in docs/EVENTS.md.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `topics` | query | no | string or null | Comma-separated topics to receive (job, queue, card, chat, task, settings, server). Leave it out for all; `server` is always sent. |
+
+*Answers:* `200`, `422` HTTPValidationError
+
 ## Health
 
 Is this process alive. Cheaper than /v1/activity and says less.
@@ -895,6 +912,44 @@ One answer distribution per question, read off the resident model's next-token l
 
 *Answers:* `200`, `422` HTTPValidationError
 
+## Features
+
+`GET /v1/info` answers `features`, the names below, so an app checks for what it needs instead of comparing versions. A name says the routes and fields exist in this build; whether a job type is enabled on this host is `job_types`. Defined in `crucible/features.py`.
+
+| feature | what it is |
+| --- | --- |
+| `accelerator` | GET /v1/accelerator: what is on the card and which holders are Crucible's own. |
+| `activity` | GET /v1/activity: what the server is doing, in one read. |
+| `align` | The `align` job: words placed on audio, chunk by chunk. |
+| `align.longform` | The `align-longform` job: a whole book's text aligned to its audio, with cues. |
+| `asr` | The `asr` job: speech to text. |
+| `audio` | The `audio` job: sound effects, music and songs (docs/AUDIO.md). |
+| `catalog` | GET /v1/catalog and DELETE /v1/catalog/{kind}/{id}: what this build can serve, what is on disk, and reclaiming it. |
+| `chat` | POST /v1/openai/chat/completions: chat on the resident model, OpenAI-shaped. |
+| `decide` | POST /v1/decide with `questions`: answer distributions read off the resident model's next-token logprobs. |
+| `decide.items` | POST /v1/decide with `items`: one choice answer per item, in one request. |
+| `denoise` | The `denoise` job: speech separated from what is behind it. |
+| `events` | GET /v1/events: one SSE stream of every change on the server, opening with a snapshot and resumable with Last-Event-ID (docs/EVENTS.md). |
+| `events.topics` | GET /v1/events?topics=job,queue,...: only the named topics. |
+| `image` | The `image` job: pictures from words (docs/IMAGE.md). |
+| `image.inpaint` | `mask` on the `image` job: only the white region of a start picture is regenerated (docs/IMAGE.md). |
+| `jobs.events` | GET /v1/jobs/{id}/events: one job's own SSE stream, resumable with Last-Event-ID. |
+| `jobs.hold` | `hold` on a submit and /v1/jobs/{id}/hold: a job's artifacts are kept until the client lets go of them. |
+| `jobs.resume` | `params.resume` and /v1/resumable: a resumable job continues the journal an earlier run left (docs/RESUMABLE-JOBS.md). |
+| `playground` | GET /v1/playground: the pages the operator page's playground draws. |
+| `queue.calls` | `queue` on a chat or a decision: the request is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
+| `queue.events` | GET /v1/queue/events: the waiting line's own SSE stream. |
+| `queue.jobs` | `queue` on POST /v1/jobs: a busy server queues the job instead of refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md). |
+| `rvc` | The `rvc` job: voice conversion. |
+| `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
+| `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
+| `tasks` | POST /v1/tasks: operator tasks (pull, install, module, engine, engine-restart) with their own SSE stream. |
+| `tts` | The `tts` job: a render of text to audio with a narration voice. |
+| `tts.stream` | /v1/tts/stream: a long-lived narration session, text in and audio back over SSE. |
+| `uploads` | POST /v1/uploads: bytes too big for a request body, named by `blob_id`. |
+| `video` | The `video` job: clips with sound from words or a start picture (docs/VIDEO.md). |
+| `voices` | /v1/voices: the narration voices, their manifests and updates. |
+
 ## Models in full
 
 Every request and answer schema the routes above refer to, for a reader following a nested field.
@@ -1216,6 +1271,7 @@ One request to the engine, timed by Crucible.
 | `role` | string | yes | — |  |
 | `managed_by` | object of string or null | yes | — |  |
 | `host` | object | yes | — |  |
+| `features` | array of string | yes | — | What this server's API offers, by name (crucible/features.py; the list is in docs/API.md under Features). Check for a name rather than comparing versions. It says the routes exist in this build, not that a job type is enabled here: `job_types` says that. |
 | `job_types` | array of string | yes | — |  |
 | `capabilities` | array of object | yes | — |  |
 | `pages_engine` | object | yes | — |  |

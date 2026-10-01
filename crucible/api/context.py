@@ -14,6 +14,7 @@ from ..backend import Backend
 from ..config import Config
 from ..connect import PairingRequests
 from ..errors import ApiError
+from ..events import EventHub
 from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
 from ..jobs.line import WaitingLine
@@ -35,6 +36,7 @@ class Routers:
 
 @dataclass(frozen=True)
 class Services:
+    events: EventHub
     leases: Leases
     store: JobStore
     line: WaitingLine
@@ -54,6 +56,11 @@ class Services:
             setattr(app.state, one.name, getattr(self, one.name))
 
 
+def hub_of(app: FastAPI) -> EventHub:
+    """The event hub, for the stream helpers that hold only the request's app."""
+    return app.state.events
+
+
 @dataclass(frozen=True)
 class AppContext:
     app: FastAPI
@@ -61,6 +68,10 @@ class AppContext:
     backend: Backend
     residency: Residency
     decide_here: Callable[[str], ApiError]
+
+    @property
+    def events(self) -> EventHub:
+        return self.app.state.events
 
     @property
     def store(self) -> JobStore:

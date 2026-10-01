@@ -10,6 +10,7 @@ from ..backend import Backend
 from ..clock import utcnow
 from ..config import Config
 from ..errors import ApiError
+from ..events import TASK, EventHub
 from ..settle import Held
 from ..weights import PullCancelled, WeightsError
 from . import hostdoor, runner
@@ -62,6 +63,7 @@ class TaskStore:
         self._runner: asyncio.Task[None] | None = None
         self._subscribers: dict[str, list[asyncio.Event]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        self.events = EventHub()
 
     async def stop(self) -> None:
         runner_task, self._runner = self._runner, None
@@ -184,6 +186,23 @@ class TaskStore:
         )
         for waiter in self._subscribers.get(task.id, []):
             waiter.set()
+        self._publish(task, kind, data)
+
+    def _publish(self, task: Task, kind: str, data: dict[str, Any]) -> None:
+        """Tell the server-wide stream: `task.running`, `task.step`, `task.progress`
+        (throttled) and, from `_finish`, `task.<state>` (docs/EVENTS.md)."""
+        if kind == "started":
+            self.events.publish(TASK, f"task.{task.state}", task.to_dict())
+        elif kind == "step":
+            self.events.publish(TASK, "task.step", {"task_id": task.id, **data})
+        elif kind == "progress":
+            self.events.publish_throttled(
+                TASK, "task.progress", f"task:{task.id}", {"task_id": task.id, **data}
+            )
+
+    def _publish_end(self, task: Task) -> None:
+        self.events.forget(f"task:{task.id}")
+        self.events.publish(TASK, f"task.{task.state}", task.to_dict())
 
     def subscribe(self, task: Task) -> asyncio.Event:
         waiter = asyncio.Event()
@@ -276,6 +295,7 @@ class TaskStore:
                 self.append_event(task, "failed", error)
         else:
             self.append_event(task, "cancelled", {})
+        self._publish_end(task)
 
     async def _run_pull(self, task: Task) -> None:
         task.raise_if_cancelled()

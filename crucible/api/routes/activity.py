@@ -198,7 +198,7 @@ def _slots_section(ctx: AppContext) -> dict[str, Any]:
     }
 
 
-def _activity_body(ctx: AppContext) -> dict[str, Any]:
+def activity_body(ctx: AppContext) -> dict[str, Any]:
     residency = ctx.residency
     store = ctx.store
     running = store.running
@@ -245,7 +245,7 @@ def _activity_handler(ctx: AppContext):
         display and a preflight, never admission; `?accelerator_probe=true` adds a live
         card probe.
         """
-        body = _activity_body(ctx)
+        body = activity_body(ctx)
         if accelerator_probe:
             body["accelerator"] = await _accelerator_probe(ctx)
         return body

@@ -162,9 +162,12 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 
 - `app.state.bind_host`/`bind_port` hold where it really listens. `GET /v1/setup` builds
   pairing lines from the bind address, so a `--host 0.0.0.0` override must reach it.
-- `uvicorn.run(timeout_keep_alive=KEEP_ALIVE_SECONDS)` is set on purpose. uvicorn's
+- The server is started through `api.serving.server_for`, the one door, which sets
+  `timeout_keep_alive=KEEP_ALIVE_SECONDS` on purpose. uvicorn's
   default of 5 s against Node undici's pooled ~4 s meant a client's next request could
-  land on a socket being closed and read ECONNRESET while the server was fine.
+  land on a socket being closed and read ECONNRESET while the server was fine. The same
+  door ends every GET /v1/events stream the moment uvicorn is asked to exit, since uvicorn
+  waits for open responses before it shuts down and an SSE stream never ends by itself.
 - `--controller-stdin` (hidden) hands the server to `host.child_lifecycle.run_owned_server`.
 
 ## `service`

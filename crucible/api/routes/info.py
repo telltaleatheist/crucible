@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ... import VERSION, pairing, weights
+from ... import VERSION, features, pairing, weights
 from ... import pages as pages_module
 from ... import peer as peer_module
 from ...errors import ApiError
@@ -78,6 +78,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     "vram_bytes": backend.gpu.vram_bytes,
                 },
             },
+            "features": features.names(),
             "job_types": sorted(store.registry),
             "capabilities": capabilities,
             "pages_engine": _pages_engine(),

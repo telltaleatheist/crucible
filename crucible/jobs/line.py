@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 from .. import clock
 from ..errors import ApiError
+from ..events import QUEUE
 from .base import Job, JobFailure
 
 if TYPE_CHECKING:
@@ -393,6 +394,8 @@ class WaitingLine:
             "event": kind,
             "data": {"job_id": item.job.id, **data, "depth": len(self._items)},
         })
+        self._store.events.publish(QUEUE, f"queue.{kind}", {
+            **self._events[-1]["data"], "kind": item.row(clock.now(), self.holder())["kind"]})
         for waiter in self._waiters:
             waiter.set()
 

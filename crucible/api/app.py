@@ -23,6 +23,7 @@ from ..capabilitystore import decide_for, write_capability
 from ..config import Config, load_config
 from ..connect import PairingRequests
 from ..errors import ApiError, ConfigError
+from ..events import EventHub
 from ..inflight import InFlight
 from ..installonsubmit import InstallOnSubmit
 from ..jobs import build_registry, disabled_error
@@ -50,6 +51,7 @@ from .routes import (
     activity,
     capability,
     decide,
+    events as event_routes,
     info,
     jobs,
     openai,
@@ -74,6 +76,7 @@ ROUTE_MODULES = (
     peer,
     catalog_routes,
     activity,
+    event_routes,
     lease_routes,
     queue_routes,
     voices,
@@ -214,10 +217,12 @@ def _services(
     leases: Leases,
     keeper: RegistryKeeper,
 ) -> Services:
+    events = EventHub()
     store = JobStore(config, backend, keeper.registry)
     line = WaitingLine(store, lambda: _lease_client(leases))
     streams = StreamManager(residency)
     inflight = InFlight()
+    settings_history = settings_module.History()
     settlement = Settlement(
         residency=residency, store=store, leases=leases, inflight=inflight,
         waiting_calls=line.calls_waiting,
@@ -232,14 +237,17 @@ def _services(
         take_up=keeper.take_up_installed,
         in_use=lambda subject: catalog_routes.held_on_card(residency, leases, subject),
     )
+    for owner in (store, residency, inflight, task_store, settings_history):
+        owner.events = events
     return Services(
+        events=events,
         leases=leases,
         store=store,
         line=line,
         streams=streams,
         inflight=inflight,
         ollama_contexts=upstreams.OllamaContexts(),
-        settings_history=settings_module.History(),
+        settings_history=settings_history,
         removals=catalog.Removals(),
         peer=peer_module.PeerState(),
         pairing_requests=PairingRequests(open_pairing=config.open_pairing),
@@ -295,6 +303,8 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store: JobStore = app.state.store
+        events: EventHub = app.state.events
+        events.bind(asyncio.get_running_loop())
         app.state.started_at = time.monotonic()
         store.restore()
         residency.start_reclaiming()
@@ -306,6 +316,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         try:
             yield
         finally:
+            events.stop("the server is shutting down")
             await app.state.tasks.stop()
             await app.state.queue_pump.stop()
             await store.stop()

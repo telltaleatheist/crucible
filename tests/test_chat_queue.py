@@ -11,6 +11,7 @@ import pytest
 
 from crucible import callqueue
 from crucible.api.routes import openai as openai_routes
+from crucible.events import EventHub
 from crucible.inflight import InFlight
 from crucible.jobs.line import Call, WaitingLine
 from crucible.settle import Settlement
@@ -313,6 +314,7 @@ def test_a_call_waiting_for_the_resident_model_holds_it() -> None:
 class _Store:
     def __init__(self) -> None:
         self.line: Any = None
+        self.events = EventHub()
 
     def attach_line(self, line: Any) -> None:
         self.line = line

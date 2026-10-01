@@ -186,6 +186,16 @@ def cmd_queue_events(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_events(connection: Connection, args: argparse.Namespace) -> int:
+    path = "/v1/events"
+    if args.topics is not None:
+        path += "?" + urllib.parse.urlencode({"topics": args.topics})
+    with contextlib.suppress(KeyboardInterrupt):
+        for event in follow(connection, path, last_event_id=args.since):
+            emit_line(event)
+    return EXIT_OK
+
+
 cmd_pairing_requests = cmd_get("/v1/pairing/requests")
 
 
@@ -1068,6 +1078,19 @@ API_VERBS = (
     Verb("upload", "put a file on the server and get its blob_id", cmd_upload, (arg("path"),)),
     Verb("job", "submit, watch, cancel and read back one unit of work", verbs=JOB_VERBS),
     Verb("queue", "the jobs waiting for the lane: list, remove, follow", verbs=QUEUE_VERBS),
+    Verb(
+        "events", "follow GET /v1/events — a snapshot, then every change on the server; "
+        "Ctrl-C ends it", cmd_events, (
+            arg(
+                "--topics", default=None, metavar="TOPICS",
+                help="comma-separated: job, queue, card, chat, task, settings, server",
+            ),
+            arg(
+                "--since", type=int, default=0, metavar="EVENT_ID",
+                help="resume after this event id (sent as Last-Event-ID)",
+            ),
+        ),
+    ),
     Verb(
         "resumable", "the resume journals: what can be resumed, and discarding one",
         verbs=RESUMABLE_VERBS,
