@@ -608,9 +608,19 @@ def _add_to_config(home: Path, text: str) -> None:
     config.write_text(config.read_text(encoding="utf-8") + text, encoding="utf-8")
 
 
-def test_without_a_video_desktop_table_the_mac_runs_as_before(
+def test_without_a_video_desktop_table_the_mac_keeps_the_desktop_responsive(
     mac: TestClient, auth: dict[str, str], transcript: Path
 ) -> None:
+    _, events = run_job(mac, auth)
+    desktop = events[-1]["data"]["video"]["desktop"]
+    assert {key: desktop[key] for key in video_job.DESKTOP_DEFAULTS} == video_job.DESKTOP_DEFAULTS
+    assert rows(transcript, "load")[0]["desktop"] == video_job.DESKTOP_DEFAULTS
+
+
+def test_a_disabled_video_desktop_table_runs_the_mac_flat_out(
+    mac: TestClient, auth: dict[str, str], home: Path, transcript: Path
+) -> None:
+    _add_to_config(home, "\n[video_desktop]\nenabled = false\n")
     _, events = run_job(mac, auth)
     assert events[-1]["data"]["video"]["desktop"] is None
     assert rows(transcript, "load")[0]["desktop"] is None
@@ -657,10 +667,32 @@ def test_the_desktop_table_fills_defaults_and_ignores_bad_values(tmp_path: Path)
     assert video_job.desktop_environment(found) == {
         "MLX_MAX_OPS_PER_BUFFER": "8", "MLX_MAX_MB_PER_BUFFER": "40", "LTX2_DIT_EVAL_EVERY": "1",
     }
-    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "missing.toml")) is None
+    defaults = video_job.DESKTOP_DEFAULTS
+    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "missing.toml")) == defaults
     assert video_job.desktop_environment(None) == {}
     (tmp_path / "plain.toml").write_text("[video_trial]\nmax_frames = 481\n", encoding="utf-8")
-    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "plain.toml")) is None
+    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "plain.toml")) == defaults
+    (tmp_path / "off.toml").write_text("[video_desktop]\nenabled = false\n", encoding="utf-8")
+    assert video_job.desktop_settings(SimpleNamespace(path=tmp_path / "off.toml")) is None
+
+
+def test_the_mac_runs_long_clips_only_while_it_tiles(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    spec = video_job.MANIFESTS.known("ltx-2.5-distilled").spec("mlx-darwin")
+    assert spec.tiled_max_frames is not None and spec.tiled_max_frames > spec.max_frames
+    plain = tmp_path / "plain.toml"
+    plain.write_text("", encoding="utf-8")
+    here = video_job.machine_spec(SimpleNamespace(path=plain), spec)
+    assert here.max_frames == spec.tiled_max_frames
+    assert here.max_video_tokens == spec.tiled_max_video_tokens
+    for table in ("[video_desktop]\nmax_tile_tokens = 0\n", "[video_desktop]\nenabled = false\n"):
+        untiled = tmp_path / "untiled.toml"
+        untiled.write_text(table, encoding="utf-8")
+        flat = video_job.machine_spec(SimpleNamespace(path=untiled), spec)
+        assert (flat.max_frames, flat.max_video_tokens) == (spec.max_frames, spec.max_video_tokens)
+    pc = video_job.MANIFESTS.known("ltx-2.5-distilled").spec("cuda-linux")
+    assert video_job.machine_spec(SimpleNamespace(path=plain), pc) == pc
 
 
 @pytest.fixture(autouse=True)

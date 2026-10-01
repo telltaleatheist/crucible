@@ -187,6 +187,13 @@ def _download_bytes(family: Family, backend_kind: str, env_missing: bool,
     return sum(part for part in parts if part is not None)
 
 
+def _spec_here(family: Family, manifest: Any, here: "Here") -> Any:
+    spec = manifest.spec(here.backend.kind)
+    if family.job_type == video_job.JOB_TYPE:
+        return video_job.machine_spec(here.config, spec)
+    return spec
+
+
 @dataclass(frozen=True)
 class Here:
     config: Any
@@ -266,7 +273,7 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
                 "reason": reason,
                 "download_bytes": size,
                 "fields": (
-                    family.fields(manifest, manifest.spec(backend.kind))
+                    family.fields(manifest, _spec_here(family, manifest, here))
                     if manifest.supports(backend.kind) else []
                 ),
             })

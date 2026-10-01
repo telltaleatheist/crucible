@@ -114,15 +114,23 @@ list:
   half must still sit on the VAE's 32-pixel grid. 1280x704, 768x512 and 512x512 are fine;
   1280x720 and 768x544 are refused `video_size_not_supported`.
 - From a picture the ceiling is **14,080** video tokens: 1280x704 x 121 frames (5.04 s), where
-  the PC stops at 73 frames. From text it is the same 16,720 (145 frames, 6.04 s).
+  the PC stops at 73 frames.
+- From text the Mac runs **up to 505 frames and 56,320 video tokens**: 1280x704 for 21 s at
+  24 fps (20.2 s at 25). That is because it tiles the full-size pass by default (below), which
+  keeps that pass's memory to one tile whatever the clip's length; a 20 s 1280x704 clip
+  measured 21.7 GB at its peak (the text encoder) on 2026-09-30. With tiling turned off it is
+  the PC's 16,720 (145 frames, 6.04 s), which the declared memory covers untiled.
 - It needs 29 GB for its largest stage on top of the 16 GB desktop allowance: a Mac with 48 GB
   or more. A smaller one answers `409 insufficient_memory` naming 29,000,000,000 bytes.
 - There is no `conditioning` stage (the picture is encoded while the transformer loads) and
   there is a `refining` stage with steps 1 to 3 after `denoising`.
-- A Mac somebody is working on can keep its desktop responsive during long clips with a
-  `[video_desktop]` table in its config (tiling, block streaming, smaller GPU batches, at some
-  cost in speed); `done.video.desktop` then says how the clip was split. See
-  [internals/video.md](internals/video.md), "Keeping the desktop responsive".
+- The Mac keeps its desktop responsive while it renders, by default: the full-size pass is
+  tiled, the transformer streams from disk, GPU work goes in small batches, and the GPU is
+  left idle for part of every step so the screen can draw. Renders are slower for it.
+  `done.video.desktop` says how each clip was split, and `done.video.gpu_busy_*` how busy the
+  GPU was. `[video_desktop] enabled = false` in the Mac's config runs it flat out, with the
+  shorter limit above. See [internals/video.md](internals/video.md), "Keeping the desktop
+  responsive".
 
 ## The result
 

@@ -403,8 +403,8 @@ the room for q8.
 | limit | value |
 | --- | --- |
 | frame size | multiples of **64**, sides 256 to 1280, at most 901,120 pixels (1280x704 either way up) |
-| frame count | 8k+1, at most 145; frame rate 24 or 25 |
-| text-to-video | at most 16,720 video tokens (1280x704 x 145 frames, 6.04 s), the same as the PC |
+| frame count | 8k+1, at most 505 while tiling (`tiled_max_frames`), else 145; frame rate 24 or 25 |
+| text-to-video | at most 56,320 video tokens while tiling (`tiled_max_video_tokens`: 1280x704 x 505 frames, 21 s at 24 fps), else 16,720 (1280x704 x 145 frames, 6.04 s), the same as the PC |
 | image-to-video | at most **14,080** video tokens (1280x704 x 121 frames, 5.04 s), higher than the PC's 8,800: the Mac has the memory for the per-token modulation |
 | steps | exactly 8, then 3 refining steps |
 
@@ -512,13 +512,18 @@ gpu_duty_pct = 85        # after each sync, leave the GPU idle for 15% of the ti
 gpu_busy_target_pct = 90 # judge only: the mean GPU busy a run should stay at or under
 ```
 
-**No table means none of this**: no env vars are set, nothing is tiled or streamed, and the
-worker runs exactly as before. When the table is present, a key left out takes the value shown
-above, and a value of the wrong type or out of range is ignored rather than guessed at. The
+**These are on by default** (since 1.0.73): with no table, or a key left out, the Mac runs
+with the values shown above, and a value of the wrong type or out of range is ignored rather
+than guessed at. `enabled = false` turns all of it off: no env vars are set, nothing is tiled
+or streamed, and the clip limits drop back to the untiled ones. The longer clip limits
+(`tiled_max_frames`, `tiled_max_video_tokens` in the manifest, `crucible.jobs.video.machine_spec`) apply
+only while `max_tile_tokens` is above 0, because the declared memory covers an untiled refine
+pass only up to 16,720 tokens; tiled, a 20 s 1280x704 clip peaked at 21.7 GB. The
 table is read when the worker starts, so a change applies from the next load, not to a worker
 already resident under a lease. Every clip records what it ran with in `done.video.desktop`:
 the settings, the env vars the worker actually saw, the MLX cache limit, and each pass's
-`tiles` ([frames, rows, columns]) and `tile_tokens`. It is null without the table.
+`tiles` ([frames, rows, columns]) and `tile_tokens`. It is null when the table says
+`enabled = false`.
 
 How each knob maps onto the libraries (mlx 0.32.2, tag `v0.32.2` = `1f8e74e3`; ltx-2-mlx at
 `1724ca67`):
