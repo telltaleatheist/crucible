@@ -567,7 +567,7 @@ The pages the operator page's playground draws: one per image, video and audio m
 
 ### `GET /v1/playground`
 
-One page per image, video and audio model this build declares: the params its form shows, with defaults and limits from its manifest, and whether this server can run it now. `reason` says why not when `available` is false.
+One page per image, video and audio model this build declares: the params its form shows, with defaults and limits from its manifest, and its `standing`: `ready`; `download`, which its first job fetches by itself (409 `installing` names the task; `download_bytes` when the size is known); or `unavailable`, with `reason` saying why.
 
 *Door:* token + `X-Crucible-Api: 1`
 

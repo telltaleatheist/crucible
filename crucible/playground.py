@@ -1,6 +1,7 @@
 """The playground's pages: one per image, video and audio model this build declares, each
 with the few params that model takes, read from its manifest, and whether this server can
-run it now and, when it cannot, why not."""
+run it now. A model install-on-submit can fetch is offered as it is: its first job
+downloads what it lacks. Only what that cannot fix is unavailable, with the reason."""
 
 from __future__ import annotations
 
@@ -8,15 +9,25 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from . import catalog, installonsubmit, weights
 from .audiomodels import KIND_WORDS, MUSIC, SFX, SONG
+from .jobenv import INSTALLER_FOR
 from .jobs import disabled_error
 from .jobs import audio as audio_job
 from .jobs import image as image_job
 from .jobs import video as video_job
 from .jobs.audio.params import FORMATS
 from .jobs.template import ManifestCatalog
+from .jobtypes import spec_of
+from .tasks import env_installed
 
 MAX_SEED = 2**32 - 1
+
+READY = "ready"
+DOWNLOAD = "download"
+UNAVAILABLE = "unavailable"
+
+INSTALLS_A_DISABLED_TYPE = frozenset({"not_installed", "undecided"})
 
 TEXT = "text"
 INTEGER = "integer"
@@ -144,44 +155,104 @@ FAMILIES: tuple[Family, ...] = (
 )
 
 
-def _not_running(family: Family, registry: dict[str, Any], config: Any,
-                 backend: Any) -> tuple[Any, str | None]:
-    plugin = registry.get(family.job_type)
+def _no_build(manifest: Any, backend_kind: str) -> str:
+    return (
+        f"{manifest.display} does not run on this server's backend ({backend_kind}); "
+        f"{manifest.path.name} declares {sorted(manifest.backends)}"
+    )
+
+
+def _downloads(job_type: str, env_missing: bool, weights_missing: bool) -> str:
+    what = " and ".join(
+        part for part, needed in (
+            (f"the {job_type} engine", env_missing), ("its weights", weights_missing)
+        ) if needed
+    )
+    return (
+        f"Not on this server yet. The first Generate downloads {what}, then makes "
+        "it; after that it is ready straight away"
+    )
+
+
+def _download_bytes(family: Family, backend_kind: str, env_missing: bool,
+                    subject: Any) -> int | None:
+    parts: list[int | None] = []
+    if env_missing:
+        installer = INSTALLER_FOR.get(family.job_type, family.job_type)
+        parts.append(installonsubmit._env_bytes(installer, None, backend_kind))
+    if subject is None or subject.installed() is None:
+        parts.append(None if subject is None else subject.expected_bytes)
+    if any(part is None for part in parts):
+        return None
+    return sum(part for part in parts if part is not None)
+
+
+@dataclass(frozen=True)
+class Here:
+    config: Any
+    backend: Any
+    registry: dict[str, Any]
+    subjects: dict[str, Any]
+
+    def can_install(self, job_type: str) -> bool:
+        spec = spec_of(job_type)
+        return bool(self.config.install_on_submit) and spec is not None and spec.installable
+
+    def env_missing(self, job_type: str) -> bool:
+        installer = INSTALLER_FOR.get(job_type, job_type)
+        return not env_installed(self.config, self.backend, installer, None)
+
+
+def _standing(family: Family, manifest: Any, here: Here) -> tuple[str, str | None, int | None]:
+    kind = here.backend.kind
+    if not manifest.supports(kind):
+        return UNAVAILABLE, _no_build(manifest, kind), None
+    plugin = here.registry.get(family.job_type)
+    subject = here.subjects.get(manifest.id)
+    weights_missing = subject is None or subject.installed() is None
+    env_missing = here.env_missing(family.job_type)
     if plugin is None:
-        return None, disabled_error(family.job_type, config).message
-    status = plugin.check(backend)
-    return plugin, None if status.ready else status.detail
-
-
-def _reason(manifest: Any, backend_kind: str, installed: bool, blocked: str | None) -> str | None:
-    if not manifest.supports(backend_kind):
-        return (
-            f"{manifest.display} does not run on this server's backend ({backend_kind}); "
-            f"{manifest.path.name} declares {sorted(manifest.backends)}"
-        )
-    if not installed:
-        return (
-            f"{manifest.display}'s weights are not on this server. Pull {manifest.id} "
-            f"from the Catalog on the console, or run `{manifest.pull_command}` on the "
-            "server"
-        )
-    return blocked
+        refusal = disabled_error(family.job_type, here.config)
+        why = (refusal.details or {}).get("reason")
+        if not (env_missing and why in INSTALLS_A_DISABLED_TYPE
+                and here.can_install(family.job_type)):
+            return UNAVAILABLE, refusal.message, None
+    elif not env_missing and not weights_missing:
+        status = plugin.check(here.backend)
+        return (READY, None, None) if status.ready else (UNAVAILABLE, status.detail, None)
+    elif not here.can_install(family.job_type):
+        return UNAVAILABLE, (
+            f"{manifest.display} is not installed on this server, and this server does "
+            "not install on first use ([jobs] install_on_submit is off). Install it from "
+            f"the console, or run `{manifest.pull_command}` on the server"
+        ), None
+    spec = manifest.spec(kind)
+    if weights_missing and getattr(spec, "gated", False) and weights.hf_token(here.config) is None:
+        return UNAVAILABLE, weights.gated_message(spec.hf_repo, here.config,
+                                                  manifest.pull_command), None
+    return (
+        DOWNLOAD,
+        _downloads(family.job_type, env_missing, weights_missing),
+        _download_bytes(family, kind, env_missing, subject),
+    )
 
 
 def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str, Any]]:
+    here = Here(
+        config=config,
+        backend=backend,
+        registry=registry,
+        subjects={
+            subject.id: subject
+            for subject in catalog.subjects(config, backend)
+            if subject.kind == "model"
+            and subject.job_type in {family.job_type for family in FAMILIES}
+        },
+    )
     rows: list[dict[str, Any]] = []
     for family in FAMILIES:
-        plugin, blocked = _not_running(family, registry, config, backend)
-        installed = (
-            {} if plugin is None
-            else {model.id: model.installed for model in plugin.describe_models()}
-        )
         for manifest in family.manifests.all().values():
-            if plugin is None:
-                reason = blocked
-            else:
-                reason = _reason(manifest, backend.kind, installed.get(manifest.id, False),
-                                 blocked)
+            standing, reason, size = _standing(family, manifest, here)
             kind = family.kind(manifest)
             rows.append({
                 "job_type": family.job_type,
@@ -190,8 +261,10 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
                 "media": family.media,
                 "kind": kind,
                 "makes": KIND_WORDS.get(kind, family.media + "s"),
-                "available": reason is None,
+                "standing": standing,
+                "available": standing != UNAVAILABLE,
                 "reason": reason,
+                "download_bytes": size,
                 "fields": (
                     family.fields(manifest, manifest.spec(backend.kind))
                     if manifest.supports(backend.kind) else []
@@ -200,4 +273,4 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
     return rows
 
 
-__all__ = ["FAMILIES", "pages"]
+__all__ = ["DOWNLOAD", "FAMILIES", "READY", "UNAVAILABLE", "pages"]

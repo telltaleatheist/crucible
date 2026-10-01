@@ -8,6 +8,7 @@
   var TOKEN_KEY = 'crucible.token';
   var TICK_MS = 1000;
   var RECONNECT_MS = 2000;
+  var INSTALL_ROUNDS = 5;
 
   var MEDIA_TYPES = {
     png: 'image/png',
@@ -133,6 +134,16 @@
     return `/v1/jobs/${safe}/events`;
   }
 
+  function taskPath(id) {
+    var safe = encodeURIComponent(id);
+    return `/v1/tasks/${safe}`;
+  }
+
+  function taskEventsPath(id) {
+    var safe = encodeURIComponent(id);
+    return `/v1/tasks/${safe}/events`;
+  }
+
   function artifactPath(id, name) {
     var safe = encodeURIComponent(id);
     var file = encodeURIComponent(name);
@@ -250,6 +261,27 @@
     ]);
   }
 
+  var UNITS = ['B', 'kB', 'MB', 'GB', 'TB'];
+
+  function bytesText(value) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    var scaled = value;
+    var unit = 0;
+    while (scaled >= 1000 && unit < UNITS.length - 1) {
+      scaled = scaled / 1000;
+      unit += 1;
+    }
+    var places = unit === 0 ? 0 : scaled < 100 ? 1 : 0;
+    return scaled.toFixed(places) + ' ' + UNITS[unit];
+  }
+
+  function downloadText(page) {
+    var size = bytesText(page.download_bytes);
+    return size === null ? 'downloads on first use' : 'downloads ' + size + ' on first use';
+  }
+
   function secondsText(value) {
     var whole = Math.floor(value);
     var minutes = Math.floor(whole / 60);
@@ -344,19 +376,20 @@
     var pages = state.pages;
     var ready = 0;
     for (var count = 0; count < pages.length; count += 1) {
-      if (pages[count].available) {
+      if (pages[count].standing === 'ready') {
         ready += 1;
       }
     }
     document.getElementById('models-stamp').textContent =
-      ready + ' of ' + pages.length + ' ready on this server';
+      ready + ' of ' + pages.length + ' ready now on this server';
     body.appendChild(
       el('p', {
         class: 'lead',
         text:
           'One page per image, video and audio model this server knows. Open one, ' +
-          'describe what you want, and press Generate. A model that is not ready ' +
-          'here says why.'
+          'describe what you want, and press Generate. A model this server does ' +
+          'not have yet downloads by itself the first time; one it cannot run ' +
+          'says why.'
       })
     );
 
@@ -406,9 +439,7 @@
     );
     block.appendChild(el('span', { class: 'chips' }, [chip(page.job_type, 'floor')]));
     block.appendChild(
-      el('span', { class: 'row-size' }, [
-        page.available ? chip('ready', 'ok') : chip('not ready', 'warn')
-      ])
+      el('span', { class: 'row-size' }, [standingChip(page)])
     );
     block.appendChild(
       el('span', { class: 'row-action' }, [
@@ -419,12 +450,22 @@
         }, ['Open'])
       ])
     );
-    if (!page.available) {
+    if (page.standing === 'unavailable') {
       block.appendChild(
         el('div', { class: 'row-span' }, [el('span', { class: 'note', text: page.reason })])
       );
     }
     return block;
+  }
+
+  function standingChip(page) {
+    if (page.standing === 'ready') {
+      return chip('ready', 'ok');
+    }
+    if (page.standing === 'download') {
+      return chip(downloadText(page), 'accent');
+    }
+    return chip('not available', 'warn');
   }
 
   function control(field) {
@@ -501,6 +542,15 @@
     }
     document.getElementById('models-stamp').textContent =
       page.job_type + ' · makes ' + page.makes;
+    if (page.standing === 'download') {
+      body.appendChild(
+        el('p', { class: 'note' }, [
+          standingChip(page),
+          ' ',
+          page.reason + '. You can press Generate now.'
+        ])
+      );
+    }
     if (!page.available) {
       body.appendChild(
         el('div', { class: 'refusal', role: 'status' }, [
@@ -578,6 +628,9 @@
     if (job.status === 'submitting') {
       return 'Sending the job…';
     }
+    if (job.status === 'installing') {
+      return installText(job.install) + ' (' + waited + ')';
+    }
     if (job.status === 'queued') {
       var where = job.position === null ? 'in line' : 'number ' + job.position +
         (job.of ? ' of ' + job.of : '') + ' in line';
@@ -603,6 +656,22 @@
         (job.message ? ': ' + job.message : '') + '. Press Generate to send it again.';
     }
     return '';
+  }
+
+  function installText(install) {
+    var said = install.ours
+      ? 'Downloading what this model needs first, once'
+      : 'Waiting for another install on the server to finish';
+    if (install.step) {
+      said += ': step ' + install.step.index + ' of ' + install.step.total + ', ' +
+        install.step.name;
+    }
+    var done = bytesText(install.bytesDone);
+    if (done !== null) {
+      var total = bytesText(install.bytesTotal);
+      said += ', ' + done + (total === null ? ' so far' : ' of ' + total);
+    }
+    return said + '. The job starts by itself after it';
   }
 
   function resultView(job) {
@@ -639,7 +708,7 @@
       generate.disabled = active;
     }
     if (cancelButton !== null) {
-      cancelButton.hidden = !(active && job.id !== null);
+      cancelButton.hidden = !cancellable(job);
     }
     if (job === null) {
       return;
@@ -648,16 +717,23 @@
     if (text) {
       var line = el('div', { class: 'progress-line', text: text, role: 'status' });
       if (active) {
-        var known = job.status === 'running' && job.fraction !== null;
+        var install = job.status === 'installing' ? job.install : null;
+        var known = install !== null
+          ? Boolean(install.bytesTotal) && install.bytesDone !== null
+          : job.status === 'running' && job.fraction !== null;
         var bar = el('div', {
           class: known ? 'bar' : 'bar indeterminate',
           role: 'progressbar',
           'aria-valuetext': text
         }, [el('span')]);
         if (known) {
-          bar.firstChild.style.width = (job.fraction * 100).toFixed(1) + '%';
+          var share = install !== null ? install.bytesDone / install.bytesTotal : job.fraction;
+          bar.firstChild.style.width = (share * 100).toFixed(1) + '%';
         }
-        box.appendChild(el('div', { class: 'progress' }, [line, bar]));
+        var detail = install !== null && install.line
+          ? el('div', { class: 'field-hint', text: install.line })
+          : null;
+        box.appendChild(el('div', { class: 'progress' }, [line, bar, detail]));
       } else {
         box.appendChild(el('div', { class: 'progress' }, [line]));
       }
@@ -700,10 +776,24 @@
       fraction: null,
       message: null,
       seed: null,
+      install: null,
       refusal: null,
       result: null,
-      lastEvent: 0,
       since: Date.now(),
+      ended: null
+    };
+  }
+
+  function newInstall(details) {
+    var step = details.step || null;
+    return {
+      taskId: details.task_id,
+      ours: details.reason !== 'task_busy',
+      message: details.message || null,
+      step: step && step.name ? step : null,
+      bytesDone: null,
+      bytesTotal: null,
+      line: details.line || null,
       ended: null
     };
   }
@@ -715,6 +805,12 @@
     renderJob();
   }
 
+  function pause(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
   async function generate(page, params) {
     stopStream();
     stopTimer();
@@ -723,22 +819,48 @@
     state.job = job;
     renderJob();
     state.timer = window.setInterval(renderJob, TICK_MS);
-    var receipt;
-    try {
-      receipt = await call('/v1/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: page.job_type,
-          model: page.id,
-          params: params,
-          queue: {}
-        })
-      });
-    } catch (refusal) {
-      job.refusal = refusal;
-      finish(job, 'refused');
-      return;
+    var receipt = null;
+    for (var round = 0; receipt === null; round += 1) {
+      try {
+        receipt = await call('/v1/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: page.job_type,
+            model: page.id,
+            params: params,
+            queue: {}
+          })
+        });
+      } catch (refusal) {
+        if (state.job !== job) {
+          return;
+        }
+        if (!isInstalling(refusal) || round >= INSTALL_ROUNDS) {
+          job.refusal = refusal;
+          finish(job, 'refused');
+          return;
+        }
+        job.status = 'installing';
+        job.install = newInstall(refusal.details);
+        renderJob();
+        var outcome = await followInstall(job, job.install);
+        if (state.job !== job) {
+          return;
+        }
+        if (outcome === 'cancelled') {
+          finish(job, 'cancelled');
+          return;
+        }
+        if (outcome !== 'done') {
+          job.refusal = outcome;
+          finish(job, 'failed');
+          return;
+        }
+        job.status = 'submitting';
+        job.install = null;
+        renderJob();
+      }
     }
     job.id = receipt.job_id;
     if (receipt.queued) {
@@ -751,39 +873,97 @@
     follow(job, page);
   }
 
-  async function follow(job, page) {
-    while (state.job === job && isActive(job) && job.status !== 'fetching') {
-      var ended = await followOnce(job, page);
-      if (ended || state.job !== job || !isActive(job)) {
-        return;
+  function isInstalling(refusal) {
+    return (
+      refusal instanceof Refusal &&
+      refusal.code === 'installing' &&
+      Boolean(refusal.details) &&
+      typeof refusal.details.task_id === 'string'
+    );
+  }
+
+  async function followInstall(job, install) {
+    var cursor = { last: 0 };
+    while (state.job === job) {
+      try {
+        await readEvents(taskEventsPath(install.taskId), cursor, function (name, data) {
+          applyInstallEvent(install, name, data);
+          renderJob();
+        });
+      } catch (refusal) {
+        if (refusal instanceof Refusal && refusal.status !== 0) {
+          return refusal;
+        }
       }
-      await new Promise(function (resolve) {
-        window.setTimeout(resolve, RECONNECT_MS);
-      });
+      if (install.ended !== null) {
+        return install.ended;
+      }
+      await pause(RECONNECT_MS);
+    }
+    return null;
+  }
+
+  function applyInstallEvent(install, name, data) {
+    if (name === 'step') {
+      install.step = data;
+      install.bytesDone = null;
+      install.bytesTotal = null;
+      install.line = null;
+    } else if (name === 'progress') {
+      if (data.line !== undefined) {
+        install.line = data.line;
+      } else {
+        install.bytesDone = data.bytes_done;
+        install.bytesTotal = data.bytes_total;
+      }
+    } else if (name === 'done') {
+      install.ended = 'done';
+    } else if (name === 'failed') {
+      install.ended = new Refusal(
+        0,
+        data.code || 'install_failed',
+        'installing what this model needs failed: ' +
+          (data.message || 'task ' + install.taskId + ' failed') +
+          '. Press Generate to try again',
+        null
+      );
+    } else if (name === 'cancelled') {
+      install.ended = 'cancelled';
     }
   }
 
-  async function followOnce(job, page) {
+  async function follow(job, page) {
+    var cursor = { last: 0 };
+    while (state.job === job && isActive(job) && job.status !== 'fetching') {
+      try {
+        await readEvents(jobEventsPath(job.id), cursor, function (name, data) {
+          if (state.job === job) {
+            applyEvent(job, page, name, data);
+            renderJob();
+          }
+        });
+      } catch (refusal) {
+        if (refusal instanceof Refusal && refusal.status !== 0) {
+          job.refusal = refusal;
+          finish(job, 'failed');
+          return;
+        }
+      }
+      if (state.job !== job || !isActive(job) || job.status === 'fetching') {
+        return;
+      }
+      await pause(RECONNECT_MS);
+    }
+  }
+
+  async function readEvents(path, cursor, onEvent) {
     var controller = new AbortController();
     state.stream = controller;
     var extra = { Accept: 'text/event-stream' };
-    if (job.lastEvent > 0) {
-      extra['Last-Event-ID'] = String(job.lastEvent);
+    if (cursor.last > 0) {
+      extra['Last-Event-ID'] = String(cursor.last);
     }
-    var response;
-    try {
-      response = await send(jobEventsPath(job.id), {
-        headers: extra,
-        signal: controller.signal
-      });
-    } catch (refusal) {
-      if (refusal instanceof Refusal && refusal.status !== 0) {
-        job.refusal = refusal;
-        finish(job, 'failed');
-        return true;
-      }
-      return false;
-    }
+    var response = await send(path, { headers: extra, signal: controller.signal });
     var reader = response.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
@@ -792,25 +972,29 @@
       try {
         chunk = await reader.read();
       } catch (dropped) {
-        return false;
+        return;
       }
       if (chunk.done) {
-        return !isActive(job) || job.status === 'fetching';
+        return;
       }
       buffer += decoder.decode(chunk.value, { stream: true });
       var cut = buffer.indexOf('\n\n');
       while (cut !== -1) {
-        onFrame(buffer.slice(0, cut), job, page);
+        var event = parseFrame(buffer.slice(0, cut));
         buffer = buffer.slice(cut + 2);
         cut = buffer.indexOf('\n\n');
+        if (event === null) {
+          continue;
+        }
+        if (event.id !== null) {
+          cursor.last = event.id;
+        }
+        onEvent(event.name, event.data);
       }
     }
   }
 
-  function onFrame(frame, job, page) {
-    if (state.job !== job) {
-      return;
-    }
+  function parseFrame(frame) {
     var name = null;
     var payload = null;
     var id = null;
@@ -842,13 +1026,13 @@
       }
     }
     if (name === null) {
-      return;
+      return null;
     }
-    if (id !== null && !isNaN(id)) {
-      job.lastEvent = id;
-    }
-    applyEvent(job, page, name, payload === null ? {} : payload);
-    renderJob();
+    return {
+      name: name,
+      id: id === null || isNaN(id) ? null : id,
+      data: payload === null ? {} : payload
+    };
   }
 
   function applyEvent(job, page, name, data) {
@@ -918,13 +1102,24 @@
     finish(job, 'done');
   }
 
+  function cancellable(job) {
+    if (!isActive(job)) {
+      return false;
+    }
+    if (job.status === 'installing') {
+      return job.install !== null && job.install.ours;
+    }
+    return job.id !== null;
+  }
+
   async function cancel() {
     var job = state.job;
-    if (!isActive(job) || job.id === null) {
+    if (!cancellable(job)) {
       return;
     }
+    var path = job.status === 'installing' ? taskPath(job.install.taskId) : jobPath(job.id);
     try {
-      await call(jobPath(job.id), { method: 'DELETE' });
+      await call(path, { method: 'DELETE' });
     } catch (refusal) {
       job.refusal = refusal;
       renderJob();

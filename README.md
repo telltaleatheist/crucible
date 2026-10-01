@@ -200,9 +200,12 @@ playground`) opens one page per image, video and audio model: Qwen-Image, LTX-2.
 Audio 3 sound effects and music, YuE2 songs, and whatever model a later build declares. Type
 a prompt, press **Generate**, and the picture, clip or sound plays on the page with a
 download link. A job sent while the server is busy waits its turn in the queue, and the
-page shows its place in line and then its progress. A model this server cannot run yet is
-listed with the reason, usually "pull it from the Catalog". The page is for trying a model
-out, with the few settings each one takes; editing, inpainting and voices stay in the apps.
+page shows its place in line and then its progress. A model this server does not have yet
+is still offered: the first Generate downloads its engine and weights (the page shows the
+download's progress) and then sends the job by itself. Only a model this machine cannot run
+(no build for its backend, a card too small, a gated model with no Hugging Face token) is
+listed with the reason instead. The page is for trying a model out, with the few settings
+each one takes; editing, inpainting and voices stay in the apps.
 
 `crucible init` refuses if a config already exists (`--force` replaces it and mints a
 **new** token, which every client then needs). It refuses outright if no backend is

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import desktop, jobenv, local, playground
+from crucible import desktop, installonsubmit, jobenv, local, playground, weights
 from crucible.api import UI_DIR
 from crucible.jobs import audio as audio_job
 from crucible.jobs import image as image_job
@@ -59,8 +60,18 @@ def test_the_playground_route_is_behind_the_token(client: TestClient) -> None:
     assert client.get("/v1/playground").status_code == 401
 
 
-def test_every_declared_model_has_a_page_and_says_why_it_cannot_run(
-    client: TestClient, auth: dict[str, str]
+@pytest.fixture
+def hf_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(weights.HF_TOKEN_ENV, "hf_test_token_not_real")
+
+
+@pytest.fixture
+def no_hf_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(weights.HF_TOKEN_ENV, raising=False)
+
+
+def test_every_declared_model_has_a_page_and_one_not_installed_downloads_on_first_use(
+    client: TestClient, auth: dict[str, str], hf_token: None
 ) -> None:
     pages = _pages(client, auth)
     declared = {
@@ -70,27 +81,38 @@ def test_every_declared_model_has_a_page_and_says_why_it_cannot_run(
     }
     assert set(pages) == declared
     for page in pages.values():
-        assert page["available"] is False
-        assert page["job_type"] in page["reason"] and "not enabled" in page["reason"]
+        assert page["standing"] == playground.DOWNLOAD and page["available"], page["id"]
+        assert "first Generate downloads" in page["reason"]
+        assert "engine" in page["reason"] and "weights" in page["reason"]
     assert pages[SFX]["makes"] == "sound effects" and pages[SFX]["media"] == "audio"
     assert pages["qwen-image-2.1"]["media"] == "image"
     assert pages["ltx-2.5-distilled"]["media"] == "video"
 
 
-def test_an_installed_model_is_ready_and_a_missing_one_names_its_pull(
+def test_a_gated_model_without_a_hugging_face_token_says_how_to_get_one(
+    client: TestClient, auth: dict[str, str], no_hf_token: None
+) -> None:
+    pages = _pages(client, auth)
+    assert pages[SFX]["standing"] == playground.UNAVAILABLE and not pages[SFX]["available"]
+    assert "gated" in pages[SFX]["reason"] and weights.HF_TOKEN_ENV in pages[SFX]["reason"]
+    assert pages[SONG]["standing"] == playground.DOWNLOAD
+    assert pages["qwen-image-2.1"]["standing"] == playground.DOWNLOAD
+
+
+def test_an_installed_model_is_ready_and_a_missing_one_downloads_its_weights(
     make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, hf_token: None,
 ) -> None:
     _audio_envs(home, FAKE_BACKEND.kind, monkeypatch)
     _weights(home, SFX, FAKE_BACKEND.kind)
     _weights(home, SONG, FAKE_BACKEND.kind)
     with make_client(enable_audio=True) as client:
         pages = _pages(client, auth)
-    assert pages[SFX]["available"] and pages[SFX]["reason"] is None
-    assert pages[SONG]["available"]
-    assert not pages[MUSIC]["available"]
-    assert f"crucible models pull {MUSIC}" in pages[MUSIC]["reason"]
-    assert "Catalog" in pages[MUSIC]["reason"]
+    assert pages[SFX]["standing"] == playground.READY and pages[SFX]["reason"] is None
+    assert pages[SONG]["standing"] == playground.READY
+    assert pages[MUSIC]["standing"] == playground.DOWNLOAD and pages[MUSIC]["available"]
+    assert "downloads its weights" in pages[MUSIC]["reason"]
+    assert "engine" not in pages[MUSIC]["reason"] and "Catalog" not in pages[MUSIC]["reason"]
 
     sfx = _fields(pages[SFX])
     assert list(sfx) == ["prompt", "duration_s", "steps", "format", "seed"]
@@ -105,25 +127,56 @@ def test_an_installed_model_is_ready_and_a_missing_one_names_its_pull(
     assert song["lyrics"]["required"]
 
 
-def test_a_model_with_weights_but_no_env_says_what_the_job_type_lacks(
+def test_a_model_with_weights_but_no_engine_downloads_the_engine_and_says_its_size(
     make_client: Callable[..., TestClient], home: Path, auth: dict[str, str]
 ) -> None:
     _weights(home, SFX, FAKE_BACKEND.kind)
     with make_client(enable_audio=True) as client:
         page = _pages(client, auth)[SFX]
-    assert not page["available"]
-    assert "crucible install audio" in page["reason"] or "env" in page["reason"]
+    assert page["standing"] == playground.DOWNLOAD
+    assert "the audio engine" in page["reason"] and "weights" not in page["reason"]
+    expected = installonsubmit._env_bytes("audio", None, FAKE_BACKEND.kind)
+    assert expected and page["download_bytes"] == expected
 
 
-def test_a_model_with_no_build_for_this_backend_says_so(
+def test_a_model_with_no_build_for_this_backend_cannot_be_generated(
     make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _audio_envs(home, FAKE_MAC_BACKEND.kind, monkeypatch)
     with make_client(enable_audio=True, backend=FAKE_MAC_BACKEND) as client:
         page = _pages(client, auth)[SONG]
-    assert not page["available"]
+    assert page["standing"] == playground.UNAVAILABLE and not page["available"]
     assert "mlx-darwin" in page["reason"] and page["fields"] == []
+
+
+def test_without_install_on_submit_nothing_missing_is_offered(
+    make_client: Callable[..., TestClient], home: Path, monkeypatch: pytest.MonkeyPatch,
+    hf_token: None,
+) -> None:
+    _audio_envs(home, FAKE_BACKEND.kind, monkeypatch)
+    _weights(home, SFX, FAKE_BACKEND.kind)
+    with make_client(enable_audio=True) as client:
+        state = client.app.state
+        config = replace(state.config, install_on_submit=False)
+        pages = {page["id"]: page for page in playground.pages(
+            config, state.backend, state.store.registry)}
+    assert pages[SFX]["standing"] == playground.READY
+    assert pages[MUSIC]["standing"] == playground.UNAVAILABLE
+    assert "install_on_submit" in pages[MUSIC]["reason"]
+    assert pages["qwen-image-2.1"]["standing"] == playground.UNAVAILABLE
+    assert "not enabled" in pages["qwen-image-2.1"]["reason"]
+
+
+def test_a_type_turned_off_with_its_engine_installed_is_not_offered(
+    make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch, hf_token: None,
+) -> None:
+    _audio_envs(home, FAKE_BACKEND.kind, monkeypatch)
+    with make_client() as client:
+        page = _pages(client, auth)[SONG]
+    assert page["standing"] == playground.UNAVAILABLE
+    assert "audio" in page["reason"]
 
 
 @pytest.mark.parametrize("backend_kind", BACKENDS)
@@ -210,7 +263,8 @@ def test_every_v1_path_the_playground_calls_is_a_route(client: TestClient) -> No
         r"/v1(?:/(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z0-9_.\-]+))+", _read(SCRIPT)
     )
     called = {re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "*", path) for path in found}
-    assert {"/v1/playground", "/v1/jobs", "/v1/jobs/*/events", "/v1/jobs/*/artifacts/*"} <= called
+    assert {"/v1/playground", "/v1/jobs", "/v1/jobs/*/events", "/v1/jobs/*/artifacts/*",
+            "/v1/tasks/*/events"} <= called
     assert sorted(called - known) == []
 
 
@@ -231,6 +285,17 @@ def test_the_playground_submits_queued_jobs() -> None:
     script = _read(SCRIPT)
     assert "queue: {}" in script
     assert "'crucible.token'" in script and "history.replaceState" in script
+
+
+def test_the_playground_follows_an_install_and_then_sends_the_job_again() -> None:
+    code = _strip_strings_and_comments(_read(SCRIPT))
+    script = _read(SCRIPT)
+    assert "refusal.code === 'installing'" in script
+    assert "details.task_id" in script
+    assert "followInstall(job, job.install)" in code
+    assert "taskEventsPath(install.taskId)" in code
+    assert "for (var round = 0; receipt === null; round += 1)" in code
+    assert "Catalog" not in script
 
 
 def test_the_door_keeps_the_section_it_was_asked_for(client: TestClient) -> None:
