@@ -267,6 +267,40 @@ export class CrucibleSessionClosed extends CrucibleRefused {
   }
 }
 
+/** The code {@link CrucibleFleetUnavailable} carries. */
+export const FLEET_UNAVAILABLE = 'fleet_unavailable';
+
+/** Why one server of a fleet could not give a {@link fleetSession} its session. */
+export interface FleetServerReason {
+  /** The server's base URL. */
+  readonly url: string;
+  /**
+   * `probe`: it could not serve the request at all (did not answer, no `queue.sessions`, the model
+   * not in its catalogue). `line`: it was asked, and its session ended before opening, or was still
+   * waiting when the fleet's `maxWaitS` ran out.
+   */
+  readonly stage: 'probe' | 'line';
+  /** A sentence a person reads. */
+  readonly reason: string;
+}
+
+/**
+ * No server of a fleet gave {@link fleetSession} a session: none could serve the request, or every
+ * one that could ended its session before it opened, or `maxWaitS` ran out first. `servers` names
+ * each server and why, in the order the fleet was given.
+ */
+export class CrucibleFleetUnavailable extends CrucibleError {
+  readonly code = FLEET_UNAVAILABLE;
+  readonly servers: readonly FleetServerReason[];
+
+  constructor(summary: string, servers: readonly FleetServerReason[]) {
+    super(
+      `${summary}: ` + servers.map((entry) => `${entry.url} (${entry.stage}): ${entry.reason}`).join('; '),
+    );
+    this.servers = servers;
+  }
+}
+
 /** The code a malformed pairing line is refused with. */
 export const INVALID_PAIRING = 'invalid_pairing';
 

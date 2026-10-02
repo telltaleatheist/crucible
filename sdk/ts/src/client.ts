@@ -910,17 +910,54 @@ export class CrucibleClient {
     const signal = given.signal;
     signal?.throwIfAborted();
 
-    const init: RequestInit = {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    };
-    if (signal !== undefined) init.signal = signal;
-    const ticket = await this.#json('/v1/queue/sessions', init, 'session');
+    const ticket = await this.#askForSession(payload, signal);
     const id = str(ticket, 'session_id', 'session');
     const status = oneOf(str(ticket, 'status', 'session'), QUEUE_SESSION_STATUSES, 'session.status');
+    if (signal !== undefined && signal.aborted) {
+      // Aborted the instant the ticket arrived: the session is not wanted, open or not.
+      await this.#leaveTheLine(id);
+      throw signal.reason;
+    }
     const cursor = status === 'open' ? 0 : await this.#untilOpen(id, onQueue, signal);
     return this.#bind(id, act, cursor);
+  }
+
+  /**
+   * `POST /v1/queue/sessions`, abortable without leaving anything behind. The request itself is
+   * never cut off: the server may already have made the session (and opened it, on an idle
+   * server), and only its ticket names it. So an abort rejects at once, and when the ticket
+   * arrives anyway the session it names is taken out of the line (or closed, if it opened).
+   */
+  async #askForSession(payload: Record<string, unknown>, signal: AbortSignal | undefined): Promise<Json> {
+    const asking = this.#json(
+      '/v1/queue/sessions',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      'session',
+    );
+    if (signal === undefined) return asking;
+    return new Promise<Json>((resolve, reject) => {
+      const abandon = (): void => {
+        reject(signal.reason);
+        void asking
+          .then((ticket) => this.#leaveTheLine(str(ticket, 'session_id', 'session')))
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', abandon, { once: true });
+      asking.then(
+        (ticket) => {
+          signal.removeEventListener('abort', abandon);
+          resolve(ticket);
+        },
+        (error: unknown) => {
+          signal.removeEventListener('abort', abandon);
+          reject(error);
+        },
+      );
+    });
   }
 
   /** Follow a session waiting in the line until it opens; the id of its `opened` event. */

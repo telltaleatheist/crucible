@@ -15,6 +15,15 @@ export type {
   WriteArtifactsOptions,
 } from './client.js';
 
+export { fleetSession } from './fleet.js';
+export type {
+  FleetDropout,
+  FleetPlace,
+  FleetQueueUpdate,
+  FleetSessionOptions,
+  FleetSessionResult,
+} from './fleet.js';
+
 export {
   ACCELERATOR_UNREADABLE,
   CAPABILITY_ROUTE_MISSING,
@@ -27,6 +36,7 @@ export {
   CrucibleCardHeld,
   CrucibleConfigError,
   CrucibleError,
+  CrucibleFleetUnavailable,
   CrucibleNotACrucible,
   CruciblePairingError,
   CruciblePairingFileError,
@@ -37,6 +47,7 @@ export {
   CrucibleSessionHeld,
   CrucibleUnreachable,
   CrucibleVersionError,
+  FLEET_UNAVAILABLE,
   INVALID_PAIRING,
   PAIRING_FILE_MALFORMED,
   ROUTE_BAD_MODEL,
@@ -65,6 +76,7 @@ export {
   VOICES_NEEDS_REFERENCE_UNKNOWN,
   isServerSpecificRefusal,
 } from './errors.js';
+export type { FleetServerReason } from './errors.js';
 
 export { PAIRING_SCHEME, parsePairing } from './pairing.js';
 export type { Pairing } from './pairing.js';
