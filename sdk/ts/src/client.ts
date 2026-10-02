@@ -126,6 +126,7 @@ import {
   type QueueChoice,
   type QueueEvent,
   type QueueItem,
+  type QueueWaitingFor,
   type QueueList,
   type QueuePosition,
   type QueueRemoved,
@@ -3077,6 +3078,21 @@ function readQueueItem(row: Json, where: string): QueueItem {
     expiresAt: str(row, 'expires_at', where),
     session: nullableStr(row, 'session', where),
     kind: oneOf(str(row, 'kind', where), QUEUE_KINDS, `${where}.kind`),
+    waitingFor: readWaitingFor(row, where),
+  };
+}
+
+function readWaitingFor(row: Json, where: string): QueueWaitingFor | null {
+  if (!('waiting_for' in row)) return null; // an older server never says
+  const found = nullableObject(row, 'waiting_for', where);
+  if (found === null) return null;
+  const at = `${where}.waiting_for`;
+  return {
+    code: str(found, 'code', at),
+    message: str(found, 'message', at),
+    details: nullableObject(found, 'details', at),
+    since: str(found, 'since', at),
+    nextCheckAt: str(found, 'next_check_at', at),
   };
 }
 
@@ -4628,6 +4644,7 @@ function readActivityJob(data: Json, where: string): ActivityJob {
     client: nullableStr(data, 'client', where),
     waitedS: optNum(data, 'waited_s', where),
     maxWaitS: optNum(data, 'max_wait_s', where),
+    waitingFor: readWaitingFor(data, where),
   };
 }
 

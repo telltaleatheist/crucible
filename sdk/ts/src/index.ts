@@ -216,6 +216,7 @@ export type {
   QueueChoice,
   QueueEvent,
   QueueItem,
+  QueueWaitingFor,
   QueueList,
   QueuePosition,
   QueueRemoved,
