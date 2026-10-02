@@ -41,6 +41,12 @@ if TYPE_CHECKING:
 ALL_JOB_TYPES: dict[str, str] = {spec.name: spec.family.name for spec in JOB_TYPE_SPECS}
 
 
+def _turned_on(config: Any, binding: Any) -> bool:
+    """Whether config.toml turns this binding's family on: the one reading of the
+    flag, for building the registry and for the door that follows the file."""
+    return bool(getattr(config, binding.spec.family.flag))
+
+
 def build_registry(
     config: "Config",
     backend: "Backend",
@@ -54,7 +60,7 @@ def build_registry(
     registry: dict[str, JobType] = {
         binding.spec.name: binding.build(wiring)
         for binding in REGISTRY_TABLE
-        if getattr(config, binding.spec.family.flag)
+        if _turned_on(config, binding)
     }
     _assert_every_type_implements_the_protocol(registry)
     return registry
@@ -214,9 +220,12 @@ def disabled_error(name: str, config: Any) -> ApiError:
     )
 
 
+_BINDINGS: dict[str, Any] = {binding.spec.name: binding for binding in REGISTRY_TABLE}
+
+
 def resolve(registry: dict[str, JobType], job_type: str, config: Any) -> JobType:
     plugin = registry.get(job_type)
-    if plugin is not None:
+    if plugin is not None and _turned_on(config, _BINDINGS[job_type]):
         return plugin
     if job_type in ALL_JOB_TYPES:
         raise disabled_error(job_type, config)
