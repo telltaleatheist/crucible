@@ -9,13 +9,15 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import httpx
 import pytest
 
-from crucible.protocol import CLIENT_HEADER, SESSION_HEADER
+from crucible.protocol import CLIENT_HEADER, QUEUE_TICKET_HEADER, SESSION_HEADER
+from crucible.queuesessions import STREAM_CLAIM_S
 
 from . import fake_narrator_engine
 from .live_server import run_job, serve
@@ -200,3 +202,96 @@ def test_another_client_cannot_open_a_stream_in_a_session_that_is_not_its_own(
                                     SESSION_HEADER: session["session_id"]})
         assert stolen.status_code == 409
         assert stolen.json()["error"]["code"] == "session_not_yours"
+
+
+def ticket_events(base: str, headers: dict[str, str], session_id: str) -> list[str]:
+    """The names on a queue session's own stream, read to its end (it has ended)."""
+    names: list[str] = []
+    with httpx.stream("GET", f"{base}/v1/queue/sessions/{session_id}/events",
+                      headers=headers, timeout=30.0) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if line.startswith("event: "):
+                names.append(line[len("event: "):])
+    return names
+
+
+def test_a_stream_that_asks_for_a_ticket_is_answered_at_once_and_claims_its_session(
+    stream_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    mine, theirs = as_client(auth, EXTENSION), as_client(auth, OTHER)
+    with stream_server() as (base, _app):
+        other = httpx.post(f"{base}/v1/queue/sessions", headers=theirs,
+                           json={"act": "analysis"}, timeout=30.0).json()
+        ticketed = {**mine, QUEUE_TICKET_HEADER: "1"}
+
+        ticket = open_stream(base, ticketed)
+        assert ticket.status_code == 202, ticket.text
+        body = ticket.json()
+        assert (body["status"], body["position"]) == ("queued", 1)
+        waiting = queue_session(base, auth, body["queue_session_id"])
+        assert (waiting["status"], waiting["act"], waiting["client"]) == (
+            "queued", "tts", EXTENSION)
+
+        httpx.delete(f"{base}/v1/queue/sessions/{other['session_id']}", headers=theirs,
+                     timeout=30.0)
+        wait_until(lambda: queue_session(base, auth, body["queue_session_id"])["status"]
+                   == "open", "the ticketed session to open")
+
+        opened = open_stream(base, {**ticketed, SESSION_HEADER: body["queue_session_id"]})
+        assert opened.status_code == 201, opened.text
+        stream = opened.json()
+        assert stream["queue_session_id"] == body["queue_session_id"]
+        assert stream["queue_session_opened_for_stream"] is True, (
+            "the second open claims the session the ticket named"
+        )
+
+        httpx.delete(f"{base}/v1/tts/stream/{stream['session_id']}", headers=mine,
+                     timeout=30.0)
+        ended = queue_session(base, auth, body["queue_session_id"])
+        assert (ended["status"], ended["reason"]) == ("closed", "client"), (
+            "a claimed session closes with its stream"
+        )
+        assert ticket_events(base, auth, body["queue_session_id"]) == [
+            "queued", "opened", "closed"]
+
+
+def test_a_ticket_is_only_an_answer_to_waiting(
+    stream_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    ticketed = {**as_client(auth, EXTENSION), QUEUE_TICKET_HEADER: "1"}
+    with stream_server() as (base, _app):
+        answer = open_stream(base, ticketed)
+        assert answer.status_code == 201, "a free server opens the stream at once"
+        assert answer.json()["queue_session_opened_for_stream"] is True
+
+        other = httpx.post(f"{base}/v1/queue/sessions", headers=as_client(auth, OTHER),
+                           json={"act": "analysis"}, timeout=30.0).json()
+        assert other["status"] == "queued", "the stream's session holds the server"
+        refused = open_stream(base, as_client(auth, "a-third"), queue=False)
+        assert refused.status_code == 409, "queue: false still refuses, ticket or not"
+        refused = open_stream(base, {**as_client(auth, "a-third"),
+                                     QUEUE_TICKET_HEADER: "1"}, queue=False)
+        assert refused.status_code == 409, refused.text
+
+
+def test_a_ticketed_session_nobody_claims_closes_soon_after_it_opens(
+    stream_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    mine, theirs = as_client(auth, EXTENSION), as_client(auth, OTHER)
+    with stream_server() as (base, app):
+        other = httpx.post(f"{base}/v1/queue/sessions", headers=theirs,
+                           json={"act": "analysis"}, timeout=30.0).json()
+        body = open_stream(base, {**mine, QUEUE_TICKET_HEADER: "1"}).json()
+        httpx.delete(f"{base}/v1/queue/sessions/{other['session_id']}", headers=theirs,
+                     timeout=30.0)
+        wait_until(lambda: queue_session(base, auth, body["queue_session_id"])["status"]
+                   == "open", "the ticketed session to open")
+        held = app.state.sessions.get(body["queue_session_id"])
+        assert held.idle_s == 900, "its own idle_s would hold the server fifteen minutes"
+        held.opened_at -= timedelta(seconds=STREAM_CLAIM_S)
+        wait_until(lambda: queue_session(base, auth, body["queue_session_id"])["status"]
+                   == "closed", "the unclaimed session to close")
+        ended = queue_session(base, auth, body["queue_session_id"])
+        assert ended["reason"] == "idle"
+        assert "not asked for again" in ended["message"]
