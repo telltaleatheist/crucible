@@ -1058,8 +1058,9 @@ class Residency:
                 print(
                     f"crucible: pid {each.pid} ({each.command}) from a previous "
                     "Crucible did not exit after SIGTERM and was left running; "
-                    f"stop it with `kill {each.pid}` (never -9). Loads are "
-                    "refused until it is gone",
+                    f"stop it with `kill {each.pid}` (never -9). Loads wait in the "
+                    "line until it is gone (one sent with \"queue\": false is "
+                    "refused accelerator_busy)",
                     file=sys.stderr,
                 )
                 continue

@@ -26,6 +26,16 @@ PROC = Path("/proc")
 
 FOREIGN_PROCESS_FLOOR_BYTES = 1 * GIB
 
+ACCELERATOR_BUSY = "accelerator_busy"
+WAITS_FOR_THE_CARD = frozenset({ACCELERATOR_BUSY})
+"""The guard's refusals that are weather, not misconfiguration: memory on the card is
+held by a process this Crucible does not own (another program, or an engine an earlier
+Crucible left running and has asked to stop). It frees when that process lets go, so a
+request that may wait keeps its place in the line and is checked again
+(crucible/jobs/line.py ``CARD_RECHECK_S``); one sent with ``"queue": false`` is refused.
+The card lacking room or a feature, or the model being larger than the host, are not
+here: no wait changes those."""
+
 LLAMA_SERVER_IMAGE = "llama-server"
 
 
@@ -615,8 +625,9 @@ def _refuse_holders(
             "start is still on the accelerator — "
         )
         closing = (
-            ". It is an engine child left behind by an earlier run; stop it and "
-            "load again. Crucible never evicts another process."
+            ". It is an engine child left behind by an earlier run; stop it, and a "
+            "request waiting in the line goes ahead once it has gone. Crucible never "
+            "evicts another process."
         )
     else:
         holders = [
@@ -630,7 +641,7 @@ def _refuse_holders(
         return
     raise ApiError(
         409,
-        "accelerator_busy",
+        ACCELERATOR_BUSY,
         *_left_behind(
             opening + "; ".join(app.describe() for app in holders) + closing,
             {"model": model_id, "processes": _process_rows(holders)},
@@ -652,7 +663,7 @@ def _refuse_stray(
         return
     raise ApiError(
         409,
-        "accelerator_busy",
+        ACCELERATOR_BUSY,
         *_left_behind(
             f"cannot load {model_id!r}: {gib_text(stray)} of the "
             f"{gib_text(state.total_bytes)} card is in use by a process "

@@ -4,7 +4,11 @@ A session (crucible/queuesessions.py) opens only on a free lane, with no TTS str
 when it must load its model, with no chat in flight. A session that names a ``model`` that
 is not resident has it loaded first by an ordinary ``load-model`` job attributed to the
 session (its client, ``client_ref: "opening session ses-…"``); the session reports ``open``
-only once that load is done, and a load that fails ends it ``load_failed``. Closing a
+only once that load is done, and a load that fails ends it ``load_failed`` — except a
+load that meets ``accelerator_busy`` (memory on the card held by a process Crucible does
+not own): the session keeps its place at the front, says who holds the card (a
+``waiting`` event), and tries again every ``CARD_RECHECK_S`` until its ``max_wait_s``
+runs out. Closing a
 session, for any reason, goes through ``SessionCloser.end`` so its waiting items leave the line
 and the card is settled the same way every time.
 """
@@ -15,8 +19,9 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
+from . import clock
 from .admission import KEEPS_WAITING, AdmissionContext, JobRequest, Refusal, admit
-from .callqueue import IN, WAIT, load_ended
+from .callqueue import IN, WAIT, card_was_held, load_ended, not_yet
 from .errors import ApiError
 from .inflight import InFlight
 from .jobs.base import DONE
@@ -60,6 +65,8 @@ async def _load_for(
         )
     if len(inflight) > 0:
         return WAIT
+    if not waiting.card_due(clock.now()):
+        return WAIT
     outcome = await admit(
         JobRequest(
             type="load-model",
@@ -73,8 +80,9 @@ async def _load_for(
     )
     if isinstance(outcome, Refusal):
         if outcome.error.code in KEEPS_WAITING:
-            return WAIT
+            return not_yet(ctx, waiting, outcome.error)
         return outcome.error
+    waiting.card_wait = None
     waiting.load_job = session.load_job = outcome.job.id
     waiting.loads += 1
     return WAIT
@@ -93,7 +101,11 @@ async def admit_session(
             return WAIT
         waiting.load_job = None
         if ended.status != DONE:
-            return _load_failed(session, ended)
+            held = card_was_held(ended)
+            if held is None:
+                return _load_failed(session, ended)
+            waiting.loads -= 1
+            return not_yet(ctx, waiting, held)
     if not ctx.store.lane_free or ctx.streaming():
         return WAIT
     if session.model is not None and not await _resident(ctx, session):

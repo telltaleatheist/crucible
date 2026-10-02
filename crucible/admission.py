@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
 
+from .accelerator import WAITS_FOR_THE_CARD
 from .config import Config
 from .errors import ApiError
 from .inputs import (
@@ -22,7 +23,12 @@ from .queuesessions import QueueSessions
 from .residency import Residency
 from .upstreamrecord import split_model
 
-KEEPS_WAITING = frozenset({"server_busy", "engine_in_use"})
+BUSY = frozenset({"server_busy", "engine_in_use"})
+KEEPS_WAITING = BUSY | WAITS_FOR_THE_CARD
+"""Refusals that mean "not yet": a request that may wait keeps (or takes) its place in
+the line instead of ending. ``BUSY`` waits for the lane or the engine; the card's
+``accelerator_busy`` waits for a process Crucible does not own to let go of memory, and
+is recorded on the waiting item and re-checked on a pace (WaitingLine.not_yet)."""
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,9 @@ def _resolved_plugin(request: JobRequest, ctx: AdmissionContext) -> Any:
 
 
 class _JoinTheLine(Exception):
-    pass
+    def __init__(self, why: ApiError | None = None) -> None:
+        super().__init__()
+        self.why = why
 
 
 def _unloads_what_is_being_cleared(
@@ -197,7 +205,7 @@ def _refuse_if_busy(request: JobRequest, ctx: AdmissionContext, model: str | Non
     except ApiError as busy:
         if not _waiting_instead(request, busy):
             raise
-        raise _JoinTheLine() from busy
+        raise _JoinTheLine(busy) from busy
     if request.queue is not None and chats_hold_the_card(
         request.type, ctx.chats_in_flight()
     ):
@@ -212,7 +220,7 @@ def _preflight_or_wait(
     except ApiError as refusal:
         if not _waiting_instead(request, refusal):
             raise
-        raise _JoinTheLine() from refusal
+        raise _JoinTheLine(refusal) from refusal
 
 
 async def _admit(request: JobRequest, ctx: AdmissionContext) -> Job:
@@ -230,12 +238,12 @@ async def _admit(request: JobRequest, ctx: AdmissionContext) -> Job:
             not_installed = _preflight_or_wait(request, ctx, plugin, model)
             if not_installed is None:
                 return _created(request, ctx, plugin, model)
-    except _JoinTheLine:
-        return _created(request, ctx, plugin, model, wait=True)
+    except _JoinTheLine as joining:
+        return _created(request, ctx, plugin, model, wait=True, why=joining.why)
     except ApiError as refusal:
         if not _waiting_instead(request, refusal):
             raise
-        return _created(request, ctx, plugin, model, wait=True)
+        return _created(request, ctx, plugin, model, wait=True, why=refusal)
     raise _install_for(request, ctx, model, not_installed)
 
 
@@ -273,11 +281,14 @@ def _onto_the_lane(waiting: Any, ctx: AdmissionContext) -> None:
 
 
 def _join(
-    request: JobRequest, ctx: AdmissionContext, job: Job, fresh: Any
+    request: JobRequest, ctx: AdmissionContext, job: Job, fresh: Any,
+    why: ApiError | None,
 ) -> None:
     line = ctx.store.line
     assert line is not None and request.queue is not None
-    line.join(job, replace(request, inputs={}), request.queue, fresh)
+    item = line.join(job, replace(request, inputs={}), request.queue, fresh)
+    if why is not None:
+        line.not_yet(item, why)
 
 
 def _created(
@@ -287,6 +298,7 @@ def _created(
     model: str | None,
     *,
     wait: bool = False,
+    why: ApiError | None = None,
 ) -> Job:
     store = ctx.store
     if wait:
@@ -326,7 +338,7 @@ def _created(
         store.journals.adopt(resuming, job.id)
         store.attach_journal(job, resuming.id, resumed=True)
     if wait:
-        _join(request, ctx, job, fresh)
+        _join(request, ctx, job, fresh, why)
     elif request.queue is not None:
         store.append_event(job, "started", {"waited_s": 0.0})
     return job

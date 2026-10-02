@@ -402,7 +402,7 @@ def test_a_busy_accelerator_is_refused_by_name(
         lambda: [ComputeApp(pid=4321, name="python3", used_bytes=9 * GIB)],
     )
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (23 * GIB, 24 * GIB))
-    response = submit(tts_client, auth, type="load-voice", model=VOICE)
+    response = submit(tts_client, auth, type="load-voice", model=VOICE, queue=False)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "accelerator_busy"
 

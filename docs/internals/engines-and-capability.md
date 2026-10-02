@@ -283,6 +283,18 @@ Crucible refuses by name and never evicts anybody else's process.
 - The guard runs four checks in order: foreign holders, unattributed bytes
   (`cuda-linux` only), then room (Mac: total less the allowance; everywhere
   else: free plus what Crucible's own resident engine would give back).
+- **`accelerator_busy` is weather; the rest is not** (2026-10-02, Owen's rule
+  that a transient fault is waited on with a sentence). The first two checks
+  (`_refuse_holders`, `_refuse_stray`, including a holder an earlier Crucible
+  left) refuse `accelerator_busy`, listed in `accelerator.WAITS_FOR_THE_CARD`
+  and so in `admission.KEEPS_WAITING`. Every card-loading job type runs the
+  guard in `preflight`, so admission is where it is met: a request that may
+  wait keeps its place in the line with the refusal recorded on the item
+  (`WaitingLine.not_yet` → `Waiting.card_wait`), and the pump checks again only
+  every `line.CARD_RECHECK_S` (5 s). `refuse_if_larger_than_host`,
+  `refuse_if_card_lacks`, the room checks (`insufficient_memory`) and
+  `accelerator_unreadable` stay failures by name. The guard's second run inside
+  `run` is not changed: a job that has started is never put back in the line.
 - `mlx-darwin`: a unified pool is **sized, not sampled** (Owen, 2026-09-22: *"it
   shouldnt put a gate on like that. theres actually plenty of memory
   available"*). The check uses total minus the allowance, the same as

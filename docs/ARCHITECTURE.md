@@ -254,7 +254,9 @@ missed that no client can know the *other* clients'. So the queue is opt-in and 
   open queue session go ahead of the line (below).
 - **Admission is unchanged and happens at the front.** `crucible/queuepump.py` offers the
   front of the line to `admission.admit_waiting`, the same checks as a fresh submit, when
-  the lane goes idle (and every second). `server_busy` and `engine_in_use` mean "not yet";
+  the lane goes idle (and every second). `server_busy`, `engine_in_use` and
+  `accelerator_busy` (the card held by a process Crucible does not own, re-checked every
+  5 s) mean "not yet";
   any other refusal ends the job `failed` with that refusal, never re-queued.
 - **`removed` is a terminal state, distinct from `failed`**, with a reason: `operator`
   (`DELETE /v1/queue/{id}`, the desktop app), `client` (`DELETE /v1/jobs/{id}`),
