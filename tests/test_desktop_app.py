@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,20 @@ ACTIVITY = {
                 "in_flight": [{"kind": "job", "id": "j1"}], "stream_session": None},
 }
 
+QUEUE = {"depth": 3, "items": [
+    {"position": 1, "job_id": "j3", "type": "tts", "model": "sigma", "client": "briefcase",
+     "submitted": "2026-10-01T12:00:00+00:00", "waited_s": 125.0, "max_wait_s": 3600,
+     "session": None, "kind": "job"},
+    {"position": 2, "job_id": "call-1", "type": "chat", "model": "qwen3.5-9b", "client": "foundry",
+     "submitted": "2026-10-01T12:01:00+00:00", "waited_s": 65.0, "max_wait_s": 600,
+     "session": "ses-1", "kind": "call"},
+    {"position": 3, "job_id": "ses-2", "type": "session", "model": None, "client": None,
+     "submitted": "2026-10-01T12:02:00+00:00", "waited_s": 5.0, "max_wait_s": 600,
+     "session": None, "kind": "session"},
+]}
+
+NOW = datetime(2026, 10, 1, 12, 2, 5, tzinfo=timezone.utc)
+
 CATALOG = {"rows": [
     {"kind": "model", "id": "qwen3.5-9b", "name": "Qwen 3.5 9B", "job_type": "llm", "installed": True,
      "installed_bytes": 18 * 2**30, "expected_bytes": None, "resident": True},
@@ -95,12 +110,13 @@ class FakeApi:
         self.docs = {
             "/v1/info": INFO, "/v1/activity": ACTIVITY, "/v1/capability": CAPABILITY,
             "/v1/catalog": CATALOG, "/v1/voices": VOICES, "/v1/tasks": {"tasks": []},
-            "/v1/settings": SETTINGS, "/v1/setup": SETUP,
+            "/v1/settings": SETTINGS, "/v1/setup": SETUP, "/v1/queue": QUEUE,
         }
         self.docs.update(docs or {})
         self.sent: list[tuple[str, str, Any]] = []
         self.answers: dict[tuple[str, str], Any] = {}
         self.frames: dict[str, list[dict]] = {}
+        self.followed: list[tuple[str, int]] = []
         self.forgotten = 0
 
     def get(self, path: str) -> Any:
@@ -118,7 +134,8 @@ class FakeApi:
             raise answer
         return answer
 
-    def follow(self, path: str):
+    def follow(self, path: str, last_event_id: int = 0):
+        self.followed.append((path, last_event_id))
         yield from self.frames.get(path, [])
 
     def forget(self) -> None:
@@ -167,7 +184,8 @@ def controller(api: FakeApi | None = None, host: FakeHost | None = None, answers
     def ask(question: str) -> bool:
         questions.append(question)
         return replies.pop(0) if replies else True
-    return Controller(api or FakeApi(), host or FakeHost(), ask, run=lambda work: work())
+    return Controller(api or FakeApi(), host or FakeHost(), ask, run=lambda work: work(),
+                      stream=lambda work: None, wall=lambda: NOW)
 
 
 def test_home_shows_the_machine_memory_what_is_loaded_and_the_running_job() -> None:
@@ -400,12 +418,17 @@ def test_the_queue_is_listed_apart_from_the_work_and_each_job_can_be_removed() -
     c.refresh_now("activity")
     view = c.view("activity")
     assert [work.cancel for work in view.work] == ["j1", "j2"]
-    (line,) = view.queue
-    assert (line.job_id, line.title, line.detail, line.waited) == (
-        "j3", "1. tts with sigma", "From briefcase", "waited 2 min")
+    job, call, session = view.queue
+    assert (job.job_id, job.kind, job.title, job.detail, job.waited) == (
+        "j3", "job", "1. tts with sigma", "From briefcase", "waited 2 min")
+    assert (call.kind, call.title, call.detail, call.waited) == (
+        "call", "2. chat with qwen3.5-9b",
+        "From foundry, in the open session (it runs first)", "waited 1 min")
+    assert (session.job_id, session.kind, session.title, session.waited) == (
+        "ses-2", "session", "3. Session", "waited 5 s")
     c.refresh_now("home")
     home = {fact.label: fact.value for fact in c.view("home").facts}
-    assert home["Queue"] == "1 job waiting; see Activity"
+    assert home["Queue"] == "1 job, 1 chat, 1 session waiting; see Activity"
     c.remove_queued("j3")
     assert api.sent == []
     c.remove_queued("j3")
@@ -458,13 +481,74 @@ def test_slow_documents_are_not_refetched_every_tick() -> None:
     reads: list[str] = []
     real_get = api.get
     api.get = lambda path: reads.append(path) or real_get(path)
-    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), clock=lambda: now[0])
+    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), clock=lambda: now[0],
+                   stream=lambda w: None)
     c.refresh_now("home")
     c.refresh_now("home")
-    assert reads.count("/v1/info") == 1 and reads.count("/v1/activity") == 2
+    assert reads.count("/v1/info") == 1 and reads.count("/v1/activity") == 1
     now[0] = 16.0
     c.refresh_now("home")
     assert reads.count("/v1/info") == 2
+    assert reads.count("/v1/activity") == 1, "what the event stream covers is never polled"
+
+
+def test_the_event_stream_replaces_polling_and_rereads_only_what_an_event_names() -> None:
+    api = FakeApi()
+    reads: list[str] = []
+    real_get = api.get
+    api.get = lambda path: reads.append(path) or real_get(path)
+    started: list = []
+    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), stream=started.append,
+                   wall=lambda: NOW)
+    c.refresh_now("activity")
+    c.refresh_now("activity")
+    assert len(started) == 1, "one stream for the window's life"
+    snapshot_activity = {**ACTIVITY, "running": [{**ACTIVITY["running"][0], "progress": 0.1}]}
+    api.frames["/v1/events"] = [
+        {"id": 7, "event": "snapshot", "data": {"gap": False, "topics": [],
+                                               "activity": snapshot_activity, "queue": QUEUE,
+                                               "tasks": []}},
+        {"id": 8, "event": "job.progress", "data": {"job_id": "j1", "fraction": 0.5,
+                                                   "message": "halfway"}},
+    ]
+    reads.clear()
+    assert c.follow_events() is True
+    assert reads == [], "a snapshot and a progress tick need no read"
+    assert c.view("activity").work[0].fraction == 0.5
+    assert c.last_event_id == 8
+    api.frames["/v1/events"] = [{"id": 9, "event": "queue.added", "data": {"kind": "session"}},
+                                {"id": 10, "event": "settings.written", "data": {}}]
+    c.follow_events()
+    assert api.followed[-1] == ("/v1/events", 8), "a reconnect resumes after the last id"
+    assert sorted(set(reads)) == ["/v1/activity", "/v1/queue"]
+    reads.clear()
+    c.refresh_now("settings")
+    assert reads.count("/v1/settings") == 1, "settings.written is read when settings shows"
+    c.refresh_now("settings")
+    assert reads.count("/v1/settings") == 1
+
+
+def test_a_gap_snapshot_rereads_what_no_event_covers() -> None:
+    api = FakeApi()
+    reads: list[str] = []
+    real_get = api.get
+    api.get = lambda path: reads.append(path) or real_get(path)
+    c = Controller(api, FakeHost(), lambda q: True, run=lambda w: w(), stream=lambda w: None)
+    c.refresh_now("home")
+    api.frames["/v1/events"] = [{"id": 3, "event": "snapshot", "data": {
+        "gap": True, "topics": [], "activity": ACTIVITY, "queue": QUEUE, "tasks": []}}]
+    reads.clear()
+    c.follow_events()
+    c.refresh_now("home")
+    assert "/v1/info" in reads and "/v1/activity" not in reads
+
+
+def test_the_open_session_counts_down_to_its_idle_close() -> None:
+    activity = {**ACTIVITY, "session": {**ACTIVITY["session"], "in_flight": [],
+                                        "idle_deadline": "2026-10-01T12:04:05+00:00"}}
+    c = controller(FakeApi({"/v1/activity": activity}))
+    c.refresh_now("activity")
+    assert "it closes in 2 min unless bookforge sends more" in c.view("activity").session.detail
 
 
 class Envelope(BaseHTTPRequestHandler):

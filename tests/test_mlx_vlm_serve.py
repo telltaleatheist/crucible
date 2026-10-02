@@ -18,9 +18,8 @@ from PIL import Image
 
 from crucible import decide as decide_core
 from crucible import pages
-from crucible.engines import EngineError, find_free_port
+from crucible.engines import EngineError, find_free_port, mlx_vlm_serve
 from crucible.engines.mlx_vlm import SERVE_SCRIPT, MlxVlmEngine
-from crucible.engines import mlx_vlm_serve
 
 FAKE = Path(__file__).resolve().parent / "fake_mlx_vlm"
 

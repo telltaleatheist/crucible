@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from crucible import VERSION, protocol
-from crucible import protocol
 from crucible.cli import api_cmd, common
 from crucible.client import connection, errors, pair, transport
 

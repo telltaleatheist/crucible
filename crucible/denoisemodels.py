@@ -11,7 +11,13 @@ from . import weights
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .config import Config
 from .errors import CrucibleError
-from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, SHA256_PATTERN, check_table
+from .tomltable import (
+    HF_REPO_PATTERN,
+    MODEL_ID_PATTERN,
+    REVISION_PATTERN,
+    SHA256_PATTERN,
+    check_table,
+)
 
 DENOISE_DIR_ENV = "CRUCIBLE_DENOISE_DIR"
 

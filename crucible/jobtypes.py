@@ -18,7 +18,6 @@ from .classnames import AUDIO_CLASSES, CLASS_NAMES, ROUTABLE_CLASSES, SEGMENT_CL
 @dataclass(frozen=True)
 class CardEffect:
     makes_resident: str | None = None
-    reuses_what_it_names: bool = False
     takes_off: str | None = None
 
 
@@ -155,11 +154,11 @@ LOAD_VOICE = JobTypeSpec(
 )
 UNLOAD_VOICE = JobTypeSpec("unload-voice", TTS, CardEffect(takes_off=KIND_TTS))
 TTS_JOB = JobTypeSpec(
-    "tts", TTS, CardEffect(makes_resident=KIND_TTS, reuses_what_it_names=True)
+    "tts", TTS, CardEffect(makes_resident=KIND_TTS)
 )
 ASR_JOB = JobTypeSpec("asr", ASR, journal_identity=True)
 ALIGN_JOB = JobTypeSpec(
-    "align", ALIGN, CardEffect(makes_resident=KIND_ALIGN, reuses_what_it_names=True)
+    "align", ALIGN, CardEffect(makes_resident=KIND_ALIGN)
 )
 UNLOAD_ALIGNER = JobTypeSpec("unload-aligner", ALIGN, CardEffect(takes_off=KIND_ALIGN))
 ALIGN_LONGFORM = JobTypeSpec("align-longform", ALIGN)
@@ -167,33 +166,33 @@ RVC_JOB = JobTypeSpec("rvc", RVC)
 DENOISE_JOB = JobTypeSpec(
     "denoise",
     DENOISE,
-    CardEffect(makes_resident=KIND_DENOISE, reuses_what_it_names=True),
+    CardEffect(makes_resident=KIND_DENOISE),
 )
 UNLOAD_DENOISER = JobTypeSpec(
     "unload-denoiser", DENOISE, CardEffect(takes_off=KIND_DENOISE)
 )
 IMAGE_JOB = JobTypeSpec(
-    "image", IMAGE, CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True)
+    "image", IMAGE, CardEffect(makes_resident=KIND_IMAGE)
 )
 UNLOAD_IMAGE = JobTypeSpec("unload-image", IMAGE, CardEffect(takes_off=KIND_IMAGE))
 LOAD_IMAGE = JobTypeSpec(
     "load-image",
     IMAGE,
-    CardEffect(makes_resident=KIND_IMAGE, reuses_what_it_names=True),
+    CardEffect(makes_resident=KIND_IMAGE),
     leaves_it_resident=True,
 )
 AUDIO_JOB = JobTypeSpec(
-    "audio", AUDIO, CardEffect(makes_resident=KIND_AUDIO, reuses_what_it_names=True)
+    "audio", AUDIO, CardEffect(makes_resident=KIND_AUDIO)
 )
 UNLOAD_AUDIO = JobTypeSpec("unload-audio", AUDIO, CardEffect(takes_off=KIND_AUDIO))
 LOAD_AUDIO = JobTypeSpec(
     "load-audio",
     AUDIO,
-    CardEffect(makes_resident=KIND_AUDIO, reuses_what_it_names=True),
+    CardEffect(makes_resident=KIND_AUDIO),
     leaves_it_resident=True,
 )
 SEGMENT_JOB = JobTypeSpec(
-    "segment", SEGMENT, CardEffect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True)
+    "segment", SEGMENT, CardEffect(makes_resident=KIND_SEGMENT)
 )
 UNLOAD_SEGMENT = JobTypeSpec(
     "unload-segment", SEGMENT, CardEffect(takes_off=KIND_SEGMENT)
@@ -201,17 +200,17 @@ UNLOAD_SEGMENT = JobTypeSpec(
 LOAD_SEGMENT = JobTypeSpec(
     "load-segment",
     SEGMENT,
-    CardEffect(makes_resident=KIND_SEGMENT, reuses_what_it_names=True),
+    CardEffect(makes_resident=KIND_SEGMENT),
     leaves_it_resident=True,
 )
 VIDEO_JOB = JobTypeSpec(
-    "video", VIDEO, CardEffect(makes_resident=KIND_VIDEO, reuses_what_it_names=True)
+    "video", VIDEO, CardEffect(makes_resident=KIND_VIDEO)
 )
 UNLOAD_VIDEO = JobTypeSpec("unload-video", VIDEO, CardEffect(takes_off=KIND_VIDEO))
 LOAD_VIDEO = JobTypeSpec(
     "load-video",
     VIDEO,
-    CardEffect(makes_resident=KIND_VIDEO, reuses_what_it_names=True),
+    CardEffect(makes_resident=KIND_VIDEO),
     leaves_it_resident=True,
 )
 

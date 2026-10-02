@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import venv
@@ -26,9 +27,7 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
 
 
 def _require_build() -> None:
-    try:
-        import build
-    except ImportError:
+    if importlib.util.find_spec("build") is None:
         pytest.skip(
             "`python -m build` is not installed in this interpreter. The wheel "
             "test needs it and CI installs it; this is a missing developer "
@@ -73,6 +72,7 @@ def wheel_names(built_wheel: Path) -> list[str]:
 
 def test_core_wheel_installs_mlx_for_apple_silicon_backend_detection(built_wheel: Path) -> None:
     from email import message_from_bytes
+
     from packaging.requirements import Requirement
     with zipfile.ZipFile(built_wheel) as bundle:
         metadata = next(name for name in bundle.namelist() if name.endswith(".dist-info/METADATA"))

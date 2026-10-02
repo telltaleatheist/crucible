@@ -12,8 +12,8 @@ from typing import Any, Callable
 from . import catalog, installonsubmit, weights
 from .audiomodels import KIND_WORDS, MUSIC, SFX, SONG
 from .jobenv import INSTALLER_FOR
-from .jobs import disabled_error
 from .jobs import audio as audio_job
+from .jobs import disabled_error
 from .jobs import image as image_job
 from .jobs import video as video_job
 from .jobs.audio.params import FORMATS

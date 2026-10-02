@@ -11,16 +11,17 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, residency as residency_module, tasks, weights
+from crucible import accelerator, jobenv, tasks
+from crucible import residency as residency_module
 from crucible.accelerator import ComputeApp
-from crucible.memorybudget import GIB
-from crucible.jobs import ALL_JOB_TYPES
 from crucible.cardkinds import KIND_LLM, KIND_TTS
+from crucible.jobs import ALL_JOB_TYPES
+from crucible.memorybudget import GIB
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 from crucible.residency import ResidentVoice
 from crucible.settle import SETTLEMENT_HOLDER
-from crucible.voicerepo import REPO_MANIFEST_NAME
-from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 from crucible.voicecatalog import load_all_voices, load_voice
+from crucible.voicerepo import REPO_MANIFEST_NAME
 
 from .conftest import (
     FAKE_BACKEND,

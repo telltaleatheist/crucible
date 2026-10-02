@@ -6,7 +6,6 @@ from typing import Callable
 
 from ..platform.paths import LOG_ROLL_BYTES
 
-
 _ASCII_SPELLING = str.maketrans(
     {
         "—": "-",

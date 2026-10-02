@@ -8,8 +8,8 @@ from typing import Callable
 
 from ..atomicjson import write_json
 from ..platform.errors import HostError
-from .state import MoveState
 from ..platform.wsl_table import WSL_OUTCOME_NAME, WSL_STATES
+from .state import MoveState
 
 OUTCOME_NAME = WSL_OUTCOME_NAME
 

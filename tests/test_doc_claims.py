@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 CLIENT_TS = ROOT / "sdk" / "ts" / "src" / "client.ts"
 PHASE15 = ROOT / "docs" / "history" / "PHASE15-HOST.md"
@@ -72,8 +71,8 @@ def test_the_reversal_is_written_down_where_a_reader_will_look() -> None:
 
 
 def test_spell_out_names_the_total_and_each_of_its_three_terms() -> None:
-    from crucible.fit import Candidate, WorkingContext
     from crucible.capabilitywords import spell_out
+    from crucible.fit import Candidate, WorkingContext
     from crucible.manifests import MemoryTerms
 
     gib = 1024 ** 3

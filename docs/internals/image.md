@@ -17,7 +17,7 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
 - One family, `image` (`[jobs] enable_image`, default off; an older config without the key
   reads as off and a rewriter that does not name it keeps what the file says). Three types:
   `image` (makes the generator resident and reuses it, like `align`), `load-image` (loads it
-  and leaves it resident, like `load-voice`; its card effect reuses what it names, so warming
+  and leaves it resident, like `load-voice`; warming
   the model that is already resident is a no-op) and `unload-image`
   (`UnloadJobType`, `generator_not_resident`). `load-model` stays text-only: its card effect
   makes an LLM resident and its manifests are the LLM catalog.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Sequence
 
-from .platform.wsl_table import CRUCIBLE_DISTRO, RELEASE_REPOSITORY
+from .platform.wsl_table import CRUCIBLE_DISTRO
 
 WSL_EXE = "wsl.exe"
 

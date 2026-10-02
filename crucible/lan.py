@@ -15,7 +15,7 @@ from .errors import CrucibleError
 from .platform import lan_door
 from .platform.paths import ENGINE_PORT
 from .platform.powershell import POWERSHELL, quote, runas_argv
-from .platform.runner import ProcessRunner, RunResult, Runner
+from .platform.runner import ProcessRunner, Runner, RunResult
 from .sharing import PairedEngine
 
 RECORD = "landoor.json"

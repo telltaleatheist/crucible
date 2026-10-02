@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 
+
 def _stop_engine_module_shadowing_mlx_vlm_library() -> None:
     engines_dir = os.path.dirname(os.path.realpath(__file__))
     sys.path[:] = [

@@ -30,13 +30,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
         request: Request,
         topics: str | None = Query(
             None,
-            description="Comma-separated topics to receive (job, queue, card, chat, task, "
-            "settings, server). Leave it out for all; `server` is always sent.",
+            description="Comma-separated topics to receive (job, queue, session, card, chat, "
+            "task, settings, server). Leave it out for all; `server` is always sent.",
         ),
     ) -> StreamingResponse:
         """Every change on this server as one SSE stream, so an app need not poll: a
-        `snapshot` first, then one event per change (jobs, the queue, the card, chats in
-        flight, tasks, settings, the server stopping). Reconnect with Last-Event-ID to
+        `snapshot` first, then one event per change (jobs, the queue, queue sessions, the
+        card, chats in flight, tasks, settings, the server stopping). Reconnect with Last-Event-ID to
         resume; the event names and payloads are in docs/EVENTS.md.
         """
         wanted = parse_topics(topics)

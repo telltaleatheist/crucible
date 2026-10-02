@@ -14,14 +14,23 @@ import pytest
 from crucible import wsl
 from crucible.host import app as app_module
 from crucible.host import catalog as catalog_module
+from crucible.host import (
+    cleanup_record,
+    installer,
+    log,
+    move_policy,
+    outcome,
+    pairing_sync,
+    presence,
+    wslstate,
+)
 from crucible.host import controller_door as door_module
-from crucible.host import cleanup_record, installer, log, move_policy, outcome, pairing_sync, presence, wslstate
 from crucible.host.catalog import CatalogRefusal, Subject
 from crucible.host.errors import HOST_ERROR_CODES
 from crucible.host.info import OWNER_ON_THE_WIRE
 from crucible.host.state import Distro, Engine, Owner
-from crucible.platform import lan_door as landoor
 from crucible.platform import hostconfig, paths, startup
+from crucible.platform import lan_door as landoor
 from crucible.platform.errors import HostError
 from crucible.platform.runner import RunResult
 from crucible.platform.wsl_table import CRUCIBLE_DISTRO, WSL_STATE_CODES, WSL_STATES
@@ -1869,6 +1878,7 @@ def test_malformed_installed_flag_cannot_authorize_source_deletion() -> None:
 
 def test_stopped_catalog_resumes_partial_deletion_through_the_weights_owner(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     from crucible import catalog
     residue = tmp_path / "fixture-remaining-weight"
     residue.write_bytes(b"weight")
@@ -2076,7 +2086,7 @@ def test_the_guest_is_reached_with_exec_and_the_body_is_one_argument() -> None:
     assert "-f" not in argv, "-f would hide the refusal body, and the CODE is the point"
     assert '{"type":"pull","kind":"model","id":"a"}' in argv
     assert argv[-1] == "http://127.0.0.1:7100/v1/tasks"
-    assert f"Authorization: Bearer tok" in argv
+    assert "Authorization: Bearer tok" in argv
 
 
 def test_the_guest_port_reads_the_status_curl_appended() -> None:
@@ -2122,7 +2132,6 @@ def test_the_windows_port_deletes_through_3_5as_route(monkeypatch) -> None:
         return Response()
 
     import urllib.request as urllib_request
-
     from types import SimpleNamespace
     def opener(handler):
         assert handler.proxies == {}, "local migration credentials must not use ambient HTTP proxies"
@@ -2782,6 +2791,7 @@ def test_a_system_unit_guest_is_brought_up_by_its_own_manager(
 
 def test_an_ownerless_host_does_not_blame_its_config(host_log: log.HostLog) -> None:
     from types import SimpleNamespace
+
     from crucible.host.pairing_sync import engine_token_detail
 
     context = SimpleNamespace(
@@ -2957,6 +2967,7 @@ def test_the_restart_of_a_system_unit_guest_goes_through_root(
 
 def test_children_start_in_crucible_home_not_in_the_installation(monkeypatch) -> None:
     import subprocess as sp
+
     from crucible.platform.runner import ProcessRunner
 
     seen: dict[str, object] = {}
@@ -3870,6 +3881,7 @@ def _stepping_clock(step: float) -> Callable[[], float]:
 def test_installwatch_starts_the_controller_before_it_gives_the_sign_in_advice(tmp_path: Path, monkeypatch) -> None:
     import io
     from datetime import datetime, timezone
+
     from crucible.host import installwatch
 
     monkeypatch.setattr(installwatch, "door_status", lambda token: None)
@@ -3892,6 +3904,7 @@ def test_installwatch_starts_the_controller_before_it_gives_the_sign_in_advice(t
 def test_installwatch_names_the_log_when_the_controller_cannot_be_started(tmp_path: Path, monkeypatch) -> None:
     import io
     from datetime import datetime, timezone
+
     from crucible.host import installwatch
 
     monkeypatch.setattr(installwatch, "door_status", lambda token: None)
@@ -3907,6 +3920,7 @@ def test_installwatch_names_the_log_when_the_controller_cannot_be_started(tmp_pa
 def _watch_with_no_door(home: Path, monkeypatch) -> str:
     import io
     from datetime import datetime, timezone
+
     from crucible.host import installwatch
 
     monkeypatch.setattr(installwatch, "door_status", lambda token: None)

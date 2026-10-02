@@ -11,6 +11,7 @@ from ..client import transport
 from ..client.connection import Connection
 from ..config import config_path, crucible_home
 from ..errors import ConfigError
+from ..tomltable import REVISION_PATTERN
 from ..voicecatalog import (
     check_updates,
     following_pin,
@@ -19,7 +20,6 @@ from ..voicecatalog import (
     pull_target,
     refresh_ref,
 )
-from ..tomltable import REVISION_PATTERN
 from ..voicerefs import VoiceRefError, resolve_ref
 from ..voices import VoiceError
 from . import common

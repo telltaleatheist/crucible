@@ -9,7 +9,13 @@ from typing import Any
 
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .errors import CrucibleError
-from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, SHA256_PATTERN, check_table
+from .tomltable import (
+    HF_REPO_PATTERN,
+    MODEL_ID_PATTERN,
+    REVISION_PATTERN,
+    SHA256_PATTERN,
+    check_table,
+)
 
 RVC_DIR_ENV = "CRUCIBLE_RVC_DIR"
 

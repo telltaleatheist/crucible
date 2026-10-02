@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -10,39 +11,38 @@ import pytest
 
 from crucible import procgroup
 from crucible.engines import EngineError, NarratorEngine, build_voice_engine
-from crucible.narratorengines import NARRATOR_ENGINES
 from crucible.engines import base as engine_base
 from crucible.engines.base import SubprocessEngine as BaseEngine
 from crucible.engines.mlx_lm import MlxLmEngine
 from crucible.engines.narrator import (
+    CONTEXT_LENGTH_VARIABLE,
     ENGINE_VARIABLE,
-    STACK_ENV_PREFIX_VARIABLE,
-    env_prefix_variable_for,
+    HIGGS_V3_MLX_WEIGHTS_GB,
     MAX_NUM_SEQS_VARIABLE,
     MEM_FRACTION_VARIABLE,
-    CONTEXT_LENGTH_VARIABLE,
-    HIGGS_V3_MLX_WEIGHTS_GB,
     MLX_BATCH_VARIABLE,
     MLX_CACHE_LIMIT_VARIABLE,
     MLX_MEM_BUDGET_VARIABLE,
     MLX_TIERS,
     MODULE,
+    STACK_ENV_PREFIX_VARIABLE,
     STACK_VARIABLE,
     EngineWouldNotStop,
+    env_prefix_variable_for,
     higgs_env_prefix,
     mlx_render_profile,
 )
 from crucible.engines.vllm import VllmEngine
 from crucible.errors import JobCancelled
-from crucible.ttsstream import STREAM_BATCH_WIDTH
+from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING, NARRATOR_ENGINES
 from crucible.narratorvoices import (
     DOCUMENT_VARIABLE,
     MLX_MODEL_VARIABLE,
     VoicesDocument,
     write_document,
 )
+from crucible.ttsstream import STREAM_BATCH_WIDTH
 from crucible.voices import parse_voice
-from crucible.narratorengines import NARRATOR_ENGINE_SAMPLING
 
 from .conftest import end_process_tree
 from .fake_narrator_engine import FAKE_NARRATOR, FakeNarratorEngine
@@ -1132,9 +1132,8 @@ LINUX_PROC = pytest.mark.skipif(
 )
 
 
-def _launched_server(owner: int, *, deaf: bool) -> "subprocess.Popen[bytes]":
+def _launched_server(owner: int, *, deaf: bool) -> subprocess.Popen[bytes]:
     import os
-    import subprocess
 
     from crucible.engines.narrator import OWNER_MARKER_VARIABLE
 

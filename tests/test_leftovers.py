@@ -18,8 +18,8 @@ from crucible.jobs.base import TERMINAL_STATES as JOB_TERMINAL_STATES
 from crucible.jobs.tts.common import VOICE_ROW_FIELDS, voice_row
 from crucible.tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
 from crucible.voicecard import CardError, export_manifest
-from crucible.voicerepo import REPO_MANIFEST_NAME, parse_repo_manifest
 from crucible.voicecatalog import load_voice
+from crucible.voicerepo import REPO_MANIFEST_NAME, parse_repo_manifest
 from crucible.voices import (
     MANIFEST_ENGINE,
     MANIFEST_OVERRIDE,

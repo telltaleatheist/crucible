@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import weights
-from crucible.manifests import load_manifest
 from crucible.protocol import CLIENT_HEADER
 
 from .conftest import FAKE_BACKEND

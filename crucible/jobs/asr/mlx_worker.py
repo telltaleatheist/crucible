@@ -94,7 +94,6 @@ def check_prompt_length(model_dir: str, dtype, prompt: str) -> "str | None":
 
 
 def detect_language(model_dir: str, window, dtype) -> tuple[str, float]:
-    import mlx.core as mx
     from mlx_whisper.audio import N_FRAMES, log_mel_spectrogram, pad_or_trim
     from mlx_whisper.transcribe import ModelHolder
 

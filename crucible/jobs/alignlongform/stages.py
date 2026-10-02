@@ -7,7 +7,6 @@ from typing import Any, Callable
 
 from ... import workers
 from ...alignmodels import AlignBackendSpec
-
 from ..align import start_aligner_session
 from ..asr import OVERLAP_SECONDS, WINDOW_SECONDS
 

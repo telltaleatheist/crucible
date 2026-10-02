@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ... import asrplan, jobenv, weights, workers
-from ...atomicjson import write_json
-from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError
-from ...alignmodels import load_align_manifest
+from ...alignmodels import AlignBackendSpec, AlignManifest, AlignManifestError, load_align_manifest
 from ...asrmodels import (
     MLX_AUDIO_ENGINE,
     QWEN_ASR_TORCH_ENGINE,
@@ -18,15 +16,15 @@ from ...asrmodels import (
     VLLM_ENGINE,
     AsrBackendSpec,
 )
+from ...atomicjson import write_json
+from ...cardfacts import card_for
 from ...config import Config
 from ...engines.vllm import ENVIRONMENT as VLLM_ENVIRONMENT
 from ...enginespec import run_dtype
-from ...cardfacts import card_for
 from ...errors import ApiError, JobError
 from ...memorybudget import available_bytes
-from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S
+from ..align import QWEN3_LANGUAGES, QWEN3_MAX_AUDIO_S, start_aligner_session
 from ..align import device_for as align_device_for
-from ..align import start_aligner_session
 from ..base import Job, JobContext
 from . import loopguard, speechonly
 from .document import progress_decoding, transcript_document, worker_failed

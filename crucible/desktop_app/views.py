@@ -154,13 +154,15 @@ def draw_queue(page: Page, view: screens.ActivityView, actions: Actions) -> None
                     kind="danger", enabled=place not in actions.c.busy)
         notice_for(page, below, actions, place)
     if not view.queue and view.session is None:
-        page.empty(box, "Nothing is waiting. Jobs that apps send while Crucible is busy wait here.")
+        page.empty(box, "Nothing is waiting. Jobs, chats and app sessions that arrive while "
+                   "Crucible is busy wait here.")
     for line in view.queue:
         _left, right, below = page.row(box, line.title, line.detail)
         place = f"queue:{line.job_id}"
         page.button(right, "Remove", lambda job=line.job_id: actions.c.remove_queued(job),
                     kind="danger", enabled=place not in actions.c.busy)
         page.tag(right, line.waited, screens.IDLE)
+        page.tag(right, screens.KIND_WORDS.get(line.kind, line.kind), screens.IDLE)
         notice_for(page, below, actions, place)
 
 

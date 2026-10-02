@@ -12,7 +12,6 @@ from crucible import API_VERSION, VERSION
 from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
 from .test_tts_api import VOICE
 
-
 PAYLOAD = {"x.bin": base64.b64encode(b"activity").decode("ascii")}
 
 

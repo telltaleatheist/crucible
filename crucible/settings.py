@@ -5,9 +5,9 @@ from typing import Any, Callable, Mapping
 
 from . import capabilityclasses, classnames, memorybudget, upstreamrecord
 from .backend import CardFacts
+from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .capabilitystore import decide_on, record_of
 from .clock import utcnow
-from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .config import Config, LocalModelRecord, RouteRecord, _advertised, load_config, write_config
 from .errors import ApiError, ConfigError
 from .events import SETTINGS, EventHub

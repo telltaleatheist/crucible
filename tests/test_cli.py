@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
-
-from urllib.parse import quote
 
 from crucible import cli, jobenv, pairing
 from crucible.config import config_path, load_config

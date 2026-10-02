@@ -8,19 +8,18 @@ from pathlib import Path
 
 from .. import API_HEADER, API_VERSION, VERSION, jobenv
 from ..backend import (
-    Backend,
     CUDA_LINUX,
     LLAMA_WINDOWS,
     WINDOWS_REFUSAL,
+    Backend,
     backend_not_here,
     detect_backend,
 )
 from ..client.connection import Connection
 from ..config import Config, load_config
 from ..errors import ConfigError, CrucibleError, NoViableBackend
-from ..protocol import USER_AGENT_HEADER, user_agent
 from ..narratorengines import NARRATOR_ENGINE_SAMPLING
-
+from ..protocol import USER_AGENT_HEADER, user_agent
 
 EXIT_OK = 0
 EXIT_REFUSED = 1

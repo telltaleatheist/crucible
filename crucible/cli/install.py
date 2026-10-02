@@ -6,12 +6,10 @@ import time
 from pathlib import Path
 
 from .. import capabilitywords, hosttools, interpreter, jobenv, llamacpp, verdict
-from ..backend import Backend, LLAMA_WINDOWS
+from ..backend import LLAMA_WINDOWS, Backend
 from ..config import Config
-from ..jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR, SMOKE_IMPORT
-from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from ..jobenv import INSTALLABLE_JOB_TYPES, SMOKE_IMPORT
-from ..voices import NARRATOR_ENGINE_SAMPLING
+from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step
 from .common import _env_spec, _fail

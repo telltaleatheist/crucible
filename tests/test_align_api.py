@@ -10,20 +10,20 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, hosttools, procgroup, jobenv, tasks, workers
+from crucible import accelerator, hosttools, jobenv, procgroup, tasks, workers
 from crucible.accelerator import ComputeApp
-from crucible.memorybudget import GIB
 from crucible.alignmodels import load_align_manifest
+from crucible.cardkinds import KIND_ALIGN
 from crucible.errors import JobError
 from crucible.jobs import align as align_job
-from crucible.cardkinds import KIND_ALIGN
+from crucible.memorybudget import GIB
 from crucible.residency import Residency
 
 from .conftest import (
     FAKE_BACKEND,
     FAKE_MAC_BACKEND,
-    end_process_tree,
     close_queue_session,
+    end_process_tree,
     holding_the_card,
     open_queue_session,
     parse_sse,

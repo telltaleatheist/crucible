@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from crucible import residency as residency_module
+from crucible.cardkinds import KIND_ALIGN, KIND_LLM, KIND_TTS
 from crucible.engines import (
     ENGINES,
     EngineError,
@@ -23,7 +24,6 @@ from crucible.engines import (
 from crucible.engines.vllm import DECIDE_ARGS
 from crucible.errors import JobError
 from crucible.manifests import NO_DEFAULTS
-from crucible.cardkinds import KIND_ALIGN, KIND_LLM, KIND_TTS
 from crucible.residency import (
     DyingResident,
     Occupant,

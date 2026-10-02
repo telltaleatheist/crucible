@@ -507,8 +507,19 @@ exists.
 **Never freezes.** Every API call and host verb runs in a daemon thread
 (`Controller.run`); the Tk thread polls `controller.version` every 120 ms and redraws only
 when the screen's view model, notices, busy set or task changed, and not while an entry has
-focus. A refresh runs every 2 s; `activity` and `tasks` are read every time, the other
-documents at most every 15 s or after an action. A running task found on refresh is followed
+focus. One daemon thread follows `GET /v1/events` (docs/EVENTS.md) for the window's life,
+reconnecting with backoff and `Last-Event-ID`. Its `snapshot` supplies `activity`, `queue`
+and `tasks` whole; after that an event marks only the documents it changes stale
+(`controller.STALE_ON`: job, card and chat events → `activity`; queue and session events →
+`activity` and `queue`; `settings.written` → `settings`; a task starting or ending → `tasks`,
+and an ending re-reads everything), and `job.progress` is applied in place. A refresh still
+runs every 2 s, but for the host's own status (whether the server process is up, which no
+event can say) and for the documents no event covers (`info`, `capability`, `catalog`,
+`voices`, `setup`), read at most every 15 s, after an action, or after a `gap` snapshot. The
+Queue lists `GET /v1/queue`'s rows of every kind (job, chat, session), marks the open
+session's own items, and counts down the open session's idle deadline from the wall clock; a
+deadline that runs out with the session still open marks `activity` stale once, since a
+client's touch moves it without an event. A running task found on refresh is followed
 once over `/v1/tasks/{id}/events`, and when the stream ends its final state is read back from
 `/v1/tasks/{id}` (a host-failed task emits no `failed` frame). Confirmation questions from a
 worker go through `window.Asker`, which the Tk thread answers with a dialog. A pull or install

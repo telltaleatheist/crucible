@@ -12,7 +12,7 @@ from typing import Any, Iterator
 import httpx
 
 from .errors import ApiError
-from .upstreamrecord import UpstreamRecord, require_key, require_url
+from .upstreamrecord import UpstreamRecord
 
 ANTHROPIC_BASE = "https://api.anthropic.com"
 OPENAI_BASE = "https://api.openai.com"

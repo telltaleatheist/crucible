@@ -171,7 +171,7 @@ def test_the_page_s_braces_and_parentheses_balance() -> None:
 def test_the_page_talks_to_its_own_server_and_to_nothing_else() -> None:
     code = _strip_strings_and_comments(_read(SCRIPT))
     targets = re.findall(r"fetch\(\s*([A-Za-z_$][A-Za-z0-9_$]*(?:\([^)]*\))?)", code)
-    assert sorted(targets) == ["path", "taskEventsPath(id)"], targets
+    assert sorted(targets) == ["path", "path"], targets
 
 
 def _paths_the_page_calls() -> set[str]:
@@ -198,7 +198,7 @@ def test_every_v1_path_the_page_calls_is_a_route_this_server_has(
 
 def test_the_page_draws_every_section_it_was_asked_for() -> None:
     html = _read(INDEX)
-    for section in ("status", "tasks", "types", "catalog", "connect", "service"):
+    for section in ("status", "queue", "tasks", "types", "catalog", "connect", "service"):
         assert f'id="{section}-body"' in html, section
 
 
@@ -252,3 +252,21 @@ def test_the_page_never_asks_for_a_key_back() -> None:
     assert "key_hint" in source
     assert "state.upstreamDraft" in source
     assert "delete state.upstreamDraft[name];" in source
+
+
+def test_the_console_follows_the_event_stream_instead_of_polling() -> None:
+    source = _read(SCRIPT)
+    code = _strip_strings_and_comments(source)
+    assert "var EVENTS_PATH = '/v1/events';" in source
+    assert "extra['Last-Event-ID'] = state.lastEventId;" in source, "a reconnect resumes"
+    assert "if (data.gap)" in source, "a gap re-reads what no event covers"
+    intervals = re.findall(r"setInterval\(\s*([^,]+?)\s*,\s*([A-Z_]+)\s*\)", code)
+    assert sorted(ms for _target, ms in intervals) == ["PAIRING_MS", "TICK_MS"], intervals
+    assert "loadActivity()" not in source.split("state.pairingTimer = window.setInterval")[1][:400]
+
+
+def test_the_queue_panel_shows_the_open_session_and_every_kind_in_the_line() -> None:
+    source = _read(SCRIPT)
+    assert "session.idle_deadline" in source and "untilSpan('closes if idle '" in source
+    assert "var KIND_WORDS = { job: 'job', call: 'chat', session: 'session' };" in source
+    assert "state.queue.items" in source

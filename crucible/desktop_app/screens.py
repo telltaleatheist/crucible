@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Mapping
 
 from ..platform.paths import INSTALL_ONE_LINER
@@ -199,36 +200,72 @@ class QueueLine:
     title: str
     detail: str
     waited: str
+    kind: str = "job"
 
 
-def queue_lines(activity: Any) -> tuple[QueueLine, ...]:
-    rows = activity.get("queued") if isinstance(activity, Mapping) else None
+KIND_WORDS = {"job": "Job", "call": "Chat", "session": "Session"}
+
+
+def _when(stamp: Any) -> datetime | None:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+
+
+def _waited_s(row: Mapping[str, Any], now: datetime | None) -> Any:
+    """How long it has waited NOW: the queue document is read when the line changes,
+    not every tick, so its `waited_s` is only right at the moment it was read."""
+    submitted = _when(row.get("submitted"))
+    if submitted is None or now is None:
+        return row.get("waited_s")
+    return max(0.0, (now - submitted).total_seconds())
+
+
+def queue_lines(queue: Any, open_session: str | None = None,
+                now: datetime | None = None) -> tuple[QueueLine, ...]:
+    """The waiting line as GET /v1/queue lists it: jobs, held-open chats and decisions
+    (`call`), and app sessions waiting for their turn (`session`)."""
+    rows = queue.get("items") if isinstance(queue, Mapping) else None
     lines = []
-    for job in rows or []:
-        if not waiting_in_queue(job):
-            continue
-        model = f" with {job['model']}" if job.get("model") else ""
-        position = job.get("position")
-        client = job.get("client") or "an app that did not say its name"
+    for row in rows or []:
+        kind = str(row.get("kind") or "job")
+        model = f" with {row['model']}" if row.get("model") else ""
+        position = row.get("position")
+        client = row.get("client") or "an app that did not say its name"
+        what = "Session" if kind == "session" else str(row.get("type"))
+        detail = f"From {client}"
+        if open_session is not None and row.get("session") == open_session:
+            detail += ", in the open session (it runs first)"
         lines.append(QueueLine(
-            job_id=str(job.get("job_id")),
+            job_id=str(row.get("job_id")),
             position=position if isinstance(position, int) else None,
-            title=(f"{position}. " if isinstance(position, int) else "") + f"{job.get('type')}{model}",
-            detail=f"From {client}",
-            waited=f"waited {waited_text(job.get('waited_s'))}",
+            title=(f"{position}. " if isinstance(position, int) else "") + f"{what}{model}",
+            detail=detail,
+            waited=f"waited {waited_text(_waited_s(row, now))}",
+            kind=kind,
         ))
     return tuple(lines)
 
 
-def queue_fact(activity: Mapping[str, Any]) -> Fact:
-    waiting = len(queue_lines(activity))
-    if not waiting:
+def queue_fact(queue: Any) -> Fact:
+    rows = queue.get("items") if isinstance(queue, Mapping) else None
+    if not rows:
         return Fact("Queue", "")
-    return Fact("Queue", f"{waiting} job{'s' if waiting != 1 else ''} waiting; see Activity")
+    counts: dict[str, int] = {}
+    for row in rows:
+        kind = str(row.get("kind") or "job")
+        counts[kind] = counts.get(kind, 0) + 1
+    names = {"job": ("job", "jobs"), "call": ("chat", "chats"), "session": ("session", "sessions")}
+    parts = [f"{n} {names.get(kind, (kind, kind))[0 if n == 1 else 1]}"
+             for kind, n in counts.items()]
+    return Fact("Queue", ", ".join(parts) + " waiting; see Activity")
 
 
 def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
-              capability: Any) -> HomeView:
+              capability: Any, queue: Any = None) -> HomeView:
     if isinstance(status, Exception):
         return not_installed_view(status)
     if status.get("state") != "running":
@@ -240,7 +277,7 @@ def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
         facts += memory_facts(info, capability if isinstance(capability, Mapping) else None)
     if isinstance(activity, Mapping):
         facts.append(resident_fact(activity))
-        facts.append(queue_fact(activity))
+        facts.append(queue_fact(queue))
     work = activity_work(activity if isinstance(activity, Mapping) else None)
     detail = "Working" if work else "Ready, and nothing is running"
     return HomeView(headline="Crucible is running", tone=OK, detail=detail,
@@ -465,7 +502,15 @@ class SessionLine:
     detail: str
 
 
-def session_line(activity: Any) -> SessionLine | None:
+def countdown_text(deadline: Any, now: datetime | None) -> str:
+    when = _when(deadline)
+    if when is None or now is None:
+        return ""
+    left = (when - now).total_seconds()
+    return "any moment now" if left <= 0 else "in " + waited_text(left)
+
+
+def session_line(activity: Any, now: datetime | None = None) -> SessionLine | None:
     session = activity.get("session") if isinstance(activity, Mapping) else None
     if not isinstance(session, Mapping) or not session.get("session_id"):
         return None
@@ -477,6 +522,10 @@ def session_line(activity: Any) -> SessionLine | None:
     stream = session.get("stream_session")
     if isinstance(stream, Mapping):
         parts.append(f"streaming narration in {stream.get('voice')}")
+    idle = countdown_text(session.get("idle_deadline"), now)
+    if idle:
+        parts.append(f"it closes {idle} unless {client if client != 'An app' else 'the app'} "
+                     "sends more")
     return SessionLine(
         session_id=str(session["session_id"]),
         title=f"{client} has Crucible to itself for {session.get('act')}",
@@ -493,12 +542,15 @@ class ActivityView:
     queue: tuple[QueueLine, ...] = ()
 
 
-def activity_view(activity: Any, tasks: Any, watch: Progress | None) -> ActivityView:
+def activity_view(activity: Any, tasks: Any, watch: Progress | None, queue: Any = None,
+                  now: datetime | None = None) -> ActivityView:
     work = activity_work(activity if isinstance(activity, Mapping) else None)
+    session = session_line(activity, now)
     return ActivityView(
         work=((watch,) if watch is not None else ()) + work,
         loaded=resident_fact(activity if isinstance(activity, Mapping) else None),
-        session=session_line(activity), tasks=task_lines(tasks), queue=queue_lines(activity),
+        session=session, tasks=task_lines(tasks),
+        queue=queue_lines(queue, None if session is None else session.session_id, now),
     )
 
 

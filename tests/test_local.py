@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.error import URLError
 
 import pytest
@@ -58,12 +58,13 @@ def test_timeout_is_not_reported_as_stopped(monkeypatch, tmp_path):
 
 
 def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatch):
-    from crucible.host.app import Host, HostContext
-    from crucible.host.pairing_sync import engine_token
-    from crucible.host.log import HostLog
-    from crucible.host.presence import Presence, UnitProbe
-    from crucible.host.state import Distro, Engine, Owner
     from types import SimpleNamespace
+
+    from crucible.host.app import Host, HostContext
+    from crucible.host.log import HostLog
+    from crucible.host.pairing_sync import engine_token
+    from crucible.host.presence import Presence
+    from crucible.host.state import Distro, Engine, Owner
     (tmp_path / "engine.stopped").write_text("stopped")
     (tmp_path / "pairing").write_text("crucible://engine@127.0.0.1:7100/#secret")
     context = HostContext(runner=SimpleNamespace(), log=HostLog(tmp_path / "log", tmp_path / "old"),
@@ -80,13 +81,14 @@ def test_windows_stopped_intent_survives_controller_restart(tmp_path, monkeypatc
 
 
 def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
+    from types import SimpleNamespace
+
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
     from crucible.host.presence import Presence, UnitProbe
     from crucible.host.state import Distro, Engine, Owner
-    from crucible.platform.runner import RunResult
     from crucible.platform.errors import HostError
-    from types import SimpleNamespace
+    from crucible.platform.runner import RunResult
     runner = SimpleNamespace(run=lambda *args, **kwargs: RunResult(code=1, stdout="", stderr="denied", failure=None))
     context = HostContext(runner=runner, log=HostLog(tmp_path / "log", tmp_path / "old"), home=tmp_path,
         watcher=SimpleNamespace(distro="crucible",
@@ -100,11 +102,12 @@ def test_windows_failed_stop_does_not_publish_stopped(tmp_path):
 
 
 def test_controller_exit_waits_for_child_shutdown(tmp_path):
+    from types import SimpleNamespace
+
     from crucible.host.app import Host, HostContext
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence, UnitProbe
+    from crucible.host.presence import Presence
     from crucible.host.state import Distro, Engine, Owner
-    from types import SimpleNamespace
     entered, finish = threading.Event(), threading.Event()
     def stop_child():
         entered.set()
@@ -153,9 +156,10 @@ def test_watch_failure_is_not_an_operator_stop(monkeypatch, tmp_path):
 @pytest.mark.parametrize("fault", [None, "ping", "empty-info", "info-name", "api-version", "native-backend"])
 def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, fault):
     from types import SimpleNamespace
+
     from crucible.host import app, pairing_sync
     from crucible.host.log import HostLog
-    from crucible.host.presence import Presence, UnitProbe
+    from crucible.host.presence import Presence
     from crucible.host.state import Distro, Engine, Owner
     from crucible.platform.errors import HostError
     line = "crucible://guest@127.0.0.1:7100/#guest-token"
@@ -201,10 +205,11 @@ def test_wsl_move_publishes_only_the_authenticated_guest(tmp_path, monkeypatch, 
 def test_controller_failure_always_has_one_terminal_event(tmp_path, already_emitted):
     from types import SimpleNamespace
     from urllib.request import Request, urlopen
-    from crucible.host.controller_door import OrchestratorDoor, serve, INSTALL_PATH
+
+    from crucible.host.controller_door import INSTALL_PATH, OrchestratorDoor, serve
+    from crucible.host.installer import Event
     from crucible.host.log import HostLog
     from crucible.platform.errors import HostError
-    from crucible.host.installer import Event
     def failing(emit):
         if already_emitted:
             emit(Event("failed", {"code": "engine_move_failed", "message": "guest is wrong"}))
@@ -269,6 +274,7 @@ def _config(home: Path, body: str) -> Path:
 
 def _stub_the_service_path(monkeypatch):
     from types import SimpleNamespace
+
     from crucible import service as service_module
 
     monkeypatch.setattr(local.sys, "platform", "linux")

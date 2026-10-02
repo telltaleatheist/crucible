@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import secrets
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field

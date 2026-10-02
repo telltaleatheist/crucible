@@ -8,7 +8,6 @@ from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from .. import upstreamrecord, upstreams
-from .. import upstreams
 from ..config import Config
 from ..errors import ApiError
 from ..inflight import Entry, InFlight, read_act

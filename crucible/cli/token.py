@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .. import pairing
-from ..config import Config, DEFAULT_HOST, config_mode
+from ..config import DEFAULT_HOST, Config, config_mode
 from ..errors import ConfigError
 from ..interfaces import InterfaceError
 from . import common

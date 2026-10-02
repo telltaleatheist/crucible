@@ -290,7 +290,9 @@ def _mflux_parts():
     from mflux.models.common.latent_creator.latent_creator import LatentCreator
     from mflux.models.common.vae.vae_util import VAEUtil
     from mflux.models.qwen21.latent_creator.qwen21_latent_creator import Qwen21LatentCreator
-    from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder import Qwen21PromptEncoder
+    from mflux.models.qwen21.model.qwen21_text_encoder.qwen21_prompt_encoder import (
+        Qwen21PromptEncoder,
+    )
     from mflux.utils.image_util import ImageUtil
 
     return SimpleNamespace(

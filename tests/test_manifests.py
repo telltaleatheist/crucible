@@ -6,11 +6,11 @@ import pytest
 
 from crucible.manifests import (
     BACKEND_ENGINES,
-    class_family,
-    engine_for,
     GgufLocal,
     ManifestError,
     OllamaLocal,
+    class_family,
+    engine_for,
     load_all_manifests,
     load_manifest,
     manifests_dir,

@@ -9,17 +9,14 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, residency as residency_module
-from crucible.memorybudget import GIB
 from crucible import accelerator, jobenv
 from crucible import engines as engines_module
-from crucible.accelerator import GIB
-from crucible.errors import ApiError
-from crucible.jobs import asr as asr_jobs
-from crucible.jobs.tts import render as render_jobs
 from crucible.cardkinds import KIND_TTS
-from crucible.voicerepo import REPO_MANIFEST_NAME
+from crucible.errors import ApiError
+from crucible.jobs.tts import render as render_jobs
+from crucible.memorybudget import GIB
 from crucible.voicecatalog import load_voice
+from crucible.voicerepo import REPO_MANIFEST_NAME
 
 from . import fake_narrator_engine
 from .conftest import (
@@ -33,13 +30,14 @@ from .conftest import (
     wav_bytes,
 )
 from .test_tts_api import (
-    fake_env,
-    fake_weights,
-    idle_card,
-    tts_client,
-    tts_recipes,
+    fake_env,  # noqa: F401 - a fixture this module uses
+    fake_weights,  # noqa: F401 - a fixture this module uses
+    idle_card,  # noqa: F401 - a fixture this module uses
+    run_job,
+    submit,
+    tts_client,  # noqa: F401 - a fixture this module uses
+    tts_recipes,  # noqa: F401 - a fixture this module uses
 )
-from .test_tts_api import run_job, submit
 
 VOICE = "deathstalker"
 
@@ -70,10 +68,10 @@ def quick_quit(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def rendered(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> Callable[..., list[dict[str, Any]]]:
 
     def go(**params: Any) -> list[dict[str, Any]]:
@@ -102,7 +100,7 @@ def terminal(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 def test_a_render_publishes_one_flac_per_chunk(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     events = rendered()
@@ -115,7 +113,7 @@ def test_a_render_publishes_one_flac_per_chunk(
 
 def test_the_bytes_are_a_real_flac_at_the_voices_sample_rate(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     rendered()
@@ -391,11 +389,11 @@ def test_take_zero_still_renders_on_a_narrator_without_the_channel(
 
 
 def test_a_zeroshot_voice_loads_with_its_clip_and_the_wav_is_on_disk(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     home: Path,
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     weights = fake_weights("zeroshot")
     events = run_job(
@@ -425,10 +423,10 @@ def test_a_zeroshot_voice_loads_with_its_clip_and_the_wav_is_on_disk(
 
 
 def test_the_resident_report_says_which_clip_is_loaded(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights("zeroshot")
     run_job(
@@ -448,10 +446,10 @@ def test_the_resident_report_says_which_clip_is_loaded(
 
 
 def test_a_resident_checkpoint_voice_reports_a_null_reference(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     run_job(tts_client, auth, type="load-voice", model=VOICE)
@@ -461,10 +459,10 @@ def test_a_resident_checkpoint_voice_reports_a_null_reference(
 
 
 def test_a_resident_zeroshot_voice_renders_like_any_other(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights("zeroshot")
     run_job(
@@ -500,11 +498,11 @@ def wsl2_card_holding_our_own_engine(monkeypatch: pytest.MonkeyPatch) -> list[in
 
 
 def test_a_render_on_the_resident_voice_never_asks_the_card_for_room(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights("zeroshot")
     run_job(
@@ -527,10 +525,10 @@ def test_a_render_on_the_resident_voice_never_asks_the_card_for_room(
 
 
 def test_a_render_of_a_voice_that_is_not_resident_still_asks(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     wsl2_card_holding_our_own_engine(monkeypatch)
@@ -689,9 +687,9 @@ def test_a_chunk_over_the_cap_renders_instead_of_being_refused(
 
 
 def test_retake_true_with_no_band_is_refused_by_name(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, retake=True)
@@ -740,9 +738,9 @@ def test_retake_true_with_no_band_is_refused_by_name(
     ],
 )
 def test_every_way_a_band_can_be_wrong_is_one_refusal(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
     band: dict[str, Any],
     names: str,
 ) -> None:
@@ -753,9 +751,9 @@ def test_every_way_a_band_can_be_wrong_is_one_refusal(
 
 
 def test_a_width_above_the_voices_serving_width_is_refused_never_clamped(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, width=32)
@@ -765,9 +763,9 @@ def test_a_width_above_the_voices_serving_width_is_refused_never_clamped(
 
 
 def test_a_zeroshot_voice_that_is_not_resident_is_refused_because_this_door_cannot_load_it(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights("zeroshot")
     response = submit(
@@ -786,9 +784,9 @@ def test_a_zeroshot_voice_that_is_not_resident_is_refused_because_this_door_cann
 
 
 def test_a_blank_chunk_is_refused_before_it_ends_the_batch(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, chunks=[{"index": 0, "text": "   "}])
@@ -797,9 +795,9 @@ def test_a_blank_chunk_is_refused_before_it_ends_the_batch(
 
 
 def test_two_chunks_with_one_index_are_refused(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     error = _refuse(
@@ -812,9 +810,9 @@ def test_two_chunks_with_one_index_are_refused(
 
 
 def test_an_unknown_param_is_refused_rather_than_ignored(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     error = _refuse(tts_client, auth, temperature=0.9)
@@ -822,7 +820,7 @@ def test_an_unknown_param_is_refused_rather_than_ignored(
 
 
 def test_the_wire_word_for_the_voice_is_model(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     response = submit(
@@ -838,7 +836,7 @@ def test_the_wire_word_for_the_voice_is_model(
 
 def test_a_render_loads_its_own_voice_and_says_it_is_warming(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     with holding_the_card(tts_client):
@@ -875,7 +873,7 @@ def test_a_render_writes_the_voices_document_narrator_reads(
 
 def test_a_second_render_does_not_restart_narrator(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     narrator: list[Any],
 ) -> None:
     with holding_the_card(tts_client):
@@ -892,7 +890,7 @@ def test_a_second_render_does_not_restart_narrator(
 
 def test_an_unheld_render_clears_the_card_and_the_next_one_reloads(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     narrator: list[Any],
 ) -> None:
@@ -912,10 +910,10 @@ def test_an_unheld_render_clears_the_card_and_the_next_one_reloads(
 
 def test_a_queue_session_turns_a_book_rendered_chapter_by_chapter_into_one_load(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     narrator: list[Any],
 ) -> None:
     fake_weights(VOICE)
@@ -938,10 +936,10 @@ def test_a_queue_session_turns_a_book_rendered_chapter_by_chapter_into_one_load(
 
 
 def test_a_queue_session_refuses_every_other_client_s_job(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     session_id = open_queue_session(tts_client, auth, act="tts")
@@ -967,10 +965,10 @@ def test_a_queue_session_refuses_every_other_client_s_job(
 
 
 def test_the_load_is_part_of_the_load(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     fake_weights(VOICE)
     events = run_job(tts_client, auth, type="load-voice", model=VOICE)
@@ -981,10 +979,10 @@ def test_the_load_is_part_of_the_load(
 
 
 def test_a_worker_that_dies_during_a_load_leaves_nothing_resident(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CRUCIBLE_FAKE_EXIT_CODE", "3")
@@ -999,10 +997,10 @@ def test_a_worker_that_dies_during_a_load_leaves_nothing_resident(
 
 
 def test_a_sample_rate_the_engine_disagrees_with_is_refused_not_resampled(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
 ) -> None:
     pulled = fake_weights(VOICE) / REPO_MANIFEST_NAME
     text = pulled.read_text(encoding="utf-8")
@@ -1022,7 +1020,7 @@ def test_a_sample_rate_the_engine_disagrees_with_is_refused_not_resampled(
 
 def test_one_holder_still_serves_both_kinds(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     with holding_the_card(tts_client):
@@ -1034,7 +1032,7 @@ def test_one_holder_still_serves_both_kinds(
 
 def test_the_provenance_sidecar_names_the_merge_that_rendered_it(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     rendered()
@@ -1054,7 +1052,7 @@ def test_the_provenance_sidecar_names_the_merge_that_rendered_it(
 
 def test_the_residency_is_torn_down_when_the_server_stops(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     narrator: list[Any],
 ) -> None:
     with holding_the_card(tts_client):
@@ -1066,7 +1064,7 @@ def test_the_residency_is_torn_down_when_the_server_stops(
 
 
 def _wait_for(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     job_id: str,
     predicate: Callable[[dict[str, Any]], bool],
@@ -1085,9 +1083,9 @@ def _wait_for(
 
 
 def _start_a_slow_render(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
+    fake_weights: Callable[[str], Path],  # noqa: F811
 ) -> str:
     fake_weights(VOICE)
     chunks = [
@@ -1112,10 +1110,10 @@ def _start_a_slow_render(
 
 
 def test_a_cancelled_render_stops_within_one_chunk(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_narrator_engine.steer(monkeypatch, row_delay_ms=120)
@@ -1144,10 +1142,10 @@ def test_a_cancelled_render_stops_within_one_chunk(
 
 
 def test_a_narrator_that_ignores_the_cancel_is_taken_off_the_card(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("crucible.engines.narrator.CANCEL_GRACE_SECONDS", 1.0)
@@ -1182,7 +1180,7 @@ def test_a_narrator_that_ignores_the_cancel_is_taken_off_the_card(
 
 def test_cancelling_a_finished_render_is_refused_by_name(
     rendered: Callable[..., list[dict[str, Any]]],
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     assert terminal(rendered())["event"] == "done"
@@ -1193,7 +1191,7 @@ def test_cancelling_a_finished_render_is_refused_by_name(
 
 
 def test_cancelling_an_unknown_job_is_refused_by_name(
-    tts_client: TestClient,
+    tts_client: TestClient,  # noqa: F811
     auth: dict[str, str],
 ) -> None:
     response = tts_client.delete("/v1/jobs/notajob", headers=auth)
