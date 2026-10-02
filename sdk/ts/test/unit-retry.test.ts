@@ -83,10 +83,10 @@ test('a GET that meets a stale socket is retried exactly once and succeeds', asy
 test('a POST is never retried, because a reset cannot say whether the server read it', async () => {
   const log = plan(['reset']);
   await assert.rejects(
-    () => client().heartbeat('lease-1'),
+    () => client().cancel('job-1'),
     (error: unknown) => error instanceof CrucibleUnreachable,
   );
-  assert.deepEqual(log.calls, ['POST http://127.0.0.1:7100/v1/leases/lease-1/heartbeat']);
+  assert.deepEqual(log.calls, ['DELETE http://127.0.0.1:7100/v1/jobs/job-1']);
 });
 
 test('a GET that resets twice surfaces the error rather than looping', async () => {

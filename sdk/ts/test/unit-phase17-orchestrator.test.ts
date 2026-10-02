@@ -56,6 +56,7 @@ function engineDocument(): Record<string, unknown> {
       gpu: { vendor: 'nvidia', name: '3090 Ti', vram_bytes: 25757220864 },
     },
     job_types: ['llm', 'tts'],
+    features: ['queue.sessions', 'events'],
     capabilities: [],
     pages_engine: {
       engine: null,
@@ -115,6 +116,7 @@ function orchestratorDocument(engine: unknown): Record<string, unknown> {
     },
     role: 'orchestrator',
     job_types: [],
+    features: ['queue.sessions', 'events'],
     engine,
     capabilities: [],
   };

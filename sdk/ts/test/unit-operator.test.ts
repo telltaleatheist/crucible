@@ -282,22 +282,22 @@ test('task_busy is a refusal the caller can act on, and it travels', async () =>
   assert.equal(isServerSpecificRefusal('invalid_module'), false);
 });
 
-test('an install refused server_busy for a lease names the holder verbatim', async () => {
+test('an install refused server_busy for a session names the holder verbatim', async () => {
   answer(409, {
     error: {
       code: 'server_busy',
       message: 'this server cannot install anything right now',
       details: {
         door: 'operator',
-        fact: 'a lease',
-        who: "'foundry/owens-pc' for 'translate'",
-        lease_id: 'l1',
-        kind: 'llm',
-        client: 'foundry/owens-pc',
+        fact: 'a session',
+        who: "session ses-1 of 'foundry/owens-pc' for 'translate'",
+        holder: 'foundry/owens-pc',
+        session_id: 'ses-1',
+        type: 'session',
         act: 'translate',
-        subject: 'qwen3.8-27b-4bit',
+        model: 'qwen3.8-27b-4bit',
+        status: 'open',
         since: '2026-09-14T03:00:00+00:00',
-        expires_at: '2026-09-14T03:12:00+00:00',
       },
     },
   });
@@ -306,18 +306,18 @@ test('an install refused server_busy for a lease names the holder verbatim', asy
     assert.fail('the client accepted a 409');
   } catch (error) {
     // NOT a CrucibleBusy: that type reads a JOB's eight fields and the holder
-    // here is a lease, so a client that read it as one would report a protocol
+    // here is a session, so a client that read it as one would report a protocol
     // error about a body that is exactly the contract. `details.fact` is the
     // discriminator and CrucibleCardHeld is what it produces.
     assert.ok(error instanceof CrucibleCardHeld);
     assert.equal(error instanceof CrucibleBusy, false);
-    assert.equal(error.fact, 'a lease');
-    assert.match(error.heldLine, /^held by a lease: /);
+    assert.equal(error.fact, 'a session');
+    assert.match(error.heldLine, /^held by a session: /);
     const details = error.details as Record<string, unknown>;
-    assert.equal(details['fact'], 'a lease');
-    assert.equal(details['client'], 'foundry/owens-pc');
+    assert.equal(details['fact'], 'a session');
+    assert.equal(details['holder'], 'foundry/owens-pc');
     assert.equal(details['act'], 'translate');
-    assert.equal(details['subject'], 'qwen3.8-27b-4bit');
+    assert.equal(details['model'], 'qwen3.8-27b-4bit');
   }
 });
 

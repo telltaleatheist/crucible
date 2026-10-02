@@ -554,6 +554,7 @@ test("info() reads the tts capability's rows with the /voices reader", async () 
     },
     ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'load-voice', 'unload-voice'],
+    features: ['queue.sessions', 'events'],
     capabilities: [
       { job_type: 'echo', models: [] },
       { job_type: 'tts', models: [VOICE_ROW] },
@@ -585,6 +586,7 @@ test('info() with one malformed voice row still returns, and says which row it c
     },
     ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'load-voice', 'unload-voice'],
+    features: ['queue.sessions', 'events'],
     capabilities: [
       { job_type: 'echo', models: [] },
       { job_type: 'tts', models: [VOICE_ROW, noRate, wrongType] },

@@ -10,10 +10,10 @@
  *   CRUCIBLE_LLM_MODEL  the model id to exercise, e.g. qwen3.5-9b
  *
  * The tests run in file order and depend on each other: the model is loaded
- * once at the top and leased for the chat series. The server settles an
- * unleased model after each chat; a sequence of chats must explicitly retain
- * residency. The lease is heartbeated and released before testing unload,
- * with an after hook cleaning up even when an earlier assertion fails.
+ * once at the top and the chat series runs inside a queue session. The server
+ * settles a model nothing holds after each chat; the session is what holds it
+ * between them. The session is closed before testing unload, with an after hook
+ * cleaning up even when an earlier assertion fails.
  *
  * It touches the GPU. Before running it, `nvidia-smi` must show only the
  * desktop: Crucible never evicts anyone else's work, so a busy card makes the
@@ -27,6 +27,7 @@ import { after, test } from 'node:test';
 import {
   CrucibleClient,
   CrucibleRefused,
+  type CrucibleSession,
   isLlmCapability,
   type JobEvent,
   type ModelInfo,
@@ -55,37 +56,22 @@ const crucible = new CrucibleClient({
 });
 
 let loadedBySuite = false;
-let leaseId: string | null = null;
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let heartbeatInFlight: Promise<void> | null = null;
-let heartbeatFailure: unknown = null;
+let session: CrucibleSession | null = null;
 
 async function retainModel(): Promise<void> {
-  // Lease acts are capability names; the test client's identity is User-Agent.
-  leaseId = (await crucible.lease(MODEL, { act: 'clean', ttlSeconds: 120 })).leaseId;
-  heartbeatTimer = setInterval(() => {
-    if (heartbeatInFlight !== null || leaseId === null) return;
-    heartbeatInFlight = crucible.heartbeat(leaseId)
-      .then(() => undefined)
-      .catch((error: unknown) => { heartbeatFailure = error; })
-      .finally(() => { heartbeatInFlight = null; });
-  }, 30_000);
-  heartbeatTimer.unref();
+  // A session's act is a capability name; the test client's identity is its client name.
+  session = await crucible.session({ act: 'clean', model: MODEL });
 }
 
 function assertRetained(): void {
-  assert.notEqual(leaseId, null, 'the chat series must hold a model lease');
-  assert.equal(heartbeatFailure, null, `the model lease heartbeat failed: ${String(heartbeatFailure)}`);
+  assert.notEqual(session, null, 'the chat series must run inside a queue session');
+  assert.equal(session?.ended ?? null, null, `the session ended: ${JSON.stringify(session?.ended)}`);
 }
 
 async function releaseModel(): Promise<void> {
-  if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
-  heartbeatTimer = null;
-  // Do not release while a previous heartbeat is still using the receipt.
-  await heartbeatInFlight;
-  const id = leaseId;
-  leaseId = null;
-  if (id !== null) await crucible.release(id);
+  const open = session;
+  session = null;
+  if (open !== null) await open.close();
 }
 
 after(async () => {
@@ -93,14 +79,13 @@ after(async () => {
   try { await releaseModel(); } catch (error) { failures.push(error); }
   try {
     // Only unload the model this suite loaded, never another client's model.
-    // Lease release may already have settled it; then there is nothing to do.
+    // Closing the session may already have settled it; then there is nothing to do.
     if (loadedBySuite && (await row()).resident) {
       const events = await collect(await crucible.unloadModel(MODEL));
       assert.equal(events.at(-1)?.event, 'done', `cleanup unload failed: ${JSON.stringify(events.at(-1))}`);
     }
   } catch (error) { failures.push(error); }
-  if (heartbeatFailure !== null) failures.push(heartbeatFailure);
-  if (failures.length > 0) throw new AggregateError(failures, 'LLM e2e cleanup or lease renewal failed');
+  if (failures.length > 0) throw new AggregateError(failures, 'LLM e2e cleanup failed');
 });
 
 /** The row for the model under test, or a failure naming what the server does offer. */
@@ -282,9 +267,8 @@ test('chat on a model that is not resident is refused by name, never loaded impl
 
 test('unload-model frees the card and the model stops reading as resident', async () => {
   assertRetained();
-  // A lease deliberately refuses unload-model. Releasing it also asks the
-  // settlement layer to clear the model; the explicit unload remains valid
-  // when that clearance has already completed or is still finishing.
+  // Closing the session settles the card, which may clear the model; the
+  // explicit unload remains valid when that clearance has already completed.
   await releaseModel();
   const jobId = await crucible.unloadModel(MODEL);
   const events = await collect(jobId);

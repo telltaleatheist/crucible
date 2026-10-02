@@ -117,20 +117,18 @@ test('video() posts one video job with snake_case params and only what the calle
   });
 });
 
-test('a start picture goes as the one input, with the lease', async () => {
+test('a start picture goes as the one input', async () => {
   answer(200, { job_id: 'job-video-2' });
   await client().video({
     model: 'ltx-2.5-distilled',
     prompt: 'She turns and smiles',
     numFrames: 73,
     image: { blobId: 'picture-1' },
-    lease: { act: 'video', ttlSeconds: 600 },
   });
   const sent = JSON.parse(lastBody);
   assert.deepEqual(sent.params, {
     prompt: 'She turns and smiles',
     num_frames: 73,
-    lease: { act: 'video', ttl_seconds: 600 },
   });
   assert.deepEqual(Object.keys(sent.inputs), ['start.png']);
 });
@@ -144,32 +142,27 @@ test('video() refuses a length said twice and a lone side before sending', async
   await assert.rejects(client().video({ model: 'ltx-2.5-distilled', prompt: '' }), CrucibleConfigError);
 });
 
-test('loadVideo() queues a load-video job, with or without a lease', async () => {
+test('loadVideo() queues a load-video job', async () => {
   answer(200, { job_id: 'job-load-video' });
-  assert.equal(
-    await client().loadVideo('ltx-2.5-distilled', { lease: { act: 'video', ttlSeconds: 300 } }),
-    'job-load-video',
-  );
+  assert.equal(await client().loadVideo('ltx-2.5-distilled'), 'job-load-video');
   assert.deepEqual(JSON.parse(lastBody), {
     type: 'load-video',
     model: 'ltx-2.5-distilled',
-    params: { lease: { act: 'video', ttl_seconds: 300 } },
+    params: {},
     inputs: {},
     queue: {},
   });
-  await client().loadVideo('ltx-2.5-distilled');
-  assert.deepEqual(JSON.parse(lastBody).params, {});
 });
 
 test('readVideoResult reads what the clip can be made again from', () => {
-  const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: DONE_CLIP, lease_id: 'lease-3' } });
+  const result = readVideoResult({ artifacts: ['video.mp4'], extra: { video: DONE_CLIP } });
   assert.deepEqual([result.mode, result.input, result.numFrames, result.fps], ['image-to-video', 'start.png', 73, 24]);
   assert.deepEqual([result.seed, result.steps, result.videoTokens, result.audio], [11, 8, 8800, true]);
   assert.equal(result.transformer?.file, 'LTX-2.5-Distilled-Q6_K.gguf');
   assert.equal(result.refineSteps, null);
   assert.equal(result.stageMemoryBytes.denoising, 20_500_000_000);
   assert.equal(result.stageSeconds.conditioning, 3.3);
-  assert.deepEqual([result.encoder, result.promptCache, result.leaseId], ['libopenh264', 'miss', 'lease-3']);
+  assert.deepEqual([result.encoder, result.promptCache], ['libopenh264', 'miss']);
   assert.deepEqual(result.artifacts, ['video.mp4']);
 });
 

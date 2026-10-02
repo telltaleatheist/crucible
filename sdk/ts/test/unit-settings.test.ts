@@ -26,7 +26,7 @@ import {
   CrucibleClient,
   CrucibleProtocolError,
   CrucibleRefused,
-  LEASE_NOT_NEEDED,
+  UPSTREAM_NEVER_RESIDENT,
   ROUTE_NOT_ROUTABLE,
   UPSTREAM_IN_USE,
   UPSTREAM_TEST_REFUSALS,
@@ -433,7 +433,7 @@ test('an empty pairing file is a DEFECT, not an absence', async () => {
 // ------------------------------------------------------------ the constants
 
 test('the refusal names this package exports are the contract spelling', () => {
-  assert.equal(LEASE_NOT_NEEDED, 'lease_not_needed');
+  assert.equal(UPSTREAM_NEVER_RESIDENT, 'upstream_never_resident');
   assert.equal(ROUTE_NOT_ROUTABLE, 'route_not_routable');
   assert.equal(UPSTREAM_IN_USE, 'upstream_in_use');
 });

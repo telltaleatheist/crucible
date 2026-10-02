@@ -14,10 +14,13 @@ import {
   CrucibleProtocolError,
   CrucibleBusy,
   CrucibleCardHeld,
-  CrucibleLeased,
   CrucibleRefused,
-  LEASED,
+  CrucibleSessionClosed,
+  CrucibleSessionHeld,
   SERVER_BUSY,
+  SESSION_CLOSED,
+  SESSION_OPEN,
+  UNKNOWN_QUEUE_SESSION,
   CrucibleServerError,
   CrucibleUnreachable,
   CrucibleVersionError,
@@ -50,7 +53,8 @@ import {
   type Json,
 } from './shape.js';
 import { loadNodeBuiltins, requireFunctions } from './node-builtins.js';
-import { readSseFrames } from './sse.js';
+import { queuePayload, requireSeconds } from './queue.js';
+import { readSseFrames, type SseFrame } from './sse.js';
 import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
   API_VERSION,
@@ -62,7 +66,6 @@ import {
   type Activity,
   type ActivityChat,
   type ActivityJob,
-  type ActivityLease,
   type ActivityStreaming,
   type AlignItem,
   type Alignment,
@@ -112,12 +115,6 @@ import {
   type JobRequest,
   type JobState,
   type JobStatus,
-  type Lease,
-  type LeaseOnLoad,
-  type LoadImageOptions,
-  type LoadAudioOptions,
-  type LoadSegmentOptions,
-  type LoadVideoOptions,
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
@@ -129,8 +126,14 @@ import {
   type QueueEvent,
   type QueueItem,
   type QueueList,
+  type QueuePosition,
   type QueueRemoved,
+  type QueueSessionEnd,
+  type QueueSessionState,
   type RemovedData,
+  type ServerEvent,
+  type ServerEventsOptions,
+  type SessionOptions,
   type Provenance,
   type RenderChunk,
   type RenderFailure,
@@ -174,8 +177,13 @@ const CLIENT_NAME_HEADER = 'X-Crucible-Client';
 const JOB_STATES: readonly JobState[] = [
   'queued', 'running', 'done', 'failed', 'cancelled', 'interrupted', 'removed',
 ];
-const MIN_MAX_WAIT_S = 10;
-const MAX_MAX_WAIT_S = 86_400;
+const SESSION_HEADER = 'X-Crucible-Session';
+const QUEUE_SESSION_STATUSES = ['queued', 'open', 'closed'] as const;
+const QUEUE_KINDS = ['job', 'call', 'session'] as const;
+const SERVER_STOPPING = 'server.stopping';
+/** The first wait before reconnecting a dropped event stream; it doubles up to the ceiling. */
+const RECONNECT_FIRST_MS = 250;
+const RECONNECT_CEILING_MS = 5_000;
 const CHAT_ROLES = ['system', 'user', 'assistant'] as const;
 const DONE_SENTINEL = '[DONE]';
 const EVENT_NAMES = [
@@ -265,6 +273,12 @@ export class CrucibleClient {
   readonly #clientName: string;
   readonly #timeoutMs: number | null;
   readonly #helperQueue: QueueChoice;
+  /** What this client was made with, so a {@link session} is the same client plus its header. */
+  readonly #options: CrucibleClientOptions;
+  /** The queue session every request of this client is an item of; null for a plain client. */
+  #session: SessionBinding | null = null;
+  /** `info().features`, read once by {@link has}. */
+  #features: Promise<ReadonlySet<string>> | null = null;
 
   constructor(options: CrucibleClientOptions) {
     const given = options as Partial<CrucibleClientOptions> | undefined;
@@ -291,6 +305,13 @@ export class CrucibleClient {
     } else {
       this.#timeoutMs = null;
     }
+    this.#options = {
+      url: this.url,
+      token: this.#token,
+      clientName,
+      queue: this.#helperQueue,
+      ...(this.#timeoutMs === null ? {} : { timeoutMs: this.#timeoutMs }),
+    };
   }
 
   /** `GET /v1/ping`, unauthenticated. */
@@ -347,6 +368,7 @@ export class CrucibleClient {
         },
       },
       jobTypes: strArray(body, 'job_types', 'info'),
+      features: strArray(body, 'features', 'info'),
       capabilities: capabilities.map((entry, index) => readCapability(entry, index)),
       ...role,
       pagesEngine: readPagesEngine(body, role.role),
@@ -460,134 +482,23 @@ export class CrucibleClient {
   async activity(options?: { acceleratorProbe?: boolean }): Promise<Activity> {
     const probe = options?.acceleratorProbe === true;
     const path = probe ? '/v1/activity?accelerator_probe=true' : '/v1/activity';
-    const body = await this.#json(path, { method: 'GET' }, 'activity');
-    const server = objectField(body, 'server', 'activity');
-    const resident = nullableObject(body, 'resident', 'activity');
-    const claim = nullableObject(body, 'claim', 'activity');
-    const streaming = nullableObject(body, 'streaming', 'activity');
-    const lease = nullableObject(body, 'lease', 'activity');
-    const chat = objectField(body, 'chat', 'activity');
-    const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
-    return {
-      server: {
-        name: str(server, 'name', 'activity.server'),
-        version: str(server, 'version', 'activity.server'),
-        apiVersion: num(server, 'api_version', 'activity.server'),
-        backend: str(server, 'backend', 'activity.server'),
-        uptimeS: num(server, 'uptime_s', 'activity.server'),
-      },
-      resident:
-        resident === null
-          ? null
-          : {
-              kind: str(resident, 'kind', 'activity.resident'),
-              id: str(resident, 'id', 'activity.resident'),
-              since: str(resident, 'since', 'activity.resident'),
-              memoryBytesEstimate: num(
-                resident,
-                'memory_bytes_estimate',
-                'activity.resident',
-              ),
-              heldBy: readHeldBy(resident),
-              unclaimedSince: nullableStr(
-                resident,
-                'unclaimed_since',
-                'activity.resident',
-              ),
-              engineExitCode: nullableNum(
-                resident,
-                'engine_exit_code',
-                'activity.resident',
-              ),
-            },
-      stopping: readStopping(body, 'activity'),
-      warming: nullableStr(body, 'warming', 'activity'),
-      claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
-      streaming: streaming === null ? null : readStreaming(streaming),
-      lease: lease === null ? null : readLease(lease, 'activity.lease'),
-      chat: readActivityChat(chat),
-      slots: {
-        accelerated: {
-          busy: num(slot, 'busy', 'activity.slots.accelerated'),
-          of: num(slot, 'of', 'activity.slots.accelerated'),
-          queueDepth: num(slot, 'queue_depth', 'activity.slots.accelerated'),
-          acceptsWork: bool(slot, 'accepts_work', 'activity.slots.accelerated'),
-        },
-      },
-      running: asArray(field(body, 'running', 'activity'), 'activity.running').map(
-        (entry, index) => readActivityJob(asObject(entry, `activity.running[${index}]`), `activity.running[${index}]`),
-      ),
-      queued: asArray(field(body, 'queued', 'activity'), 'activity.queued').map(
-        (entry, index) => readActivityJob(asObject(entry, `activity.queued[${index}]`), `activity.queued[${index}]`),
-      ),
-    };
+    return readActivity(await this.#json(path, { method: 'GET' }, 'activity'));
   }
 
-  /**
-   * `POST /v1/models/{subject}/lease` — keep the resident model, voice or aligner on the card
-   * during a run. Waits in the server's queue by default (the client's `queue`): a busy or
-   * leased card is waited out, and a model that is not resident is loaded with the lease.
-   */
-  async lease(
-    subject: string,
-    options: { act: string; ttlSeconds: number; queue?: QueueChoice },
-  ): Promise<Lease> {
-    const id = requireText(subject, 'subject');
-    const act = requireText(options?.act, 'act');
-    const ttlSeconds = options?.ttlSeconds;
-    if (typeof ttlSeconds !== 'number' || !Number.isInteger(ttlSeconds)) {
-      throw new CrucibleConfigError(
-        'ttlSeconds',
-        'is required and must be a whole number of seconds; the server states ' +
-          'its own accepted range if this one is outside it',
-      );
+  /** Whether this server's `GET /v1/info` lists `feature` (`queue.sessions`, `events`, …); read once. */
+  async has(feature: string): Promise<boolean> {
+    const name = requireText(feature, 'feature');
+    let features = this.#features;
+    if (features === null) {
+      const reading = this.info().then((info) => new Set(info.features) as ReadonlySet<string>);
+      features = reading;
+      this.#features = reading;
+      // A failed read is not remembered: the next call asks again.
+      reading.catch(() => {
+        if (this.#features === reading) this.#features = null;
+      });
     }
-    const send = (payload: Record<string, unknown>): Promise<Json> =>
-      this.#json(
-        `/v1/models/${encodeURIComponent(id)}/lease`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        },
-        'lease',
-      );
-    const plain = { act, ttl_seconds: ttlSeconds };
-    const queue = this.#callQueue(options?.queue);
-    let body: Json;
-    if (queue === null) {
-      body = await send(plain);
-    } else {
-      try {
-        body = await send({ ...plain, queue });
-      } catch (error) {
-        if (!refusedTheQueueField(error)) throw error;
-        body = await send(plain);
-      }
-    }
-    return { ...readLease(body, 'lease'), subject: str(body, 'subject', 'lease') };
-  }
-
-  /** `POST /v1/leases/{id}/heartbeat` — I am still here. */
-  async heartbeat(leaseId: string): Promise<string> {
-    const id = requireText(leaseId, 'leaseId');
-    const body = await this.#json(
-      `/v1/leases/${encodeURIComponent(id)}/heartbeat`,
-      { method: 'POST' },
-      'heartbeat',
-    );
-    return str(body, 'expires_at', 'heartbeat');
-  }
-
-  /** `DELETE /v1/leases/{id}` — give the card back. */
-  async release(leaseId: string): Promise<void> {
-    const id = requireText(leaseId, 'leaseId');
-    const response = await this.#fetch(
-      `/v1/leases/${encodeURIComponent(id)}`,
-      { method: 'DELETE' },
-      true,
-    );
-    if (!response.ok) throw await this.#failure(response);
+    return (await features).has(name);
   }
 
   /** `POST /v1/uploads` — park bytes on the server and get a blob id to name as a job input. */
@@ -648,31 +559,25 @@ export class CrucibleClient {
     const queue = queuePayload(request.queue);
     if (queue !== null) payload['queue'] = queue;
 
-    const post = async (document: Record<string, unknown>): Promise<string> => {
-      const init: RequestInit = {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(document),
-      };
-      if (options.signal !== undefined) init.signal = options.signal;
-      const body = await this.#json('/v1/jobs', init, 'submit');
-      return str(body, 'job_id', 'submit');
+    const init: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     };
-    try {
-      return await post(payload);
-    } catch (error) {
-      if (queue === null || !refusedTheQueueField(error)) throw error;
-      // A server older than the queue refuses the field it does not know. Ask the way it
-      // understands: it answers server_busy while busy, exactly as it always has.
-      const { queue: _unknown, ...plain } = payload;
-      return post(plain);
-    }
+    if (options.signal !== undefined) init.signal = options.signal;
+    const body = await this.#json('/v1/jobs', init, 'submit');
+    return str(body, 'job_id', 'submit');
   }
 
-  /** What the high-level helpers submit through: {@link submit}, queued unless told not to. */
+  /**
+   * What the high-level helpers submit through: {@link submit}, queued unless told not to. Inside a
+   * {@link session} a helper sends no `queue`: the server runs a session's items ahead of the line,
+   * and one that must wait behind the session's own running job waits up to a day.
+   */
   #submitHelper(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
-    const queued = request.queue === undefined ? { ...request, queue: this.#helperQueue } : request;
-    return this.submit(queued, options);
+    if (request.queue !== undefined) return this.submit(request, options);
+    const queue = this.#session === null ? this.#helperQueue : false;
+    return this.submit({ ...request, queue }, options);
   }
 
   /** `GET /v1/queue` — the jobs waiting for the lane, in the order they will get it. */
@@ -699,7 +604,8 @@ export class CrucibleClient {
   }
 
   /**
-   * `DELETE /v1/queue/{id}` — take a waiting job out of the queue (reason `operator`). A job that
+   * `DELETE /v1/queue/{id}` — take a waiting job, call or session out of the queue (reason
+   * `operator`), or, given the open queue session's id, end it (`status: 'closed'`). A job that
    * has started is cancelled with {@link cancel} instead.
    */
   async removeFromQueue(jobId: string): Promise<QueueRemoved> {
@@ -711,7 +617,11 @@ export class CrucibleClient {
     );
     return {
       jobId: str(body, 'job_id', 'removeFromQueue'),
-      status: oneOf(str(body, 'status', 'removeFromQueue'), ['removed'], 'removeFromQueue.status'),
+      status: oneOf(
+        str(body, 'status', 'removeFromQueue'),
+        ['removed', 'closed'] as const,
+        'removeFromQueue.status',
+      ),
       reason: oneOf(str(body, 'reason', 'removeFromQueue'), ['operator'], 'removeFromQueue.reason'),
     };
   }
@@ -759,7 +669,6 @@ export class CrucibleClient {
       created: str(body, 'created', 'job'),
       started: nullableStr(body, 'started', 'job'),
       finished: nullableStr(body, 'finished', 'job'),
-      leaseId: optStr(body, 'lease_id', 'job'),
       clientRef: nullableStr(body, 'client_ref', 'job'),
       interruptedAt: nullableStr(body, 'interrupted_at', 'job'),
       heldBy: nullableStr(body, 'held_by', 'job'),
@@ -808,7 +717,25 @@ export class CrucibleClient {
   }
 
   /** `GET /v1/jobs/{id}/events` — the job's SSE stream, as typed events. */
-  async *events(jobId: string, options: EventsOptions = {}): AsyncGenerator<JobEvent, void, undefined> {
+  events(jobId: string, options?: EventsOptions): AsyncGenerator<JobEvent, void, undefined>;
+  /**
+   * `GET /v1/events` — every change on the server as typed events, instead of polling
+   * `/v1/activity`, `/v1/tasks`, `/v1/queue` or `/v1/health`. A `snapshot` comes first (and again,
+   * with `gap: true`, when a resume asks for history the server no longer has), then one event per
+   * change. A dropped connection is reconnected with `Last-Event-ID`; `overflow` is yielded and
+   * reconnected at once; `server.stopping` is yielded, then the stream is reconnected with backoff
+   * until the server is back. It ends only when `signal` aborts or you break out of the loop.
+   */
+  events(options?: ServerEventsOptions): AsyncGenerator<ServerEvent, void, undefined>;
+  events(
+    target?: string | ServerEventsOptions,
+    options: EventsOptions = {},
+  ): AsyncGenerator<JobEvent, void, undefined> | AsyncGenerator<ServerEvent, void, undefined> {
+    if (typeof target === 'string') return this.#jobEvents(target, options);
+    return this.#serverEvents(target === undefined ? {} : target);
+  }
+
+  async *#jobEvents(jobId: string, options: EventsOptions): AsyncGenerator<JobEvent, void, undefined> {
     const id = requireText(jobId, 'jobId');
     yield* this.#follow(
       `/v1/jobs/${encodeURIComponent(id)}/events`,
@@ -826,27 +753,20 @@ export class CrucibleClient {
     read: (rawId: string | null, rawName: string | null, rawData: string) => Event,
     terminal: readonly string[],
   ): AsyncGenerator<Event, void, undefined> {
-    const headers: Record<string, string> = { Accept: 'text/event-stream' };
-    if (options.lastEventId !== undefined) {
-      if (!Number.isInteger(options.lastEventId) || options.lastEventId < 0) {
-        throw new CrucibleConfigError(
-          'lastEventId',
-          `must be a non-negative integer, got ${String(options.lastEventId)}`,
-        );
-      }
-      headers['Last-Event-ID'] = String(options.lastEventId);
-    }
+    const start = readLastEventId(options.lastEventId);
+    const stream = await this.#openStream(path, start, undefined, what);
 
-    const response = await this.#fetch(path, { method: 'GET', headers }, true);
-    if (!response.ok) throw await this.#failure(response);
-    const stream = response.body;
-    if (stream === null) {
-      throw new CrucibleProtocolError(`the event stream for ${what} carried no body`);
-    }
-
-    let previousId = options.lastEventId === undefined ? 0 : options.lastEventId;
+    let previousId = start === null ? 0 : start;
     try {
       for await (const frame of readSseFrames(stream)) {
+        if (frame.event === SERVER_STOPPING) {
+          throw new CrucibleUnreachable(
+            this.url,
+            `the server is stopping (${readStopReason(frame.data)}), so the event stream for ` +
+              `${what} ended after event ${previousId}. Follow it again with lastEventId ` +
+              `${previousId} once the server is back`,
+          );
+        }
         const event = read(frame.lastEventId, frame.event, frame.data);
         if (event.id <= previousId) {
           throw new CrucibleProtocolError(
@@ -866,6 +786,339 @@ export class CrucibleClient {
       `the event stream for ${what} ended after event ${previousId} without a ` +
         'terminal event (done, failed or cancelled)',
     );
+  }
+
+  /** One connection to an SSE route, resuming after `lastEventId` when there is one. */
+  async #openStream(
+    path: string,
+    lastEventId: number | null,
+    signal: AbortSignal | undefined,
+    what: string,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    if (lastEventId !== null) headers['Last-Event-ID'] = String(lastEventId);
+    const init: RequestInit = { method: 'GET', headers };
+    if (signal !== undefined) init.signal = signal;
+    const response = await this.#fetch(path, init, true);
+    if (!response.ok) throw await this.#failure(response);
+    const stream = response.body;
+    if (stream === null) {
+      throw new CrucibleProtocolError(`the event stream for ${what} carried no body`);
+    }
+    return stream;
+  }
+
+  async *#serverEvents(options: ServerEventsOptions): AsyncGenerator<ServerEvent, void, undefined> {
+    const path = `/v1/events${topicsQuery(options.topics)}`;
+    let cursor = readLastEventId(options.lastEventId);
+    // A signal of our own when the caller gave none: an SSE stream must never meet timeoutMs.
+    const signal = options.signal === undefined ? new AbortController().signal : options.signal;
+    const backoff = new Backoff();
+    for (;;) {
+      if (signal.aborted) return;
+      let stream: ReadableStream<Uint8Array>;
+      try {
+        stream = await this.#openStream(path, cursor, signal, 'the server');
+      } catch (error) {
+        if (signal.aborted) return;
+        if (!isWeather(error)) throw error;
+        if (!(await backoff.wait(signal))) return;
+        continue;
+      }
+      let overflowed = false;
+      try {
+        for await (const frame of readSseFrames(stream)) {
+          const event = readServerEvent(frame);
+          if (event.event === 'overflow') {
+            cursor = event.lastEventId;
+            overflowed = true;
+            yield event;
+            break;
+          }
+          if (event.id !== null) cursor = event.id;
+          yield event;
+          if (event.event === SERVER_STOPPING) break;
+          backoff.reset();
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        if (error instanceof CrucibleError) throw error;
+        // The connection broke mid-stream: weather. Reconnect below from the last id.
+      } finally {
+        await stream.cancel().catch(() => undefined);
+      }
+      if (signal.aborted) return;
+      if (!overflowed && !(await backoff.wait(signal))) return;
+    }
+  }
+
+  /**
+   * `POST /v1/queue/sessions` — this app's turn holding the server, for a run of requests it
+   * cannot know in advance. Resolves once the session is OPEN: while it waits in the line its own
+   * stream is followed (which keeps it present) and `onQueue` hears every move. A session that ends
+   * before it opens (`expired`, `operator`, `load_failed`, the server stopping) throws
+   * {@link CrucibleSessionClosed} with its `reason`; aborting `signal` takes it out of the line.
+   *
+   * The returned {@link CrucibleSession} is this client plus the session's header: every method
+   * sends `X-Crucible-Session`. Close it when the run is done:
+   *
+   * ```ts
+   * const session = await crucible.session({ act: 'analysis', model: 'qwen3.5-9b' });
+   * try { ... } finally { await session.close(); }
+   * ```
+   */
+  async session(options: SessionOptions): Promise<CrucibleSession> {
+    const bound = this.#session;
+    if (bound !== null) {
+      throw new CrucibleConfigError(
+        'session',
+        `this client is queue session ${bound.id} already; open another session from the ` +
+          'client it came from, after this one closes (one is open at a time)',
+      );
+    }
+    const given = options as Partial<SessionOptions> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('options', 'session(...) needs {act}');
+    }
+    const act = requireText(given.act, 'act');
+    const payload: Record<string, unknown> = { act };
+    if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '300 s');
+    if (given.maxWaitS !== undefined) {
+      payload['max_wait_s'] = requireSeconds(given.maxWaitS, 'maxWaitS', 'an hour');
+    }
+    const onQueue = given.onQueue;
+    if (onQueue !== undefined && typeof onQueue !== 'function') {
+      throw new CrucibleConfigError('onQueue', `must be a function, got ${typeof onQueue}`);
+    }
+    const signal = given.signal;
+    signal?.throwIfAborted();
+
+    const init: RequestInit = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    };
+    if (signal !== undefined) init.signal = signal;
+    const ticket = await this.#json('/v1/queue/sessions', init, 'session');
+    const id = str(ticket, 'session_id', 'session');
+    const status = oneOf(str(ticket, 'status', 'session'), QUEUE_SESSION_STATUSES, 'session.status');
+    const cursor = status === 'open' ? 0 : await this.#untilOpen(id, onQueue, signal);
+    return this.#bind(id, act, cursor);
+  }
+
+  /** Follow a session waiting in the line until it opens; the id of its `opened` event. */
+  async #untilOpen(
+    sessionId: string,
+    onQueue: ((position: QueuePosition) => void) | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<number> {
+    const following = signal === undefined ? new AbortController().signal : signal;
+    let settled = false;
+    try {
+      for await (const event of this.#sessionFeed(sessionId, 0, following)) {
+        switch (event.kind) {
+          case 'queued':
+          case 'moved':
+            if (onQueue !== undefined) onQueue(event.position);
+            break;
+          case 'opened':
+            settled = true;
+            return event.id;
+          case 'removed':
+            settled = true;
+            throw sessionClosed(sessionId, event.reason, event.message, event.error);
+          case 'closed':
+            settled = true;
+            throw sessionClosed(sessionId, event.end.reason, event.end.message, null);
+          case 'stopping':
+            settled = true;
+            throw sessionClosed(
+              sessionId,
+              'server_restart',
+              `the server stopped (${event.reason}) while queue session ${sessionId} waited in ` +
+                'its line; ask again once it is back',
+              null,
+            );
+          case 'forgotten':
+            settled = true;
+            throw sessionClosed(sessionId, 'server_restart', event.message, null);
+          case 'unknown':
+            break;
+        }
+      }
+      // The feed ends without saying how only when the wait was aborted.
+      throw following.reason;
+    } finally {
+      if (!settled) await this.#leaveTheLine(sessionId);
+    }
+  }
+
+  /** Take a session that will not be waited for out of the line (reason `client`). */
+  async #leaveTheLine(sessionId: string): Promise<void> {
+    try {
+      await this.#json(
+        `/v1/queue/sessions/${encodeURIComponent(sessionId)}`,
+        { method: 'DELETE' },
+        'session.close',
+      );
+    } catch {
+      // The reconciler owns this one: the server removes a waiting session nobody follows
+      // (`expired`) within five minutes, and the error that ended the wait is the one to throw.
+    }
+  }
+
+  /** The client a session's items go through: this one, plus the session's header. */
+  #bind(sessionId: string, act: string, cursor: number): CrucibleSession {
+    const watch = new AbortController();
+    let resolve: (end: QueueSessionEnd) => void = () => undefined;
+    const closed = new Promise<QueueSessionEnd>((settle) => {
+      resolve = settle;
+    });
+    const binding: SessionBinding = {
+      id: sessionId,
+      end: null,
+      watchFailure: null,
+      settle(end: QueueSessionEnd): void {
+        if (binding.end !== null) return;
+        binding.end = end;
+        resolve(end);
+        watch.abort();
+      },
+    };
+    const session = new CrucibleSession(
+      this.#options,
+      sessionId,
+      act,
+      closed,
+      this.#sessionHooks(binding),
+    );
+    session.#session = binding;
+    void this.#watch(binding, cursor, watch.signal);
+    return session;
+  }
+
+  /** A session's own routes, sent as its owner: no session header, never refused locally as ended. */
+  #sessionHooks(binding: SessionBinding): SessionHooks {
+    const path = `/v1/queue/sessions/${encodeURIComponent(binding.id)}`;
+    return {
+      binding,
+      touch: async (): Promise<void> => {
+        if (binding.end !== null) throw endedSession(binding.id, binding.end);
+        try {
+          await this.#json(`${path}/touch`, { method: 'POST' }, 'session.touch');
+        } catch (error) {
+          noteSessionEnd(binding, error);
+          throw error;
+        }
+      },
+      state: async (): Promise<QueueSessionState> => {
+        const state = readQueueSession(
+          await this.#json(path, { method: 'GET' }, 'session.state'),
+          'session.state',
+        );
+        if (state.status === 'closed') binding.settle(endOf(state, 'session.state'));
+        return state;
+      },
+      close: async (): Promise<QueueSessionEnd> => {
+        if (binding.end !== null) return binding.end;
+        try {
+          const state = readQueueSession(
+            await this.#json(path, { method: 'DELETE' }, 'session.close'),
+            'session.close',
+          );
+          binding.settle(endOf(state, 'session.close'));
+        } catch (error) {
+          if (!(error instanceof CrucibleRefused) || error.code !== UNKNOWN_QUEUE_SESSION) throw error;
+          binding.settle({
+            reason: 'server_restart',
+            message: error.serverMessage,
+            itemsRun: null,
+            heldS: null,
+          });
+        }
+        return settledEnd(binding);
+      },
+    };
+  }
+
+  /** Follow an open session's stream in the background until it says the session ended. */
+  async #watch(binding: SessionBinding, cursor: number, signal: AbortSignal): Promise<void> {
+    try {
+      for await (const event of this.#sessionFeed(binding.id, cursor, signal)) {
+        if (event.kind === 'closed') {
+          binding.settle(event.end);
+        } else if (event.kind === 'removed') {
+          binding.settle({ reason: event.reason, message: event.message, itemsRun: null, heldS: null });
+        } else if (event.kind === 'stopping') {
+          binding.settle({
+            reason: 'server_restart',
+            message:
+              `the server is stopping (${event.reason}); a stopping server closes the session ` +
+              'it holds. Open a new session once it is back',
+            itemsRun: null,
+            heldS: null,
+          });
+        } else if (event.kind === 'forgotten') {
+          binding.settle({ reason: 'server_restart', message: event.message, itemsRun: null, heldS: null });
+        }
+      }
+    } catch (error) {
+      // Not weather (that is reconnected inside the feed): a refusal or a malformed frame. The
+      // session's items meet the same fault by name; this records why `closed` can no longer
+      // resolve by itself.
+      binding.watchFailure = error;
+    }
+  }
+
+  /**
+   * A queue session's own stream (`GET /v1/queue/sessions/{id}/events`) after `cursor`,
+   * reconnected with `Last-Event-ID` after any drop, until it says how the session ended or
+   * `signal` aborts.
+   */
+  async *#sessionFeed(
+    sessionId: string,
+    cursor: number,
+    signal: AbortSignal,
+  ): AsyncGenerator<SessionFeedEvent, void, undefined> {
+    const path = `/v1/queue/sessions/${encodeURIComponent(sessionId)}/events`;
+    const what = `queue session ${sessionId}`;
+    const backoff = new Backoff();
+    let delivered = cursor;
+    for (;;) {
+      if (signal.aborted) return;
+      let stream: ReadableStream<Uint8Array>;
+      try {
+        stream = await this.#openStream(path, delivered === 0 ? null : delivered, signal, what);
+      } catch (error) {
+        if (signal.aborted) return;
+        if (error instanceof CrucibleRefused && error.code === UNKNOWN_QUEUE_SESSION) {
+          yield { id: delivered, kind: 'forgotten', message: error.serverMessage };
+          return;
+        }
+        if (!isWeather(error)) throw error;
+        if (!(await backoff.wait(signal))) return;
+        continue;
+      }
+      try {
+        for await (const frame of readSseFrames(stream)) {
+          const event = readSessionFrame(frame, what, delivered);
+          if (event.kind !== 'stopping') delivered = event.id;
+          backoff.reset();
+          yield event;
+          if (event.kind === 'closed' || event.kind === 'removed' || event.kind === 'stopping') {
+            return;
+          }
+        }
+      } catch (error) {
+        if (signal.aborted) return;
+        if (error instanceof CrucibleError) throw error;
+        // The connection broke mid-stream: weather. Reconnect below from the last id.
+      } finally {
+        await stream.cancel().catch(() => undefined);
+      }
+      if (!(await backoff.wait(signal))) return;
+    }
   }
 
   /** `GET /v1/jobs/{id}/artifacts/{name}` — the artifact's bytes. */
@@ -932,10 +1185,7 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'load-model',
       model: requireText(model, 'model'),
-      params: {
-        ...leaseParams(options?.lease),
-        ...(options?.context === undefined ? {} : { context: options.context }),
-      },
+      params: options?.context === undefined ? {} : { context: options.context },
       inputs: {},
     });
   }
@@ -957,15 +1207,16 @@ export class CrucibleClient {
     return readChatResponse(body);
   }
 
-  /** The `queue` member a chat or decision sends: its own choice, else the client's. */
+  /**
+   * The `queue` member a chat or decision sends: its own choice, else the client's. Inside a
+   * session it is still sent: a session's call that must wait (its model not resident, every slot
+   * taken) waits ahead of the line with it, and is refused without it.
+   */
   #callQueue(choice: QueueChoice | undefined): Record<string, number> | null {
     return queuePayload(choice === undefined ? this.#helperQueue : choice);
   }
 
-  /**
-   * `POST /v1/decide`, asked again without `queue` when the server is older than the queue
-   * and refuses the field it does not know.
-   */
+  /** `POST /v1/decide` with the client's (or the request's) `queue`. */
   async #postDecide(
     payload: Record<string, unknown>,
     options: DecideOptions,
@@ -973,19 +1224,11 @@ export class CrucibleClient {
   ): Promise<Json> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
-    const send = (body: Record<string, unknown>): Promise<Json> => {
-      const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(body) };
-      if (options.signal !== undefined) init.signal = options.signal;
-      return this.#json('/v1/decide', init, what);
-    };
     const queue = this.#callQueue(options.queue);
-    if (queue === null) return send(payload);
-    try {
-      return await send({ ...payload, queue });
-    } catch (error) {
-      if (!refusedTheQueueField(error)) throw error;
-      return send(payload);
-    }
+    const body = queue === null ? payload : { ...payload, queue };
+    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(body) };
+    if (options.signal !== undefined) init.signal = options.signal;
+    return this.#json('/v1/decide', init, what);
   }
 
   /** The same completion as {@link chat}, streamed as content deltas. */
@@ -1163,15 +1406,12 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'load-voice',
       model: requireText(voice, 'voice'),
-      params: {
-        ...leaseParams(options?.lease),
-        ...(reference === undefined ? {} : {
-          reference: {
-            data: requireText(reference.data, 'reference.data'),
-            transcript: requireText(reference.transcript, 'reference.transcript'),
-            ...(reference.name === undefined ? {} : {name: reference.name}),
-          },
-        }),
+      params: reference === undefined ? {} : {
+        reference: {
+          data: requireText(reference.data, 'reference.data'),
+          transcript: requireText(reference.transcript, 'reference.transcript'),
+          ...(reference.name === undefined ? {} : {name: reference.name}),
+        },
       },
       inputs: {},
     });
@@ -1494,17 +1734,17 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'image',
       model: requireText(given.model, 'model'),
-      params: { ...params, ...leaseParams(given.lease) },
+      params,
       inputs,
     });
   }
 
   /** Queue a `load-image` job (warm the image model up before the first prompt) and return its id. */
-  async loadImage(model: string, options?: LoadImageOptions): Promise<string> {
+  async loadImage(model: string): Promise<string> {
     return this.#submitHelper({
       type: 'load-image',
       model: requireText(model, 'model'),
-      params: leaseParams(options?.lease),
+      params: {},
       inputs: {},
     });
   }
@@ -1540,17 +1780,17 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'audio',
       model: requireText(given.model, 'model'),
-      params: { ...params, ...leaseParams(given.lease) },
+      params,
       inputs: {},
     });
   }
 
   /** Queue a `load-audio` job (warm an audio model up before the first request) and return its id. */
-  async loadAudio(model: string, options?: LoadAudioOptions): Promise<string> {
+  async loadAudio(model: string): Promise<string> {
     return this.#submitHelper({
       type: 'load-audio',
       model: requireText(model, 'model'),
-      params: leaseParams(options?.lease),
+      params: {},
       inputs: {},
     });
   }
@@ -1578,17 +1818,17 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'segment',
       model: requireText(given.model, 'model'),
-      params: { ...params, ...leaseParams(given.lease) },
+      params,
       inputs: { [given.imageName ?? 'input.png']: given.image },
     });
   }
 
   /** Queue a `load-segment` job (warm a segment model up, e.g. when a selection tool opens) and return its id. */
-  async loadSegment(model: string, options?: LoadSegmentOptions): Promise<string> {
+  async loadSegment(model: string): Promise<string> {
     return this.#submitHelper({
       type: 'load-segment',
       model: requireText(model, 'model'),
-      params: leaseParams(options?.lease),
+      params: {},
       inputs: {},
     });
   }
@@ -1627,17 +1867,17 @@ export class CrucibleClient {
     return this.#submitHelper({
       type: 'video',
       model: requireText(given.model, 'model'),
-      params: { ...params, ...leaseParams(given.lease) },
+      params,
       inputs: picture === null ? {} : { [given.imageName ?? 'start.png']: picture },
     });
   }
 
   /** Queue a `load-video` job (warm the video model up before a batch) and return its id. */
-  async loadVideo(model: string, options?: LoadVideoOptions): Promise<string> {
+  async loadVideo(model: string): Promise<string> {
     return this.#submitHelper({
       type: 'load-video',
       model: requireText(model, 'model'),
-      params: leaseParams(options?.lease),
+      params: {},
       inputs: {},
     });
   }
@@ -1658,9 +1898,12 @@ export class CrucibleClient {
   }
 
   async #fetch(path: string, init: RequestInit, authenticated: boolean): Promise<Response> {
+    const bound = this.#session;
+    if (bound !== null && bound.end !== null) throw endedSession(bound.id, bound.end);
     const headers = new Headers(init.headers);
     headers.set('User-Agent', this.#userAgent);
     headers.set(CLIENT_NAME_HEADER, this.#clientName);
+    if (bound !== null) headers.set(SESSION_HEADER, bound.id);
     if (authenticated) {
       headers.set('Authorization', `Bearer ${this.#token}`);
       headers.set(API_HEADER, String(API_VERSION));
@@ -1715,11 +1958,17 @@ export class CrucibleClient {
     }
     if (response.status >= 400) {
       if (code === SERVER_BUSY) {
-        return heldAtTheOperatorDoor(details)
-          ? heldRefusal(response.status, code, message, details)
-          : busyRefusal(response.status, code, message, details);
+        if (heldAtTheOperatorDoor(details)) return heldRefusal(response.status, code, message, details);
+        if (heldBySession(details)) return sessionRefusal(response.status, code, message, details);
+        return busyRefusal(response.status, code, message, details);
       }
-      if (code === LEASED) return leasedRefusal(response.status, code, message, details);
+      if (code === SESSION_OPEN) return sessionRefusal(response.status, code, message, details);
+      if (code === SESSION_CLOSED) {
+        const refusal = closedRefusal(response.status, message, details);
+        const bound = this.#session;
+        if (bound !== null) noteSessionEnd(bound, refusal);
+        return refusal;
+      }
       return new CrucibleRefused(response.status, code, message, details);
     }
     return new CrucibleProtocolError(
@@ -1727,7 +1976,12 @@ export class CrucibleClient {
     );
   }
 
-  /** `POST /v1/tts/stream` — open a live TTS session on the resident voice. */
+  /**
+   * `POST /v1/tts/stream` — open a live TTS stream. It runs inside a queue session: this client's
+   * own (a {@link CrucibleSession}'s, or the open one this client holds), else one opened for it,
+   * which waits in the line and closes with the stream. Resolves once that session is open and the
+   * voice is resident.
+   */
   async stream(options: StreamOptions): Promise<TtsStreamSession> {
     return openTtsStream(
       {
@@ -1839,6 +2093,537 @@ export class CrucibleClient {
       status: oneOf(str(body, 'status', 'cancelTask'), ['cancelling'], 'cancelTask.status'),
     };
   }
+}
+
+/**
+ * An app's queue session: its turn holding the server for a run of requests (docs/QUEUE.md). Made
+ * by {@link CrucibleClient.session}, open when you get it.
+ *
+ * It IS a {@link CrucibleClient} — `chat`, `chatStream`, `decide`, `decideItems`, `submit`,
+ * `render`, `asr`, `align`, `image`, `audio`, `segment`, `video`, every load and unload, `events`,
+ * `artifact`, `stream`, … — and every request it makes carries `X-Crucible-Session`. Its helpers
+ * send no `queue`: a session's items go ahead of the line. Once the session has ended, every one of
+ * them throws {@link CrucibleSessionClosed} without asking the server; fetch what its jobs left
+ * through the client it came from.
+ *
+ * End it with {@link close} in a `finally`; until then nothing from any other client runs.
+ */
+export class CrucibleSession extends CrucibleClient {
+  /** The session's id (`ses-…`). */
+  readonly id: string;
+  /** The capability class it was opened for. */
+  readonly act: string;
+  /**
+   * How the session ended, once it has: closed by {@link close}, idle, by an operator, at the
+   * server's maximum hold, or the server stopping. Never rejects. A background follow of the
+   * session's own stream is what resolves it; that follow ends with the session.
+   */
+  readonly closed: Promise<QueueSessionEnd>;
+
+  readonly #hooks: SessionHooks;
+
+  /** Made by {@link CrucibleClient.session}; an app never constructs one. */
+  constructor(
+    options: CrucibleClientOptions,
+    id: string,
+    act: string,
+    closed: Promise<QueueSessionEnd>,
+    hooks: SessionHooks,
+  ) {
+    super(options);
+    this.id = id;
+    this.act = act;
+    this.closed = closed;
+    this.#hooks = hooks;
+  }
+
+  /**
+   * `POST /v1/queue/sessions/{id}/touch` — still here. Anything the server is running or answering
+   * for the session already counts; this is for a long gap on the app's side with nothing in
+   * flight there (a cloud call, a file copy) that would otherwise outlast `idleS`.
+   */
+  touch(): Promise<void> {
+    return this.#hooks.touch();
+  }
+
+  /** `GET /v1/queue/sessions/{id}` — where it stands: what it has run and has in flight. */
+  state(): Promise<QueueSessionState> {
+    return this.#hooks.state();
+  }
+
+  /**
+   * `DELETE /v1/queue/sessions/{id}` — end it (reason `client`); the server settles the card
+   * before it answers. Resolves {@link closed}. Calling it again, or after the server ended it,
+   * answers how it ended.
+   */
+  close(): Promise<QueueSessionEnd> {
+    return this.#hooks.close();
+  }
+
+  /** How it ended, when this client knows it has; null while it is open. */
+  get ended(): QueueSessionEnd | null {
+    return this.#hooks.binding.end;
+  }
+
+  /**
+   * Why the background follow of the session's stream stopped before the session ended (a refusal
+   * or a malformed frame, never a dropped connection, which is reconnected), or null. While it is
+   * set, {@link closed} resolves only through {@link close} or an item the server refuses as
+   * `session_closed`.
+   */
+  get watchFailure(): unknown {
+    return this.#hooks.binding.watchFailure;
+  }
+}
+
+/** What a session's client knows about the session it sends items for. */
+interface SessionBinding {
+  readonly id: string;
+  /** How it ended; null while it is open. */
+  end: QueueSessionEnd | null;
+  watchFailure: unknown;
+  /** Record how it ended, once; the first word wins. */
+  settle(end: QueueSessionEnd): void;
+}
+
+/** A session's own routes, which its owner sends. */
+interface SessionHooks {
+  readonly binding: SessionBinding;
+  touch(): Promise<void>;
+  state(): Promise<QueueSessionState>;
+  close(): Promise<QueueSessionEnd>;
+}
+
+/** One event of a queue session's own stream, read. */
+type SessionFeedEvent =
+  | { readonly id: number; readonly kind: 'queued' | 'moved'; readonly position: QueuePosition }
+  | { readonly id: number; readonly kind: 'opened' }
+  | { readonly id: number; readonly kind: 'closed'; readonly end: QueueSessionEnd }
+  | {
+      readonly id: number;
+      readonly kind: 'removed';
+      readonly reason: string;
+      readonly message: string;
+      readonly error: Json | null;
+    }
+  /** The server is stopping; it closes or removes the session as it does. */
+  | { readonly id: number; readonly kind: 'stopping'; readonly reason: string }
+  /** The server does not know the session: it restarted since (or forgot it long after it ended). */
+  | { readonly id: number; readonly kind: 'forgotten'; readonly message: string }
+  | { readonly id: number; readonly kind: 'unknown' };
+
+/** Waits between reconnects: doubling from a quarter second to five, reset by a delivered event. */
+class Backoff {
+  #next = RECONNECT_FIRST_MS;
+
+  reset(): void {
+    this.#next = RECONNECT_FIRST_MS;
+  }
+
+  /** Wait before the next attempt; false when `signal` aborted the wait. */
+  async wait(signal: AbortSignal): Promise<boolean> {
+    const ms = this.#next;
+    this.#next = Math.min(this.#next * 2, RECONNECT_CEILING_MS);
+    await pause(ms, signal);
+    return !signal.aborted;
+  }
+}
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
+ * Weather, not misconfiguration: the server could not be reached, or a proxy or a stopping server
+ * answered for it. A follow reconnects after these and refuses everything else by name.
+ */
+function isWeather(error: unknown): boolean {
+  if (error instanceof CrucibleUnreachable) return true;
+  return (
+    error instanceof CrucibleServerError &&
+    (error.status === 502 || error.status === 503 || error.status === 504)
+  );
+}
+
+function readLastEventId(value: number | undefined): number | null {
+  if (value === undefined) return null;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new CrucibleConfigError('lastEventId', `must be a non-negative integer, got ${String(value)}`);
+  }
+  return value;
+}
+
+const SERVER_EVENT_TOPICS: readonly string[] = [
+  'job', 'queue', 'session', 'card', 'chat', 'task', 'settings', 'server',
+];
+
+function topicsQuery(topics: readonly string[] | undefined): string {
+  if (topics === undefined) return '';
+  if (!Array.isArray(topics) || topics.length === 0) {
+    throw new CrucibleConfigError(
+      'topics',
+      'must be a non-empty array of topics; leave it out for all of them',
+    );
+  }
+  for (const topic of topics) oneOfTopics(topic);
+  return `?topics=${encodeURIComponent(topics.join(','))}`;
+}
+
+function oneOfTopics(topic: unknown): void {
+  if (typeof topic !== 'string' || !SERVER_EVENT_TOPICS.includes(topic)) {
+    throw new CrucibleConfigError(
+      'topics',
+      `${JSON.stringify(topic)} is not a topic of GET /v1/events; they are ` +
+        SERVER_EVENT_TOPICS.join(', '),
+    );
+  }
+}
+
+function frameData(frame: SseFrame, where: string): Json {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(frame.data);
+  } catch {
+    throw new CrucibleProtocolError(`${where} has non-JSON data: ${excerpt(frame.data)}`);
+  }
+  return asObject(parsed, where);
+}
+
+function frameId(frame: SseFrame, where: string): number {
+  const raw = frame.lastEventId;
+  const id = Number(raw);
+  if (raw === null || raw === '' || !Number.isInteger(id) || id < 1) {
+    throw new CrucibleProtocolError(`${where} carried no usable id: ${JSON.stringify(raw)}`);
+  }
+  return id;
+}
+
+function readStopReason(data: string): string {
+  return str(frameData({ lastEventId: null, event: SERVER_STOPPING, data }, SERVER_STOPPING), 'reason', SERVER_STOPPING);
+}
+
+function readSessionFrame(frame: SseFrame, what: string, previous: number): SessionFeedEvent {
+  if (frame.event === SERVER_STOPPING) {
+    return { id: previous, kind: 'stopping', reason: readStopReason(frame.data) };
+  }
+  const where = `${what}'s ${String(frame.event)} event`;
+  const id = frameId(frame, where);
+  if (id <= previous) {
+    throw new CrucibleProtocolError(`event id ${id} does not follow ${previous} on ${what}`);
+  }
+  const data = frameData(frame, where);
+  switch (frame.event) {
+    case 'queued':
+    case 'moved':
+      return {
+        id,
+        kind: frame.event,
+        position: { position: num(data, 'position', where), of: num(data, 'of', where) },
+      };
+    case 'opened':
+      return { id, kind: 'opened' };
+    case 'closed':
+      return {
+        id,
+        kind: 'closed',
+        end: {
+          reason: str(data, 'reason', where),
+          message: str(data, 'message', where),
+          itemsRun: num(data, 'items_run', where),
+          heldS: nullableNum(data, 'held_s', where),
+        },
+      };
+    case 'removed':
+      return {
+        id,
+        kind: 'removed',
+        reason: str(data, 'reason', where),
+        message: str(data, 'message', where),
+        error: optObject(data, 'error', where),
+      };
+    default:
+      return { id, kind: 'unknown' };
+  }
+}
+
+/** How a closed session's state says it ended. */
+function endOf(state: QueueSessionState, where: string): QueueSessionEnd {
+  if (state.status !== 'closed' || state.reason === null || state.message === null) {
+    throw new CrucibleProtocolError(
+      `${where} answered status ${state.status} with reason ${String(state.reason)}; a session ` +
+        'that has ended says closed, and why',
+    );
+  }
+  return {
+    reason: state.reason,
+    message: state.message,
+    itemsRun: state.itemsRun,
+    heldS:
+      state.openedAt === null || state.closedAt === null
+        ? null
+        : (Date.parse(state.closedAt) - Date.parse(state.openedAt)) / 1000,
+  };
+}
+
+function settledEnd(binding: SessionBinding): QueueSessionEnd {
+  if (binding.end === null) {
+    throw new CrucibleProtocolError(`queue session ${binding.id} was closed and says no end`);
+  }
+  return binding.end;
+}
+
+/** A session that ended before it opened, or whose end a client already knows. */
+function sessionClosed(
+  sessionId: string,
+  reason: string,
+  message: string,
+  error: Json | null,
+): CrucibleSessionClosed {
+  return new CrucibleSessionClosed(
+    409,
+    message,
+    { session_id: sessionId, reason, ...(error === null ? {} : { error }) },
+    { sessionId, reason },
+  );
+}
+
+function endedSession(sessionId: string, end: QueueSessionEnd): CrucibleSessionClosed {
+  return sessionClosed(
+    sessionId,
+    end.reason,
+    `queue session ${sessionId} ended (${end.reason}): ${end.message}. Nothing more runs in ` +
+      'it; open a new one with session(...), and fetch what its jobs left through the client ' +
+      'it came from',
+    null,
+  );
+}
+
+/** A refusal saying the session ended is how its client learns, when its follow has not yet. */
+function noteSessionEnd(binding: SessionBinding, error: unknown): void {
+  if (!(error instanceof CrucibleSessionClosed) || error.sessionId !== binding.id) return;
+  binding.settle({ reason: error.reason, message: error.serverMessage, itemsRun: null, heldS: null });
+}
+
+/** `GET /v1/queue/sessions/{id}`, and `/v1/activity`'s `session`. */
+function readQueueSession(data: Json, where: string): QueueSessionState {
+  return {
+    sessionId: str(data, 'session_id', where),
+    status: oneOf(str(data, 'status', where), QUEUE_SESSION_STATUSES, `${where}.status`),
+    act: str(data, 'act', where),
+    client: nullableStr(data, 'client', where),
+    model: nullableStr(data, 'model', where),
+    position: nullableNum(data, 'position', where),
+    idleS: num(data, 'idle_s', where),
+    maxWaitS: num(data, 'max_wait_s', where),
+    created: str(data, 'created', where),
+    openedAt: nullableStr(data, 'opened_at', where),
+    idleDeadline: nullableStr(data, 'idle_deadline', where),
+    maxHoldDeadline: nullableStr(data, 'max_hold_deadline', where),
+    itemsRun: num(data, 'items_run', where),
+    inFlight: arrayField(data, 'in_flight', where).map((entry, index) =>
+      asObject(entry, `${where}.in_flight[${index}]`),
+    ),
+    streamSession: nullableObject(data, 'stream_session', where),
+    loadJob: nullableStr(data, 'load_job', where),
+    closedAt: nullableStr(data, 'closed_at', where),
+    reason: nullableStr(data, 'reason', where),
+    message: nullableStr(data, 'message', where),
+    error: nullableObject(data, 'error', where),
+  };
+}
+
+const JOB_CHANGES = [
+  'job.queued', 'job.running', 'job.done', 'job.failed', 'job.cancelled', 'job.interrupted',
+  'job.removed',
+] as const;
+const QUEUE_CHANGES = ['queue.added', 'queue.moved', 'queue.started', 'queue.removed'] as const;
+const SESSION_CHANGES = [
+  'session.queued', 'session.moved', 'session.opened', 'session.closed', 'session.removed',
+] as const;
+const CARD_CHANGES = [
+  'card.warming', 'card.warming_ended', 'card.loaded', 'card.unloading', 'card.unloaded',
+] as const;
+const TASK_CHANGES = ['task.running', 'task.done', 'task.failed', 'task.cancelled'] as const;
+
+function isOneOf<T extends string>(value: string, names: readonly T[]): value is T {
+  return (names as readonly string[]).includes(value);
+}
+
+/** One frame of `GET /v1/events`, read (docs/EVENTS.md). */
+function readServerEvent(frame: SseFrame): ServerEvent {
+  const name = frame.event;
+  if (name === null) {
+    throw new CrucibleProtocolError(`a server event carried no event name: ${excerpt(frame.data)}`);
+  }
+  if (name === SERVER_STOPPING) {
+    const where = 'the server.stopping event';
+    const data = frameData(frame, where);
+    return {
+      id: frame.lastEventId === null ? null : frameId(frame, where),
+      event: SERVER_STOPPING,
+      reason: str(data, 'reason', where),
+      at: optStr(data, 'at', where),
+    };
+  }
+  const where = `server event ${String(frame.lastEventId)} (${name})`;
+  const id = frameId(frame, where);
+  const data = frameData(frame, where);
+  if (name === 'snapshot') {
+    const queue = objectField(data, 'queue', where);
+    return {
+      id,
+      event: 'snapshot',
+      gap: bool(data, 'gap', where),
+      topics: strArray(data, 'topics', where),
+      activity: readActivity(objectField(data, 'activity', where)),
+      queue: {
+        items: arrayField(queue, 'items', `${where}.queue`).map((row, index) =>
+          readQueueItem(asObject(row, `${where}.queue.items[${index}]`), `${where}.queue.items[${index}]`),
+        ),
+        depth: num(queue, 'depth', `${where}.queue`),
+      },
+      tasks: arrayField(data, 'tasks', where).map((row, index) =>
+        readTaskStatus(asObject(row, `${where}.tasks[${index}]`), `${where}.tasks[${index}]`),
+      ),
+    };
+  }
+  if (name === 'overflow') {
+    return {
+      id,
+      event: 'overflow',
+      lastEventId: num(data, 'last_event_id', where),
+      limit: num(data, 'limit', where),
+      message: str(data, 'message', where),
+    };
+  }
+  const at = str(data, 'at', where);
+  if (name === 'job.progress') {
+    return {
+      id,
+      event: name,
+      at,
+      jobId: str(data, 'job_id', where),
+      fraction: num(data, 'fraction', where),
+      message: nullableStr(data, 'message', where),
+    };
+  }
+  if (isOneOf(name, JOB_CHANGES)) {
+    const error = name === 'job.failed' ? nullableObject(data, 'error', where) : null;
+    const removal = name === 'job.removed' ? nullableObject(data, 'removal', where) : null;
+    return {
+      id,
+      event: name,
+      at,
+      jobId: str(data, 'job_id', where),
+      type: str(data, 'type', where),
+      model: nullableStr(data, 'model', where),
+      client: nullableStr(data, 'client', where),
+      clientRef: nullableStr(data, 'client_ref', where),
+      status: oneOf(str(data, 'status', where), JOB_STATES, `${where}.status`),
+      position: name === 'job.queued' ? nullableNum(data, 'position', where) : null,
+      waiting: name === 'job.queued' ? bool(data, 'waiting', where) : null,
+      started: name === 'job.running' ? nullableStr(data, 'started', where) : null,
+      artifacts: name === 'job.done' ? strArray(data, 'artifacts', where) : null,
+      error: error === null ? null : readFailure(error, `${where}.error`),
+      interruptedAt: name === 'job.interrupted' ? nullableStr(data, 'interrupted_at', where) : null,
+      removal: readRemovalOrNull(removal, `${where}.removal`),
+    };
+  }
+  if (isOneOf(name, QUEUE_CHANGES)) {
+    const placed = name === 'queue.added' || name === 'queue.moved';
+    return {
+      id,
+      event: name,
+      at,
+      jobId: str(data, 'job_id', where),
+      depth: num(data, 'depth', where),
+      kind: oneOf(str(data, 'kind', where), QUEUE_KINDS, `${where}.kind`),
+      position: placed ? num(data, 'position', where) : null,
+      waitedS: name === 'queue.started' ? num(data, 'waited_s', where) : null,
+      reason: name === 'queue.removed' ? str(data, 'reason', where) : null,
+      data,
+    };
+  }
+  if (isOneOf(name, SESSION_CHANGES)) {
+    const placed = name === 'session.queued' || name === 'session.moved';
+    const ended = name === 'session.closed' || name === 'session.removed';
+    return {
+      id,
+      event: name,
+      at,
+      sessionId: str(data, 'session_id', where),
+      client: nullableStr(data, 'client', where),
+      act: str(data, 'act', where),
+      position: placed
+        ? { position: num(data, 'position', where), of: num(data, 'of', where) }
+        : null,
+      reason: ended ? str(data, 'reason', where) : null,
+      message: ended ? str(data, 'message', where) : null,
+      data,
+    };
+  }
+  if (isOneOf(name, CARD_CHANGES)) {
+    const loaded = name === 'card.loaded';
+    const leaving = name === 'card.unloading' || name === 'card.unloaded';
+    return {
+      id,
+      event: name,
+      at,
+      subject: str(data, 'subject', where),
+      kind: nullableStr(data, 'kind', where),
+      engine: nullableStr(data, 'engine', where),
+      memoryBytesEstimate: loaded ? num(data, 'memory_bytes_estimate', where) : null,
+      since: loaded || leaving ? nullableStr(data, 'since', where) : null,
+      pids: leaving ? readNumbers(arrayField(data, 'pids', where), `${where}.pids`) : null,
+    };
+  }
+  if (name === 'chat.in_flight') {
+    return {
+      id,
+      event: name,
+      at,
+      inFlight: num(data, 'in_flight', where),
+      byModel: readSampling(objectField(data, 'by_model', where), `${where}.by_model`),
+    };
+  }
+  if (isOneOf(name, TASK_CHANGES)) {
+    return { id, event: name, at, task: readTaskStatus(data, where) };
+  }
+  if (name === 'task.step') {
+    return { id, event: name, at, taskId: str(data, 'task_id', where), step: readTaskStep(data, where) };
+  }
+  if (name === 'task.progress') {
+    return {
+      id,
+      event: name,
+      at,
+      taskId: str(data, 'task_id', where),
+      progress: readTaskProgress(data, where),
+    };
+  }
+  if (name === 'settings.written') {
+    return {
+      id,
+      event: name,
+      at,
+      act: nullableStr(data, 'act', where),
+      client: nullableStr(data, 'client', where),
+      changed: strArray(data, 'changed', where),
+    };
+  }
+  return { id, event: 'unknown', kind: name, data };
 }
 
 function readResumable(body: Json): Resumable {
@@ -2235,8 +3020,8 @@ function readQueueItem(row: Json, where: string): QueueItem {
     waitedS: num(row, 'waited_s', where),
     maxWaitS: num(row, 'max_wait_s', where),
     expiresAt: str(row, 'expires_at', where),
-    leaseHolder: bool(row, 'lease_holder', where),
-    kind: oneOf(str(row, 'kind', where), ['job', 'call', 'lease'] as const, `${where}.kind`),
+    session: nullableStr(row, 'session', where),
+    kind: oneOf(str(row, 'kind', where), QUEUE_KINDS, `${where}.kind`),
   };
 }
 
@@ -2267,35 +3052,6 @@ function readQueueEvent(rawId: string | null, rawName: string | null, rawData: s
     return { id, event: rawName, jobId: str(data, 'job_id', where), depth: num(data, 'depth', where), data };
   }
   return { id, event: 'unknown', kind: String(rawName), data };
-}
-
-function queuePayload(choice: QueueChoice | undefined): Record<string, number> | null {
-  if (choice === undefined || choice === false) return null;
-  if (choice === true) return {};
-  if (typeof choice !== 'object' || choice === null) {
-    throw new CrucibleConfigError('queue', 'must be true, false or {maxWaitS}');
-  }
-  if (choice.maxWaitS === undefined) return {};
-  const wait = choice.maxWaitS;
-  if (!Number.isInteger(wait) || wait < MIN_MAX_WAIT_S || wait > MAX_MAX_WAIT_S) {
-    throw new CrucibleConfigError(
-      'queue.maxWaitS',
-      `is ${String(wait)}; a queued job waits a whole number of seconds from ` +
-        `${MIN_MAX_WAIT_S} to ${MAX_MAX_WAIT_S}. Leave it out for the server's default (an hour).`,
-    );
-  }
-  return { max_wait_s: wait };
-}
-
-/** True when the server refused `queue` as a field it does not know: a server older than the queue. */
-function refusedTheQueueField(error: unknown): boolean {
-  if (!(error instanceof CrucibleRefused) || error.code !== 'invalid_request') return false;
-  const details = error.details as { problems?: unknown } | null;
-  const problems = Array.isArray(details?.problems) ? details.problems : [];
-  return problems.some((problem: unknown) => {
-    const location = (problem as { location?: unknown } | null)?.location;
-    return Array.isArray(location) && location[0] === 'body' && location[1] === 'queue';
-  });
 }
 
 function readChunksDone(body: Json): number[] {
@@ -2524,7 +3280,6 @@ export function readImageResult(done: DoneData): ImageResult {
     memoryBasis: str(image, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
     promptCache: readPromptCache(image, at),
-    leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
 }
 
@@ -2561,7 +3316,6 @@ export function readAudioResult(done: DoneData): AudioResult {
     memoryBytesEstimate: num(audio, 'memory_bytes_estimate', at),
     memoryBasis: str(audio, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
-    leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
 }
 
@@ -2595,7 +3349,6 @@ export function readSegmentResult(done: DoneData): SegmentResult {
     memoryBytesEstimate: num(segment, 'memory_bytes_estimate', at),
     memoryBasis: str(segment, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
-    leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
 }
 
@@ -2649,7 +3402,6 @@ export function readVideoResult(done: DoneData): VideoResult {
     stageMemoryBytes: numberMap(nullableObject(video, 'stage_memory_bytes', at), `${at}.stage_memory_bytes`),
     promptCache: readPromptCache(video, at),
     artifacts: done.artifacts ?? [],
-    leaseId: optStr(done.extra as Json, 'lease_id', where),
   };
 }
 
@@ -3644,7 +4396,16 @@ function heldRefusal(
   }
 }
 
-function leasedRefusal(
+const SESSION_DOOR = 'session';
+
+/** `server_busy` because another client's queue session holds the server. */
+function heldBySession(details: unknown): boolean {
+  if (typeof details !== 'object' || details === null) return false;
+  return (details as Record<string, unknown>)['door'] === SESSION_DOOR;
+}
+
+/** `server_busy` (door `session`) or `session_open`: another client's session holds the server. */
+function sessionRefusal(
   status: number,
   code: string,
   message: string,
@@ -3652,13 +4413,31 @@ function leasedRefusal(
 ): CrucibleError {
   try {
     const body = asObject(details, 'error.details');
-    return new CrucibleLeased(status, code, message, details, {
-      leaseId: str(body, 'lease_id', 'error.details'),
-      kind: str(body, 'kind', 'error.details'),
-      holder: nullableStr(body, 'client', 'error.details'),
+    return new CrucibleSessionHeld(status, code, message, details, {
+      holder: nullableStr(body, 'holder', 'error.details'),
+      sessionId: str(body, 'session_id', 'error.details'),
       act: str(body, 'act', 'error.details'),
+      model: nullableStr(body, 'model', 'error.details'),
+      sessionStatus: str(body, 'status', 'error.details'),
       since: str(body, 'since', 'error.details'),
-      expiresAt: str(body, 'expires_at', 'error.details'),
+    });
+  } catch (cause) {
+    if (cause instanceof CrucibleProtocolError) return cause;
+    throw cause;
+  }
+}
+
+/**
+ * `session_closed`. An item names the session as `session_id`; a TTS stream whose session ended
+ * before it opened names it as `queue_session_id`.
+ */
+function closedRefusal(status: number, message: string, details: unknown): CrucibleError {
+  try {
+    const body = asObject(details, 'error.details');
+    const key = 'session_id' in body ? 'session_id' : 'queue_session_id';
+    return new CrucibleSessionClosed(status, message, details, {
+      sessionId: str(body, key, 'error.details'),
+      reason: str(body, 'reason', 'error.details'),
     });
   } catch (cause) {
     if (cause instanceof CrucibleProtocolError) return cause;
@@ -3704,26 +4483,67 @@ function readHeldBy(
   };
 }
 
-function leaseParams(lease: LeaseOnLoad | undefined): Record<string, unknown> {
-  if (lease === undefined) {
-    return {};
-  }
+/** `GET /v1/activity`'s body, read; also the `activity` of a server event stream's snapshot. */
+function readActivity(body: Json): Activity {
+  const server = objectField(body, 'server', 'activity');
+  const resident = nullableObject(body, 'resident', 'activity');
+  const claim = nullableObject(body, 'claim', 'activity');
+  const streaming = nullableObject(body, 'streaming', 'activity');
+  const session = nullableObject(body, 'session', 'activity');
+  const chat = objectField(body, 'chat', 'activity');
+  const slot = objectField(objectField(body, 'slots', 'activity'), 'accelerated', 'activity.slots');
   return {
-    lease: {
-      act: requireText(lease.act, 'lease.act'),
-      ttl_seconds: lease.ttlSeconds,
+    server: {
+      name: str(server, 'name', 'activity.server'),
+      version: str(server, 'version', 'activity.server'),
+      apiVersion: num(server, 'api_version', 'activity.server'),
+      backend: str(server, 'backend', 'activity.server'),
+      uptimeS: num(server, 'uptime_s', 'activity.server'),
     },
-  };
-}
-
-function readLease(data: Json, where: string): ActivityLease {
-  return {
-    leaseId: str(data, 'lease_id', where),
-    kind: str(data, 'kind', where),
-    client: nullableStr(data, 'client', where),
-    act: str(data, 'act', where),
-    since: str(data, 'since', where),
-    expiresAt: str(data, 'expires_at', where),
+    resident:
+      resident === null
+        ? null
+        : {
+            kind: str(resident, 'kind', 'activity.resident'),
+            id: str(resident, 'id', 'activity.resident'),
+            since: str(resident, 'since', 'activity.resident'),
+            memoryBytesEstimate: num(
+              resident,
+              'memory_bytes_estimate',
+              'activity.resident',
+            ),
+            heldBy: readHeldBy(resident),
+            unclaimedSince: nullableStr(
+              resident,
+              'unclaimed_since',
+              'activity.resident',
+            ),
+            engineExitCode: nullableNum(
+              resident,
+              'engine_exit_code',
+              'activity.resident',
+            ),
+          },
+    stopping: readStopping(body, 'activity'),
+    warming: nullableStr(body, 'warming', 'activity'),
+    claim: claim === null ? null : { heldBy: str(claim, 'held_by', 'activity.claim') },
+    streaming: streaming === null ? null : readStreaming(streaming),
+    session: session === null ? null : readQueueSession(session, 'activity.session'),
+    chat: readActivityChat(chat),
+    slots: {
+      accelerated: {
+        busy: num(slot, 'busy', 'activity.slots.accelerated'),
+        of: num(slot, 'of', 'activity.slots.accelerated'),
+        queueDepth: num(slot, 'queue_depth', 'activity.slots.accelerated'),
+        acceptsWork: bool(slot, 'accepts_work', 'activity.slots.accelerated'),
+      },
+    },
+    running: asArray(field(body, 'running', 'activity'), 'activity.running').map(
+      (entry, index) => readActivityJob(asObject(entry, `activity.running[${index}]`), `activity.running[${index}]`),
+    ),
+    queued: asArray(field(body, 'queued', 'activity'), 'activity.queued').map(
+      (entry, index) => readActivityJob(asObject(entry, `activity.queued[${index}]`), `activity.queued[${index}]`),
+    ),
   };
 }
 

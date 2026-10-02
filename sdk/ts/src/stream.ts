@@ -5,8 +5,10 @@ import {
   CrucibleRefused,
   CrucibleUnreachable,
 } from './errors.js';
+import { queuePayload, requireSeconds } from './queue.js';
 import { readSseFrames } from './sse.js';
 import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
+import type { QueueChoice } from './types.js';
 
 /** Everything `stream(...)` needs. */
 export interface StreamOptions {
@@ -14,6 +16,20 @@ export interface StreamOptions {
   voice: string;
   /** The language every row of this session is spoken in. */
   language: string;
+  /**
+   * A stream runs inside a queue session: the client's own when it holds one, else one opened for
+   * the stream, which waits in the line like any session and closes with the stream. This is that
+   * session's `idle_s` (10..86400, the server's default 900): no row being said, no op and no
+   * touch for this long closes it and the stream. Ignored inside the client's own session.
+   */
+  idleS?: number;
+  /**
+   * How the stream's session waits in the line: `true` (the default) or `{maxWaitS}` waits;
+   * `false` refuses instead (`session_open`, `server_busy`) when the server is not free now.
+   */
+  queue?: QueueChoice;
+  /** Aborts the open, which is held until the session is open and the voice resident. */
+  signal?: AbortSignal;
 }
 
 /** One sub-sentence chunk of audio, decoded. */
@@ -95,6 +111,10 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   readonly sampleRate: number;
   /** The backend speaking. */
   readonly backend: string;
+  /** The queue session the stream runs in. */
+  readonly queueSessionId: string;
+  /** True when that session was opened for this stream, so it closes with it. */
+  readonly openedForStream: boolean;
 
   /** Speak one row and return its id; the audio comes out of the iterator. */
   say(id: string, text: string, take?: number): Promise<string>;
@@ -105,7 +125,7 @@ export interface TtsStreamSession extends AsyncIterable<StreamEvent> {
   /** Stop every row. */
   cancelAll(): Promise<number>;
 
-  /** Close the session and free the voice. */
+  /** Close the stream; a queue session opened for it closes with it, one the client opened stays. */
   close(): Promise<void>;
 }
 
@@ -133,17 +153,24 @@ export async function openTtsStream(
   }
   const voice = requireOption(given.voice, 'voice');
   const language = requireOption(given.language, 'language');
-  const body = await transport.json(
-    '/v1/tts/stream',
-    { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ voice, language }) },
-    'stream',
-  );
+  const payload: Record<string, unknown> = { voice, language };
+  if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '900 s');
+  if (given.queue === false) {
+    payload['queue'] = false;
+  } else if (given.queue !== undefined) {
+    payload['queue'] = queuePayload(given.queue);
+  }
+  const init: RequestInit = { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(payload) };
+  if (given.signal !== undefined) init.signal = given.signal;
+  const body = await transport.json('/v1/tts/stream', init, 'stream');
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
     fingerprint: str(body, 'fingerprint', 'stream'),
     sampleRate: num(body, 'sample_rate', 'stream'),
     backend: str(body, 'backend', 'stream'),
+    queueSessionId: str(body, 'queue_session_id', 'stream'),
+    openedForStream: bool(body, 'queue_session_opened_for_stream', 'stream'),
   });
   try {
     await session.attach();
@@ -162,6 +189,8 @@ interface Identity {
   fingerprint: string;
   sampleRate: number;
   backend: string;
+  queueSessionId: string;
+  openedForStream: boolean;
 }
 
 class Session implements TtsStreamSession {
@@ -170,6 +199,8 @@ class Session implements TtsStreamSession {
   readonly fingerprint: string;
   readonly sampleRate: number;
   readonly backend: string;
+  readonly queueSessionId: string;
+  readonly openedForStream: boolean;
 
   readonly #transport: StreamTransport;
   readonly #pump: AsyncGenerator<Pumped, void, undefined>;
@@ -184,6 +215,8 @@ class Session implements TtsStreamSession {
     this.fingerprint = identity.fingerprint;
     this.sampleRate = identity.sampleRate;
     this.backend = identity.backend;
+    this.queueSessionId = identity.queueSessionId;
+    this.openedForStream = identity.openedForStream;
     this.#pump = this.#run();
   }
 

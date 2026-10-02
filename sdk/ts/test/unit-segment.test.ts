@@ -89,7 +89,6 @@ test('segment() posts one segment job: the picture as its input, points and box 
     imageName: 'photo.jpg',
     points: [{ x: 412, y: 300, label: 1 }],
     box: [120, 80, 700, 590],
-    lease: { act: 'select', ttlSeconds: 300 },
   });
   assert.equal(jobId, 'job-segment-1');
   assert.deepEqual(JSON.parse(lastBody), {
@@ -98,7 +97,6 @@ test('segment() posts one segment job: the picture as its input, points and box 
     params: {
       points: [{ x: 412, y: 300, label: 1 }],
       box: [120, 80, 700, 590],
-      lease: { act: 'select', ttl_seconds: 300 },
     },
     inputs: { 'photo.jpg': { blob_id: 'blob-7' } },
     queue: {},
@@ -132,27 +130,22 @@ test('segment() without a picture is refused before sending', async () => {
   );
 });
 
-test('loadSegment() queues a load-segment job, with or without a lease', async () => {
+test('loadSegment() queues a load-segment job', async () => {
   answer(200, { job_id: 'job-load-segment' });
-  assert.equal(
-    await client().loadSegment('sam2.1-hiera-large', { lease: { act: 'select', ttlSeconds: 120 } }),
-    'job-load-segment',
-  );
+  assert.equal(await client().loadSegment('sam2.1-hiera-large'), 'job-load-segment');
   assert.deepEqual(JSON.parse(lastBody), {
     type: 'load-segment',
     model: 'sam2.1-hiera-large',
-    params: { lease: { act: 'select', ttl_seconds: 120 } },
+    params: {},
     inputs: {},
     queue: {},
   });
-  await client().loadSegment('birefnet');
-  assert.deepEqual(JSON.parse(lastBody).params, {});
 });
 
 test('readSegmentResult reads the selection, its score and its artifacts', () => {
   const result = readSegmentResult({
     artifacts: ['mask.png', 'cutout.png'],
-    extra: { segment: DONE_SELECT, lease_id: 'lease-3' },
+    extra: { segment: DONE_SELECT },
   });
   assert.deepEqual([result.kind, result.width, result.height], ['select', 1600, 1200]);
   assert.deepEqual(result.points, [{ x: 412, y: 300, label: 1 }, { x: 520.5, y: 610, label: 0 }]);
@@ -164,7 +157,6 @@ test('readSegmentResult reads the selection, its score and its artifacts', () =>
     false,
   ]);
   assert.equal(result.stageSeconds.segmenting, 0.41);
-  assert.equal(result.leaseId, 'lease-3');
 });
 
 test('readSegmentResult reads a cutout, whose prompts and score are null', () => {
@@ -175,7 +167,6 @@ test('readSegmentResult reads a cutout, whose prompts and score are null', () =>
     },
   });
   assert.deepEqual([result.points, result.box, result.score, result.multimask], [null, null, null, null]);
-  assert.equal(result.leaseId, null);
 });
 
 test('readSegmentResult refuses a missing block, an unknown kind and a bad label', () => {

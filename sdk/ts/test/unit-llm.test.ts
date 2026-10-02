@@ -292,6 +292,7 @@ const INFO = {
   // `load-model` / `unload-model` are the job types that operate it.
   ...UNCLAIMED_ENGINE,
   job_types: ['asr', 'echo', 'load-model', 'unload-model'],
+  features: ['queue.sessions', 'events'],
   capabilities: [
     {
       job_type: 'asr',
@@ -437,15 +438,12 @@ test('loadModel submits a load-model job with the model and no inputs', async ()
   });
 });
 
-test('loadModel sends a stated context as params.context, beside a lease', async () => {
+test('loadModel sends a stated context as params.context', async () => {
   handle = (_request, response) => json(response, 200, { job_id: 'job-load-2' });
-  await client().loadModel('qwen3.5-9b', {
-    context: 65536,
-    lease: { act: 'generate', ttlSeconds: 600 },
-  });
+  await client().loadModel('qwen3.5-9b', { context: 65536 });
   assert.deepEqual(JSON.parse(lastBody), {
     type: 'load-model',
-    params: { lease: { act: 'generate', ttl_seconds: 600 }, context: 65536 },
+    params: { context: 65536 },
     inputs: {},
     model: 'qwen3.5-9b',
     queue: {},

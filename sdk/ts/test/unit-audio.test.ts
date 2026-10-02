@@ -95,7 +95,7 @@ test('audio() posts one audio job with snake_case params and only what the calle
   });
 });
 
-test('a song sends tags, lyrics, cfg, format and the lease', async () => {
+test('a song sends tags, lyrics, cfg and format', async () => {
   answer(200, { job_id: 'job-audio-2' });
   await client().audio({
     model: 'yue2-3b',
@@ -103,14 +103,12 @@ test('a song sends tags, lyrics, cfg, format and the lease', async () => {
     lyrics: '[Verse]\nla la\n',
     cfg: 1.2,
     format: 'wav',
-    lease: { act: 'song', ttlSeconds: 600 },
   });
   assert.deepEqual(JSON.parse(lastBody).params, {
     tags: 'English, piano pop',
     lyrics: '[Verse]\nla la\n',
     cfg: 1.2,
     format: 'wav',
-    lease: { act: 'song', ttl_seconds: 600 },
   });
 });
 
@@ -118,33 +116,27 @@ test('audio() without a prompt or tags is refused before sending', async () => {
   await assert.rejects(client().audio({ model: 'stable-audio-3-medium' }), CrucibleConfigError);
 });
 
-test('loadAudio() queues a load-audio job, with or without a lease', async () => {
+test('loadAudio() queues a load-audio job', async () => {
   answer(200, { job_id: 'job-load-audio' });
-  assert.equal(
-    await client().loadAudio('stable-audio-3-medium', { lease: { act: 'music', ttlSeconds: 120 } }),
-    'job-load-audio',
-  );
+  assert.equal(await client().loadAudio('stable-audio-3-medium'), 'job-load-audio');
   assert.deepEqual(JSON.parse(lastBody), {
     type: 'load-audio',
     model: 'stable-audio-3-medium',
-    params: { lease: { act: 'music', ttl_seconds: 120 } },
+    params: {},
     inputs: {},
     queue: {},
   });
-  await client().loadAudio('stable-audio-3-medium');
-  assert.deepEqual(JSON.parse(lastBody).params, {});
 });
 
 test('readAudioResult reads what a song can be made again from, score included', () => {
   const result = readAudioResult({
     artifacts: ['audio.flac', 'score.abc'],
-    extra: { audio: DONE_SONG, lease_id: 'lease-7' },
+    extra: { audio: DONE_SONG },
   });
   assert.deepEqual([result.kind, result.seed, result.cfg, result.durationS], ['song', 3, 1.0, null]);
   assert.deepEqual([result.sampleRate, result.channels, result.score], [48000, 2, 'score.abc']);
   assert.equal(result.stageSeconds.composing, 50.2);
   assert.deepEqual(result.artifacts, ['audio.flac', 'score.abc']);
-  assert.equal(result.leaseId, 'lease-7');
 });
 
 test('readAudioResult refuses a missing audio block and a kind it does not know', () => {
