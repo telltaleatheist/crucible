@@ -275,7 +275,7 @@ class QueueSessions:
             409,
             "server_busy",
             f"{held.describe()} holds this server, and nothing else runs until it "
-            f"closes, so {what} is not admitted now. Submit with \"queue\": {{}} to "
+            f"closes, so {what} is not admitted now. Leave out \"queue\": false to "
             "wait in the line, or read GET /v1/activity to see the session",
             held.busy_details(),
         )
@@ -289,7 +289,7 @@ class QueueSessions:
         if held is None or session_id == held.id:
             return
         wait = (
-            "Send it with \"queue\": {} to wait in the line until the session closes"
+            "Leave out \"queue\": false to wait in the line until the session closes"
             if queueable else "Try again once it closes (GET /v1/activity shows it)"
         )
         raise ApiError(

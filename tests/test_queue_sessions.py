@@ -143,7 +143,7 @@ def test_while_a_session_is_open_its_items_run_and_nobody_else_s_do(
     mine, theirs = as_client(auth, "briefcase"), as_client(auth, "bookforge")
     session_id = open_session(client, mine)["session_id"]
 
-    plain = submit(client, theirs, **body())
+    plain = submit(client, theirs, **body(queue=False))
     assert plain.status_code == 409
     error = plain.json()["error"]
     assert error["code"] == "server_busy"
@@ -151,7 +151,7 @@ def test_while_a_session_is_open_its_items_run_and_nobody_else_s_do(
     assert error["details"]["door"] == "session"
     assert "briefcase" in error["message"]
 
-    waiting = submit(client, theirs, **body(queue={}))
+    waiting = submit(client, theirs, **body())
     assert waiting.status_code == 202 and waiting.json()["queued"] is True
     waiting_id = waiting.json()["job_id"]
 
@@ -179,7 +179,7 @@ def test_a_session_s_jobs_wait_inside_the_session_ahead_of_everyone(
     first = submit(client, item(mine, session_id), **body(delay_ms=60_000)).json()["job_id"]
     wait_for(lambda: status(client, auth, first) == "running", "the first item to run")
 
-    other = submit(client, theirs, **body(queue={})).json()["job_id"]
+    other = submit(client, theirs, **body()).json()["job_id"]
     second = submit(client, item(mine, session_id), **body())
     assert second.status_code == 202, second.text
     assert (second.json()["queued"], second.json()["position"]) == (True, 1)
@@ -464,23 +464,23 @@ def test_other_clients_chats_wait_or_are_refused_while_a_session_is_open(
         run_job(base, auth, type="load-model", model=MODEL)
         session_id = _session(base, mine)["session_id"]
 
-        refused = _post_chat(base, theirs, _chat())
+        refused = _post_chat(base, theirs, _chat(queue=False))
         assert refused.status_code == 409
         error = refused.json()["error"]
         assert error["code"] == "session_open"
         assert "contentstudio" in error["message"] and session_id in error["message"]
         decided = httpx.post(f"{base}/v1/decide", headers=theirs, timeout=30.0,
-                             json=EXAMPLE)
+                             json={**EXAMPLE, "queue": False})
         assert decided.status_code == 409
         assert decided.json()["error"]["code"] == "session_open"
 
-        waiting, out = _in_background(lambda: _post_chat(base, theirs, _chat(queue={})))
+        waiting, out = _in_background(lambda: _post_chat(base, theirs, _chat()))
         _wait_for(lambda: httpx.get(f"{base}/v1/queue", headers=auth, timeout=30.0)
                   .json()["depth"] == 1, "the other client's chat in the line")
 
         own = _post_chat(base, mine, _chat())
         assert own.status_code == 200, "the holder's standalone chat is an implicit item"
-        explicit = _post_chat(base, {**mine, SESSION_HEADER: session_id}, _chat(queue={}))
+        explicit = _post_chat(base, {**mine, SESSION_HEADER: session_id}, _chat())
         assert explicit.status_code == 200
         assert waiting.is_alive(), "the other client's chat is still waiting"
 
@@ -502,11 +502,11 @@ def test_a_session_chat_waits_ahead_of_the_line_for_a_slot(
         _wait_for(lambda: _activity(base, auth)["chat"]["in_flight"] == 1,
                   "the session's first chat in flight")
         theirs, theirs_out = _in_background(
-            lambda: _post_chat(base, _as(auth, "bookforge"), _chat(queue={}))
+            lambda: _post_chat(base, _as(auth, "bookforge"), _chat())
         )
         _wait_for(lambda: httpx.get(f"{base}/v1/queue", headers=auth, timeout=30.0)
                   .json()["depth"] == 1, "the other client's chat waiting")
-        second, second_out = _in_background(lambda: _post_chat(base, mine, _chat(queue={})))
+        second, second_out = _in_background(lambda: _post_chat(base, mine, _chat()))
         _wait_for(lambda: httpx.get(f"{base}/v1/queue", headers=auth, timeout=30.0)
                   .json()["depth"] == 2, "the session's second chat waiting")
         rows = httpx.get(f"{base}/v1/queue", headers=auth, timeout=30.0).json()["items"]

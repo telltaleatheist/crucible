@@ -20,10 +20,14 @@ FEATURES: dict[str, str] = {
     "until the client lets go of them.",
     "jobs.resume": "`params.resume` and /v1/resumable: a resumable job continues the "
     "journal an earlier run left (docs/RESUMABLE-JOBS.md).",
-    "queue.jobs": "`queue` on POST /v1/jobs: a busy server queues the job instead of "
-    "refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md).",
-    "queue.calls": "`queue` on a chat or a decision: the request is held open in the "
-    "same line until the resident model has a slot (docs/QUEUE.md).",
+    "queue.jobs": "POST /v1/jobs: a busy server queues the job instead of refusing it; "
+    "GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md).",
+    "queue.calls": "A chat or a decision is held open in the same line until the "
+    "resident model has a slot (docs/QUEUE.md).",
+    "queue.default": "Every request that can wait (a job, a chat, a decision, a TTS "
+    "stream) waits in the line by default; `\"queue\": false` refuses at once instead, "
+    "and `{\"max_wait_s\": N}` sets the wait. `\"queue\": {}` is refused "
+    "(docs/QUEUE.md).",
     "queue.events": "GET /v1/queue/events: the waiting line's own SSE stream.",
     "queue.sessions": "/v1/queue/sessions: an app's session holds the machine for a run "
     "of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md).",

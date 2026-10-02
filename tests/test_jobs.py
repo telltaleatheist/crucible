@@ -63,6 +63,7 @@ def test_echo_end_to_end(client: TestClient, auth: dict[str, str]) -> None:
 
     assert kinds == [
         "queued",
+        "started",
         "progress",
         "progress",
         "artifact",
@@ -324,7 +325,8 @@ def test_the_lane_takes_one_job_at_a_time(
         "/v1/jobs",
         json={"type": "echo", "params": {"delay_ms": 0},
               "inputs": {"beta.bin": {"inline_base64":
-                                      base64.b64encode(BETA).decode("ascii")}}},
+                                      base64.b64encode(BETA).decode("ascii")}},
+              "queue": False},
         headers=auth,
     )
     assert refused.status_code == 409, refused.text

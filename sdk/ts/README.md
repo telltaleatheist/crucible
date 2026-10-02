@@ -137,14 +137,22 @@ capabilities.
 
 ### The queue
 
-The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video` and
-every load and unload) submit with `queue`: while the server is busy the job waits in its
-queue instead of being refused `CrucibleBusy`. `new CrucibleClient({..., queue: false})`
-turns that off and `queue: {maxWaitS: 600}` changes the wait (the server's default is an
-hour). `submit()` queues only when its request says `queue: true` or `{maxWaitS}`. A server
-that refuses the field is answered by name like any refusal; nothing is sent again without it.
-`chat`, `chatStream`, `decide` and `decideItems` send the same `queue` on a chat: one that must
-wait (its model not resident, every slot taken) waits in the same line.
+Waiting is the default, on the server and in the SDK. Every request that can wait
+(`submit()`, every job helper, `chat`, `chatStream`, `decide`, `decideItems` and `stream`)
+takes a place in the server's line while it is busy instead of being refused, and sends no
+`queue` member to do it. A chat or decision that must wait for its model or a slot is held
+open until its turn and the server loads the model for it.
+
+- `queue: {maxWaitS: 600}` changes the wait (10..86400 s; the server's default is an hour).
+- `queue: false` refuses at once instead: `CrucibleBusy` for a job, `model_not_resident`,
+  `chat_queue_full` or `CrucibleSessionHeld` for a chat or decision.
+- Set it per request, or once for the client (`new CrucibleClient({..., queue: false})`); a
+  request's own `queue` wins. There is no `true` and no `{}`: both are refused before
+  anything is sent, as the server refuses them.
+
+So there is no "catch `server_busy`, ask again with the queue" step to write, and the SDK
+never sends a request a second time. A server that refuses the field is answered by name like
+any refusal.
 
 A queued job that never runs ends `removed {reason, message, waitedS, at}`: `operator`,
 `client`, `expired` or `server_restart`. **It is not a failure**: show it and offer to send
@@ -181,10 +189,10 @@ try {
 - **A `CrucibleSession` is the client plus the session's header.** Every method works on it —
   `chat`, `chatStream`, `decide`, `decideItems`, `submit`, `render`, `asr`, `align`, `image`,
   `audio`, `segment`, `video`, every load and unload, `events`, `artifact`, `stream`, … — and
-  each request carries `X-Crucible-Session`. Its job helpers send no `queue`: a session's
-  jobs go ahead of the line and wait only behind its own. Its chats and decisions still send
-  the client's `queue`, because a session's call that must wait for its model or a slot waits
-  only with it.
+  each request carries `X-Crucible-Session`. Its jobs send only their own `queue`, never the
+  client's: a session's jobs go ahead of the line, wait only behind its own, and wait up to a
+  day. Its chats and decisions send the client's `queue` like any other: one that must wait
+  for its model or a slot waits ahead of the line.
 - **Same-client membership.** Every request from the client holding the open session is an
   item of it, header or not (the server matches on `clientName`). So an app's standalone calls
   beside its own long run never wait behind it.
@@ -204,9 +212,9 @@ try {
 - `await using` is not offered: this package's TypeScript target does not declare
   `Symbol.asyncDispose`. Use `try`/`finally` as above.
 
-While another client's session is open, a job without `queue` is refused `server_busy` and a
-chat or decision without it `session_open`; both throw `CrucibleSessionHeld`, naming the
-holder, the session and its act. With `queue` (the helpers' default) they wait for it to close.
+While another client's session is open, every request waits for it to close (the default).
+Sent with `queue: false`, a job is refused `server_busy` and a chat or decision
+`session_open`; both throw `CrucibleSessionHeld`, naming the holder, the session and its act.
 
 ### More than one server: `fleetSession()`
 
@@ -1069,7 +1077,7 @@ carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleAuthError` | 401 — wrong or missing token |
 | `CrucibleVersionError` | 426 — carries `serverApiVersion` and `clientApiVersion` |
 | `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, `session_not_open`, `session_not_yours`, `unknown_queue_session`, ...) |
-| `CrucibleBusy` | 409 `server_busy` from a running job, for a job sent without `queue` |
+| `CrucibleBusy` | 409 `server_busy` from a running job, for a job sent with `queue: false` |
 | `CrucibleSessionHeld` | 409 `server_busy` (`details.door: "session"`) or `session_open` — another client's queue session holds the server; carries `holder`, `sessionId`, `act` |
 | `CrucibleSessionClosed` | 409 `session_closed` — the queue session ended (`reason`); also what a session that never opened throws, and what a `CrucibleSession` throws once it knows it has ended |
 | `CrucibleServerError` | 5xx — carries the envelope's `details` (`chat_queue_full`'s `retry_after`, `label_not_in_probs`'s question and letter) |

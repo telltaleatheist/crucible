@@ -113,7 +113,6 @@ test('video() posts one video job with snake_case params and only what the calle
       audio: false,
     },
     inputs: {},
-    queue: {},
   });
 });
 
@@ -150,7 +149,6 @@ test('loadVideo() queues a load-video job', async () => {
     model: 'ltx-2.5-distilled',
     params: {},
     inputs: {},
-    queue: {},
   });
 });
 

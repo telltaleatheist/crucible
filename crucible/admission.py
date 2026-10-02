@@ -167,8 +167,8 @@ def refuse_if_line_ahead(request: JobRequest, ctx: AdmissionContext) -> None:
         409,
         "server_busy",
         f"this server has {depth} job(s) waiting in its queue, the first job "
-        f"{front.id} ({front.type}), and a new job goes behind them. Submit with "
-        '"queue": {} to take a place in the line, or read GET /v1/queue',
+        f"{front.id} ({front.type}), and a new job goes behind them. Leave out "
+        '"queue": false to take a place in the line, or read GET /v1/queue',
         {**front.busy_details(), "queue_depth": depth},
     )
 

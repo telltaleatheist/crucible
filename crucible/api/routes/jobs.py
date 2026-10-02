@@ -8,8 +8,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from ...admission import JobRequest, Refusal, admit
 from ...errors import ApiError
 from ...jobs.base import Job, validate_member_name
-from ...jobs.line import MAX_MAX_WAIT_S
+from ...jobs.line import DEFAULT_MAX_WAIT_S, MAX_MAX_WAIT_S
 from ...jobs.queue import JobStore
+from ...queuerequest import max_wait_of
 from ...uploads import store_upload
 from .. import sse
 from ..caller import client_agent, queue_session
@@ -87,19 +88,20 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.post("/jobs", status_code=202, responses=BUSY_RESPONSES)
     async def create_job(request: Request, body: JobCreate) -> dict[str, Any]:
-        """Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a
-        missing environment or model is installed while the job is refused `409
-        installing`. With `queue` a busy lane queues the job instead: it waits with
-        status `queued` and its events say where it stands. `params.resume` set to a
-        `resume_id` continues a journaled job; without it the job starts fresh. An item
-        of the open queue session (named in the session header, or any submit from the client
-        holding it) goes ahead of everything waiting, and waits only behind the
-        session's own jobs.
+        """Admit one job, or refuse by name. A busy lane queues the job: it waits with
+        status `queued` (up to an hour, or `queue.max_wait_s`) and its events say where
+        it stands. With `"queue": false` a busy lane is refused `409 server_busy`
+        instead. A missing environment or model is installed while the job is refused
+        `409 installing`. `params.resume` set to a `resume_id` continues a journaled
+        job; without it the job starts fresh. An item of the open queue session (named
+        in the session header, or any submit from the client holding it) goes ahead of
+        everything waiting, waits only behind the session's own jobs, and waits up to
+        a day unless its `queue` says otherwise.
         """
         session = queue_session(request, ctx.sessions)
-        queue = None if body.queue is None else body.queue.max_wait_s
-        if session is not None and queue is None:
-            queue = MAX_MAX_WAIT_S
+        queue = max_wait_of(
+            body.queue, DEFAULT_MAX_WAIT_S if session is None else MAX_MAX_WAIT_S
+        )
         outcome = await admit(
             JobRequest(
                 type=body.type,

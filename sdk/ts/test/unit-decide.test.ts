@@ -38,7 +38,7 @@ let server: Server;
 let base = '';
 
 function client(): CrucibleClient {
-  return new CrucibleClient({ url: base, token: 'the-token', clientName: 'unit-decide', queue: false });
+  return new CrucibleClient({ url: base, token: 'the-token', clientName: 'unit-decide' });
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {

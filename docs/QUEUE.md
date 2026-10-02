@@ -1,23 +1,42 @@
 # The queue: for app authors
 
 Crucible runs one job at a time. A job sent while another runs used to be refused
-`409 server_busy`, and every app wrote its own retry loop. Now an app can ask to wait:
-the server keeps the job in a first-come, first-served queue and runs it when its turn
-comes. Old apps are not affected: a submit without `queue` is refused exactly as before.
+`409 server_busy`, and every app wrote its own retry loop. Then an app could ask to wait.
+Now **waiting is the default**: every request that can wait (a job, a chat, a decision, a
+TTS stream) takes a place in the server's first-come, first-served line when the server
+is busy, and runs when its turn comes. An app that would rather be told "busy" at once
+says so with `"queue": false`.
 
-The TypeScript SDK's high-level helpers queue by default, and its `session()` is the queue
-session below (see "In the SDK").
+The TypeScript SDK waits by default too, and its `session()` is the queue session below
+(see "In the SDK").
 
-## Submit with `queue`
+## The `queue` member
+
+Every request that can wait takes the same optional member:
+
+| `queue` | means |
+|---|---|
+| left out | wait in the line while the server is busy, up to an hour (a day for a job that is an item of the open queue session) |
+| `{"max_wait_s": N}` | wait, up to N seconds (10 to 86400) |
+| `false` | do not wait: refuse at once (`409 server_busy`, `409 session_open`, `409 model_not_resident`, `503 chat_queue_full`) |
+
+Nothing else is a `queue`. `{}` (the old opt-in), `true`, `null` and an out-of-range
+`max_wait_s` are `400 invalid_request` with a sentence naming the two shapes. `{}` is
+refused rather than read as "wait" so that no request means "wait" by one spelling and
+"refuse" by another.
+
+`max_wait_s` is how long the request may wait for its turn; when it runs out the request
+is removed `expired` (below). It is not a deadline on the work itself: once the job is on
+the lane, or the chat has its slot, it runs as long as it runs. A held-open chat or
+decision sends nothing before its answer, so give the HTTP request a read timeout that
+covers `max_wait_s` plus the answer.
+
+## Submit a job
 
 ```json
 POST /v1/jobs
-{"type": "tts", "model": "sigma", "params": {...}, "inputs": {...},
- "queue": {"max_wait_s": 3600}}
+{"type": "tts", "model": "sigma", "params": {...}, "inputs": {...}}
 ```
-
-`"queue": {}` takes the default wait of an hour. `max_wait_s` is 10 to 86400 seconds;
-anything else is `400 invalid_request`.
 
 The answer is `202` either way:
 
@@ -37,8 +56,8 @@ waiting (`details.scope: "client"`) or the server has 200 (`details.scope: "serv
 
 ## Follow the job's events
 
-`GET /v1/jobs/{id}/events`, the same stream as always, adds three events for a job
-submitted with `queue`:
+`GET /v1/jobs/{id}/events`, the same stream as always, carries three events for a job
+that may wait (every job not sent with `"queue": false`):
 
 | event | data | means |
 |---|---|---|
@@ -110,18 +129,21 @@ nothing from anyone else runs. Everyone else is first come, first served.
   carries jobs, the card, chats, tasks and settings. A dashboard that would otherwise poll
   `/v1/queue`, `/v1/activity` and `/v1/tasks` follows that instead (docs/EVENTS.md).
 
-While anything waits, a submit without `queue` is refused `409 server_busy` even if the
-lane is momentarily free, with `details.queue_depth`, so an old app cannot jump the line.
+While anything waits, a submit with `"queue": false` is refused `409 server_busy` even if
+the lane is momentarily free, with `details.queue_depth`, so it cannot jump the line.
 
-## Chats and decisions can wait too
+A job sent with `"queue": false` gets no `queued`/`position` in its receipt and no
+`started` event: it either went straight onto the lane or was refused.
 
-`POST /v1/openai/chat/completions` and `POST /v1/decide` take the same member in their
-body: `"queue": {}` or `"queue": {"max_wait_s": 600}`. Without it they are refused as
-before: `409 model_not_resident` when the model is not loaded, `503 chat_queue_full` when
-every slot on its engine is taken. With it:
+## Chats and decisions wait too
+
+`POST /v1/openai/chat/completions` (and `/openai/v1/...`) and `POST /v1/decide` take the
+same member in their body. With `"queue": false` they are refused at once: `409
+model_not_resident` when the model is not loaded, `503 chat_queue_full` when every slot on
+its engine is taken. Otherwise (the default):
 
 - **The model is resident with a free slot, and nothing is waiting:** the request goes
-  straight through, exactly as an unqueued one.
+  straight through.
 - **Otherwise** the request is held open and takes a place in the same line as queued jobs.
   It shows in `GET /v1/queue` with `kind: "call"`, `type: "chat"` or `"decide"`, and a
   `job_id` of the form `call-…` (there is no job record behind it; `GET /v1/jobs/{id}` does
@@ -153,9 +175,12 @@ on the card (any load, unload, or a job that brings its own model) waits while c
 flight instead of taking the model out from under them. And while a call waits for the
 resident model, the server does not unload that model between completions.
 
-Unqueued chats go straight to a resident model with a free slot even while something waits
-in the line, unless another client's queue session is open (below): then they are refused
-`409 session_open`.
+A chat sent with `"queue": false` goes straight to a resident model with a free slot even
+while something waits in the line, unless another client's queue session is open (below):
+then it is refused `409 session_open`.
+
+A chat for an upstream model (`<upstream>/<id>`) never waits: it is forwarded at once and
+its `queue` member, if any, is dropped. Nothing about it uses this server's card.
 
 ## Queue sessions: the server to yourself for a run
 
@@ -235,10 +260,12 @@ install's work instead.
 - `POST /v1/jobs`: admitted ahead of everything waiting. Items still run one at a time on
   the lane: an item submitted while another of the session's jobs runs waits *inside* the
   session, first come first served, ahead of everyone else (it answers `queued: true`
-  with its position; it waits up to a day unless its own `queue` says otherwise).
+  with its position; it waits up to a day unless its own `queue` says otherwise, and
+  `"queue": false` refuses it `server_busy` instead).
 - `POST /v1/openai/chat/completions` (and `/openai/v1/...`), `POST /v1/decide`: as usual.
-  With `"queue": {}` one that must wait (its model not resident, every slot taken) waits
-  ahead of the line, and its model is loaded for it with the session's priority.
+  One that must wait (its model not resident, every slot taken) waits ahead of the line,
+  up to an hour or its own `max_wait_s`, and its model is loaded for it with the
+  session's priority.
 - `POST /v1/tts/stream`: see below.
 
 A header naming a session that is not open is refused by name: `404
@@ -252,9 +279,9 @@ Nothing from any other client runs:
 
 | their request | gets |
 |---|---|
-| a job without `queue` | `409 server_busy`, `details.door: "session"`, naming the holder |
-| a job, chat or decision with `queue` | waits in the line until the session closes |
-| a chat or decision without `queue` | `409 session_open`, naming the holder and the session |
+| a job, chat or decision | waits in the line until the session closes |
+| a job with `"queue": false` | `409 server_busy`, `details.door: "session"`, naming the holder |
+| a chat or decision with `"queue": false` | `409 session_open`, naming the holder and the session |
 | another queue session | waits in the line |
 | a TTS stream | waits in the line (or `409 session_open` with `"queue": false`) |
 
@@ -328,13 +355,14 @@ for await (const event of crucible.events(id)) {
 }
 ```
 
-- The high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`, `video`,
-  every load and unload, `chat`, `chatStream`, `decide` and `decideItems`) queue by
-  default. `new CrucibleClient({..., queue: false})`
-  turns that off; `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins.
-- `submit()` queues only when its request says `queue: true` or `queue: {maxWaitS}`.
-- A refusal of `queue` is thrown like any refusal; the SDK never sends a request again
-  without it.
+- Every request that can wait (`submit()`, every job helper, `chat`, `chatStream`,
+  `decide`, `decideItems`, `stream`) waits by default, and sends no `queue` member to do
+  it. `new CrucibleClient({..., queue: false})` makes them refuse at once instead;
+  `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins. There is no
+  `true` and no `{}`: the SDK refuses them before sending, as the server would.
+- There is no "busy, then ask again with the queue" step to write: a `CrucibleBusy` (or
+  `session_open`, `model_not_resident`, `chat_queue_full`) now only reaches a request
+  sent with `queue: false`. The SDK never sends a request a second time.
 - A queued chat or decision that is removed throws `CrucibleRefused` with code
   `removed_from_queue` and `details.reason`.
 - `job()` returns `status: 'removed'` and `removal`; `cancel()` on a waiting job answers

@@ -41,10 +41,13 @@ def _load_and_wait(client: TestClient, auth: dict[str, str]) -> str:
 
 
 def _chat(client: TestClient, auth: dict[str, str]) -> Any:
+    """A chat that will not wait: these tests are about the refusals a full engine gives
+    (a waiting chat is tests/test_chat_queue.py)."""
     return client.post(
         "/v1/openai/chat/completions",
         headers=auth,
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+              "queue": False},
     )
 
 

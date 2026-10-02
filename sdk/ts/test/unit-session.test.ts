@@ -245,11 +245,11 @@ test('every item carries the session header, and helpers inside it send no queue
     assert.equal(load?.session, 'ses-1');
     assert.ok(!('queue' in JSON.parse(load?.body ?? '{}')), 'a job inside a session waits by right');
     assert.equal(chat?.session, 'ses-1');
-    // A chat that must wait for its model or a slot waits ahead of the line only with `queue`.
-    assert.deepEqual(JSON.parse(chat?.body ?? '{}').queue, {});
-    // The client it came from is untouched: no header, and its helpers still queue.
+    // A chat that must wait for its model or a slot waits ahead of the line by default: no `queue`.
+    assert.ok(!('queue' in JSON.parse(chat?.body ?? '{}')));
+    // The client it came from is untouched: no header, and its helpers still wait by default.
     assert.equal(outside?.session, undefined);
-    assert.deepEqual(JSON.parse(outside?.body ?? '{}').queue, {});
+    assert.ok(!('queue' in JSON.parse(outside?.body ?? '{}')));
   } finally {
     await session.close();
   }

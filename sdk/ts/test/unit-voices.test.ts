@@ -454,7 +454,6 @@ test('loadVoice and unloadVoice post their own job types and return the job id',
     model: 'deathstalker',
     params: {},
     inputs: {},
-    queue: {},
   });
 
   answers(200, { job_id: 'job-unload-voice-1' });
@@ -465,7 +464,6 @@ test('loadVoice and unloadVoice post their own job types and return the job id',
     model: 'deathstalker',
     params: {},
     inputs: {},
-    queue: {},
   });
 });
 
@@ -485,7 +483,6 @@ test('loadVoice carries a zero-shot reference in params, and omits an absent nam
       reference: { data: 'UklGRiQAAABXQVZF', transcript: 'He had been walking.' },
     },
     inputs: {},
-    queue: {},
   });
 
   answers(200, { job_id: 'job-load-zeroshot-2' });
@@ -843,7 +840,6 @@ test('align() posts ONE align job: chunks by index, each audio named <index>.<ex
     },
     // The server matches audio to text by the index in the filename.
     inputs: { '0.flac': { blob_id: 'aa' }, '7.wav': { blob_id: 'bb' } },
-    queue: {},
   });
 });
 
@@ -940,7 +936,6 @@ test('asr() posts the job the contract describes, with the params spelled the se
     // Keyed by the caller's filename: the input's name becomes the file's name
     // on disk and ffmpeg reads the container off the extension.
     inputs: { 'audiobook.m4b': { blob_id: 'b7c6d5e4f3a2b1c0' } },
-    queue: {},
   });
 });
 

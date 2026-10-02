@@ -380,7 +380,7 @@ def test_a_held_card_refuses_align_before_the_job_is_queued(
     residency = ready.app.state.residency
     residency.claim("a tts stream on sigma", may_mutate=False)
     try:
-        response = submit(ready, auth)
+        response = submit(ready, auth, queue=False)
         assert response.status_code == 409, response.text
         error = response.json()["error"]
         assert error["code"] == "engine_in_use"
@@ -390,7 +390,7 @@ def test_a_held_card_refuses_align_before_the_job_is_queued(
         unload = ready.post(
             "/v1/jobs",
             headers=auth,
-            json={"type": "unload-aligner", "model": MODEL, "params": {}},
+            json={"type": "unload-aligner", "model": MODEL, "params": {}, "queue": False},
         )
         assert unload.status_code == 409, unload.text
         assert unload.json()["error"]["code"] == "engine_in_use"
@@ -551,8 +551,8 @@ def test_the_model_is_loaded_once_and_held_across_jobs(
     transcript = tmp_path / "sent.jsonl"
     monkeypatch.setenv("CRUCIBLE_FAKE_ALIGN_TRANSCRIPT", str(transcript))
     with holding_the_card(ready):
-        run_job(ready, auth)
-        run_job(ready, auth)
+        run_job(ready, auth, queue=False)
+        run_job(ready, auth, queue=False)
     ops = [json.loads(line)["op"] for line in transcript.read_text().splitlines()]
     assert ops == ["load", "align", "align"]
 
@@ -602,7 +602,9 @@ def test_a_queue_session_refuses_another_client_s_eviction_and_admits_its_own_wo
     run_job(ready, auth)
 
     other = {**auth, "X-Crucible-Client": "briefcase"}
-    refused = submit(ready, other, type="unload-aligner", model=MODEL, params={})
+    refused = submit(
+        ready, other, type="unload-aligner", model=MODEL, params={}, queue=False
+    )
     assert refused.status_code == 409, refused.text
     error = refused.json()["error"]
     assert error["code"] == "server_busy"
@@ -615,7 +617,7 @@ def test_a_resident_aligner_lights_up_its_own_row(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
     with holding_the_card(ready):
-        run_job(ready, auth)
+        run_job(ready, auth, queue=False)
         capabilities = ready.get("/v1/info", headers=auth).json()["capabilities"]
         by_type = {entry["job_type"]: entry for entry in capabilities}
         row = next(r for r in by_type["align"]["models"] if r["id"] == MODEL)
@@ -629,7 +631,7 @@ def test_the_accelerator_route_names_the_aligner_as_the_resident_kind(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
     with holding_the_card(ready):
-        run_job(ready, auth)
+        run_job(ready, auth, queue=False)
         resident = ready.get("/v1/accelerator", headers=auth).json()["resident"]
     assert resident["kind"] == KIND_ALIGN
     assert resident["id"] == MODEL
@@ -639,8 +641,8 @@ def test_unloading_takes_it_off_the_card(
     ready: TestClient, auth: dict[str, str]
 ) -> None:
     with holding_the_card(ready):
-        run_job(ready, auth)
-        events = run_job(ready, auth, type="unload-aligner", params={}, inputs={})
+        run_job(ready, auth, queue=False)
+        events = run_job(ready, auth, type="unload-aligner", params={}, inputs={}, queue=False)
     assert terminal(events)["event"] == "done", terminal(events)
     assert terminal(events)["data"]["resident"] is None
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None

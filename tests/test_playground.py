@@ -281,9 +281,9 @@ def test_the_script_can_show_every_result_a_family_makes() -> None:
             assert re.search(rf"\b{extension}: '{family.media}/", script), name
 
 
-def test_the_playground_submits_queued_jobs() -> None:
+def test_the_playground_submits_jobs_that_wait_by_default() -> None:
     script = _read(SCRIPT)
-    assert "queue: {}" in script
+    assert "queue:" not in script
     assert "'crucible.token'" in script and "history.replaceState" in script
 
 

@@ -66,7 +66,7 @@ status it has just entered. Every one carries `job_id`, `type`, `model`, `client
 
 | event | also carries |
 | --- | --- |
-| `job.queued` | `position`; `waiting`: `true` when it waits in the line (it was submitted with `queue` while the lane was busy), `false` when it went straight to the lane. Moves in the line are `queue.moved`, not more `job.queued`. |
+| `job.queued` | `position`; `waiting`: `true` when it waits in the line (it found the lane busy and was not sent with `"queue": false`), `false` when it went straight to the lane. Moves in the line are `queue.moved`, not more `job.queued`. |
 | `job.running` | `started`. |
 | `job.progress` | Only `job_id`, `fraction` (0 to 1) and `message`. At most one a second per job, only when either changed, and the latest one always arrives unless the job ends first. |
 | `job.done` | `artifacts`: the names to fetch from `GET /v1/jobs/{id}/artifacts/{name}`. |

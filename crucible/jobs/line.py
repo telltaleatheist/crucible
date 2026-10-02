@@ -1,4 +1,5 @@
-"""The server's waiting line: jobs a client asked to queue while the lane was busy.
+"""The server's waiting line: what a request found busy and waits for (waiting is the
+default; a request sent with ``"queue": false`` is refused instead, crucible/queuerequest.py).
 
 A queued job is a normal job (status ``queued``) that holds its inputs and waits here
 until the queue pump (crucible/queuepump.py) walks the line and admits it through the

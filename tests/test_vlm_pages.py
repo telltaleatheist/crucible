@@ -394,7 +394,7 @@ def test_a_page_sent_to_a_text_model_is_still_refused_by_name(
     response = llm_client.post(
         "/v1/openai/chat/completions",
         headers=auth,
-        json=page_request(PAGE_MODEL, data_uri),
+        json={**page_request(PAGE_MODEL, data_uri), "queue": False},
     )
     assert response.status_code == 409
     error = response.json()["error"]

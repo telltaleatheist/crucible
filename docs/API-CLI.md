@@ -117,7 +117,7 @@ crucible api pairing-decide --id … --code … --allow|--deny
 ```
 crucible api job submit --type <t> [--model <m>] [--params <json|@file>]
                         [--input NAME=PATH]... [--input-blob NAME=BLOB]...
-                        [--resume RESUME_ID] [--queue [MAX_WAIT_S]]
+                        [--resume RESUME_ID] [--max-wait SECONDS | --no-queue]
                         [--follow] [--artifacts-dir DIR]
 crucible api job get <job-id>
 crucible api job events <job-id> [--since <event-id>]
@@ -143,8 +143,9 @@ is audio.
 (`artifacts_need_follow`). Downloading artifacts means waiting, and a flag that
 silently decides whether a command blocks for twenty minutes is a surprise.
 
-`--queue` asks the server to hold the job in its queue while it is busy instead of
-refusing `server_busy` (docs/QUEUE.md); with a number, for at most that many seconds.
+A busy server holds the job in its queue (docs/QUEUE.md), up to an hour;
+`--max-wait SECONDS` changes that, and `--no-queue` asks to be refused `server_busy`
+at once instead. `chat`, `decide` and `align` take the same two flags.
 
 ### The queue (2026-09-30)
 

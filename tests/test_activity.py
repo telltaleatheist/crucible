@@ -139,7 +139,9 @@ def test_the_bench_shows_one_job_and_nothing_waiting_behind_it(
             "accepts_work": False,
         }
 
-        refused = client.post("/v1/jobs", json=job_body(delay_ms=0), headers=auth)
+        refused = client.post(
+            "/v1/jobs", json={**job_body(delay_ms=0), "queue": False}, headers=auth
+        )
         assert refused.status_code == 409, refused.text
         assert refused.json()["error"]["details"]["job_id"] == first
 

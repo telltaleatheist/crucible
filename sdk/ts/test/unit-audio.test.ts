@@ -91,7 +91,6 @@ test('audio() posts one audio job with snake_case params and only what the calle
     model: 'stable-audio-3-small-sfx',
     params: { prompt: 'TrackType: SFX. A door creaks open', duration_s: 4, seed: 9 },
     inputs: {},
-    queue: {},
   });
 });
 
@@ -124,7 +123,6 @@ test('loadAudio() queues a load-audio job', async () => {
     model: 'stable-audio-3-medium',
     params: {},
     inputs: {},
-    queue: {},
   });
 });
 

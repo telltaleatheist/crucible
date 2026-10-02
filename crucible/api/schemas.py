@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..jobs.line import DEFAULT_MAX_WAIT_S, MAX_MAX_WAIT_S, MIN_MAX_WAIT_S
-from ..queuerequest import QueueRequest
+from ..queuerequest import QueueChoice, queue_field
 from ..queuesessions import DEFAULT_IDLE_S, MAX_IDLE_S, MIN_IDLE_S, STREAM_IDLE_S
 from ..tasks import TASK_TYPES
 
@@ -63,11 +63,11 @@ class JobCreate(BaseModel):
         description="Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, "
         "so its artifacts outlive being fetched.",
     )
-    queue: QueueRequest | None = Field(
-        default=None,
-        description="Opt in to the server's queue: while the lane is busy the job "
-        "waits (status `queued`) instead of being refused `409 server_busy`. "
-        "Without it, a busy server refuses as it always has.",
+    queue: QueueChoice = queue_field(
+        "Left out, a busy lane queues the job: it waits (status `queued`) "
+        "up to an hour, or up to a day as an item of the open queue session. "
+        "`{\"max_wait_s\": N}` changes the wait; `false` refuses at once with "
+        "`409 server_busy` instead of waiting.",
     )
 
 
@@ -89,11 +89,11 @@ class StreamOpen(BaseModel):
         "closes the session and the stream with it. Ignored inside the client's own "
         "session.",
     )
-    queue: QueueRequest | Literal[False] = Field(
-        default_factory=QueueRequest,
-        description="How long the stream's queue session may wait in the line to open "
-        "(`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than "
-        "wait when the server is not free now.",
+    queue: QueueChoice = queue_field(
+        "Left out, the stream's queue session waits in the line to open, up "
+        "to an hour; `{\"max_wait_s\": N}` changes the wait. `false`: refuse "
+        "(`session_open`, `server_busy`) rather than wait when the server is not free "
+        "now.",
     )
 
 

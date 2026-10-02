@@ -99,7 +99,6 @@ test('segment() posts one segment job: the picture as its input, points and box 
       box: [120, 80, 700, 590],
     },
     inputs: { 'photo.jpg': { blob_id: 'blob-7' } },
-    queue: {},
   });
 });
 
@@ -138,7 +137,6 @@ test('loadSegment() queues a load-segment job', async () => {
     model: 'sam2.1-hiera-large',
     params: {},
     inputs: {},
-    queue: {},
   });
 });
 

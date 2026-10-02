@@ -21,7 +21,7 @@ from .conftest import parse_sse
 PAYLOAD = base64.b64encode(b"queued bytes").decode("ascii")
 
 
-def body(delay_ms: int = 0, queue: dict[str, Any] | None = None) -> dict[str, Any]:
+def body(delay_ms: int = 0, queue: Any = None) -> dict[str, Any]:
     document: dict[str, Any] = {
         "type": "echo",
         "params": {"delay_ms": delay_ms},
@@ -56,7 +56,7 @@ def wait_for(condition: Callable[[], bool], what: str, timeout: float = 20.0) ->
 
 
 def queue_up(client: TestClient, headers: dict[str, str], **queue: Any) -> dict[str, Any]:
-    answer = client.post("/v1/jobs", json=body(queue=queue), headers=headers)
+    answer = client.post("/v1/jobs", json=body(queue=queue or None), headers=headers)
     assert answer.status_code == 202, answer.text
     return answer.json()
 
@@ -71,15 +71,43 @@ def free_the_lane(client: TestClient, auth: dict[str, str], job_id: str) -> None
     client.delete(f"/v1/jobs/{job_id}", headers=auth)
 
 
-def test_without_queue_a_busy_server_still_refuses(
+def test_with_queue_false_a_busy_server_refuses_at_once(
     client: TestClient, auth: dict[str, str]
 ) -> None:
     holder = occupy_the_lane(client, auth)
-    refused = client.post("/v1/jobs", json=body(), headers=auth)
+    refused = client.post("/v1/jobs", json=body(queue=False), headers=auth)
     assert refused.status_code == 409
     assert refused.json()["error"]["code"] == "server_busy"
     assert client.get("/v1/queue", headers=auth).json()["depth"] == 0
     free_the_lane(client, auth, holder)
+
+
+def test_a_plain_submit_waits_by_default_when_the_server_is_busy(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    holder = occupy_the_lane(client, auth)
+    answer = client.post("/v1/jobs", json=body(), headers=auth)
+    assert answer.status_code == 202, answer.text
+    receipt = answer.json()
+    assert (receipt["queued"], receipt["position"]) == (True, 1)
+    listed = client.get("/v1/queue", headers=auth).json()["items"]
+    assert [(row["job_id"], row["max_wait_s"]) for row in listed] == [
+        (receipt["job_id"], line_module.DEFAULT_MAX_WAIT_S)
+    ]
+    free_the_lane(client, auth, holder)
+    assert events(client, auth, receipt["job_id"])[-1]["event"] == "done"
+
+
+@pytest.mark.parametrize("queue", [{}, True, None, 0, "yes"])
+def test_a_queue_that_is_neither_false_nor_a_wait_is_refused_by_name(
+    client: TestClient, auth: dict[str, str], queue: Any
+) -> None:
+    document = {**body(), "queue": queue}
+    refused = client.post("/v1/jobs", json=document, headers=auth)
+    assert refused.status_code == 400, refused.text
+    error = refused.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert '"queue" is false' in error["message"]
 
 
 def test_an_idle_server_admits_a_queued_submit_at_once(
@@ -158,7 +186,7 @@ def test_an_operator_and_a_client_can_each_remove_a_waiting_job(
     free_the_lane(client, auth, holder)
 
 
-def test_a_plain_submit_does_not_jump_a_waiting_line(
+def test_a_submit_that_will_not_wait_does_not_jump_a_waiting_line(
     client: TestClient, auth: dict[str, str]
 ) -> None:
     pump = client.app.state.queue_pump
@@ -171,7 +199,7 @@ def test_a_plain_submit_does_not_jump_a_waiting_line(
     waiting = queue_up(client, auth)["job_id"]
     free_the_lane(client, auth, holder)
     wait_for(lambda: client.app.state.store.lane_free, "the lane to go idle")
-    refused = client.post("/v1/jobs", json=body(), headers=auth)
+    refused = client.post("/v1/jobs", json=body(queue=False), headers=auth)
     assert refused.status_code == 409
     details = refused.json()["error"]["details"]
     assert refused.json()["error"]["code"] == "server_busy"
@@ -268,12 +296,12 @@ def test_the_caps_refuse_by_name(
     monkeypatch.setattr(line_module, "TOTAL_LIMIT", 2)
     holder = occupy_the_lane(client, auth)
     queue_up(client, as_client(auth, "a"))
-    refused = client.post("/v1/jobs", json=body(queue={}), headers=as_client(auth, "a"))
+    refused = client.post("/v1/jobs", json=body(), headers=as_client(auth, "a"))
     assert refused.status_code == 409
     assert refused.json()["error"]["code"] == "queue_full"
     assert refused.json()["error"]["details"]["scope"] == "client"
     queue_up(client, as_client(auth, "b"))
-    refused = client.post("/v1/jobs", json=body(queue={}), headers=as_client(auth, "c"))
+    refused = client.post("/v1/jobs", json=body(), headers=as_client(auth, "c"))
     assert refused.json()["error"]["details"]["scope"] == "server"
     free_the_lane(client, auth, holder)
 
