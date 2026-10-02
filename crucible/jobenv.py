@@ -953,6 +953,17 @@ def _install_recipe(
         raise EnvError(str(exc)) from exc
 
 
+def _repair_patches(
+    spec: EnvSpec, python: Path, recipe: Path, directory: Path, on_line: Any
+) -> None:
+    try:
+        envpatches.repair(
+            spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line
+        )
+    except envpatches.PatchError as exc:
+        raise EnvError(str(exc)) from exc
+
+
 def _python_version_of(python: Path) -> str:
     return subprocess.run(
         [
@@ -978,6 +989,7 @@ def install_env(
     directory = env_dir(home, spec)
     plan = plan_install(home, spec, backend_kind, force=force)
     if plan.action == PLAN_NOTHING:
+        _repair_patches(spec, env_python(home, spec), recipe, directory, on_line)
         return env_status(home, spec, backend_kind)
     if on_line is not None:
         on_line(f"{plan.action}: {plan.detail}")
@@ -990,6 +1002,7 @@ def install_env(
         python_version = _stamped_python_version(home, spec)
     if plan.action == PLAN_REFERENCES:
         _reinstall_references(python, plan.lines, directory, on_line)
+        _repair_patches(spec, python, recipe, directory, on_line)
     else:
         _install_recipe(spec, backend_kind, python, recipe, directory, on_line)
     if python_version is None:

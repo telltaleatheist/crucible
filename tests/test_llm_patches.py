@@ -197,9 +197,8 @@ def test_the_script_and_the_table_name_the_same_strings() -> None:
     assert namespace["OLD"].strip() == PATCH.absent_marker
 
 
-def test_only_the_llm_env_carries_patches() -> None:
-    assert envpatches.patched_job_types() == ("llm",)
-    assert envpatches.patches_for("tts") is None
+def test_only_the_llm_and_tts_envs_carry_patches() -> None:
+    assert envpatches.patched_job_types() == ("llm", "tts")
     assert envpatches.patches_for("asr") is None
     assert envpatches.check("asr", Path("nowhere"), {}) == []
 

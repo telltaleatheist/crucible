@@ -432,7 +432,7 @@ window with word timestamps: turbo peaked at 2,654,916,970 B (25.4x realtime) an
 tiny at 549,418,642 B (75.3x). Accuracy between the two engines has not been
 compared.
 
-## Site-packages patches (`envpatches.py`, `envs/llm/patches/`)
+## Site-packages patches (`envpatches.py`, `envs/llm/patches/`, `envs/tts/patches/`)
 
 A patch is defined by its distribution, target file, marker, an optional string
 that must be absent, and a current-version marker; a patch with only an older
@@ -448,6 +448,47 @@ version-pinned to mlx-lm 0.31.3 (`VERSION_MISMATCH`, exit 2) and all-or-nothing
 (`ANCHOR_NOT_FOUND`, exit 2). `NOT_FOUND` and `AMBIGUOUS` are reported for a
 missing file or two site-packages trees. `site-packages` is found by glob and
 deduplicated by real path. Line endings are preserved.
+
+`apply_patches` runs each distinct script once per call (one script may own several
+rows). `install_env` applies the table after a recipe install, after a narrator
+reference reinstall, and, when the plan is `nothing`, still repairs a row that is
+`missing` or `stale` (`envpatches.repair`), so `crucible install <type>` is always
+enough to bring a patch in.
+
+**The sglang-omni 0.1.4 stall guard** (`tts` env, cuda-linux only, selected by the
+`sglang-omni` pin; `not_applicable` on the Mac). One script,
+`patch_sglang_omni_stall_guard.py`, edits three files under
+`sglang_omni/models/higgs_tts/` and reports three rows
+(`sglang-omni-stall-guard-sampler`, `-model`, `-model-runner`). The contract it
+implements is in `internals/voices.md` (Serving):
+
+- `sampler.py`: `HIGGS_STALL_GUARD` parsed at import (`STALL_GUARD`,
+  `STALL_RING_WIDTH`); the pool's `stall_run [max_bs]` and
+  `stall_ring [max_bs, window]` (−1 = empty), cleared by `reset_row`; in
+  `batched_step_direct` the penalty before sampling (cb0 only, in place: gather
+  the ring's codes' logits, subtract, scatter back; an empty slot points at the
+  ring's newest code and a repeated code is written with the same value, so the
+  write is deterministic) and the count after it, both branchless with fixed
+  shapes; the eager `batched_step` gathers, passes and scatters the state.
+- `model.py`: the CUDA-graph shadow buffers `_cg_active_stall_run/_ring`, sliced
+  into `batched_step_direct`.
+- `model_runner.py`: gathered beside `step_count` before the captured decode and
+  scattered back in `_decode_pack_gpu`.
+
+Off (`"off"` or unset) allocates the buffers and touches nothing else: no
+gather/scatter, no penalty. The tests run the patched sampler on CPU against the
+stock 0.1.4 files in `tests/fixtures/sglang_omni_0.1.4_higgs_tts/` and prove a
+render that never stalls draws exactly what stock draws, guard on or off. Nothing
+has been measured on a GPU yet.
+
+Versioning: every edited file carries `# PATCH (crucible stall-guard v<N>, ...)`.
+The table's marker is the version-free prefix and its `stale_marker` the current
+tag, so a file with an older version reports `stale`; the script then re-derives
+it from its `.orig` snapshot. Bump `VERSION` in the script and `STALL_GUARD_TAG`
+in `envpatches.py` together. `NarratorEngine.start` (served arm) applies it
+itself before narrator starts, so a deploy that installs a new wheel and never
+runs `crucible install` still gets it on the next load; `crucible env patch tts`
+and doctor's `tts_patches` rows cover the rest.
 
 The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
 `MlxLmEngine.start` refuses `llm_env_unpatched` unless all four report `applied`:

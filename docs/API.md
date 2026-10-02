@@ -628,7 +628,7 @@ Every voice this build has a manifest for, and where it stands here.
 | `identity_basis` | string or null | yes | — |  |
 | `memory_bytes_estimate` | integer or number or null | yes | — |  |
 | `estimate_basis` | string or null | yes | — |  |
-| `serving` | object or null | yes | — |  |
+| `serving` | object or null | yes | — | The server narrator starts for this voice (`[voice.serving]`, Higgs v3 only): `max_num_seqs`, `mem_fraction`, `context_length` with their notes, and `stall_guard`, the EFFECTIVE runaway-silence guard: `{enabled, frames, rate, max, window, env, basis, note}`, where `env` is the exact `HIGGS_STALL_GUARD` value narrator is started with (`off` when disabled) and `basis` is `default` or `manifest`. |
 | `max_chars` | integer or null | yes | — |  |
 | `max_chars_basis` | string or null | yes | — |  |
 | `pace_basis` | string or null | yes | — |  |
@@ -1726,7 +1726,7 @@ One row of `GET /v1/voices`: a voice and where it stands on this server.
 | `identity_basis` | string or null | yes | — |  |
 | `memory_bytes_estimate` | integer or number or null | yes | — |  |
 | `estimate_basis` | string or null | yes | — |  |
-| `serving` | object or null | yes | — |  |
+| `serving` | object or null | yes | — | The server narrator starts for this voice (`[voice.serving]`, Higgs v3 only): `max_num_seqs`, `mem_fraction`, `context_length` with their notes, and `stall_guard`, the EFFECTIVE runaway-silence guard: `{enabled, frames, rate, max, window, env, basis, note}`, where `env` is the exact `HIGGS_STALL_GUARD` value narrator is started with (`off` when disabled) and `basis` is `default` or `manifest`. |
 | `max_chars` | integer or null | yes | — |  |
 | `max_chars_basis` | string or null | yes | — |  |
 | `pace_basis` | string or null | yes | — |  |

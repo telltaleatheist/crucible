@@ -8,6 +8,7 @@ from typing import Any
 
 import tomli_w
 
+from . import stallguard
 from .backend import CUDA_LINUX, MLX_DARWIN
 from .config import crucible_home
 from .errors import CrucibleError
@@ -87,6 +88,8 @@ _SERVING_OPTIONAL: dict[str, type] = {
     "mem_fraction_note": str,
     "context_length": int,
     "context_length_note": str,
+    stallguard.KEY: object,
+    stallguard.NOTE_KEY: str,
 }
 SERVING_KEYS = frozenset({*_SERVING_REQUIRED, *_SERVING_OPTIONAL})
 
@@ -239,8 +242,16 @@ class Serving:
     mem_fraction_note: str | None = None
     context_length: int | None = None
     context_length_note: str | None = None
+    stall_guard: stallguard.StallGuard | None = stallguard.DEFAULT
+    stall_guard_note: str = stallguard.DEFAULT_NOTE
+    stall_guard_basis: str = stallguard.BASIS_DEFAULT
+
+    @property
+    def stall_guard_env(self) -> str:
+        return stallguard.env_value(self.stall_guard)
 
     def to_dict(self) -> dict[str, Any]:
+        guard = self.stall_guard
         return {
             "max_num_seqs": self.max_num_seqs,
             "max_num_seqs_note": self.max_num_seqs_note,
@@ -248,7 +259,30 @@ class Serving:
             "mem_fraction_note": self.mem_fraction_note,
             "context_length": self.context_length,
             "context_length_note": self.context_length_note,
+            "stall_guard": {
+                "enabled": guard is not None,
+                "frames": None if guard is None else guard.frames,
+                "rate": None if guard is None else guard.rate,
+                "max": None if guard is None else guard.max,
+                "window": None if guard is None else guard.window,
+                "env": self.stall_guard_env,
+                "basis": self.stall_guard_basis,
+                "note": self.stall_guard_note,
+            },
         }
+
+    def to_document(self) -> dict[str, Any]:
+        document = {
+            key: value
+            for key, value in self.to_dict().items()
+            if value is not None and key != stallguard.KEY
+        }
+        if self.stall_guard_basis == stallguard.BASIS_MANIFEST:
+            document[stallguard.KEY] = (
+                False if self.stall_guard is None else self.stall_guard.to_dict()
+            )
+            document[stallguard.NOTE_KEY] = self.stall_guard_note
+        return document
 
 
 @dataclass(frozen=True)
@@ -761,7 +795,37 @@ def _check_serving(
         mem_fraction_note=block.get("mem_fraction_note"),
         context_length=_check_context_length(where, block),
         context_length_note=block.get("context_length_note"),
+        **_check_stall_guard(where, block),
     )
+
+
+def _check_stall_guard(where: str, block: dict[str, Any]) -> dict[str, Any]:
+    if stallguard.KEY not in block:
+        if stallguard.NOTE_KEY in block:
+            raise VoiceError(
+                f"{where}: states {stallguard.NOTE_KEY} and no {stallguard.KEY}. "
+                "The note says where a setting came from and there is no "
+                "setting; drop it, or state the stall_guard it describes"
+            )
+        return {}
+    try:
+        guard = stallguard.check_block(where, block[stallguard.KEY])
+    except stallguard.StallGuardError as exc:
+        raise VoiceError(str(exc)) from None
+    note = block.get(stallguard.NOTE_KEY)
+    if note is None or note.strip() == "":
+        raise VoiceError(
+            f"{where}: {stallguard.KEY} carries no {stallguard.NOTE_KEY}. It "
+            "overrides the guard every Higgs v3 voice gets by default "
+            f"({stallguard.env_value(stallguard.DEFAULT)}), which decides how "
+            "long a runaway silence may run, so a reader of a /v1/voices row "
+            "has to be able to find out why this voice differs"
+        )
+    return {
+        "stall_guard": guard,
+        "stall_guard_note": note,
+        "stall_guard_basis": stallguard.BASIS_MANIFEST,
+    }
 
 
 def _check_mem_fraction(where: str, block: dict[str, Any]) -> float | None:
@@ -1107,11 +1171,7 @@ def voice_document(manifest: VoiceManifest) -> tuple[dict[str, Any], list[str]]:
         voice["pace"] = pace
 
     if manifest.serving is not None:
-        voice["serving"] = {
-            key: value
-            for key, value in manifest.serving.to_dict().items()
-            if value is not None
-        }
+        voice["serving"] = manifest.serving.to_document()
 
     voice["backends"] = {
         kind: _backend_document(spec) for kind, spec in manifest.backends.items()

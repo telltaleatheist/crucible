@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .. import procgroup
+from .. import envpatches, procgroup, stallguard
 from ..accelerator import proc_entries
 from ..errors import EngineError, JobCancelled
 from ..narratorengines import HIGGS_V3, VOICES_PULL_COMMAND, VoicesDocumentView
@@ -25,6 +25,8 @@ MAX_NUM_SEQS_VARIABLE = "HIGGS_MAX_NUM_SEQS"
 MEM_FRACTION_VARIABLE = "HIGGS_SGL_MEM_FRACTION"
 
 CONTEXT_LENGTH_VARIABLE = "HIGGS_CONTEXT_LENGTH"
+
+STALL_GUARD_VARIABLE = stallguard.ENV_VARIABLE
 
 STACK_ENV_PREFIX_VARIABLE: dict[str, str] = {
     "sglang-omni": "HIGGS_SGL_ENV",
@@ -208,6 +210,7 @@ class NarratorEngine(SubprocessEngine):
         max_num_seqs: int | None,
         mem_fraction: float | None,
         context_length: int | None,
+        stall_guard: str | None,
         voices: VoicesDocumentView | None,
         mlx_total_bytes: int | None,
     ) -> None:
@@ -217,6 +220,27 @@ class NarratorEngine(SubprocessEngine):
         self._max_num_seqs = max_num_seqs
         self._mem_fraction = mem_fraction
         self._context_length = context_length
+        if narrator_engine == HIGGS_V3:
+            if stall_guard is None:
+                raise EngineError(
+                    f"cannot start {self.name} "
+                    f"without {STALL_GUARD_VARIABLE}: Crucible states the Higgs "
+                    "stall guard on every load, on both arms, and an unset "
+                    "variable is the guard OFF on the server and in narrator's "
+                    "MLX loop alike. It comes from the voice manifest's "
+                    "[voice.serving].stall_guard (absent = the default guard, "
+                    "false = \"off\")"
+                )
+            try:
+                stallguard.parse_env(stall_guard)
+            except stallguard.StallGuardError as exc:
+                raise EngineError(f"cannot start {self.name}: {exc}") from exc
+        elif stall_guard is not None:
+            raise EngineError(
+                f"{self.name} was given {STALL_GUARD_VARIABLE}="
+                f"{stall_guard!r}, but only {HIGGS_V3!r} reads it"
+            )
+        self._stall_guard = stall_guard
         if narrator_engine == HIGGS_V3:
             if voices is None:
                 raise EngineError(
@@ -297,6 +321,31 @@ class NarratorEngine(SubprocessEngine):
         self._reader: threading.Thread | None = None
         self._ready_message: dict[str, Any] | None = None
 
+    def start(
+        self, model_dir: Path, served_name: str, port: int, args: list[str]
+    ) -> None:
+        if self._env_prefix is not None and self._python.is_file():
+            self._require_patched(self._env_prefix)
+        super().start(model_dir, served_name, port, args)
+
+    def _require_patched(self, env_dir: Path) -> None:
+        try:
+            envpatches.ensure_applied(
+                envpatches.TTS_PATCHES,
+                env_dir,
+                self._python,
+                scripts_dir=envpatches.TTS_SCRIPTS_DIR,
+            )
+        except envpatches.PatchError as exc:
+            raise EngineError(
+                f"tts_env_unpatched: {self.name} will not start the "
+                f"{self._serving_stack} server out of {env_dir}: {exc}. The "
+                f"server reads {STALL_GUARD_VARIABLE} only through Crucible's "
+                "env patch, so an unpatched server would take the variable "
+                "and render with no guard at all; run `crucible env patch tts` "
+                "(or `crucible install tts --narrator-engine "
+                f"{self._narrator_engine}`) and load again"
+            ) from exc
 
     @property
     def name(self) -> str:
@@ -339,6 +388,8 @@ class NarratorEngine(SubprocessEngine):
             environment[MEM_FRACTION_VARIABLE] = f"{self._mem_fraction:g}"
         if self._context_length is not None:
             environment[CONTEXT_LENGTH_VARIABLE] = str(self._context_length)
+        if self._stall_guard is not None:
+            environment[STALL_GUARD_VARIABLE] = self._stall_guard
         if self._mlx_tier is not None:
             environment[MLX_BATCH_VARIABLE] = str(self._mlx_tier.width)
             environment[MLX_MEM_BUDGET_VARIABLE] = f"{self._mlx_tier.mem_budget_gb:g}"

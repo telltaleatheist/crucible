@@ -87,7 +87,10 @@ class MlxLmEngine(SubprocessEngine):
         try:
             for patch in gated:
                 envpatches.require_applied(patch, env_dir)
-            envpatches.ensure_applied(self_applied, env_dir, self._python)
+            envpatches.ensure_applied(
+                self_applied, env_dir, self._python,
+                scripts_dir=envpatches.LLM_SCRIPTS_DIR,
+            )
             for patch in self_applied:
                 envpatches.require_applied(patch, env_dir)
         except PatchError as exc:

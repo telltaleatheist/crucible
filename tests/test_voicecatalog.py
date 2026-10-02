@@ -107,11 +107,13 @@ def test_merge_takes_the_machine_facts_from_the_footprint_itself() -> None:
     pin = Pin(id="probe", hf_repo="owner/name", revision="a" * 40, path=Path("pins.toml"))
     voice = merge(repo, pin, footprint)
     assert voice.serving is not None
-    assert voice.serving.to_dict() == {
+    assert voice.serving.to_document() == {
         key: value
         for key, value in footprint.to_dict().items()
         if key in voices.SERVING_KEYS
     }
+    assert voice.serving.stall_guard_basis == "default"
+    assert voice.serving.stall_guard_env == "37,0.5,20,8"
     for spec in voice.backends.values():
         assert (spec.memory_bytes_estimate, spec.estimate_basis, spec.estimate_note) == (
             19_000_000_000, "declared", "the server's reservation",

@@ -185,7 +185,14 @@ class VoiceInfo(_Open):
     identity_basis: str | None
     memory_bytes_estimate: Number | None
     estimate_basis: str | None
-    serving: dict[str, Any] | None
+    serving: dict[str, Any] | None = Field(
+        description="The server narrator starts for this voice (`[voice.serving]`, Higgs v3 "
+        "only): `max_num_seqs`, `mem_fraction`, `context_length` with their notes, and "
+        "`stall_guard`, the EFFECTIVE runaway-silence guard: `{enabled, frames, rate, max, "
+        "window, env, basis, note}`, where `env` is the exact `HIGGS_STALL_GUARD` value "
+        "narrator is started with (`off` when disabled) and `basis` is `default` or "
+        "`manifest`.",
+    )
     max_chars: int | None
     max_chars_basis: str | None
     pace_basis: str | None

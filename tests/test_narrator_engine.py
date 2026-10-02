@@ -52,6 +52,8 @@ BATCH_TERMINAL = frozenset({"batch_done"})
 
 A_FUTURE_ENGINE = "an-engine-with-no-document"
 
+GUARD = "37,0.5,20,8"
+
 A_64_GIB_MAC = 64 * 1024 * 1024 * 1024
 A_16_GIB_MAC = 16 * 1024 * 1024 * 1024
 
@@ -90,6 +92,7 @@ def engine(tmp_path: Path, weights: Path) -> Iterator[FakeNarratorEngine]:
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, weights),
         mlx_total_bytes=A_64_GIB_MAC,
     )
@@ -115,6 +118,7 @@ def test_the_argv_is_narrator_serve_and_nothing_else() -> None:
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )
@@ -149,6 +153,7 @@ def test_a_higgs_worker_is_told_the_stack_the_env_and_the_width(
         max_num_seqs=16,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=document,
         mlx_total_bytes=None,
     )
@@ -173,7 +178,7 @@ def test_a_higgs_worker_without_a_document_is_refused_by_name(
                 "higgs-v3", python, tmp_path / "x.log",
                 serving_stack=stack, max_num_seqs=16,
                 mem_fraction=None, context_length=None,
-                voices=None, mlx_total_bytes=None)
+                stall_guard=GUARD, voices=None, mlx_total_bytes=None)
         assert DOCUMENT_VARIABLE in str(caught.value)
         assert "narratorvoices" in str(caught.value)
 
@@ -188,7 +193,7 @@ def test_a_document_for_an_engine_that_reads_none_is_refused(tmp_path: Path) -> 
             max_num_seqs=None,
             mem_fraction=None,
             context_length=None,
-            voices=a_document(tmp_path, tmp_path / "weights"),
+            stall_guard=None, voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None,
         )
     assert "takes its weights on the load message" in str(caught.value)
@@ -202,6 +207,7 @@ def test_the_width_is_a_string_because_an_environment_holds_strings(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=16,
         mem_fraction=None, context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
     for name, value in built.environment().items():
@@ -214,7 +220,7 @@ def test_a_higgs_worker_with_no_width_is_refused_by_name(tmp_path: Path) -> None
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack="sglang-omni", max_num_seqs=None,
             mem_fraction=None, context_length=None,
-            voices=a_document(tmp_path, tmp_path / "weights"),
+            stall_guard=GUARD, voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
     assert MAX_NUM_SEQS_VARIABLE in str(caught.value)
     assert "[voice.serving]" in str(caught.value)
@@ -226,7 +232,7 @@ def test_a_width_below_one_is_refused(tmp_path: Path) -> None:
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack="sglang-omni", max_num_seqs=0,
             mem_fraction=None, context_length=None,
-            voices=a_document(tmp_path, tmp_path / "weights"),
+            stall_guard=GUARD, voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
     assert "at least 1" in str(caught.value)
 
@@ -261,6 +267,7 @@ def test_the_prefix_is_the_env_the_stack_is_in_not_the_one_it_symlinks_to(
         "higgs-v3", python, tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=16,
         mem_fraction=None, context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
     prefix = built.environment()[env_prefix_variable_for("sglang-omni")]
@@ -280,6 +287,7 @@ def test_a_conda_env_is_its_own_prefix(tmp_path: Path) -> None:
         "higgs-v3", python, tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=16,
         mem_fraction=None, context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None)
     assert built.environment()[env_prefix_variable_for("sglang-omni")] == str(conda)
@@ -295,7 +303,7 @@ def test_an_interpreter_that_is_not_in_a_venv_is_refused(tmp_path: Path) -> None
             "higgs-v3", stray, tmp_path / "x.log",
             serving_stack="sglang-omni", max_num_seqs=16,
             mem_fraction=None, context_length=None,
-            voices=a_document(tmp_path, tmp_path / "weights"),
+            stall_guard=GUARD, voices=a_document(tmp_path, tmp_path / "weights"),
             mlx_total_bytes=None)
     assert env_prefix_variable_for("sglang-omni") in str(caught.value)
     assert "pyvenv.cfg" in str(caught.value)
@@ -311,7 +319,7 @@ def test_an_arm_that_starts_no_server_is_told_none_of_the_three(
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack=None, max_num_seqs=16,
-        mem_fraction=None, context_length=None, voices=document,
+        mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
         mlx_total_bytes=A_64_GIB_MAC)
     environment = built.environment()
     assert environment[ENGINE_VARIABLE] == "higgs-v3"
@@ -328,7 +336,7 @@ def test_the_arm_that_starts_no_server_is_told_its_batch_width(
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack=None, max_num_seqs=16,
-        mem_fraction=None, context_length=None, voices=document,
+        mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
         mlx_total_bytes=A_64_GIB_MAC)
     environment = built.environment()
     assert environment[MLX_BATCH_VARIABLE] == "64"
@@ -342,6 +350,7 @@ def test_a_stated_mem_fraction_and_context_length_reach_the_served_arm(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=4,
         mem_fraction=0.48, context_length=8192,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None).environment()
     assert environment[MEM_FRACTION_VARIABLE] == "0.48"
@@ -354,6 +363,7 @@ def test_a_voice_stating_neither_sets_neither_variable(tmp_path: Path) -> None:
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=16,
         mem_fraction=None, context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=None).environment()
     assert MEM_FRACTION_VARIABLE not in environment
@@ -365,6 +375,7 @@ def test_both_levers_reach_the_IN_PROCESS_arm_too(tmp_path: Path) -> None:
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack=None, max_num_seqs=16,
         mem_fraction=0.48, context_length=8192,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=A_64_GIB_MAC).environment()
     assert environment[MEM_FRACTION_VARIABLE] == "0.48"
@@ -377,7 +388,7 @@ def test_the_width_and_the_budget_come_from_one_row(tmp_path: Path) -> None:
     environment = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack=None, max_num_seqs=16,
-        mem_fraction=None, context_length=None, voices=document,
+        mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
         mlx_total_bytes=A_64_GIB_MAC).environment()
     assert environment[MLX_BATCH_VARIABLE] == "64"
     assert environment[MLX_MEM_BUDGET_VARIABLE] == "42"
@@ -389,7 +400,7 @@ def test_a_smaller_mac_gets_a_smaller_row(tmp_path: Path) -> None:
     environment = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack=None, max_num_seqs=16,
-        mem_fraction=None, context_length=None, voices=document,
+        mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
         mlx_total_bytes=A_16_GIB_MAC).environment()
     assert environment[MLX_BATCH_VARIABLE] == "24"
     assert environment[MLX_MEM_BUDGET_VARIABLE] == "13"
@@ -413,7 +424,7 @@ def test_the_served_arm_is_not_told_the_mlx_width(tmp_path: Path) -> None:
     built = build_voice_engine(
         "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
         serving_stack="sglang-omni", max_num_seqs=16,
-        mem_fraction=None, context_length=None, voices=document,
+        mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
         mlx_total_bytes=None)
     environment = built.environment()
     for name in (
@@ -429,7 +440,7 @@ def test_the_served_arm_is_refused_a_memory_figure(tmp_path: Path) -> None:
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack="sglang-omni", max_num_seqs=16,
-            mem_fraction=None, context_length=None, voices=document,
+            mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
             mlx_total_bytes=A_64_GIB_MAC)
     assert "mlx_total_bytes" in str(caught.value)
     assert "launcher's GPU fractions" in str(caught.value)
@@ -443,7 +454,7 @@ def test_the_in_process_arm_without_a_memory_figure_is_refused_by_name(
         build_voice_engine(
             "higgs-v3", a_venv(tmp_path), tmp_path / "x.log",
             serving_stack=None, max_num_seqs=16,
-            mem_fraction=None, context_length=None, voices=document,
+            mem_fraction=None, context_length=None, stall_guard=GUARD, voices=document,
             mlx_total_bytes=None)
     assert MLX_BATCH_VARIABLE in str(caught.value)
     assert MLX_MEM_BUDGET_VARIABLE in str(caught.value)
@@ -475,6 +486,7 @@ def test_an_engine_that_reads_no_higgs_vocabulary_is_told_no_mlx_width(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )
@@ -491,7 +503,7 @@ def test_a_stack_on_an_engine_that_has_none_is_refused(tmp_path: Path) -> None:
             max_num_seqs=16,
             mem_fraction=None,
             context_length=None,
-            voices=None,
+            stall_guard=None, voices=None,
             mlx_total_bytes=None,
         )
     assert "serving_stack='sglang-omni'" in str(caught.value)
@@ -524,7 +536,7 @@ def test_the_four_facts_have_no_defaults(tmp_path: Path) -> None:
             max_num_seqs=None,
             mem_fraction=None,
             context_length=None,
-            voices=a_document(tmp_path, tmp_path / "weights"),
+            stall_guard=GUARD, voices=a_document(tmp_path, tmp_path / "weights"),
         )
 
 
@@ -534,6 +546,7 @@ def test_the_engine_id_is_in_the_name_so_a_refusal_says_which(
     built = build_voice_engine(
         "higgs-v3", Path(sys.executable), Path("/tmp/x.log"),
         serving_stack=None, max_num_seqs=None, mem_fraction=None, context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=A_64_GIB_MAC)
     assert built.name == "narrator (higgs-v3)"
@@ -546,7 +559,7 @@ def test_an_engine_this_build_cannot_start_is_refused_by_name() -> None:
             "higgs-v2", Path(sys.executable), Path("/tmp/x.log"),
             serving_stack=None, max_num_seqs=None,
             mem_fraction=None, context_length=None,
-            voices=None, mlx_total_bytes=None)
+            stall_guard=GUARD, voices=None, mlx_total_bytes=None)
     assert "unknown narrator engine 'higgs-v2'" in str(caught.value)
     assert "['higgs-v3']" in str(caught.value)
 
@@ -660,6 +673,7 @@ def test_a_load_with_no_document_carries_the_weights_on_the_message(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )
@@ -718,6 +732,7 @@ def test_the_fake_worker_refuses_a_model_dir_exactly_as_narrator_does(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, weights),
         mlx_total_bytes=A_64_GIB_MAC,
     )
@@ -879,6 +894,7 @@ def test_a_line_on_stdout_that_is_not_a_message_is_a_refusal_naming_it(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=A_64_GIB_MAC,
     )
@@ -976,6 +992,7 @@ def test_a_worker_that_will_not_go_is_reported_and_never_sigkilled(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=A_64_GIB_MAC,
     )
@@ -1025,6 +1042,7 @@ def test_stopping_a_worker_that_ignores_sigterm_does_not_wedge_the_server(
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=GUARD,
         voices=a_document(tmp_path, tmp_path / "weights"),
         mlx_total_bytes=A_64_GIB_MAC,
     )
@@ -1076,6 +1094,7 @@ def test_the_stop_budget_is_the_whole_worst_case_of_stop() -> None:
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )
@@ -1101,6 +1120,7 @@ def test_a_narrator_env_that_is_missing_names_the_tts_install(tmp_path: Path) ->
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )
@@ -1118,6 +1138,7 @@ def test_missing_voice_weights_name_the_voices_pull(tmp_path: Path) -> None:
         max_num_seqs=None,
         mem_fraction=None,
         context_length=None,
+        stall_guard=None,
         voices=None,
         mlx_total_bytes=None,
     )

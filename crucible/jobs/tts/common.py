@@ -411,6 +411,7 @@ def _build_narrator(
         max_num_seqs=_serving_width(manifest, serving_width),
         mem_fraction=None if serving is None else serving.mem_fraction,
         context_length=None if serving is None else serving.context_length,
+        stall_guard=None if serving is None else serving.stall_guard_env,
         voices=voices,
         mlx_total_bytes=(
             accelerator.probe_unified_memory()[1]

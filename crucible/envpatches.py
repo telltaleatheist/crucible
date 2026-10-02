@@ -56,9 +56,13 @@ def apply_patches(
     scripts_dir: Path,
 ) -> list[dict[str, Any]]:
     run = runner if runner is not None else _run_script
+    ran: set[str] = set()
     for patch in patches:
         if patch.distribution not in recipe_pins:
             continue
+        if patch.script in ran:
+            continue
+        ran.add(patch.script)
         argv = [str(python), str(script_path(patch, scripts_dir)), str(env_dir)]
         result = run(argv)
         for line in (result.stdout or "").splitlines():
@@ -320,6 +324,48 @@ LLM_PATCHES: tuple[EnvPatch, ...] = (
 )
 
 
+TTS_SCRIPTS_DIR = Path(__file__).resolve().parent / "envs" / "tts" / "patches"
+
+STALL_GUARD_SCRIPT = "patch_sglang_omni_stall_guard.py"
+STALL_GUARD_TAG_FAMILY = "# PATCH (crucible stall-guard "
+STALL_GUARD_TAG = (
+    STALL_GUARD_TAG_FAMILY + "v1, envs/tts/patches/patch_sglang_omni_stall_guard.py)"
+)
+STALL_GUARD_WHY = (
+    "stock sglang-omni 0.1.4 has no way out of a Higgs runaway silence: "
+    "codebook 0 repeats a silence code frame after frame and top-k 50 / top-p "
+    "0.95 cut every exit token, so the state is absorbing. The patch reads "
+    "HIGGS_STALL_GUARD (which Crucible sets from the voice's "
+    "[voice.serving].stall_guard on every load) and lowers the repeating cb0 "
+    "codes' logits past the stated run. NarratorEngine applies it itself before "
+    "it starts the server, and refuses to start one without it"
+)
+
+
+def _stall_guard_patch(rel: str) -> EnvPatch:
+    return EnvPatch(
+        id=f"sglang-omni-stall-guard-{rel.removesuffix('.py').replace('_', '-')}",
+        distribution="sglang-omni",
+        rel_path=f"sglang_omni/models/higgs_tts/{rel}",
+        marker=STALL_GUARD_TAG_FAMILY,
+        absent_marker=None,
+        stale_marker=STALL_GUARD_TAG,
+        script=STALL_GUARD_SCRIPT,
+        why=STALL_GUARD_WHY,
+    )
+
+
+SGLANG_OMNI_STALL_GUARD_SAMPLER = _stall_guard_patch("sampler.py")
+SGLANG_OMNI_STALL_GUARD_MODEL = _stall_guard_patch("model.py")
+SGLANG_OMNI_STALL_GUARD_MODEL_RUNNER = _stall_guard_patch("model_runner.py")
+
+TTS_PATCHES: tuple[EnvPatch, ...] = (
+    SGLANG_OMNI_STALL_GUARD_SAMPLER,
+    SGLANG_OMNI_STALL_GUARD_MODEL,
+    SGLANG_OMNI_STALL_GUARD_MODEL_RUNNER,
+)
+
+
 CUDA_TOOLKIT_REL = "nvidia/cu13"
 
 CUDA_TOOLKIT_LINKS: tuple[tuple[str, str], ...] = (
@@ -427,6 +473,7 @@ class PatchSet:
 
 REGISTRY: dict[str, PatchSet] = {
     "llm": PatchSet(LLM_PATCHES, LLM_SCRIPTS_DIR),
+    "tts": PatchSet(TTS_PATCHES, TTS_SCRIPTS_DIR),
 }
 
 
@@ -471,14 +518,39 @@ def check(
 
 
 def ensure_applied(
-    patches: tuple[EnvPatch, ...], env_dir: Path, python: Path, *, runner: Any = None
+    patches: tuple[EnvPatch, ...],
+    env_dir: Path,
+    python: Path,
+    *,
+    scripts_dir: Path,
+    runner: Any = None,
 ) -> None:
     pins = {patch.distribution: "" for patch in patches}
     rows = check_patches(env_dir, pins, patches=patches)
     if all(row["status"] == APPLIED for row in rows):
         return
     apply_patches(
-        env_dir, python, pins, runner=runner, patches=patches, scripts_dir=LLM_SCRIPTS_DIR
+        env_dir, python, pins, runner=runner, patches=patches, scripts_dir=scripts_dir
+    )
+
+
+REPAIRABLE: frozenset[str] = frozenset({MISSING, STALE})
+
+
+def repair(
+    job_type: str,
+    env_dir: Path,
+    python: Path,
+    recipe_pins: dict[str, str],
+    *,
+    on_line: Any = None,
+    runner: Any = None,
+) -> list[dict[str, Any]]:
+    rows = check(job_type, env_dir, recipe_pins)
+    if not any(row["status"] in REPAIRABLE for row in rows):
+        return rows
+    return apply(
+        job_type, env_dir, python, recipe_pins, on_line=on_line, runner=runner
     )
 
 
@@ -512,6 +584,15 @@ __all__ = [
     "PatchError",
     "PatchSet",
     "REGISTRY",
+    "REPAIRABLE",
+    "SGLANG_OMNI_STALL_GUARD_MODEL",
+    "SGLANG_OMNI_STALL_GUARD_MODEL_RUNNER",
+    "SGLANG_OMNI_STALL_GUARD_SAMPLER",
+    "STALL_GUARD_SCRIPT",
+    "STALL_GUARD_TAG",
+    "STALL_GUARD_TAG_FAMILY",
+    "TTS_PATCHES",
+    "TTS_SCRIPTS_DIR",
     "SELF_APPLIED_LLM_PATCHES",
     "SOUND_STATUSES",
     "STALE",
@@ -524,6 +605,7 @@ __all__ = [
     "ensure_cuda_toolkit_links",
     "patched_job_types",
     "patches_for",
+    "repair",
     "require_applied",
     "site_packages",
 ]
