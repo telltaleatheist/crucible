@@ -8,12 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv
-from crucible.accelerator import ComputeApp, ProbeError
-from crucible.memorybudget import GIB
-from crucible import residency as residency_module
-from crucible.accelerator import GIB, ComputeApp, ProbeError
 from crucible import engines as engines_module
+from crucible import residency as residency_module
+from crucible.accelerator import ComputeApp, ProbeError
 from crucible.manifests import load_manifest
+from crucible.memorybudget import GIB
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, parse_sse, write_env_stamp
 from .fake_engine import FakeEngine
@@ -239,7 +238,6 @@ def test_a_resident_voice_is_reported_as_a_voice(
     auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from crucible import residency as residency_module
 
     cuda(monkeypatch, apps=[], free_bytes=22 * GIB)
     with make_client(enable_tts=True) as client:

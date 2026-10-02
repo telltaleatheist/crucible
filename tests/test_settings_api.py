@@ -11,12 +11,10 @@ from fastapi.testclient import TestClient
 from crucible import (
     capabilitywords,
     classnames,
-    ladder,
     upstreamrecord,
     upstreams,
     verdict,
 )
-from crucible import upstreams
 from crucible.cardfacts import card_for
 from crucible.config import config_path, crucible_home, load_config
 

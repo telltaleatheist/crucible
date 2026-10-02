@@ -5,7 +5,6 @@ from typing import Any, Callable
 from fastapi.testclient import TestClient
 
 from crucible import API_VERSION, peer
-from crucible.api import create_app
 
 from .conftest import TOKEN
 

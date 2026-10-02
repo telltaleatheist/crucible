@@ -16,8 +16,8 @@ from fastapi.testclient import TestClient
 
 from crucible import engines as engines_module
 from crucible.manifests import (
-    MODALITIES,
     LANGUAGE_MODEL_ONLY,
+    MODALITIES,
     SKIP_MM_PROFILING,
     ManifestError,
     load_manifest,
@@ -26,8 +26,7 @@ from crucible.manifests import (
 
 from .conftest import FAKE_MAC_BACKEND
 from .fake_engine import ANSWER, FakeEngine
-
-from .test_llm_api import llm_client, run_job
+from .test_llm_api import llm_client, run_job  # noqa: F401 - a fixture this module uses
 
 PAGE_MODEL = "dots-ocr"
 TEXT_MODEL = "qwen3.5-9b"
@@ -112,7 +111,7 @@ def page_engines(monkeypatch: pytest.MonkeyPatch) -> PageEngines:
 
 @pytest.fixture
 def resident_page_model(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
@@ -131,7 +130,7 @@ def test_the_page_model_is_the_only_one_offered_for_images() -> None:
 
 
 def test_modalities_reaches_the_models_row_and_the_info_capability(
-    llm_client: TestClient, auth: dict[str, str]
+    llm_client: TestClient, auth: dict[str, str]  # noqa: F811
 ) -> None:
     rows = llm_client.get("/v1/models", headers=auth).json()
     by_id = {row["id"]: row for row in rows}
@@ -304,7 +303,7 @@ def test_an_eleven_megabyte_data_uri_is_not_truncated(
 
 
 def test_only_the_model_field_is_rewritten(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
@@ -383,7 +382,7 @@ def test_twelve_pages_are_in_the_engine_at_once(
 
 
 def test_a_page_sent_to_a_text_model_is_still_refused_by_name(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import platform
 from pathlib import Path
 
 import pytest
@@ -11,8 +10,6 @@ from crucible.backend import (
     CUDA_LINUX,
     LLAMA_WINDOWS,
     MLX_DARWIN,
-    Backend,
-    Gpu,
     backend_not_here,
 )
 from crucible.capabilityclasses import BY_NAME

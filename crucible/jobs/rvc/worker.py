@@ -16,11 +16,10 @@ import subprocess
 import tempfile
 import time
 
-from workerio import fail, send
-
 import numpy
 import soundfile
 from scipy.signal import resample_poly
+from workerio import fail, send
 
 PROGRESS_LINE = re.compile(r"^\[RVC\]\s+(\d+)/(\d+)")
 

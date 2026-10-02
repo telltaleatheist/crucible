@@ -10,9 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import accelerator, jobenv, tasks, workers
-from crucible.memorybudget import GIB
+from crucible.cardkinds import KIND_DENOISE
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
+from crucible.memorybudget import GIB
+from crucible.residency import Residency
 
 from .conftest import (
     FAKE_BACKEND,
@@ -22,8 +24,6 @@ from .conftest import (
     parse_sse,
     write_env_stamp,
 )
-from crucible.cardkinds import KIND_DENOISE
-from crucible.residency import Residency
 
 MODEL = "denoise-roformer"
 VOCALS_MODEL = "vocals-roformer"

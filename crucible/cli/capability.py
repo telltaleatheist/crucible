@@ -6,11 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .. import installplan, ladder, memorybudget, verdict
-from .. import cardfacts, ladder
-from ..backend import Backend, MLX_DARWIN
-from ..capabilitystore import decide_for, write_capability
+from .. import cardfacts, installplan, ladder, memorybudget, verdict
+from ..backend import MLX_DARWIN, Backend
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
+from ..capabilitystore import decide_for, write_capability
 from ..config import Config
 from ..memorybudget import GIB, gib_text
 from . import common

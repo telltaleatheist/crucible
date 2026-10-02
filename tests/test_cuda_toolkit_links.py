@@ -18,6 +18,7 @@ from crucible.envpatches import (
     PatchError,
 )
 
+
 def _can_symlink() -> bool:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)

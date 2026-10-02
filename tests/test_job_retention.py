@@ -10,9 +10,9 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from crucible import clock
 from crucible.config import DEFAULT_RETENTION_DAYS, load_config, write_config
 from crucible.errors import ConfigError
-from crucible import clock
 from crucible.jobs.base import Job
 
 from .conftest import FAKE_BACKEND, TOKEN

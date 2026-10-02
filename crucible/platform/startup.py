@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
-import subprocess
 from typing import Mapping
 
 from .errors import HostError
 from .paths import crucible_root, host_pack_dir, pythonw_path
-from .powershell import quote as _ps_quote, script_argv
+from .powershell import quote as _ps_quote
+from .powershell import script_argv
 from .runner import Runner
 
 SHORTCUT_NAME = "Crucible.lnk"

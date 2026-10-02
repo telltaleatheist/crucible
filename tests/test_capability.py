@@ -16,12 +16,12 @@ from crucible import (
     verdict,
 )
 from crucible.capabilityclasses import BY_NAME, CLASSES, classes_for_job_type
-from crucible.memorybudget import available_bytes
-from crucible.verdict import decide, decide_all, job_type_enabled
-from crucible.config import config_path, default_desktop_allowance_bytes, load_config, write_config
 from crucible.capabilityrecord import CapabilityRecord, CapabilityRow
+from crucible.config import config_path, default_desktop_allowance_bytes, load_config, write_config
 from crucible.errors import ApiError, ConfigError
 from crucible.jobs import disabled_error
+from crucible.memorybudget import available_bytes
+from crucible.verdict import decide, decide_all, job_type_enabled
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 

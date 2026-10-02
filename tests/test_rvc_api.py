@@ -10,11 +10,11 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, procgroup, rvcbase, jobenv, tasks
+from crucible import accelerator, jobenv, procgroup, rvcbase, tasks
 from crucible.accelerator import ComputeApp
-from crucible.memorybudget import GIB
 from crucible.errors import ApiError
 from crucible.jobs import rvc as rvc_job
+from crucible.memorybudget import GIB
 from crucible.rvcmodels import load_rvc_manifest
 
 from .conftest import FAKE_BACKEND, end_process_tree, parse_sse, write_env_stamp

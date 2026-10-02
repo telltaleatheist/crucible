@@ -12,10 +12,10 @@ import pytest
 
 from crucible import accelerator, memorybudget
 from crucible import residency as residency_module
+from crucible.cardkinds import KIND_TTS
 from crucible.config import load_config, write_config
 from crucible.engines import EngineError
 from crucible.errors import ApiError, JobError
-from crucible.cardkinds import KIND_TTS
 from crucible.residency import Residency, ResidentVoice
 
 from .conftest import FAKE_BACKEND

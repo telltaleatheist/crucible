@@ -1,7 +1,8 @@
 import pytest
 
-from crucible.connect import PairingRequests, MAX_REQUESTS
+from crucible.connect import MAX_REQUESTS, PairingRequests
 from crucible.errors import ApiError
+
 from .conftest import TOKEN
 
 HEADERS = {"X-Crucible-Api": "1"}

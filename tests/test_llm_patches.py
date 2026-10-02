@@ -10,7 +10,7 @@ import pytest
 
 from crucible import cli, envpatches, jobenv
 from crucible.engines import EngineError, decide_reading
-from crucible.engines.mlx_lm import MlxLmEngine, REQUIRED_FLAGS
+from crucible.engines.mlx_lm import REQUIRED_FLAGS, MlxLmEngine
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 

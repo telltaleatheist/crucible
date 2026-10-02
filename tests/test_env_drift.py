@@ -7,7 +7,6 @@ import pytest
 
 from crucible import jobenv
 
-
 BASE = """--extra-index-url https://download.pytorch.org/whl/cu121
 # a comment
 torch==2.5.1

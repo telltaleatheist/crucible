@@ -14,7 +14,6 @@ import wave
 
 from workerio import SAMPLE_RATE, decode, send
 
-
 MIN_PIECE_SECONDS = 0.5
 
 SEARCH_SECONDS = 10.0

@@ -618,12 +618,11 @@ def test_models_and_info_rows_carry_weights_of(
 def test_an_alias_never_reads_as_held_in_the_ollama_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from crucible import ollamastore
     from crucible.jobs.llm import model_rows
     from crucible.residency import Residency
 
     from .test_ollama_copy_row import a_store
-
-    from crucible import ollamastore
 
     store = tmp_path / "ollama"
     a_store(store, "qwen3.5:9b-bf16")

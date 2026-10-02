@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,8 +9,13 @@ from crucible import tasks
 from crucible.platform.paths import HOST_DOOR_ENV
 from crucible.tasks import hostdoor
 
-from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
-from .test_engine_task import FakeDoor, door, events, wait_for, windows_client
+from .test_engine_task import (  # noqa: F401 - a fixture this module uses
+    FakeDoor,
+    door,
+    events,
+    wait_for,
+    windows_client,
+)
 
 
 def restart(client: TestClient, auth: dict[str, str]) -> Any:
@@ -41,7 +46,7 @@ def test_a_restart_takes_no_fields_at_all(
 
 
 def test_any_backend_may_be_restarted_unlike_the_move(
-    client: TestClient, auth: dict[str, str], door: FakeDoor
+    client: TestClient, auth: dict[str, str], door: FakeDoor  # noqa: F811
 ) -> None:
     import os
 
@@ -57,7 +62,7 @@ def test_any_backend_may_be_restarted_unlike_the_move(
 
 
 def test_the_restart_goes_to_slash_restart_with_the_engines_bearer_and_no_body_fields(
-    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     from .conftest import TOKEN
 
@@ -72,7 +77,7 @@ def test_the_restart_goes_to_slash_restart_with_the_engines_bearer_and_no_body_f
 
 
 def test_the_orchestrators_events_arrive_UNALTERED_under_this_tasks_id(
-    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     door.script = [
         ("step", {"name": "restart the guest's unit", "index": 1, "total": 2}),
@@ -94,7 +99,7 @@ def test_the_orchestrators_events_arrive_UNALTERED_under_this_tasks_id(
 
 
 def test_engine_not_ours_comes_back_with_the_orchestrators_OWN_code(
-    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     door.refusal = (409, "engine_not_ours", "watched and never acted on")
     monkeypatch.setenv(HOST_DOOR_ENV, door.url)
@@ -105,7 +110,7 @@ def test_engine_not_ours_comes_back_with_the_orchestrators_OWN_code(
 
 
 def test_a_failed_event_from_the_orchestrator_is_NOT_described_twice(
-    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     door.script = [
         ("step", {"name": "restart the guest's unit", "index": 1, "total": 2}),
@@ -122,7 +127,7 @@ def test_a_failed_event_from_the_orchestrator_is_NOT_described_twice(
 
 
 def test_a_stream_that_just_STOPS_is_the_expected_shape_and_says_to_read_info(
-    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, auth: dict[str, str], door: FakeDoor, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     door.script = [("step", {"name": "restart the guest's unit", "index": 1, "total": 2})]
     door.cut_after = 1

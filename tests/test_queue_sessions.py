@@ -402,7 +402,7 @@ def _activity(base: str, headers: dict[str, str]) -> dict[str, Any]:
 
 
 def test_a_session_opens_with_its_model_loaded_and_holds_it_until_it_closes(
-    chat_server: Callable[..., Any], auth: dict[str, str]
+    chat_server: Callable[..., Any], auth: dict[str, str]  # noqa: F811
 ) -> None:
     engines, server = chat_server()
     mine = _as(auth, "briefcase")
@@ -435,7 +435,7 @@ def test_a_session_opens_with_its_model_loaded_and_holds_it_until_it_closes(
 
 
 def test_a_session_whose_model_will_not_load_never_opens(
-    chat_server: Callable[..., Any], auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    chat_server: Callable[..., Any], auth: dict[str, str], monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
     _, server = chat_server()
 
@@ -456,7 +456,7 @@ def test_a_session_whose_model_will_not_load_never_opens(
 
 
 def test_other_clients_chats_wait_or_are_refused_while_a_session_is_open(
-    chat_server: Callable[..., Any], auth: dict[str, str]
+    chat_server: Callable[..., Any], auth: dict[str, str]  # noqa: F811
 ) -> None:
     _, server = chat_server()
     mine, theirs = _as(auth, "contentstudio"), _as(auth, "bookforge")

@@ -14,14 +14,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from crucible import API_VERSION, accelerator, jobenv
-from crucible.memorybudget import GIB
+from crucible import engines as engines_module
 from crucible.api import create_app
 from crucible.backend import Backend, Gpu
 from crucible.config import DEFAULT_OPEN_PAIRING, load_config, mint_token, write_config
-from crucible.narratorengines import declared_tts_footprints
-from crucible import residency as residency_module
-from crucible import engines as engines_module
 from crucible.manifests import load_manifest
+from crucible.memorybudget import GIB
+from crucible.narratorengines import declared_tts_footprints
 
 from .fake_engine import FakeEngine
 

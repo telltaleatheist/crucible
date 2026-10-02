@@ -6,9 +6,7 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ... import accelerator, enginespec, jobenv, llamacpp, ollamastore, vram, weights
-from ... import residency as residency_module
-from ... import accelerator, engines, jobenv, llamacpp, ollamastore, vram, weights
+from ... import accelerator, engines, enginespec, jobenv, llamacpp, ollamastore, vram, weights
 from ...backend import LLAMA_WINDOWS
 from ...cardfacts import card_for
 from ...cardkinds import KIND_LLM

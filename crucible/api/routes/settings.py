@@ -6,8 +6,7 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import catalog, ladder, upstreamrecord, upstreams
-from ... import catalog, upstreams
+from ... import catalog, upstreamrecord, upstreams
 from ... import settings as settings_module
 from ...cardfacts import card_for
 from ...errors import ApiError

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,12 +10,11 @@ from crucible.engines import ENGINES, start_engine
 from crucible.inflight import InFlight
 
 from .fake_engine import FakeEngine
-
 from .test_llm_api import (
     MODEL,
-    engines,
-    fake_env,
-    llm_client,
+    engines,  # noqa: F401 - a fixture this module uses
+    fake_env,  # noqa: F401 - a fixture this module uses
+    llm_client,  # noqa: F401 - a fixture this module uses
     run_job,
     submit,
 )
@@ -51,11 +49,11 @@ def _chat(client: TestClient, auth: dict[str, str]) -> Any:
 
 
 def test_a_storm_of_refusals_leaks_no_slot(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    engines: list[FakeEngine],
+    engines: list[FakeEngine],  # noqa: F811
     serial_engines: None,
 ) -> None:
     fake_weights(MODEL)
@@ -76,11 +74,11 @@ def test_a_storm_of_refusals_leaks_no_slot(
 
 
 def test_refusals_do_not_poison_the_retry_after(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    engines: list[FakeEngine],
+    engines: list[FakeEngine],  # noqa: F811
     serial_engines: None,
 ) -> None:
     fake_weights(MODEL)
@@ -106,11 +104,11 @@ def test_refusals_do_not_poison_the_retry_after(
 
 
 def test_the_refusal_states_the_limit_the_client_should_have_read(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    engines: list[FakeEngine],
+    engines: list[FakeEngine],  # noqa: F811
     serial_engines: None,
 ) -> None:
     fake_weights(MODEL)
@@ -132,11 +130,11 @@ def test_the_refusal_states_the_limit_the_client_should_have_read(
 
 
 def test_cancelling_a_finished_load_is_refused_and_changes_nothing(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    engines: list[FakeEngine],
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     job_id = _load_and_wait(llm_client, auth)
@@ -156,11 +154,11 @@ def test_cancelling_a_finished_load_is_refused_and_changes_nothing(
 
 
 def test_a_second_cancel_of_the_same_finished_job_is_the_same_answer(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
-    engines: list[FakeEngine],
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     job_id = _load_and_wait(llm_client, auth)

@@ -1,6 +1,6 @@
+import json
 import sys
 import threading
-import json
 from types import SimpleNamespace
 from urllib.error import URLError
 

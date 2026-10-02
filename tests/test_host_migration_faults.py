@@ -1,9 +1,8 @@
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from pathlib import Path
 import subprocess
 import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
@@ -11,8 +10,8 @@ import pytest
 
 from crucible.host import app, cleanup_record, pairing_sync, presence
 from crucible.host.catalog import HttpCatalog, StoppedWindowsCatalog
-from crucible.platform.errors import HostError
 from crucible.host.state import Distro, Engine, Owner
+from crucible.platform.errors import HostError
 from tests.test_host import FakeCatalog, Scripted, _context, migration
 
 

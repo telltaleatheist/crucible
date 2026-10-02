@@ -19,7 +19,7 @@ from crucible.decide import (
 from crucible.engines import ENGINES
 
 from .fake_engine import END_OF_TURN, FakeEngine, _rendered, system_segment
-from .test_llm_api import fake_env, llm_client, run_job
+from .test_llm_api import fake_env, llm_client, run_job  # noqa: F401 - a fixture this module uses
 
 MODEL = "qwen3.5-9b"
 PAGE_MODEL = "dots-ocr"
@@ -74,7 +74,7 @@ def _decide(client: TestClient, auth: dict[str, str], body: dict[str, Any],
 
 @pytest.fixture
 def loaded(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
@@ -92,7 +92,7 @@ def loaded(
 
 
 def test_the_worked_example_end_to_end(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=example_probs)
     response = _decide(llm_client, auth, EXAMPLE)
@@ -132,7 +132,7 @@ def test_the_worked_example_end_to_end(
 
 
 def test_the_model_triple_is_the_load_s_own_provenance(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     loaded(probs_for=example_probs)
     body = _decide(llm_client, auth, EXAMPLE).json()
@@ -143,7 +143,7 @@ def test_the_model_triple_is_the_load_s_own_provenance(
 
 
 def test_an_engine_that_does_not_report_its_cache_says_null_not_zero(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     loaded(probs_for=example_probs, report_cached=False)
     body = _decide(llm_client, auth, EXAMPLE).json()
@@ -155,7 +155,7 @@ def test_an_engine_that_does_not_report_its_cache_says_null_not_zero(
 
 
 def test_the_prime_goes_first_and_every_question_extends_it(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=example_probs)
     assert _decide(llm_client, auth, EXAMPLE).status_code == 200
@@ -192,7 +192,7 @@ LONG_STATE = " ".join(
 
 
 def test_on_mlx_lm_s_exact_prefix_rule_every_question_reuses_the_primed_state(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=example_probs, prefix_cache="segments")
     response = _decide(llm_client, auth, {**EXAMPLE, "state": LONG_STATE})
@@ -223,7 +223,7 @@ def test_the_old_layout_reused_only_the_frame_under_the_same_rule() -> None:
 
 
 def test_one_question_is_not_primed(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=example_probs)
     body = {**EXAMPLE, "questions": {"urgent": EXAMPLE["questions"]["urgent"]}}
@@ -235,7 +235,7 @@ def test_one_question_is_not_primed(
 
 
 def test_the_engine_is_sent_its_own_name_for_the_model(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     fake_weights: Callable[[str], Path],
     idle_card: None,
@@ -256,7 +256,7 @@ def test_the_engine_is_sent_its_own_name_for_the_model(
 
 
 def test_questions_go_out_together_up_to_the_engines_admission(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly, answer_delay=0.3)
     questions = {f"q{i}": {"type": "yesno", "instructions": f"statement {i}"}
@@ -268,7 +268,7 @@ def test_questions_go_out_together_up_to_the_engines_admission(
 
 
 def test_a_serial_engine_is_asked_no_more_than_its_admission(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
@@ -286,7 +286,7 @@ def test_a_serial_engine_is_asked_no_more_than_its_admission(
 
 
 def test_a_letter_outside_the_top_k_is_label_not_in_probs(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     def probs(messages: list[dict[str, Any]]) -> dict[str, float]:
         if question_of(messages) == "How frustrated is the customer?":
@@ -311,7 +311,7 @@ def _c_below_the_top_k(messages: list[dict[str, Any]]) -> dict[str, float]:
 
 @pytest.mark.parametrize("mode", [{}, {"missing": "refuse"}], ids=["default", "stated"])
 def test_refuse_mode_is_unchanged_for_a_letter_ranked_below_k(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],  # noqa: F811
     mode: dict[str, str],
 ) -> None:
     engine = loaded(probs_for=_c_below_the_top_k)
@@ -324,7 +324,7 @@ def test_refuse_mode_is_unchanged_for_a_letter_ranked_below_k(
 
 
 def test_report_mode_end_to_end_with_a_letter_ranked_below_k(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=_c_below_the_top_k)
     response = _decide(llm_client, auth, {**EXAMPLE, "missing": "report"})
@@ -349,7 +349,7 @@ def test_report_mode_end_to_end_with_a_letter_ranked_below_k(
 
 
 def test_report_mode_still_refuses_a_question_with_no_label_returned(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     def probs(messages: list[dict[str, Any]]) -> dict[str, float]:
         if question_of(messages) == "The message conveys urgency":
@@ -367,7 +367,7 @@ def test_report_mode_still_refuses_a_question_with_no_label_returned(
 
 @pytest.mark.parametrize("bad", ["ignore", "REPORT", None, 1])
 def test_an_unknown_missing_mode_is_invalid_request(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine],  # noqa: F811
     bad: Any,
 ) -> None:
     engine = loaded(probs_for=example_probs)
@@ -380,7 +380,7 @@ def test_an_unknown_missing_mode_is_invalid_request(
 
 
 def test_an_engine_refusal_is_engine_error_quoting_the_engine(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
@@ -399,7 +399,7 @@ def test_an_engine_refusal_is_engine_error_quoting_the_engine(
 
 
 def test_too_many_options_is_refused_before_anything_is_sent(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
     body = {**EXAMPLE, "questions": {
@@ -413,7 +413,7 @@ def test_too_many_options_is_refused_before_anything_is_sent(
 
 
 def test_too_many_images_is_refused_before_anything_is_sent(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
     response = _decide(llm_client, auth, {**EXAMPLE, "images": [PNG] * 9})
@@ -423,7 +423,7 @@ def test_too_many_images_is_refused_before_anything_is_sent(
 
 
 def test_images_on_a_text_model_are_model_text_only(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
     response = _decide(llm_client, auth, {**EXAMPLE, "images": [PNG]})
@@ -443,7 +443,7 @@ def test_images_on_a_text_model_are_model_text_only(
 def test_model_text_only_reads_what_the_backend_SERVES_not_the_weights(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
-    fake_env: Path,
+    fake_env: Path,  # noqa: F811
     fake_weights: Callable[[str], Path],
     idle_card: None,
     engine_factory: Callable[..., list[FakeEngine]],
@@ -490,7 +490,7 @@ engine_args = ["--language-model-only"]
 
 
 def test_the_models_row_says_what_this_host_serves(
-    llm_client: TestClient, auth: dict[str, str]
+    llm_client: TestClient, auth: dict[str, str]  # noqa: F811
 ) -> None:
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     assert rows["qwen3.5-4b"]["modalities"] == ["text", "image"]
@@ -500,7 +500,7 @@ def test_the_models_row_says_what_this_host_serves(
 
 
 def test_a_small_tier_that_serves_images_here_answers_an_image_decision(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(model="qwen3.5-4b", probs_for=yes_mostly)
     body = {
@@ -516,7 +516,7 @@ def test_a_small_tier_that_serves_images_here_answers_an_image_decision(
 
 
 def test_an_upstream_model_is_decide_needs_logprobs(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
     response = _decide(llm_client, auth, {**EXAMPLE, "model": "anthropic/claude"})
@@ -526,7 +526,7 @@ def test_an_upstream_model_is_decide_needs_logprobs(
 
 
 def test_an_engine_that_returns_no_logprobs_is_decide_not_served(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
@@ -545,7 +545,7 @@ def test_an_engine_that_returns_no_logprobs_is_decide_not_served(
 
 
 def test_more_options_than_the_engine_s_cap_is_decide_not_served(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
@@ -566,7 +566,7 @@ def test_more_options_than_the_engine_s_cap_is_decide_not_served(
 
 
 def test_an_unknown_act_is_refused_before_the_work(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=yes_mostly)
     response = _decide(llm_client, auth, EXAMPLE, **{"X-Crucible-Act": "analysys"})
@@ -576,7 +576,7 @@ def test_an_unknown_act_is_refused_before_the_work(
 
 
 def test_a_model_that_is_not_resident_gets_the_chat_door_s_409(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     empty = _decide(llm_client, auth, EXAMPLE)
     assert empty.status_code == 409
@@ -596,7 +596,7 @@ def test_a_model_that_is_not_resident_gets_the_chat_door_s_409(
 
 
 def test_a_full_door_is_chat_queue_full(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
@@ -620,13 +620,13 @@ def test_a_full_door_is_chat_queue_full(
     assert engine.requests == []
 
 
-def test_the_door_needs_auth(llm_client: TestClient) -> None:
+def test_the_door_needs_auth(llm_client: TestClient) -> None:  # noqa: F811
     response = llm_client.post("/v1/decide", json=EXAMPLE)
     assert response.status_code == 401
 
 
 def test_a_malformed_body_is_invalid_request_naming_the_field(
-    llm_client: TestClient, auth: dict[str, str]
+    llm_client: TestClient, auth: dict[str, str]  # noqa: F811
 ) -> None:
     response = _decide(llm_client, auth, {**EXAMPLE, "state": None})
     assert response.status_code == 400
@@ -638,7 +638,7 @@ def test_a_malformed_body_is_invalid_request_naming_the_field(
 
 
 def test_a_decision_in_flight_is_on_the_activity_bench_and_then_gone(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     seen: list[dict[str, Any]] = []
     looked = threading.Event()
@@ -663,7 +663,7 @@ def test_a_decision_in_flight_is_on_the_activity_bench_and_then_gone(
 
 
 def test_images_travel_as_data_uri_parts_ahead_of_the_text(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(model=PAGE_MODEL, probs_for=example_probs)
     body = {**EXAMPLE, "model": PAGE_MODEL, "state": "", "images": [PNG]}
@@ -708,7 +708,7 @@ def item_probs(messages: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def test_the_items_form_answers_a_list_in_order_in_the_choice_shape(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=item_probs)
     response = _decide(llm_client, auth, ITEMS_EXAMPLE)
@@ -727,7 +727,7 @@ def test_the_items_form_answers_a_list_in_order_in_the_choice_shape(
 
 
 def test_every_item_goes_as_the_lone_choice_question_would(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     from crucible import decide as decide_core
 
@@ -746,7 +746,7 @@ def test_every_item_goes_as_the_lone_choice_question_would(
 
 
 def test_too_many_items_is_refused_before_anything_is_sent(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=item_probs)
     body = {**ITEMS_EXAMPLE, "items": [{"text": f"t{i}"} for i in range(513)]}
@@ -759,7 +759,7 @@ def test_too_many_items_is_refused_before_anything_is_sent(
 
 
 def test_an_item_with_too_many_options_is_refused_by_its_index(
-    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
+    llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]  # noqa: F811
 ) -> None:
     engine = loaded(probs_for=item_probs)
     body = {**ITEMS_EXAMPLE, "items": [
@@ -771,7 +771,7 @@ def test_an_item_with_too_many_options_is_refused_by_its_index(
 
 
 def test_an_items_engine_started_before_its_route_says_to_load_again(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,

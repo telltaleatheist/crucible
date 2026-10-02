@@ -18,11 +18,11 @@ from crucible.voices import VOICES_DIR_ENV, parse_voice
 from . import fake_narrator_engine
 from .conftest import FAKE_BACKEND
 from .test_tts_api import (
-    fake_env,
-    idle_card,
-    tts_recipes,
+    fake_env,  # noqa: F401 - a fixture this module uses
+    idle_card,  # noqa: F401 - a fixture this module uses
+    run_job,
+    tts_recipes,  # noqa: F401 - a fixture this module uses
 )
-from .test_tts_api import run_job
 
 LOCAL = """
 [voice]
@@ -212,8 +212,8 @@ def test_the_resident_record_carries_the_identity_it_was_loaded_from(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     screening: Path,
-    fake_env: Path,
-    idle_card: None,
+    fake_env: Path,  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_narrator_engine.install(monkeypatch)

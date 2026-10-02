@@ -9,14 +9,14 @@ from fastapi.testclient import TestClient
 
 from crucible import catalog, denoisemodels, lineup, rvcbase
 from crucible.alignmodels import load_all_align_manifests
-from crucible.audiomodels import load_all_audio_manifests
-from crucible.videomodels import load_all_video_manifests
-from crucible.imagemodels import load_all_image_manifests
 from crucible.asrmodels import load_all_asr_manifests
+from crucible.audiomodels import load_all_audio_manifests
 from crucible.errors import CrucibleError
+from crucible.imagemodels import load_all_image_manifests
 from crucible.manifests import load_all_manifests
 from crucible.rvcmodels import load_all_rvc_manifests
 from crucible.segmentmodels import load_all_segment_manifests
+from crucible.videomodels import load_all_video_manifests
 from crucible.voicecatalog import load_all_voices
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND

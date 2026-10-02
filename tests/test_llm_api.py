@@ -11,16 +11,15 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator
 from crucible import accelerator, jobenv, tasks
-from crucible.accelerator import ComputeApp
-from crucible.memorybudget import GIB
-from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
-from crucible import residency as residency_module
 from crucible import engines as engines_module
+from crucible import residency as residency_module
+from crucible.accelerator import ComputeApp
+from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible.engines import ENGINES
 from crucible.engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
 from crucible.manifests import load_manifest
+from crucible.memorybudget import GIB
 from crucible.settle import SETTLEMENT_HOLDER
 
 from .conftest import (

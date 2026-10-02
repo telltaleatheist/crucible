@@ -22,10 +22,10 @@ from .conftest import a_clearance_to_hold
 from .live_server import run_job, serve
 from .test_residency import STUBBORN_PID, a_process_that_will_not_stop
 from .test_tts_api import (
-    fake_env,
-    fake_weights,
-    idle_card,
-    tts_recipes,
+    fake_env,  # noqa: F401 - a fixture this module uses
+    fake_weights,  # noqa: F401 - a fixture this module uses
+    idle_card,  # noqa: F401 - a fixture this module uses
+    tts_recipes,  # noqa: F401 - a fixture this module uses
 )
 
 VOICE = "deathstalker"
@@ -55,9 +55,9 @@ def quick_engine(monkeypatch: pytest.MonkeyPatch) -> None:
 def streaming_server(
     make_app: Callable[..., Any],
     auth: dict[str, str],
-    fake_env: Path,
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_env: Path,  # noqa: F811
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[..., Any]:
 
@@ -549,9 +549,9 @@ def test_a_stream_s_queue_session_holds_the_card_against_every_job_that_wants_it
 def test_a_session_opened_during_a_clearance_waits_it_out(
     make_app: Callable[..., Any],
     auth: dict[str, str],
-    fake_env: Path,
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
+    fake_env: Path,  # noqa: F811
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_narrator_engine.install(monkeypatch)

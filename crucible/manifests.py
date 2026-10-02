@@ -8,8 +8,8 @@ from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .classnames import CLASS_NAMES
-from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits
 from .errors import CrucibleError
+from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"

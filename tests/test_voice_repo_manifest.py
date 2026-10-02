@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from crucible.voicecatalog import load_all_voices, load_voice
 from crucible.voicerepo import (
     REPO_MANIFEST_NAME,
     Pin,
@@ -16,7 +17,6 @@ from crucible.voicerepo import (
     write_home_pin,
 )
 from crucible.voices import VOICES_DIR_ENV, VoiceError, voice_document
-from crucible.voicecatalog import load_all_voices, load_voice
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
@@ -791,9 +791,9 @@ def test_a_backend_that_serves_no_narrator_engine_writes_no_table() -> None:
 def test_a_served_voice_exported_and_merged_is_the_same_voice(
     host: Path, voice_id: str
 ) -> None:
+    from crucible.config import tts_engine_footprints
     from crucible.voicecard import export_manifest
     from crucible.voicerepo import merge, parse_repo_manifest
-    from crucible.config import tts_engine_footprints
 
     packaged = load_voice(voice_id)
     text, dropped = export_manifest(

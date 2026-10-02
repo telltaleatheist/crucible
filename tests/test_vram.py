@@ -6,7 +6,6 @@ from crucible.accelerator import AcceleratorState
 from crucible.engines import engine_load_args
 from crucible.manifests import BackendSpec, MemoryTerms, load_manifest
 from crucible.vram import (
-    KvPlan,
     engine_budget_bytes,
     max_num_seqs,
     plan_vllm_memory,

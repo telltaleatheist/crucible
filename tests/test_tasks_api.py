@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import json
-import os
 import stat
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 import huggingface_hub
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import jobenv, tasks, weights
+from crucible import jobenv, tasks
 from crucible.tasks.states import ReloadRefused
 
 from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
@@ -219,8 +217,9 @@ def test_native_windows_install_checks_the_llama_binary_not_a_nonexistent_venv(
     installed: bool,
 ) -> None:
     from types import SimpleNamespace
+
     from crucible import llamacpp
-    from crucible.backend import Backend, Gpu, LLAMA_WINDOWS
+    from crucible.backend import LLAMA_WINDOWS, Backend, Gpu
 
     with make_client() as client:
         config = client.app.state.config

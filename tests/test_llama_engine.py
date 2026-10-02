@@ -22,7 +22,6 @@ from crucible.jobs.llm import LoadModelJobType
 from crucible.manifests import load_manifest
 from crucible.residency import Residency
 from crucible.weights import WeightsError
-
 from tests.fake_hub import FakeHub
 
 GIB = 1024 ** 3

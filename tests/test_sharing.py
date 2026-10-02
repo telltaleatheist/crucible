@@ -1,9 +1,9 @@
-from pathlib import Path
 import json
+from pathlib import Path
 
 import pytest
 
-from crucible import sharing, launcher
+from crucible import launcher, sharing
 from crucible.errors import CrucibleError
 from crucible.platform.runner import RunResult
 
@@ -168,6 +168,7 @@ def test_a_stranger_named_crucible_is_still_refused_and_told_what_to_do(tmp_path
 
 def test_windows_interfaces_read_structured_addresses_and_filter(monkeypatch):
     import subprocess
+
     from crucible import interfaces
     def run(argv, **kwargs):
         assert "Get-NetIPAddress" in argv[-1]

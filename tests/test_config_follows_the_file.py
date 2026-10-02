@@ -6,8 +6,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import capabilityclasses, cli, verdict
-from crucible import capabilitystore, cli
+from crucible import capabilityclasses, capabilitystore, cli, verdict
 from crucible.config import config_path, load_config
 
 from .conftest import FAKE_BACKEND, TOKEN

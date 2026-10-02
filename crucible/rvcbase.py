@@ -9,7 +9,13 @@ from typing import Any, Callable
 from . import weights
 from .config import Config
 from .errors import CrucibleError
-from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, SHA256_PATTERN, check_table
+from .tomltable import (
+    HF_REPO_PATTERN,
+    MODEL_ID_PATTERN,
+    REVISION_PATTERN,
+    SHA256_PATTERN,
+    check_table,
+)
 
 RVC_BASE_DIR_ENV = "CRUCIBLE_RVC_BASE_DIR"
 

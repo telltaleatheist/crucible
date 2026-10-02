@@ -7,15 +7,15 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
+from crucible.errors import ApiError
 from crucible.manifests import (
-    NO_DEFAULTS,
     DEFAULTS_KEYS,
+    NO_DEFAULTS,
     ManifestError,
     ModelDefaults,
     load_manifest,
     parse_manifest,
 )
-from crucible.errors import ApiError
 from crucible.sampling import (
     SAMPLING_HEADER,
     SOURCE_ENGINE,
@@ -26,15 +26,14 @@ from crucible.sampling import (
     apply_defaults,
 )
 
-from .conftest import FAKE_BACKEND
 from .fake_engine import FakeEngine
 from .test_llm_api import (
     MODEL,
-    engines,
-    fake_env,
-    fake_weights,
-    idle_card,
-    llm_client,
+    engines,  # noqa: F401 - a fixture this module uses
+    fake_env,  # noqa: F401 - a fixture this module uses
+    fake_weights,  # noqa: F401 - a fixture this module uses
+    idle_card,  # noqa: F401 - a fixture this module uses
+    llm_client,  # noqa: F401 - a fixture this module uses
     run_job,
 )
 
@@ -249,11 +248,11 @@ def load(client: TestClient, auth: dict[str, str]) -> None:
 
 
 def test_the_manifest_default_reaches_the_engine(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     load(llm_client, auth)
@@ -271,11 +270,11 @@ def test_the_manifest_default_reaches_the_engine(
 
 
 def test_the_request_wins_over_the_manifest_at_the_door(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     load(llm_client, auth)
@@ -296,11 +295,11 @@ def test_the_request_wins_over_the_manifest_at_the_door(
 
 
 def test_a_knob_neither_states_is_reported_as_the_engines(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     load(llm_client, auth)
@@ -320,11 +319,11 @@ def test_a_knob_neither_states_is_reported_as_the_engines(
 
 
 def test_a_streamed_completion_carries_the_same_header(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     load(llm_client, auth)
@@ -347,7 +346,7 @@ def test_a_streamed_completion_carries_the_same_header(
 
 
 def test_the_models_row_advertises_the_defaults(
-    llm_client: TestClient, auth: dict[str, str]
+    llm_client: TestClient, auth: dict[str, str]  # noqa: F811
 ) -> None:
     rows = {row["id"]: row for row in llm_client.get("/v1/models", headers=auth).json()}
     assert rows[MODEL]["defaults"]["thinking"] is False
@@ -356,11 +355,11 @@ def test_the_models_row_advertises_the_defaults(
 
 
 def test_the_openai_listing_advertises_them_too(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
 ) -> None:
     fake_weights(MODEL)
     load(llm_client, auth)
@@ -369,11 +368,11 @@ def test_the_openai_listing_advertises_them_too(
 
 
 def test_a_manifest_edited_under_a_running_engine_does_not_change_the_answer(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
-    fake_weights: Callable[[str], Path],
-    idle_card: None,
-    engines: list[FakeEngine],
+    fake_weights: Callable[[str], Path],  # noqa: F811
+    idle_card: None,  # noqa: F811
+    engines: list[FakeEngine],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_weights(MODEL)

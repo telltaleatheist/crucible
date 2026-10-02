@@ -121,6 +121,7 @@ def test_a_backend_with_no_page_block_says_so_and_still_publishes_the_request(
     import dataclasses
 
     from crucible import manifests as manifests_module
+
     from .conftest import FAKE_MAC_BACKEND
 
     real = manifests_module.load_manifest
