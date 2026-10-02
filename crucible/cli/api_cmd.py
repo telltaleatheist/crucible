@@ -293,7 +293,7 @@ CHAT_PATH = "/v1/openai/chat/completions"
 
 
 def cmd_chat(connection: Connection, args: argparse.Namespace) -> int:
-    body = chat_body(args)
+    body = with_queue(chat_body(args), args)
     extra = act_header(args.act)
     if not args.stream:
         emit(call(connection, "POST", CHAT_PATH, json_body=body, extra_headers=extra))
@@ -384,6 +384,7 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     body["questions"] = decide_questions(args.questions)
     if args.missing is not None:
         body["missing"] = args.missing
+    with_queue(body, args)
     emit(call(connection, "POST", "/v1/decide", json_body=body,
               extra_headers=act_header(args.act)))
     return EXIT_OK
@@ -429,6 +430,7 @@ def cmd_align(connection: Connection, args: argparse.Namespace) -> int:
         "params": {"language": args.language, "chunks": chunks},
         "inputs": inputs,
     }
+    with_queue(body, args)
     accepted = call(connection, "POST", "/v1/jobs", json_body=body)
     code, _ = _submitted(connection, accepted, "jobs", "job_id", args.follow)
     if args.follow and args.out is not None and code == EXIT_OK:
@@ -465,9 +467,26 @@ def job_body(args: argparse.Namespace) -> dict[str, Any]:
                 f"resume {params['resume']!r} name two journals; send one"
             )
         params["resume"] = args.resume
-    queue = getattr(args, "queue", None)
-    if queue is not None:
-        body["queue"] = {} if queue == 0 else {"max_wait_s": queue}
+    with_queue(body, args)
+    return body
+
+
+def with_queue(body: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """`--no-queue` or `--max-wait N` as the body's `queue` member. Neither: the
+    member is left out and a busy server holds the request in its line (docs/QUEUE.md)."""
+    if args.no_queue and args.max_wait is not None:
+        raise ClientRefusal(
+            "queue_overspecified: --no-queue refuses at once and --max-wait waits; "
+            "pass one"
+        )
+    if "queue" in body and (args.no_queue or args.max_wait is not None):
+        raise ClientRefusal(
+            "queue_given_twice: the request body has its own `queue`; drop it or the flag"
+        )
+    if args.no_queue:
+        body["queue"] = False
+    elif args.max_wait is not None:
+        body["queue"] = {"max_wait_s": args.max_wait}
     return body
 
 
@@ -793,6 +812,18 @@ READERS = (
 
 SINCE = arg("--since", type=int, default=0, metavar="EVENT_ID")
 BENCH_ACT = arg("--act", default=None, help="the capability class, for the bench")
+QUEUE_ARGS = (
+    arg(
+        "--max-wait", type=int, default=None, metavar="SECONDS",
+        help="how long a busy server may hold this in its line (10..86400); without "
+             "it, an hour",
+    ),
+    arg(
+        "--no-queue", action="store_true",
+        help="refuse at once (server_busy, model_not_resident and the like) instead "
+             "of waiting in the server's line",
+    ),
+)
 
 JOB_VERBS = (
     Verb("submit", "POST /v1/jobs", cmd_job_submit, (
@@ -823,12 +854,7 @@ JOB_VERBS = (
             help="continue the journal a job answered with (params.resume); without "
                  "it the job starts fresh. `crucible api resumable list` shows them",
         ),
-        arg(
-            "--queue", type=int, nargs="?", const=0, default=None, metavar="MAX_WAIT_S",
-            help="wait in the server's queue while it is busy instead of being refused "
-                 "server_busy; optionally for at most MAX_WAIT_S seconds (10..86400, "
-                 "default an hour)",
-        ),
+        *QUEUE_ARGS,
         arg("--follow", action="store_true", help="watch the event stream until the job ends"),
         arg(
             "--artifacts-dir", default=None,
@@ -998,6 +1024,7 @@ DECIDE_ARGS = (
              "the letters returned",
     ),
     BENCH_ACT,
+    *QUEUE_ARGS,
 )
 
 API_VERBS = (
@@ -1072,6 +1099,7 @@ API_VERBS = (
         arg("--message", default=None, help="shorthand: the user message"),
         arg("--stream", action="store_true", help="send stream:true and print each frame"),
         BENCH_ACT,
+        *QUEUE_ARGS,
     )),
     Verb(
         "decide", "a distribution over each question's fixed answers — snap's grammar",
@@ -1096,6 +1124,7 @@ API_VERBS = (
                 "--out", default=None,
                 help="save alignment.json here once the job is done. Requires --follow",
             ),
+            *QUEUE_ARGS,
         ),
     ),
     Verb("upload", "put a file on the server and get its blob_id", cmd_upload, (arg("path"),)),

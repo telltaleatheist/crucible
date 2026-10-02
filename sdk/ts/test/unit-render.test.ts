@@ -246,7 +246,6 @@ test('render() posts the tts job the contract describes', async () => {
       ],
     },
     inputs: {},
-    queue: {},
   });
 });
 

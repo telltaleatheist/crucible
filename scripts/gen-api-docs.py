@@ -73,8 +73,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/queue",
         "Queue",
-        "Jobs, calls and queue sessions submitted with `queue` while the lane is busy wait "
-        "here, in order: list them, "
+        "Jobs, calls and queue sessions that find the server busy wait here (waiting is "
+        "the default; `\"queue\": false` refuses instead), in order: list them, "
         "remove one, keep one alive, or follow every change. How an app should use it is "
         "docs/QUEUE.md.",
     ),

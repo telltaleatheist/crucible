@@ -76,11 +76,12 @@ def rendered(
     idle_card: None,
 ) -> Callable[..., list[dict[str, Any]]]:
 
-    def go(**params: Any) -> list[dict[str, Any]]:
+    def go(*, queue: Any = None, **params: Any) -> list[dict[str, Any]]:
         fake_weights(VOICE)
         body = {"language": "en", "take": 0, "chunks": CHUNKS}
         body.update(params)
-        response = submit(tts_client, auth, type="tts", model=VOICE, params=body)
+        waits = {} if queue is None else {"queue": queue}
+        response = submit(tts_client, auth, type="tts", model=VOICE, params=body, **waits)
         assert response.status_code == 202, response.json()
         go.job_id = response.json()["job_id"]
         with tts_client.stream(
@@ -842,7 +843,7 @@ def test_a_render_loads_its_own_voice_and_says_it_is_warming(
     auth: dict[str, str],
 ) -> None:
     with holding_the_card(tts_client):
-        events = rendered()
+        events = rendered(queue=False)
         health = tts_client.get("/v1/health", headers=auth).json()
     warmings = [row["message"] for row in events_of(events, "warming")]
     assert any("checking the accelerator for deathstalker" in m for m in warmings)
@@ -879,9 +880,9 @@ def test_a_second_render_does_not_restart_narrator(
     narrator: list[Any],
 ) -> None:
     with holding_the_card(tts_client):
-        rendered()
+        rendered(queue=False)
         assert len(narrator) == 1
-        second = rendered()
+        second = rendered(queue=False)
         assert terminal(second)["event"] == "done"
         assert len(narrator) == 1
         assert not any(
@@ -958,7 +959,9 @@ def test_a_queue_session_refuses_every_other_client_s_job(
             "params": {"language": "en", "take": 0, "chunks": CHUNKS},
         },
     ):
-        response = tts_client.post("/v1/jobs", headers=other, json=body)
+        response = tts_client.post(
+            "/v1/jobs", headers=other, json={**body, "queue": False}
+        )
         assert response.status_code == 409, (body, response.text)
         error = response.json()["error"]
         assert error["code"] == "server_busy", body
@@ -1026,7 +1029,7 @@ def test_one_holder_still_serves_both_kinds(
     auth: dict[str, str],
 ) -> None:
     with holding_the_card(tts_client):
-        rendered()
+        rendered(queue=False)
         assert tts_client.app.state.residency.resident_kind == KIND_TTS
         assert tts_client.app.state.residency.resident_model is None
         assert tts_client.app.state.residency.voice_engine is not None
@@ -1058,7 +1061,7 @@ def test_the_residency_is_torn_down_when_the_server_stops(
     narrator: list[Any],
 ) -> None:
     with holding_the_card(tts_client):
-        rendered()
+        rendered(queue=False)
         engine = narrator[0]
         assert engine.pids
     tts_client.app.state.residency.shutdown()

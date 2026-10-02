@@ -92,7 +92,8 @@ audiences are different, and "stop logging" is not the instruction.
 
 ### R5. Queues belong to clients. Admission belongs to the server.
 
-Section 3. Since 2026-09-30 the server also keeps an opt-in queue between clients (3.3);
+Section 3. Since 2026-09-30 the server also keeps a queue between clients (3.3), which every
+request that can wait joins by default since 2026-10-01;
 admission is still the server's one check, and a queued job meets it at the front.
 
 ### R6. Partial work survives failure, always.
@@ -244,7 +245,10 @@ missed that no client can know the *other* clients'. So the queue is opt-in and 
 
 - **Opt-in per request.** `POST /v1/jobs` with `"queue": {"max_wait_s": N}` (10..86400,
   default 3600). Without it, nothing changed. The SDK's high-level helpers opt in by
-  default; its raw `submit` does not.
+  default; its raw `submit` does not. **Superseded 2026-10-01** (Owen: no legacy, the apps
+  move with the server): waiting is now the default for every request that can wait (jobs,
+  chats, decisions, streams); `"queue": false` opts out and is refused at once, `{}` is
+  refused as a shape, and the SDK's `submit` waits like its helpers (docs/QUEUE.md).
 - **A queued job is a normal job** (`status: queued`, holding its inputs), in the waiting
   line (`crucible/jobs/line.py`), first come first served, except that the items of the
   open queue session go ahead of the line (below).
@@ -309,7 +313,7 @@ The settled ownership, for reference:
 | Concern | Owner | Notes |
 |---|---|---|
 | ordering, priority and pins within one client's work | **the client** | section 3 |
-| fairness between clients: the opt-in queue | **the server** | section 3.3 |
+| fairness between clients: the server's queue | **the server** | section 3.3 |
 | admission ("is there room now") | **the server** | only it can answer |
 | the guard and the retake decision | **the model + its inference** | Owen, 2026-09-13; PHASE6 |
 | chunking and the order of work | **the client** | docs/history/PHASE3-TTS.md section 1 |

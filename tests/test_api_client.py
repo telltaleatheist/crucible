@@ -170,12 +170,12 @@ def test_follow_streams_the_events_then_the_final_state(
     )
 
 
-def test_submit_with_queue_says_whether_it_waited_and_the_queue_lists_it(
+def test_a_submit_says_whether_it_waited_and_the_queue_lists_it(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = tmp_path / "in.txt"
     source.write_text("a page", encoding="utf-8")
-    assert run(base, "job", "submit", "--type", "echo", "--queue", "600",
+    assert run(base, "job", "submit", "--type", "echo", "--max-wait", "600",
                "--input", f"page.txt={source}") == 0
     receipt = json.loads(capsys.readouterr().out)
     assert set(receipt) == {"job_id", "resume_id", "queued", "position"}
@@ -184,13 +184,16 @@ def test_submit_with_queue_says_whether_it_waited_and_the_queue_lists_it(
     assert set(listed) == {"items", "depth", "limits"}
 
 
-def test_the_queue_flag_takes_the_default_or_a_number() -> None:
-    def body(queue: Any) -> dict[str, Any]:
+def test_the_queue_flags_wait_by_default_or_refuse_at_once() -> None:
+    def body(max_wait: Any = None, no_queue: bool = False) -> dict[str, Any]:
         return api_cmd.job_body(argparse.Namespace(
-            type="echo", model=None, params=None, resume=None, queue=queue))
-    assert "queue" not in body(None)
-    assert body(0)["queue"] == {}
-    assert body(600)["queue"] == {"max_wait_s": 600}
+            type="echo", model=None, params=None, resume=None,
+            max_wait=max_wait, no_queue=no_queue))
+    assert "queue" not in body()
+    assert body(max_wait=600)["queue"] == {"max_wait_s": 600}
+    assert body(no_queue=True)["queue"] is False
+    with pytest.raises(ClientRefusal, match="queue_overspecified"):
+        body(max_wait=600, no_queue=True)
 
 
 def test_a_failed_job_exits_nonzero_even_though_every_request_succeeded(
@@ -683,7 +686,7 @@ def llm_base(
 def test_decide_reaches_the_door_and_is_refused_for_the_servers_own_reason(
     llm_base: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(llm_base, *DECIDE_ARGV) == 1
+    assert run(llm_base, *DECIDE_ARGV, "--no-queue") == 1
     refusal = json.loads(capsys.readouterr().err.split("\n", 1)[1])
     assert refusal["error"]["code"] == "model_not_resident"
 

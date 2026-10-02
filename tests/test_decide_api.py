@@ -578,15 +578,18 @@ def test_an_unknown_act_is_refused_before_the_work(
 def test_a_model_that_is_not_resident_gets_the_chat_door_s_409(
     llm_client: TestClient, auth: dict[str, str], loaded: Callable[..., FakeEngine]
 ) -> None:
-    empty = _decide(llm_client, auth, EXAMPLE)
+    empty = _decide(llm_client, auth, {**EXAMPLE, "queue": False})
     assert empty.status_code == 409
     assert empty.json()["error"]["details"] == {"requested": MODEL, "resident": None}
 
     engine = loaded(probs_for=yes_mostly)
-    wrong = _decide(llm_client, auth, {**EXAMPLE, "model": "qwen3.8-27b-4bit"})
+    wrong = _decide(
+        llm_client, auth, {**EXAMPLE, "model": "qwen3.8-27b-4bit", "queue": False}
+    )
     chat = llm_client.post(
         "/v1/openai/chat/completions", headers=auth,
-        json={"model": "qwen3.8-27b-4bit", "messages": [{"role": "user", "content": "hi"}]})
+        json={"model": "qwen3.8-27b-4bit", "messages": [{"role": "user", "content": "hi"}],
+              "queue": False})
     assert wrong.status_code == chat.status_code == 409
     mine, theirs = wrong.json()["error"], chat.json()["error"]
     assert mine["code"] == theirs["code"] == "model_not_resident"
@@ -609,7 +612,7 @@ def test_a_full_door_is_chat_queue_full(
     inflight = llm_client.app.state.inflight
     held = [inflight.open(act=None, model=MODEL, client="a-test") for _ in range(2)]
     try:
-        response = _decide(llm_client, auth, EXAMPLE)
+        response = _decide(llm_client, auth, {**EXAMPLE, "queue": False})
     finally:
         for entry in held:
             inflight.close(entry)

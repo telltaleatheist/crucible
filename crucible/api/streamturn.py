@@ -25,6 +25,7 @@ from ..admission import JobRequest, Refusal, admit
 from ..errors import ApiError, JobError
 from ..jobs.base import DONE, TERMINAL_STATES
 from ..jobs.line import MAX_MAX_WAIT_S
+from ..queuerequest import max_wait_of
 from ..queuesessions import CLIENT, OPEN, QUEUED, QueueSession, QueueSessions
 from .caller import queue_session
 from .context import AppContext
@@ -109,15 +110,16 @@ async def take_the_server(
         return StreamTurn(held, opened_for_it=False)
     line, sessions = ctx.line, ctx.sessions
     line.refuse_if_full(client)
+    max_wait_s = max_wait_of(queue)
     session = sessions.create(
         act=STREAM_ACT, client=client, model=None, idle_s=idle_s,
-        max_wait_s=queue.max_wait_s if queue is not False else MAX_MAX_WAIT_S,
+        max_wait_s=MAX_MAX_WAIT_S if max_wait_s is None else max_wait_s,
     )
     line.join_session(session)
     await ctx.queue_pump.step()
     if session.status == OPEN:
         return StreamTurn(session, opened_for_it=True)
-    if queue is False:
+    if max_wait_s is None:
         if session.status == QUEUED:
             line.remove(
                 session.id, CLIENT,

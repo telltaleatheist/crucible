@@ -50,7 +50,7 @@ def one_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(openai_routes, "chat_admission", single)
 
 
-def _chat(queue: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+def _chat(queue: Any = None, **extra: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Say something."}],
@@ -111,17 +111,18 @@ def _post_chat(base: str, headers: dict[str, str], body: dict[str, Any]) -> http
     )
 
 
-def test_a_queued_chat_loads_its_model_and_is_answered(
+def test_a_chat_waits_for_its_model_by_default_and_is_answered(
     chat_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
     engines, server = chat_server()
     with server as base:
-        refused = _post_chat(base, auth, _chat())
+        refused = _post_chat(base, auth, _chat(queue=False))
         assert refused.status_code == 409
         assert refused.json()["error"]["code"] == "model_not_resident"
+        assert '"queue": false' in refused.json()["error"]["message"]
         assert engines == []
 
-        answered = _post_chat(base, _as(auth, "bookforge"), _chat(queue={}))
+        answered = _post_chat(base, _as(auth, "bookforge"), _chat())
         assert answered.status_code == 200, answered.text
         assert answered.json()["model"] == MODEL
         assert len(engines) == 1, "one engine was started for the queued chat"
@@ -140,7 +141,7 @@ def test_a_queued_chat_waits_for_a_slot_and_is_listed(
         busy, busy_out = _in_background(lambda: _post_chat(base, auth, _chat()))
         _wait_for(lambda: _in_flight(base, auth) == 1, "the first completion in flight")
 
-        plain = _post_chat(base, auth, _chat())
+        plain = _post_chat(base, auth, _chat(queue=False))
         assert plain.status_code == 503
         assert plain.json()["error"]["code"] == "chat_queue_full"
 
@@ -178,7 +179,7 @@ def test_an_operator_removes_a_waiting_chat_and_it_is_told_why(
         busy, _ = _in_background(lambda: _post_chat(base, auth, _chat()))
         _wait_for(lambda: _in_flight(base, auth) == 1, "the first completion in flight")
         waiting, out = _in_background(
-            lambda: _post_chat(base, auth, _chat(queue={}))
+            lambda: _post_chat(base, auth, _chat())
         )
         _wait_for(lambda: _queue(base, auth)["depth"] == 1, "the chat in the queue")
         call_id = _queue(base, auth)["items"][0]["job_id"]
@@ -211,7 +212,7 @@ def test_a_caller_who_leaves_leaves_the_queue(
         with pytest.raises(httpx.ReadTimeout):
             httpx.post(
                 f"{base}/v1/openai/chat/completions", headers=auth,
-                json=_chat(queue={}),
+                json=_chat(),
                 timeout=httpx.Timeout(connect=10.0, read=1.0, write=10.0, pool=10.0),
             )
         _wait_for(lambda: _queue(base, auth)["depth"] == 0, "the queue empty again")
@@ -224,9 +225,12 @@ def test_a_malformed_queue_is_refused_before_anything_waits(
 ) -> None:
     _, server = chat_server()
     with server as base:
-        bad = _post_chat(base, auth, _chat(queue={"max_wait_s": 1}))
-        assert bad.status_code == 400
-        assert bad.json()["error"]["code"] == "invalid_request"
+        for queue in ({"max_wait_s": 1}, {}, True, None):
+            bad = _post_chat(base, auth, _chat(queue=queue) if queue is not None
+                             else {**_chat(), "queue": None})
+            assert bad.status_code == 400, (queue, bad.text)
+            assert bad.json()["error"]["code"] == "invalid_request"
+            assert '"queue" is false' in bad.json()["error"]["message"]
         assert _queue(base, auth)["depth"] == 0
 
 
@@ -242,21 +246,23 @@ def test_the_queue_member_never_reaches_the_engine(
     _, server = chat_server(delay_for=record)
     with server as base:
         run_job(base, auth, type="load-model", model=MODEL)
-        answered = _post_chat(base, auth, _chat(queue={}))
-        assert answered.status_code == 200
-    assert seen and all("queue" not in body for body in seen)
+        for queue in (False, {"max_wait_s": 60}):
+            answered = _post_chat(base, auth, _chat(queue=queue))
+            assert answered.status_code == 200
+    assert len(seen) == 2 and all("queue" not in body for body in seen)
 
 
-def test_a_queued_decision_loads_its_model_and_is_answered(
+def test_a_decision_waits_for_its_model_by_default_and_is_answered(
     chat_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
     _, server = chat_server(probs_for=example_probs)
     with server as base:
-        refused = httpx.post(f"{base}/v1/decide", headers=auth, json=EXAMPLE, timeout=60.0)
-        assert refused.status_code == 409
-        answered = httpx.post(
-            f"{base}/v1/decide", headers=auth, json={**EXAMPLE, "queue": {}}, timeout=60.0
+        refused = httpx.post(
+            f"{base}/v1/decide", headers=auth, json={**EXAMPLE, "queue": False}, timeout=60.0
         )
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "model_not_resident"
+        answered = httpx.post(f"{base}/v1/decide", headers=auth, json=EXAMPLE, timeout=60.0)
         assert answered.status_code == 200, answered.text
         assert set(answered.json()["answers"]) == {"team", "anger", "urgent"}
 
@@ -266,7 +272,7 @@ def test_a_malformed_queued_decision_is_refused_before_it_waits(
 ) -> None:
     engines, server = chat_server()
     with server as base:
-        bad = {**EXAMPLE, "questions": None, "queue": {}}
+        bad = {**EXAMPLE, "questions": None}
         refused = httpx.post(f"{base}/v1/decide", headers=auth, json=bad, timeout=60.0)
         assert refused.status_code in (400, 422)
         assert _queue(base, auth)["depth"] == 0
@@ -347,7 +353,7 @@ def test_a_queued_job_that_changes_the_card_waits_for_chats_in_flight(
         _wait_for(lambda: _in_flight(base, auth) == 1, "the first completion in flight")
         submitted = httpx.post(
             f"{base}/v1/jobs", headers=auth, timeout=30.0,
-            json={"type": "unload-model", "model": MODEL, "queue": {}},
+            json={"type": "unload-model", "model": MODEL},
         )
         assert submitted.status_code == 202, submitted.text
         assert submitted.json()["queued"] is True

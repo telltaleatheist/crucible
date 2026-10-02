@@ -828,8 +828,7 @@
           body: JSON.stringify({
             type: page.job_type,
             model: page.id,
-            params: params,
-            queue: {}
+            params: params
           })
         });
       } catch (refusal) {

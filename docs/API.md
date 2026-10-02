@@ -213,7 +213,7 @@ The work. Every job type is created, polled and cancelled through the same route
 
 ### `POST /v1/jobs`
 
-Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missing environment or model is installed while the job is refused `409 installing`. With `queue` a busy lane queues the job instead: it waits with status `queued` and its events say where it stands. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh. An item of the open queue session (named in the session header, or any submit from the client holding it) goes ahead of everything waiting, and waits only behind the session's own jobs.
+Admit one job, or refuse by name. A busy lane queues the job: it waits with status `queued` (up to an hour, or `queue.max_wait_s`) and its events say where it stands. With `"queue": false` a busy lane is refused `409 server_busy` instead. A missing environment or model is installed while the job is refused `409 installing`. `params.resume` set to a `resume_id` continues a journaled job; without it the job starts fresh. An item of the open queue session (named in the session header, or any submit from the client holding it) goes ahead of everything waiting, waits only behind the session's own jobs, and waits up to a day unless its `queue` says otherwise.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -227,7 +227,7 @@ Admit one job, or refuse by name: a busy lane is `409 server_busy`, and a missin
 | `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
-| `queue` | QueueRequest or null | no | — | Opt in to the server's queue: while the lane is busy the job waits (status `queued`) instead of being refused `409 server_busy`. Without it, a busy server refuses as it always has. |
+| `queue` | QueueRequest or `False` | no | — | Left out, a busy lane queues the job: it waits (status `queued`) up to an hour, or up to a day as an item of the open queue session. `{"max_wait_s": N}` changes the wait; `false` refuses at once with `409 server_busy` instead of waiting. |
 
 *Answers:* `202`, `409` ServerBusy, `422` HTTPValidationError
 
@@ -333,7 +333,7 @@ The chain is complete: release the hold and remove the job now.
 
 ## Queue
 
-Jobs, calls and queue sessions submitted with `queue` while the lane is busy wait here, in order: list them, remove one, keep one alive, or follow every change. How an app should use it is docs/QUEUE.md.
+Jobs, calls and queue sessions that find the server busy wait here (waiting is the default; `"queue": false` refuses instead), in order: list them, remove one, keep one alive, or follow every change. How an app should use it is docs/QUEUE.md.
 
 ### `GET /v1/queue`
 
@@ -710,7 +710,7 @@ Open the one streaming session this server will hold at a time, inside a queue s
 | `voice` | string | yes | — |  |
 | `language` | string | yes | — |  |
 | `idle_s` | integer | no | `900` | When the client holds no queue session, the stream opens one for itself with this idle_s: no row being said, no op and no touch for this long closes the session and the stream with it. Ignored inside the client's own session. |
-| `queue` | QueueRequest or `False` | no | — | How long the stream's queue session may wait in the line to open (`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
+| `queue` | QueueRequest or `False` | no | — | Left out, the stream's queue session waits in the line to open, up to an hour; `{"max_wait_s": N}` changes the wait. `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
 
 *Answers:* `201`, `422` HTTPValidationError
 
@@ -910,7 +910,7 @@ A chat surface shaped like OpenAI's, for clients that already speak it.
 
 ### `POST /openai/v1/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -926,7 +926,7 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 
 ### `POST /v1/openai/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -972,7 +972,7 @@ The orchestrator releases its claim; releasing when nothing is claimed succeeds.
 
 ### `POST /v1/decide`
 
-One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. Every refusal a caller can cause is made before anything is decided.
+One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. Every refusal a caller can cause is made before anything is decided. A decision whose model is not resident, or whose engine has every slot taken, waits in the server's line and its model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -980,7 +980,7 @@ One answer distribution per question, read off the resident model's next-token l
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
+| `model` | string | yes | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
@@ -988,7 +988,7 @@ One answer distribution per question, read off the resident model's next-token l
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
-| `queue` | QueueRequest or null | no | — | Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`. While the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) and the model is loaded for it when its turn comes. Absent: refused as before. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) up to an hour, and the model is loaded for it when its turn comes. `{"max_wait_s": N}` changes the wait. `false`: refused at once instead (`409 model_not_resident`, `503 chat_queue_full`, `409 session_open`). |
 
 *Answers:* `200`, `422` HTTPValidationError
 
@@ -1017,9 +1017,10 @@ One answer distribution per question, read off the resident model's next-token l
 | `jobs.hold` | `hold` on a submit and /v1/jobs/{id}/hold: a job's artifacts are kept until the client lets go of them. |
 | `jobs.resume` | `params.resume` and /v1/resumable: a resumable job continues the journal an earlier run left (docs/RESUMABLE-JOBS.md). |
 | `playground` | GET /v1/playground: the pages the operator page's playground draws. |
-| `queue.calls` | `queue` on a chat or a decision: the request is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
+| `queue.calls` | A chat or a decision is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
+| `queue.default` | Every request that can wait (a job, a chat, a decision, a TTS stream) waits in the line by default; `"queue": false` refuses at once instead, and `{"max_wait_s": N}` sets the wait. `"queue": {}` is refused (docs/QUEUE.md). |
 | `queue.events` | GET /v1/queue/events: the waiting line's own SSE stream. |
-| `queue.jobs` | `queue` on POST /v1/jobs: a busy server queues the job instead of refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md). |
+| `queue.jobs` | POST /v1/jobs: a busy server queues the job instead of refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md). |
 | `queue.sessions` | /v1/queue/sessions: an app's session holds the machine for a run of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md). |
 | `rvc` | The `rvc` job: voice conversion. |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
@@ -1254,7 +1255,7 @@ An items-form decision: one choice distribution per item, in item order.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `model` | string | yes | — | The Crucible model id, which must already be resident (`409 model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
+| `model` | string | yes | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
@@ -1262,7 +1263,7 @@ An items-form decision: one choice distribution per item, in item order.
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
 | `images` | array of string or null | no | — | Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no whitespace, no `data:` prefix), read as part of the state, after its text. At most 8 (`too_many_images`), and only on a model whose manifest declares `image` (`400 model_text_only` otherwise). `[]` is the same as none. |
 | `missing` | `'refuse'` or `'report'` | no | `'refuse'` | What to do when a label is not among the top tokens the engine returned. `refuse` (the default): the decision is `502 label_not_in_probs` naming the question and the letter. `report`: the door never invents a number — that option's probability and log-probability are null, it is named in the answer's `missing_labels`, and the renormalisation, `confidence`, `score` and `label_mass` run over the letters actually returned. A question whose EVERY label is missing is refused in both modes: there is no answer to report. |
-| `queue` | QueueRequest or null | no | — | Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`. While the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) and the model is loaded for it when its turn comes. Absent: refused as before. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or every slot on its engine is taken, the request is held open in the server's queue (docs/QUEUE.md) up to an hour, and the model is loaded for it when its turn comes. `{"max_wait_s": N}` changes the wait. `false`: refused at once instead (`409 model_not_resident`, `503 chat_queue_full`, `409 session_open`). |
 
 ### `DecideResponse`
 
@@ -1392,7 +1393,7 @@ How big the items form's prompts were.
 | `inputs` | object of JobInput | no | — |  |
 | `client_ref` | string or null | no | — | The client's own name for this work, echoed on the job record and never read by the server. |
 | `hold` | boolean | no | `False` | Hold the job from creation, as `POST /v1/jobs/{id}/hold` would, so its artifacts outlive being fetched. |
-| `queue` | QueueRequest or null | no | — | Opt in to the server's queue: while the lane is busy the job waits (status `queued`) instead of being refused `409 server_busy`. Without it, a busy server refuses as it always has. |
+| `queue` | QueueRequest or `False` | no | — | Left out, a busy lane queues the job: it waits (status `queued`) up to an hour, or up to a day as an item of the open queue session. `{"max_wait_s": N}` changes the wait; `false` refuses at once with `409 server_busy` instead of waiting. |
 
 ### `JobFailure`
 
@@ -1522,11 +1523,11 @@ One job waiting in the server's queue.
 
 ### `QueueRequest`
 
-Wait in the server's queue instead of being refused `409 server_busy`.
+How long this request may wait in the server's line.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `max_wait_s` | integer | no | `3600` | How long the job may wait for the lane before it is removed `expired`. |
+| `max_wait_s` | integer | yes | — | How long the request may wait for its turn before it is removed `expired`. |
 
 ### `ScoreAnswer`
 
@@ -1669,7 +1670,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `voice` | string | yes | — |  |
 | `language` | string | yes | — |  |
 | `idle_s` | integer | no | `900` | When the client holds no queue session, the stream opens one for itself with this idle_s: no row being said, no op and no touch for this long closes the session and the stream with it. Ignored inside the client's own session. |
-| `queue` | QueueRequest or `False` | no | — | How long the stream's queue session may wait in the line to open (`max_wait_s`). `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
+| `queue` | QueueRequest or `False` | no | — | Left out, the stream's queue session waits in the line to open, up to an hour; `{"max_wait_s": N}` changes the wait. `false`: refuse (`session_open`, `server_busy`) rather than wait when the server is not free now. |
 
 ### `TaskCreate`
 

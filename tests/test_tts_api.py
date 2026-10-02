@@ -576,7 +576,7 @@ def test_unloading_a_voice_under_a_holder_using_the_card_is_still_engine_in_use(
     residency._resident = resident_voice(VOICE)
     residency.claim("tts stream abc123", may_mutate=False)
     try:
-        response = submit(tts_client, auth, type="unload-voice", model=VOICE)
+        response = submit(tts_client, auth, type="unload-voice", model=VOICE, queue=False)
     finally:
         residency.release("tts stream abc123")
     assert response.status_code == 409
@@ -696,10 +696,18 @@ def test_the_openai_proxy_does_not_see_a_voice_as_a_model(
         response = client.post(
             "/v1/openai/chat/completions",
             headers=auth,
-            json={"model": VOICE, "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": VOICE, "messages": [{"role": "user", "content": "hi"}],
+                  "queue": False},
         )
         assert response.status_code == 409
         assert response.json()["error"]["code"] == "model_not_resident"
+        waited = client.post(
+            "/v1/openai/chat/completions",
+            headers=auth,
+            json={"model": VOICE, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert waited.status_code == 400, "a voice is never loaded as a chat model"
+        assert waited.json()["error"]["code"] == "unknown_model"
 
 
 def test_unload_model_will_not_take_a_voice_off_the_card(

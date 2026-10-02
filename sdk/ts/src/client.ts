@@ -53,7 +53,7 @@ import {
   type Json,
 } from './shape.js';
 import { loadNodeBuiltins, requireFunctions } from './node-builtins.js';
-import { queuePayload, requireSeconds } from './queue.js';
+import { queuePayload, requireSeconds, type QueuePayload } from './queue.js';
 import { readSseFrames, type SseFrame } from './sse.js';
 import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
@@ -212,11 +212,11 @@ export interface CrucibleClientOptions {
   /** A deadline on every call, in milliseconds; a per-call `signal` replaces it. */
   timeoutMs?: number;
   /**
-   * Whether the high-level helpers (`render`, `asr`, `align`, `image`, `audio`, `segment`,
-   * `video`, every load/unload, `chat`, `chatStream`, `decide` and `decideItems`) wait in the
-   * server's queue while it is busy. On by default (`true`, the server's default wait of an
-   * hour); `false` makes them refuse as before. A request's own `queue` wins.
-   * {@link CrucibleClient.submit} never queues unless its request says so.
+   * How every request of this client that can wait (`submit` and every job helper, `chat`,
+   * `chatStream`, `decide`, `decideItems`, `stream`) waits in the server's line while it is busy.
+   * Left out, they wait: the server holds them up to its default (an hour). `{maxWaitS}` changes
+   * the wait; `false` makes them refuse at once (`server_busy`, `model_not_resident`,
+   * `chat_queue_full`, `session_open`) instead. A request's own `queue` wins.
    */
   queue?: QueueChoice;
 }
@@ -272,7 +272,8 @@ export class CrucibleClient {
   readonly #userAgent: string;
   readonly #clientName: string;
   readonly #timeoutMs: number | null;
-  readonly #helperQueue: QueueChoice;
+  /** The client's own {@link CrucibleClientOptions.queue}; undefined waits the server's default. */
+  readonly #queue: QueueChoice | undefined;
   /** What this client was made with, so a {@link session} is the same client plus its header. */
   readonly #options: CrucibleClientOptions;
   /** The queue session every request of this client is an item of; null for a plain client. */
@@ -290,8 +291,8 @@ export class CrucibleClient {
     const clientName = requireText(given.clientName, 'clientName');
     this.#userAgent = `${clientName} crucible-client/${SDK_VERSION}`;
     this.#clientName = clientName;
-    this.#helperQueue = given.queue === undefined ? true : given.queue;
-    queuePayload(this.#helperQueue);
+    this.#queue = given.queue;
+    queuePayload(this.#queue);
     if (given.timeoutMs !== undefined) {
       if (!Number.isFinite(given.timeoutMs) || given.timeoutMs <= 0) {
         throw new CrucibleConfigError(
@@ -309,7 +310,7 @@ export class CrucibleClient {
       url: this.url,
       token: this.#token,
       clientName,
-      queue: this.#helperQueue,
+      ...(this.#queue === undefined ? {} : { queue: this.#queue }),
       ...(this.#timeoutMs === null ? {} : { timeoutMs: this.#timeoutMs }),
     };
   }
@@ -515,7 +516,11 @@ export class CrucibleClient {
     };
   }
 
-  /** `POST /v1/jobs` — queue a job. */
+  /**
+   * `POST /v1/jobs` — submit a job. A busy server holds it in its line (status `queued`) unless
+   * the request's `queue` (else the client's) says `false`. Inside a {@link session} only the
+   * request's own `queue` is sent: a session's item waits ahead of the line, up to a day.
+   */
   async submit(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
     const type = requireText(request?.type, 'type');
     const inputs: Record<
@@ -556,7 +561,9 @@ export class CrucibleClient {
     if (request.model !== undefined) payload['model'] = request.model;
     if (request.clientRef !== undefined) payload['client_ref'] = request.clientRef;
     if (request.hold !== undefined) payload['hold'] = requireBool(request.hold, 'hold');
-    const queue = queuePayload(request.queue);
+    const choice =
+      request.queue !== undefined ? request.queue : this.#session === null ? this.#queue : undefined;
+    const queue = queuePayload(choice);
     if (queue !== null) payload['queue'] = queue;
 
     const init: RequestInit = {
@@ -567,17 +574,6 @@ export class CrucibleClient {
     if (options.signal !== undefined) init.signal = options.signal;
     const body = await this.#json('/v1/jobs', init, 'submit');
     return str(body, 'job_id', 'submit');
-  }
-
-  /**
-   * What the high-level helpers submit through: {@link submit}, queued unless told not to. Inside a
-   * {@link session} a helper sends no `queue`: the server runs a session's items ahead of the line,
-   * and one that must wait behind the session's own running job waits up to a day.
-   */
-  #submitHelper(request: JobRequest, options: { signal?: AbortSignal } = {}): Promise<string> {
-    if (request.queue !== undefined) return this.submit(request, options);
-    const queue = this.#session === null ? this.#helperQueue : false;
-    return this.submit({ ...request, queue }, options);
   }
 
   /** `GET /v1/queue` — the jobs waiting for the lane, in the order they will get it. */
@@ -1198,7 +1194,7 @@ export class CrucibleClient {
 
   /** Queue a `load-model` job and return its id. */
   async loadModel(model: string, options?: LoadModelOptions): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-model',
       model: requireText(model, 'model'),
       params: options?.context === undefined ? {} : { context: options.context },
@@ -1208,7 +1204,7 @@ export class CrucibleClient {
 
   /** Queue an `unload-model` job and return its id. */
   async unloadModel(model: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'unload-model',
       model: requireText(model, 'model'),
       params: {},
@@ -1224,12 +1220,12 @@ export class CrucibleClient {
   }
 
   /**
-   * The `queue` member a chat or decision sends: its own choice, else the client's. Inside a
-   * session it is still sent: a session's call that must wait (its model not resident, every slot
-   * taken) waits ahead of the line with it, and is refused without it.
+   * The `queue` member a chat or decision sends: its own choice, else the client's, else none (the
+   * server holds it in its line). Inside a session too: a session's call that must wait (its model
+   * not resident, every slot taken) waits ahead of the line.
    */
-  #callQueue(choice: QueueChoice | undefined): Record<string, number> | null {
-    return queuePayload(choice === undefined ? this.#helperQueue : choice);
+  #callQueue(choice: QueueChoice | undefined): QueuePayload | null {
+    return queuePayload(choice === undefined ? this.#queue : choice);
   }
 
   /** `POST /v1/decide` with the client's (or the request's) `queue`. */
@@ -1419,7 +1415,7 @@ export class CrucibleClient {
   /** Queue a `load-voice` job and return its id. */
   async loadVoice(voice: string, options?: LoadVoiceOptions): Promise<string> {
     const reference = options?.reference;
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-voice',
       model: requireText(voice, 'voice'),
       params: reference === undefined ? {} : {
@@ -1435,7 +1431,7 @@ export class CrucibleClient {
 
   /** Queue an `unload-voice` job and return its id. */
   async unloadVoice(voice: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'unload-voice',
       model: requireText(voice, 'voice'),
       params: {},
@@ -1454,7 +1450,7 @@ export class CrucibleClient {
     }
     const submission: { signal?: AbortSignal } = {};
     if (given.signal !== undefined) submission.signal = given.signal;
-    return this.#submitHelper(
+    return this.submit(
       {
         type: 'tts',
         model: requireText(given.voice, 'voice'),
@@ -1605,7 +1601,7 @@ export class CrucibleClient {
     if (audio === undefined || audio === null) {
       throw new CrucibleConfigError('audio', 'is required and was not given');
     }
-    return this.#submitHelper({
+    return this.submit({
       type: 'asr',
       model: requireText(given.model, 'model'),
       params: {
@@ -1691,7 +1687,7 @@ export class CrucibleClient {
       chunks.push({ index, text: requireText(window.text, `${where}.text`) });
       inputs[name] = window.audio;
     });
-    return this.#submitHelper({
+    return this.submit({
       type: 'align',
       model: requireText(given.model, 'model'),
       params: { language: requireText(given.language, 'language'), chunks },
@@ -1747,7 +1743,7 @@ export class CrucibleClient {
       params.mask = maskName;
       inputs[maskName] = mask;
     }
-    return this.#submitHelper({
+    return this.submit({
       type: 'image',
       model: requireText(given.model, 'model'),
       params,
@@ -1757,7 +1753,7 @@ export class CrucibleClient {
 
   /** Queue a `load-image` job (warm the image model up before the first prompt) and return its id. */
   async loadImage(model: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-image',
       model: requireText(model, 'model'),
       params: {},
@@ -1793,7 +1789,7 @@ export class CrucibleClient {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
     }
-    return this.#submitHelper({
+    return this.submit({
       type: 'audio',
       model: requireText(given.model, 'model'),
       params,
@@ -1803,7 +1799,7 @@ export class CrucibleClient {
 
   /** Queue a `load-audio` job (warm an audio model up before the first request) and return its id. */
   async loadAudio(model: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-audio',
       model: requireText(model, 'model'),
       params: {},
@@ -1831,7 +1827,7 @@ export class CrucibleClient {
     if (given.box !== undefined && given.box !== null) {
       params.box = [...given.box];
     }
-    return this.#submitHelper({
+    return this.submit({
       type: 'segment',
       model: requireText(given.model, 'model'),
       params,
@@ -1841,7 +1837,7 @@ export class CrucibleClient {
 
   /** Queue a `load-segment` job (warm a segment model up, e.g. when a selection tool opens) and return its id. */
   async loadSegment(model: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-segment',
       model: requireText(model, 'model'),
       params: {},
@@ -1880,7 +1876,7 @@ export class CrucibleClient {
       if (value !== undefined && value !== null) params[wire] = value;
     }
     const picture = given.image ?? null;
-    return this.#submitHelper({
+    return this.submit({
       type: 'video',
       model: requireText(given.model, 'model'),
       params,
@@ -1890,7 +1886,7 @@ export class CrucibleClient {
 
   /** Queue a `load-video` job (warm the video model up before a batch) and return its id. */
   async loadVideo(model: string): Promise<string> {
-    return this.#submitHelper({
+    return this.submit({
       type: 'load-video',
       model: requireText(model, 'model'),
       params: {},
@@ -1999,6 +1995,11 @@ export class CrucibleClient {
    * voice is resident.
    */
   async stream(options: StreamOptions): Promise<TtsStreamSession> {
+    const given = options as Partial<StreamOptions> | undefined;
+    const withQueue =
+      given !== undefined && given !== null && given.queue === undefined && this.#queue !== undefined
+        ? { ...options, queue: this.#queue }
+        : options;
     return openTtsStream(
       {
         url: this.url,
@@ -2006,7 +2007,7 @@ export class CrucibleClient {
         failure: (response) => this.#failure(response),
         json: (path, init, where) => this.#json(path, init, where),
       },
-      options,
+      withQueue,
     );
   }
 

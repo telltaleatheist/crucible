@@ -526,7 +526,8 @@ def test_a_stream_s_queue_session_holds_the_card_against_every_job_that_wants_it
     with streaming_server() as base:
         stream = opened(base, auth)
         for body in jobs:
-            response = httpx.post(f"{base}/v1/jobs", headers=other, json=body, timeout=30.0)
+            response = httpx.post(f"{base}/v1/jobs", headers=other, json={**body, "queue": False},
+                                  timeout=30.0)
             assert response.status_code == 409, (body["type"], response.text)
             error = response.json()["error"]
             assert error["code"] == "server_busy", body["type"]
@@ -1041,7 +1042,8 @@ def test_the_bench_does_not_show_an_idle_machine_while_a_session_runs(
             headers={**auth, "X-Crucible-Client": "briefcase"},
             json={"type": "tts", "model": VOICE,
                   "params": {"language": "en", "take": 0,
-                             "chunks": [{"index": 0, "text": "Rain."}]}},
+                             "chunks": [{"index": 0, "text": "Rain."}]},
+                  "queue": False},
             timeout=30.0,
         )
         assert refused.status_code == 409, refused.text

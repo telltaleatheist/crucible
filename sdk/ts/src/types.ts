@@ -459,19 +459,19 @@ export interface JobRequest {
    */
   readonly hold?: boolean;
   /**
-   * Wait in the server's queue while it is busy instead of being refused `server_busy`. `true`
-   * (or `{}`) takes the server's default wait; `false` or leaving it out refuses as before.
-   * {@link CrucibleClient.submit} leaves it off unless you set it; the high-level helpers
-   * (`render`, `asr`, `image`, `loadModel`, …) turn it on — see `CrucibleClientOptions.queue`.
+   * How this job waits while the server is busy. Left out: the client's own `queue`, else it waits
+   * in the server's line (an hour; a day inside a session). `{maxWaitS}` changes the wait; `false`
+   * refuses at once with `server_busy` instead.
    */
   readonly queue?: QueueChoice;
 }
 
 /**
- * Whether and how long a job may wait in the server's queue. `maxWaitS` is 10..86400 seconds; the
- * server's default is an hour.
+ * How a request waits in the server's line while the server is busy. Waiting is the default, so
+ * there is nothing to say to wait: leave `queue` out. `{maxWaitS}` (10..86400 seconds) changes the
+ * wait from the server's default of an hour; `false` refuses at once instead of waiting.
  */
-export type QueueChoice = boolean | { readonly maxWaitS?: number };
+export type QueueChoice = false | { readonly maxWaitS: number };
 
 /**
  * A job's lifecycle state; `interrupted` means the server stopped mid-job, not that the work
@@ -846,9 +846,10 @@ export interface ChatOptions {
    */
   readonly act?: string;
   /**
-   * Wait in the server's queue instead of being refused while the model is not resident or
-   * every slot on its engine is taken; the server loads the model when the chat's turn comes.
-   * Omitted: the client's own `queue` (on by default). `false`: refused as before.
+   * While the model is not resident or every slot on its engine is taken, the chat waits in the
+   * server's line and the server loads the model when its turn comes. Omitted: the client's own
+   * `queue`, else it waits (an hour). `{maxWaitS}` changes the wait; `false` refuses at once
+   * (`model_not_resident`, `chat_queue_full`, `session_open`) instead.
    */
   readonly queue?: QueueChoice;
   /** Aborts the request. */
@@ -921,7 +922,7 @@ export type DecideMissing = 'refuse' | 'report';
 export interface DecideOptions {
   /** What this decision is, sent as `X-Crucible-Act` exactly as {@link ChatOptions.act}. */
   readonly act?: string;
-  /** Wait in the server's queue for the model, exactly as {@link ChatOptions.queue}. */
+  /** How the decision waits for its model, exactly as {@link ChatOptions.queue}. */
   readonly queue?: QueueChoice;
   /** Aborts the request; the abort surfaces as a DOM `AbortError`. */
   readonly signal?: AbortSignal;

@@ -20,6 +20,7 @@ from ...engines.items_forward import ITEMS_PATH
 from ...errors import ApiError
 from ...inflight import read_act
 from ...manifests import load_manifest
+from ...queuerequest import max_wait_of
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..proxy import (
@@ -176,7 +177,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def decide(request: Request, body: DecideRequest) -> Response:
         """One answer distribution per question, read off the resident model's
         next-token logprobs; with `items`, one choice answer per item in one request.
-        Every refusal a caller can cause is made before anything is decided.
+        Every refusal a caller can cause is made before anything is decided. A decision
+        whose model is not resident, or whose engine has every slot taken, waits in the
+        server's line and its model is loaded for it; with `"queue": false` it is
+        refused at once instead.
         """
         arrived = time.monotonic()
         act = read_act(request.headers)
@@ -186,12 +190,13 @@ def register(routers: Routers, ctx: AppContext) -> None:
         session = queue_session(request, ctx.sessions)
         session_id = None if session is None else session.id
         turn: Any = None
-        if body.queue is not None:
+        max_wait_s = max_wait_of(body.queue)
+        if max_wait_s is not None:
             _refuse_a_malformed_decision(body, backend.kind)
             turn = await take_a_turn(
                 request, line=ctx.line, residency=residency, inflight=inflight,
                 settle=chat_over, kind="decide", model=body.model, act=act,
-                client=client_agent(request), max_wait_s=body.queue.max_wait_s,
+                client=client_agent(request), max_wait_s=max_wait_s,
                 session=session,
             )
             if isinstance(turn, Response):

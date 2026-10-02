@@ -10,10 +10,11 @@ from fastapi import Request, Response
 from starlette.background import BackgroundTask
 
 from ... import upstreamrecord
-from ...callqueue import queue_of, take_a_turn
+from ...callqueue import take_a_turn
 from ...engines import chat_admission
 from ...errors import ApiError
 from ...inflight import read_act
+from ...queuerequest import queue_of
 from ...sampling import SAMPLING_HEADER, apply_defaults
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
@@ -74,7 +75,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @openai.post("/chat/completions")
     async def openai_chat_completions(request: Request) -> Response:
         """An OpenAI chat completion, proxied to the resident engine or, for a
-        `<upstream>/<id>` model, forwarded to that upstream.
+        `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not
+        resident, or whose engine has every slot taken, waits in the server's line
+        (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with
+        `"queue": false` it is refused at once instead. An upstream chat never waits.
         """
         raw = await request.body()
         body = chat_body(raw)
@@ -86,9 +90,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "a chat request must name a model; this server proxies only to the "
                 "model that is resident",
             )
-        queued: int | None = None
-        if "queue" in body:
-            queued = queue_of(body.pop("queue"))
+        sent_queue = "queue" in body
+        queued = queue_of(body)
+        if sent_queue:
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
             return await forward_to_upstream(

@@ -1,10 +1,11 @@
 /**
  * The server's queue, from the client's side.
  *
- * A job submitted with `queue` waits on the server instead of being refused
- * `server_busy`. What a client has to get right: the raw `submit` sends the
- * field only when asked, the high-level helpers ask by default, a refusal of
- * the field is the server's word (never retried without it), and a job that
+ * A request waits on the server by default instead of being refused
+ * `server_busy`. What a client has to get right: waiting needs no field, so
+ * none is sent unless the request (or the client) says `false` or `{maxWaitS}`;
+ * a refusal of the field is the server's word (never retried without it); there
+ * is no `true` and no `{}` to send; and a job that
  * leaves the queue without running ends `removed` — its own terminal event and
  * status, never mistaken for `failed`.
  *
@@ -22,6 +23,7 @@ import {
   CrucibleConfigError,
   CrucibleRefused,
   type JobEvent,
+  type QueueChoice,
   type QueueEvent,
 } from '../src/index.js';
 
@@ -63,21 +65,30 @@ beforeEach(() => {
   };
 });
 
-function client(options: { queue?: boolean | { maxWaitS?: number } } = {}): CrucibleClient {
+function client(options: { queue?: QueueChoice } = {}): CrucibleClient {
   return new CrucibleClient({ url, token: 't', clientName: 'queue-test', ...options });
 }
 
 const ECHO = { type: 'echo', params: {}, inputs: {} } as const;
 
-test('submit() sends no queue field unless the request asks for one', async () => {
+test('submit() waits by default, so it sends a queue field only to change the wait or refuse', async () => {
   await client().submit(ECHO);
-  await client().submit({ ...ECHO, queue: true });
   await client().submit({ ...ECHO, queue: { maxWaitS: 600 } });
   await client().submit({ ...ECHO, queue: false });
+  await client({ queue: false }).submit(ECHO);
+  await client({ queue: false }).submit({ ...ECHO, queue: { maxWaitS: 60 } });
   assert.deepEqual(
     posted.map((body) => (body as { queue?: unknown }).queue),
-    [undefined, {}, { max_wait_s: 600 }, undefined],
+    [undefined, { max_wait_s: 600 }, false, false, { max_wait_s: 60 }],
   );
+});
+
+test('the old opt-in shapes are refused before anything is sent', async () => {
+  for (const queue of [true, {}, null, 0] as unknown as QueueChoice[]) {
+    await assert.rejects(client().submit({ ...ECHO, queue }), CrucibleConfigError);
+    assert.throws(() => client({ queue }), CrucibleConfigError);
+  }
+  assert.equal(posted.length, 0);
 });
 
 test('a max wait the server would refuse is refused before anything is sent', async () => {
@@ -88,13 +99,13 @@ test('a max wait the server would refuse is refused before anything is sent', as
   assert.equal(posted.length, 0);
 });
 
-test('the high-level helpers queue by default, and the client option turns that off', async () => {
+test('the high-level helpers wait by default, and the client option turns that off', async () => {
   await client().loadModel('qwen3.5-9b');
   await client({ queue: { maxWaitS: 120 } }).unloadModel('qwen3.5-9b');
   await client({ queue: false }).loadModel('qwen3.5-9b');
   assert.deepEqual(
     posted.map((body) => (body as { queue?: unknown }).queue),
-    [{}, { max_wait_s: 120 }, undefined],
+    [undefined, { max_wait_s: 120 }, false],
   );
 });
 
@@ -119,7 +130,7 @@ test('a refusal of the queue field is the server\'s word, not a cue to ask again
   assert.equal(posted.length, 1);
 });
 
-test('a busy refusal to a submit that did not queue is still CrucibleBusy', async () => {
+test('a busy refusal to a submit sent with queue: false is CrucibleBusy', async () => {
   handler = (_request, _body, response) =>
     json(response, 409, {
       error: {
@@ -132,7 +143,7 @@ test('a busy refusal to a submit that did not queue is still CrucibleBusy', asyn
         },
       },
     });
-  await assert.rejects(client().submit(ECHO), CrucibleBusy);
+  await assert.rejects(client().submit({ ...ECHO, queue: false }), CrucibleBusy);
 });
 
 function stream(frames: string[]): Handler {
@@ -314,7 +325,7 @@ test('chat() waits in the queue by default, and not when told not to', async () 
   await client({ queue: false }).chat({ model: 'qwen3.5-9b', messages });
   assert.deepEqual(
     posted.map((body) => (body as { queue?: unknown }).queue),
-    [{}, { max_wait_s: 120 }, undefined, undefined],
+    [undefined, { max_wait_s: 120 }, false, false],
   );
 });
 
@@ -326,9 +337,10 @@ test('decide() waits in the queue by default, and not when told not to', async (
   const answer = await client().decide(URGENT);
   assert.equal(answer.answers['urgent']?.type, 'yesno');
   await client().decide(URGENT, { queue: false });
+  await client({ queue: { maxWaitS: 30 } }).decide(URGENT);
   assert.deepEqual(
     posted.map((body) => (body as { queue?: unknown }).queue),
-    [{}, undefined],
+    [undefined, false, { max_wait_s: 30 }],
   );
 });
 

@@ -682,7 +682,9 @@ def test_a_queue_session_refuses_another_client_s_eviction_and_admits_its_own_wo
     run_job(ready, auth)
 
     other = {**auth, "X-Crucible-Client": "briefcase"}
-    refused = submit(ready, other, type="unload-denoiser", model=MODEL, params={})
+    refused = submit(
+        ready, other, type="unload-denoiser", model=MODEL, params={}, queue=False
+    )
     assert refused.status_code == 409, refused.text
     error = refused.json()["error"]
     assert error["code"] == "server_busy"
@@ -700,11 +702,11 @@ def test_unload_denoiser_takes_it_off_the_card_and_refuses_when_nothing_is_there
     assert "no separator is" in empty.json()["error"]["message"]
 
     with holding_the_card(ready):
-        run_job(ready, auth)
+        run_job(ready, auth, queue=False)
         assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == (
             KIND_DENOISE
         )
-        events = run_job(ready, auth, type="unload-denoiser", model=MODEL, params={})
+        events = run_job(ready, auth, type="unload-denoiser", model=MODEL, params={}, queue=False)
     assert terminal(events)["event"] == "done", terminal(events)
     assert terminal(events)["data"]["resident"] is None
     assert ready.get("/v1/health", headers=auth).json()["resident_kind"] is None

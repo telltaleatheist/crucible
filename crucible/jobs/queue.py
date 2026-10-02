@@ -393,9 +393,9 @@ class JobStore:
             f"this server is busy with job {holder.id} ({what}), {holder.status} "
             f"since {busy.since}, submitted by {who}, "
             f"{holder.progress:.0%} done"
-            f"{doing}. Crucible admits one job at a time. Submit with "
-            '"queue": {} to wait in the queue on this server instead of being refused '
-            "(ARCHITECTURE.md section 3), or read GET /v1/activity to see when it "
+            f"{doing}. Crucible admits one job at a time. Leave out "
+            '"queue": false to wait in the queue on this server instead of being '
+            "refused (docs/QUEUE.md), or read GET /v1/activity to see when it "
             "is finished.",
             busy.to_dict(),
         )

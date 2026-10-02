@@ -1,9 +1,10 @@
 """Queued chats and decisions: a held-open request that waits in the job line.
 
-A chat or decision that opts in (``"queue": {"max_wait_s": N}`` in its body) is not
-refused while its model is not resident or every slot on its engine is taken. It takes
-a place in the same line as queued jobs (crucible/jobs/line.py) and its HTTP request
-stays open. When it reaches the front:
+A chat or decision waits by default (crucible/queuerequest.py): while its model is not
+resident or every slot on its engine is taken, it takes a place in the same line as
+queued jobs (crucible/jobs/line.py) and its HTTP request stays open, up to an hour or
+its own ``"queue": {"max_wait_s": N}``. One sent with ``"queue": false`` never comes
+here; it is refused at once. When a waiting call reaches the front:
 
 - its model is resident with a free slot: the pump opens the in-flight slot for it and
   the request goes on to the engine exactly as an unqueued one would;
@@ -27,7 +28,6 @@ import asyncio
 from typing import Any, Awaitable, Callable
 
 from fastapi import Request, Response
-from pydantic import ValidationError
 
 from .admission import KEEPS_WAITING, AdmissionContext, JobRequest, Refusal, admit
 from .engines import chat_admission
@@ -35,30 +35,11 @@ from .errors import ApiError
 from .inflight import Entry, InFlight
 from .jobs.base import DONE, TERMINAL_STATES
 from .jobs.line import ADMITTED, CLIENT, Call, WaitingCall, WaitingLine
-from .queuerequest import QueueRequest
 from .queuesessions import QueueSession
 
 IN = "in"
 WAIT = "wait"
 MAX_LOADS = 2
-
-
-def queue_of(value: Any) -> int | None:
-    """``max_wait_s`` from a chat body's ``queue`` member, or None when it has none."""
-    if value is None:
-        return None
-    try:
-        return QueueRequest.model_validate(value).max_wait_s
-    except ValidationError as exc:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or 'queue'}: {error['msg']}"
-            for error in exc.errors()
-        )
-        raise ApiError(
-            400,
-            "invalid_request",
-            f'"queue" must be an object like {{"max_wait_s": 600}} or {{}}: {problems}',
-        ) from None
 
 
 def _slot_free(resident: Any, inflight: InFlight) -> bool:
@@ -269,5 +250,5 @@ async def take_a_turn(
 
 
 __all__ = [
-    "IN", "WAIT", "admit_call", "load_ended", "queue_of", "take_a_turn", "wait_in_line",
+    "IN", "WAIT", "admit_call", "load_ended", "take_a_turn", "wait_in_line",
 ]

@@ -5,6 +5,55 @@ release: **no legacy compatibility**. Leases are gone from the server and from t
 nothing wraps them; the SDK also no longer asks an older server again without `queue`. Move to
 queue sessions and the event stream as you touch each call site.
 
+## Waiting in line is the default (the release after 1.0.77)
+
+Every request that can wait now waits, on the server and in this SDK: a job, a chat, a
+decision and a TTS stream take a place in the server's line while it is busy instead of being
+refused. The opt-in is gone, not kept beside the new default (no legacy compatibility):
+
+| On the wire | Before | Now |
+|---|---|---|
+| `queue` left out | refused at once (`server_busy`, `model_not_resident`, `chat_queue_full`, `session_open`); a stream and a job inside the open session already waited | **waits**, up to an hour (a day for a job inside the open session) |
+| `"queue": {}` | wait the default hour | **`400 invalid_request`**: leave the member out |
+| `"queue": {"max_wait_s": N}` | wait up to N s | unchanged |
+| `"queue": false` | `400 invalid_request` on a job, chat or decision (a stream: refuse at once) | **refuse at once**, everywhere |
+| `"queue": true` / `null` | `true` refused; `null` meant "refuse" | `400 invalid_request` |
+
+In the SDK:
+
+| Before | Now |
+|---|---|
+| `QueueChoice = boolean \| {maxWaitS?}` | `QueueChoice = false \| {maxWaitS}`: `true` and `{}` are refused with `CrucibleConfigError` before anything is sent |
+| `submit()` sent no `queue` unless its request asked, so it was refused while the server was busy | `submit()` waits like every helper; the client's `queue` applies to it too |
+| the helpers sent `queue: {}` | they send no `queue` (the server waits by default); `queue: false` sends `"queue": false` |
+| `new CrucibleClient({queue: false})` sent no member, which meant "refuse" | it sends `"queue": false` on every job, chat, decision and stream |
+| `stream()` used only its own `queue` | it falls back to the client's `queue` like every other call |
+
+What to change in an app:
+
+- **Delete the busy-then-requeue dance.** Code that sent a request plainly, caught
+  `CrucibleBusy` / `server_busy` / `model_not_resident` / `chat_queue_full`, and sent it again
+  with `queue` is now one call: send it once and it waits. Those errors only reach a request
+  sent with `queue: false`.
+- `queue: true` → leave `queue` out. `queue: {}` → leave it out. `queue: {maxWaitS: N}` is
+  unchanged.
+- A raw `submit()` that relied on being refused while busy (a "try now, skip if busy" probe)
+  must now say `queue: false`.
+- A waiting job is a normal job: its `events()` say `queued {position, of}` and
+  `started {waitedS}` before its progress (every job now gets them, `waitedS: 0` when the
+  server was free), and one that never runs ends `removed`. A waiting chat or decision is a
+  held-open request: give it a `signal`/timeout that covers the wait, and show the line with
+  `queue()` / `queueEvents()` / `events({topics: ['queue']})`. `session({onQueue})` still
+  reports a session's place in the line as it moves.
+- A job that would change what is on the card (a load, an unload, a job bringing its own
+  model) now waits while chats are in flight instead of running beside them, because waiting
+  is what it does by default. Send it with `queue: false` to have it admitted (or refused)
+  at once as before.
+
+The CLI moved the same way: `crucible api job submit --queue [N]` is now
+`--max-wait N` (or nothing) and `--no-queue`; `chat`, `decide` and `align` take the same two
+flags.
+
 ## What was removed, and what replaces it
 
 | Removed | Replacement |

@@ -18,7 +18,9 @@ HELD_MS = 4_000
 
 
 def job_body(**params: Any) -> dict[str, Any]:
-    return {"type": "echo", "params": params, "inputs": dict(PAYLOAD)}
+    """A submit that will not wait: these tests are about the refusal a busy lane gives
+    a request sent with `"queue": false` (a plain submit waits, tests/test_queue.py)."""
+    return {"type": "echo", "params": params, "inputs": dict(PAYLOAD), "queue": False}
 
 
 def submit(

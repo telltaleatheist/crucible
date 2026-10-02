@@ -933,7 +933,7 @@ def test_unloading_under_a_holder_that_is_using_the_card_is_still_engine_in_use(
     residency = llm_client.app.state.residency
     residency.claim("tts stream abc123", may_mutate=False)
     try:
-        response = submit(llm_client, auth, type="unload-model", model=MODEL)
+        response = submit(llm_client, auth, type="unload-model", model=MODEL, queue=False)
     finally:
         residency.release("tts stream abc123")
     assert response.status_code == 409
@@ -959,7 +959,7 @@ def test_unloading_under_another_client_s_queue_session_is_refused(
     )
     assert opened.status_code == 202 and opened.json()["status"] == "open", opened.text
 
-    response = submit(llm_client, auth, type="unload-model", model=MODEL)
+    response = submit(llm_client, auth, type="unload-model", model=MODEL, queue=False)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "server_busy"
     assert response.json()["error"]["details"]["session_id"] == opened.json()["session_id"]
@@ -1103,7 +1103,8 @@ def test_a_chat_sent_during_a_clearance_waits_and_is_not_resident(
         lambda: llm_client.post(
             "/v1/openai/chat/completions",
             headers=auth,
-            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+              "queue": False},
         ),
         waiting,
         release,
@@ -1127,7 +1128,7 @@ def test_a_clearance_that_never_finishes_is_a_wedge_not_a_hang(
     release, clearing, _ = _a_clearance_under_way(llm_client, engines[0])
     monkeypatch.setattr(residency_module, "CLEARANCE_TIMEOUT_SECONDS", 0.3)
     try:
-        response = submit(llm_client, auth, type="load-model", model=MODEL)
+        response = submit(llm_client, auth, type="load-model", model=MODEL, queue=False)
     finally:
         release.set()
         clearing.join(timeout=30)
@@ -1233,13 +1234,14 @@ def test_the_proxy_refuses_a_model_that_is_not_resident(
     response = llm_client.post(
         "/v1/openai/chat/completions",
         headers=auth,
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+              "queue": False},
     )
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "model_not_resident"
     assert "no model is" in error["message"]
-    assert "never loads a model to answer a chat request" in error["message"]
+    assert "a chat request is never waited for or loaded for" in error["message"]
     assert error["details"] == {"requested": MODEL, "resident": None}
 
 
@@ -1255,7 +1257,7 @@ def test_the_proxy_names_the_resident_model_in_the_409(
     response = llm_client.post(
         "/v1/openai/chat/completions",
         headers=auth,
-        json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}], "queue": False},
     )
     assert response.status_code == 409
     error = response.json()["error"]
@@ -1296,7 +1298,8 @@ def test_a_serial_engine_refuses_past_its_width_instead_of_queueing(
         response = llm_client.post(
             "/v1/openai/chat/completions",
             headers=auth,
-            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}],
+              "queue": False},
         )
     finally:
         for entry in held:
@@ -1791,7 +1794,7 @@ def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
     assert no_model.status_code == 400
     assert no_model.json()["error"]["code"] == "model_required"
     other = llm_client.post(
-        "/openai/v1/chat/completions", headers=auth, json={"model": "not-this-one", "messages": []}
+        "/openai/v1/chat/completions", headers=auth, json={"model": "not-this-one", "messages": [], "queue": False}
     )
     assert other.status_code == 409
     assert other.json()["error"]["code"] == "model_not_resident"

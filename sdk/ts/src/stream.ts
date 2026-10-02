@@ -24,8 +24,9 @@ export interface StreamOptions {
    */
   idleS?: number;
   /**
-   * How the stream's session waits in the line: `true` (the default) or `{maxWaitS}` waits;
-   * `false` refuses instead (`session_open`, `server_busy`) when the server is not free now.
+   * How the stream's session waits in the line. Left out (and the client says nothing), it waits up
+   * to an hour; `{maxWaitS}` changes the wait; `false` refuses instead (`session_open`,
+   * `server_busy`) when the server is not free now.
    */
   queue?: QueueChoice;
   /** Aborts the open, which is held until the session is open and the voice resident. */
@@ -155,11 +156,8 @@ export async function openTtsStream(
   const language = requireOption(given.language, 'language');
   const payload: Record<string, unknown> = { voice, language };
   if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '900 s');
-  if (given.queue === false) {
-    payload['queue'] = false;
-  } else if (given.queue !== undefined) {
-    payload['queue'] = queuePayload(given.queue);
-  }
+  const queue = queuePayload(given.queue);
+  if (queue !== null) payload['queue'] = queue;
   const init: RequestInit = { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(payload) };
   if (given.signal !== undefined) init.signal = given.signal;
   const body = await transport.json('/v1/tts/stream', init, 'stream');

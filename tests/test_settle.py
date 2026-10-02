@@ -93,11 +93,11 @@ def close(client: TestClient, auth: dict[str, str], session_id: str) -> None:
     assert response.status_code == 200, response.text
 
 
-def a_chat(client: TestClient, auth: dict[str, str]) -> Any:
+def a_chat(client: TestClient, auth: dict[str, str], **extra: Any) -> Any:
     return client.post(
         "/v1/openai/chat/completions",
         headers=auth,
-        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": MODEL, "messages": [{"role": "user", "content": "hi"}], **extra},
     )
 
 
@@ -171,10 +171,14 @@ def test_a_real_chat_run_outside_a_session_reloads_its_model(
     assert first.status_code == 200, first.text
     assert not is_resident(resident, auth)
 
-    second = a_chat(resident, auth)
-    assert second.status_code == 409, second.text
-    assert second.json()["error"]["code"] == "model_not_resident"
+    refused = a_chat(resident, auth, queue=False)
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "model_not_resident"
     assert len(engines) == 1
+
+    second = a_chat(resident, auth)
+    assert second.status_code == 200, second.text
+    assert len(engines) == 2, "the chat waited while its model was loaded again"
 
 
 def test_a_session_turns_two_jobs_back_to_back_into_one_load(

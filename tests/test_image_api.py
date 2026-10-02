@@ -294,7 +294,7 @@ def test_unload_image_takes_the_generator_off_the_card(
     session_id = in_a_session(ready, auth)
     close_queue_session(ready, auth, session_id)
     with holding_the_card(ready, act="image"):
-        assert run_job(ready, auth)[1][-1]["event"] == "done"
+        assert run_job(ready, auth, queue=False)[1][-1]["event"] == "done"
         assert ready.get("/v1/health", headers=auth).json()["resident_kind"] == "image"
     response = ready.post("/v1/jobs", headers=auth, json={"type": "unload-image", "model": MODEL})
     assert response.status_code == 202, response.json()

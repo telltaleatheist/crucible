@@ -21,7 +21,7 @@ from pydantic import (
 )
 
 from .errors import ApiError
-from .queuerequest import QueueRequest
+from .queuerequest import QueueChoice, queue_field
 
 LETTERS: tuple[str, ...] = tuple(string.ascii_uppercase)
 
@@ -127,8 +127,9 @@ class DecideRequest(_Strict):
     """`POST /v1/decide`: one forward pass per question at the resident model, or a list of items about one state; nothing decoded or loaded."""
 
     model: _NonEmpty
-    """The Crucible model id, which must already be resident (`409
-    model_not_resident` otherwise). An upstream id (`<upstream>/<id>`) is
+    """The Crucible model id. One that is not resident is loaded for the
+    decision while it waits in the line (`409 model_not_resident` with
+    `"queue": false`). An upstream id (`<upstream>/<id>`) is
     refused `400 decide_needs_logprobs`: no upstream returns a distribution."""
     state: Any
     """What the questions are about: a string, used verbatim, or any other JSON
@@ -168,11 +169,12 @@ class DecideRequest(_Strict):
     and `label_mass` run over the letters actually returned. A question whose
     EVERY label is missing is refused in both modes: there is no answer to
     report."""
-    queue: QueueRequest | None = None
-    """Wait for the model instead of being refused: `{}` or `{"max_wait_s": N}`.
-    While the model is not resident, or every slot on its engine is taken, the
-    request is held open in the server's queue (docs/QUEUE.md) and the model is
-    loaded for it when its turn comes. Absent: refused as before."""
+    queue: QueueChoice = queue_field()
+    """Absent: while the model is not resident, or every slot on its engine is
+    taken, the request is held open in the server's queue (docs/QUEUE.md) up to
+    an hour, and the model is loaded for it when its turn comes.
+    `{"max_wait_s": N}` changes the wait. `false`: refused at once instead
+    (`409 model_not_resident`, `503 chat_queue_full`, `409 session_open`)."""
 
     @field_validator("state")
     @classmethod

@@ -6,14 +6,24 @@ export const MIN_MAX_WAIT_S = 10;
 /** The longest wait the server's queue accepts (a day), in seconds. */
 export const MAX_MAX_WAIT_S = 86_400;
 
-/** The `queue` member a request sends for a {@link QueueChoice}, or null to send none. */
-export function queuePayload(choice: QueueChoice | undefined): Record<string, number> | null {
-  if (choice === undefined || choice === false) return null;
-  if (choice === true) return {};
-  if (typeof choice !== 'object' || choice === null) {
-    throw new CrucibleConfigError('queue', 'must be true, false or {maxWaitS}');
+/** The `queue` member on the wire: `false` (refuse at once) or how long to wait. */
+export type QueuePayload = false | { max_wait_s: number };
+
+/**
+ * The `queue` member a request sends for a {@link QueueChoice}, or null to send none: a request
+ * without one waits in the server's line (its default, an hour), so waiting needs no member.
+ */
+export function queuePayload(choice: QueueChoice | undefined): QueuePayload | null {
+  if (choice === undefined) return null;
+  if (choice === false) return false;
+  if (typeof choice !== 'object' || choice === null || choice.maxWaitS === undefined) {
+    throw new CrucibleConfigError(
+      'queue',
+      `is ${choice === null || typeof choice !== 'object' ? String(choice) : JSON.stringify(choice)}; ` +
+        'it is false (refuse at once when the server is busy) or {maxWaitS}. Leave it out to ' +
+        "wait in the server's line: waiting is the default.",
+    );
   }
-  if (choice.maxWaitS === undefined) return {};
   return { max_wait_s: requireSeconds(choice.maxWaitS, 'queue.maxWaitS', 'an hour') };
 }
 
