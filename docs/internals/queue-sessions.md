@@ -70,9 +70,10 @@ Closing a stream closes a session opened for it (`opened_for_stream`), immediate
 the route, or from the pump's next step when the stream died another way (its grace window
 ran out). It never closes a session the client opened itself.
 
-## Not built here
+## Notes
 
-- The server-wide event stream (`GET /v1/events`) and `features` in `GET /v1/info` are a
-  parallel branch; the publish hook belongs in `QueueSessions._say`.
+- Every session change also publishes on the server-wide event stream (`GET /v1/events`,
+  topic `session`, docs/EVENTS.md) from `QueueSessions._say`, and `queue.sessions` is listed
+  in `GET /v1/info` `features`.
 - Upstream chats (`<upstream>/<model>`) never touch the card, so a session does not hold
   them back.
