@@ -3,8 +3,8 @@
  *
  * A job submitted with `queue` waits on the server instead of being refused
  * `server_busy`. What a client has to get right: the raw `submit` sends the
- * field only when asked, the high-level helpers ask by default, a server older
- * than the queue is asked again the old way instead of failing, and a job that
+ * field only when asked, the high-level helpers ask by default, a refusal of
+ * the field is the server's word (never retried without it), and a job that
  * leaves the queue without running ends `removed` — its own terminal event and
  * status, never mistaken for `failed`.
  *
@@ -20,6 +20,7 @@ import {
   CrucibleBusy,
   CrucibleClient,
   CrucibleConfigError,
+  CrucibleRefused,
   type JobEvent,
   type QueueEvent,
 } from '../src/index.js';
@@ -97,27 +98,25 @@ test('the high-level helpers queue by default, and the client option turns that 
   );
 });
 
-test('a server older than the queue is asked again without it', async () => {
+test('a refusal of the queue field is the server\'s word, not a cue to ask again without it', async () => {
   handler = (request, body, response) => {
-    const document = JSON.parse(body) as Record<string, unknown>;
-    posted.push(document);
-    if ('queue' in document) {
-      json(response, 400, {
-        error: {
-          code: 'invalid_request',
-          message: 'queue: Extra inputs are not permitted',
-          details: {
-            problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
-          },
+    posted.push(JSON.parse(body));
+    json(response, 400, {
+      error: {
+        code: 'invalid_request',
+        message: 'queue: Extra inputs are not permitted',
+        details: {
+          problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
         },
-      });
-      return;
-    }
-    json(response, 202, { job_id: 'old-server-job', resume_id: null });
+      },
+    });
   };
-  assert.equal(await client().loadModel('qwen3.5-9b'), 'old-server-job');
-  assert.equal(posted.length, 2);
-  assert.ok(!('queue' in (posted[1] as object)));
+  await assert.rejects(client().loadModel('qwen3.5-9b'), (error: unknown) => {
+    assert.ok(error instanceof CrucibleRefused);
+    assert.equal(error.code, 'invalid_request');
+    return true;
+  });
+  assert.equal(posted.length, 1);
 });
 
 test('a busy refusal to a submit that did not queue is still CrucibleBusy', async () => {
@@ -221,7 +220,7 @@ test('cancelling a waiting job answers removed', async () => {
 const ROW = {
   position: 1, job_id: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
   client_ref: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waited_s: 12.5,
-  max_wait_s: 3600, expires_at: '2026-09-30T11:00:00+00:00', lease_holder: false, kind: 'job',
+  max_wait_s: 3600, expires_at: '2026-09-30T11:00:00+00:00', session: null, kind: 'job',
 };
 
 test('queue() lists the waiting jobs in order, and removeFromQueue() removes one', async () => {
@@ -246,7 +245,7 @@ test('queue() lists the waiting jobs in order, and removeFromQueue() removes one
   assert.deepEqual(listed.items[0], {
     position: 1, jobId: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
     clientRef: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waitedS: 12.5,
-    maxWaitS: 3600, expiresAt: '2026-09-30T11:00:00+00:00', leaseHolder: false, kind: 'job',
+    maxWaitS: 3600, expiresAt: '2026-09-30T11:00:00+00:00', session: null, kind: 'job',
   });
   assert.equal(listed.limits.maxWaitS.default, 3600);
   assert.deepEqual(await client().removeFromQueue('j1'), {
@@ -319,58 +318,44 @@ test('chat() waits in the queue by default, and not when told not to', async () 
   );
 });
 
-test('decide() waits in the queue by default, and asks an older server again without it', async () => {
+test('decide() waits in the queue by default, and not when told not to', async () => {
   handler = (request, body, response) => {
-    const document = JSON.parse(body) as Record<string, unknown>;
-    posted.push(document);
-    if ('queue' in document) {
-      json(response, 422, {
-        error: {
-          code: 'invalid_request',
-          message: 'queue: Extra inputs are not permitted',
-          details: {
-            problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
-          },
-        },
-      });
-      return;
-    }
+    posted.push(JSON.parse(body));
     json(response, 200, DECISION);
   };
   const answer = await client().decide(URGENT);
   assert.equal(answer.answers['urgent']?.type, 'yesno');
-  assert.equal(posted.length, 2);
-  assert.deepEqual((posted[0] as { queue?: unknown }).queue, {});
-  assert.ok(!('queue' in (posted[1] as object)));
+  await client().decide(URGENT, { queue: false });
+  assert.deepEqual(
+    posted.map((body) => (body as { queue?: unknown }).queue),
+    [{}, undefined],
+  );
 });
 
-test('lease() waits in the queue by default, and asks an older server again without it', async () => {
-  handler = (request, body, response) => {
-    const document = JSON.parse(body) as Record<string, unknown>;
-    posted.push(document);
-    if ('queue' in document && posted.length === 1) {
-      json(response, 422, {
-        error: {
-          code: 'invalid_request',
-          message: 'queue: Extra inputs are not permitted',
-          details: {
-            problems: [{ location: ['body', 'queue'], type: 'extra_forbidden', message: 'x' }],
-          },
-        },
-      });
-      return;
-    }
-    json(response, 201, {
-      lease_id: 'l1', kind: 'llm', client: 'queue-test', act: 'translate',
-      since: '2026-09-30T10:00:00+00:00', expires_at: '2026-09-30T10:02:00+00:00',
-      subject: 'qwen3.5-9b',
+test('a queue row of a session waiting to open, and an item of the open one', async () => {
+  handler = (_request, _body, response) =>
+    json(response, 200, {
+      items: [
+        { ...ROW, job_id: 'j9', session: 'ses-1' },
+        { ...ROW, position: 2, job_id: 'ses-2', type: 'session', model: null, kind: 'session' },
+      ],
+      depth: 2,
+      limits: {
+        per_client: 50, total: 200, max_wait_s: { default: 3600, min: 10, max: 86400 },
+        abandon_after_s: 300,
+      },
     });
-  };
-  const lease = await client().lease('qwen3.5-9b', { act: 'translate', ttlSeconds: 120 });
-  assert.equal(lease.leaseId, 'l1');
-  assert.deepEqual((posted[0] as { queue?: unknown }).queue, {});
-  assert.ok(!('queue' in (posted[1] as object)));
-  posted = [];
-  await client().lease('qwen3.5-9b', { act: 'translate', ttlSeconds: 120, queue: false });
-  assert.ok(!('queue' in (posted[0] as object)));
+  const listed = await client().queue();
+  assert.deepEqual(
+    listed.items.map((item) => [item.jobId, item.kind, item.session]),
+    [['j9', 'job', 'ses-1'], ['ses-2', 'session', null]],
+  );
+});
+
+test('removeFromQueue() given the open session ends it', async () => {
+  handler = (_request, _body, response) =>
+    json(response, 200, { job_id: 'ses-1', status: 'closed', reason: 'operator' });
+  assert.deepEqual(await client().removeFromQueue('ses-1'), {
+    jobId: 'ses-1', status: 'closed', reason: 'operator',
+  });
 });

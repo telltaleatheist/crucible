@@ -5,8 +5,8 @@ Crucible runs one job at a time. A job sent while another runs used to be refuse
 the server keeps the job in a first-come, first-served queue and runs it when its turn
 comes. Old apps are not affected: a submit without `queue` is refused exactly as before.
 
-The TypeScript SDK's high-level helpers queue by default from the release that carries
-this page (see "In the SDK" below).
+The TypeScript SDK's high-level helpers queue by default, and its `session()` is the queue
+session below (see "In the SDK").
 
 ## Submit with `queue`
 
@@ -307,13 +307,21 @@ for await (const event of crucible.events(id)) {
   default. `new CrucibleClient({..., queue: false})`
   turns that off; `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins.
 - `submit()` queues only when its request says `queue: true` or `queue: {maxWaitS}`.
-- Against a server older than the queue, the SDK sends the job (or decision) again
-  without `queue`, so the app sees `CrucibleBusy` as it always did. An older server passes
-  a chat's `queue` member on to the engine, which ignores it, and refuses as before.
+- A refusal of `queue` is thrown like any refusal; the SDK never sends a request again
+  without it.
 - A queued chat or decision that is removed throws `CrucibleRefused` with code
   `removed_from_queue` and `details.reason`.
 - `job()` returns `status: 'removed'` and `removal`; `cancel()` on a waiting job answers
   `status: 'removed'`. `queue()`, `removeFromQueue()`, `queueHeartbeat()` and
   `queueEvents()` cover the routes above.
-- Queue sessions replace the SDK's old `lease()`; the session helpers arrive with the SDK
-  release that follows this server change. Until then, call the routes above directly.
+- `session({act, model?, idleS?, maxWaitS?, onQueue?, signal?})` asks for a queue session
+  and answers once it is open (following its stream, and calling `onQueue({position, of})`,
+  while it waits). The `CrucibleSession` it returns is the client plus the session's header:
+  every method sends `X-Crucible-Session`, its job helpers send no `queue`, and its
+  `closed` promise resolves with the reason when the session ends. `touch()`, `state()` and
+  `close()` cover the session's routes. A session that ends before it opens throws
+  `CrucibleSessionClosed` with its `reason`; another client's session refuses as
+  `CrucibleSessionHeld`.
+- `events({topics?, lastEventId?, signal?})` follows `GET /v1/events` (docs/EVENTS.md),
+  reconnecting by itself.
+- sdk/ts/MIGRATION.md maps every lease call an app made to its replacement.

@@ -171,6 +171,11 @@ export interface ServerInfo {
   readonly engine: EngineRef | null;
   /** What a page request is on this server, or `null` from an orchestrator. */
   readonly pagesEngine: PagesEngine | null;
+  /**
+   * What this server's API offers, by name (`queue.sessions`, `events`, `tts.stream`, …): check a
+   * name here, or with {@link CrucibleClient.has}, instead of comparing versions.
+   */
+  readonly features: readonly string[];
 }
 
 /**
@@ -255,25 +260,101 @@ export interface ActivityChat {
   readonly since: string;
 }
 
-/** A client's declared intention to keep using what is resident; a refusal, not a reservation. */
-export interface Lease {
-  readonly leaseId: string;
-  /** Which resident kind it holds: `llm`, `tts` or `align`. */
-  readonly kind: string;
-  /** The id it is held on — a model, a voice or an aligner — which is always the resident one. */
-  readonly subject: string;
-  /** The holder's User-Agent, as `/v1/activity` reports it. */
-  readonly client: string | null;
-  /** What the run IS: a capability class name. */
+/** Where a queue session stands: waiting in the line, holding the server, or ended. */
+export type QueueSessionStatus = 'queued' | 'open' | 'closed';
+
+/**
+ * Why a queue session ended. `client`: its client closed it. `idle`: `idle_s` passed with nothing
+ * in flight, no item and no touch. `operator`: a person ended it. `max_hold`: the server's
+ * configured maximum hold. `server_restart`: the server stopped. A session that never opened ends
+ * `expired` (it waited `max_wait_s`, or nobody followed it), `load_failed` (its model would not
+ * load), or with one of the reasons above.
+ */
+export type QueueSessionReason =
+  | 'client'
+  | 'idle'
+  | 'operator'
+  | 'max_hold'
+  | 'server_restart'
+  | 'expired'
+  | 'load_failed';
+
+/**
+ * `GET /v1/queue/sessions/{id}`: one app's turn holding the server for a run of requests. Not a
+ * TTS stream session.
+ */
+export interface QueueSessionState {
+  readonly sessionId: string;
+  readonly status: QueueSessionStatus;
+  /** The capability class the run is for. */
   readonly act: string;
-  /** When it was taken, in {@link ActivityJob.started}'s format. */
-  readonly since: string;
-  /** When it stops being open unless something heartbeats it. */
-  readonly expiresAt: string;
+  /** Who holds it (`X-Crucible-Client`, else `User-Agent`). */
+  readonly client: string | null;
+  /** The model it opened with resident, or null when it named none. */
+  readonly model: string | null;
+  /** 1 is next, while it waits; null once open. */
+  readonly position: number | null;
+  readonly idleS: number;
+  readonly maxWaitS: number;
+  readonly created: string;
+  readonly openedAt: string | null;
+  /** When it closes `idle` unless something arrives; null while anything is in flight. */
+  readonly idleDeadline: string | null;
+  /** When it closes `max_hold`; null unless the server sets a maximum. */
+  readonly maxHoldDeadline: string | null;
+  readonly itemsRun: number;
+  /** What it has running or waiting: jobs, chats, queued calls, stream rows being said. */
+  readonly inFlight: readonly Readonly<Record<string, unknown>>[];
+  /** The TTS stream open in it, or null. */
+  readonly streamSession: Readonly<Record<string, unknown>> | null;
+  /** The `load-model` job that made its model resident, or null. */
+  readonly loadJob: string | null;
+  readonly closedAt: string | null;
+  /** Why it ended, once it has: one of {@link QueueSessionReason}; a newer server may name another. */
+  readonly reason: string | null;
+  readonly message: string | null;
+  /** The load's error, for a session that ended `load_failed`. */
+  readonly error: Readonly<Record<string, unknown>> | null;
 }
 
-/** The open lease, as `/v1/activity` reports it. */
-export type ActivityLease = Omit<Lease, 'subject'>;
+/** Where a queued session stands in the line: 1 is next, of `of` waiting. */
+export interface QueuePosition {
+  readonly position: number;
+  readonly of: number;
+}
+
+/** How a queue session ended, as its `closed` event said. */
+export interface QueueSessionEnd {
+  /** One of {@link QueueSessionReason}; a newer server may name another. */
+  readonly reason: string;
+  /** A sentence a person reads. */
+  readonly message: string;
+  /** How many items ran in it; null when the server could not say (it stopped). */
+  readonly itemsRun: number | null;
+  /** How long it held the server, in seconds; null when the server could not say. */
+  readonly heldS: number | null;
+}
+
+/** Options for {@link CrucibleClient.session}. */
+export interface SessionOptions {
+  /** The capability class the run is for, as `X-Crucible-Act` names it. Required. */
+  readonly act: string;
+  /** A model to have resident when the session opens; the server loads it for the session. */
+  readonly model?: string;
+  /**
+   * Close the session after this many seconds with nothing in flight, no item and no touch:
+   * 10..86400, the server's default 300. A running job or an answer in flight always counts as
+   * activity; work on the app's own side (a cloud call, a file copy) does not, so call
+   * `touch()` across a long gap.
+   */
+  readonly idleS?: number;
+  /** How long it may wait in the line to open: 10..86400 seconds, the server's default an hour. */
+  readonly maxWaitS?: number;
+  /** Called with the session's place in the line whenever it joins or moves. */
+  readonly onQueue?: (position: QueuePosition) => void;
+  /** Aborts the wait: a session still in the line leaves it, and the abort is thrown. */
+  readonly signal?: AbortSignal;
+}
 
 /** `GET /v1/activity` — what is on this server and how far along. */
 export interface Activity {
@@ -317,8 +398,8 @@ export interface Activity {
     readonly maxInFlightBasis: string | null;
     readonly rows: readonly ActivityChat[];
   };
-  /** The open lease on whatever is resident, or null. */
-  readonly lease: ActivityLease | null;
+  /** The open queue session, which holds the server until it closes, or null. */
+  readonly session: QueueSessionState | null;
   readonly slots: { readonly accelerated: ActivitySlot };
   readonly running: readonly ActivityJob[];
   readonly queued: readonly ActivityJob[];
@@ -401,7 +482,7 @@ export type QueueChoice = boolean | { readonly maxWaitS?: number };
 export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted' | 'removed';
 
 /** Why a job left the server's queue without running. */
-export type RemovalReason = 'operator' | 'client' | 'expired' | 'server_restart';
+export type RemovalReason = 'operator' | 'client' | 'expired' | 'server_restart' | 'session_closed';
 
 /** The `removed` event's payload, and {@link JobStatus.removal}. */
 export interface RemovedData {
@@ -434,8 +515,6 @@ export interface JobStatus {
   readonly created: string;
   readonly started: string | null;
   readonly finished: string | null;
-  /** The lease this job opened, `null` if it opened none. */
-  readonly leaseId: string | null;
   /** The client's own name for this work, echoed back. */
   readonly clientRef: string | null;
   /** When the server was found to have stopped while this job was running. */
@@ -625,10 +704,13 @@ export interface QueueItem {
   readonly maxWaitS: number;
   /** When it is removed `expired` if it has not started. */
   readonly expiresAt: string;
-  /** True for the open lease's holder, whose jobs go ahead of the line. */
-  readonly leaseHolder: boolean;
-  /** `call` for a queued chat or decision, `lease` for a queued lease (both have a `call-…` `jobId` and no job record). */
-  readonly kind: 'job' | 'call' | 'lease';
+  /** The queue session this item belongs to (its items go ahead of the line), or null. */
+  readonly session: string | null;
+  /**
+   * `call` for a queued chat or decision (a `call-…` `jobId`, no job record); `session` for a queue
+   * session waiting to open (its `jobId` is the session's `ses-…` id).
+   */
+  readonly kind: 'job' | 'call' | 'session';
 }
 
 /** `GET /v1/queue`. */
@@ -646,7 +728,8 @@ export interface QueueList {
 /** `DELETE /v1/queue/{id}`. */
 export interface QueueRemoved {
   readonly jobId: string;
-  readonly status: 'removed';
+  /** `closed` when the id was the open queue session's, which this ended. */
+  readonly status: 'removed' | 'closed';
   readonly reason: 'operator';
 }
 
@@ -992,7 +1075,7 @@ export interface VoiceInfo {
   readonly backendSupported: boolean;
   readonly installed: boolean;
   readonly resident: boolean;
-  /** A local (`path`) voice that nothing holds: not resident, not leased, not named by a job. */
+  /** A local (`path`) voice that nothing holds: not resident, not named by a job. */
   readonly orphan: boolean;
   readonly loadable: boolean;
   /** Why it is not loadable, in the server's words; `null` when it is loadable. */
@@ -1092,22 +1175,10 @@ export interface LoadVoiceOptions {
    * Required when the voice's row says {@link VoiceInfo.needsReference}; refused on any other kind.
    */
   readonly reference?: VoiceReference;
-  /** Hold the voice from the instant it is resident. */
-  readonly lease?: LeaseOnLoad;
-}
-
-/** Hold what a load makes resident, from the instant it exists. */
-export interface LeaseOnLoad {
-  /** What the run is for: one of the capability classes. */
-  readonly act: string;
-  /** How long the lease outlives silence, in seconds (30-3600); each heartbeat extends it. */
-  readonly ttlSeconds: number;
 }
 
 /** Options for {@link CrucibleClient.loadModel}. */
 export interface LoadModelOptions {
-  /** Hold the model from the instant it is resident. */
-  readonly lease?: LeaseOnLoad;
   /** Tokens: the context to start the engine with (`params.context`). */
   readonly context?: number;
 }
@@ -1446,14 +1517,6 @@ export interface ImageOptions {
   readonly maskName?: string;
   /** How many pixels inside the mask's edge the new picture fades into the kept one; 0 to 256, the server's default 8. Only with `mask`. */
   readonly maskBlur?: number;
-  /** Hold the model from the moment it is loaded, for a batch; `act` must be `image`. */
-  readonly lease?: LeaseOnLoad;
-}
-
-/** Options for {@link CrucibleClient.loadImage}. */
-export interface LoadImageOptions {
-  /** Hold the model from the moment it is loaded; `act` must be `image`. */
-  readonly lease?: LeaseOnLoad;
 }
 
 /** An `image` job's effective parameters and measurements, read by {@link readImageResult}. */
@@ -1492,8 +1555,6 @@ export interface ImageResult {
   readonly artifacts: readonly string[];
   /** Whether the prompt's embeddings came from the loaded model's cache; null from a server that does not say. */
   readonly promptCache: 'hit' | 'miss' | null;
-  /** The lease this job opened or renewed from `lease`, else null. */
-  readonly leaseId: string | null;
 }
 
 /** What an `audio` job makes: `prompt` for sound effects and music, `tags` and `lyrics` for songs. */
@@ -1508,14 +1569,6 @@ export interface AudioOptions {
   readonly steps?: number;
   readonly cfg?: number;
   readonly format?: 'flac' | 'wav';
-  /** Hold the model from the moment it is loaded; `act` is the model's class: `sfx`, `music` or `song`. */
-  readonly lease?: LeaseOnLoad;
-}
-
-/** Options for {@link CrucibleClient.loadAudio}. */
-export interface LoadAudioOptions {
-  /** Hold the model from the moment it is loaded; `act` is the model's class: `sfx`, `music` or `song`. */
-  readonly lease?: LeaseOnLoad;
 }
 
 /** An `audio` job's effective parameters and measurements, read by {@link readAudioResult}. */
@@ -1549,8 +1602,6 @@ export interface AudioResult {
   readonly memoryBytesEstimate: number;
   readonly memoryBasis: string;
   readonly artifacts: readonly string[];
-  /** The lease this job opened or renewed from `lease`, else null. */
-  readonly leaseId: string | null;
 }
 
 /** One click for a `select` model, in the input's own pixels from its top-left corner. */
@@ -1575,14 +1626,6 @@ export interface SegmentOptions {
   readonly points?: readonly SegmentPoint[];
   /** `[x0, y0, x1, y1]` in input pixels, top-left corner first. */
   readonly box?: readonly [number, number, number, number];
-  /** Hold the model from the moment it is loaded; `act` is the model's class: `cutout` or `select`. */
-  readonly lease?: LeaseOnLoad;
-}
-
-/** Options for {@link CrucibleClient.loadSegment}. */
-export interface LoadSegmentOptions {
-  /** Hold the model from the moment it is loaded; `act` is the model's class: `cutout` or `select`. */
-  readonly lease?: LeaseOnLoad;
 }
 
 /** A `segment` job's effective parameters and measurements, read by {@link readSegmentResult}. */
@@ -1618,8 +1661,6 @@ export interface SegmentResult {
   readonly memoryBytesEstimate: number;
   readonly memoryBasis: string;
   readonly artifacts: readonly string[];
-  /** The lease this job opened or renewed from `lease`, else null. */
-  readonly leaseId: string | null;
 }
 
 /** What a `video` job makes: a clip with sound from `prompt`, or from `prompt` and a start `image`. */
@@ -1642,14 +1683,6 @@ export interface VideoOptions {
   /** The first frame, for image-to-video: a PNG, JPEG or WebP. */
   readonly image?: JobInput | null;
   readonly imageName?: string;
-  /** Hold the model from the moment it is loaded, for a batch; `act` must be `video`. */
-  readonly lease?: LeaseOnLoad;
-}
-
-/** Options for {@link CrucibleClient.loadVideo}. */
-export interface LoadVideoOptions {
-  /** Hold the model from the moment it is loaded; `act` must be `video`. */
-  readonly lease?: LeaseOnLoad;
 }
 
 /** A `video` job's effective parameters and measurements, read by {@link readVideoResult}. */
@@ -1697,8 +1730,6 @@ export interface VideoResult {
   readonly stageMemoryBytes: Readonly<Record<string, number>>;
   readonly promptCache: 'hit' | 'miss' | null;
   readonly artifacts: readonly string[];
-  /** The lease this job opened or renewed from `lease`, else null. */
-  readonly leaseId: string | null;
 }
 
 /** `GET /v1/setup` — everything an app needs to be pointed at this server, token included. */
@@ -1999,3 +2030,245 @@ export type UpstreamTestResult =
         | 'upstream_unconfigured';
       readonly message: string;
     };
+
+
+/** A topic of `GET /v1/events`; `server` is always sent. */
+export type ServerEventTopic =
+  | 'job'
+  | 'queue'
+  | 'session'
+  | 'card'
+  | 'chat'
+  | 'task'
+  | 'settings'
+  | 'server';
+
+/** Options for the server-wide {@link CrucibleClient.events} (no job id). */
+export interface ServerEventsOptions {
+  /** Only these topics; leave it out for all of them. */
+  readonly topics?: readonly ServerEventTopic[];
+  /** Resume after this event id: the server replays what came after it, or opens with a `gap` snapshot. */
+  readonly lastEventId?: number;
+  /** Ends the iteration: the stream is closed and no reconnect is attempted. */
+  readonly signal?: AbortSignal;
+}
+
+/** The first event of every connection that is not a resume: what to draw before the first change. */
+export interface ServerSnapshot {
+  readonly id: number;
+  readonly event: 'snapshot';
+  /** True when a resume asked for an id the server no longer has: replace what you drew with this. */
+  readonly gap: boolean;
+  readonly topics: readonly string[];
+  /** `GET /v1/activity`, exactly. */
+  readonly activity: Activity;
+  /** The waiting line, as `GET /v1/queue` lists it. */
+  readonly queue: { readonly items: readonly QueueItem[]; readonly depth: number };
+  /** The recent tasks, newest first, as `GET /v1/tasks` lists them. */
+  readonly tasks: readonly TaskStatus[];
+}
+
+/**
+ * The stream fell too far behind and the server dropped it. {@link CrucibleClient.events}
+ * reconnects at once with `Last-Event-ID: lastEventId`; you lose nothing while that is still in
+ * the server's history, and get a `gap` snapshot when it is not.
+ */
+export interface ServerOverflow {
+  readonly id: number;
+  readonly event: 'overflow';
+  readonly lastEventId: number;
+  readonly limit: number;
+  readonly message: string;
+}
+
+/**
+ * The server is stopping, and the stream ends after this. {@link CrucibleClient.events} waits and
+ * reconnects with backoff until the server is back (or the signal aborts).
+ */
+export interface ServerStopping {
+  /** Null on a stream other than `/v1/events`, whose stopping frame carries no id. */
+  readonly id: number | null;
+  readonly event: 'server.stopping';
+  readonly reason: string;
+  readonly at: string | null;
+}
+
+/** A job's status changed: the event is named for the status it has just entered. */
+export interface JobChangeEvent {
+  readonly id: number;
+  readonly event:
+    | 'job.queued'
+    | 'job.running'
+    | 'job.done'
+    | 'job.failed'
+    | 'job.cancelled'
+    | 'job.interrupted'
+    | 'job.removed';
+  readonly at: string;
+  readonly jobId: string;
+  readonly type: string;
+  readonly model: string | null;
+  readonly client: string | null;
+  readonly clientRef: string | null;
+  readonly status: JobState;
+  /** `job.queued`: its place in the line, or null when it went straight to the lane. */
+  readonly position: number | null;
+  /** `job.queued`: true when it waits in the line; null on the other events. */
+  readonly waiting: boolean | null;
+  /** `job.running`: when it started. */
+  readonly started: string | null;
+  /** `job.done`: the artifacts to fetch. */
+  readonly artifacts: readonly string[] | null;
+  /** `job.failed`: why. */
+  readonly error: JobFailure | null;
+  /** `job.interrupted`: when the server was found stopped under it. */
+  readonly interruptedAt: string | null;
+  /** `job.removed`: why it left the line without running. */
+  readonly removal: RemovedData | null;
+}
+
+/** A running job's progress: at most one a second per job, and the latest always arrives. */
+export interface JobProgressEvent {
+  readonly id: number;
+  readonly event: 'job.progress';
+  readonly at: string;
+  readonly jobId: string;
+  readonly fraction: number;
+  readonly message: string | null;
+}
+
+/** The waiting line changed, as `GET /v1/queue/events` says it. */
+export interface QueueChangeEvent {
+  readonly id: number;
+  readonly event: 'queue.added' | 'queue.moved' | 'queue.started' | 'queue.removed';
+  readonly at: string;
+  readonly jobId: string;
+  /** How many wait after this change. */
+  readonly depth: number;
+  readonly kind: 'job' | 'call' | 'session';
+  /** `queue.added` and `queue.moved`: its place. */
+  readonly position: number | null;
+  /** `queue.started`: how long it waited. */
+  readonly waitedS: number | null;
+  /** `queue.removed`: why (`refused` for one refused at the front, with `error`). */
+  readonly reason: string | null;
+  /** Everything the server put on the frame (`type`, `model`, `client`, `message`, `error`, …). */
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
+/** A queue session changed: the same events its own stream sends, named `session.<event>`. */
+export interface SessionChangeEvent {
+  readonly id: number;
+  readonly event:
+    | 'session.queued'
+    | 'session.moved'
+    | 'session.opened'
+    | 'session.closed'
+    | 'session.removed';
+  readonly at: string;
+  readonly sessionId: string;
+  readonly client: string | null;
+  readonly act: string;
+  /** `session.queued` and `session.moved`: its place in the line. */
+  readonly position: QueuePosition | null;
+  /** `session.closed` and `session.removed`: why it ended. */
+  readonly reason: string | null;
+  readonly message: string | null;
+  /** Everything the server put on the frame (`items_run`, `held_s`, `model`, `error`, …). */
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
+/** What is resident changed. */
+export interface CardEvent {
+  readonly id: number;
+  readonly event:
+    | 'card.warming'
+    | 'card.warming_ended'
+    | 'card.loaded'
+    | 'card.unloading'
+    | 'card.unloaded';
+  readonly at: string;
+  /** The model, voice or other subject id. */
+  readonly subject: string;
+  /** `llm`, `tts`, `align`, `denoise`, `image`, `audio`, `segment` or `video`. */
+  readonly kind: string | null;
+  /** The engine's name; null while warming, and for an aligner or a separator. */
+  readonly engine: string | null;
+  /** `card.loaded`: what it is estimated to hold. */
+  readonly memoryBytesEstimate: number | null;
+  /** `card.loaded`, `card.unloading`, `card.unloaded`. */
+  readonly since: string | null;
+  /** `card.unloading` and `card.unloaded`: its processes. */
+  readonly pids: readonly number[] | null;
+}
+
+/** How many chats and decisions are being answered: coalesced, at most one a second. */
+export interface ChatInFlightEvent {
+  readonly id: number;
+  readonly event: 'chat.in_flight';
+  readonly at: string;
+  readonly inFlight: number;
+  readonly byModel: Readonly<Record<string, number>>;
+}
+
+/** A task's state changed: the task as `GET /v1/tasks/{id}` shows it. */
+export interface TaskChangeEvent {
+  readonly id: number;
+  readonly event: 'task.running' | 'task.done' | 'task.failed' | 'task.cancelled';
+  readonly at: string;
+  readonly task: TaskStatus;
+}
+
+/** A task began a step. */
+export interface TaskStepEvent {
+  readonly id: number;
+  readonly event: 'task.step';
+  readonly at: string;
+  readonly taskId: string;
+  readonly step: TaskStepData;
+}
+
+/** A task's progress: a line of output, or bytes of a download. */
+export interface TaskProgressEvent {
+  readonly id: number;
+  readonly event: 'task.progress';
+  readonly at: string;
+  readonly taskId: string;
+  readonly progress: TaskProgressData;
+}
+
+/** `PUT /v1/settings` wrote: read `GET /v1/settings` for the new values. */
+export interface SettingsWrittenEvent {
+  readonly id: number;
+  readonly event: 'settings.written';
+  readonly at: string;
+  readonly act: string | null;
+  readonly client: string | null;
+  readonly changed: readonly string[];
+}
+
+/** An event this build does not know, carried rather than refused. */
+export interface UnknownServerEvent {
+  readonly id: number;
+  readonly event: 'unknown';
+  /** The event name the server actually sent. */
+  readonly kind: string;
+  readonly data: Readonly<Record<string, unknown>>;
+}
+
+/** One event from `GET /v1/events` (docs/EVENTS.md). */
+export type ServerEvent =
+  | ServerSnapshot
+  | ServerOverflow
+  | ServerStopping
+  | JobChangeEvent
+  | JobProgressEvent
+  | QueueChangeEvent
+  | SessionChangeEvent
+  | CardEvent
+  | ChatInFlightEvent
+  | TaskChangeEvent
+  | TaskStepEvent
+  | TaskProgressEvent
+  | SettingsWrittenEvent
+  | UnknownServerEvent;

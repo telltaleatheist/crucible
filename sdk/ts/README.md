@@ -8,6 +8,9 @@ client speaks HTTP even to a server it just started on localhost.
 `FormData` and `Blob`, which are globals in Node 20+, bun, and the Electron main
 process. ESM and CommonJS builds ship side by side, with `.d.ts` for both.
 
+**Coming from 1.0.55?** Leases are gone; queue sessions and the server-wide event stream
+replace them. [MIGRATION.md](MIGRATION.md) maps every removed call to its replacement.
+
 ## Install
 
 From the GitHub Release (there is no npm registry publish):
@@ -76,13 +79,16 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | Method | Route | Returns |
 |---|---|---|
 | `ping()` | `GET /v1/ping` (no auth) | `Ping` |
-| `info()` | `GET /v1/info` | `ServerInfo` |
+| `info()` | `GET /v1/info` | `ServerInfo`, with `features` |
+| `has(feature)` | `GET /v1/info`, read once | `boolean` — `info().features` includes it |
 | `capability()` | `GET /v1/capability` | `CapabilityRecord` — one verdict per class |
 | `health()` | `GET /v1/health` | `Health` |
 | `upload(bytes \| blob, {filename})` | `POST /v1/uploads` | `UploadResult` — `{blobId, bytes, sha256}` |
 | `submit({type, model?, params, inputs})` | `POST /v1/jobs` | the job id |
 | `job(id)` | `GET /v1/jobs/{id}` | `JobStatus` |
 | `events(id, {lastEventId?})` | `GET /v1/jobs/{id}/events` | `AsyncIterable<JobEvent>` |
+| `events({topics?, lastEventId?, signal?})` | `GET /v1/events` | `AsyncIterable<ServerEvent>`: a snapshot, then every change on the server |
+| `session({act, model?, idleS?, maxWaitS?, onQueue?, signal?})` | `POST /v1/queue/sessions` and its companions | a `CrucibleSession`, once open |
 | `artifact(id, name)` | `GET /v1/jobs/{id}/artifacts/{name}` | `Uint8Array` |
 | `provenance(id, name)` | the `.provenance.json` sibling | `Provenance` |
 | `cancel(id)` | `DELETE /v1/jobs/{id}` | `CancelResult` |
@@ -109,8 +115,8 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `tasks()` | `GET /v1/tasks` | `TaskStatus[]`, newest first |
 | `taskEvents(id, {lastEventId?})` | `GET /v1/tasks/{id}/events` | `AsyncIterable<TaskEvent>` |
 | `cancelTask(id)` | `DELETE /v1/tasks/{id}` | `TaskCancelResult` |
-| `queue()` | `GET /v1/queue` | `QueueList` — the jobs waiting, in order |
-| `removeFromQueue(id)` | `DELETE /v1/queue/{id}` | `QueueRemoved` |
+| `queue()` | `GET /v1/queue` | `QueueList` — the jobs, calls and sessions waiting, in order |
+| `removeFromQueue(id)` | `DELETE /v1/queue/{id}` | `QueueRemoved` (`closed` for the open session) |
 | `queueHeartbeat(id)` | `POST /v1/queue/{id}/heartbeat` | `{position, expiresAt}` |
 | `queueEvents()` | `GET /v1/queue/events` | `AsyncIterable<QueueEvent>`: a snapshot, then every change |
 | `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |
@@ -134,11 +140,71 @@ every load and unload) submit with `queue`: while the server is busy the job wai
 queue instead of being refused `CrucibleBusy`. `new CrucibleClient({..., queue: false})`
 turns that off and `queue: {maxWaitS: 600}` changes the wait (the server's default is an
 hour). `submit()` queues only when its request says `queue: true` or `{maxWaitS}`. A server
-older than the queue is asked again without it, so the app sees `CrucibleBusy` as before.
+that refuses the field is answered by name like any refusal; nothing is sent again without it.
+`chat`, `chatStream`, `decide` and `decideItems` send the same `queue` on a chat: one that must
+wait (its model not resident, every slot taken) waits in the same line.
 
 A queued job that never runs ends `removed {reason, message, waitedS, at}`: `operator`,
 `client`, `expired` or `server_restart`. **It is not a failure**: show it and offer to send
 the job again. docs/QUEUE.md in the Crucible repo is the whole contract.
+
+### Queue sessions: the server to yourself for a run
+
+A **queue session** is an app's turn holding the machine for a run of requests it cannot know
+in advance: a chapter loop, a video analysis, a batch of renders beside an editor's own calls.
+While it is open its items run back to back, nothing from any other client runs in between,
+and what they leave on the card stays for the next item. One session is open at a time per
+server, and there is no priority: sessions wait in the same first-come line as everything
+else.
+
+```ts
+const session = await crucible.session({
+  act: 'analysis',
+  model: 'qwen3.5-9b',                 // loaded for the session if it is not resident
+  onQueue: ({ position, of }) => show(`waiting: ${position} of ${of}`),
+});
+try {
+  const transcript = await session.asr({ ... });
+  for (const chunk of chunks) await session.chat({ model: 'qwen3.5-9b', messages: chunk });
+} finally {
+  await session.close();
+}
+```
+
+- **`session()` answers once the session is open.** While it waits in the line it follows the
+  session's own stream (which is what keeps it in the line) and calls `onQueue` on every move.
+  A session that ends before it opens throws `CrucibleSessionClosed` with its `reason`:
+  `expired`, `operator`, `load_failed` (with the load's error in `details.error`), or
+  `server_restart`. Aborting `signal` takes it out of the line and throws the abort.
+- **A `CrucibleSession` is the client plus the session's header.** Every method works on it —
+  `chat`, `chatStream`, `decide`, `decideItems`, `submit`, `render`, `asr`, `align`, `image`,
+  `audio`, `segment`, `video`, every load and unload, `events`, `artifact`, `stream`, … — and
+  each request carries `X-Crucible-Session`. Its job helpers send no `queue`: a session's
+  jobs go ahead of the line and wait only behind its own. Its chats and decisions still send
+  the client's `queue`, because a session's call that must wait for its model or a slot waits
+  only with it.
+- **Same-client membership.** Every request from the client holding the open session is an
+  item of it, header or not (the server matches on `clientName`). So an app's standalone calls
+  beside its own long run never wait behind it.
+- **`closed` resolves by itself** with `{reason, message, itemsRun, heldS}` when the session
+  ends — `close()`, `idle`, `operator`, `max_hold`, `server_restart` — from a cheap background
+  follow of the session's stream, reconnected with `Last-Event-ID` after a drop. `ended` is
+  the same answer, or `null` while open. After the end every method of the session throws
+  `CrucibleSessionClosed` (`code: 'session_closed'`) without asking the server; fetch what its
+  jobs left through the client it came from.
+- **`idleS`** (default 300 s, 10–86400): the session closes after that long with nothing in
+  flight, no item and no touch. A running job, a chat being answered, a queued call or a stream
+  row being said all count as activity, so a day-long job never idles a session out. Work on
+  the app's own side does not — a cloud model call, a NAS copy — so call `session.touch()`
+  across such a gap (it is a timestamp on the server; every 30 s is fine).
+- `session.state()` reads `GET /v1/queue/sessions/{id}`: `itemsRun`, `inFlight`,
+  `idleDeadline`, and how it ended once it has. `close()` is safe to call twice.
+- `await using` is not offered: this package's TypeScript target does not declare
+  `Symbol.asyncDispose`. Use `try`/`finally` as above.
+
+While another client's session is open, a job without `queue` is refused `server_busy` and a
+chat or decision without it `session_open`; both throw `CrucibleSessionHeld`, naming the
+holder, the session and its act. With `queue` (the helpers' default) they wait for it to close.
 
 ### Events
 
@@ -192,7 +258,46 @@ try {
 ```
 
 A stream that closes *without* a terminal event throws `CrucibleUnreachable`: "the job
-finished" and "the socket died" must never look the same to a caller.
+finished" and "the socket died" must never look the same to a caller. So does a stream the
+server ends because it is stopping (its id-less `server.stopping` frame); the message names the
+last id to resume from once the server is back.
+
+### The server's event stream
+
+`events()` without a job id follows `GET /v1/events`: one stream of every change on the
+server, instead of polling `activity()`, `tasks()`, `queue()` or `health()`.
+
+```ts
+const controller = new AbortController();
+for await (const event of crucible.events({ topics: ['job', 'session', 'card'], signal: controller.signal })) {
+  switch (event.event) {
+    case 'snapshot': draw(event.activity, event.queue, event.tasks); break;   // event.gap: redraw
+    case 'job.done': fetchArtifacts(event.jobId, event.artifacts); break;
+    case 'session.closed': note(event.sessionId, event.reason); break;
+    case 'card.loaded': showResident(event.subject, event.engine); break;
+    case 'server.stopping': showOffline(event.reason); break;           // it reconnects by itself
+  }
+}
+```
+
+- A `snapshot` comes first: `activity` (exactly `activity()`), `queue` and `tasks`. Draw from
+  it, then apply each event.
+- Families, typed per docs/EVENTS.md: `job.<status>` (`JobChangeEvent`, with the status's own
+  field: `position`/`waiting`, `started`, `artifacts`, `error`, `interruptedAt`, `removal`),
+  `job.progress`, `queue.*` (`kind` `job`/`call`/`session`), `session.*`, `card.*`,
+  `chat.in_flight`, `task.*`, `settings.written`. A name this build does not know arrives as
+  `unknown`.
+- **It reconnects by itself** and ends only when `signal` aborts or you break out. A dropped
+  connection resumes with `Last-Event-ID`; when the server no longer has that id the stream
+  opens with a snapshot whose `gap` is `true` — replace what you drew. `overflow` (the reader
+  fell 2000 events behind) is yielded, then reconnected at once from its `lastEventId`.
+  `server.stopping` is yielded, then the stream is waited out and reconnected with backoff
+  (a quarter second, doubling to five) until the server is back.
+- `topics` narrows it (`server` is always sent); a name that is not a topic is refused before
+  anything is sent. `lastEventId` starts from a saved position.
+
+Check that a server has it with `await crucible.has('events')` — `has()` reads
+`info().features` once per client — rather than comparing versions.
 
 ### Provenance is verbatim
 
@@ -413,7 +518,7 @@ decision.answers.team;   // {type: 'choice', choice: 'billing', probabilities, c
 
 It behaves like `chat()`: the model must be resident (409 `model_not_resident`, never a
 silent load), it takes no lane, and a caller that wants the model to stay across a book
-holds a lease. `labelMass` is how much of the engine's raw mass the option letters held;
+runs the book inside a `session()`. `labelMass` is how much of the engine's raw mass the option letters held;
 `timingMs.perQuestion[q].cachedTokens` is `null` when the engine did not say, never 0.
 The reply is checked against the request: an answer for every question asked, of the type
 asked, with a probability for every option — anything else is a `CrucibleProtocolError`.
@@ -659,13 +764,17 @@ for await (const event of session) {
 }
 ```
 
-**The voice must already be resident.** This door never loads one — it behaves like chat, not
-like a render job — and refuses `voice_not_resident` naming what *is* resident. Call
-`loadVoice()` first.
+**A stream runs inside a queue session.** It opens inside this client's own — a
+`CrucibleSession`'s, or the one this client holds open — and otherwise the server opens one for
+it (`act: 'tts'`, `idleS` default 900), which waits in the line like any session and closes
+with the stream. `stream()` resolves once that session is open and the voice is resident (a
+voice that is not is loaded inside the session); `queueSessionId` and `openedForStream` say
+which session it is in. `queue: false` refuses instead of waiting (`session_open` or
+`server_busy`), `queue: {maxWaitS}` bounds the wait, and `signal` aborts it.
 
-**One session per server.** A second is refused `stream_session_open`, and a `render()`
-submitted while one is open is refused `engine_in_use`: narrator has one stdin and one
-stdout, and two conversations on it read each other's replies.
+**One stream per server.** A render submitted inside the same session while the stream is open
+waits until it closes: narrator has one stdin and one stdout, and two conversations on it read
+each other's replies.
 
 **`say` answers with the row's id, not the audio.** The audio comes out of the iterator.
 
@@ -707,8 +816,10 @@ flight and the listener's place in the paragraph. A **refusal** is never retried
 `unknown_session` and `replay_unavailable` are the server saying the window closed, or that
 replaying would hand you audio with a hole in it, and both are yours to see.
 
-`close()` ends the session and frees the voice; the iterator ends on the server's `closed`
-frame either way.
+`close()` ends the stream; a queue session opened for it closes with it, one the client opened
+stays open. The iterator ends on the server's `closed` frame either way — including when the
+queue session around it ended (its `idleS` ran out with no row being said): that frame carries
+`code: "session_closed"` and the session's reason.
 
 ## `capability()`
 
@@ -827,8 +938,8 @@ for (const w of alignment.windows) {
 ```
 
 - **One job for the whole run.** The aligner loads once and stays for the job, so a book's
-  windows need no lease between them. A lease (`POST /v1/models/qwen3-aligner/lease`) only
-  matters if you split the run across several jobs.
+  windows need nothing to hold it between them. Split the run across several jobs inside one
+  `session()` to keep it on the card between them.
 - **A window fails alone.** Past 300 s, or nothing returned: its `error` names why, and the
   rest are aligned.
 - **Times are seconds from the start of that window's audio.** Add the window's own offset
@@ -882,7 +993,7 @@ Every field this client reads is read as the current server sends it. A key the 
 sends is required: a missing one is a `CrucibleProtocolError` naming the field, and so is a
 field of the wrong type. Where the server may honestly send `null`, the type says `T | null`,
 and `null` is never `0` and never `false`. The few keys the server sends only in some cases
-(a job's `leaseId`, a model row's `reason`) read as `null` when absent.
+(a job's `removal`, a model row's `reason`) read as `null` when absent.
 
 An unknown event kind — on a job's stream or a TTS session's — arrives as an `unknown` event
 rather than ending the stream, because a newer server may add one. And `info()` never fails
@@ -904,8 +1015,11 @@ comparison beyond the API major.
 
 ## Errors
 
-No call ever returns a degraded result, and nothing is retried. Each failure has its own
-type, carrying the server's own `code` and `message` where the server sent one:
+No call ever returns a degraded result, and no request is sent twice (a GET that meets a stale
+keep-alive socket is the one exception, once). The long-lived follows — `events()` without a
+job id, a session's own stream, a TTS stream — reconnect after a dropped connection, because a
+dropped connection is weather; a refusal is never retried away. Each failure has its own type,
+carrying the server's own `code` and `message` where the server sent one:
 
 | Error | When |
 |---|---|
@@ -914,7 +1028,10 @@ type, carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleNotACrucible` | something answered `/v1/ping` but did not say `{"crucible": true}` |
 | `CrucibleAuthError` | 401 — wrong or missing token |
 | `CrucibleVersionError` | 426 — carries `serverApiVersion` and `clientApiVersion` |
-| `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, ...) |
+| `CrucibleRefused` | any other 4xx — carries the named reason (`unknown_job_type`, `unknown_model`, `unknown_blob`, `session_not_open`, `session_not_yours`, `unknown_queue_session`, ...) |
+| `CrucibleBusy` | 409 `server_busy` from a running job, for a job sent without `queue` |
+| `CrucibleSessionHeld` | 409 `server_busy` (`details.door: "session"`) or `session_open` — another client's queue session holds the server; carries `holder`, `sessionId`, `act` |
+| `CrucibleSessionClosed` | 409 `session_closed` — the queue session ended (`reason`); also what a session that never opened throws, and what a `CrucibleSession` throws once it knows it has ended |
 | `CrucibleServerError` | 5xx — carries the envelope's `details` (`chat_queue_full`'s `retry_after`, `label_not_in_probs`'s question and letter) |
 | `CrucibleAcceleratorUnreadable` | 503 `accelerator_unreadable` — a `CrucibleServerError` with a narrower name, because "I cannot see the card" must never be read as "the card is free" |
 | `CrucibleProtocolError` | a response API v1 does not describe: a missing load-bearing field, or a field of the wrong type |

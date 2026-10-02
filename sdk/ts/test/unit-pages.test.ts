@@ -66,6 +66,7 @@ function document(pagesEngine: unknown): Record<string, unknown> {
       gpu: { vendor: 'nvidia', name: '3090 Ti', vram_bytes: 25757220864 },
     },
     job_types: ['llm', 'tts'],
+    features: ['queue.sessions', 'events'],
     capabilities: [],
   };
   if (pagesEngine !== undefined) body['pages_engine'] = pagesEngine;

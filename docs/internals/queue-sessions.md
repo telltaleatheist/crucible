@@ -74,6 +74,5 @@ ran out). It never closes a session the client opened itself.
 
 - The server-wide event stream (`GET /v1/events`) and `features` in `GET /v1/info` are a
   parallel branch; the publish hook belongs in `QueueSessions._say`.
-- The TypeScript SDK's session helpers (the SDK still has `lease()` until it is updated).
 - Upstream chats (`<upstream>/<model>`) never touch the card, so a session does not hold
   them back.

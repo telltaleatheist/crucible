@@ -640,6 +640,7 @@ function preFieldInfo(rows: Record<string, unknown>[]): Record<string, unknown> 
     },
     ...UNCLAIMED_ENGINE,
     job_types: ['tts', 'load-voice', 'unload-voice'],
+    features: ['queue.sessions', 'events'],
     capabilities: [
       { job_type: 'echo', models: [] },
       { job_type: 'tts', models: rows },

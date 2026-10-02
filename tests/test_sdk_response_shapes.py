@@ -82,16 +82,16 @@ CASES: list[tuple[str, str, str, type[BaseModel], dict[str, str]]] = [
         "inherited_from": "which packaged voice an override shadows",
         "manifest": "packaged, local or repo",
     }),
-    ("method", "activity", "body", responses.Activity, {
+    ("function", "readActivity", "body", responses.Activity, {
         "settings": "the operator page's audit rows",
         "catalog": "the operator page's audit rows",
         "accelerator": "present only with ?accelerator_probe=true; the SDK exposes accelerator()",
     }),
-    ("method", "activity", "server", responses.ActivityServer, {}),
-    ("method", "activity", "resident", responses.ActivityResident, {
+    ("function", "readActivity", "server", responses.ActivityServer, {}),
+    ("function", "readActivity", "resident", responses.ActivityResident, {
         "reference": "the reference clip a zero-shot voice was loaded with",
     }),
-    ("method", "activity", "slot", responses.ActivitySlot, {}),
+    ("function", "readActivity", "slot", responses.ActivitySlot, {}),
     ("function", "readHeldBy", "held", responses.ActivityHeld, {}),
     ("function", "readActivityChat", "chat", responses.ActivityChat, {}),
     ("function", "readActivityChat", "row", responses.ActivityChatRow, {}),

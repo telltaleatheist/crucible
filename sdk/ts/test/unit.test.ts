@@ -411,7 +411,7 @@ test('only refusals about a SERVER travel to the next one', () => {
 const ACTIVITY_WITH_SESSION = {
   server: { name: 'crucible@mac', version: '0.4.0', api_version: 1, backend: 'mlx-darwin', uptime_s: 12.5 },
   resident: { kind: 'tts', id: 'deathstalker', since: '2026-09-13T18:00:00Z', memory_bytes_estimate: 19000000000, held_by: null, unclaimed_since: null, engine_exit_code: null },
-  // Nothing was told to go: present and null, like `claim` and `lease` below.
+  // Nothing was told to go: present and null, like `session` below.
   stopping: null,
   warming: null,
   claim: { held_by: 'tts stream 3f2a' },
@@ -430,9 +430,11 @@ const ACTIVITY_WITH_SESSION = {
     chars: 903,
   },
   chat: { in_flight: 0, max_in_flight: null, max_in_flight_basis: null, rows: [] },
-  // Nobody has said they are mid-run. Present and null, like `claim` above:
+  // No app holds the server for a run. Present and null, like `stopping` above:
   // an absent key would mean a build that does not speak the field.
-  lease: null,
+  settings: { writes: [] },
+  catalog: { removals: [] },
+  session: null,
   slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
   running: [],
   queued: [],

@@ -49,6 +49,8 @@ const SESSION = {
   fingerprint: 'deathstalker@0123456789abcdef0123456789abcdef01234567',
   sample_rate: 24000,
   backend: 'cuda-linux',
+  queue_session_id: 'ses-stream',
+  queue_session_opened_for_stream: true,
 };
 
 function client(): CrucibleClient {

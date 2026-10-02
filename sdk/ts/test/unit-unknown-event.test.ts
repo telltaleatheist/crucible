@@ -144,6 +144,7 @@ test('a capability whose rows are unreadable is carried, not thrown', async () =
     },
     ...UNCLAIMED_ENGINE,
     job_types: ['echo', 'aurora'],
+    features: ['queue.sessions', 'events'],
     capabilities: [
       { job_type: 'echo', models: [] },
       // A shape from the future: no `source`, no `vram_bytes`.

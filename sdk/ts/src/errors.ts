@@ -163,7 +163,7 @@ export class CrucibleBusy extends CrucibleRefused {
  * 409 `server_busy` from the OPERATOR door: something holds the card and an install may not start.
  */
 export class CrucibleCardHeld extends CrucibleRefused {
-  /** `a job`, `a lease`, `the claim` or `a chat`. */
+  /** `a job`, `a session`, `the claim` or `a chat`. */
   readonly fact: string;
   /** Who, in the server's own words. */
   readonly who: string;
@@ -180,31 +180,40 @@ export class CrucibleCardHeld extends CrucibleRefused {
     this.who = fields.who;
   }
 
-  /** "held by a lease: 'foundry/owens-pc' for 'translate'" — one line, for a row. */
+  /** "held by a session: session ses-… of 'foundry' for 'translate'" — one line, for a row. */
   get heldLine(): string {
     return `held by ${this.fact}: ${this.who}`;
   }
 }
 
-/** The server's code for "somebody has said they are mid-run on this". */
-export const LEASED = 'leased';
+/** The server's code for "another client's queue session holds this server". */
+export const SESSION_OPEN = 'session_open';
+/** A session header (or a session's own route) naming a session that has ended. */
+export const SESSION_CLOSED = 'session_closed';
+/** A session header naming a session still waiting in the line: send its items after it opens. */
+export const SESSION_NOT_OPEN = 'session_not_open';
+/** A session header naming another client's session. */
+export const SESSION_NOT_YOURS = 'session_not_yours';
+/** A session id this server does not know: it never had it, or it restarted since. */
+export const UNKNOWN_QUEUE_SESSION = 'unknown_queue_session';
 
 /**
- * 409 `leased`: a client holds a lease on what is resident, so anything that would take it off the
- * card is refused.
+ * 409 `server_busy` (`details.door: "session"`) or `session_open`: another client's queue session
+ * holds the server, and nothing but its own items runs until it closes. A job or call sent with
+ * `queue` waits in the line instead of meeting this.
  */
-export class CrucibleLeased extends CrucibleRefused {
-  readonly leaseId: string;
-  /** Which resident kind is held: `llm`, `tts` or `align`. */
-  readonly kind: string;
-  /** Who holds it, or null when it did not say. */
+export class CrucibleSessionHeld extends CrucibleRefused {
+  /** Who holds it (its `X-Crucible-Client`, else `User-Agent`), or null when it did not say. */
   readonly holder: string | null;
-  /** What the run IS: a capability class name. */
+  readonly sessionId: string;
+  /** What the holder's run is: a capability class name. */
   readonly act: string;
-  /** When the lease was taken. */
+  /** The model it opened with, or null. */
+  readonly model: string | null;
+  /** `open`, or `queued` for one about to open. */
+  readonly sessionStatus: string;
+  /** When it opened (or was asked for). */
   readonly since: string;
-  /** When it stops being open unless its holder heartbeats it. */
-  readonly expiresAt: string;
 
   constructor(
     status: number,
@@ -212,27 +221,49 @@ export class CrucibleLeased extends CrucibleRefused {
     serverMessage: string,
     details: unknown,
     fields: {
-      leaseId: string;
-      kind: string;
       holder: string | null;
+      sessionId: string;
       act: string;
+      model: string | null;
+      sessionStatus: string;
       since: string;
-      expiresAt: string;
     },
   ) {
     super(status, code, serverMessage, details);
-    this.leaseId = fields.leaseId;
-    this.kind = fields.kind;
     this.holder = fields.holder;
+    this.sessionId = fields.sessionId;
     this.act = fields.act;
+    this.model = fields.model;
+    this.sessionStatus = fields.sessionStatus;
     this.since = fields.since;
-    this.expiresAt = fields.expiresAt;
   }
 
-  /** "leased: foundry, translate, until …" — one line for a bench. */
-  get leasedLine(): string {
+  /** "held: foundry's session for translate, since …" — one line for a bench. */
+  get heldLine(): string {
     const who = this.holder === null ? 'an unnamed client' : this.holder;
-    return `leased: ${who}, ${this.act}, until ${this.expiresAt}`;
+    return `held: ${who}'s session for ${this.act}, since ${this.since}`;
+  }
+}
+
+/**
+ * 409 `session_closed`: the queue session ended, so nothing more runs in it. Also what a session
+ * that never opened throws (`reason` `expired`, `operator`, `load_failed`, …), and what using a
+ * {@link CrucibleSession} after it ended throws without asking the server.
+ */
+export class CrucibleSessionClosed extends CrucibleRefused {
+  readonly sessionId: string;
+  /** Why it ended: `client`, `idle`, `operator`, `max_hold`, `server_restart`, `expired`, `load_failed`, … */
+  readonly reason: string;
+
+  constructor(
+    status: number,
+    serverMessage: string,
+    details: unknown,
+    fields: { sessionId: string; reason: string },
+  ) {
+    super(status, SESSION_CLOSED, serverMessage, details);
+    this.sessionId = fields.sessionId;
+    this.reason = fields.reason;
   }
 }
 
@@ -279,7 +310,11 @@ export function isServerSpecificRefusal(code: string): boolean {
 
 const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   SERVER_BUSY,
-  LEASED,
+  SESSION_OPEN,
+  SESSION_CLOSED,
+  SESSION_NOT_OPEN,
+  SESSION_NOT_YOURS,
+  UNKNOWN_QUEUE_SESSION,
   'engine_in_use',
   'stream_session_open',
   'job_type_disabled',
@@ -347,7 +382,7 @@ export const VOICES_NEEDS_REFERENCE_UNKNOWN = 'voices_needs_reference_unknown';
 export const SUBJECT_UNKNOWN = 'subject_unknown';
 /** It is a subject this server can hold and it does not hold it (409). */
 export const SUBJECT_NOT_INSTALLED = 'subject_not_installed';
-/** Resident, leased, or named by a running task (409). */
+/** Resident, held by a session, or named by a running task (409). */
 export const SUBJECT_IN_USE = 'subject_in_use';
 /** The files would not go (500). */
 export const SUBJECT_REMOVE_FAILED = 'subject_remove_failed';
@@ -374,8 +409,8 @@ export const UPSTREAM_REJECTED = 'upstream_rejected';
 export const UPSTREAM_UNREACHABLE = 'upstream_unreachable';
 /** The upstream rate-limited it, passed through with `Retry-After`. */
 export const UPSTREAM_RATE_LIMITED = 'upstream_rate_limited';
-/** A lease or a `load-model` naming an upstream model. */
-export const LEASE_NOT_NEEDED = 'lease_not_needed';
+/** A `load-model` or a session's `model` naming an upstream model, which is never resident. */
+export const UPSTREAM_NEVER_RESIDENT = 'upstream_never_resident';
 
 /** The three `testUpstream` answers that are results rather than exceptions. */
 export const UPSTREAM_TEST_REFUSALS = [
