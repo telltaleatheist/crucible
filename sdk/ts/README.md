@@ -710,7 +710,7 @@ row, and becomes the artifact's name.
 ```ts
 for await (const event of crucible.events(jobId)) {
   if (event.event !== 'chunk') continue;
-  const { index, seconds, chars, charsPerSec, tokens, capped, take, guard } = event.data;
+  const { index, seconds, chars, charsPerSec, tokens, capped, take, guard, pauseCuts } = event.data;
   if (guard !== null) record(index, guard);   // what the ENGINE decided about it
 }
 ```
@@ -727,6 +727,12 @@ measured fields "the whole guard interface", with "your PaceTracker is the thing
 judges". Both were wrong in the same way: the PaceTracker was never in this path, and until
 narrator grew a guarded batch driver the door a Crucible render drives had no guard at all.
 Do not retake on what you read on this event.
+
+**`pauseCuts` is what narrator's interior-pause cap did to the chunk**: `{atS, fromS, toS}`
+per pause it shortened (seconds), `[]` when it shortened none, `null` when narrator did not say
+(an older narrator or server). The audio and `seconds` are already after the cuts, so this is
+for a render report — a run of cuts in one chapter is a voice stalling — not for correcting
+anything.
 
 **`guard` is an opaque object or `null`, and it is not modelled.** Its contents are
 narrator's — today `{verdict, clean, parts, band, takes}`, where `verdict` is the ladder's own

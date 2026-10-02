@@ -161,6 +161,7 @@ export type {
   ChatResponse,
   ChatUsage,
   ChunkData,
+  PauseCut,
   UnreadableRow,
   DecideAnswer,
   DecideAnswerCommon,

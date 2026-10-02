@@ -96,6 +96,7 @@ import {
   type ChatOptions,
   type ChatResponse,
   type ChunkData,
+  type PauseCut,
   type DecideAnswer,
   type DecideChoiceAnswer,
   type DecideChoiceQuestion,
@@ -3229,7 +3230,19 @@ function readChunk(data: Json, where: string): ChunkData {
     capped: nullableBool(data, 'capped', where),
     take: num(data, 'take', where),
     guard: nullableObject(data, 'guard', where),
+    pauseCuts: readPauseCuts(data, where),
   };
+}
+
+function readPauseCuts(data: Json, where: string): PauseCut[] | null {
+  if (!('pause_cuts' in data)) return null; // a server before 1.0.80 never says
+  const cuts = nullableArray(data, 'pause_cuts', where);
+  if (cuts === null) return null;
+  return cuts.map((entry, index) => {
+    const at = `${where}.pause_cuts[${index}]`;
+    const cut = asObject(entry, at);
+    return { atS: num(cut, 'at_s', at), fromS: num(cut, 'from_s', at), toS: num(cut, 'to_s', at) };
+  });
 }
 
 function readDone(data: Json, where: string): DoneData {

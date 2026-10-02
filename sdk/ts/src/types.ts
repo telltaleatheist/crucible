@@ -662,6 +662,23 @@ export interface ChunkData {
    * none.
    */
   readonly guard: Readonly<Record<string, unknown>> | null;
+  /**
+   * The interior pauses narrator cut down in this chunk (its interior-pause cap,
+   * `NARRATOR_MAX_INTERIOR_PAUSE_S`), in order; `[]` when it cut none, null when narrator did not
+   * say (an older narrator, or a server before 1.0.80). The audio and `seconds` are already after
+   * the cuts.
+   */
+  readonly pauseCuts: readonly PauseCut[] | null;
+}
+
+/** One interior pause narrator shortened: where it was, how long it was, how long it is now. */
+export interface PauseCut {
+  /** Where the pause starts in the chunk's audio as delivered, in seconds. */
+  readonly atS: number;
+  /** How long the pause was before the cut, in seconds. */
+  readonly fromS: number;
+  /** How long it is now, in seconds. */
+  readonly toS: number;
 }
 
 export interface ArtifactData {

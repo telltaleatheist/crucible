@@ -475,7 +475,25 @@ test('a chunk event is typed, narrowable, and read with the server spelling', as
     capped: null,
     take: 0,
     guard: null,
+    pauseCuts: null,
   });
+});
+
+test('pause cuts arrive camelCased; [] stays []; a server that never says reads null', async () => {
+  streams(
+    frame(1, 'chunk', { ...CHUNK_FRAME, pause_cuts: [{ at_s: 3.2, from_s: 4.75, to_s: 1.5 }] }),
+    frame(2, 'chunk', { ...CHUNK_FRAME, index: 42, pause_cuts: [] }),
+    frame(3, 'chunk', { ...CHUNK_FRAME, index: 43, pause_cuts: null }),
+    frame(4, 'done', { artifacts: ['41.flac'], rendered: 3, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const events = await drain('job-tts-1');
+  const cuts = events.map((event) => (event.event === 'chunk' ? event.data.pauseCuts : 'not a chunk'));
+  assert.deepEqual(cuts, [[{ atS: 3.2, fromS: 4.75, toS: 1.5 }], [], null, 'not a chunk']);
+});
+
+test('pause cuts that are not seconds are a protocol error', async () => {
+  streams(frame(1, 'chunk', { ...CHUNK_FRAME, pause_cuts: [{ at_s: 'soon', from_s: 4.75, to_s: 1.5 }] }));
+  await assert.rejects(drain('job-tts-1'), /pause_cuts\[0\]/);
 });
 
 test('an engine verdict survives the read unchanged, vocabulary and all', async () => {

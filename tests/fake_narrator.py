@@ -78,6 +78,15 @@ def _guard_for(row: int | None) -> dict[str, object]:
     return {"guard": verdicts[key]} if key in verdicts else {}
 
 
+def _pause_cuts_for(row: int | None) -> dict[str, object]:
+    raw = os.environ.get("CRUCIBLE_FAKE_PAUSE_CUTS")
+    if raw is None or raw == "" or row is None:
+        return {}
+    cuts = json.loads(raw)
+    key = str(row)
+    return {"pauseCuts": cuts[key]} if key in cuts else {}
+
+
 _WIRE_KEYS = ("temperature", "topP", "topK", "repetitionPenalty")
 
 
@@ -204,7 +213,7 @@ def _emit_whole_row(text: str, row: int | None) -> None:
     if row is None:
         send("audio", **fields, **_gap_fields())
     else:
-        send("batch_item", i=row, **fields, **_guard_for(row))
+        send("batch_item", i=row, **fields, **_guard_for(row), **_pause_cuts_for(row))
 
 
 def _stream_row(text: str, row: int | None) -> Iterator[None]:

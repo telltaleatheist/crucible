@@ -461,6 +461,36 @@ def _optional_bool(row: dict[str, Any], key: str) -> bool | None:
     return value
 
 
+def _seconds_of(cut: dict[str, Any], key: str, at: int) -> float:
+    value = cut.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+        raise _RowFailure(
+            f"narrator sent pauseCuts[{at}].{key}={value!r}, which is not a number "
+            "of seconds"
+        )
+    return float(value)
+
+
+def _pause_cuts_of(row: dict[str, Any]) -> list[dict[str, float]] | None:
+    """The interior pauses narrator cut down in this chunk ({atS, fromS, toS}, seconds;
+    [] when it cut none), or None when narrator did not say (an older narrator)."""
+    cuts = row.get("pauseCuts")
+    if cuts is None:
+        return None
+    if not isinstance(cuts, list):
+        raise _RowFailure(f"narrator sent pauseCuts={cuts!r}, which is not a list")
+    read = []
+    for at, cut in enumerate(cuts):
+        if not isinstance(cut, dict):
+            raise _RowFailure(f"narrator sent pauseCuts[{at}]={cut!r}, which is not an object")
+        read.append({
+            "at_s": _seconds_of(cut, "atS", at),
+            "from_s": _seconds_of(cut, "fromS", at),
+            "to_s": _seconds_of(cut, "toS", at),
+        })
+    return read
+
+
 def _guard_of(row: dict[str, Any]) -> dict[str, Any] | None:
     guard = row.get("guard")
     if guard is None:
@@ -708,6 +738,7 @@ class TtsJobType:
             tokens = _optional_int(row, "tokens")
             capped = _optional_bool(row, "capped")
             guard = _guard_of(row)
+            pause_cuts = _pause_cuts_of(row)
         except _RowFailure as exc:
             return str(exc)
 
@@ -725,5 +756,6 @@ class TtsJobType:
             capped=capped,
             take=take,
             guard=guard,
+            pause_cuts=pause_cuts,
         )
         return None

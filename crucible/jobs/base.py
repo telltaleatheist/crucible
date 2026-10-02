@@ -272,6 +272,7 @@ class JobContext:
         capped: bool | None,
         take: int,
         guard: dict[str, Any] | None,
+        pause_cuts: list[dict[str, float]] | None,
     ) -> None:
         if capped is not None and not isinstance(capped, bool):
             raise TypeError(f"capped must be a bool or None, got {capped!r}")
@@ -290,6 +291,7 @@ class JobContext:
                 "capped": capped,
                 "take": take,
                 "guard": guard,
+                "pause_cuts": pause_cuts,
             },
         )
 

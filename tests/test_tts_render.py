@@ -139,9 +139,10 @@ def test_the_chunk_event_carries_the_measurements_and_the_verdict(
     row = chunks[41]
     assert set(row) == {
         "index", "seconds", "chars", "chars_per_sec", "tokens", "capped", "take",
-        "guard",
+        "guard", "pause_cuts",
     }
     assert row["guard"] is None
+    assert row["pause_cuts"] is None
     assert row["chars"] == len(CHUNKS[0]["text"])
     assert row["seconds"] == pytest.approx(row["chars"] / CHARS_PER_SEC, abs=1e-4)
     assert row["chars_per_sec"] == pytest.approx(CHARS_PER_SEC, abs=1e-3)
@@ -265,6 +266,31 @@ def test_a_guard_reaches_the_event_without_being_rebuilt() -> None:
     assert _guard_of({"i": 41, "guard": None}) is None
     verdict = {"verdict": "clean", "takes": []}
     assert _guard_of({"i": 41, "guard": verdict}) is verdict
+
+
+def test_the_pauses_narrator_cut_reach_the_chunk_event(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_PAUSE_CUTS", json.dumps({
+        "41": [{"atS": 3.2, "fromS": 4.75, "toS": 1.5}], "42": [],
+    }))
+    chunks = {row["index"]: row for row in events_of(rendered(), "chunk")}
+    assert chunks[41]["pause_cuts"] == [{"at_s": 3.2, "from_s": 4.75, "to_s": 1.5}]
+    assert chunks[42]["pause_cuts"] == []
+    assert chunks[43]["pause_cuts"] is None, "an older narrator says nothing: null, not []"
+
+
+def test_pause_cuts_that_are_not_seconds_fail_their_row_and_not_the_batch(
+    rendered: Callable[..., list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_PAUSE_CUTS", json.dumps({
+        "41": [{"atS": "soon", "fromS": 4.75, "toS": 1.5}],
+    }))
+    events = rendered()
+    assert terminal(events)["event"] == "done"
+    failed = terminal(events)["data"]["failed"]
+    assert [row["index"] for row in failed] == [41]
+    assert "pauseCuts[0].atS='soon'" in failed[0]["message"]
 
 
 def test_a_failed_chunk_is_reported_and_its_neighbours_still_land(

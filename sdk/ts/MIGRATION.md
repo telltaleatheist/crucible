@@ -5,7 +5,15 @@ release: **no legacy compatibility**. Leases are gone from the server and from t
 nothing wraps them; the SDK also no longer asks an older server again without `queue`. Move to
 queue sessions and the event stream as you touch each call site.
 
-## Waiting in line is the default (the release after 1.0.77)
+## New: `ChunkData.pauseCuts` (1.0.80)
+
+A `tts` render's `chunk` event carries the interior pauses narrator cut down in that chunk
+(narrator's interior-pause cap, `NARRATOR_MAX_INTERIOR_PAUSE_S`, default 1.5 s):
+`pauseCuts: readonly {atS, fromS, toS}[] | null`, seconds. `[]` means nothing was cut; `null`
+means narrator did not say (an older narrator, or a server before 1.0.80). The chunk's audio and
+`seconds` are already after the cuts. Nothing to change unless you want to show them.
+
+## Waiting in line is the default (1.0.78)
 
 Every request that can wait now waits, on the server and in this SDK: a job, a chat, a
 decision and a TTS stream take a place in the server's line while it is busy instead of being
@@ -14,7 +22,7 @@ refused. The opt-in is gone, not kept beside the new default (no legacy compatib
 | On the wire | Before | Now |
 |---|---|---|
 | `queue` left out | refused at once (`server_busy`, `model_not_resident`, `chat_queue_full`, `session_open`); a stream and a job inside the open session already waited | **waits**, up to an hour (a day for a job inside the open session) |
-| `"queue": {}` | wait the default hour | **`400 invalid_request`**: leave the member out |
+| `"queue": {}` | wait the default hour | unchanged: waits the default hour (1.0.78 refused it, which broke every older SDK; 1.0.79 reads it as "wait" again). This SDK leaves the member out instead |
 | `"queue": {"max_wait_s": N}` | wait up to N s | unchanged |
 | `"queue": false` | `400 invalid_request` on a job, chat or decision (a stream: refuse at once) | **refuse at once**, everywhere |
 | `"queue": true` / `null` | `true` refused; `null` meant "refuse" | `400 invalid_request` |
