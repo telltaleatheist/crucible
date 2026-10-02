@@ -56,7 +56,13 @@ At the front of the line, `admit_session` waits for a free lane and no open stre
 keeps the session's place; the session counts as a holder of that model while it waits
 (`calls_waiting`), so nothing settles it away between the load finishing and the opening.
 A load that ends anything but `done` fails the session (`removed`, `load_failed`, error
-`session_load_failed`).
+`session_load_failed`), except a card held by a process Crucible does not own: a load
+refused `accelerator_busy` at admission is never started, and one that ended
+`accelerator_busy` on the lane (`callqueue.card_was_held`) does not count against
+`MAX_LOADS`. Either way the session keeps its place (`WaitingLine.not_yet` records the
+sentence, says `waiting` on the session's stream, and paces the next try by
+`CARD_RECHECK_S`); its `max_wait_s` bounds the wait. Queued calls do the same in
+`callqueue.admit_call` / `_load_for`.
 
 ### Streams
 

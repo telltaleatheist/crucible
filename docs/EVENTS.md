@@ -48,8 +48,8 @@ unknown name is refused `400 unknown_topic` with the known ones in `details.know
 | topic | events |
 | --- | --- |
 | `job` | `job.queued`, `job.running`, `job.progress`, `job.done`, `job.failed`, `job.cancelled`, `job.interrupted`, `job.removed` |
-| `queue` | `queue.added`, `queue.moved`, `queue.started`, `queue.removed` |
-| `session` | `session.queued`, `session.moved`, `session.opened`, `session.closed`, `session.removed` |
+| `queue` | `queue.added`, `queue.moved`, `queue.waiting`, `queue.started`, `queue.removed` |
+| `session` | `session.queued`, `session.moved`, `session.waiting`, `session.opened`, `session.closed`, `session.removed` |
 | `card` | `card.warming`, `card.warming_ended`, `card.loaded`, `card.unloading`, `card.unloaded` |
 | `chat` | `chat.in_flight` |
 | `task` | `task.running`, `task.step`, `task.progress`, `task.done`, `task.failed`, `task.cancelled` |
@@ -89,6 +89,7 @@ queued chat or decision) or `"session"` (an app's session waiting for its turn).
 | --- | --- |
 | `queue.added` | `position`, `type`, `model`, `client`, `submitted`, `max_wait_s`. |
 | `queue.moved` | `position`. |
+| `queue.waiting` | `code` (`accelerator_busy`) and `message`: the item is at the front, but the card is held by a process Crucible does not own, so it waits for the card (docs/QUEUE.md). Said when that starts and whenever who holds the card changes; `waiting_for` on its row in the snapshot says the same. |
 | `queue.started` | `waited_s`: it left the line for the lane or for a chat slot. |
 | `queue.removed` | `reason` and `message`; a job refused at the front has `reason: "refused"` and `error` instead of `message`. |
 

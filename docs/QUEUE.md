@@ -61,6 +61,7 @@ that may wait (every job not sent with `"queue": false`):
 | event | data | means |
 |---|---|---|
 | `queued` | `{position, of}` | where it stands; sent when it joins and again whenever it moves |
+| `waiting` | `{code, message, details, since}` | it is at the front and the lane is free, but the card is held by a process Crucible does not own (below); sent when that starts and whenever who holds it changes |
 | `started` | `{waited_s}` | it reached the lane; `progress`, `done` and `failed` follow as usual |
 | `removed` | `{reason, message, waited_s, at}` | it left the queue without running; **terminal** |
 
@@ -85,8 +86,66 @@ by yourself on `operator` (a person removed it on purpose). On `expired` or
 When the job reaches the front of the queue, it goes through exactly the checks a fresh
 submit meets. If one of them refuses it (not enough memory, a model missing), the job ends
 `failed` with that refusal as its error, as if it had been refused at submit. It is not
-queued again. Only "busy" refusals (`server_busy`, `engine_in_use`) mean "not yet", and
-the job keeps its place.
+queued again. Only "busy" refusals (`server_busy`, `engine_in_use`) and a card held by
+someone else (`accelerator_busy`, next section) mean "not yet", and the job keeps its
+place.
+
+## When the card is held by someone else
+
+Before Crucible loads a model it checks the card. If memory on it is held by a process
+this Crucible does not own (a training run, another program, or an engine an earlier
+Crucible left running), the check refuses `409 accelerator_busy`, naming the holder: its
+pid, name and memory, or under WSL2, where the driver names nobody, how many bytes no
+process accounts for. Crucible never evicts another process.
+
+That is contention, not a mistake in the request, so a request that may wait **waits for
+the card**, the same way it waits for the lane:
+
+- A job keeps its place at the front of the line. The lane stays free; the job is checked
+  again every 5 s (each check is a full admission, so it is paced, never per tick) and runs
+  as soon as the memory is let go. It says why it waits: a `waiting` event on its own
+  stream, `waiting_for` on its row in `GET /v1/queue` and in `GET /v1/activity`'s
+  `queued`, and `queue.waiting` on the queue streams. Each is said once, and again only
+  when who holds the card changes.
+- A job submitted to an idle server while the card is held joins the line at once
+  (`queued: true`, `position: 1`) and waits the same way.
+- A queue session opening on its `model`, and a queued chat or decision whose model must
+  be loaded, wait the same way at the front: the load is not started until the card is
+  free. A load that the pump did start and that met a holder on the lane (one appeared
+  between the check and the start) does not end the session `load_failed` or the call
+  `queued_load_failed`; the item goes back to waiting for the card.
+- The wait is bounded by the request's own `max_wait_s`. When it runs out the item is
+  removed `expired`, and the message says it was waiting for the accelerator and who held
+  it.
+- `"queue": false` still refuses at once: `409 accelerator_busy`.
+
+`waiting_for` is `{code: "accelerator_busy", message, details, since, next_check_at}`, or
+null for an item that waits only for its turn. `details` is the guard's: `processes`
+(pid, name, `used_bytes`), or `unattributed_bytes`, and `left_by_previous_run` when an
+earlier Crucible left the holder.
+
+An engine an earlier Crucible left running waits like any other holder. The server asks
+it to stop when it starts (SIGTERM, then the engine's stop budget), so the first requests
+after a restart usually find it already exiting; one that will not exit is named with the
+command to stop it (`kill <pid>`, never -9), and the waiting request goes ahead the moment
+it has gone.
+
+What still fails by name, because no wait changes it: a model larger than the host or the
+card's free memory with nothing foreign on it (`insufficient_memory`), a card measured
+without a feature the engine needs (`card_lacks_feature`), and a card that cannot be read
+(`accelerator_unreadable`).
+
+The line stays first come, first served while its front waits for the card: what is
+behind it (another client's job, a chat for the resident model) waits behind it. The only
+job types that never touch the card are `echo` and the `unload-*` jobs, and letting those
+past would reorder a client's own intent (its unload ahead of its load). A chat sent with
+`"queue": false` to a resident model with a free slot is not held back.
+
+One edge stays a failure: a job that passed the check at the front and met a holder in
+the milliseconds before its engine started ends `failed` `accelerator_busy`, as before. A
+job that has started is never put back in the line (`running` never becomes `queued`
+again). The loads the server starts for a session or a queued call are the exception
+above, because the waiting item is not the job.
 
 `removed` has a fifth reason for a job that was an item of a queue session (below):
 `session_closed`, when its session ended before the job reached the lane.
@@ -111,20 +170,22 @@ nothing from anyone else runs. Everyone else is first come, first served.
 ## The whole queue
 
 - `GET /v1/queue`: `{items: [{position, job_id, type, model, client, client_ref, submitted,
-  waited_s, max_wait_s, expires_at, session, kind}], depth, limits}`. `kind` is `"job"`,
+  waited_s, max_wait_s, expires_at, session, kind, waiting_for}], depth, limits}`.
+  `waiting_for` says the front item waits for a held card (above), else null. `kind` is `"job"`,
   `"call"` (a queued chat or decision) or `"session"` (a queue session waiting to open,
   `job_id` `ses-…`). `session` names the queue session an item belongs to, or is null.
 - `DELETE /v1/queue/{job_id}`: remove one (reason `operator`). Given the open session's
   id, it ends that session (reason `operator`).
 - `GET /v1/queue/events`: server-wide SSE for dashboards. A `snapshot {items, depth}`
-  first, then `added`, `moved {position}`, `started {waited_s}` and `removed {reason}` with
-  `job_id` and `depth` on every event. A job refused at the front shows here as `removed`
+  first, then `added`, `moved {position}`, `waiting {code, message}` (the front waits for
+  a held card), `started {waited_s}` and `removed {reason}` with `job_id` and `depth` on
+  every event. A job refused at the front shows here as `removed`
   with `reason: "refused"` and its `error`; on its own stream it is `failed`.
-- `GET /v1/activity`: `queued` lists the waiting jobs in order (with `waited_s` and
-  `max_wait_s`), and `slots.accelerated.queue_depth` counts the job on the lane plus every
+- `GET /v1/activity`: `queued` lists the waiting jobs in order (with `waited_s`,
+  `max_wait_s` and `waiting_for`), and `slots.accelerated.queue_depth` counts the job on the lane plus every
   waiting job.
-- `GET /v1/events`: the same four announcements as `queue.added`, `queue.moved`,
-  `queue.started` and `queue.removed`, each with its `kind`, on the one stream that also
+- `GET /v1/events`: the same announcements as `queue.added`, `queue.moved`,
+  `queue.waiting`, `queue.started` and `queue.removed`, each with its `kind`, on the one stream that also
   carries jobs, the card, chats, tasks and settings. A dashboard that would otherwise poll
   `/v1/queue`, `/v1/activity` and `/v1/tasks` follows that instead (docs/EVENTS.md).
 
@@ -151,7 +212,8 @@ its engine is taken. Otherwise (the default):
   on another model, the server submits a `load-model` job for it (your client name,
   `client_ref: "for the queued chat call-…"`). Every call behind it for the same model
   then fills the engine's slots together once it is loaded. A load that fails ends the
-  call `502 queued_load_failed` naming the job.
+  call `502 queued_load_failed` naming the job; a card held by someone else is not a
+  failure, the call waits for it ("When the card is held by someone else").
 - **At the front, every slot taken:** it gets the next slot that frees.
 - The answer is the normal completion (or stream, or decision). Nothing is sent before it,
   so give the HTTP request a read timeout that covers `max_wait_s` plus the answer.
@@ -204,7 +266,8 @@ POST /v1/queue/sessions
   server loads it for the session (a `load-model` job with your client name and
   `client_ref: "opening session ses-…"`) and reports the session open only once the load
   is done. A load that fails ends the session (`removed`, reason `load_failed`, with the
-  error). Leave it out to open on whatever is resident. An upstream model is refused
+  error); a card held by someone else is not a failure, the session waits for it at the
+  front (a `waiting` event, "When the card is held by someone else"). Leave it out to open on whatever is resident. An upstream model is refused
   `409 upstream_never_resident`; an unknown one `404 unknown_model`.
 - `idle_s` (default 300, 10 to 86400): see "How a session ends".
 - `max_wait_s` (as the queue's): how long it may wait in the line to open.
@@ -229,6 +292,7 @@ or it is removed `expired`.
 |---|---|---|
 | `queued` | `{position, of}` | it joined the line |
 | `moved` | `{position, of}` | its place changed |
+| `waiting` | `{code, message, details, since}` | at the front, its model's load waits for a card held by someone else |
 | `opened` | `{opened_at, model, load_job}` | it is open; send its items |
 | `closed` | `{reason, message, items_run, held_s}` | it ended; **terminal** |
 | `removed` | `{reason, message, error?}` | it ended without ever opening; **terminal** |

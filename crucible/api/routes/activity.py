@@ -23,7 +23,12 @@ def _activity_row(store: JobStore, job: Any) -> dict[str, Any]:
     if waiting is not None:
         row["waited_s"] = waiting.waited_s(clock.now())
         row["max_wait_s"] = waiting.max_wait_s
+        row["waiting_for"] = _waiting_for(waiting)
     return row
+
+
+def _waiting_for(waiting: Any) -> dict[str, Any] | None:
+    return None if waiting.card_wait is None else waiting.card_wait.to_dict()
 
 
 def _call_row(waiting: Any) -> dict[str, Any]:
@@ -42,6 +47,7 @@ def _call_row(waiting: Any) -> dict[str, Any]:
         "waited_s": waiting.waited_s(clock.now()),
         "max_wait_s": waiting.max_wait_s,
         "kind": waiting.kind,
+        "waiting_for": _waiting_for(waiting),
     }
 
 

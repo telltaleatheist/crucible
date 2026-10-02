@@ -5,8 +5,11 @@ expires what has waited too long or been abandoned, closes the open queue sessio
 it has gone idle or held the server for its maximum, re-announces positions (the open
 session's items move to the front), and, when the lane is free, offers the front of the
 line to admission — the same checks a fresh submit meets. A refusal that only says
-"busy" (``server_busy``, ``engine_in_use``) leaves the job waiting in its place; any
-other refusal ends the job ``failed`` with that refusal as its error.
+"busy" (``server_busy``, ``engine_in_use``) leaves the job waiting in its place; so does
+``accelerator_busy`` (memory on the card held by a process Crucible does not own), which
+is recorded on the item with the guard's sentence and checked again only every
+``CARD_RECHECK_S`` (crucible/jobs/line.py). Any other refusal ends the job ``failed``
+with that refusal as its error.
 
 A queued chat or decision (a *call*, crucible/callqueue.py) is offered its model
 instead of the lane: a free slot on the resident model admits it, and a model that is
@@ -25,6 +28,7 @@ import asyncio
 import sys
 from typing import Any, Callable
 
+from . import clock
 from .admission import (
     KEEPS_WAITING,
     AdmissionContext,
@@ -168,10 +172,14 @@ class QueuePump:
                 return
             if chats_hold_the_card(waiting.job.type, len(self._inflight)):
                 return
+            if not waiting.card_due(clock.now()):
+                return
             refusal = await admit_waiting(waiting, ctx)
             if refusal is None:
                 return
             if refusal.code in KEEPS_WAITING:
+                if not waiting.gone:
+                    line.not_yet(waiting, refusal)
                 return
             if not waiting.gone:
                 line.fail(waiting, refusal)

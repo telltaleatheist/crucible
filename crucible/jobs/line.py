@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 from .. import clock
+from ..accelerator import WAITS_FOR_THE_CARD
 from ..errors import ApiError
 from ..events import QUEUE
 from ..queuesessions import LOAD_FAILED, QueueSession, QueueSessions, is_session_id
@@ -49,6 +50,11 @@ UNNAMED = "an unnamed client"
 
 CALL_PREFIX = "call-"
 ADMITTED = "admitted"
+
+CARD_RECHECK_S = 5.0
+"""How often an item waiting for the accelerator (``accelerator_busy``: memory on it is
+held by a process this Crucible does not own) has its card checked again. Each check is
+a full admission (nvidia-smi and the process table), so it is paced, never per tick."""
 
 
 def limits() -> dict[str, Any]:
@@ -82,6 +88,27 @@ class Call:
                 "client": self.client}
 
 
+@dataclass(frozen=True)
+class CardWait:
+    """Why an item at the front waits for the accelerator rather than for the lane: the
+    refusal its last admission met (``accelerator_busy``), naming who holds the card."""
+
+    code: str
+    message: str
+    details: dict[str, Any] | None
+    since: datetime
+    next_check: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "details": self.details,
+            "since": self.since.isoformat(),
+            "next_check_at": self.next_check.isoformat(),
+        }
+
+
 @dataclass
 class Waiting:
     is_call: ClassVar[bool] = False
@@ -95,6 +122,7 @@ class Waiting:
     fresh_journal: Any = None
     position: int | None = None
     gone: bool = False
+    card_wait: CardWait | None = None
 
     @property
     def expires_at(self) -> datetime:
@@ -127,7 +155,13 @@ class Waiting:
             "expires_at": self.expires_at.isoformat(),
             "session": self.session,
             "kind": self.kind,
+            "waiting_for": None if self.card_wait is None else self.card_wait.to_dict(),
         }
+
+    def card_due(self, now: datetime) -> bool:
+        """Whether this item may meet admission now: always, unless it is waiting for
+        the accelerator and its next check has not come."""
+        return self.card_wait is None or now >= self.card_wait.next_check
 
 
 @dataclass
@@ -283,6 +317,40 @@ class WaitingLine:
         self._wake()
         return item
 
+
+    def not_yet(self, item: Waiting, refusal: ApiError) -> None:
+        """The item met a refusal that keeps it waiting in its place. One that says the
+        accelerator is held (``accelerator_busy``) is recorded on the item, said once on
+        its stream, the session's and the queue's whenever who holds the card changes,
+        and checked again only after ``CARD_RECHECK_S``; any other ("busy") clears it."""
+        if refusal.code not in WAITS_FOR_THE_CARD:
+            item.card_wait = None
+            return
+        now = clock.now()
+        was = item.card_wait
+        item.card_wait = CardWait(
+            code=refusal.code,
+            message=refusal.message,
+            details=refusal.details,
+            since=now if was is None else was.since,
+            next_check=now + timedelta(seconds=CARD_RECHECK_S),
+        )
+        if was is not None and was.message == refusal.message:
+            return
+        said = {
+            "code": refusal.code,
+            "message": (
+                f"waiting for the accelerator, checked again every {CARD_RECHECK_S:g} s "
+                f"until {item.expires_at.isoformat()}: {refusal.message}"
+            ),
+            "details": refusal.details,
+            "since": item.card_wait.since.isoformat(),
+        }
+        if item.is_session:
+            self._sessions.waiting(item.job, said)  # type: ignore[arg-type]
+        elif not item.is_call:
+            self._store.append_event(item.job, "waiting", said)
+        self._announce("waiting", item, code=refusal.code, message=said["message"])
 
     def reorder(self, announce_new: Waiting | None = None) -> None:
         depth = len(self._items)
@@ -453,6 +521,13 @@ class WaitingLine:
         followed_jobs: set[str], followed_clients: set[str | None],
     ) -> str | None:
         if now >= item.expires_at:
+            if item.card_wait is not None:
+                return (
+                    f"it waited its whole max_wait_s ({item.max_wait_s} s) without "
+                    "reaching the lane; since "
+                    f"{item.card_wait.since.isoformat()} it was waiting for the "
+                    f"accelerator, and it was still held: {item.card_wait.message}"
+                )
             return (
                 f"it waited its whole max_wait_s ({item.max_wait_s} s) without "
                 "reaching the lane"

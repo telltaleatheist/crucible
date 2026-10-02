@@ -562,7 +562,7 @@ def test_a_render_of_a_voice_that_is_not_resident_still_asks(
 
     response = submit(
         tts_client, auth, type="tts", model=VOICE,
-        params={"language": "en", "take": 0, "chunks": CHUNKS},
+        params={"language": "en", "take": 0, "chunks": CHUNKS}, queue=False,
     )
     assert response.status_code == 409, response.json()
     assert response.json()["error"]["code"] == "accelerator_busy"

@@ -1116,6 +1116,7 @@ A running or queued job, as `GET /v1/activity` shows it.
 | `client` | string or null | yes | — |  |
 | `waited_s` | integer or number or null | no | — |  |
 | `max_wait_s` | integer or null | no | — |  |
+| `waiting_for` | QueueWaitingFor or null | no | — |  |
 
 ### `ActivityResident`
 
@@ -1500,6 +1501,7 @@ One job waiting in the server's queue.
 | `expires_at` | string | yes | — |  |
 | `session` | string or null | yes | — |  |
 | `kind` | `'job'` or `'call'` or `'session'` | yes | — |  |
+| `waiting_for` | QueueWaitingFor or null | no | — |  |
 
 ### `QueueList`
 
@@ -1528,6 +1530,18 @@ How long this request may wait in the server's line.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `max_wait_s` | integer | yes | — | How long the request may wait for its turn before it is removed `expired`. |
+
+### `QueueWaitingFor`
+
+Why an item at the front is not offered the lane yet although it is free: memory on the accelerator is held by a process this Crucible does not own. `message` is the guard's sentence naming the holder (pid, name and bytes, or the unattributed bytes); the item is checked again at `next_check_at` and leaves the line `expired` when its `max_wait_s` runs out.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `code` | `'accelerator_busy'` | yes | — |  |
+| `message` | string | yes | — |  |
+| `details` | object or null | yes | — |  |
+| `since` | string | yes | — |  |
+| `next_check_at` | string | yes | — |  |
 
 ### `ScoreAnswer`
 

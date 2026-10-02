@@ -369,7 +369,7 @@ def test_somebody_else_on_the_card_refuses_by_name(
         lambda: [ComputeApp(pid=44503, name="python", used_bytes=17 * GIB)],
     )
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (5 * GIB, 24 * GIB))
-    response = submit(align_client, auth)
+    response = submit(align_client, auth, queue=False)
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "accelerator_busy"
 

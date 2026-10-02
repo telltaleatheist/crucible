@@ -322,6 +322,11 @@ class QueueSessions:
         session.position = position
         self._say(session, "queued" if first else "moved", {"position": position, "of": of})
 
+    def waiting(self, session: QueueSession, data: dict[str, Any]) -> None:
+        """A queued session at the front waits for the accelerator (its model's load
+        met ``accelerator_busy``); said whenever who holds the card changes."""
+        self._say(session, "waiting", data)
+
     def opened(self, session: QueueSession) -> None:
         if self._open is not None and self._open is not session:
             raise RuntimeError(

@@ -203,7 +203,9 @@ ladder or the CLI:
 - `position`, `queue_depth` and cancel are unchanged for a job that did not ask to queue.
   Under the admission rule they only take the values 0, 1 or null.
 - **The waiting line (2026-09-30).** A submit with `"queue": {...}` that admission refuses
-  only as busy (`server_busy`, `engine_in_use`) is created anyway and joins
+  only as busy (`server_busy`, `engine_in_use`) or with the card held by a process
+  Crucible does not own (`accelerator_busy`; `admission.KEEPS_WAITING`) is created anyway
+  and joins
   `WaitingLine` (`crucible/jobs/line.py`), attached to the store with `attach_line`. It is
   a normal job (`queued`, inputs moved in, journal created) whose record carries `waiting`
   while it waits. `crucible/queuepump.py` runs `admission.admit_waiting` on the front of the
@@ -460,7 +462,11 @@ describes how they are built). In this runtime's terms:
   `accelerator.guard`'s `accelerator_busy` message says which pid and command a previous Crucible
   left, when it was asked to stop, and to run `kill <pid>` (never -9), with the rows under
   `details.left_by_previous_run`. The survivor stays in `resident.json`, so the next start asks
-  again.
+  again. A request that may wait waits for it like any other holder (docs/QUEUE.md, "When the
+  card is held by someone else"): it was asked to stop and is usually mid-exit when the first
+  requests after a restart arrive, and the wait ends the moment it has gone, so failing them
+  would turn a few seconds of teardown into lost work. The kill instruction rides on the
+  waiting sentence and on the `expired` removal.
 
 ## 7. Worker processes (`crucible/workers.py`, `crucible/jobs/workerio.py`)
 

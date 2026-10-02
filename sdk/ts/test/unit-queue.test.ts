@@ -232,6 +232,11 @@ const ROW = {
   position: 1, job_id: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
   client_ref: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waited_s: 12.5,
   max_wait_s: 3600, expires_at: '2026-09-30T11:00:00+00:00', session: null, kind: 'job',
+  waiting_for: {
+    code: 'accelerator_busy', message: 'the accelerator is held by pid 4242 (python, 10.0 GiB)',
+    details: { processes: [{ pid: 4242 }] }, since: '2026-09-30T10:00:05+00:00',
+    next_check_at: '2026-09-30T10:00:15+00:00',
+  },
 };
 
 test('queue() lists the waiting jobs in order, and removeFromQueue() removes one', async () => {
@@ -257,6 +262,11 @@ test('queue() lists the waiting jobs in order, and removeFromQueue() removes one
     position: 1, jobId: 'j1', type: 'tts', model: 'sigma', client: 'bookforge crucible-client/1.0',
     clientRef: 'chapter 3', submitted: '2026-09-30T10:00:00+00:00', waitedS: 12.5,
     maxWaitS: 3600, expiresAt: '2026-09-30T11:00:00+00:00', session: null, kind: 'job',
+    waitingFor: {
+      code: 'accelerator_busy', message: 'the accelerator is held by pid 4242 (python, 10.0 GiB)',
+      details: { processes: [{ pid: 4242 }] }, since: '2026-09-30T10:00:05+00:00',
+      nextCheckAt: '2026-09-30T10:00:15+00:00',
+    },
   });
   assert.equal(listed.limits.maxWaitS.default, 3600);
   assert.deepEqual(await client().removeFromQueue('j1'), {

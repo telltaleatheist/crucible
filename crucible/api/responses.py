@@ -132,6 +132,20 @@ class JobStatus(_Open):
     removal: JobRemoval | None = None
 
 
+class QueueWaitingFor(_Open):
+    """Why an item at the front is not offered the lane yet although it is free: memory
+    on the accelerator is held by a process this Crucible does not own. `message` is the
+    guard's sentence naming the holder (pid, name and bytes, or the unattributed bytes);
+    the item is checked again at `next_check_at` and leaves the line `expired` when its
+    `max_wait_s` runs out."""
+
+    code: Literal["accelerator_busy"]
+    message: str
+    details: dict[str, Any] | None
+    since: str
+    next_check_at: str
+
+
 class QueueItem(_Open):
     """One job waiting in the server's queue."""
 
@@ -147,6 +161,7 @@ class QueueItem(_Open):
     expires_at: str
     session: str | None
     kind: Literal["job", "call", "session"]
+    waiting_for: QueueWaitingFor | None = None
 
 
 class QueueList(_Open):
@@ -363,6 +378,7 @@ class ActivityJob(_Open):
     client: str | None
     waited_s: Number | None = None
     max_wait_s: int | None = None
+    waiting_for: QueueWaitingFor | None = None
 
 
 class ActivitySettings(_Open):

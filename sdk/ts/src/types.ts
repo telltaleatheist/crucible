@@ -223,6 +223,8 @@ export interface ActivityJob {
   readonly waitedS: number | null;
   /** How long it may wait before it is removed `expired`; `null` unless it is waiting. */
   readonly maxWaitS: number | null;
+  /** Why it waits although the lane is free (a card held by someone else); `null` otherwise. */
+  readonly waitingFor: QueueWaitingFor | null;
 }
 
 /** An open TTS streaming session, as a bench reads it. */
@@ -706,6 +708,20 @@ export interface CancelledData {
 /** The event names that end a stream. */
 export const TERMINAL_EVENTS = ['done', 'failed', 'cancelled', 'removed'] as const;
 
+/**
+ * Why an item at the front waits although the lane is free: memory on the accelerator is held by a
+ * process the server does not own (`accelerator_busy`). It is checked again at `nextCheckAt` and runs
+ * the moment the memory is let go, or is removed `expired` when its wait runs out (docs/QUEUE.md).
+ */
+export interface QueueWaitingFor {
+  readonly code: string;
+  /** The guard's sentence naming the holder: pid, name and memory, or the unattributed bytes. */
+  readonly message: string;
+  readonly details: Readonly<Record<string, unknown>> | null;
+  readonly since: string;
+  readonly nextCheckAt: string;
+}
+
 /** One job waiting in the server's queue, as `GET /v1/queue` lists it. */
 export interface QueueItem {
   /** 1 is next. */
@@ -728,6 +744,8 @@ export interface QueueItem {
    * session waiting to open (its `jobId` is the session's `ses-…` id).
    */
   readonly kind: 'job' | 'call' | 'session';
+  /** Why it waits although the lane is free (a card held by someone else); `null` otherwise. */
+  readonly waitingFor: QueueWaitingFor | null;
 }
 
 /** `GET /v1/queue`. */

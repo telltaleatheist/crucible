@@ -10,7 +10,10 @@ here; it is refused at once. When a waiting call reaches the front:
   the request goes on to the engine exactly as an unqueued one would;
 - its model is not resident and the lane is free: the pump submits a ``load-model`` job
   for it through normal admission, and the call (with every call behind it for the same
-  model) is admitted into the engine's slots once the load is done.
+  model) is admitted into the engine's slots once the load is done. A load refused (or
+  ended) ``accelerator_busy`` — memory on the card held by a process Crucible does not
+  own — keeps the call at the front, waiting, and is tried again every
+  ``CARD_RECHECK_S`` (crucible/jobs/line.py) until its ``max_wait_s`` runs out.
 
 The call never takes the lane itself, and the pump never loads a model over chats that
 are still in flight. A caller who closes the connection while waiting leaves the line
@@ -29,6 +32,8 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import Request, Response
 
+from . import clock
+from .accelerator import WAITS_FOR_THE_CARD
 from .admission import KEEPS_WAITING, AdmissionContext, JobRequest, Refusal, admit
 from .engines import chat_admission
 from .errors import ApiError
@@ -62,6 +67,24 @@ class _Reaped:
     failure = None
 
 
+def card_was_held(job: Any) -> ApiError | None:
+    """The refusal a load job the pump started for a waiting item ended on, when it is one
+    that keeps the item waiting: the card was held by a process Crucible does not own
+    when the load reached its own guard (after admission's check had passed). The load
+    never ran, so it does not count against ``MAX_LOADS``."""
+    failure = job.failure
+    if failure is None or failure.code not in WAITS_FOR_THE_CARD:
+        return None
+    return ApiError(409, failure.code, failure.message)
+
+
+def not_yet(ctx: AdmissionContext, waiting: Any, refusal: ApiError) -> str:
+    line = ctx.store.line
+    if line is not None and not waiting.gone:
+        line.not_yet(waiting, refusal)
+    return WAIT
+
+
 def _load_failed(call: Call, job: Any) -> ApiError:
     failure = job.failure
     why = "" if failure is None else f": {failure.message}"
@@ -88,7 +111,11 @@ async def admit_call(
             return WAIT
         waiting.load_job = None
         if ended.status != DONE:
-            return _load_failed(call, ended)
+            held = card_was_held(ended)
+            if held is None:
+                return _load_failed(call, ended)
+            waiting.loads -= 1
+            return not_yet(ctx, waiting, held)
     try:
         granted = await _open_slot(waiting, ctx, inflight)
     except ApiError as busy:
@@ -134,6 +161,8 @@ async def _load_for(waiting: WaitingCall, ctx: AdmissionContext) -> str | ApiErr
             "time before it was answered. Nothing was sent to the engine",
             {"call_id": call.id, "model": call.model},
         )
+    if not waiting.card_due(clock.now()):
+        return WAIT
     outcome = await admit(
         JobRequest(
             type="load-model",
@@ -147,8 +176,9 @@ async def _load_for(waiting: WaitingCall, ctx: AdmissionContext) -> str | ApiErr
     )
     if isinstance(outcome, Refusal):
         if outcome.error.code in KEEPS_WAITING:
-            return WAIT
+            return not_yet(ctx, waiting, outcome.error)
         return outcome.error
+    waiting.card_wait = None
     waiting.load_job = outcome.job.id
     waiting.loads += 1
     return WAIT

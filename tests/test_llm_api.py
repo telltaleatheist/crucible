@@ -599,12 +599,19 @@ def test_a_busy_card_is_refused_before_the_job_exists(
         lambda: [ComputeApp(pid=12769, name="sgl-omni", used_bytes=17 * GIB)],
     )
     monkeypatch.setattr(accelerator, "probe_vram", lambda: (7 * GIB, 24 * GIB))
-    response = submit(llm_client, auth, type="load-model", model=MODEL)
+    response = submit(llm_client, auth, type="load-model", model=MODEL, queue=False)
     assert response.status_code == 409
     error = response.json()["error"]
     assert error["code"] == "accelerator_busy"
     assert "sgl-omni" in error["message"]
     assert llm_client.get("/v1/health", headers=auth).json()["queue_depth"] == 0
+
+    waits = submit(llm_client, auth, type="load-model", model=MODEL)
+    assert waits.status_code == 202, waits.json()
+    assert waits.json()["queued"] is True, "a load that may wait waits for the card"
+    row = llm_client.get("/v1/queue", headers=auth).json()["items"][0]
+    assert "sgl-omni" in row["waiting_for"]["message"]
+    llm_client.delete(f"/v1/queue/{waits.json()['job_id']}", headers=auth)
 
 
 def _stamp_without_a_block(home: Path, model_id: str) -> Path:
