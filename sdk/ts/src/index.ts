@@ -20,6 +20,7 @@ export type {
   FleetDropout,
   FleetPlace,
   FleetQueueUpdate,
+  FleetWaitingUpdate,
   FleetSessionOptions,
   FleetSessionResult,
 } from './fleet.js';
@@ -217,6 +218,7 @@ export type {
   QueueEvent,
   QueueItem,
   QueueWaitingFor,
+  CardWaitData,
   QueueList,
   QueuePosition,
   QueueRemoved,

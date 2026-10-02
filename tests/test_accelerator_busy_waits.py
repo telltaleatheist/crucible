@@ -110,6 +110,48 @@ def test_a_job_at_the_front_waits_for_a_held_card_and_says_who_holds_it(
     assert "waiting for the accelerator" in said[0]["data"]["message"]
 
 
+def test_a_long_card_wait_is_said_again_every_minute_with_its_next_check(
+    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(line_module, "CARD_RECHECK_S", 3600.0)
+    store, line = client.app.state.store, client.app.state.line
+    echo = store.registry["echo"]
+    holder = occupy_the_lane(client, auth)
+    patient = client.post("/v1/jobs", json=body(), headers=auth).json()["job_id"]
+    asked: list[int] = []
+    monkeypatch.setattr(echo, "preflight", held_card(asked))
+    free_the_lane(client, auth, holder)
+    wait_for(lambda: line.get(patient) is not None
+             and line.get(patient).card_wait is not None, "the job to wait for the card")
+
+    def said() -> list[dict[str, Any]]:
+        # the job's own event log, read while it still waits (its SSE would not end)
+        return [e for e in store.get(patient).events if e["event"] == "waiting"]
+
+    first = said()
+    assert len(first) == 1
+    assert set(first[0]["data"]) == {"code", "message", "details", "since", "next_check_at"}
+
+    due_now(line, patient)
+    wait_for(lambda: len(asked) >= 2, "a second check inside the minute")
+    assert len(said()) == 1, "the same holder inside the minute is not said again"
+
+    item = line.get(patient)
+    item.card_wait = replace(
+        item.card_wait,
+        said_at=clock.now() - timedelta(seconds=line_module.CARD_WAIT_REPEAT_S + 1),
+        next_check=clock.now(),
+    )
+    wait_for(lambda: len(said()) == 2, "the wait to be said again after a minute")
+    again = said()[1]["data"]
+    assert again["since"] == first[0]["data"]["since"], "the same wait, not a new one"
+    assert again["code"] == "accelerator_busy"
+
+    monkeypatch.setattr(echo, "preflight", lambda model, params: None)
+    due_now(line, patient)
+    wait_for(lambda: status(client, auth, patient) == "done", "the job to run")
+
+
 def test_a_fresh_submit_to_a_held_card_queues_and_queue_false_is_refused(
     client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

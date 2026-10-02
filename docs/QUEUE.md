@@ -105,8 +105,11 @@ the card**, the same way it waits for the lane:
   again every 5 s (each check is a full admission, so it is paced, never per tick) and runs
   as soon as the memory is let go. It says why it waits: a `waiting` event on its own
   stream, `waiting_for` on its row in `GET /v1/queue` and in `GET /v1/activity`'s
-  `queued`, and `queue.waiting` on the queue streams. Each is said once, and again only
-  when who holds the card changes.
+  `queued`, and `queue.waiting` on the queue streams. Each is said when the wait begins,
+  whenever who holds the card changes, and again every 60 s while it does not
+  (`CARD_WAIT_REPEAT_S`; same `since`, a fresh `next_check_at`), so a client watching its
+  stream for silence sees the wait is alive. Every SSE stream also sends a `: keepalive`
+  comment after 15 s of silence.
 - A job submitted to an idle server while the card is held joins the line at once
   (`queued: true`, `position: 1`) and waits the same way.
 - A queue session opening on its `model`, and a queued chat or decision whose model must
@@ -118,6 +121,10 @@ the card**, the same way it waits for the lane:
   removed `expired`, and the message says it was waiting for the accelerator and who held
   it.
 - `"queue": false` still refuses at once: `409 accelerator_busy`.
+
+The `waiting` event on a job's or a session's own stream carries the same five fields,
+flat: `{code, message, details, since, next_check_at}` (`message` is the server's sentence
+around the holder's; a 1.0.82 server sent no `next_check_at`).
 
 `waiting_for` is `{code: "accelerator_busy", message, details, since, next_check_at}`, or
 null for an item that waits only for its turn. `details` is the guard's: `processes`

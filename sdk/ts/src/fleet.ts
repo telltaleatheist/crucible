@@ -7,7 +7,7 @@ import {
   type FleetServerReason,
 } from './errors.js';
 import { requireSeconds } from './queue.js';
-import type { QueuePosition, SessionOptions } from './types.js';
+import type { CardWaitData, QueuePosition, SessionOptions } from './types.js';
 
 /** The feature a server lists in `GET /v1/info` when it has queue sessions. */
 const QUEUE_SESSIONS_FEATURE = 'queue.sessions';
@@ -36,6 +36,11 @@ export interface FleetSessionOptions {
   readonly maxWaitS?: number;
   /** Called whenever a server reports its session's place in its line. */
   readonly onQueue?: (update: FleetQueueUpdate) => void;
+  /**
+   * Called when a server's session waits at the front of its line for an accelerator held by a
+   * process that server does not own ({@link SessionOptions.onWaiting}), naming the server.
+   */
+  readonly onWaiting?: (update: FleetWaitingUpdate) => void;
   /** Aborts the wait on every server: each session asked for leaves its line, and the abort is thrown. */
   readonly signal?: AbortSignal;
   /**
@@ -43,6 +48,12 @@ export interface FleetSessionOptions {
    * it is left out as not answering, in milliseconds. Default 10 000.
    */
   readonly probeTimeoutMs?: number;
+}
+
+/** What {@link FleetSessionOptions.onWaiting} hears: which server's session waits for its card, and why. */
+export interface FleetWaitingUpdate {
+  readonly client: CrucibleClient;
+  readonly waiting: CardWaitData;
 }
 
 /** One server's place, as {@link FleetQueueUpdate.places} lists it. */
@@ -119,6 +130,9 @@ export async function fleetSession(
   if (given.onQueue !== undefined && typeof given.onQueue !== 'function') {
     throw new CrucibleConfigError('onQueue', `must be a function, got ${typeof given.onQueue}`);
   }
+  if (given.onWaiting !== undefined && typeof given.onWaiting !== 'function') {
+    throw new CrucibleConfigError('onWaiting', `must be a function, got ${typeof given.onWaiting}`);
+  }
   const probeTimeoutMs = given.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   if (!Number.isFinite(probeTimeoutMs) || probeTimeoutMs <= 0) {
     throw new CrucibleConfigError(
@@ -135,7 +149,7 @@ export async function fleetSession(
     ...(given.idleS === undefined ? {} : { idleS: given.idleS }),
     ...(maxWaitS === undefined ? {} : { maxWaitS }),
   };
-  return new Race(fleet, ask, given.onQueue, probeTimeoutMs, maxWaitS, signal).run();
+  return new Race(fleet, ask, given.onQueue, given.onWaiting, probeTimeoutMs, maxWaitS, signal).run();
 }
 
 function readFleet(clients: readonly CrucibleClient[]): readonly CrucibleClient[] {
@@ -184,6 +198,7 @@ class Race {
     readonly fleet: readonly CrucibleClient[],
     readonly ask: SessionOptions,
     readonly onQueue: ((update: FleetQueueUpdate) => void) | undefined,
+    readonly onWaiting: ((update: FleetWaitingUpdate) => void) | undefined,
     readonly probeTimeoutMs: number,
     readonly maxWaitS: number | undefined,
     readonly signal: AbortSignal | undefined,
@@ -228,6 +243,7 @@ class Race {
         ...this.ask,
         signal: this.#stop.signal,
         onQueue: (position) => this.#moved(index, position),
+        onWaiting: (waiting) => this.#waited(index, waiting),
       });
     } catch (error) {
       if (this.#finished) return; // the race is over; its own end took this one out of the line
@@ -272,6 +288,15 @@ class Race {
     });
     try {
       this.onQueue({ client: this.fleet[index]!, position, places });
+    } catch (error) {
+      this.#fail(error); // the app's own callback threw: that is its bug, surfaced by name
+    }
+  }
+
+  #waited(index: number, waiting: CardWaitData): void {
+    if (this.#finished || this.onWaiting === undefined) return;
+    try {
+      this.onWaiting({ client: this.fleet[index]!, waiting });
     } catch (error) {
       this.#fail(error); // the app's own callback threw: that is its bug, surfaced by name
     }

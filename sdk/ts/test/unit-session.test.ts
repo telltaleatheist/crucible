@@ -22,6 +22,7 @@ import {
   CrucibleSession,
   CrucibleSessionClosed,
   CrucibleSessionHeld,
+  type CardWaitData,
   type QueuePosition,
 } from '../src/index.js';
 
@@ -231,6 +232,56 @@ test('a queued session reports each move and answers once it opens', async () =>
   } finally {
     await session.close();
   }
+});
+
+test('a session waiting for a held card hears onWaiting, and only until it opens', async () => {
+  ticket = { session_id: 'ses-1', status: 'queued', position: 1 };
+  const waits: CardWaitData[] = [];
+  const opening = client().session({
+    act: 'analysis',
+    model: 'qwen3.5-9b',
+    onWaiting: (waiting) => waits.push(waiting),
+  });
+  await until(watching, 'the queued session to be followed');
+  feed.say('queued', { position: 1, of: 1 });
+  const said = {
+    code: 'accelerator_busy',
+    message: 'waiting for the accelerator, checked again every 5 s until …: held by pid 4242',
+    details: { model: 'qwen3.5-9b' },
+    since: '2026-10-02T10:00:00+00:00',
+    next_check_at: '2026-10-02T10:00:05+00:00',
+  };
+  feed.say('waiting', said);
+  // A 1.0.82 server said no next_check_at: read as null, not refused.
+  const { next_check_at: _dropped, ...older } = said;
+  feed.say('waiting', older);
+  await until(() => waits.length === 2, 'both waits');
+  feed.say('opened', { opened_at: '2026-10-02T10:01:00+00:00', model: 'qwen3.5-9b', load_job: 'j0' });
+  const session = await opening;
+  try {
+    assert.deepEqual(waits[0], {
+      code: 'accelerator_busy',
+      message: said.message,
+      details: { model: 'qwen3.5-9b' },
+      since: '2026-10-02T10:00:00+00:00',
+      nextCheckAt: '2026-10-02T10:00:05+00:00',
+    });
+    assert.equal(waits[1]?.nextCheckAt, null);
+    feed.say('waiting', said);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(waits.length, 2, 'never called once the session is open');
+  } finally {
+    await session.close();
+  }
+});
+
+test('onWaiting that is not a function is refused before anything is sent', async () => {
+  seen = [];
+  await assert.rejects(
+    client().session({ act: 'analysis', onWaiting: 'yes' as unknown as () => void }),
+    /onWaiting/,
+  );
+  assert.equal(seen.length, 0);
 });
 
 test('every item carries the session header, and helpers inside it send no queue', async () => {

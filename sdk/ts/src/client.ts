@@ -127,6 +127,7 @@ import {
   type QueueEvent,
   type QueueItem,
   type QueueWaitingFor,
+  type CardWaitData,
   type QueueList,
   type QueuePosition,
   type QueueRemoved,
@@ -193,6 +194,7 @@ const EVENT_NAMES = [
   'started',
   'removed',
   'warming',
+  'waiting',
   'progress',
   'chunk',
   'artifact',
@@ -905,6 +907,10 @@ export class CrucibleClient {
     if (onQueue !== undefined && typeof onQueue !== 'function') {
       throw new CrucibleConfigError('onQueue', `must be a function, got ${typeof onQueue}`);
     }
+    const onWaiting = given.onWaiting;
+    if (onWaiting !== undefined && typeof onWaiting !== 'function') {
+      throw new CrucibleConfigError('onWaiting', `must be a function, got ${typeof onWaiting}`);
+    }
     const signal = given.signal;
     signal?.throwIfAborted();
 
@@ -916,7 +922,7 @@ export class CrucibleClient {
       await this.#leaveTheLine(id);
       throw signal.reason;
     }
-    const cursor = status === 'open' ? 0 : await this.#untilOpen(id, onQueue, signal);
+    const cursor = status === 'open' ? 0 : await this.#untilOpen(id, { onQueue, onWaiting }, signal);
     return this.#bind(id, act, cursor);
   }
 
@@ -961,7 +967,7 @@ export class CrucibleClient {
   /** Follow a session waiting in the line until it opens; the id of its `opened` event. */
   async #untilOpen(
     sessionId: string,
-    onQueue: ((position: QueuePosition) => void) | undefined,
+    watch: LineWatch,
     signal: AbortSignal | undefined,
   ): Promise<number> {
     const following = signal === undefined ? new AbortController().signal : signal;
@@ -971,7 +977,10 @@ export class CrucibleClient {
         switch (event.kind) {
           case 'queued':
           case 'moved':
-            if (onQueue !== undefined) onQueue(event.position);
+            watch.onQueue?.(event.position);
+            break;
+          case 'waiting':
+            watch.onWaiting?.(event.waiting);
             break;
           case 'opened':
             settled = true;
@@ -2046,8 +2055,8 @@ export class CrucibleClient {
         fetch: (path, init, authenticated) => this.#fetch(path, init, authenticated),
         failure: (response) => this.#failure(response),
         json: (path, init, where) => this.#json(path, init, where),
-        untilOpen: async (queueSessionId, onQueue, signal) => {
-          await this.#untilOpen(queueSessionId, onQueue, signal);
+        untilOpen: async (queueSessionId, watch, signal) => {
+          await this.#untilOpen(queueSessionId, watch, signal);
         },
         leaveTheLine: (queueSessionId) => this.#leaveTheLine(queueSessionId),
       },
@@ -2256,9 +2265,16 @@ interface SessionHooks {
 }
 
 /** One event of a queue session's own stream, read. */
+/** What a wait in the line reports while it follows a session's own stream. */
+export interface LineWatch {
+  readonly onQueue?: ((position: QueuePosition) => void) | undefined;
+  readonly onWaiting?: ((waiting: CardWaitData) => void) | undefined;
+}
+
 type SessionFeedEvent =
   | { readonly id: number; readonly kind: 'queued' | 'moved'; readonly position: QueuePosition }
   | { readonly id: number; readonly kind: 'opened' }
+  | { readonly id: number; readonly kind: 'waiting'; readonly waiting: CardWaitData }
   | { readonly id: number; readonly kind: 'closed'; readonly end: QueueSessionEnd }
   | {
       readonly id: number;
@@ -2395,6 +2411,8 @@ function readSessionFrame(frame: SseFrame, what: string, previous: number): Sess
       };
     case 'opened':
       return { id, kind: 'opened' };
+    case 'waiting':
+      return { id, kind: 'waiting', waiting: readCardWait(data, where) };
     case 'closed':
       return {
         id,
@@ -2509,9 +2527,12 @@ const JOB_CHANGES = [
   'job.queued', 'job.running', 'job.done', 'job.failed', 'job.cancelled', 'job.interrupted',
   'job.removed',
 ] as const;
-const QUEUE_CHANGES = ['queue.added', 'queue.moved', 'queue.started', 'queue.removed'] as const;
+const QUEUE_CHANGES = [
+  'queue.added', 'queue.moved', 'queue.started', 'queue.removed', 'queue.waiting',
+] as const;
 const SESSION_CHANGES = [
   'session.queued', 'session.moved', 'session.opened', 'session.closed', 'session.removed',
+  'session.waiting',
 ] as const;
 const CARD_CHANGES = [
   'card.warming', 'card.warming_ended', 'card.loaded', 'card.unloading', 'card.unloaded',
@@ -2614,6 +2635,10 @@ function readServerEvent(frame: SseFrame): ServerEvent {
       position: placed ? num(data, 'position', where) : null,
       waitedS: name === 'queue.started' ? num(data, 'waited_s', where) : null,
       reason: name === 'queue.removed' ? str(data, 'reason', where) : null,
+      waiting:
+        name === 'queue.waiting'
+          ? { code: str(data, 'code', where), message: str(data, 'message', where) }
+          : null,
       data,
     };
   }
@@ -2632,6 +2657,7 @@ function readServerEvent(frame: SseFrame): ServerEvent {
         : null,
       reason: ended ? str(data, 'reason', where) : null,
       message: ended ? str(data, 'message', where) : null,
+      waiting: name === 'session.waiting' ? readCardWait(data, where) : null,
       data,
     };
   }
@@ -3087,6 +3113,17 @@ function readQueueItem(row: Json, where: string): QueueItem {
   };
 }
 
+/** A `waiting` event's data, flat; `next_check_at` is absent from a 1.0.82 server. */
+function readCardWait(data: Json, where: string): CardWaitData {
+  return {
+    code: str(data, 'code', where),
+    message: str(data, 'message', where),
+    details: nullableObject(data, 'details', where),
+    since: str(data, 'since', where),
+    nextCheckAt: optStr(data, 'next_check_at', where),
+  };
+}
+
 function readWaitingFor(row: Json, where: string): QueueWaitingFor | null {
   if (!('waiting_for' in row)) return null; // an older server never says
   const found = nullableObject(row, 'waiting_for', where);
@@ -3215,6 +3252,8 @@ function readEvent(rawId: string | null, rawName: string | null, rawData: string
       return { id, event: 'progress', data: readProgress(data, where) };
     case 'chunk':
       return { id, event: 'chunk', data: readChunk(data, where) };
+    case 'waiting':
+      return { id, event: 'waiting', data: readCardWait(data, where) };
     case 'artifact':
       return { id, event: 'artifact', data: { name: str(data, 'name', where) } };
     case 'done':

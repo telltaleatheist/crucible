@@ -354,6 +354,12 @@ export interface SessionOptions {
   readonly maxWaitS?: number;
   /** Called with the session's place in the line whenever it joins or moves. */
   readonly onQueue?: (position: QueuePosition) => void;
+  /**
+   * Called while the session waits at the front of the line because its model's load found the
+   * accelerator held by a process the server does not own: when the wait begins, when the holder
+   * changes, and every minute while it does not (1.0.83+). Never called once the session is open.
+   */
+  readonly onWaiting?: (waiting: CardWaitData) => void;
   /** Aborts the wait: a session still in the line leaves it, and the abort is thrown. */
   readonly signal?: AbortSignal;
 }
@@ -596,6 +602,7 @@ export type JobEvent =
   | { readonly id: number; readonly event: 'warming'; readonly data: WarmingData }
   | { readonly id: number; readonly event: 'progress'; readonly data: ProgressData }
   | { readonly id: number; readonly event: 'chunk'; readonly data: ChunkData }
+  | { readonly id: number; readonly event: 'waiting'; readonly data: CardWaitData }
   | { readonly id: number; readonly event: 'artifact'; readonly data: ArtifactData }
   | { readonly id: number; readonly event: 'done'; readonly data: DoneData }
   | { readonly id: number; readonly event: 'failed'; readonly data: FailedData }
@@ -712,6 +719,23 @@ export const TERMINAL_EVENTS = ['done', 'failed', 'cancelled', 'removed'] as con
  * Why an item at the front waits although the lane is free: memory on the accelerator is held by a
  * process the server does not own (`accelerator_busy`). It is checked again at `nextCheckAt` and runs
  * the moment the memory is let go, or is removed `expired` when its wait runs out (docs/QUEUE.md).
+ */
+export interface CardWaitData {
+  /** `accelerator_busy`. */
+  readonly code: string;
+  /** The server's sentence: how often it checks again, until when, and who holds the card. */
+  readonly message: string;
+  readonly details: Readonly<Record<string, unknown>> | null;
+  /** When this wait began; the same on every repeat of it. */
+  readonly since: string;
+  /** When the card is checked again; null from a 1.0.82 server, which did not say. */
+  readonly nextCheckAt: string | null;
+}
+
+/**
+ * Why an item at the front waits although the lane is free (see {@link QueueWaitingFor}), as its
+ * `waiting` event says it: when the wait begins, whenever who holds the card changes, and again
+ * every minute while it does not (from 1.0.83), so a client watching for silence sees it is alive.
  */
 export interface QueueWaitingFor {
   readonly code: string;
@@ -2176,7 +2200,7 @@ export interface JobProgressEvent {
 /** The waiting line changed, as `GET /v1/queue/events` says it. */
 export interface QueueChangeEvent {
   readonly id: number;
-  readonly event: 'queue.added' | 'queue.moved' | 'queue.started' | 'queue.removed';
+  readonly event: 'queue.added' | 'queue.moved' | 'queue.started' | 'queue.removed' | 'queue.waiting';
   readonly at: string;
   readonly jobId: string;
   /** How many wait after this change. */
@@ -2188,6 +2212,8 @@ export interface QueueChangeEvent {
   readonly waitedS: number | null;
   /** `queue.removed`: why (`refused` for one refused at the front, with `error`). */
   readonly reason: string | null;
+  /** `queue.waiting`: the item at the front waits for an accelerator held by someone else. */
+  readonly waiting: { readonly code: string; readonly message: string } | null;
   /** Everything the server put on the frame (`type`, `model`, `client`, `message`, `error`, …). */
   readonly data: Readonly<Record<string, unknown>>;
 }
@@ -2200,7 +2226,8 @@ export interface SessionChangeEvent {
     | 'session.moved'
     | 'session.opened'
     | 'session.closed'
-    | 'session.removed';
+    | 'session.removed'
+    | 'session.waiting';
   readonly at: string;
   readonly sessionId: string;
   readonly client: string | null;
@@ -2210,6 +2237,8 @@ export interface SessionChangeEvent {
   /** `session.closed` and `session.removed`: why it ended. */
   readonly reason: string | null;
   readonly message: string | null;
+  /** `session.waiting`: its opening load waits for an accelerator held by someone else. */
+  readonly waiting: CardWaitData | null;
   /** Everything the server put on the frame (`items_run`, `held_s`, `model`, `error`, …). */
   readonly data: Readonly<Record<string, unknown>>;
 }

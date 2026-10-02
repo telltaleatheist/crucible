@@ -56,6 +56,11 @@ CARD_RECHECK_S = 5.0
 held by a process this Crucible does not own) has its card checked again. Each check is
 a full admission (nvidia-smi and the process table), so it is paced, never per tick."""
 
+CARD_WAIT_REPEAT_S = 60.0
+"""How often a card wait whose holder has not changed is said again on the job's, the
+session's and the queue's streams, so a client watching for silence sees the wait is
+still alive. A changed holder is said at once."""
+
 
 def limits() -> dict[str, Any]:
     return {
@@ -98,6 +103,7 @@ class CardWait:
     details: dict[str, Any] | None
     since: datetime
     next_check: datetime
+    said_at: datetime
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -320,22 +326,29 @@ class WaitingLine:
 
     def not_yet(self, item: Waiting, refusal: ApiError) -> None:
         """The item met a refusal that keeps it waiting in its place. One that says the
-        accelerator is held (``accelerator_busy``) is recorded on the item, said once on
-        its stream, the session's and the queue's whenever who holds the card changes,
-        and checked again only after ``CARD_RECHECK_S``; any other ("busy") clears it."""
+        accelerator is held (``accelerator_busy``) is recorded on the item, said on its
+        stream, the session's and the queue's whenever who holds the card changes and
+        again every ``CARD_WAIT_REPEAT_S`` while it does not, and checked again only
+        after ``CARD_RECHECK_S``; any other ("busy") clears it."""
         if refusal.code not in WAITS_FOR_THE_CARD:
             item.card_wait = None
             return
         now = clock.now()
         was = item.card_wait
+        repeat = (
+            was is not None
+            and was.message == refusal.message
+            and now - was.said_at < timedelta(seconds=CARD_WAIT_REPEAT_S)
+        )
         item.card_wait = CardWait(
             code=refusal.code,
             message=refusal.message,
             details=refusal.details,
             since=now if was is None else was.since,
             next_check=now + timedelta(seconds=CARD_RECHECK_S),
+            said_at=was.said_at if repeat and was is not None else now,
         )
-        if was is not None and was.message == refusal.message:
+        if repeat:
             return
         said = {
             "code": refusal.code,
@@ -345,6 +358,7 @@ class WaitingLine:
             ),
             "details": refusal.details,
             "since": item.card_wait.since.isoformat(),
+            "next_check_at": item.card_wait.next_check.isoformat(),
         }
         if item.is_session:
             self._sessions.waiting(item.job, said)  # type: ignore[arg-type]

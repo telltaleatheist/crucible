@@ -8,7 +8,7 @@ import {
 import { queuePayload, requireSeconds } from './queue.js';
 import { readSseFrames } from './sse.js';
 import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
-import type { QueueChoice, QueuePosition } from './types.js';
+import type { CardWaitData, QueueChoice, QueuePosition } from './types.js';
 
 /** Everything `stream(...)` needs. */
 export interface StreamOptions {
@@ -38,6 +38,13 @@ export interface StreamOptions {
    * session or on a free server, where there is no line to wait in.
    */
   onQueue?: (position: QueuePosition) => void;
+  /**
+   * Called while the stream's queue session waits at the front of the line because its voice's
+   * load found the accelerator held by a process the server does not own (1.0.83+): when the wait
+   * begins, when the holder changes, and every minute while it does not. Given, the open asks for a
+   * ticket exactly as `onQueue` does.
+   */
+  onWaiting?: (waiting: CardWaitData) => void;
   /**
    * Aborts the open, which is held until the session is open and the voice resident. A session
    * waiting in the line for the stream leaves it.
@@ -154,7 +161,10 @@ export interface StreamTransport {
    */
   untilOpen(
     queueSessionId: string,
-    onQueue: (position: QueuePosition) => void,
+    watch: {
+      readonly onQueue?: ((position: QueuePosition) => void) | undefined;
+      readonly onWaiting?: ((waiting: CardWaitData) => void) | undefined;
+    },
     signal: AbortSignal | undefined,
   ): Promise<void>;
   /** Take a queue session out of the line, or close it if it opened; never throws. */
@@ -191,6 +201,10 @@ export async function openTtsStream(
   if (onQueue !== undefined && typeof onQueue !== 'function') {
     throw new CrucibleError(`onQueue must be a function, got ${typeof onQueue}`);
   }
+  const onWaiting = given.onWaiting;
+  if (onWaiting !== undefined && typeof onWaiting !== 'function') {
+    throw new CrucibleError(`onWaiting must be a function, got ${typeof onWaiting}`);
+  }
   const signal = given.signal;
   const opening = JSON.stringify(payload);
   const open = (headers: Record<string, string>): RequestInit => {
@@ -199,9 +213,9 @@ export async function openTtsStream(
     return init;
   };
   const body =
-    onQueue === undefined
+    onQueue === undefined && onWaiting === undefined
       ? await transport.json('/v1/tts/stream', open({}), 'stream')
-      : await openThroughTheLine(transport, open, onQueue, signal);
+      : await openThroughTheLine(transport, open, { onQueue, onWaiting }, signal);
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
@@ -228,13 +242,16 @@ export async function openTtsStream(
 async function openThroughTheLine(
   transport: StreamTransport,
   open: (headers: Record<string, string>) => RequestInit,
-  onQueue: (position: QueuePosition) => void,
+  watch: {
+    readonly onQueue?: ((position: QueuePosition) => void) | undefined;
+    readonly onWaiting?: ((waiting: CardWaitData) => void) | undefined;
+  },
   signal: AbortSignal | undefined,
 ): Promise<Json> {
   const first = await answerOf(transport, open({ [QUEUE_TICKET_HEADER]: '1' }));
   if (first.status !== 202) return first.body;
   const queueSessionId = str(first.body, 'queue_session_id', 'stream ticket');
-  await transport.untilOpen(queueSessionId, onQueue, signal);
+  await transport.untilOpen(queueSessionId, watch, signal);
   try {
     signal?.throwIfAborted();
     const second = await answerOf(transport, open({ [SESSION_HEADER]: queueSessionId }));

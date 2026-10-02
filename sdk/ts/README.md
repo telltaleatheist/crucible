@@ -172,6 +172,7 @@ const session = await crucible.session({
   act: 'analysis',
   model: 'qwen3.5-9b',                 // loaded for the session if it is not resident
   onQueue: ({ position, of }) => show(`waiting: ${position} of ${of}`),
+  onWaiting: ({ message }) => show(message),   // its model's load waits for a card held by someone else
 });
 try {
   const transcript = await session.asr({ ... });
@@ -193,6 +194,11 @@ try {
   client's: a session's jobs go ahead of the line, wait only behind its own, and wait up to a
   day. Its chats and decisions send the client's `queue` like any other: one that must wait
   for its model or a slot waits ahead of the line.
+- **`onWaiting`** hears a session whose opening load waits for an accelerator held by a process
+  the server does not own: when the wait begins, when the holder changes, and every minute
+  while it does not (`CardWaitData`: `code`, `message`, `details`, `since`, `nextCheckAt`).
+  A job's own stream says the same as a typed `waiting` event; `stream()` and `fleetSession()`
+  take `onWaiting` too.
 - **Same-client membership.** Every request from the client holding the open session is an
   item of it, header or not (the server matches on `clientName`). So an app's standalone calls
   beside its own long run never wait behind it.

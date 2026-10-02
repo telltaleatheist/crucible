@@ -24,6 +24,23 @@ before. Aborting `signal` while it waits takes the session out of the line; a se
 before it opens throws `CrucibleSessionClosed` with its `reason` (the held-open path's
 `409 session_closed` refusal, by the same code).
 
+## New: card waits typed, and `onWaiting` (1.0.83)
+
+A request whose model load finds the accelerator held by another process waits at the front
+of the line (1.0.82). 1.0.83 lets a client hear it:
+
+- **Job events:** `{event: 'waiting', data: CardWaitData}` is now part of `JobEvent` (it
+  arrived as `unknown` in 1.0.82). `CardWaitData` is `{code, message, details, since,
+  nextCheckAt}`, read flat off the event; `nextCheckAt` is null from a 1.0.82 server.
+- **`session({onWaiting})`, `stream({onWaiting})`, `fleetSession({onWaiting})`:** called
+  while the session waits for the card (the fleet's names the server); never after it opens.
+  `stream()` asks for a ticket when either `onQueue` or `onWaiting` is given.
+- **Server-wide events:** `queue.waiting` (`waiting: {code, message}`) and `session.waiting`
+  (`waiting: CardWaitData`) are typed.
+- **The server repeats a card wait every 60 s** while the holder is the same, so a client's
+  stall watchdog can treat a minute of silence on a waiting item as a fault. Every SSE stream
+  already sends a `: keepalive` comment after 15 s of silence.
+
 ## New: `ChunkData.pauseCuts` (1.0.80)
 
 A `tts` render's `chunk` event carries the interior pauses narrator cut down in that chunk

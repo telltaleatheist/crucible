@@ -148,6 +148,31 @@ async function take(count: number, options: ServerEventsOptions = {}): Promise<S
   return seen;
 }
 
+test('a card wait arrives typed on the queue and session families', async () => {
+  connections = [{
+    frames: [
+      snapshot(100),
+      frame(101, 'queue.waiting', {
+        job_id: 'ses-2', code: 'accelerator_busy', message: 'held by pid 4242', depth: 1,
+        kind: 'session', at: AT,
+      }),
+      frame(102, 'session.waiting', {
+        session_id: 'ses-2', client: 'briefcase', act: 'analysis', code: 'accelerator_busy',
+        message: 'held by pid 4242', details: null, since: AT, next_check_at: AT, at: AT,
+      }),
+    ],
+  }];
+  const [, queued, session] = await take(3);
+  assert.ok(queued?.event === 'queue.waiting');
+  assert.deepEqual(queued.waiting, { code: 'accelerator_busy', message: 'held by pid 4242' });
+  assert.equal(queued.position, null);
+  assert.ok(session?.event === 'session.waiting');
+  assert.deepEqual(session.waiting, {
+    code: 'accelerator_busy', message: 'held by pid 4242', details: null, since: AT, nextCheckAt: AT,
+  });
+  assert.equal(session.reason, null);
+});
+
 test('the snapshot comes first, then every family arrives typed', async () => {
   connections = [{
     frames: [

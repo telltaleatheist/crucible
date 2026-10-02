@@ -491,6 +491,30 @@ test('pause cuts arrive camelCased; [] stays []; a server that never says reads 
   assert.deepEqual(cuts, [[{ atS: 3.2, fromS: 4.75, toS: 1.5 }], [], null, 'not a chunk']);
 });
 
+test('a job waiting for a held card arrives as a typed waiting event, flat, either server', async () => {
+  const said = {
+    code: 'accelerator_busy',
+    message: 'waiting for the accelerator, checked again every 5 s until …: held by pid 4242',
+    details: { model: 'qwen3.5-9b' },
+    since: '2026-10-02T10:00:00+00:00',
+  };
+  streams(
+    frame(1, 'waiting', { ...said, next_check_at: '2026-10-02T10:00:05+00:00' }),
+    frame(2, 'waiting', said),
+    frame(3, 'done', { artifacts: [], rendered: 0, failed: [], take: 0, sample_rate: 24000 }),
+  );
+  const events = await drain('job-tts-1');
+  assert.equal(events[0]?.event, 'waiting');
+  assert.deepEqual(events[0]?.event === 'waiting' ? events[0].data : null, {
+    code: 'accelerator_busy',
+    message: said.message,
+    details: { model: 'qwen3.5-9b' },
+    since: '2026-10-02T10:00:00+00:00',
+    nextCheckAt: '2026-10-02T10:00:05+00:00',
+  });
+  assert.equal(events[1]?.event === 'waiting' ? events[1].data.nextCheckAt : 'not waiting', null);
+});
+
 test('pause cuts that are not seconds are a protocol error', async () => {
   streams(frame(1, 'chunk', { ...CHUNK_FRAME, pause_cuts: [{ at_s: 'soon', from_s: 4.75, to_s: 1.5 }] }));
   await assert.rejects(drain('job-tts-1'), /pause_cuts\[0\]/);
