@@ -158,6 +158,38 @@ once the session is open and the voice is resident, and the result says `queueSe
 `signal`. An open stream with no row being said is not activity, so its session's `idleS` can
 run out; the stream's `closed` frame then says `code: "session_closed"`.
 
+## New: one session from a fleet of servers
+
+An app that reaches more than one server used to pick one and wait in its line even while
+another sat idle. `fleetSession(clients, options)` asks every server that can serve the run at
+once and answers with the first session to open; every other request is removed (or closed, if
+it opened in the same instant) straight away.
+
+Before:
+
+```ts
+const session = await pc.session({ act: 'analysis', model: 'qwen3.5-9b', onQueue });
+```
+
+After:
+
+```ts
+const { session, client, dropouts } = await fleetSession([pc, mac], {
+  act: 'analysis',
+  model: 'qwen3.5-9b',
+  onQueue: ({ client, position, places }) => status(places),   // every server's place
+});
+try { ... } finally { await session.close(); }
+```
+
+The options are `session()`'s plus `probeTimeoutMs`; `onQueue` receives
+`{client, position, places}` instead of a bare position. A server that cannot serve (no
+`queue.sessions`, the model not in its catalogue, supported and installed, or no answer within
+`probeTimeoutMs`) is skipped and listed in `dropouts`; when none can give a session it throws
+`CrucibleFleetUnavailable` naming every server and why. `session()` itself changed in one way:
+aborting its `signal` while the ticket is still on the wire now rejects at once and removes the
+session that ticket names when it arrives, instead of leaving it to expire.
+
 ## Smaller changes
 
 - `info().features: string[]` and `has(feature)`.

@@ -121,6 +121,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `queueHeartbeat(id)` | `POST /v1/queue/{id}/heartbeat` | `{position, expiresAt}` |
 | `queueEvents()` | `GET /v1/queue/events` | `AsyncIterable<QueueEvent>`: a snapshot, then every change |
 | `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |
+| `fleetSession(clients, {act, model?, idleS?, maxWaitS?, onQueue?, signal?, probeTimeoutMs?})` | `POST /v1/queue/sessions` on every capable server | `{session, client, index, dropouts}` — the first session to open |
 
 Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-Api: 1`.
 `ping()` deliberately sends neither, so it can tell "wrong token" from "not a Crucible".
@@ -206,6 +207,44 @@ try {
 While another client's session is open, a job without `queue` is refused `server_busy` and a
 chat or decision without it `session_open`; both throw `CrucibleSessionHeld`, naming the
 holder, the session and its act. With `queue` (the helpers' default) they wait for it to close.
+
+### More than one server: `fleetSession()`
+
+An app that can reach several servers (the PC and the Mac) should not wait in one line while
+another server sits idle. `fleetSession()` asks every server that can serve the run for a session
+at once and takes the first one that opens:
+
+```ts
+import { fleetSession } from '@crucible/client';
+
+const { session, client } = await fleetSession([pc, mac], {
+  act: 'analysis',
+  model: 'qwen3.5-9b',
+  onQueue: ({ places }) => show(places.map((p) => `${p.position?.position ?? '?'} on ${p.client.url}`)),
+  signal: cancelButton.signal,
+});
+try { ... } finally { await session.close(); }
+```
+
+- **Only servers that can serve are asked.** Each one must list `queue.sessions` in
+  `GET /v1/info` and, with `model`, have it in `GET /v1/models`, supported on its backend and
+  installed. A server that cannot, or does not answer within `probeTimeoutMs` (default 10 s),
+  is left out; the result's `dropouts` says which and why (`stage: 'probe'`, or `'line'` for one
+  whose session ended before it opened).
+- **The first session to OPEN wins**, and `session` is an ordinary `CrucibleSession` on that
+  server (`client` and `index` say which). Every other session is taken out of its line the
+  moment that happens (`DELETE`, reason `client`), and one that opened in the same instant is
+  closed at once, so a loser never holds its machine. There is no preference between servers
+  and nothing is pre-empted.
+- **`onQueue({client, position, places})`** hears every move on every server; `places` lists
+  each server still waiting with its latest place (null until it has said), so an app can show
+  "2nd on the PC, 1st on the Mac".
+- **`maxWaitS`** bounds the whole fleet: every server is asked with it, and when it runs out the
+  call stops waiting. **Aborting `signal`** takes every session out of its line (even one whose
+  ticket was still on the wire) and throws the abort.
+- When no server can serve, every asked one ended its session before it opened, or `maxWaitS`
+  ran out, it throws `CrucibleFleetUnavailable` (`code: 'fleet_unavailable'`), whose `servers`
+  names each server, its stage and why.
 
 ### Events
 
@@ -1035,6 +1074,7 @@ carrying the server's own `code` and `message` where the server sent one:
 | `CrucibleSessionClosed` | 409 `session_closed` — the queue session ended (`reason`); also what a session that never opened throws, and what a `CrucibleSession` throws once it knows it has ended |
 | `CrucibleServerError` | 5xx — carries the envelope's `details` (`chat_queue_full`'s `retry_after`, `label_not_in_probs`'s question and letter) |
 | `CrucibleAcceleratorUnreadable` | 503 `accelerator_unreadable` — a `CrucibleServerError` with a narrower name, because "I cannot see the card" must never be read as "the card is free" |
+| `CrucibleFleetUnavailable` | `fleetSession()` got no session: no server could serve, every asked one ended its session before it opened, or `maxWaitS` ran out; `servers` lists `{url, stage, reason}` for each |
 | `CrucibleProtocolError` | a response API v1 does not describe: a missing load-bearing field, or a field of the wrong type |
 
 All of them extend `CrucibleError`.

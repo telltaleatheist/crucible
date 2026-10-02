@@ -300,6 +300,23 @@ the session and the stream with it. The stream's `closed` frame then carries `co
 "session_closed"`, `session_reason` (e.g. `idle`) and `queue_session_id`. Closing the
 stream closes a session that was opened for it, but never one the client opened itself.
 
+## More than one server
+
+The queue is per server: a session waits in one server's line, and nothing on the server side
+knows about any other server. An app that can reach several (the PC and the Mac) asks each of
+them for a session and keeps the first that opens. The rules that keep that fair:
+
+- Ask only servers that can serve the run: `queue.sessions` in `GET /v1/info` `features` and,
+  with a `model`, that model in `GET /v1/models` with `backend_supported` and `installed`.
+- The moment one session is `opened`, `DELETE /v1/queue/sessions/{id}` every other one (reason
+  `client`): a queued one leaves its line, and one that opened in the same instant closes and
+  settles its card. A loser must never hold its machine.
+- If the request is abandoned while a `POST /v1/queue/sessions` is still unanswered, wait for
+  its ticket and delete the session it names: the server may already have made, or opened, it.
+
+There is no priority and no pre-emption across servers; the first to open wins. The TS SDK's
+`fleetSession()` does all of this (below).
+
 ## In the SDK
 
 ```ts
@@ -331,6 +348,11 @@ for await (const event of crucible.events(id)) {
   `close()` cover the session's routes. A session that ends before it opens throws
   `CrucibleSessionClosed` with its `reason`; another client's session refuses as
   `CrucibleSessionHeld`.
+- `fleetSession(clients, {act, model?, idleS?, maxWaitS?, onQueue?, signal?, probeTimeoutMs?})`
+  asks every capable server for a session at once and answers `{session, client, index,
+  dropouts}` with the first that opens; the rest are removed at once. `onQueue({client,
+  position, places})` hears every server's place. With no session to give it throws
+  `CrucibleFleetUnavailable`, whose `servers` names each server and why.
 - `events({topics?, lastEventId?, signal?})` follows `GET /v1/events` (docs/EVENTS.md),
   reconnecting by itself.
 - sdk/ts/MIGRATION.md maps every lease call an app made to its replacement.
