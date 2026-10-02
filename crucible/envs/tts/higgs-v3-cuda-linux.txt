@@ -120,7 +120,7 @@ msgpack==1.2.2
 msgspec==0.21.1
 multidict==6.7.1
 multiprocess==0.70.19
-narrator @ git+https://github.com/telltaleatheist/bookforge@653ffc12c12beb823e1d446aec5934d14bde3bf7#subdirectory=python
+narrator @ git+https://github.com/telltaleatheist/bookforge@c8e8dcfe31feb9a80a1c8f5b57a495ea3c6342fb#subdirectory=python
 narwhals==2.25.0
 nccl4py==0.5.0
 nemo_text_processing==1.2.0
