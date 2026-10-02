@@ -3,10 +3,9 @@
 What a maintainer of `@crucible/client` needs that the code does not say. The
 public API's own JSDoc is one sentence per member; the reasons live here.
 
-> **Server change, 2026-10-01: leases are gone.** The server replaced them with queue
-> sessions (docs/QUEUE.md, docs/internals/queue-sessions.md): no lease routes, no
-> `params.lease`, no `lease_id` on `done`, no `409 leased`. The lease notes below describe
-> SDK code that predates that change and goes with the SDK's own update.
+> **Leases are gone (2026-10-01).** Queue sessions replaced them on the server and in the
+> SDK (docs/QUEUE.md, docs/internals/queue-sessions.md); `sdk/ts/MIGRATION.md` maps every
+> lease call to its replacement.
 
 ## Runtime rules
 
@@ -46,8 +45,8 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   `bool`, `objectField`, `strArray`); a value it may honestly send as `null` uses
   the `nullable*` readers. A missing key is a `CrucibleProtocolError` naming it.
 - The `opt*` readers are only for keys the server sends in some cases and not
-  others: a job's `lease_id` (loaders only), a model row's `reason` (only on a
-  refusal), and the relayed chat body's `id`, `model` and `usage`.
+  others: a model row's `reason` (only on a refusal), and the relayed chat body's
+  `id`, `model` and `usage`.
 - `oneOf` is for vocabularies the client or caller branches on (job and task
   state, a decision's type, subject kind, a stream cancel outcome). Words only a
   display reads (a voice's `kind`, `estimate_basis`, lane health, `residentKind`,
@@ -96,7 +95,7 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
 
 - **Optional request fields are omitted when absent, never sent as `null`.** The
   server's params models forbid unknown keys and treat `null` as a value. This
-  covers `clientRef`, `hold`, `retake`, `band`, `width`, a load's lease, a
+  covers `clientRef`, `hold`, `retake`, `band`, `width`, a
   zero-shot clip's `name`, asr's `initial_prompt`, `context`, speech-only knobs
   and `resume`, decide's `missing`, and a task's `narrator_engine`.
 - **The client keeps no second copy of the server's rules**: no voice `maxChars`
@@ -115,8 +114,6 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   the server sends the tag's own context. A reasoning model that runs out of
   budget answers with `reasoning` and no `content`; that is a protocol error whose
   message names the remedy (raise `maxTokens` or send `thinking: false`).
-- A load's lease is sent snake_case (`ttl_seconds`) as the server's `LeaseOnLoad`
-  declares.
 - A task request carries only its own type's fields; the server refuses a `pull`
   carrying `job_type`. A module document is posted byte for byte as the app
   vendors it from `scripts/gen-modules.py`. `engine` tasks accept only `wsl`.
@@ -142,7 +139,7 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   `timeoutMs` rather than composing with it; a probe's `timeoutMs` does compose
   with a probe's `signal`. A caller's abort rejects with their own reason, so
   `TimeoutError` and `AbortError` stay distinguishable.
-- The client never retries `server_busy`, `leased`, a 5xx, or an upstream rate
+- The client never retries `server_busy`, `session_open`, a 5xx, or an upstream rate
   limit. Queues belong to clients (ARCHITECTURE.md R5); a retry loop in the SDK
   would be an invisible queue with a policy nobody chose.
 
@@ -151,17 +148,18 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
 - Every non-2xx maps to one type. Three 5xx/4xx codes get subclasses because one
   conclusion must never be drawn from them: `accelerator_unreadable` is not an
   idle card, `capability_undecided` is not "nothing fits", and `server_busy` /
-  `leased` carry bodies a bench needs (holder, job, progress, `busyLine`).
-- `server_busy` has two shapes, discriminated on `details.door`: `job` (the job
-  door's, `CrucibleBusy`; the holder is always a job) and `operator` (the
-  operator door's, `CrucibleCardHeld`: a job, a lease, the streaming claim or a
-  chat). A body with no `door` (a server before 1.0.52) is read by whether it
-  carries `fact`.
+  `session_open` carry bodies a bench needs (holder, job, progress, `busyLine`).
+- `server_busy` has three shapes, discriminated on `details.door`: `job` (the job
+  door's, `CrucibleBusy`; the holder is always a job), `operator` (the operator
+  door's, `CrucibleCardHeld`: a job, a session, the streaming claim or a chat) and
+  `session` (`CrucibleSessionHeld`, as is `session_open`: another client's queue
+  session holds the server). A body with no `door` is read by whether it carries
+  `fact`.
 - `events` and `taskEvents` are one private generator, `#follow`, given the
   path, the frame reader and the terminal set; the Node builtins both
   `writeArtifactsTo` and `readPairingFile` need are loaded once by
   `node-builtins.ts`.
-- `holder`/`client` is `null` when the busy job or lease came without a name; show
+- `holder`/`client` is `null` when the busy job or session came without a name; show
   "an unnamed client", never a guess.
 - `testUpstream` decides its three result refusals (`upstream_unreachable`,
   `upstream_rejected`, `upstream_unconfigured`) on the **code**, never the status
@@ -171,7 +169,8 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   Crucible as the refuser.
 - `isServerSpecificRefusal` lists codes that may differ on another server
   (`server_busy`, `engine_in_use`, `job_type_disabled`, `model_not_resident`,
-  `not_resident`, `unknown_model`, `stream_session_open`, `leased`,
+  `not_resident`, `unknown_model`, `stream_session_open`, `session_open`,
+  `session_closed`, `session_not_open`, `session_not_yours`, `unknown_queue_session`,
   `env_missing`, `task_busy`, `already_installed`, `job_type_installed`). An
   unknown code answers `false`, so a new refusal is surfaced once rather than
   swallowed by a walk across machines.
