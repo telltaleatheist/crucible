@@ -11,7 +11,7 @@ from ...config import Config
 from ...engines import EngineError, NarratorEngine, find_free_port, start_engine
 from ...errors import ApiError
 from ...narratorengines import DOCUMENT_READERS
-from ...narratorvoices import write_document
+from ...narratorvoices import not_served_here, write_document
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     Occupant,
@@ -168,6 +168,9 @@ def _unloadable_reason(
         jobenv.tts_env(manifest.narrator_engine, backend.kind),
         backend.kind,
     )
+    unserved = not_served_here(manifest, backend.kind)
+    if unserved is not None:
+        return unserved
     estimate = spec.memory_bytes_estimate
     if estimate > backend.gpu.vram_bytes:
         return (
@@ -296,6 +299,14 @@ def require_loadable(
             f"declares {sorted(manifest.backends)}",
             {"voice": voice_id, "backend": backend_kind,
              "declared": sorted(manifest.backends)},
+        )
+    unserved = not_served_here(manifest, backend_kind)
+    if unserved is not None:
+        raise ApiError(
+            409,
+            "voice_not_served_here",
+            f"cannot load {voice_id!r} on {backend_kind}: {unserved}",
+            {"voice": voice_id, "backend": backend_kind, "kind": manifest.kind},
         )
     spec = manifest.spec(backend_kind)
     accelerator.refuse_if_larger_than_host(

@@ -107,6 +107,22 @@ def take_sampling(manifest: VoiceManifest, take: int) -> dict[str, Any] | None:
     return entry
 
 
+def not_served_here(manifest: VoiceManifest, backend_kind: str) -> str | None:
+    """Why narrator cannot serve this voice on this backend, or None.
+
+    The one owner of the token-voice ruling: the load refuses on it, and the
+    /v1/voices listing and the load door read it, so a voice no load here can
+    serve is never listed loadable.
+    """
+    if _KIND_ON_THE_WIRE.get(manifest.kind) == "default" and backend_kind == CUDA_LINUX:
+        return (
+            f"a token voice loads on {MLX_DARWIN} only: narrator's served arm on "
+            f"{CUDA_LINUX} serves a default voice from the HuggingFace cache, not "
+            "from the pinned directory Crucible names (RULING OWED on narrator's side)"
+        )
+    return None
+
+
 def voice_entry(
     manifest: VoiceManifest,
     spec: VoiceBackendSpec,
@@ -170,7 +186,7 @@ def _entry_kind(
             "its weights and a token voice's is in the engine; narrator would "
             "clone from the clip and ignore the weights this load names"
         )
-    if kind == "default" and spec.backend == CUDA_LINUX:
+    if not_served_here(manifest, spec.backend) is not None:
         meant = (
             f"pulled at {spec.hf_repo}@{spec.revision[:12]}"
             if spec.source == PINNED
@@ -211,6 +227,7 @@ def write_document(
 
 
 __all__ = [
+    "not_served_here",
     "DOCUMENT_NAME",
     "DOCUMENT_VARIABLE",
     "MLX_MODEL_VARIABLE",

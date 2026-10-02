@@ -213,6 +213,23 @@ def test_a_row_carries_the_sampling_its_arm_renders_with_and_not_the_reason(
         assert "narrator_engine" in row
 
 
+def test_a_token_voice_on_cuda_linux_is_never_listed_loadable_and_its_load_is_refused(
+    tts_client: TestClient, auth: dict[str, str], fake_weights: Callable[[str], Path]
+) -> None:
+    fake_weights("higgs-default")
+    row = rows(tts_client, auth)["higgs-default"]
+    assert row["installed"] is True
+    assert row["loadable"] is False
+    assert "a token voice loads on mlx-darwin only" in row["reason"]
+    response = tts_client.post(
+        "/v1/jobs",
+        headers=auth,
+        json={"type": "load-voice", "model": "higgs-default", "params": {}, "inputs": {}},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "voice_not_served_here"
+
+
 def test_an_unpulled_voice_says_which_command_pulls_it(
     tts_client: TestClient, auth: dict[str, str]
 ) -> None:
