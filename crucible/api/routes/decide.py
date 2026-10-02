@@ -241,13 +241,19 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     limit if limit is not None
                     else enginespec.UNSTATED_ENGINE_CONCURRENCY
                 )
+                items_reading = decide_items_reading(resident.engine)
                 if body.items is not None:
                     work = decide_items.decide_items_on_engine(
                         _engine_call(ctx.http, resident),
                         _engine_post(ctx.http, resident),
                         resident, body, plans,
-                        batched=decide_items_reading(resident.engine).batched,
+                        batched=items_reading.batched,
                         max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                    )
+                elif items_reading.questions:
+                    work = decide_items.decide_questions_on_items(
+                        _engine_call(ctx.http, resident), resident, body, plans,
+                        max_logprobs=reading.max_logprobs,
                     )
                 else:
                     work = decide_core.decide_on_engine(

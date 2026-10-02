@@ -5,13 +5,29 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 1
+ITEMS_VERSION = 2
 
 ITEMS_PATH = "/v1/crucible/items"
 
 MAX_TOP_LOGPROBS = 40
 
 CHUNK_TOKENS = 2048
+
+ROW_BYTES = 512 << 20
+"""Bytes of copied shared-state cache one batched item forward may hold. Every
+row of the batch is the shared state's cache repeated, so this bounds the rows
+per forward: a 300-token state on qwen3.5-9b is ~50 MB a row (24 linear-
+attention layers of float32 recurrent state, 2 MiB each, plus 8 layers of KV),
+so ~10 rows; a 32k-token state is ~1 GB a row, so one."""
+
+MAX_ROWS = 32
+
+STATE_ENTRIES = 4
+
+STATE_BYTES = 1 << 30
+"""The engine keeps the caches of the last STATE_ENTRIES shared states it read,
+at most this many bytes together, so the next decision about the same state
+skips its prefill. A state larger than this is read and not kept."""
 
 ITEMS_FIELDS = frozenset(
     {
@@ -219,6 +235,126 @@ def read_items(
     return tops
 
 
+def common_prefix(prompts: Sequence[Sequence[int]]) -> int:
+    shortest = min(len(prompt) for prompt in prompts)
+    common = 0
+    while common < shortest and len({prompt[common] for prompt in prompts}) == 1:
+        common += 1
+    return common
+
+
+def rows_per_pass(per_row_bytes: int, longest: int) -> int:
+    by_bytes = ROW_BYTES // max(1, per_row_bytes)
+    by_tokens = CHUNK_TOKENS // max(1, longest)
+    return max(1, min(MAX_ROWS, by_bytes, by_tokens))
+
+
+def row_groups(
+    suffixes: Sequence[Sequence[int]], rows: Callable[[int], int]
+) -> list[list[int]]:
+    """Item indexes in the groups one forward reads, longest first so a group
+    pads little; `rows(longest)` is how many rows a group that long may hold."""
+    order = sorted(range(len(suffixes)), key=lambda index: -len(suffixes[index]))
+    groups: list[list[int]] = []
+    at = 0
+    while at < len(order):
+        size = rows(len(suffixes[order[at]]))
+        groups.append(order[at:at + size])
+        at += size
+    return groups
+
+
+def padded(suffixes: Sequence[Sequence[int]]) -> tuple[list[list[int]], list[int]]:
+    """Right-padded rows and each row's last real position. The model is causal,
+    so a real position never reads the padding after it."""
+    longest = max(len(suffix) for suffix in suffixes)
+    rows = [list(suffix) + [suffix[-1]] * (longest - len(suffix)) for suffix in suffixes]
+    return rows, [len(suffix) - 1 for suffix in suffixes]
+
+
+def read_rows(
+    split: Split,
+    shared_pass: Callable[[], list[Any]],
+    rows_pass: Callable[[list[Any], list[list[int]], list[int]], Any],
+    head: Callable[[Any], Any],
+    k: int,
+    per_row_bytes: Callable[[list[Any]], int],
+) -> list[list[tuple[int, float]]]:
+    """Every item read as one row of a batched forward over the shared state's
+    cache: one forward per group of items, not one per item. On Apple silicon a
+    forward of 2 to 64 tokens costs the same ~115 ms on a 9B (MLX's bf16 matmul
+    leaves its matrix-vector kernel past one row), so items in one forward are
+    nearly free next to items in turn."""
+    import mlx.core as mx
+
+    cache = shared_pass()
+    row_bytes = per_row_bytes(cache)
+    tops: list[list[tuple[int, float]] | None] = [None] * len(split.suffixes)
+    for group in row_groups(split.suffixes, lambda longest: rows_per_pass(row_bytes, longest)):
+        rows, lasts = padded([split.suffixes[index] for index in group])
+        for index, top in zip(group, top_of(head, rows_pass(cache, rows, lasts), k)):
+            tops[index] = top
+    mx.clear_cache()
+    read = [top for top in tops if top is not None]
+    assert len(read) == len(tops)
+    return read
+
+
+@dataclass
+class HeldState:
+    model: Any
+    tokens: tuple[int, ...]
+    cache: list[Any]
+    nbytes: int
+
+
+class StateCache:
+    """The caches of the shared states the engine read last, so the next
+    decision about the same state continues from it instead of reading it
+    again. A held cache is only ever reused as a PREFIX: a recurrent layer's
+    state cannot be trimmed back, so it is used when its tokens open the new
+    state and never otherwise. It lives and dies with the engine process."""
+
+    def __init__(self, entries: int, max_bytes: int) -> None:
+        self._entries = entries
+        self._max_bytes = max_bytes
+        self._held: list[HeldState] = []
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+    @property
+    def nbytes(self) -> int:
+        return sum(held.nbytes for held in self._held)
+
+    def nearest(self, model: Any, tokens: Sequence[int]) -> HeldState | None:
+        best: HeldState | None = None
+        for held in self._held:
+            n = len(held.tokens)
+            if held.model is not model or n > len(tokens) or tuple(tokens[:n]) != held.tokens:
+                continue
+            if best is None or n > len(best.tokens):
+                best = held
+        if best is not None:
+            self._held.remove(best)
+            self._held.append(best)
+        return best
+
+    def keep(self, model: Any, tokens: Sequence[int], cache: list[Any], nbytes: int) -> None:
+        key = tuple(tokens)
+        self._held = [
+            held for held in self._held if held.model is model and held.tokens != key
+        ]
+        if not key or nbytes > self._max_bytes:
+            return
+        self._held.append(HeldState(model=model, tokens=key, cache=cache, nbytes=nbytes))
+        while len(self._held) > self._entries or self.nbytes > self._max_bytes:
+            self._held.pop(0)
+
+
+STATES = StateCache(STATE_ENTRIES, STATE_BYTES)
+
+
 def text_parts(model: Any) -> tuple[Any, Callable[[Any], Any]]:
     language = getattr(model, "language_model", model)
     inner = language.model
@@ -232,8 +368,9 @@ def items_document(
     split: Split,
     tops: Sequence[Sequence[tuple[int, float]]],
     decode: Callable[[int], str],
+    cached_tokens: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    document: dict[str, Any] = {
         "object": "crucible.items",
         "shared_tokens": len(split.shared),
         "item_tokens": [len(suffix) for suffix in split.suffixes],
@@ -248,6 +385,9 @@ def items_document(
             for row in tops
         ],
     }
+    if cached_tokens is not None:
+        document["cached_tokens"] = cached_tokens
+    return document
 
 
 def answer_items(
@@ -277,6 +417,10 @@ class MlxLmItemsJob:
     ask: ItemsAsk
 
 
+def state_bytes(cache: list[Any]) -> int:
+    return sum(array.nbytes for entry in cache for array in entry.state if array is not None)
+
+
 def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
@@ -289,23 +433,61 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
             messages, add_generation_prompt=True, tokenize=True, **job.ask.template_kwargs
         ))
 
-    def read(split: Split) -> list[list[tuple[int, float]]]:
-        def shared_pass() -> list[Any]:
-            cache = make_prompt_cache(model)
-            ids = mx.array(split.shared)
-            for start in range(0, len(split.shared), CHUNK_TOKENS):
-                inner(ids[None, start:start + CHUNK_TOKENS], cache=cache)
-                mx.eval([entry.state for entry in cache])
-            return cache
+    ask = job.ask
+    prompts = [tokenize(item_messages(ask.messages, question)) for question in ask.questions]
+    split = split_shared(prompts, ask.max_prompt_tokens, ask.max_item_tokens)
+    # Where the state ends: what every item shares with the open turn left
+    # empty. The state's cache is kept at that point, so a later decision about
+    # the same state, with other questions, continues from it.
+    state_end = min(
+        len(split.shared), common_prefix([*prompts, tokenize(item_messages(ask.messages, ""))])
+    )
+    if len(split.suffixes) == 1 and state_end < len(split.shared):
+        # One item: what lies past the state is read in its row's forward. A
+        # forward of its own would cost a whole forward (~115 ms on a 9B at any
+        # length up to 64) for nothing another row could share.
+        split = Split(
+            shared=split.shared[:state_end],
+            suffixes=[split.shared[state_end:] + split.suffixes[0]],
+        )
+    reused = 0
 
-        def item_pass(cache: list[Any], suffix: list[int]) -> Any:
-            own = copied(make_prompt_cache(model), cache)
-            return inner(mx.array(suffix)[None], cache=own)
+    def prefill(cache: list[Any], tokens: list[int]) -> None:
+        ids = mx.array(tokens)
+        for start in range(0, len(tokens), CHUNK_TOKENS):
+            inner(ids[None, start:start + CHUNK_TOKENS], cache=cache)
+            mx.eval([entry.state for entry in cache])
 
-        return read_items(split, shared_pass, item_pass, head, job.ask.top_logprobs)
+    def shared_pass() -> list[Any]:
+        nonlocal reused
+        cache = make_prompt_cache(model)
+        held = STATES.nearest(model, split.shared[:state_end])
+        if held is not None:
+            copied(cache, held.cache)
+            reused = len(held.tokens)
+        if state_end > reused:
+            prefill(cache, split.shared[reused:state_end])
+            kept = copied(make_prompt_cache(model), cache)
+            mx.eval([entry.state for entry in kept])
+            STATES.keep(model, split.shared[:state_end], kept, state_bytes(kept))
+        if len(split.shared) > state_end:
+            prefill(cache, split.shared[state_end:])
+        return cache
 
-    return answer_items(
-        job.ask, tokenize, read, lambda token: tokenizer.convert_ids_to_tokens([token])[0]
+    def rows_pass(cache: list[Any], rows: list[list[int]], lasts: list[int]) -> Any:
+        own = make_prompt_cache(model)
+        if split.shared:
+            for mine, theirs in zip(own, cache):
+                mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
+        hidden = inner(mx.array(rows), cache=own)
+        return hidden[mx.arange(len(rows)), mx.array(lasts)]
+
+    tops = read_rows(
+        split, shared_pass, rows_pass, head, ask.top_logprobs,
+        lambda cache: state_bytes(cache) if split.shared else 0,
+    )
+    return items_document(
+        split, tops, lambda token: tokenizer.convert_ids_to_tokens([token])[0], reused
     )
 
 

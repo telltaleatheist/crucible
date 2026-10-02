@@ -793,3 +793,27 @@ def test_an_items_engine_started_before_its_route_says_to_load_again(
     assert error["code"] == "decide_not_served"
     assert "/v1/crucible/items" in error["message"] and "load-model" in error["message"]
     assert error["details"]["form"] == "items"
+
+
+def test_on_an_engine_that_reads_questions_as_items_the_question_form_takes_the_items_route(
+    llm_client: TestClient,
+    auth: dict[str, str],
+    loaded: Callable[..., FakeEngine],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from crucible.api.routes import decide as decide_route
+    from crucible.engines import DecideItemsReading
+
+    monkeypatch.setattr(
+        decide_route, "decide_items_reading",
+        lambda engine: DecideItemsReading(batched=True, basis="test: batched", questions=True),
+    )
+    engine = loaded(probs_for=example_probs)
+    response = _decide(llm_client, auth, EXAMPLE)
+    # The fake engine has no items route: reaching it proves where the question
+    # form went, and no chat request (no prime, no question) was sent.
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["details"]["form"] == "items"
+    assert not any(
+        SYSTEM_PROMPT in str(request.get("messages")) for request in engine.requests
+    ), "no decision prompt went to the chat route"

@@ -274,21 +274,41 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
     id="mlx-lm-decide-items-helper",
     distribution="mlx-lm",
     rel_path="mlx_lm/_crucible_items.py",
-    marker="ITEMS_VERSION = 1",
+    marker="ITEMS_VERSION = 2",
     absent_marker=None,
     stale_marker=None,
     script="patch_mlx_lm_decide_items_helper.py",
     why=(
         "the items route runs Crucible's engines/items_forward.py, copied into "
         "the env as mlx_lm/_crucible_items.py; an older copy reads the wrong "
-        "request. MlxLmEngine applies it itself at start"
+        "request (version 1 re-read the state on every request and ran its "
+        "items one forward each). MlxLmEngine applies it itself at start"
     ),
     creates=True,
+)
+
+MLX_LM_DETOKENIZER_TOKENMAP = EnvPatch(
+    id="mlx-lm-detokenizer-tokenmap",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/tokenizer_utils.py",
+    marker='tokenizer, "_crucible_bpe_tokenmap", _crucible_bpe_tokenmap',
+    absent_marker="for value, tokenid in tokenizer.vocab.items():",
+    stale_marker=None,
+    script="patch_mlx_lm_detokenizer_tokenmap.py",
+    why=(
+        "stock mlx-lm 0.31.3 builds a streaming detokenizer's id-to-token table "
+        "from tokenizer.vocab for every request, on its one generation thread: "
+        "~150 ms on Qwen3.5's 248k vocabulary (Mac Studio, 2026-10-01), which "
+        "was most of a one-question decision's 230 ms and serialised every "
+        "concurrent chat's start. Patched, the table is built once per "
+        "tokenizer. MlxLmEngine applies it itself at start"
+    ),
 )
 
 SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_DECIDE_ITEMS,
     MLX_LM_DECIDE_ITEMS_HELPER,
+    MLX_LM_DETOKENIZER_TOKENMAP,
 )
 
 LLM_PATCHES: tuple[EnvPatch, ...] = (
@@ -481,6 +501,7 @@ __all__ = [
     "MLX_LM_CACHE_COUNTERS",
     "MLX_LM_DECIDE_ITEMS",
     "MLX_LM_DECIDE_ITEMS_HELPER",
+    "MLX_LM_DETOKENIZER_TOKENMAP",
     "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_FP32_LOGPROBS",
     "MLX_LM_TOP_LOGPROBS",

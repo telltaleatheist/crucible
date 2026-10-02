@@ -20,6 +20,10 @@ PATCH = envpatches.MLX_LM_TOP_LOGPROBS
 GEN_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_generate.py.txt"
 GEN_SHA256 = "270778ad53eaca55a8533d82e6752660fe5d2605c4aa0879b48a50a91f69345f"
 FP32 = envpatches.MLX_LM_FP32_LOGPROBS
+TOK_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_tokenizer_utils.py.txt"
+TOK_SHA256 = "25784bb03c922d0d7832ce6c66a6cd4eb3a4820b6c5a8e583dedb63a018fb56a"
+DETOK = envpatches.MLX_LM_DETOKENIZER_TOKENMAP
+DETOK_SCRIPT = envpatches.LLM_SCRIPTS_DIR / DETOK.script
 FP32_SCRIPT = envpatches.LLM_SCRIPTS_DIR / FP32.script
 MLX_ARGS = [
     "--decode-concurrency", "16", "--prompt-concurrency", "4", "--prompt-cache-size", "10",
@@ -66,6 +70,10 @@ def pristine_generate() -> str:
     return GEN_FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
+def pristine_tokenizer_utils() -> str:
+    return TOK_FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
 def write_mlx_lm(
     package: Path,
     server_text: str,
@@ -76,6 +84,7 @@ def write_mlx_lm(
     files = {
         "server.py": server_text,
         "generate.py": pristine_generate() if generate_text is None else generate_text,
+        "tokenizer_utils.py": pristine_tokenizer_utils(),
         "_version.py": f'# Copyright\n\n__version__ = "{version}"\n',
     }
     for name, body in files.items():
@@ -617,7 +626,9 @@ def test_the_engine_applies_the_items_patches_itself_at_start(
     with pytest.raises(EngineError) as caught:
         engine.start(tmp_path / "no-weights", "m", 0, MLX_ARGS)
     assert "no model directory" in str(caught.value)
-    assert [Path(argv[1]).name for argv in ran] == [ITEMS.script, ITEMS_HELPER.script]
+    assert [Path(argv[1]).name for argv in ran] == [
+        ITEMS.script, ITEMS_HELPER.script, DETOK.script,
+    ]
     assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
     assert helper_of(env).is_file()
 
@@ -635,3 +646,100 @@ def test_an_items_patch_that_will_not_go_in_is_refused_by_name_at_start(
     assert message.startswith("llm_env_unpatched:") and "mlx-lm-decide-items" in message
     assert "crucible env patch llm" in message
     assert not (tmp_path / "e.log").exists(), "nothing was spawned"
+
+
+def tokenizer_utils_of(env: Path) -> Path:
+    return env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "tokenizer_utils.py"
+
+
+def test_the_tokenizer_utils_fixture_is_the_stock_file() -> None:
+    raw = TOK_FIXTURE.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == TOK_SHA256
+    text = pristine_tokenizer_utils()
+    assert text.count(DETOK.absent_marker) == 2
+    assert DETOK.marker not in text
+
+
+def test_the_detokenizer_applier_builds_the_table_once_and_keeps_a_snapshot(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path)
+    done = run_script(env, DETOK_SCRIPT)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("PATCHED ")
+    text = tokenizer_utils_of(env).read_text(encoding="utf-8")
+    assert DETOK.absent_marker not in text
+    assert text.count("self.tokenmap = _crucible_tokenmap(") == 2
+    assert text.count("def _crucible_tokenmap(") == 1
+    snapshot = Path(str(tokenizer_utils_of(env)) + ".orig").read_text(encoding="utf-8")
+    assert snapshot == pristine_tokenizer_utils()
+    again = run_script(env, DETOK_SCRIPT)
+    assert again.stdout.startswith("ALREADY_PATCHED ")
+    assert tokenizer_utils_of(env).read_text(encoding="utf-8") == text
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(DETOK,))
+    assert row["status"] == envpatches.APPLIED
+
+
+def test_the_detokenizer_applier_writes_nothing_when_a_site_moved(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    moved = pristine_tokenizer_utils().replace(
+        "        self.tokenmap = [None] * len(tokenizer.vocab)\n",
+        "        self.tokenmap = [None] * len(tokenizer.get_vocab())\n",
+    )
+    assert moved != pristine_tokenizer_utils()
+    with open(tokenizer_utils_of(env), "w", encoding="utf-8", newline="") as handle:
+        handle.write(moved)
+    done = run_script(env, DETOK_SCRIPT)
+    assert done.returncode == 2 and "ANCHOR_NOT_FOUND" in done.stderr
+    assert tokenizer_utils_of(env).read_text(encoding="utf-8") == moved
+
+
+class _CountingTokenizer:
+    """A wrapper-shaped tokenizer whose `vocab` is a fresh dict on every read,
+    as a fast HF tokenizer's is."""
+
+    def __init__(self, vocab: dict[str, int]) -> None:
+        self._vocab = vocab
+        self.reads = 0
+
+    @property
+    def vocab(self) -> dict[str, int]:
+        self.reads += 1
+        return dict(self._vocab)
+
+
+def test_the_patched_table_is_the_stock_table_and_is_built_once() -> None:
+    helpers: dict = {}
+    namespace = _script_namespace(DETOK_SCRIPT)
+    exec(namespace["HELPER"].replace(namespace["HELPER_ANCHOR"], "\n"), helpers)
+    vocab = {"a": 2, "<0x41>": 0, "bc": 1, "\u2581d": 3}
+    stock_bpe: list = [None] * len(vocab)
+    for value, tokenid in vocab.items():
+        stock_bpe[tokenid] = value
+    stock_spm: list = [""] * (max(vocab.values()) + 1)
+    for value, tokenid in vocab.items():
+        stock_spm[tokenid] = (
+            bytes([int(value[3:5], 16)]) if value.startswith("<0x") else value.encode()
+        )
+    tokenizer = _CountingTokenizer(vocab)
+    tables = [
+        helpers["_crucible_tokenmap"](
+            tokenizer, "_crucible_bpe_tokenmap", helpers["_crucible_bpe_tokenmap"]
+        )
+        for _ in range(5)
+    ]
+    assert tables[0] == stock_bpe
+    assert all(table is tables[0] for table in tables), "one table, shared"
+    assert tokenizer.reads == 1, "the vocabulary was read once, not once per request"
+    spm = helpers["_crucible_tokenmap"](
+        tokenizer, "_crucible_spm_tokenmap", helpers["_crucible_spm_tokenmap"]
+    )
+    assert spm == stock_spm and tokenizer.reads == 2
+
+
+def test_the_detokenizer_script_and_the_table_name_the_same_strings() -> None:
+    namespace = _script_namespace(DETOK_SCRIPT)
+    assert namespace["MARKER"] == DETOK.marker
+    assert namespace["ABSENT_MARKER"] == DETOK.absent_marker
+    assert namespace["REL"] == DETOK.rel_path
+    assert DETOK in envpatches.SELF_APPLIED_LLM_PATCHES
