@@ -34,6 +34,7 @@ from typing import Any, Callable
 
 from . import clock
 from .errors import ApiError
+from .protocol import CLIENT_HEADER
 
 SESSION_PREFIX = "ses-"
 DEFAULT_IDLE_S = 300
@@ -216,7 +217,7 @@ class QueueSessions:
                 409,
                 "session_not_yours",
                 f"session {session_id} belongs to {who(session.client)}, and this request "
-                f"comes from {who(client)} (X-Crucible-Client, else User-Agent). Only "
+                f"comes from {who(client)} ({CLIENT_HEADER}, else User-Agent). Only "
                 "the client that opened a session sends its items",
                 {"session_id": session_id, "client": session.client, "caller": client},
             )
