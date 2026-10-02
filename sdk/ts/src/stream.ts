@@ -8,7 +8,7 @@ import {
 import { queuePayload, requireSeconds } from './queue.js';
 import { readSseFrames } from './sse.js';
 import { asObject, bool, nullableBool, nullableNum, num, str, type Json } from './shape.js';
-import type { QueueChoice } from './types.js';
+import type { QueueChoice, QueuePosition } from './types.js';
 
 /** Everything `stream(...)` needs. */
 export interface StreamOptions {
@@ -29,7 +29,19 @@ export interface StreamOptions {
    * `server_busy`) when the server is not free now.
    */
   queue?: QueueChoice;
-  /** Aborts the open, which is held until the session is open and the voice resident. */
+  /**
+   * Called with the stream's place in the line whenever its queue session joins or moves, while
+   * it waits; never once the session is open. Given, the open asks the server for a ticket rather
+   * than a held-open request when the session has to wait, follows the session's own stream
+   * through the line, and opens the stream in it once it opens. A server older than 1.0.82 holds
+   * the request open as before and this is never called; neither is it inside this client's own
+   * session or on a free server, where there is no line to wait in.
+   */
+  onQueue?: (position: QueuePosition) => void;
+  /**
+   * Aborts the open, which is held until the session is open and the voice resident. A session
+   * waiting in the line for the stream leaves it.
+   */
   signal?: AbortSignal;
 }
 
@@ -136,7 +148,24 @@ export interface StreamTransport {
   fetch(path: string, init: RequestInit, authenticated: boolean): Promise<Response>;
   failure(response: Response): Promise<CrucibleError>;
   json(path: string, init: RequestInit, where: string): Promise<Json>;
+  /**
+   * Follow a queue session waiting in the line until it opens, calling `onQueue` on every move.
+   * Throws when it ends before it opens; on an abort it leaves the line and throws the abort.
+   */
+  untilOpen(
+    queueSessionId: string,
+    onQueue: (position: QueuePosition) => void,
+    signal: AbortSignal | undefined,
+  ): Promise<void>;
+  /** Take a queue session out of the line, or close it if it opened; never throws. */
+  leaveTheLine(queueSessionId: string): Promise<void>;
 }
+
+/** Asks `POST /v1/tts/stream` for a `202` ticket instead of a held-open request while it waits. */
+const QUEUE_TICKET_HEADER = 'X-Crucible-Queue-Ticket';
+
+/** Names the queue session a request is an item of. */
+const SESSION_HEADER = 'X-Crucible-Session';
 
 const REATTACH_BUDGET_MS = 16_000;
 
@@ -158,9 +187,21 @@ export async function openTtsStream(
   if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '900 s');
   const queue = queuePayload(given.queue);
   if (queue !== null) payload['queue'] = queue;
-  const init: RequestInit = { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(payload) };
-  if (given.signal !== undefined) init.signal = given.signal;
-  const body = await transport.json('/v1/tts/stream', init, 'stream');
+  const onQueue = given.onQueue;
+  if (onQueue !== undefined && typeof onQueue !== 'function') {
+    throw new CrucibleError(`onQueue must be a function, got ${typeof onQueue}`);
+  }
+  const signal = given.signal;
+  const opening = JSON.stringify(payload);
+  const open = (headers: Record<string, string>): RequestInit => {
+    const init: RequestInit = { method: 'POST', headers: { ...JSON_HEADERS, ...headers }, body: opening };
+    if (signal !== undefined) init.signal = signal;
+    return init;
+  };
+  const body =
+    onQueue === undefined
+      ? await transport.json('/v1/tts/stream', open({}), 'stream')
+      : await openThroughTheLine(transport, open, onQueue, signal);
   const session = new Session(transport, {
     sessionId: str(body, 'session_id', 'stream'),
     voice: str(body, 'voice', 'stream'),
@@ -177,6 +218,54 @@ export async function openTtsStream(
     throw cause;
   }
   return session;
+}
+
+/**
+ * The open with a ticket: a `201` is the stream (the server was free, or an older server held the
+ * request open); a `202` names the queue session opened for it, which is followed through the line
+ * and then named by a second open, which claims it for the stream.
+ */
+async function openThroughTheLine(
+  transport: StreamTransport,
+  open: (headers: Record<string, string>) => RequestInit,
+  onQueue: (position: QueuePosition) => void,
+  signal: AbortSignal | undefined,
+): Promise<Json> {
+  const first = await answerOf(transport, open({ [QUEUE_TICKET_HEADER]: '1' }));
+  if (first.status !== 202) return first.body;
+  const queueSessionId = str(first.body, 'queue_session_id', 'stream ticket');
+  await transport.untilOpen(queueSessionId, onQueue, signal);
+  try {
+    signal?.throwIfAborted();
+    const second = await answerOf(transport, open({ [SESSION_HEADER]: queueSessionId }));
+    if (second.status === 202) {
+      throw new CrucibleProtocolError(
+        `the server answered the open inside queue session ${queueSessionId} with another ` +
+          'ticket; a stream opened inside an open session never waits for one',
+      );
+    }
+    return second.body;
+  } catch (cause) {
+    // The session was opened for this stream, and no stream will claim it now.
+    await transport.leaveTheLine(queueSessionId);
+    throw cause;
+  }
+}
+
+async function answerOf(
+  transport: StreamTransport,
+  init: RequestInit,
+): Promise<{ status: number; body: Json }> {
+  const response = await transport.fetch('/v1/tts/stream', init, true);
+  if (!response.ok) throw await transport.failure(response);
+  const text = await response.text();
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new CrucibleProtocolError(`stream did not return JSON: ${text.slice(0, 200)}`);
+  }
+  return { status: response.status, body: asObject(value, 'stream') };
 }
 
 type Pumped = StreamEvent | { readonly kind: 'ready' };

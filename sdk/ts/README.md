@@ -826,6 +826,28 @@ voice that is not is loaded inside the session); `queueSessionId` and `openedFor
 which session it is in. `queue: false` refuses instead of waiting (`session_open` or
 `server_busy`), `queue: {maxWaitS}` bounds the wait, and `signal` aborts it.
 
+**`onQueue` shows the wait.** Without it the open is one held-open request with nothing to
+report until the stream is ready. Give `onQueue` and it is called with `{position, of}` every
+time the stream's session joins or moves in the line, as `session({onQueue})` does — never once
+the session is open:
+
+```ts
+const session = await crucible.stream({
+  voice: 'deathstalker',
+  language: 'en',
+  onQueue: ({ position, of }) => status(`waiting for the server: ${position} of ${of}`),
+  signal: tab.signal,
+});
+```
+
+On the wire the open asks for a ticket (`X-Crucible-Queue-Ticket: 1`); a server that must make
+the session wait answers `202` with its id, the client follows that session's own stream through
+the line, and once it opens it asks for the stream again inside it (`X-Crucible-Session`), which
+claims the session so it still closes with the stream. Aborting `signal` while it waits takes
+the session out of the line; a second open that fails gives the session back. A free server,
+this client's own session and a server before 1.0.82 answer the first open with the stream, and
+`onQueue` is never called.
+
 **One stream per server.** A render submitted inside the same session while the stream is open
 waits until it closes: narrator has one stdin and one stdout, and two conversations on it read
 each other's replies.

@@ -5,6 +5,25 @@ release: **no legacy compatibility**. Leases are gone from the server and from t
 nothing wraps them; the SDK also no longer asks an older server again without `queue`. Move to
 queue sessions and the event stream as you touch each call site.
 
+## New: `stream({onQueue})` (1.0.82)
+
+`stream()` can report its place in the line the way `session({onQueue})` does. A stream opens
+inside a queue session, and when the client holds none the server opens one for it that waits
+in the line like any session; until now the open was one held-open request with nothing to say
+while it waited, so an app could only spin. Give `onQueue: ({position, of}) => …` and it is
+called on every `queued`/`moved` while the stream's session waits, and never once it is open.
+
+Nothing changes without `onQueue`: the open is the same request as before. With it, the SDK
+sends `X-Crucible-Queue-Ticket: 1`; a 1.0.82 server that must make the session wait answers
+`202 {queue_session_id, status, position}` at once, the SDK follows
+`GET /v1/queue/sessions/{id}/events`, and after `opened` sends the open again with
+`X-Crucible-Session: <id>`, which claims the session for the stream (it still closes with the
+stream). An older server ignores the header and holds the request open as before, so `onQueue`
+is simply never called; an older SDK never sends the header, so a 1.0.82 server answers it as
+before. Aborting `signal` while it waits takes the session out of the line; a session removed
+before it opens throws `CrucibleSessionClosed` with its `reason` (the held-open path's
+`409 session_closed` refusal, by the same code).
+
 ## New: `ChunkData.pauseCuts` (1.0.80)
 
 A `tts` render's `chunk` event carries the interior pauses narrator cut down in that chunk

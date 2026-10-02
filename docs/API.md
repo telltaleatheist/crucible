@@ -699,7 +699,7 @@ A long-lived session that takes text and gives audio back over SSE, instead of o
 
 ### `POST /v1/tts/stream`
 
-Open the one streaming session this server will hold at a time, inside a queue session: the client's own (the session header, or the open one it holds), else one opened for the stream, which waits in the line like any session and closes with the stream. Answers once that session is open and the voice is resident (loaded in the session when it is not).
+Open the one streaming session this server will hold at a time, inside a queue session: the client's own (the session header, or the open one it holds), else one opened for the stream, which waits in the line like any session and closes with the stream. Answers once that session is open and the voice is resident (loaded in the session when it is not). Sent with the queue-ticket header set to `1`, an open whose session has to wait answers `202 {queue_session_id, status, position}` at once instead: follow `GET /v1/queue/sessions/{id}/events` and, after `opened`, open again with the session header naming it, which claims that session for the stream (it closes with it). Unclaimed 60 s after opening, it closes. docs/QUEUE.md has the wire.
 
 *Door:* token + `X-Crucible-Api: 1`
 

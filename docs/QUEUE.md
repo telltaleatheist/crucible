@@ -320,6 +320,27 @@ beside the stream's own fields. `"queue": false` refuses instead of waiting (`40
 session_open`, or `server_busy`). A session that ends before it opens answers `409
 session_closed` with `details.reason`.
 
+A held-open request has nothing to say while it waits, so a client that wants to show its
+place in the line asks for a ticket instead, with the header `X-Crucible-Queue-Ticket: 1`:
+
+1. When the session opened for the stream has to wait, the open answers `202` at once:
+   `{"queue_session_id": "ses-…", "status": "queued", "position": N}`. Nothing else
+   changes about that session: it waits in the line like any other.
+2. The client follows `GET /v1/queue/sessions/{id}/events` (`queued {position, of}`,
+   `moved`, then `opened`; `removed {reason}` if it never opens). Following it is what keeps
+   it in the line; `DELETE /v1/queue/sessions/{id}` takes it out.
+3. After `opened`, the client sends the same open again with `X-Crucible-Session: <id>`.
+   That open claims the session as opened for the stream: it answers `201` as above with
+   `queue_session_opened_for_stream: true`, and the session closes with the stream.
+
+A ticketed session that opens and is not claimed within 60 s closes (reason `idle`), so a
+client that vanished between `opened` and its second open holds the server for a minute,
+not for the stream's `idle_s`. The header changes nothing when the open does not have to
+wait (a free server, or the client's own session: `201` as before) or with `"queue":
+false` (refused as before). A client that does not send it, and every SDK before 1.0.82,
+gets the held-open request; a server before 1.0.82 ignores the header and holds the request
+open, so a client asking for a ticket must accept a `201` to its first open.
+
 Every stream op (`say`, `cancel`, `cancel_all`, attaching the events) is activity of its
 session; an open stream with no row being said is not, so `idle_s` runs out and closes
 the session and the stream with it. The stream's `closed` frame then carries `code:
@@ -375,6 +396,9 @@ for await (const event of crucible.events(id)) {
   `close()` cover the session's routes. A session that ends before it opens throws
   `CrucibleSessionClosed` with its `reason`; another client's session refuses as
   `CrucibleSessionHeld`.
+- `stream({voice, language, ..., onQueue?})`: given `onQueue`, the open asks for a ticket
+  and calls `onQueue({position, of})` while the stream's session waits, then opens the
+  stream in it; aborting `signal` takes the waiting session out of the line.
 - `fleetSession(clients, {act, model?, idleS?, maxWaitS?, onQueue?, signal?, probeTimeoutMs?})`
   asks every capable server for a session at once and answers `{session, client, index,
   dropouts}` with the first that opens; the rest are removed at once. `onQueue({client,

@@ -39,6 +39,7 @@ from .protocol import CLIENT_HEADER
 SESSION_PREFIX = "ses-"
 DEFAULT_IDLE_S = 300
 STREAM_IDLE_S = 900
+STREAM_CLAIM_S = 60
 MIN_IDLE_S = 10
 MAX_IDLE_S = 86_400
 REMEMBERED = 200
@@ -96,6 +97,7 @@ class QueueSession:
     jobs: list[str] = field(default_factory=list)
     stream_sessions: set[str] = field(default_factory=set)
     opened_for_stream: str | None = None
+    awaits_stream: bool = False
     events: list[dict[str, Any]] = field(default_factory=list)
     waiters: list[asyncio.Event] = field(default_factory=list)
 
@@ -253,6 +255,20 @@ class QueueSessions:
         if opened_for_it:
             session.opened_for_stream = stream_session_id
 
+    def ticketed_for_stream(self, session: QueueSession) -> None:
+        """A session opened for a TTS stream whose open answered with a ticket rather
+        than waiting: its client follows it through the line and asks for the stream
+        again, with the session header, once it opens."""
+        session.awaits_stream = True
+
+    def claim_for_stream(self, session: QueueSession) -> bool:
+        """The stream open that names a ticketed session claims it, once: True when this
+        session was opened for that stream, so it closes with it."""
+        if not session.awaits_stream:
+            return False
+        session.awaits_stream = False
+        return True
+
     def of_stream_session(self, stream_session_id: str) -> QueueSession | None:
         held = self._open
         if held is not None and stream_session_id in held.stream_sessions:
@@ -378,6 +394,14 @@ class QueueSessions:
                 f"it was open for the server's maximum hold, {self._max_hold_s()} s "
                 "([queue] max_session_hold_s in config.toml)"
             )
+        if (
+            session.awaits_stream and session.opened_at is not None
+            and (now - session.opened_at).total_seconds() >= STREAM_CLAIM_S
+        ):
+            return session, IDLE, (
+                "it was opened for a TTS stream that answered with a ticket, and the "
+                f"stream was not asked for again within {STREAM_CLAIM_S} s of it opening"
+            )
         if session.opened_for_stream is not None and self._stream(session) is None:
             return session, CLIENT, (
                 f"the TTS stream session it was opened for ({session.opened_for_stream}) "
@@ -447,6 +471,6 @@ class QueueSessions:
 
 __all__ = [
     "CLIENT", "CLOSED", "DEFAULT_IDLE_S", "ENDING_EVENTS", "EXPIRED", "SESSION_PREFIX",
-    "QueueSession", "QueueSessions", "IDLE", "LOAD_FAILED", "MAX_HOLD", "MAX_IDLE_S", "MIN_IDLE_S",
+    "QueueSession", "QueueSessions", "IDLE", "STREAM_CLAIM_S", "LOAD_FAILED", "MAX_HOLD", "MAX_IDLE_S", "MIN_IDLE_S",
     "OPEN", "OPERATOR", "QUEUED", "REFUSED", "SERVER_RESTART", "is_session_id", "who",
 ]

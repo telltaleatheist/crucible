@@ -12,6 +12,16 @@ The open is a held-open request, like a queued chat: it answers once the session
 and the voice is resident, because only then does a stream have a sample rate and a
 fingerprint to answer with. A voice that is not resident is loaded by a ``load-voice``
 job inside the session.
+
+A client that wants to show the line asks for a ticket instead (the queue-ticket header,
+``QUEUE_TICKET_HEADER``, set to ``1``): when the session opened for the stream has to wait,
+the open answers ``202`` at once with that session's id, the client follows
+``GET /v1/queue/sessions/{id}/events`` (``queued``/``moved``, then ``opened``) and asks for
+the stream again with the session header naming it. That second open claims the session as
+opened for the stream, so it still closes with it. A ticketed session nobody claims within
+``STREAM_CLAIM_S`` of opening closes (``idle``); one nobody follows while it waits expires
+like any other. A client that does not send the header gets the held-open request,
+unchanged.
 """
 
 from __future__ import annotations
@@ -20,11 +30,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 
 from ..admission import JobRequest, Refusal, admit
 from ..errors import ApiError, JobError
 from ..jobs.base import DONE, TERMINAL_STATES
 from ..jobs.line import MAX_MAX_WAIT_S
+from ..protocol import QUEUE_TICKET_HEADER
 from ..queuerequest import max_wait_of
 from ..queuesessions import CLIENT, OPEN, QUEUED, QueueSession, QueueSessions
 from .caller import queue_session
@@ -99,15 +111,28 @@ def _refuse_without_waiting(ctx: AppContext) -> None:
     )
 
 
+def wants_a_ticket(request: Request) -> bool:
+    return (request.headers.get(QUEUE_TICKET_HEADER) or "").strip() == "1"
+
+
+def _ticket(session: QueueSession) -> Response:
+    return JSONResponse(status_code=202, content={
+        "queue_session_id": session.id,
+        "status": session.status,
+        "position": session.position,
+    })
+
+
 async def take_the_server(
     ctx: AppContext, request: Request, *, client: str | None, idle_s: int,
     queue: Any,
 ) -> StreamTurn | Response:
     """The queue session this stream opens in, opened for it when its client holds
-    none; a Response when the caller left while it waited."""
+    none; a Response when the caller left while it waited, or a ``202`` ticket naming
+    the session when the caller asked for one and the session has to wait."""
     held = queue_session(request, ctx.sessions)
     if held is not None:
-        return StreamTurn(held, opened_for_it=False)
+        return StreamTurn(held, opened_for_it=ctx.sessions.claim_for_stream(held))
     line, sessions = ctx.line, ctx.sessions
     line.refuse_if_full(client)
     max_wait_s = max_wait_of(queue)
@@ -126,6 +151,9 @@ async def take_the_server(
                 "the stream was opened with \"queue\": false and the server was not free",
             )
         _refuse_without_waiting(ctx)
+    if wants_a_ticket(request) and session.status == QUEUED:
+        ctx.sessions.ticketed_for_stream(session)
+        return _ticket(session)
     waited = await unless_the_caller_leaves(_until_open(sessions, session), request)
     if waited is None:
         await let_go(ctx, session, "the caller closed the connection while it waited")

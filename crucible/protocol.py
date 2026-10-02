@@ -6,6 +6,7 @@ ACT_HEADER = "X-Crucible-Act"
 CLIENT_HEADER = "X-Crucible-Client"
 SESSION_HEADER = "X-Crucible-Session"
 HANDOVER_HEADER = "X-Crucible-Handover"
+QUEUE_TICKET_HEADER = "X-Crucible-Queue-Ticket"
 USER_AGENT_HEADER = "User-Agent"
 
 LOOPBACK = "127.0.0.1"

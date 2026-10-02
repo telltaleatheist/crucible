@@ -54,6 +54,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
         else one opened for the stream, which waits in the line like any session and
         closes with the stream. Answers once that session is open and the voice is
         resident (loaded in the session when it is not).
+
+        Sent with the queue-ticket header set to `1`, an open whose session has to
+        wait answers `202 {queue_session_id, status, position}` at once instead: follow
+        `GET /v1/queue/sessions/{id}/events` and, after `opened`, open again with the
+        session header naming it, which claims that session for the stream (it closes
+        with it). Unclaimed 60 s after opening, it closes. docs/QUEUE.md has the wire.
         """
         streams = ctx.streams
         manifest = _streaming_voice(body.voice)
