@@ -20,7 +20,7 @@ from .test_voices import GOOD
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sglang_omni_0.1.4_higgs_tts"
 FILES = ("sampler.py", "model.py", "model_runner.py")
 SCRIPT = envpatches.TTS_SCRIPTS_DIR / envpatches.STALL_GUARD_SCRIPT
-DEFAULT_ENV = "37,0.5,20,8"
+DEFAULT_ENV = "37,1,20,16"
 TTS_PINS = jobenv.recipe_pins(
     jobenv.recipe_for(jobenv.tts_env("higgs-v3", "cuda-linux"))
 )
@@ -160,7 +160,7 @@ def test_a_higgs_voice_that_says_nothing_gets_the_default_guard(a_configured_box
     assert serving.stall_guard_env == DEFAULT_ENV
     row = serving.to_dict()["stall_guard"]
     assert row == {
-        "enabled": True, "frames": 37, "rate": 0.5, "max": 20.0, "window": 8,
+        "enabled": True, "frames": 37, "rate": 1.0, "max": 20.0, "window": 16,
         "env": DEFAULT_ENV, "basis": "default", "note": stallguard.DEFAULT_NOTE,
     }
 

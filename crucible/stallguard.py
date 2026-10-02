@@ -53,7 +53,7 @@ class StallGuard:
         }
 
 
-DEFAULT = StallGuard(frames=37, rate=0.5, max=20.0, window=8)
+DEFAULT = StallGuard(frames=37, rate=1.0, max=20.0, window=16)
 
 DEFAULT_NOTE = (
     "Crucible's default for every Higgs v3 voice that states no stall_guard "
@@ -65,10 +65,14 @@ DEFAULT_NOTE = (
     "code is already among the last `window` cb0 codes, each of those codes "
     "loses min(max, rate * (run - frames)) of logit before temperature/top-k/"
     "top-p, and the model's own next choice takes over; nothing is forced. "
-    "37 frames is ~1.5 s at 25 fps. The prototype (37, 0.5, 20) reset on any "
-    "code change, which let a loop hopping among silence codes run 4.7 s; the "
-    "8-code window makes that hop one run (target ~2 s). Owed: the GPU "
-    "acceptance render of this exact setting"
+    "37 frames is ~1.5 s at 25 fps. Accepted 2026-10-02 (training-pc-1) from "
+    "the A/B through Crucible on the PC, the stalling no-bed Mistborn ckpt-3510, "
+    "Mutineers' Moon bank x 16 per arm: generated pauses over 5 s 5 -> 0, the "
+    "longest 35.3 s -> 4.5 s, the dead air the render-side cap trims 108 s -> "
+    "48 s, coverage 0.984 -> 0.985, speed -2.5 % (inside run noise). (37, 0.5, "
+    "20, 8) reached 4.2 s with 65 s trimmed; the ~2 s target was dropped "
+    "because the leftovers sit inside the voice's own pause range (corpus max "
+    "4.44 s)."
 )
 
 

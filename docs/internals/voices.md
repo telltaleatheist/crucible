@@ -276,7 +276,8 @@ This section sizes the server narrator starts. It is **required for
   screening voice states 8192. **No narrator pin reads this variable yet.**
 - `stall_guard` → `HIGGS_STALL_GUARD`, **on both arms, always stated**
   (`crucible/stallguard.py`). Absent means the default guard,
-  `{ frames = 37, rate = 0.5, max = 20, window = 8 }` (`"37,0.5,20,8"`); a
+  `{ frames = 37, rate = 1.0, max = 20, window = 16 }` (`"37,1,20,16"`, accepted
+  2026-10-02 from the PC A/B; see `stallguard.DEFAULT_NOTE`); a
   table states other numbers; `false` turns it off (`"off"`). `true` is
   refused (absent already is the default), and so is a partial table, an
   unknown key, or a number outside frames 1–10000, rate 0.001–100, max

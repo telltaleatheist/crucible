@@ -109,8 +109,8 @@ def test_import_reads_the_variable_and_refuses_a_malformed_one(load_sampler: Any
     assert load_sampler("off").STALL_GUARD is None
     on = load_sampler(DEFAULT_ENV)
     assert (on.STALL_GUARD.frames, on.STALL_GUARD.rate, on.STALL_GUARD.max,
-            on.STALL_GUARD.window) == (37, 0.5, 20.0, 8)
-    assert on.STALL_RING_WIDTH == 8
+            on.STALL_GUARD.window) == (37, 1.0, 20.0, 16)
+    assert on.STALL_RING_WIDTH == 16
     with pytest.raises(ValueError) as caught:
         load_sampler("37,0.5,20")
     assert "HIGGS_STALL_GUARD" in str(caught.value)
@@ -272,7 +272,7 @@ def test_reset_row_empties_the_guard(load_sampler: Any) -> None:
     state.stall_ring[1] = 7
     state.reset_row(1)
     assert int(state.stall_run[1]) == 0
-    assert state.stall_ring[1].tolist() == [-1] * 8
+    assert state.stall_ring[1].tolist() == [-1] * 16
 
 
 def test_the_graph_path_updates_its_shadow_buffers_in_place(load_sampler: Any) -> None:
