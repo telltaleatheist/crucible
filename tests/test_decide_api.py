@@ -796,7 +796,7 @@ def test_an_items_engine_started_before_its_route_says_to_load_again(
 
 
 def test_on_an_engine_that_reads_questions_as_items_the_question_form_takes_the_items_route(
-    llm_client: TestClient,
+    llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     loaded: Callable[..., FakeEngine],
     monkeypatch: pytest.MonkeyPatch,
