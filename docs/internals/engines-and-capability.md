@@ -637,17 +637,59 @@ started exactly as `load-model` would).
   mlx-lm and mlx-vlm answer `POST /v1/crucible/items` with
   `engines/items_forward.py`: every item's lone-question prompt is tokenized
   through the chat template, the common token prefix runs once (in
-  2,048-token chunks), and each item's tail runs from a copy of that cache
-  (`copied`: the state arrays, into a fresh `make_prompt_cache`); the head is
-  applied to the last position only, in float32, top-k by argsort. Items run
-  one after another: batching the tails (right-padded, the cache repeated per
-  row) measured 0.275 s per item at 1 row, 0.207 at 4, 0.243 at 8 and 0.631
-  at 16 on the Mac 9B, not worth the padding. On mlx-vlm the images are
-  embedded once with the shared prefix (`get_input_embeddings` over the shared
-  part plus the longest tail, so the rope positions are the lone question's),
-  and a tail is text only. vLLM and llama-server answer one prompt per request,
-  so the items go through the questions machinery, prime first; vLLM batches
-  them and reuses the prefix.
+  2,048-token chunks), and the items' tails are read as rows of batched
+  forwards over that cache repeated per row (`read_rows`: right-padded, each
+  row read at its own last token, longest tails grouped first; rows per
+  forward bounded by `ROW_BYTES`, 512 MiB of repeated cache, and by
+  `CHUNK_TOKENS`); the head is applied to those positions only, in float32,
+  top-k by argsort. Why rows and not one forward per item, measured on the Mac
+  Studio M1 Ultra 9B bf16 2026-10-01: MLX's bf16 matmul leaves its
+  matrix-vector kernel past one row (0.8 GB of weights: 1.6 ms at 1 row, 6.0 ms
+  at 2-64 rows, 11.7 at 128), so a 9B forward of 2-64 tokens costs ~115-150 ms
+  whatever its length and a forward of B rows x T tokens costs what B*T tokens
+  in one row cost (3x36: 243 ms; 1x108: 231 ms). Three ~36-token items in turn
+  were ~400 ms, as rows ~240 ms. (An earlier note measured batched tails at
+  0.207-0.631 s per item and kept them in turn; that was before rows were
+  bounded by the bytes of the repeated cache.) The engine also keeps the cache
+  of the last 4 STATES it read (`StateCache`, 1 GiB at most, least recently
+  used out; a state over the budget is read and not kept), cut where the state
+  ends — what every item shares with the open user turn left empty — so the
+  next decision about the same state with other questions skips the prefill
+  (a held state is used only as a PREFIX of the new one: a recurrent layer
+  cannot be trimmed back). The reply's `cached_tokens` says how many state
+  tokens came from it. A single item reads everything past the state in its
+  own row (no forward of its own for a prefix nothing else shares). On mlx-vlm
+  (sequential `read_items`, unchanged) the images are embedded once with the
+  shared prefix (`get_input_embeddings` over the shared part plus the longest
+  tail, so the rope positions are the lone question's), and a tail is text
+  only. vLLM and llama-server answer one prompt per request, so the items go
+  through the questions machinery, prime first; vLLM batches them and reuses
+  the prefix.
+- On mlx-lm the QUESTION form rides the same route (`decide_questions_batched`,
+  read by `decide_items_reading(...).questions`, `decide_items.
+  decide_questions_on_items`): the open user turn and one question block per
+  question are exactly the prompts the chat path sends (same distributions:
+  identical to 1e-16 on a repeated state, otherwise within one bf16 logit
+  step, 0.125 at |logit| 16-32), one request, no prime; each question's
+  `timing_ms.per_question` is that request, `cached_tokens` the state tokens
+  the engine reused. Through the chat path a question on mlx-lm was three
+  forwards of the ~115 ms floor (mlx-lm prefills the system, user and
+  thinking-tail segments apart), plus its token, plus a pipelined token
+  nobody reads, plus a fresh detokenizer table (below). Measured 2026-10-01,
+  ~300-token state, door logic against the engine: 1/2/3 questions on a
+  state the engine holds 155/263/386 ms (chat path 460/1204/1521 before,
+  329/788/1021 with the detokenizer patch); on a new state 656/756/864 ms
+  (931/1746/1965 before). The chat path is still faster for an EXACT repeat
+  of one question (74 ms with the patch): mlx-lm's own prompt cache then holds
+  all but its last token.
+- `mlx-lm-detokenizer-tokenmap` (self-applied): stock mlx-lm 0.31.3 builds a
+  streaming detokenizer's id-to-token table from `tokenizer.vocab` for every
+  request, on the one generation thread, and a fast tokenizer's `vocab` is a
+  fresh 248k-entry dict on each read: ~150 ms per chat request on Qwen3.5,
+  serialising the start of concurrent ones. The patch builds the table once per
+  tokenizer (`_crucible_tokenmap`, memoised on the wrapper; only ever read).
+  A one-question chat decision on the 9B went 221 -> 73 ms with nothing else
+  changed and identical answers.
 - mlx-lm gets the route from two env patches: `mlx-lm-decide-items` edits
   `mlx_lm/server.py` (the `/v1/crucible/items` branch at the top of
   `do_POST`, and a branch in `_generate` that drains an active batch and then
@@ -657,7 +699,8 @@ started exactly as `load-model` would).
   not "no such package"). Both are `SELF_APPLIED_LLM_PATCHES`: `MlxLmEngine`
   applies them itself at start when they are missing, with the env's own
   python, after the other four are checked as before, so a Mac that upgrades
-  needs no `crucible env patch llm` for them. The helper's marker is
+  needs no `crucible env patch llm` for them (`mlx-lm-detokenizer-tokenmap` is
+  self-applied the same way). The helper's marker is
   `ITEMS_VERSION = <n>`: change `ITEMS_VERSION` with every change to
   `items_forward.py`, or an env keeps the older copy. An engine process
   started before its env had the route answers 404, which the door reports as
