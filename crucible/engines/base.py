@@ -90,6 +90,10 @@ class SubprocessEngine:
 
     decide_items_basis: str | None = None
 
+    decide_questions_batched: bool = False
+
+    decide_questions_basis: str | None = None
+
     sigterm_wait_seconds: float = STOP_TIMEOUT_SECONDS
 
     env_job_type = "llm"

@@ -53,6 +53,17 @@ class MlxLmEngine(SubprocessEngine):
         "copy of its cache"
     )
 
+    decide_questions_batched = True
+    decide_questions_basis = (
+        "measured on the Mac Studio M1 Ultra, qwen3.5-9b bf16, 2026-10-01: MLX's "
+        "bf16 matmul leaves its matrix-vector kernel past one row (1.6 ms vs 6.0 ms "
+        "for 0.8 GB of weights at 1 vs 2-64 rows), so any forward of 2-64 tokens "
+        "costs ~115 ms and a chat request is three of them (mlx-lm prefills the "
+        "system, user and thinking-tail segments apart) plus a token and a "
+        "pipelined token nobody reads; the items route reads every question as "
+        "a row of one forward over a state it keeps between decisions"
+    )
+
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:

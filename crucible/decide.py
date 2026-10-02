@@ -366,7 +366,9 @@ class DecideTiming(_Strict):
     """Each question's own request."""
     prime: ForwardTiming | None
     """The shared prefix sent alone first — present when the decision had more
-    than one question, null when it had one."""
+    than one question, null when it had one, and null when the engine read every
+    question in one batched request (mlx-lm: each question's timing is then that
+    one request)."""
 
 
 class DecideTokens(_Strict):

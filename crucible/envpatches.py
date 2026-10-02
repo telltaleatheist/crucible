@@ -274,7 +274,7 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
     id="mlx-lm-decide-items-helper",
     distribution="mlx-lm",
     rel_path="mlx_lm/_crucible_items.py",
-    marker="ITEMS_VERSION = 1",
+    marker="ITEMS_VERSION = 2",
     absent_marker=None,
     stale_marker=None,
     script="patch_mlx_lm_decide_items_helper.py",

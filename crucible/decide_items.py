@@ -6,11 +6,16 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
 from .decide import (
+    Answer,
     ChoiceAnswer,
     ChoiceQuestion,
     DecideItemsResponse,
     DecideRequest,
+    DecideResponse,
+    DecideTiming,
+    DecideTokens,
     EnginePost,
+    ForwardTiming,
     ItemsTiming,
     ItemsTokens,
     ModelProvenance,
@@ -92,7 +97,8 @@ def prompt_cap(max_model_len: int) -> int:
 
 
 def items_body(
-    engine_model_name: str, msgs: list[dict[str, Any]], questions: list[str], k: int, cap: int
+    engine_model_name: str, msgs: list[dict[str, Any]], questions: list[str], k: int, cap: int,
+    item_cap: int = MAX_ITEM_TOKENS,
 ) -> dict[str, Any]:
     return {
         "model": engine_model_name,
@@ -101,7 +107,7 @@ def items_body(
         "chat_template_kwargs": {"enable_thinking": False},
         "top_logprobs": k,
         "max_prompt_tokens": cap,
-        "max_item_tokens": MAX_ITEM_TOKENS,
+        "max_item_tokens": item_cap,
     }
 
 
@@ -110,6 +116,7 @@ class ItemsReading:
     shared_tokens: int
     item_tokens: tuple[int, ...]
     tops: tuple[tuple[tuple[str, float], ...], ...]
+    cached_tokens: int | None = None
 
 
 def _engine_error(engine: str, detail: str) -> ApiError:
@@ -170,7 +177,12 @@ def read_items_reply(data: Any, engine: str, n_items: int) -> ItemsReading:
             logprob = _field(entry, "logprob", (int, float), where, engine)
             row.append((token, math.exp(logprob)))
         tops.append(tuple(row))
-    return ItemsReading(shared_tokens=shared, item_tokens=tuple(counts), tops=tuple(tops))
+    cached = data.get("cached_tokens")
+    if cached is not None and (isinstance(cached, bool) or not isinstance(cached, int)):
+        raise _engine_error(engine, f"reply.cached_tokens is {type(cached).__name__}, expected int")
+    return ItemsReading(
+        shared_tokens=shared, item_tokens=tuple(counts), tops=tuple(tops), cached_tokens=cached
+    )
 
 
 def _choice_answers(
@@ -214,6 +226,52 @@ async def _batched(
             per_item=[reading.shared_tokens + n for n in reading.item_tokens],
             images=len(images),
         ),
+    )
+
+
+async def decide_questions_on_items(
+    call: EngineCall,
+    resident: Any,
+    body: DecideRequest,
+    plans: list[Plan],
+    *,
+    max_logprobs: int | None,
+) -> DecideResponse:
+    """The question form read through the items route: the state once (or not
+    at all, when the engine still holds it), every question one row of a batched
+    forward, one request. The prompts are the ones `decide_on_engine` sends, so
+    the answers are the same distributions; there is no prime."""
+    started = time.perf_counter()
+    images = list(body.images or [])
+    k = top_k(max(len(item.labels) for item in plans), max_logprobs)
+    cap = prompt_cap(resident.max_model_len)
+    wire = items_body(
+        resident.engine_model_name, open_messages(render_state(body.state), images),
+        blocks(plans), k, cap, item_cap=cap,
+    )
+    sent = time.perf_counter()
+    reading = read_items_reply(await call(ITEMS_PATH, wire), resident.engine, len(plans))
+    wall_ms = round((time.perf_counter() - sent) * 1000.0, 1)
+    answers: dict[str, Answer] = {}
+    per_question: dict[str, ForwardTiming] = {}
+    tokens: dict[str, int] = {}
+    for item, top, own in zip(plans, reading.tops, reading.item_tokens):
+        dist = label_distribution(top, item, resident.engine, missing=body.missing)
+        answers[item.name] = answer(item, dist, body.missing)
+        tokens[item.name] = reading.shared_tokens + own
+        per_question[item.name] = ForwardTiming(
+            wall_ms=wall_ms, prompt_tokens=tokens[item.name], cached_tokens=reading.cached_tokens
+        )
+    return DecideResponse(
+        model=_provenance(resident),
+        engine=resident.engine,
+        answers=answers,
+        timing_ms=DecideTiming(
+            total=round((time.perf_counter() - started) * 1000.0, 1),
+            per_question=per_question,
+            prime=None,
+        ),
+        tokens=DecideTokens(per_question=tokens, images=len(images)),
     )
 
 
@@ -269,6 +327,7 @@ __all__ = [
     "blocks",
     "check_item_count",
     "decide_items_on_engine",
+    "decide_questions_on_items",
     "engine_refusal",
     "item_plans",
     "item_question",

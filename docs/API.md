@@ -1284,7 +1284,7 @@ Where the time went.
 | --- | --- | --- | --- | --- |
 | `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
 | `per_question` | object of ForwardTiming | yes | — | Each question's own request. |
-| `prime` | ForwardTiming or null | yes | — | The shared prefix sent alone first — present when the decision had more than one question, null when it had one. |
+| `prime` | ForwardTiming or null | yes | — | The shared prefix sent alone first — present when the decision had more than one question, null when it had one, and null when the engine read every question in one batched request (mlx-lm: each question's timing is then that one request). |
 
 ### `DecideTokens`
 

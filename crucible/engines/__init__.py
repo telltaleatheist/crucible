@@ -119,6 +119,9 @@ def decide_reading(engine_name: str) -> DecideReading:
 class DecideItemsReading:
     batched: bool
     basis: str
+    questions: bool = False
+    """The question form is read through the items route too: every question
+    a row of one batched request, no prime, no request per question."""
 
 
 def decide_items_reading(engine_name: str) -> DecideItemsReading:
@@ -130,7 +133,21 @@ def decide_items_reading(engine_name: str) -> DecideItemsReading:
             "list of items in one batched request is read from its source, and the "
             "reading says where"
         )
-    return DecideItemsReading(batched=cls.decide_items_batched, basis=basis)
+    questions = cls.decide_questions_batched
+    if questions and not cls.decide_items_batched:
+        raise EngineError(
+            f"{engine_name} states decide_questions_batched with no batched items "
+            "route; the question form can only ride a route the engine has"
+        )
+    if questions and cls.decide_questions_basis is None:
+        raise EngineError(
+            f"{engine_name} states decide_questions_batched and no "
+            "decide_questions_basis; why the question form is better read as items "
+            "is a measurement, and the reading says which"
+        )
+    return DecideItemsReading(
+        batched=cls.decide_items_batched, basis=basis, questions=questions
+    )
 
 
 def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
