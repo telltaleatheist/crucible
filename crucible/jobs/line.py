@@ -23,7 +23,7 @@ from .. import clock
 from ..errors import ApiError
 from ..events import QUEUE
 from ..queuesessions import LOAD_FAILED, QueueSession, QueueSessions, is_session_id
-from .base import Job, JobFailure
+from .base import TERMINAL_STATES, Job, JobFailure
 
 if TYPE_CHECKING:
     from .queue import JobStore
@@ -365,12 +365,24 @@ class WaitingLine:
             item.settle("removed", removed_call(item.job, removal))
         elif isinstance(item, WaitingSession):
             self._sessions.removed(item.job, reason, message)  # type: ignore[arg-type]
+            self._abandon_load(item)
         else:
             self._store.end_waiting(item, removal=removal)
         self._announce("removed", item, reason=reason, message=message)
         self.reorder()
         self._wake()
         return item
+
+    def _abandon_load(self, item: WaitingSession) -> None:
+        """A session that leaves the line while the load opening it runs takes that load
+        with it: the load was its own, and finishing it would leave a model on the card
+        that nothing asked for (a fleet's losing server, a client that gave up)."""
+        if item.load_job is None:
+            return
+        job = self._store.get(item.load_job)
+        item.load_job = None
+        if job.status not in TERMINAL_STATES:
+            self._store.cancel(job)
 
     def not_waiting(self, job_id: str) -> ApiError:
         if is_session_id(job_id):

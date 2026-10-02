@@ -538,3 +538,35 @@ def test_every_session_change_reaches_the_server_wide_event_stream(
     assert all(event["data"]["session_id"] == ticket["session_id"] for event in sessions)
     assert sessions[0]["data"]["client"] == "briefcase"
     assert sessions[-1]["data"]["reason"] == "client"
+
+
+def test_a_session_removed_while_its_model_loads_takes_the_load_with_it(
+    chat_server: Callable[..., Any], auth: dict[str, str]
+) -> None:
+    hold = threading.Event()
+    _, server = chat_server(hold=hold)
+    mine = _as(auth, "fleet-loser")
+    with server as base:
+        ticket = _session(base, mine, model=MODEL)
+        session_id = ticket["session_id"]
+        _wait_for(lambda: _state(base, auth, session_id)["load_job"] is not None,
+                  "the session's load to start")
+        load_job = _state(base, auth, session_id)["load_job"]
+        try:
+            gone = httpx.delete(f"{base}/v1/queue/sessions/{session_id}", headers=mine,
+                                timeout=30.0)
+            assert gone.status_code == 200, gone.text
+            assert gone.json()["reason"] == "client"
+        finally:
+            hold.set()
+
+        def load_status() -> str:
+            return httpx.get(f"{base}/v1/jobs/{load_job}", headers=auth,
+                             timeout=30.0).json()["status"]
+
+        _wait_for(lambda: load_status() in ("done", "failed", "cancelled"),
+                  "the abandoned load to end")
+        assert load_status() == "cancelled"
+        _wait_for(lambda: _activity(base, auth)["resident"] is None
+                  and _activity(base, auth)["warming"] is None,
+                  "the card to be left empty")
