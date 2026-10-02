@@ -4,9 +4,15 @@
   var API_HEADER = 'X-Crucible-Api';
   var API_VERSION = '1';
   var TOKEN_KEY = 'crucible.token';
-  var ACTIVITY_MS = 4000;
-  var STATUS_THROTTLE_MS = 1500;
+  // GET /v1/events (docs/EVENTS.md) says when anything changes, so nothing here is read on
+  // a timer except what no event covers: an app's pairing request.
+  var EVENTS_PATH = '/v1/events';
+  var PAIRING_MS = 4000;
+  var RECONNECT_MS = [1000, 2000, 4000, 8000, 15000];
+  var REREAD_MS = 300;
+  var TICK_MS = 1000;
   var INSTALL_LINES_KEPT = 400;
+  var TASK_ENDS = ['task.done', 'task.failed', 'task.cancelled'];
 
   var state = {
     token: null,
@@ -32,8 +38,18 @@
     voiceAdd: { id: '', repo: '', revision: '' },
     allowanceDraft: null,
     upstreamModels: {},
-    lastStatusAt: 0,
-    timer: null
+    queue: null,
+    events: null,
+    eventsOpen: false,
+    eventsFailures: 0,
+    lastEventId: null,
+    reconnect: null,
+    stopping: null,
+    stale: {},
+    rereading: null,
+    rereadAt: null,
+    pairingTimer: null,
+    ticker: null
   };
 
   function liveTask(task) {
@@ -183,9 +199,19 @@
     forgetToken();
     state.token = null;
     stopStream();
-    if (state.timer !== null) {
-      window.clearInterval(state.timer);
-      state.timer = null;
+    stopEvents();
+    if (state.rereading !== null) {
+      window.clearTimeout(state.rereading);
+      state.rereading = null;
+    }
+    state.stale = {};
+    if (state.pairingTimer !== null) {
+      window.clearInterval(state.pairingTimer);
+      state.pairingTimer = null;
+    }
+    if (state.ticker !== null) {
+      window.clearInterval(state.ticker);
+      state.ticker = null;
     }
     showGate(refusal);
   }
@@ -344,6 +370,71 @@
     return seconds + ' s';
   }
 
+  function secondsSince(stamp) {
+    var when = new Date(stamp).getTime();
+    return isNaN(when) ? null : Math.max(0, (Date.now() - when) / 1000);
+  }
+
+  function secondsUntil(stamp) {
+    var when = new Date(stamp).getTime();
+    return isNaN(when) ? null : (when - Date.now()) / 1000;
+  }
+
+  function untilText(stamp) {
+    var left = secondsUntil(stamp);
+    if (left === null) {
+      return stamp;
+    }
+    return left <= 0 ? 'any moment now' : 'in ' + secondsText(left);
+  }
+
+  // A span the ticker keeps true between events: `data-since` counts up from a stamp,
+  // `data-until` counts down to one. Only the text changes; nothing is read.
+  function sinceSpan(prefix, stamp) {
+    var left = secondsSince(stamp);
+    return el('span', {
+      class: 'num',
+      'data-since': stamp,
+      'data-prefix': prefix,
+      text: prefix + (left === null ? stamp : secondsText(left))
+    });
+  }
+
+  function untilSpan(prefix, stamp, rereadWhenDue) {
+    return el('span', {
+      class: 'num',
+      'data-until': stamp,
+      'data-prefix': prefix,
+      'data-reread': rereadWhenDue ? 'activity' : null,
+      text: prefix + untilText(stamp)
+    });
+  }
+
+  function tick() {
+    var counting = document.querySelectorAll('[data-since]');
+    for (var index = 0; index < counting.length; index += 1) {
+      var up = counting[index];
+      var since = secondsSince(up.getAttribute('data-since'));
+      if (since !== null) {
+        up.textContent = up.getAttribute('data-prefix') + secondsText(since);
+      }
+    }
+    var waiting = document.querySelectorAll('[data-until]');
+    for (var at = 0; at < waiting.length; at += 1) {
+      var down = waiting[at];
+      var stamp = down.getAttribute('data-until');
+      down.textContent = down.getAttribute('data-prefix') + untilText(stamp);
+      var due = secondsUntil(stamp);
+      var reread = down.getAttribute('data-reread');
+      if (reread && due !== null && due <= 0 && state.rereadAt !== stamp) {
+        // An idle deadline also moves when the session's client touches it, which no
+        // event says: read it once more when it runs out and the session is still open.
+        state.rereadAt = stamp;
+        markStale(reread);
+      }
+    }
+  }
+
   function clockText(stamp) {
     if (!stamp) {
       return null;
@@ -427,6 +518,36 @@
     }
   }
 
+  async function loadQueue() {
+    try {
+      state.queue = await call('/v1/queue');
+      setRefusal('queue', null);
+    } catch (refusal) {
+      state.queue = null;
+      setRefusal('queue', refusal);
+    }
+  }
+
+  function queuePath(id) {
+    var safe = encodeURIComponent(id);
+    return `/v1/queue/${safe}`;
+  }
+
+  async function removeFromQueue(id, question) {
+    if (!window.confirm(question)) {
+      return;
+    }
+    setRefusal('dequeue', null);
+    try {
+      await call(queuePath(id), { method: 'DELETE' });
+    } catch (refusal) {
+      setRefusal('dequeue', refusal);
+    }
+    markStale('queue');
+    markStale('activity');
+    renderQueue();
+  }
+
   async function loadCatalog() {
     try {
       state.catalog = await call('/v1/catalog');
@@ -440,12 +561,16 @@
   async function loadTasks() {
     try {
       var body = await call('/v1/tasks');
-      state.tasks = body.tasks;
       setRefusal('tasks', null);
+      takeTasks(body.tasks);
     } catch (refusal) {
-      state.tasks = [];
       setRefusal('tasks', refusal);
+      takeTasks([]);
     }
+  }
+
+  function takeTasks(tasks) {
+    state.tasks = tasks;
     var running = null;
     for (var index = 0; index < state.tasks.length; index += 1) {
       if (state.tasks[index].state === 'running') {
@@ -475,57 +600,62 @@
     stopStream();
     var controller = new AbortController();
     state.stream = controller;
-    var response;
     try {
-      response = await fetch(taskEventsPath(id), {
-        headers: headers({ Accept: 'text/event-stream' }),
-        signal: controller.signal
+      await readStream(taskEventsPath(id), {}, controller.signal, function (frame) {
+        onTaskFrame(frame, id);
       });
-    } catch (dropped) {
+    } catch (failure) {
+      if (failure instanceof Refusal) {
+        setRefusal('tasks', failure);
+        render();
+      }
       return;
     }
+    // The task's own stream ended with it: what it installed or pulled is read once,
+    // in the same burst as the task.* event that says the same thing.
+    markStale('tasks');
+    markStale('slow');
+  }
+
+  // One SSE reader for every stream the page follows. It returns when the stream ends,
+  // throws a Refusal when the server refuses it, and lets a dropped connection or an
+  // abort propagate as the browser's own error.
+  async function readStream(path, extra, signal, onFrame) {
+    var response = await fetch(path, {
+      headers: headers(Object.assign({ Accept: 'text/event-stream' }, extra)),
+      signal: signal
+    });
     if (!response.ok) {
       var refusal = await refusalOf(response);
       if (response.status === 401) {
         signOut(refusal);
       }
-      setRefusal('tasks', refusal);
-      render();
-      return;
+      throw refusal;
     }
     var reader = response.body.getReader();
     var decoder = new TextDecoder();
     var buffer = '';
     while (true) {
-      var chunk;
-      try {
-        chunk = await reader.read();
-      } catch (dropped) {
-        return;
-      }
+      var chunk = await reader.read();
       if (chunk.done) {
-        break;
+        return;
       }
       buffer += decoder.decode(chunk.value, { stream: true });
       var cut = buffer.indexOf('\n\n');
       while (cut !== -1) {
-        onFrame(buffer.slice(0, cut), id);
+        var frame = parseFrame(buffer.slice(0, cut));
         buffer = buffer.slice(cut + 2);
         cut = buffer.indexOf('\n\n');
+        if (frame !== null) {
+          onFrame(frame);
+        }
       }
-    }
-    if (state.token !== null) {
-      await refreshAll();
     }
   }
 
-  function onFrame(frame, id) {
-    if (state.live === null || state.live.id !== id) {
-      return;
-    }
-    var name = null;
-    var payload = null;
-    var lines = frame.split('\n');
+  function parseFrame(text) {
+    var frame = { id: null, name: null, data: {} };
+    var lines = text.split('\n');
     for (var index = 0; index < lines.length; index += 1) {
       var line = lines[index];
       if (line.indexOf(':') === 0) {
@@ -541,22 +671,181 @@
         value = value.slice(1);
       }
       if (field === 'event') {
-        name = value;
+        frame.name = value;
+      } else if (field === 'id') {
+        frame.id = value;
       } else if (field === 'data') {
         try {
-          payload = JSON.parse(value);
+          frame.data = JSON.parse(value);
         } catch (notJson) {
-          payload = null;
+          frame.data = {};
         }
       }
     }
-    if (name === null) {
+    return frame.name === null ? null : frame;
+  }
+
+  function onTaskFrame(frame, id) {
+    if (state.live === null || state.live.id !== id) {
       return;
     }
-    applyEvent(name, payload === null ? {} : payload);
+    applyEvent(frame.name, frame.data);
+    renderTasks();
+  }
+
+  function startEvents() {
+    if (state.events !== null || state.token === null) {
+      return;
+    }
+    var controller = new AbortController();
+    state.events = controller;
+    followEvents(controller);
+  }
+
+  function stopEvents() {
+    if (state.reconnect !== null) {
+      window.clearTimeout(state.reconnect);
+      state.reconnect = null;
+    }
+    if (state.events !== null) {
+      state.events.abort();
+      state.events = null;
+    }
+    state.eventsOpen = false;
+  }
+
+  // The server-wide stream: a snapshot, then one event per change. It ends on a drop, an
+  // `overflow` or `server.stopping`; it is opened again after a backoff with the last id
+  // it saw, and the server either resumes from there or sends a snapshot with `gap`.
+  async function followEvents(controller) {
+    var extra = {};
+    if (state.lastEventId !== null) {
+      extra['Last-Event-ID'] = state.lastEventId;
+    }
+    var opened = false;
+    try {
+      await readStream(EVENTS_PATH, extra, controller.signal, function (frame) {
+        opened = true;
+        onServerEvent(frame);
+      });
+      setRefusal('events', null);
+    } catch (failure) {
+      if (failure instanceof Refusal) {
+        setRefusal('events', failure);
+      }
+    }
+    if (state.events !== controller) {
+      return;
+    }
+    state.events = null;
+    state.eventsOpen = false;
+    state.eventsFailures = opened ? 0 : state.eventsFailures + 1;
+    renderBar();
+    renderStamp();
+    if (state.token === null) {
+      return;
+    }
+    var wait = RECONNECT_MS[Math.min(state.eventsFailures, RECONNECT_MS.length - 1)];
+    state.reconnect = window.setTimeout(function () {
+      state.reconnect = null;
+      startEvents();
+    }, wait);
+  }
+
+  function onServerEvent(frame) {
+    if (frame.id !== null) {
+      state.lastEventId = frame.id;
+    }
+    var name = frame.name;
+    var data = frame.data;
+    if (name === 'snapshot') {
+      state.eventsOpen = true;
+      state.stopping = null;
+      state.activity = data.activity;
+      setRefusal('activity', null);
+      state.queue = data.queue;
+      setRefusal('queue', null);
+      takeTasks(data.tasks);
+      if (data.gap) {
+        markStale('settings');
+        markStale('slow');
+      }
+      render();
+      return;
+    }
+    if (name === 'job.progress') {
+      progressed(data);
+      return;
+    }
+    if (name === 'server.stopping') {
+      state.stopping = data.reason;
+      renderBar();
+      return;
+    }
+    var topic = name.split('.')[0];
+    if (topic === 'job' || topic === 'card' || topic === 'chat') {
+      markStale('activity');
+    } else if (topic === 'queue' || topic === 'session') {
+      markStale('activity');
+      markStale('queue');
+    } else if (topic === 'settings') {
+      markStale('settings');
+    } else if (name === 'task.running') {
+      markStale('tasks');
+    } else if (TASK_ENDS.indexOf(name) !== -1) {
+      markStale('tasks');
+      markStale('slow');
+    }
+  }
+
+  function progressed(data) {
+    var activity = state.activity;
+    if (!activity || !activity.running) {
+      return;
+    }
+    for (var index = 0; index < activity.running.length; index += 1) {
+      var row = activity.running[index];
+      if (row.job_id === data.job_id) {
+        row.progress = data.fraction;
+        row.message = data.message;
+        renderStatus();
+      }
+    }
+  }
+
+  // Events name what changed; the documents that show it are read once per burst.
+  var REREADS = {
+    activity: function () { return loadActivity(); },
+    queue: function () { return loadQueue(); },
+    tasks: function () { return loadTasks(); },
+    settings: function () { return loadSettings(); },
+    slow: function () {
+      return Promise.all([loadInfo(), loadCapability(), loadCatalog(), loadVoices()]);
+    }
+  };
+
+  function markStale(name) {
+    state.stale[name] = true;
+    if (state.rereading === null) {
+      state.rereading = window.setTimeout(reread, REREAD_MS);
+    }
+  }
+
+  async function reread() {
+    var names = Object.keys(state.stale);
+    state.stale = {};
+    var reads = [];
+    for (var index = 0; index < names.length; index += 1) {
+      reads.push(REREADS[names[index]]());
+    }
+    await Promise.all(reads);
+    state.rereading = null;
+    if (state.token === null) {
+      return;
+    }
     render();
-    if (!isTerminalTaskEvent(name)) {
-      touchStatus();
+    if (Object.keys(state.stale).length) {
+      state.rereading = window.setTimeout(reread, REREAD_MS);
     }
   }
 
@@ -590,15 +879,6 @@
     return Boolean(terminal) && terminal.tasks.indexOf(name) !== -1;
   }
 
-  function touchStatus() {
-    var now = Date.now();
-    if (now - state.lastStatusAt < STATUS_THROTTLE_MS) {
-      return;
-    }
-    state.lastStatusAt = now;
-    loadActivity().then(render);
-  }
-
   function holderRows(activity) {
     var rows = [];
     if (activity.running && activity.running.length) {
@@ -626,7 +906,7 @@
       if (held.idle_deadline) {
         line += ', idle at ' + clockText(held.idle_deadline);
       }
-      rows.push(['a queue session', line]);
+      rows.push(['a queue session', line + ' (see Queue)']);
     }
     if (activity.claim) {
       rows.push(['the claim', 'held by ' + activity.claim.held_by]);
@@ -833,12 +1113,155 @@
     renderBar();
   }
 
+  var KIND_TONES = { job: '', call: 'accent', session: 'warn' };
+  var KIND_WORDS = { job: 'job', call: 'chat', session: 'session' };
+
+  function renderSession(session) {
+    var box = el('div', { class: 'rows' });
+    box.appendChild(el('div', { class: 'row head' }, [
+      el('span', { text: 'Open session' }),
+      el('span', null, [
+        'open ',
+        session.opened_at ? sinceSpan('for ', session.opened_at) : 'since a moment ago'
+      ])
+    ]));
+    var who = session.client || 'an unnamed client';
+    var doing = session.items_run + ' request(s) run';
+    doing += session.in_flight.length ? ', ' + session.in_flight.length + ' in flight' : ', idle';
+    if (session.stream_session) {
+      doing += ', streaming narration in ' + session.stream_session.voice;
+    }
+    var closes;
+    if (session.idle_deadline) {
+      closes = el('span', null, [untilSpan('closes if idle ', session.idle_deadline, true)]);
+    } else {
+      closes = el('span', { text: 'busy, so not idling' });
+    }
+    var end = el('button', {
+      class: 'button danger',
+      type: 'button',
+      onclick: function () {
+        removeFromQueue(
+          session.session_id,
+          'End ' + who + "'s session? What it is running finishes, nothing more of its " +
+            'runs, and the app is told an operator ended it.'
+        );
+      }
+    }, ['End']);
+    box.appendChild(el('div', { class: 'row' }, [
+      el('span', null, [
+        el('span', { class: 'row-title', text: who + ' — ' + session.act }),
+        el('span', { class: 'row-id', text: session.session_id })
+      ]),
+      el('span', null, [
+        session.model ? mono(session.model) : 'no model',
+        ' · ' + doing
+      ]),
+      el('span', { class: 'row-size' }, [closes]),
+      el('span', { class: 'row-action' }, [end])
+    ]));
+    if (session.max_hold_deadline) {
+      box.appendChild(el('div', { class: 'row wide' }, [
+        el('span', { class: 'note' }, [untilSpan('the server ends it at the latest ',
+                                                 session.max_hold_deadline, false)])
+      ]));
+    }
+    return box;
+  }
+
+  function queueRow(item, openSession) {
+    var kind = item.kind;
+    var what = kind === 'session' ? 'session' : item.type;
+    var remove = el('button', {
+      class: 'button quiet',
+      type: 'button',
+      onclick: function () {
+        removeFromQueue(
+          item.job_id,
+          'Remove this ' + KIND_WORDS[kind] + ' from the queue? It will not run, and the ' +
+            'app that sent it will be told it was removed.'
+        );
+      }
+    }, ['Remove']);
+    var mine = openSession !== null && item.session === openSession;
+    return el('div', { class: 'row' }, [
+      el('span', null, [
+        el('span', { class: 'row-title', text: item.position + '. ' + what +
+          (item.model ? ' — ' + item.model : '') }),
+        el('span', { class: 'row-id', text: item.job_id })
+      ]),
+      el('span', null, [
+        chip(KIND_WORDS[kind] || kind, KIND_TONES[kind]),
+        ' from ' + (item.client || 'an unnamed client'),
+        mine ? ' ' : null,
+        mine ? chip('in the open session', 'ok') : null
+      ]),
+      el('span', { class: 'row-size' }, [
+        sinceSpan('waited ', item.submitted),
+        ' · ',
+        untilSpan('gives up ', item.expires_at, false)
+      ]),
+      el('span', { class: 'row-action' }, [remove])
+    ]);
+  }
+
+  function renderQueue() {
+    var body = document.getElementById('queue-body');
+    body.textContent = '';
+    var problems = [state.refusals.queue, state.refusals.dequeue];
+    for (var at = 0; at < problems.length; at += 1) {
+      var box = refusalBox(problems[at]);
+      if (box) {
+        body.appendChild(box);
+      }
+    }
+    var session = state.activity ? state.activity.session : null;
+    var items = state.queue ? state.queue.items : [];
+    if (session) {
+      body.appendChild(renderSession(session));
+    }
+    if (items.length === 0) {
+      body.appendChild(el('p', {
+        class: 'empty',
+        text: session
+          ? 'Nothing else is waiting.'
+          : 'Nothing is waiting. Jobs, chats and app sessions that arrive while this ' +
+            'server is busy wait here.'
+      }));
+      return;
+    }
+    var rows = el('div', { class: 'rows' });
+    rows.appendChild(el('div', { class: 'row head' }, [
+      el('span', { text: 'Waiting' }),
+      el('span', { text: items.length + ' in line, offered the lane in this order' })
+    ]));
+    var openSession = session ? session.session_id : null;
+    for (var index = 0; index < items.length; index += 1) {
+      rows.appendChild(queueRow(items[index], openSession));
+    }
+    body.appendChild(rows);
+  }
+
+  function renderStamp() {
+    var stamp = document.getElementById('status-stamp');
+    if (state.activity === null) {
+      stamp.textContent = '';
+    } else if (state.eventsOpen) {
+      stamp.textContent = 'live';
+    } else {
+      stamp.textContent = 'reconnecting…';
+    }
+  }
+
   function renderBar() {
     document.getElementById('bar-name').textContent = state.setup
       ? state.setup.name
       : 'operator console';
     var bar = document.getElementById('bar-state');
     bar.textContent = '';
+    if (state.stopping !== null) {
+      bar.appendChild(chip('server stopping: ' + state.stopping, 'bad'));
+    }
     if (state.running) {
       bar.appendChild(chip(state.running.type + ' running', 'accent'));
     }
@@ -2530,6 +2953,7 @@
     }
 
     renderStatus();
+    renderQueue();
     renderTasks();
     renderJobTypes();
     renderSettings();
@@ -2548,10 +2972,7 @@
       }
     }
 
-    var stamp = document.getElementById('status-stamp');
-    stamp.textContent = state.activity
-      ? 'read ' + new Date().toLocaleTimeString()
-      : '';
+    renderStamp();
   }
 
   function showGate(refusal) {
@@ -2579,6 +3000,7 @@
       loadSetup(),
       loadInfo(),
       loadActivity(),
+      loadQueue(),
       loadCapability(),
       loadSettings(),
       loadVoices(),
@@ -2586,7 +3008,6 @@
       loadPairingRequests()
     ]);
     await loadTasks();
-    state.lastStatusAt = Date.now();
     render();
   }
 
@@ -2601,14 +3022,19 @@
     if (new URLSearchParams(window.location.search).get('section') === 'connect') {
       document.getElementById('panel-connect').scrollIntoView();
     }
-    if (state.timer === null) {
-      state.timer = window.setInterval(function () {
+    startEvents();
+    if (state.pairingTimer === null) {
+      // No event says an app asked to pair, so the requests are the one thing still read
+      // on a timer.
+      state.pairingTimer = window.setInterval(function () {
         if (state.token === null) {
           return;
         }
-        state.lastStatusAt = Date.now();
-        Promise.all([loadActivity(), loadPairingRequests()]).then(render);
-      }, ACTIVITY_MS);
+        loadPairingRequests().then(renderConnect);
+      }, PAIRING_MS);
+    }
+    if (state.ticker === null) {
+      state.ticker = window.setInterval(tick, TICK_MS);
     }
   }
 

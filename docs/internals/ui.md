@@ -15,6 +15,7 @@ opens that window. This console stays the way to reach a server from another com
 | Section   | Reads |
 |-----------|-------|
 | Status    | `GET /v1/setup`, `GET /v1/activity`, the card from `/v1/info` |
+| Queue     | `GET /v1/queue` and the open session from `GET /v1/activity`; End/Remove are `DELETE /v1/queue/{id}` |
 | Tasks     | `GET /v1/tasks` and the running task's event stream |
 | Job types | `GET /v1/capability` and the capabilities `/v1/info` reports |
 | Settings  | `GET/PUT /v1/settings` |
@@ -56,13 +57,40 @@ opens that window. This console stays the way to reach a server from another com
 - **No local state about the server.** Every write re-reads what it changed
   (settings redraw from the document the PUT returns; a catalog Remove re-reads
   the catalog; a route change re-reads capability and catalog) rather than
-  patching in place. When a task stream reaches its terminal event, everything is
-  re-read.
+  patching in place. When a task ends, the tasks and everything a pull or install
+  changes are re-read. The one patch in place is `job.progress` on the running row:
+  the event carries the whole of what changed.
+
+## Live state: the event stream
+
+The console follows `GET /v1/events` (docs/EVENTS.md) once, from sign-in to sign-out,
+instead of reading anything on a timer:
+
+- The `snapshot` supplies `activity`, the waiting line (`queue`) and `tasks` whole.
+- After it, an event only names what changed. Job, card and chat events mark
+  `activity` stale; queue and session events mark `activity` and `queue`;
+  `settings.written` marks `settings`; a task starting marks `tasks`, and a task ending
+  marks `tasks` and the documents a pull or install changes (`info`, `capability`,
+  `catalog`, `voices`). Stale documents are read once per burst (`REREAD_MS`), never per
+  event. `job.progress` is applied to the running row in place.
+- A dropped stream, an `overflow` and `server.stopping` all end it; it is opened again
+  after a backoff (`RECONNECT_MS`) with `Last-Event-ID`, and a `gap` snapshot also re-reads
+  `settings` and what no event covers. The Status stamp says `live` or `reconnecting…`.
+- The one timer that still reads is the pairing requests (`PAIRING_MS`): no event says an
+  app asked to pair. The other timer (`TICK_MS`) reads nothing; it moves the countdowns
+  (`data-since`, `data-until`) in place. When the open session's idle deadline runs out
+  and the session is still shown, `activity` is read once, because a client's touch moves
+  that deadline without an event.
+- The Queue panel shows the open session (its client, act, model, requests run, what is
+  in flight, the idle countdown and the max-hold deadline, and End) and every waiting row
+  of every kind: `job`, `call` (a held-open chat or decision) and `session` (an app's
+  session waiting to open), the open session's own items marked, each with how long it
+  has waited, when it gives up, and Remove.
 
 ## Redraws and operator input
 
-Status refreshes on a four-second interval and on every task event (throttled),
-and the whole console is redrawn from `state`. Therefore:
+The whole console is redrawn from `state` when the stream or a write changes it.
+Therefore:
 
 - Anything the operator has typed or chosen but not yet sent (module text,
   engine choice, upstream keys, the voice draft and its JSON, a half-typed pin)
@@ -78,8 +106,8 @@ and the whole console is redrawn from `state`. Therefore:
 ## Transport and token
 
 - Events are read with `fetch`, not `EventSource`: every `/v1` route needs a
-  bearer token and the API version header, which `EventSource` cannot send. The
-  SSE framing is the same envelope the job stream uses.
+  bearer token and the API version header, which `EventSource` cannot send. One
+  reader (`readStream`) serves both the server-wide stream and a task's own.
 - Every path the page calls is written as a whole template literal, never built
   from fragments, so `tests/test_ui_mount.py` can extract each path and check it
   against the app's route table.
@@ -89,7 +117,7 @@ and the whole console is redrawn from `state`. Therefore:
   to the sign-in gate with the reason. If storage is refused the page still runs
   for this visit and asks again on reload.
 - Status does not pass `?accelerator_probe=true`: the probe spawns `nvidia-smi`
-  per read and Status is on a timer. The card's identity comes from `/v1/info`.
+  per read and Status is re-read on every burst of events. The card's identity comes from `/v1/info`.
 
 ## Specific controls
 

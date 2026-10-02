@@ -49,6 +49,7 @@ unknown name is refused `400 unknown_topic` with the known ones in `details.know
 | --- | --- |
 | `job` | `job.queued`, `job.running`, `job.progress`, `job.done`, `job.failed`, `job.cancelled`, `job.interrupted`, `job.removed` |
 | `queue` | `queue.added`, `queue.moved`, `queue.started`, `queue.removed` |
+| `session` | `session.queued`, `session.moved`, `session.opened`, `session.closed`, `session.removed` |
 | `card` | `card.warming`, `card.warming_ended`, `card.loaded`, `card.unloading`, `card.unloaded` |
 | `chat` | `chat.in_flight` |
 | `task` | `task.running`, `task.step`, `task.progress`, `task.done`, `task.failed`, `task.cancelled` |

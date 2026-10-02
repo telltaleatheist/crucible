@@ -70,10 +70,10 @@ class LocalApi:
     def send(self, method: str, path: str, body: Any = None) -> Any:
         return self._guarded(lambda c: transport.call(c, method, path, json_body=body))
 
-    def follow(self, path: str) -> Iterator[dict[str, Any]]:
+    def follow(self, path: str, last_event_id: int = 0) -> Iterator[dict[str, Any]]:
         connection = self.connection()
         try:
-            yield from transport.follow(connection, path)
+            yield from transport.follow(connection, path, last_event_id=last_event_id)
         except urllib.error.HTTPError as exc:
             raise refusal_from_http(exc, connection) from None
         except (urllib.error.URLError, OSError, TimeoutError) as exc:

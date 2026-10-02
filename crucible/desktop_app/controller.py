@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 from typing import Any, Callable, Mapping
 
+from .. import clock as wall_clock
 from ..errors import CrucibleError
 from . import screens
 from .api import ApiError, quoted
@@ -21,20 +23,37 @@ PATHS = {
     "tasks": "/v1/tasks",
     "settings": "/v1/settings",
     "setup": "/v1/setup",
+    "queue": "/v1/queue",
 }
-
-LIVE = frozenset({"activity", "tasks"})
 
 SLOW_SECONDS = 15.0
 
 NEEDS = {
-    "home": ("info", "activity", "capability", "tasks"),
+    "home": ("info", "activity", "queue", "capability", "tasks"),
     "models": ("catalog", "tasks", "capability"),
     "voices": ("voices", "catalog", "tasks", "info"),
     "packages": ("info", "capability", "tasks"),
-    "activity": ("activity", "tasks"),
+    "activity": ("activity", "queue", "tasks"),
     "settings": ("settings", "setup"),
 }
+
+# GET /v1/events (docs/EVENTS.md) says when what these documents show has changed, so they
+# are read again when an event says so, never on a timer. `activity`, `queue` and `tasks`
+# arrive whole in the stream's snapshot. The rest (info, capability, catalog, voices,
+# setup) have no event, so they are read every SLOW_SECONDS, and again when a task ends.
+EVENTS_PATH = "/v1/events"
+STREAMED = ("activity", "queue", "tasks")
+EVENT_COVERED = frozenset(STREAMED + ("settings",))
+STALE_ON = {
+    "job": ("activity",),
+    "card": ("activity",),
+    "chat": ("activity",),
+    "session": ("activity", "queue"),
+    "queue": ("activity", "queue"),
+    "settings": ("settings",),
+}
+TASK_CHANGES = frozenset({"task.running", "task.done", "task.failed", "task.cancelled"})
+RECONNECT_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0)
 
 HOST_ERRORS = (CrucibleError, OSError, ValueError, RuntimeError)
 
@@ -45,12 +64,23 @@ def in_thread(work: Callable[[], None]) -> None:
 
 class Controller:
     def __init__(self, api: Any, host: Any, ask: Ask, run: Run = in_thread,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 stream: Run = in_thread,
+                 wall: Callable[[], datetime] = wall_clock.now,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.api = api
         self.host = host
         self.ask = ask
         self.run = run
         self.clock = clock
+        self.stream = stream
+        self.wall = wall
+        self.sleep = sleep
+        self.stale: set[str] = set()
+        self.last_event_id = 0
+        self.events_open = False
+        self.events_started = False
+        self.screen = "home"
         self.lock = threading.RLock()
         self.docs: dict[str, Any] = {}
         self.fetched: dict[str, float] = {}
@@ -83,7 +113,11 @@ class Controller:
 
     def _due(self, name: str) -> bool:
         seen = self.fetched.get(name)
-        return seen is None or name in LIVE or self.clock() - seen >= SLOW_SECONDS
+        if seen is None or name in self.stale:
+            return True
+        if name in EVENT_COVERED:
+            return False
+        return self.clock() - seen >= SLOW_SECONDS
 
     def _read_status(self) -> None:
         try:
@@ -102,6 +136,7 @@ class Controller:
             with self.lock:
                 self.docs[name] = value
                 self.fetched[name] = self.clock()
+                self.stale.discard(name)
 
     def _read_lan(self) -> None:
         try:
@@ -110,8 +145,11 @@ class Controller:
             self.notices["lan"] = str(exc)
 
     def refresh_now(self, screen: str) -> None:
+        self.screen = screen
         self._read_status()
         if self.running():
+            self.start_events()
+            self._idle_passed()
             self._read(NEEDS.get(screen, ()))
             if screen == "settings":
                 self._read_lan()
@@ -130,6 +168,102 @@ class Controller:
             finally:
                 self.refreshing = False
         self.run(work)
+
+    def start_events(self) -> None:
+        """Follow GET /v1/events for as long as this window lives: one stream, resumed
+        with Last-Event-ID after a drop, a fresh snapshot after a gap."""
+        with self.lock:
+            if self.events_started:
+                return
+            self.events_started = True
+        self.stream(self._events_forever)
+
+    def _events_forever(self) -> None:
+        failures = 0
+        while True:
+            if self.follow_events():
+                failures = 0
+            self.sleep(RECONNECT_SECONDS[min(failures, len(RECONNECT_SECONDS) - 1)])
+            failures += 1
+
+    def follow_events(self) -> bool:
+        """Read the stream until it ends, and say whether it opened. It ends when the
+        connection drops, on `overflow` and on `server.stopping`; the caller reconnects,
+        and the server resumes from `last_event_id` or sends a snapshot with `gap`."""
+        opened = False
+        try:
+            for frame in self.api.follow(EVENTS_PATH, last_event_id=self.last_event_id):
+                opened = True
+                self._on_event(frame)
+        except ApiError:
+            pass
+        finally:
+            self.events_open = False
+            self.changed()
+        return opened
+
+    def _on_event(self, frame: Mapping[str, Any]) -> None:
+        name = str(frame.get("event") or "")
+        data = frame.get("data") or {}
+        ident = frame.get("id")
+        if isinstance(ident, int):
+            self.last_event_id = ident
+        if name == "snapshot":
+            self._take_snapshot(data)
+            return
+        if name == "job.progress":
+            self._job_progress(data)
+            return
+        with self.lock:
+            self.stale.update(STALE_ON.get(name.partition(".")[0], ()))
+            if name in TASK_CHANGES:
+                self.stale.add("tasks")
+            if name in TASK_CHANGES - {"task.running"}:
+                self.fetched.clear()
+            any_stale = bool(self.stale)
+        if any_stale:
+            self.refresh(self.screen)
+        self.changed()
+
+    def _take_snapshot(self, data: Mapping[str, Any]) -> None:
+        with self.lock:
+            if data.get("gap"):
+                self.fetched.clear()
+            now = self.clock()
+            self.docs["activity"] = data.get("activity")
+            self.docs["queue"] = data.get("queue")
+            self.docs["tasks"] = {"tasks": data.get("tasks") or []}
+            for name in STREAMED:
+                self.fetched[name] = now
+                self.stale.discard(name)
+            self.events_open = True
+        self._follow_running_task()
+        self.changed()
+
+    def _job_progress(self, data: Mapping[str, Any]) -> None:
+        activity = self.doc("activity")
+        if not isinstance(activity, Mapping):
+            return
+        rows = []
+        for row in activity.get("running") or []:
+            if row.get("job_id") == data.get("job_id"):
+                row = {**row, "progress": data.get("fraction"), "message": data.get("message")}
+            rows.append(row)
+        with self.lock:
+            self.docs["activity"] = {**activity, "running": rows}
+        self.changed()
+
+    def _idle_passed(self) -> None:
+        """A session's idle deadline also moves when its client touches it, which no event
+        says, so a countdown that ran out with the session still open is read again."""
+        activity = self.doc("activity")
+        session = activity.get("session") if isinstance(activity, Mapping) else None
+        deadline = session.get("idle_deadline") if isinstance(session, Mapping) else None
+        if not isinstance(deadline, str):
+            return
+        if datetime.fromisoformat(deadline) <= self.wall():
+            with self.lock:
+                self.stale.add("activity")
 
     def _follow_running_task(self) -> None:
         task = screens.running_task(self.doc("tasks"))
@@ -287,7 +421,7 @@ class Controller:
             return screens.HomeView(headline="Looking for Crucible", tone=screens.IDLE,
                                     detail="Checking whether it is running")
         view = screens.home_view(self.status, self.doc("info"), self.doc("activity"),
-                                 self.doc("capability"))
+                                 self.doc("capability"), self.doc("queue"))
         watch = self.watch_view()
         if watch is None or not self.running():
             return view
@@ -306,7 +440,8 @@ class Controller:
         if screen == "packages":
             return screens.package_rows(self.doc("info"), self.doc("capability"), self.doc("tasks"))
         if screen == "activity":
-            return screens.activity_view(self.doc("activity"), self.doc("tasks"), self.watch_view())
+            return screens.activity_view(self.doc("activity"), self.doc("tasks"), self.watch_view(),
+                                         self.doc("queue"), self.wall())
         return screens.settings_view(self.doc("settings"), self.doc("setup"), self.lan,
                                      self.host.lan_supported())
 

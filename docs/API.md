@@ -536,13 +536,13 @@ Every change on the server as one SSE stream, so an app follows it instead of po
 
 ### `GET /v1/events`
 
-Every change on this server as one SSE stream, so an app need not poll: a `snapshot` first, then one event per change (jobs, the queue, the card, chats in flight, tasks, settings, the server stopping). Reconnect with Last-Event-ID to resume; the event names and payloads are in docs/EVENTS.md.
+Every change on this server as one SSE stream, so an app need not poll: a `snapshot` first, then one event per change (jobs, the queue, queue sessions, the card, chats in flight, tasks, settings, the server stopping). Reconnect with Last-Event-ID to resume; the event names and payloads are in docs/EVENTS.md.
 
 *Door:* token + `X-Crucible-Api: 1`
 
 | parameter | in | required | type | what it is |
 | --- | --- | --- | --- | --- |
-| `topics` | query | no | string or null | Comma-separated topics to receive (job, queue, card, chat, task, settings, server). Leave it out for all; `server` is always sent. |
+| `topics` | query | no | string or null | Comma-separated topics to receive (job, queue, session, card, chat, task, settings, server). Leave it out for all; `server` is always sent. |
 
 *Answers:* `200`, `422` HTTPValidationError
 
