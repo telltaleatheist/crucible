@@ -257,9 +257,9 @@ and `crucible voices export` write them back when present.
 ### Serving (`[voice.serving]`)
 
 This section sizes the server narrator starts. It is **required for
-`higgs-v3`**, refused on any engine that reads no `HIGGS_*` variable, and
-never published on `/v1/voices`. Each lever requires a `_note`. A note
-without a number is refused.
+`higgs-v3`** and refused on any engine that reads no `HIGGS_*` variable. The
+`/v1/voices` row reports it as its `serving` block. Each lever requires a
+`_note`. A note without a number is refused.
 
 - `max_num_seqs` → `HIGGS_MAX_NUM_SEQS`: stage 0's admission width **and**
   narrator's batch width. narrator refuses to render without it. 16 is
@@ -274,6 +274,40 @@ without a number is refused.
   hard-coded 4096. That holds about 2,000 characters, so long rungs truncate on
   context and a screen records the truncation as the voice's length wall. A
   screening voice states 8192. **No narrator pin reads this variable yet.**
+- `stall_guard` → `HIGGS_STALL_GUARD`, **on both arms, always stated**
+  (`crucible/stallguard.py`). Absent means the default guard,
+  `{ frames = 37, rate = 0.5, max = 20, window = 8 }` (`"37,0.5,20,8"`); a
+  table states other numbers; `false` turns it off (`"off"`). `true` is
+  refused (absent already is the default), and so is a partial table, an
+  unknown key, or a number outside frames 1–10000, rate 0.001–100, max
+  0.001–1000, window 1–64. A stated `stall_guard` needs `stall_guard_note`. The
+  row's `serving.stall_guard` is the EFFECTIVE setting: `enabled`, the four
+  numbers (null when off), `env` (the exact variable value), `basis`
+  (`default` or `manifest`) and `note`. A document written back
+  (`voice_document`) carries the key only when the manifest stated it. Repo
+  voices take serving from `[tts.<engine>]`, which has no stall guard, so they
+  get the default; an override manifest is how one differs.
+
+  What the variable does (the contract both arms implement: the sglang-omni
+  env patch on cuda-linux, narrator's own MLX loop on mlx-darwin):
+
+  - `HIGGS_STALL_GUARD = "off" | "<frames>,<rate>,<max>,<window>"`, read once
+    at startup. Unset is off. Anything else is a startup error naming the
+    variable.
+  - Per row: a ring R of the last `window` sampled cb0 codes and a counter
+    `run`. A row is **counted** on a frame when it is active, past the delay
+    window, not in EOC wind-down and not finishing on that frame.
+  - Before temperature/top-k/top-p (so greedy is covered), a counted row with
+    `run > frames` has `min(max, rate × (run − frames))` subtracted from the cb0
+    logit of every distinct code in R. Nothing is forced.
+  - After sampling cb0 code c on a counted frame: `run += 1` if c is in R, else
+    `run = 0`; then c is pushed into R. **On a frame a row is not counted, run is
+    zeroed and R emptied** (the prototype's rule), so a wind-down never carries
+    a penalty and a new row starts clean.
+  - The ring makes a loop hopping among a few silence codes one run. The
+    prototype (`"37,0.5,20"`, campaign `2026-10-02-stall-guard`) reset on any
+    code change, which let such a loop run 4.7 s.
+
 - `mem_fraction` and `context_length` go to **both arms** (Owen, 2026-09-19:
   *"we're going to want to configure darwin to work the same way"*). narrator
   refuses a knob its backend lacks. A voice from a repo gets all three
@@ -355,8 +389,19 @@ saved back as a home voice once lost it with no line in `not_carried`. Voice ids
     `fast` really is wider than `extreme` (extreme was cut 96 → 64 and never
     re-measured). At width 1 the Mac rendered 7× slower. `NARRATOR_HIGGS3_MLX_BATCH`
     in the environment overrides the width.
-  - Both arms: `NARRATOR_HIGGS_VOICES` (the document path). Variables an arm
+  - Both arms: `NARRATOR_HIGGS_VOICES` (the document path) and
+    `HIGGS_STALL_GUARD` (from `serving.stall_guard`; a higgs-v3 engine without
+    it, or with a malformed one, is refused at construction). Variables an arm
     does not read are refused rather than silently set.
+  - narrator does not export `HIGGS_STALL_GUARD` itself on the served arm: the
+    sglang server it launches inherits narrator's environment
+    (`sgl_served.start` → `subprocess.Popen` with no `env=`, then
+    `setsid bash serve_higgs_sgl.sh` → `exec python sgl_omni_entry.py`), and
+    the patched sampler reads it at import inside the server.
+- **Start, served arm**: before narrator starts, `NarratorEngine.start`
+  applies the tts env's sglang-omni stall-guard patch if it is missing or stale
+  (`envpatches.ensure_applied`) and refuses `tts_env_unpatched` if it cannot.
+  An unpatched server would accept the variable and render with no guard.
 - **Cancel** sends `{"action": "cancel"}` and keeps reading until the terminal
   message. `CANCEL_GRACE_SECONDS` (120) starts at the cancel and is **not**
   reset by output. A narrator that keeps rendering past it raises

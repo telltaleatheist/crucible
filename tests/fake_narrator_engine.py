@@ -40,6 +40,7 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
         max_num_seqs: int | None,
         mem_fraction: float | None,
         context_length: int | None,
+        stall_guard: str | None,
         voices: VoicesDocument | None,
         mlx_total_bytes: int | None,
     ) -> FakeNarratorEngine:
@@ -51,6 +52,7 @@ def install(monkeypatch: pytest.MonkeyPatch) -> list[FakeNarratorEngine]:
             max_num_seqs=None,
             mem_fraction=None,
             context_length=None,
+            stall_guard=stall_guard,
             voices=voices,
             mlx_total_bytes=FAKE_TOTAL_BYTES,
         )

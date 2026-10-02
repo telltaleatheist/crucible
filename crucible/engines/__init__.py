@@ -164,6 +164,7 @@ def build_voice_engine(
     max_num_seqs: int | None,
     mem_fraction: float | None,
     context_length: int | None,
+    stall_guard: str | None,
     voices: "VoicesDocumentView | None",
     mlx_total_bytes: int | None,
 ) -> NarratorEngine:
@@ -180,6 +181,7 @@ def build_voice_engine(
         max_num_seqs=max_num_seqs,
         mem_fraction=mem_fraction,
         context_length=context_length,
+        stall_guard=stall_guard,
         voices=voices,
         mlx_total_bytes=mlx_total_bytes,
     )

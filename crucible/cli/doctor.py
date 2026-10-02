@@ -37,6 +37,7 @@ CAPABILITY_WRITE = "crucible capability --write"
 DOCTOR_JSON = "crucible doctor --json"
 RERUN_DOCTOR = "crucible doctor"
 PATCH_LLM = "crucible env patch llm"
+PATCH_TTS = "crucible env patch tts"
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("video_envs", dict),
     ("cuda_toolkit_links", list),
     ("llm_patches", list),
+    ("tts_patches", list),
     ("capability", lambda: None),
     ("path", lambda: None),
     ("stranded_weights", lambda: None),
@@ -432,6 +434,23 @@ def _cuda_toolkit_links(home: Path, backend_kind: str) -> list[dict[str, Any]]:
     return links
 
 
+def _tts_patches(home: Path, backend_kind: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+        spec = jobenv.tts_env(engine, backend_kind)
+        if spec.key in seen:
+            continue
+        seen.add(spec.key)
+        engine_env = jobenv.env_dir(home, spec)
+        if envpatches.site_packages(engine_env) is None:
+            continue
+        pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+        for entry in envpatches.check("tts", engine_env, pins):
+            rows.append({"engine": engine, **entry})
+    return rows
+
+
 def check_tts_envs(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None or not config.enable_tts:
@@ -457,8 +476,19 @@ def check_tts_envs(host: Host) -> Section:
                 f"`{install}` re-links it",
                 install,
             ))
+    patches = _tts_patches(config.home, backend.kind)
+    for entry in patches:
+        if entry["status"] not in envpatches.SOUND_STATUSES:
+            findings.append(Finding(
+                f"tts_patch[{entry['engine']}:{entry['id']}]",
+                f"{entry['status']} — {entry['detail']}. {entry['why']}. Run "
+                f"`{PATCH_TTS}` (the next load applies it too)",
+                PATCH_TTS,
+            ))
     return Section(
-        "tts_envs", {"tts_envs": envs, "cuda_toolkit_links": links}, tuple(findings)
+        "tts_envs",
+        {"tts_envs": envs, "cuda_toolkit_links": links, "tts_patches": patches},
+        tuple(findings),
     )
 
 
@@ -771,6 +801,12 @@ def lines_patches(report: dict[str, Any]) -> Iterator[str]:
             f"cuda toolkit link ({entry['engine']}, {entry['id']}): {mark} — "
             f"{entry['detail']}"
         )
+    for entry in report["tts_patches"]:
+        if entry["status"] == envpatches.NOT_APPLICABLE:
+            mark = "n/a"
+        else:
+            mark = "applied" if entry["applied"] else entry["status"].upper()
+        yield f"tts patch ({entry['engine']}, {entry['id']}): {mark} — {entry['detail']}"
     for entry in report["llm_patches"]:
         if entry["status"] == envpatches.NOT_APPLICABLE:
             mark = "n/a"
@@ -893,6 +929,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return EXIT_OK if report["healthy"] else EXIT_REFUSED
 
 
+def _patchable_specs(job_type: str, backend_kind: str) -> list[jobenv.EnvSpec]:
+    if job_type != "tts":
+        return [_env_spec(job_type, None, backend_kind)]
+    specs: dict[str, jobenv.EnvSpec] = {}
+    for engine in sorted(NARRATOR_ENGINE_SAMPLING):
+        spec = jobenv.tts_env(engine, backend_kind)
+        specs.setdefault(spec.key, spec)
+    return list(specs.values())
+
+
 def cmd_env_patch(args: argparse.Namespace) -> int:
     config, backend = common.here()
     job_type = args.job_type
@@ -905,23 +951,26 @@ def cmd_env_patch(args: argparse.Namespace) -> int:
         rows = envpatches.check(job_type, _no_python_env_dir(config.home), {})
     else:
         try:
-            spec = _env_spec(job_type, None, backend.kind)
-            recipe = jobenv.recipe_for(spec)
-            pins = jobenv.recipe_pins(recipe)
+            specs = _patchable_specs(job_type, backend.kind)
         except jobenv.EnvError as exc:
             return _fail(str(exc))
-        directory = jobenv.env_dir(config.home, spec)
-        python = jobenv.env_python(config.home, spec)
-        if not python.is_file():
-            print(
-                f"{job_type} env: not installed at {directory}; nothing to "
-                f"patch (`crucible install {job_type}` applies them)"
-            )
-            return EXIT_OK
-        try:
-            rows = envpatches.apply(job_type, directory, python, pins, on_line=print)
-        except envpatches.PatchError as exc:
-            return _fail(f"env_patch_failed: {exc}")
+        rows = []
+        for spec in specs:
+            directory = jobenv.env_dir(config.home, spec)
+            python = jobenv.env_python(config.home, spec)
+            if not python.is_file():
+                print(
+                    f"{spec.key} env: not installed at {directory}; nothing to "
+                    f"patch (`crucible install {job_type}` applies them)"
+                )
+                continue
+            try:
+                pins = jobenv.recipe_pins(jobenv.recipe_for(spec))
+                rows += envpatches.apply(job_type, directory, python, pins, on_line=print)
+            except jobenv.EnvError as exc:
+                return _fail(str(exc))
+            except envpatches.PatchError as exc:
+                return _fail(f"env_patch_failed: {exc}")
     for row in rows:
         print(f"{job_type} patch ({row['id']}): {row['status']} — {row['detail']}")
     unsound = [r for r in rows if r["status"] not in envpatches.SOUND_STATUSES]
