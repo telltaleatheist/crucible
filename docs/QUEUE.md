@@ -20,10 +20,9 @@ Every request that can wait takes the same optional member:
 | `{"max_wait_s": N}` | wait, up to N seconds (10 to 86400) |
 | `false` | do not wait: refuse at once (`409 server_busy`, `409 session_open`, `409 model_not_resident`, `503 chat_queue_full`) |
 
-Nothing else is a `queue`. `{}` (the old opt-in), `true`, `null` and an out-of-range
-`max_wait_s` are `400 invalid_request` with a sentence naming the two shapes. `{}` is
-refused rather than read as "wait" so that no request means "wait" by one spelling and
-"refuse" by another.
+`{}` (the old opt-in, which every SDK before 1.0.78 sends) also waits with the default:
+it can only mean "wait". `true`, `null` and an out-of-range `max_wait_s` are
+`400 invalid_request` with a sentence naming the shapes.
 
 `max_wait_s` is how long the request may wait for its turn; when it runs out the request
 is removed `expired` (below). It is not a deadline on the work itself: once the job is on
@@ -358,8 +357,8 @@ for await (const event of crucible.events(id)) {
 - Every request that can wait (`submit()`, every job helper, `chat`, `chatStream`,
   `decide`, `decideItems`, `stream`) waits by default, and sends no `queue` member to do
   it. `new CrucibleClient({..., queue: false})` makes them refuse at once instead;
-  `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins. There is no
-  `true` and no `{}`: the SDK refuses them before sending, as the server would.
+  `queue: {maxWaitS: 600}` changes the wait. A request's own `queue` wins. This SDK has no
+  `true` and no `{}`; the server still reads an older SDK's `{}` as "wait".
 - There is no "busy, then ask again with the queue" step to write: a `CrucibleBusy` (or
   `session_open`, `model_not_resident`, `chat_queue_full`) now only reaches a request
   sent with `queue: false`. The SDK never sends a request a second time.

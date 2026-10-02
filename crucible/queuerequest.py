@@ -5,8 +5,8 @@ place in the line (crucible/jobs/line.py) and waits up to ``DEFAULT_MAX_WAIT_S``
 (a job that is an item of the open queue session: up to ``MAX_MAX_WAIT_S``).
 ``{"max_wait_s": N}`` changes the wait. ``false`` opts out: the request is refused at
 once (`409 server_busy`, `session_open`, `model_not_resident`, `503 chat_queue_full`)
-instead of waiting. Nothing else is a `queue`: `{}`, `true` and `null` are refused by
-name, so no request means "wait" by one spelling and "refuse" by another.
+instead of waiting. ``{}`` also waits with the default: it is what every SDK before
+1.0.78 sends to wait, and it can only mean that. `true` and `null` are refused by name.
 """
 
 from __future__ import annotations
@@ -45,10 +45,7 @@ def _queue_shape(value: Any) -> Any:
     if isinstance(value, dict) and "max_wait_s" in value:
         return value
     if value == {}:
-        raise ValueError(
-            f"{QUEUE_SHAPE}. {{}} is not one: waiting is the default, so leave the "
-            "member out"
-        )
+        return None
     raise ValueError(f"{QUEUE_SHAPE}, not {json.dumps(value, default=repr)}")
 
 
@@ -97,6 +94,8 @@ def queue_of(body: dict[str, Any]) -> int | None:
         raise ApiError(400, "invalid_request", str(exc)) from None
     if value is False:
         return None
+    if value == {}:
+        return max_wait_of(None)
     try:
         return QueueRequest.model_validate(value).max_wait_s
     except ValidationError as exc:

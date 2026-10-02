@@ -98,7 +98,7 @@ def test_a_plain_submit_waits_by_default_when_the_server_is_busy(
     assert events(client, auth, receipt["job_id"])[-1]["event"] == "done"
 
 
-@pytest.mark.parametrize("queue", [{}, True, None, 0, "yes"])
+@pytest.mark.parametrize("queue", [True, None, 0, "yes"])
 def test_a_queue_that_is_neither_false_nor_a_wait_is_refused_by_name(
     client: TestClient, auth: dict[str, str], queue: Any
 ) -> None:
@@ -108,6 +108,18 @@ def test_a_queue_that_is_neither_false_nor_a_wait_is_refused_by_name(
     error = refused.json()["error"]
     assert error["code"] == "invalid_request"
     assert '"queue" is false' in error["message"]
+
+
+def test_an_empty_queue_waits_like_one_left_out(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    """`{}` is what every SDK before 1.0.78 sends to wait; it can only mean that."""
+    holder = occupy_the_lane(client, auth)
+    receipt = client.post("/v1/jobs", json={**body(), "queue": {}}, headers=auth)
+    assert receipt.status_code == 202, receipt.text
+    assert receipt.json()["queued"] is True
+    free_the_lane(client, auth, holder)
+    assert events(client, auth, receipt.json()["job_id"])[-1]["event"] == "done"
 
 
 def test_an_idle_server_admits_a_queued_submit_at_once(

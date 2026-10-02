@@ -225,7 +225,7 @@ def test_a_malformed_queue_is_refused_before_anything_waits(
 ) -> None:
     _, server = chat_server()
     with server as base:
-        for queue in ({"max_wait_s": 1}, {}, True, None):
+        for queue in ({"max_wait_s": 1}, True, None):
             bad = _post_chat(base, auth, _chat(queue=queue) if queue is not None
                              else {**_chat(), "queue": None})
             assert bad.status_code == 400, (queue, bad.text)
