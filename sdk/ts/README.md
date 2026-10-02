@@ -117,6 +117,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `cancelTask(id)` | `DELETE /v1/tasks/{id}` | `TaskCancelResult` |
 | `queue()` | `GET /v1/queue` | `QueueList` — the jobs, calls and sessions waiting, in order |
 | `removeFromQueue(id)` | `DELETE /v1/queue/{id}` | `QueueRemoved` (`closed` for the open session) |
+| `closeSession(id)` | `DELETE /v1/queue/sessions/{id}` | `QueueSessionState` (reason `client`; for an app that restarted holding a recorded id) |
 | `queueHeartbeat(id)` | `POST /v1/queue/{id}/heartbeat` | `{position, expiresAt}` |
 | `queueEvents()` | `GET /v1/queue/events` | `AsyncIterable<QueueEvent>`: a snapshot, then every change |
 | `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |

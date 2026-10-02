@@ -161,6 +161,8 @@ run out; the stream's `closed` frame then says `code: "session_closed"`.
 ## Smaller changes
 
 - `info().features: string[]` and `has(feature)`.
+- `closeSession(id)` closes a session your app recorded before a restart (reason `client`);
+  `removeFromQueue(id)` would record it as `operator`.
 - `QueueRemoved.status` is `'removed' | 'closed'` (`removeFromQueue()` given the open session's
   id ends it).
 - `RemovalReason` includes `session_closed`.

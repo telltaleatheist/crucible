@@ -604,6 +604,22 @@ export class CrucibleClient {
   }
 
   /**
+   * `DELETE /v1/queue/sessions/{id}` — close a session this client opened, by its id (reason
+   * `client`). For an app that restarted and recorded the id of a session it no longer holds a
+   * {@link CrucibleSession} for; a live session closes with its own `close()`. Closing one that
+   * is already closed answers its state again.
+   */
+  async closeSession(sessionId: string): Promise<QueueSessionState> {
+    const id = requireText(sessionId, 'sessionId');
+    const body = await this.#json(
+      `/v1/queue/sessions/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+      'closeSession',
+    );
+    return readQueueSession(body, 'closeSession');
+  }
+
+  /**
    * `DELETE /v1/queue/{id}` — take a waiting job, call or session out of the queue (reason
    * `operator`), or, given the open queue session's id, end it (`status: 'closed'`). A job that
    * has started is cancelled with {@link cancel} instead.

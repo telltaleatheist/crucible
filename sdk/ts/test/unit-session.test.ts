@@ -439,3 +439,13 @@ test('activity reads the open session', async () => {
   assert.equal(activity.session?.client, 'briefcase');
   assert.equal(activity.session?.idleS, 300);
 });
+
+test('closeSession() closes a recorded session by its id, as its client', async () => {
+  const closed = await client().closeSession('ses-1');
+  assert.equal(closed.status, 'closed');
+  assert.equal(closed.reason, 'client');
+  const sent = seen.filter((request) => request.method === 'DELETE');
+  assert.deepEqual(sent.map((request) => [request.path, request.session]), [
+    ['/v1/queue/sessions/ses-1', undefined],
+  ]);
+});
