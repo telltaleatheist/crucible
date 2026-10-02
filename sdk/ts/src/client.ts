@@ -2030,7 +2030,8 @@ export class CrucibleClient {
    * `POST /v1/tts/stream` — open a live TTS stream. It runs inside a queue session: this client's
    * own (a {@link CrucibleSession}'s, or the open one this client holds), else one opened for it,
    * which waits in the line and closes with the stream. Resolves once that session is open and the
-   * voice is resident.
+   * voice is resident. Given `onQueue`, it reports that session's place in the line while it waits,
+   * as {@link session} does.
    */
   async stream(options: StreamOptions): Promise<TtsStreamSession> {
     const given = options as Partial<StreamOptions> | undefined;
@@ -2044,6 +2045,10 @@ export class CrucibleClient {
         fetch: (path, init, authenticated) => this.#fetch(path, init, authenticated),
         failure: (response) => this.#failure(response),
         json: (path, init, where) => this.#json(path, init, where),
+        untilOpen: async (queueSessionId, onQueue, signal) => {
+          await this.#untilOpen(queueSessionId, onQueue, signal);
+        },
+        leaveTheLine: (queueSessionId) => this.#leaveTheLine(queueSessionId),
       },
       withQueue,
     );
