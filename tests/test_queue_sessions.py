@@ -541,7 +541,7 @@ def test_every_session_change_reaches_the_server_wide_event_stream(
 
 
 def test_a_session_removed_while_its_model_loads_takes_the_load_with_it(
-    chat_server: Callable[..., Any], auth: dict[str, str]
+    chat_server: Callable[..., Any], auth: dict[str, str]  # noqa: F811
 ) -> None:
     hold = threading.Event()
     _, server = chat_server(hold=hold)
