@@ -223,6 +223,15 @@ explicitly with the header `X-Crucible-Session: ses-…`, or let your client nam
 **implicit item**, header or not. That is so an app can make standalone calls beside its
 own long run (an editor's title, a frame check) without them waiting behind itself.
 
+**Give each install its own client name.** Membership is by name, so two installs that send
+the same `clientName` (BookForge on the Mac and on the PC, both `"bookforge"`) ride each
+other's sessions. Name each install distinctly and stably, for example
+`"bookforge@<hostname>"`; give a CLI or an embedded runner its own name too when it is a
+separate app. Nothing on the server keys on a particular name; it is identity and display
+only. A client that opens a second session while its first is open waits in line behind its
+own first one (one session is open at a time, never merged): share one session for one
+install's work instead.
+
 - `POST /v1/jobs`: admitted ahead of everything waiting. Items still run one at a time on
   the lane: an item submitted while another of the session's jobs runs waits *inside* the
   session, first come first served, ahead of everyone else (it answers `queued: true`

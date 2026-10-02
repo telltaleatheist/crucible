@@ -99,6 +99,15 @@ editor's title, a frame check — never wait behind your session. Items of the s
 of everything waiting; they run one at a time on the lane, so a job sent while the session's
 own job runs waits inside the session, not in the line.
 
+**Give each install its own client name.** Membership is by name, so two installs that send
+the same `clientName` (BookForge on the Mac and on the PC, both `"bookforge"`) ride each
+other's sessions. Name each install distinctly and stably, for example
+`"bookforge@<hostname>"`; give a CLI or an embedded runner its own name too when it is a
+separate app. Nothing on the server keys on a particular name; it is identity and display
+only. A client that opens a second session while its first is open waits in line behind its
+own first one (one session is open at a time, never merged): share one session for one
+install's work instead.
+
 A `CrucibleSession` sends the header explicitly on every request. Its job helpers send no
 `queue` (the server lets a session's job wait up to a day behind the session's own work); its
 chats and decisions still send the client's `queue`, because a session's call that must wait
