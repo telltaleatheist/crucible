@@ -26,6 +26,11 @@ START_SECONDS = 90.0
 POLL_SECONDS = 0.25
 CALL_TIMEOUT_SECONDS = 3.0
 GUEST_READ_SECONDS = 60.0
+# The shutdown's own reads. The controller answers /v1/info only after asking the engine
+# behind it, so a 3 s client timeout on it gave up first: on the PC (2026-10-02, twice)
+# the read took 3-4 s, `local shutdown` said "timed out" without ever sending /quit, and
+# the installer started a second orchestrator beside the old one, which hung.
+SHUTDOWN_READ_SECONDS = 30.0
 
 ORCHESTRATOR_ROLE = "orchestrator"
 
@@ -386,5 +391,6 @@ def shutdown_controller(home: Path, *, send: Send, engine_token: Callable[[], st
     native = owner not in GUEST_OWNERS
     if native:
         stop_engine()
-    send(CONTROLLER_URL + "/quit", token=token, method="POST", headers={HANDOVER_HEADER: "1"})
+    send(CONTROLLER_URL + "/quit", token=token, method="POST", headers={HANDOVER_HEADER: "1"},
+         timeout=SHUTDOWN_READ_SECONDS)
     _wait_for_exit(home, pid, send=send, alive=alive, native=native)

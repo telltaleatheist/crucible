@@ -27,7 +27,12 @@ LOST_ON_THE_WIRE: tuple[type[Exception], ...] = (
     httpx.NetworkError,
     httpx.RemoteProtocolError,
 )
-WIRE_ATTEMPTS = 2
+# A request the wire lost (a reset, a socket closed under it) is sent again, waiting a
+# little longer each time: five attempts over ~7.5 s. Two attempts 4 s apart were not
+# enough weather budget - a Hellworld clean on the PC (2026-10-02 23:08) lost both to
+# ReadError from an engine whose own log shows it healthy and idle, and the book ended.
+WIRE_ATTEMPTS = 5
+WIRE_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -100,12 +105,13 @@ async def sent_across_the_wire(
                     file=sys.stderr,
                 )
                 raise
+            pause = WIRE_BACKOFF_SECONDS[attempt_number - 1]
             print(
                 f"crucible: lost on the wire to {where} ({detail}), attempt "
-                f"{attempt_number} of {WIRE_ATTEMPTS}; sending it again on a "
-                "fresh socket",
+                f"{attempt_number} of {WIRE_ATTEMPTS}; sending it again in {pause:g} s",
                 file=sys.stderr,
             )
+            await asyncio.sleep(pause)
 
 
 def attempts_note(exc: Exception) -> str:

@@ -221,6 +221,45 @@ def test_a_guest_keeps_serving_through_the_controllers_quit(tmp_path: Path) -> N
     assert ("quit", {controller_client.HANDOVER_HEADER: "1"}) in sent
 
 
+def test_the_shutdown_reads_outwait_a_controller_that_asks_its_engine_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The controller's /v1/info asks the engine behind it; with the 3 s call timeout
+    `local shutdown` gave up first and never sent /quit (the PC, 2026-10-02, twice), and
+    the installer then started a second orchestrator beside the first."""
+    (tmp_path / "host.pid").write_text("4242")
+    sent: list = []
+    calls: list = []
+    monkeypatch.setattr(local, "crucible_home", lambda: tmp_path)
+    monkeypatch.setattr(local, "close_app", lambda home: None)
+    monkeypatch.setattr(local.traylife, "close_tray", lambda home: None)
+    monkeypatch.setattr(local, "_controller_bearer", lambda home: "t")
+    monkeypatch.setattr(local, "_set_aside_a_broken_pairing", lambda home: None)
+    monkeypatch.setattr(local.sys, "platform", "win32")
+    info = {"server": {"api_version": controller_client.API_VERSION, "version": "1.0.0"},
+            "role": "orchestrator", "local_lifecycle_version": 1, "engine": {"owner": "wsl-unit"}}
+
+    def door_call(path, home, token, **options):
+        calls.append((path, options.get("timeout")))
+        return info, token
+
+    def request(url, **options):
+        sent.append((url.rsplit("/", 1)[-1], options.get("timeout")))
+        if url.endswith("/quit"):
+            return {"quit": True}
+        if any(u == "quit" for u, _ in sent):
+            raise urllib.error.URLError(ConnectionRefusedError())
+        return {"crucible": True, "role": "orchestrator"}
+
+    monkeypatch.setattr(local, "door_call", door_call)
+    monkeypatch.setattr(local, "request", request)
+    monkeypatch.setattr(local.processlock, "alive", lambda pid: False)
+    local.shutdown()
+    assert calls == [("/v1/info", controller_client.SHUTDOWN_READ_SECONDS)]
+    assert ("quit", controller_client.SHUTDOWN_READ_SECONDS) in sent
+    assert controller_client.SHUTDOWN_READ_SECONDS > controller_client.CALL_TIMEOUT_SECONDS * 3
+
+
 def test_a_controller_with_no_pid_record_names_the_file(tmp_path: Path) -> None:
     with pytest.raises(local.LocalError, match="host.pid"):
         _shutdown(tmp_path, "wsl-unit", [])

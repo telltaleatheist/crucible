@@ -8,7 +8,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible.api import app as api_module
-from crucible.api.proxy import LOST_ON_THE_WIRE, PROXY_KEEPALIVE_EXPIRY, WIRE_ATTEMPTS
+from crucible.api.proxy import (
+    LOST_ON_THE_WIRE,
+    PROXY_KEEPALIVE_EXPIRY,
+    WIRE_ATTEMPTS,
+    WIRE_BACKOFF_SECONDS,
+)
 
 from .fake_engine import FakeEngine
 from .live_server import run_job, serve
@@ -77,7 +82,7 @@ def test_a_streamed_request_the_wire_loses_is_opened_again(
         assert len(engines[0]._handler.requests) == 2
 
 
-def test_the_budget_is_two_attempts_and_the_502_says_so(
+def test_the_budget_is_stated_attempts_and_the_502_says_so(
     resident_server: Callable[..., Any], auth: dict[str, str]
 ) -> None:
     engines, server = resident_server(drop_requests=WIRE_ATTEMPTS + 1)
@@ -112,6 +117,12 @@ def test_a_timeout_is_not_a_lost_socket_and_is_tried_once(
         assert "ReadTimeout" in error["message"]
         assert "attempts" not in error["message"]
         assert len(engines[0]._handler.requests) == 1
+
+
+def test_every_retry_waits_and_the_waits_are_a_budget_not_a_spin() -> None:
+    assert len(WIRE_BACKOFF_SECONDS) == WIRE_ATTEMPTS - 1
+    assert all(b > a for a, b in zip(WIRE_BACKOFF_SECONDS, WIRE_BACKOFF_SECONDS[1:]))
+    assert 5.0 <= sum(WIRE_BACKOFF_SECONDS) <= 15.0
 
 
 def test_the_proxy_lets_a_socket_go_before_the_engine_would(

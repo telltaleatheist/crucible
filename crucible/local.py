@@ -329,7 +329,8 @@ def shutdown() -> None:
         home,
         send=lambda url, **options: request(url, **options),
         engine_token=lambda: _controller_bearer(home),
-        call=lambda path, token: door_call(path, home, token),
+        call=lambda path, token: door_call(
+            path, home, token, timeout=controller_client.SHUTDOWN_READ_SECONDS),
         stop_engine=lambda: run_engine_verb("stop"),
         alive=lambda pid: processlock.alive(pid),
     )

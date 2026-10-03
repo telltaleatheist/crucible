@@ -115,7 +115,8 @@ held.
   (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, vllm 0.29.0) and httpx's 5 s default, so the
   pool never hands a request to a socket the engine just closed.
 - `LOST_ON_THE_WIRE` (`httpx.NetworkError`, `httpx.RemoteProtocolError`) is sent
-  once more on a fresh socket; `WIRE_ATTEMPTS` = 2 is the whole budget. Timeouts
+  again after `WIRE_BACKOFF_SECONDS` (0.5, 1, 2, 4 s); `WIRE_ATTEMPTS` = 5 is the whole
+  budget (~7.5 s). Two attempts 4 s apart lost a Hellworld clean on 2026-10-02. Timeouts
   are never repeated. A streamed request is retried only while opening, before a
   byte has been relayed. Every loss is logged.
 - Disconnects: `unless_the_caller_leaves` is the one owner of "the caller left,
