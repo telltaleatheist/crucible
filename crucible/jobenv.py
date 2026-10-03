@@ -550,10 +550,39 @@ def installed_direct_references(home: Path, spec: EnvSpec) -> dict[str, str]:
     return found
 
 
+# `pip list` per env, kept until the env's site-packages changes. Every GET /v1/info and
+# /v1/voices reads every voice's env status, and a `pip list` in the tts env takes 1-3 s;
+# it ran on the event loop, so on the PC (2026-10-02) the whole server stopped ~3 s in
+# every 4 while clients polled - the desktop app read "not running", `local shutdown`
+# timed out, and chats proxied in those seconds were lost. Installing, removing or
+# re-versioning a distribution adds, removes or renames a `*.dist-info` directory, which
+# moves the site-packages directory's mtime; that is the key.
+_PACKAGES: dict[Path, tuple[tuple[tuple[str, int], ...], dict[str, str]]] = {}
+
+
+def _site_packages_state(directory: Path) -> tuple[tuple[str, int], ...]:
+    found = sorted([*(directory / "lib").glob("python*/site-packages"),
+                    *(directory / "Lib").glob("site-packages")])
+    return tuple((str(path), path.stat().st_mtime_ns) for path in found)
+
+
 def installed_packages(home: Path, spec: EnvSpec) -> dict[str, str]:
     python = env_python(home, spec)
     if not python.is_file():
         return {}
+    directory = env_dir(home, spec)
+    state = _site_packages_state(directory)
+    held = _PACKAGES.get(directory)
+    if state and held is not None and held[0] == state:
+        return dict(held[1])
+    listed = _pip_list(home, spec)
+    if state:
+        _PACKAGES[directory] = (state, dict(listed))
+    return listed
+
+
+def _pip_list(home: Path, spec: EnvSpec) -> dict[str, str]:
+    python = env_python(home, spec)
     completed = subprocess.run(
         [str(python), "-m", "pip", "list", "--format=json", "--disable-pip-version-check"],
         capture_output=True,
