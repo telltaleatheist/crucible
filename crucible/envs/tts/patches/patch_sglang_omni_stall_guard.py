@@ -22,10 +22,19 @@ THE CONTRACT (identical on narrator's MLX arm, in BookForge):
       pen = min(max, rate * (run - frames)) is subtracted from the cb0 logit of
       every distinct code in R (once per code, however often R holds it);
     after sampling cb0 code c, for a counted row:
-      run = run + 1 if c is in R else 0; then c is pushed into R, the oldest out;
+      c in R:                     run = run + 1, away = 0;
+      c not in R, run <= frames:  run = 0, away = 0 (a guard not engaged);
+      c not in R, run > frames:   away = away + 1 and run is HELD, so a return to
+                                  a ring code is penalised at once; when away
+                                  reaches STALL_ESCAPE_FRAMES (10, 0.4 s) the row
+                                  has left: run = 0, away = 0, R emptied;
+      then c is pushed into R, the oldest out.
+    (v2, training-pc 2026-10-02: under v1 a run zeroed on ONE escaped frame, the
+    model snapped back to the stuck code and sat out another `frames` before the
+    guard engaged again - three such cycles were the 5.5 s pauses on the Mac arm.)
     a row that is NOT counted on a frame has run = 0 and R emptied (the
     prototype's rule: run resets on every frame a row is not counted).
-  reset_row() empties both for the row's next owner.
+  reset_row() empties all three for the row's next owner.
 
 Usage: <env python> patch_sglang_omni_stall_guard.py <env prefix>
 
@@ -44,7 +53,7 @@ PACKAGE_REL = "sglang_omni/models/higgs_tts"
 VERSION_REL = "sglang_omni/__init__.py"
 EXPECTED_VERSION = "0.1.4"
 
-VERSION = 1
+VERSION = 2
 TAG_FAMILY = "# PATCH (crucible stall-guard "
 TAG = TAG_FAMILY + f"v{VERSION}, envs/tts/patches/patch_sglang_omni_stall_guard.py)"
 
@@ -62,6 +71,10 @@ SAMPLER_CONFIG = (
     "STALL_GUARD_VARIABLE = \"HIGGS_STALL_GUARD\"\n"
     f"STALL_GUARD_PATCH_VERSION = {VERSION}\n"
     "STALL_RING_EMPTY = -1\n"
+    "# Consecutive frames outside the ring before an ENGAGED row counts as having left\n"
+    "# its stall (0.4 s at 25 fps); until then its run is held. Speech leaves the ring\n"
+    "# for far longer than this; a guard-forced escape that snaps back does not.\n"
+    "STALL_ESCAPE_FRAMES = 10\n"
     "_STALL_INTEGER = _stall_re.compile(r\"[0-9]+\")\n"
     "_STALL_DECIMAL = _stall_re.compile(r\"[0-9]+(\\.[0-9]+)?\")\n"
     "_STALL_RANGES = {\n"
@@ -140,6 +153,9 @@ SAMPLER_EDITS = (
         "        self.stall_run = torch.zeros(\n"
         "            self.max_batch_size, dtype=torch.long, device=self.device\n"
         "        )\n"
+        "        self.stall_away = torch.zeros(\n"
+        "            self.max_batch_size, dtype=torch.long, device=self.device\n"
+        "        )\n"
         "        self.stall_ring = torch.full(\n"
         "            (self.max_batch_size, STALL_RING_WIDTH),\n"
         "            STALL_RING_EMPTY,\n"
@@ -153,6 +169,7 @@ SAMPLER_EDITS = (
         "        self.step_count[row] = 0\n",
         "        self.step_count[row] = 0\n"
         "        self.stall_run[row] = 0\n"
+        "        self.stall_away[row] = 0\n"
         "        self.stall_ring[row].fill_(STALL_RING_EMPTY)\n",
     ),
     (
@@ -164,6 +181,7 @@ SAMPLER_EDITS = (
         "    # gathered, updated in place by batched_step_direct and scattered back,\n"
         "    # exactly as the graph path does it.\n"
         "    stall_run = state.stall_run[row_indices] if STALL_GUARD is not None else None\n"
+        "    stall_away = state.stall_away[row_indices] if STALL_GUARD is not None else None\n"
         "    stall_ring = state.stall_ring[row_indices] if STALL_GUARD is not None else None\n",
     ),
     (
@@ -179,11 +197,13 @@ SAMPLER_EDITS = (
         "        boc_id=boc_id,\n"
         "        eoc_id=eoc_id,\n"
         "        stall_run=stall_run,\n"
+        "        stall_away=stall_away,\n"
         "        stall_ring=stall_ring,\n"
         "    )\n"
         "\n"
         "    if STALL_GUARD is not None:\n"
         "        state.stall_run[row_indices] = stall_run\n"
+        "        state.stall_away[row_indices] = stall_away\n"
         "        state.stall_ring[row_indices] = stall_ring\n"
         "    state.delay_count[row_indices]",
     ),
@@ -199,6 +219,7 @@ SAMPLER_EDITS = (
         "    eoc_id: int = EOC_ID,\n"
         "    stall_run: torch.Tensor | None = None,\n"
         "    stall_ring: torch.Tensor | None = None,\n"
+        "    stall_away: torch.Tensor | None = None,\n"
         ") -> tuple[",
     ),
     (
@@ -219,6 +240,7 @@ SAMPLER_EDITS = (
         "    # Fixed shapes and no host branch on a tensor value: CUDA-graph safe.\n"
         "    stall_guard_on = (\n"
         "        STALL_GUARD is not None and stall_run is not None and stall_ring is not None\n"
+        "        and stall_away is not None\n"
         "    )\n"
         "    if stall_guard_on:\n"
         "        counted_B = (~generation_done) & (delay_count >= N) & (eoc_countdown < 0)\n"
@@ -244,9 +266,11 @@ SAMPLER_EDITS = (
         "\n"
         "    " + TAG + ":\n"
         "    # the count, after sampling. A row not counted on this frame (done, in the\n"
-        "    # delay window, winding down, or finishing now) has its run zeroed and its\n"
-        "    # ring emptied; a counted row's run grows when its cb0 code is already in\n"
-        "    # the ring and is zeroed when it is not, and the code is then pushed.\n"
+        "    # delay window, winding down, or finishing now) has its run and away zeroed\n"
+        "    # and its ring emptied. A counted row's run grows when its cb0 code is in\n"
+        "    # the ring; off the ring, an engaged row (run > frames) HOLDS its run until\n"
+        "    # STALL_ESCAPE_FRAMES consecutive frames off it, then starts clean; a row\n"
+        "    # not engaged zeroes it. The code is then pushed.\n"
         "    if stall_guard_on:\n"
         "        steady_B = (\n"
         "            active & (~in_delay_active) & (~in_winddown_active) & (~done_this_step)\n"
@@ -254,13 +278,23 @@ SAMPLER_EDITS = (
         "        cb0_B1 = codes_BN[:, :1].to(stall_ring.dtype)\n"
         "        repeat_B = (stall_ring == cb0_B1).any(dim=1)\n"
         "        pushed_BW = torch.cat([stall_ring[:, 1:], cb0_B1], dim=1)\n"
-        "        stall_run.copy_(\n"
-        "            torch.where(steady_B & repeat_B, stall_run + 1, torch.zeros_like(stall_run))\n"
+        "        zero_B = torch.zeros_like(stall_run)\n"
+        "        engaged_B = stall_run > STALL_GUARD.frames\n"
+        "        away_next_B = stall_away + 1\n"
+        "        left_B = (~repeat_B) & engaged_B & (away_next_B >= STALL_ESCAPE_FRAMES)\n"
+        "        hold_B = (~repeat_B) & engaged_B & (~left_B)\n"
+        "        run_next_B = torch.where(\n"
+        "            repeat_B, stall_run + 1, torch.where(hold_B, stall_run, zero_B)\n"
+        "        )\n"
+        "        stall_run.copy_(torch.where(steady_B, run_next_B, zero_B))\n"
+        "        stall_away.copy_(torch.where(steady_B & hold_B, away_next_B, zero_B))\n"
+        "        restarted_BW = torch.cat(\n"
+        "            [torch.full_like(stall_ring[:, 1:], STALL_RING_EMPTY), cb0_B1], dim=1\n"
         "        )\n"
         "        stall_ring.copy_(\n"
         "            torch.where(\n"
         "                steady_B.unsqueeze(-1),\n"
-        "                pushed_BW,\n"
+        "                torch.where(left_B.unsqueeze(-1), restarted_BW, pushed_BW),\n"
         "                torch.full_like(stall_ring, STALL_RING_EMPTY),\n"
         "            )\n"
         "        )\n",
@@ -289,6 +323,9 @@ MODEL_EDITS = (
         "        self._cg_active_stall_run = torch.zeros(\n"
         "            pool_size, dtype=torch.long, device=cg_device\n"
         "        )\n"
+        "        self._cg_active_stall_away = torch.zeros(\n"
+        "            pool_size, dtype=torch.long, device=cg_device\n"
+        "        )\n"
         "        self._cg_active_stall_ring = torch.full(\n"
         "            (pool_size, STALL_RING_WIDTH),\n"
         "            STALL_RING_EMPTY,\n"
@@ -304,6 +341,7 @@ MODEL_EDITS = (
         "            step_count=step_count_B,\n"
         "            stall_run=self._cg_active_stall_run[:batch_size],\n"
         "            stall_ring=self._cg_active_stall_ring[:batch_size],\n"
+        "            stall_away=self._cg_active_stall_away[:batch_size],\n"
         "        )\n",
     ),
 )
@@ -320,14 +358,16 @@ MODEL_RUNNER_EDITS = (
         "        model._cg_active_step_count[:bs] = pool.step_count[rows_t]\n"
         "        if STALL_GUARD is not None:\n"
         "            model._cg_active_stall_run[:bs] = pool.stall_run[rows_t]\n"
-        "            model._cg_active_stall_ring[:bs] = pool.stall_ring[rows_t]\n",
+        "            model._cg_active_stall_ring[:bs] = pool.stall_ring[rows_t]\n"
+        "            model._cg_active_stall_away[:bs] = pool.stall_away[rows_t]\n",
     ),
     (
         "        pool.step_count[rows_t] = model._cg_active_step_count[:n_real]\n",
         "        pool.step_count[rows_t] = model._cg_active_step_count[:n_real]\n"
         "        if STALL_GUARD is not None:\n"
         "            pool.stall_run[rows_t] = model._cg_active_stall_run[:n_real]\n"
-        "            pool.stall_ring[rows_t] = model._cg_active_stall_ring[:n_real]\n",
+        "            pool.stall_ring[rows_t] = model._cg_active_stall_ring[:n_real]\n"
+        "            pool.stall_away[rows_t] = model._cg_active_stall_away[:n_real]\n",
     ),
 )
 
@@ -339,8 +379,8 @@ EDITS = {
 
 MARKERS = {
     "sampler.py": "STALL_GUARD = parse_stall_guard(_stall_os.environ.get(STALL_GUARD_VARIABLE))",
-    "model.py": "stall_ring=self._cg_active_stall_ring[:batch_size],",
-    "model_runner.py": "pool.stall_ring[rows_t] = model._cg_active_stall_ring[:n_real]",
+    "model.py": "stall_away=self._cg_active_stall_away[:batch_size],",
+    "model_runner.py": "pool.stall_away[rows_t] = model._cg_active_stall_away[:n_real]",
 }
 
 

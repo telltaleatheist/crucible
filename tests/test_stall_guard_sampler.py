@@ -269,9 +269,11 @@ def test_reset_row_empties_the_guard(load_sampler: Any) -> None:
     S = load_sampler(DEFAULT_ENV)
     state = S.HiggsBatchedSamplerState(2, N, device="cpu")
     state.stall_run[1] = 9
+    state.stall_away[1] = 4
     state.stall_ring[1] = 7
     state.reset_row(1)
     assert int(state.stall_run[1]) == 0
+    assert int(state.stall_away[1]) == 0
     assert state.stall_ring[1].tolist() == [-1] * 16
 
 
@@ -279,6 +281,7 @@ def test_the_graph_path_updates_its_shadow_buffers_in_place(load_sampler: Any) -
     S = load_sampler("3,1,10,4")
     pool = 4
     run_buf = torch.zeros(pool, dtype=torch.long)
+    away_buf = torch.zeros(pool, dtype=torch.long)
     ring_buf = torch.full((pool, S.STALL_RING_WIDTH), S.STALL_RING_EMPTY, dtype=torch.long)
     delay = torch.full((2,), N, dtype=torch.long)
     eoc = torch.full((2,), -1, dtype=torch.long)
@@ -291,7 +294,7 @@ def test_the_graph_path_updates_its_shadow_buffers_in_place(load_sampler: Any) -
             logits, delay, eoc, done, last,
             seeds=torch.full((2,), -1, dtype=torch.long),
             step_count=torch.zeros(2, dtype=torch.long),
-            stall_run=run_buf[:2], stall_ring=ring_buf[:2],
+            stall_run=run_buf[:2], stall_ring=ring_buf[:2], stall_away=away_buf[:2],
             **sampling(2, 0.0),
         )
     assert run_buf.tolist() == [5, 5, 0, 0]
@@ -337,6 +340,72 @@ def test_a_sampled_silence_is_left_soon_after_the_stated_frame(load_sampler: Any
             assert left is not None and 37 < left < 37 + 40, left
         else:
             assert left is None
+
+
+SILENCE, SPEECH_FIRST = 7, 400
+
+
+def snapping_logits(history: list[int]) -> Any:
+    """A model that snaps back: while either of its last two cb0 codes is the
+    silence code it prefers silence by 9 logits (its nearest word, code 300, at 1);
+    two non-silence frames in a row and it is speaking, a new code each frame. One
+    escaped frame is therefore not enough to leave - the row-45 cycle on the Mac arm."""
+    logits = torch.zeros(1, N, V)
+    if len(history) >= 2 and SILENCE not in history[-2:]:
+        logits[0, :, SPEECH_FIRST + len(history) % 200] = 10.0
+    else:
+        logits[0, :, SILENCE] = 10.0
+        logits[0, 0, 300] = 1.0
+    return logits
+
+
+def silence_stretches(guard: str, load_sampler: Any, frames: int = 400) -> list[int]:
+    S = load_sampler(guard)
+    state = S.HiggsBatchedSamplerState(1, N, device="cpu")
+    rows = torch.arange(1)
+    history: list[int] = []
+    for _ in range(frames):
+        codes = S.batched_step(snapping_logits(history), state, rows, **sampling(1, 0.0))
+        history.append(int(codes[0, 0]))
+    stretches, current = [], 0
+    for code in history[N:]:
+        if code == SILENCE:
+            current += 1
+        elif current:
+            stretches.append(current)
+            current = 0
+    return stretches + ([current] if current else [])
+
+
+def test_an_escape_that_snaps_back_is_held_until_the_row_has_left(load_sampler: Any) -> None:
+    """v1 zeroed the run on the one escaped frame: the model went straight back to
+    silence and sat out another `frames` before the guard engaged again (three such
+    cycles were the 5.3-5.8 s pauses on the Mac, 2026-10-02). v2 holds the run, so
+    the return is penalised at once and the row leaves on the first engagement."""
+    assert silence_stretches("off", load_sampler) == [400 - N], "off, silence is absorbing"
+    stretches = silence_stretches(DEFAULT_ENV, load_sampler)
+    assert len(stretches) == 1, stretches
+    assert stretches[0] < int(2.5 * 25), "one stay, under ~2.5 s at 25 fps"
+
+
+def test_an_engaged_row_starts_clean_after_ten_frames_off_its_ring(load_sampler: Any) -> None:
+    S = load_sampler("3,1,10,4")
+    state = S.HiggsBatchedSamplerState(1, N, device="cpu")
+    rows = torch.arange(1)
+    state.delay_count[0] = N
+    state.stall_ring[0] = torch.tensor([7, 7, 7, 7])
+    state.stall_run[0] = 6
+    runs, aways = [], []
+    for code in range(500, 500 + S.STALL_ESCAPE_FRAMES):
+        logits = torch.zeros(1, N, V)
+        logits[0, 0, code] = 50.0
+        S.batched_step(logits, state, rows, **sampling(1, 0.0))
+        runs.append(int(state.stall_run[0]))
+        aways.append(int(state.stall_away[0]))
+    assert runs[:-1] == [6] * (S.STALL_ESCAPE_FRAMES - 1), "held while away"
+    assert aways[:-1] == list(range(1, S.STALL_ESCAPE_FRAMES))
+    assert (runs[-1], aways[-1]) == (0, 0)
+    assert state.stall_ring[0].tolist() == [-1, -1, -1, 500 + S.STALL_ESCAPE_FRAMES - 1]
 
 
 def test_the_patched_model_files_carry_the_shadow_state(tmp_path: Path) -> None:

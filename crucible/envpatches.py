@@ -329,7 +329,7 @@ TTS_SCRIPTS_DIR = Path(__file__).resolve().parent / "envs" / "tts" / "patches"
 STALL_GUARD_SCRIPT = "patch_sglang_omni_stall_guard.py"
 STALL_GUARD_TAG_FAMILY = "# PATCH (crucible stall-guard "
 STALL_GUARD_TAG = (
-    STALL_GUARD_TAG_FAMILY + "v1, envs/tts/patches/patch_sglang_omni_stall_guard.py)"
+    STALL_GUARD_TAG_FAMILY + "v2, envs/tts/patches/patch_sglang_omni_stall_guard.py)"
 )
 STALL_GUARD_WHY = (
     "stock sglang-omni 0.1.4 has no way out of a Higgs runaway silence: "
