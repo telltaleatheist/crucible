@@ -83,8 +83,17 @@ def _service_state(home: Path) -> dict:
     return {}
 
 
+def timed_out(exc: BaseException) -> bool:
+    """Whether a failed read waited out its timeout on a connection that was accepted,
+    which is a busy server, rather than being refused, which is one that is not there."""
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
+        exc = exc.reason
+    return isinstance(exc, TimeoutError)
+
+
 def _not_answering(home: Path, result: dict, token: str, exc: BaseException) -> dict:
     result["detail"] = f"Engine did not answer: {exc}"
+    result["timed_out"] = timed_out(exc)
     result.update(_stopped_on_purpose(token) if sys.platform == "win32" else _service_state(home))
     return result
 
@@ -96,7 +105,7 @@ def _identified(result: dict, url: str, name: str, token: str) -> dict:
         return dict(result, state="unauthorized" if exc.code in (401, 403) else "unhealthy",
                     detail=f"Engine info returned HTTP {exc.code}")
     except (OSError, ValueError, LocalError) as exc:
-        return dict(result, state="unhealthy",
+        return dict(result, state="unhealthy", timed_out=timed_out(exc),
                     detail=f"The engine answered ping but not /v1/info: {exc}")
     server = info.get("server")
     if not isinstance(server, dict) or server.get("name") != name or server.get("api_version") != API_VERSION:

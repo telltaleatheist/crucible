@@ -225,6 +225,7 @@ def test_a_load_that_fails_any_way_at_all_takes_its_engine_down() -> None:
                 [],
                 lambda _message: None,
                 1.0,
+                cancelled=lambda: False,
                 confirm=confirm,
             )
         assert engine.stopped is True, (
@@ -256,5 +257,6 @@ def test_the_original_failure_is_what_the_caller_is_told() -> None:
             [],
             lambda _message: None,
             1.0,
+            cancelled=lambda: False,
             confirm=confirm,
         )

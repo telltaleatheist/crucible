@@ -128,7 +128,10 @@ class MlxLmEngine(SubprocessEngine):
         ]
 
     def confirm(
-        self, deadline: float, on_progress: Callable[[str], None] | None
+        self,
+        deadline: float,
+        on_progress: Callable[[str], None] | None,
+        cancelled: Callable[[], bool] | None,
     ) -> None:
         url = f"{self.base_url}/v1/chat/completions"
         payload = json.dumps(
@@ -142,6 +145,7 @@ class MlxLmEngine(SubprocessEngine):
         attempt = 0
         last: str = "no attempt made"
         while True:
+            self.raise_if_cancelled(cancelled)
             if self._process is not None and self._process.poll() is not None:
                 raise EngineError(
                     f"{self.name} exited {self._process.returncode} while loading "

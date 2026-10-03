@@ -225,6 +225,42 @@ def test_a_server_that_is_down_offers_the_one_action_that_fixes_it(state: str, a
     assert c.docs == {}
 
 
+def test_a_busy_server_that_misses_a_status_read_is_slow_not_gone() -> None:
+    """The PC took 2-3.5 s to answer the 3 s status ping during a long render, and every
+    miss flipped the window to "Crucible is not running" and back (2026-10-02)."""
+    now = [0.0]
+    host = FakeHost()
+    c = Controller(FakeApi(), host, lambda q: True, run=lambda w: w(), clock=lambda: now[0],
+                   stream=lambda w: None, wall=lambda: NOW)
+    c.refresh_now("home")
+    host._status = {"state": "unreachable", "detail": "Engine did not answer: timed out",
+                    "timed_out": True}
+    now[0] = 10.0
+    c.refresh_now("home")
+    assert c.view("home").headline == "Crucible is running"
+    assert "slow to answer" in c.notices["status"]
+    now[0] = 12.0
+    host._status = RUNNING
+    c.refresh_now("home")
+    assert "status" not in c.notices
+    host._status = {"state": "unreachable", "detail": "timed out", "timed_out": True}
+    now[0] = 20.0
+    c.refresh_now("home")
+    now[0] = 20.0 + 31.0
+    c.refresh_now("home")
+    assert c.view("home").headline == "Crucible is not running", "the budget is a budget"
+
+
+def test_a_refused_connection_is_shown_down_at_once() -> None:
+    host = FakeHost()
+    c = controller(host=host)
+    c.refresh_now("home")
+    host._status = {"state": "unreachable", "detail": "Engine did not answer: refused",
+                    "timed_out": False}
+    c.refresh_now("home")
+    assert c.view("home").headline == "Crucible is not running"
+
+
 def test_no_installation_names_the_installer_to_run(monkeypatch) -> None:
     view = screens.not_installed_view(RuntimeError("crucible_not_installed: nothing at C:\\x"), "win32")
     assert "PowerShell" in view.detail and "install.ps1 | iex" in view.detail

@@ -47,6 +47,7 @@ def notice_for(page: Page, parent: tk.Misc, actions: Actions, place: str) -> Non
 
 def draw_home(page: Page, view: screens.HomeView, actions: Actions) -> None:
     page.header(view.headline, view.detail, view.tone)
+    notice_for(page, page.body, actions, "status")
     busy = "home" in actions.c.busy
     if view.action:
         line = page.frame(page.body, pady=(page.style.px(8), 0))
@@ -126,6 +127,7 @@ def draw_packages(page: Page, rows: list[screens.PackageRow], actions: Actions) 
 
 def draw_activity(page: Page, view: screens.ActivityView, actions: Actions) -> None:
     box = page.section("Running now")
+    notice_for(page, box, actions, "status")
     if not view.work:
         page.empty(box, "Nothing is running.")
     for work in view.work:

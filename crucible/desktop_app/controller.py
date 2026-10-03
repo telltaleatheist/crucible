@@ -28,6 +28,13 @@ PATHS = {
 
 SLOW_SECONDS = 15.0
 
+# A server that was answering and now misses a status read is weather until it has missed
+# them for this long: the status ping waits 3 s, and a server busy with a long render has
+# been measured taking 2-3.5 s to answer it (the PC, 2026-10-02), so a single miss flipped
+# the window to "Crucible is not running" and back every few seconds. Inside the budget
+# the window keeps what it last knew and says the server is slow to answer.
+SLOW_ANSWER_BUDGET_SECONDS = 30.0
+
 NEEDS = {
     "home": ("info", "activity", "queue", "capability", "tasks"),
     "models": ("catalog", "tasks", "capability"),
@@ -58,6 +65,15 @@ RECONNECT_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0)
 HOST_ERRORS = (CrucibleError, OSError, ValueError, RuntimeError)
 
 
+def _slow_not_gone(status: Mapping[str, Any] | Exception) -> bool:
+    """A status read that says only that the server did not answer in time. A refused
+    connection, a server stopped on purpose, a refused token or something else answering
+    is a real state, shown at once."""
+    return (isinstance(status, Mapping)
+            and status.get("state") in ("unreachable", "unhealthy")
+            and status.get("timed_out") is True)
+
+
 def in_thread(work: Callable[[], None]) -> None:
     threading.Thread(target=work, daemon=True).start()
 
@@ -85,6 +101,7 @@ class Controller:
         self.docs: dict[str, Any] = {}
         self.fetched: dict[str, float] = {}
         self.status: Mapping[str, Any] | Exception | None = None
+        self.missed_since: float | None = None
         self.lan: Mapping[str, Any] | None = None
         self.notices: dict[str, str] = {}
         self.busy: set[str] = set()
@@ -121,9 +138,24 @@ class Controller:
 
     def _read_status(self) -> None:
         try:
-            self.status = self.host.status()
+            status: Mapping[str, Any] | Exception = self.host.status()
         except HOST_ERRORS as exc:
-            self.status = exc
+            status = exc
+        answered = isinstance(status, Mapping) and status.get("state") == "running"
+        if not answered and self.running() and _slow_not_gone(status):
+            now = self.clock()
+            if self.missed_since is None:
+                self.missed_since = now
+            waited = now - self.missed_since
+            if waited < SLOW_ANSWER_BUDGET_SECONDS:
+                self.notices["status"] = (
+                    f"Crucible is slow to answer (no reply for {waited:.0f} s); it is "
+                    "probably busy with a long job. Showing what it last said."
+                )
+                return
+        self.missed_since = None
+        self.notices.pop("status", None)
+        self.status = status
 
     def _read(self, names: tuple[str, ...]) -> None:
         for name in names:

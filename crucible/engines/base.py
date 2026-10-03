@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from .. import procgroup
 from ..enginespec import flag_value
-from ..errors import EngineError
+from ..errors import EngineError, JobCancelled
 from ..logtail import tail_of_last_run
 
 STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
@@ -186,7 +186,10 @@ class SubprocessEngine:
         return f"answer {self.base_url}/v1/models"
 
     def confirm(
-        self, deadline: float, on_progress: Callable[[str], None] | None
+        self,
+        deadline: float,
+        on_progress: Callable[[str], None] | None,
+        cancelled: Callable[[], bool] | None,
     ) -> None:
         return None
 
@@ -288,13 +291,20 @@ class SubprocessEngine:
             ) from exc
 
     def ready(
-        self, timeout: float, on_progress: Callable[[str], None] | None = None
+        self,
+        timeout: float,
+        on_progress: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
+        """Wait for the engine to answer. ``cancelled`` is the owning job's cancel
+        flag: a load nobody wants any more stops waiting at the next poll rather
+        than at the end of the load (a fleet's losing server held its card ~80 s)."""
         if self._process is None or self._port is None:
             raise EngineError(f"{self.name} has not been started")
         deadline = time.monotonic() + timeout
         attempt = 0
         while True:
+            self.raise_if_cancelled(cancelled)
             code = self._process.poll()
             self.refuse_a_taken_port()
             if code is not None:
@@ -306,7 +316,7 @@ class SubprocessEngine:
             if announcement is not None:
                 if on_progress is not None:
                     on_progress(announcement)
-                self.confirm(deadline, on_progress)
+                self.confirm(deadline, on_progress, cancelled)
                 return
             if time.monotonic() >= deadline:
                 raise EngineError(
@@ -318,6 +328,10 @@ class SubprocessEngine:
             if on_progress is not None:
                 on_progress(self.warming_message(attempt, deadline))
             time.sleep(READY_POLL_SECONDS)
+
+    def raise_if_cancelled(self, cancelled: Callable[[], bool] | None) -> None:
+        if cancelled is not None and cancelled():
+            raise JobCancelled(f"{self.name} was cancelled while it was starting")
 
     def warming_message(self, attempt: int, deadline: float) -> str:
         remaining = max(0.0, deadline - time.monotonic())

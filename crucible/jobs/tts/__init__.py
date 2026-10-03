@@ -166,6 +166,7 @@ class LoadVoiceJobType:
                 reference=needs.reference,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
+                cancelled=lambda: ctx.cancelled,
                 serving_width=needs.plan.width,
             )
         except EngineError as exc:

@@ -1,6 +1,6 @@
 # archive-bytes: 900000000  docs/internals/config-envs-weights.md "Archive sizes", the mlx total, measured 2026-09-18
 
-narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@2340aab77d6cf7fdb7037f13039901770f997496#subdirectory=python
+narrator[narrator-mlx] @ git+https://github.com/telltaleatheist/bookforge@6d54f8488f8aa4696d3d7712d91f5673866efbb7#subdirectory=python
 
 mlx-lm==0.31.3
 mlx-audio==0.4.8

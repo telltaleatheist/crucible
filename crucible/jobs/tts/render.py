@@ -650,6 +650,7 @@ class TtsJobType:
                 weights_dir,
                 python,
                 on_progress=ctx.warming,
+                cancelled=lambda: ctx.cancelled,
                 serving_width=plan.width,
             )
         except EngineError as exc:

@@ -484,9 +484,13 @@ class FakeEngine:
         )
 
     def ready(
-        self, timeout: float, on_progress: Callable[[str], None] | None = None
+        self,
+        timeout: float,
+        on_progress: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         from crucible.engines import EngineError
+        from crucible.errors import JobCancelled
 
         self.warming_started.set()
         if self._fail_ready is not None:
@@ -494,8 +498,16 @@ class FakeEngine:
         for step in range(self._warmings):
             if on_progress is not None:
                 on_progress(f"fake engine warming, step {step + 1}/{self._warmings}")
-        if self._hold is not None and not self._hold.wait(timeout=30):
-            raise EngineError("the test never released the hold on ready()")
+        if self._hold is None:
+            return
+        # Held like a real engine still warming: the real ready() polls its cancel flag,
+        # so this does too.
+        deadline = time.monotonic() + 30
+        while not self._hold.wait(timeout=0.05):
+            if cancelled is not None and cancelled():
+                raise JobCancelled("fake engine was cancelled while it was starting")
+            if time.monotonic() >= deadline:
+                raise EngineError("the test never released the hold on ready()")
 
     def stop(self) -> None:
         self.stopped = True

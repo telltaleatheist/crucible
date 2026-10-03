@@ -464,6 +464,7 @@ def occupy_voice(
     reference: VoiceReference | None = None,
     timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
     on_progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool],
     serving_width: int | None = None,
 ) -> ResidentVoice:
     say = say_to(on_progress)
@@ -493,6 +494,7 @@ def occupy_voice(
             [],
             say,
             timeout,
+            cancelled=cancelled,
             confirm=lambda: confirm_voice_loaded(engine, manifest, weights_dir, say),
         )
         resident = ResidentVoice(

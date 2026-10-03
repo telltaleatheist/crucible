@@ -118,6 +118,35 @@ def test_a_ready_line_that_never_comes_times_out_by_name(
     assert "/v1/models" not in message
 
 
+def test_a_cancelled_load_stops_at_the_next_poll_and_takes_its_engine_with_it(
+    engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fleet's losing server cancels its load; the load used to notice only when
+    the engine finished warming (~80 s of a vLLM holding the card for nobody)."""
+    import time
+
+    from crucible.engines import start_engine
+    from crucible.errors import JobCancelled
+
+    monkeypatch.setenv("CRUCIBLE_FAKE_READY_NEVER", "1")
+    asked_at: list[float] = []
+
+    def cancelled() -> bool:
+        if not asked_at:
+            asked_at.append(time.monotonic())
+            return False
+        return True
+
+    began = time.monotonic()
+    with pytest.raises(JobCancelled, match="cancelled while it was starting"):
+        start_engine(
+            engine, weights, "deathstalker", 0, [], lambda _m: None, 600.0,
+            cancelled=cancelled,
+        )
+    assert time.monotonic() - began < 30.0
+    assert engine._process is None, "the cancelled load left its engine running"
+
+
 def test_an_engine_that_dies_before_it_is_ready_says_so(
     engine: ReadyLineEngine, weights: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

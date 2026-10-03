@@ -199,11 +199,13 @@ def start_engine(
     args: list[str],
     say: Callable[[str], None],
     timeout: float,
+    *,
+    cancelled: Callable[[], bool],
     confirm: Callable[[], Any] | None = None,
 ) -> None:
     try:
         engine.start(weights_dir, served, port, args)
-        engine.ready(timeout, on_progress=say)
+        engine.ready(timeout, on_progress=say, cancelled=cancelled)
         if confirm is not None:
             confirm()
     except BaseException as start_failure:

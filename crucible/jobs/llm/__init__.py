@@ -442,6 +442,7 @@ class LoadModelJobType:
                 context=needs.context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
+                cancelled=lambda: ctx.cancelled,
                 card_args=enginespec.card_args(
                     needs.spec, card_for(self._config.home, self._backend.gpu)
                 ),
@@ -465,6 +466,7 @@ def occupy_model(
     context: int,
     timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
     on_progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool],
     card_args: tuple[str, ...] = (),
 ) -> ResidentModel:
     say = say_to(on_progress)
@@ -483,7 +485,9 @@ def occupy_model(
         args = engine_load_args(
             manifest, spec, weights_dir, plan, context=context, card_args=card_args
         )
-        start_engine(engine, weights_dir, served, port, args, say, timeout)
+        start_engine(
+            engine, weights_dir, served, port, args, say, timeout, cancelled=cancelled
+        )
         resident = ResidentModel(
             model_id=manifest.id,
             backend=spec.backend,
