@@ -156,6 +156,9 @@ def job_progress(job: Mapping[str, Any]) -> Progress:
     detail = str(job.get("message") or job.get("status") or "")
     if job.get("status") == "queued" and job.get("position") is not None:
         detail = f"waiting, number {job['position']} in line"
+    if job.get("cancelling"):
+        return Progress(title=f"Stopping a cancelled {job.get('type')}{model}", detail=detail,
+                        fraction=None, cancel=None)
     return Progress(title=f"{job.get('type')}{model}{who}", detail=detail, fraction=fraction,
                     cancel=str(job.get("job_id")) if job.get("job_id") else None)
 

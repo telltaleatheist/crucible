@@ -52,6 +52,10 @@ def _call_row(waiting: Any) -> dict[str, Any]:
 
 
 def _lane_row(store: JobStore, job: Any) -> dict[str, Any]:
+    # A running job whose client cancelled it (a closed session, a DELETE) is the
+    # server's to finish stopping, not the client's: the PC showed a cancelled load as
+    # "for foundry@owens-pc" for 3 minutes after Foundry had let go (2026-10-03).
+    cancelling = bool(job.cancel_requested) and job.status == "running"
     return {
         "job_id": job.id,
         "type": job.type,
@@ -59,10 +63,14 @@ def _lane_row(store: JobStore, job: Any) -> dict[str, Any]:
         "status": job.status,
         "position": store.position(job),
         "progress": job.progress,
-        "message": job.message,
+        "message": (
+            f"cancelled by {job.client or 'its client'}; Crucible is stopping it"
+            if cancelling else job.message
+        ),
         "created": job.created,
         "started": job.started,
         "client": job.client,
+        "cancelling": cancelling,
     }
 
 

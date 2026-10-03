@@ -90,3 +90,55 @@ def test_groups_are_asked_to_stop_and_a_gone_pid_is_not_a_failure() -> None:
 def test_asking_groups_to_stop_off_posix_refuses() -> None:
     with pytest.raises(procgroup.ProcessGroupError):
         procgroup.ask_groups_to_stop(frozenset({1}))
+
+
+SECOND_TIME = (
+    "import signal, sys, time\n"
+    "seen = []\n"
+    "def heard(*_):\n"
+    "    seen.append(1)\n"
+    "    if len(seen) >= 2:\n"
+    "        sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, heard)\n"
+    "print('ready', flush=True)\n"
+    "while True:\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+@pytest.mark.skipif(procgroup.platform_kind() != "posix", reason="SIGTERM resend is the POSIX path")
+def test_a_process_deaf_to_the_first_sigterm_is_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vLLM cancelled mid-load ignored one SIGTERM and left at once on a second sent by
+    hand 3 minutes later (the PC, 2026-10-03)."""
+    monkeypatch.setattr(procgroup, "RESEND_SECONDS", 0.3)
+    process = spawn(SECOND_TIME)
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == b"ready"
+        procgroup.stop_gracefully(process, "second-time", 30.0, tmp_path / "log")
+        assert process.poll() == 0
+    finally:
+        end_process_tree(process.pid)
+
+
+@pytest.mark.skipif(procgroup.platform_kind() != "posix", reason="zombies are a POSIX state")
+def test_a_process_that_outlives_its_stop_is_reaped_when_it_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import signal
+    import time
+
+    monkeypatch.setattr(procgroup, "RESEND_SECONDS", 0.2)
+    process = spawn(DEAF)
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == b"deaf"
+    with pytest.raises(procgroup.ProcessGroupError):
+        procgroup.stop_gracefully(process, "deaf", 0.5, tmp_path / "log")
+    os.kill(process.pid, signal.SIGKILL)  # a test child holding no GPU
+    deadline = time.monotonic() + 10
+    while os.path.exists(f"/proc/{process.pid}") and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not os.path.exists(f"/proc/{process.pid}"), "left a zombie nobody reaped"

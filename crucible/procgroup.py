@@ -5,6 +5,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from typing import Any
 
 from .errors import CrucibleError
@@ -15,6 +17,11 @@ WIN32 = "win32"
 KILL_WAIT_SECONDS = 10.0
 
 STOP_TIMEOUT_SECONDS = 180.0
+
+# SIGTERM is sent again this often while a stop waits. A vLLM API server cancelled while
+# it loaded weights ignored the first one (its engine core was dying under it) and left
+# at once on a second, sent by hand 3 minutes later (the PC, 2026-10-03).
+RESEND_SECONDS = 10.0
 
 LOG_TAIL_LINES = 40
 
@@ -124,6 +131,30 @@ def stop_budget_seconds(sigterm_wait_seconds: float) -> float:
     return sigterm_wait_seconds
 
 
+def _waited_out(process: "subprocess.Popen[Any]", timeout_seconds: float) -> bool:
+    """Wait up to `timeout_seconds` for `process` to exit, asking it again every
+    RESEND_SECONDS. True when it exited."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            process.wait(timeout=min(RESEND_SECONDS, remaining))
+            return True
+        except subprocess.TimeoutExpired:
+            pass
+        if not ask_to_stop(process):
+            return process.poll() is not None
+
+
+def _reap_when_it_exits(process: "subprocess.Popen[Any]") -> None:
+    """A process that outlived its stop is still this server's child: when it does exit
+    (on a later SIGTERM, from a person or the reconciler), something must wait() on it or
+    it stays a zombie. A daemon thread holds the Popen and does."""
+    threading.Thread(target=process.wait, name=f"reap-{process.pid}", daemon=True).start()
+
+
 def stop_gracefully(
     process: "subprocess.Popen[Any]",
     what: str,
@@ -138,11 +169,8 @@ def stop_gracefully(
             if win32:
                 terminate_tree(process, what)
             return
-        try:
-            process.wait(timeout=timeout_seconds)
+        if _waited_out(process, timeout_seconds):
             return
-        except subprocess.TimeoutExpired:
-            pass
         if win32:
             terminate_tree(process, what)
             return
@@ -150,9 +178,10 @@ def stop_gracefully(
         raise ProcessGroupError(
             f"could not stop {what} (pid {process.pid}): {exc}. Its log is {log_path}"
         ) from exc
+    _reap_when_it_exits(process)
     raise ProcessGroupError(
         f"{what} (pid {process.pid}) did not exit within {timeout_seconds:.0f}s "
-        "of SIGTERM. Crucible does not SIGKILL a process holding CUDA: that "
+        f"of SIGTERM, sent every {RESEND_SECONDS:.0f}s. Crucible does not SIGKILL a process holding CUDA: that "
         "wedges WSL2 until Windows reboots. Stop it with "
         f"`kill {process.pid}` (never -9), then run the request again. Its log "
         f"is {log_path}"
@@ -161,6 +190,7 @@ def stop_gracefully(
 
 __all__ = [
     "KILL_WAIT_SECONDS",
+    "RESEND_SECONDS",
     "LOG_TAIL_LINES",
     "STOP_TIMEOUT_SECONDS",
     "POSIX_PLATFORMS",

@@ -278,7 +278,7 @@ class Controller:
             return
         rows = []
         for row in activity.get("running") or []:
-            if row.get("job_id") == data.get("job_id"):
+            if row.get("job_id") == data.get("job_id") and not row.get("cancelling"):
                 row = {**row, "progress": data.get("fraction"), "message": data.get("message")}
             rows.append(row)
         with self.lock:

@@ -237,3 +237,28 @@ def test_health_says_it_too_and_the_two_reads_cannot_differ(
         assert health["stopping"] == activity(client, auth)["stopping"]
         assert health["stopping"]["pids"] == [STUBBORN_PID]
         assert health["status"] == "ok"
+
+
+def test_a_cancelled_running_job_is_the_servers_to_stop_not_its_clients() -> None:
+    """A load whose session closed showed "for foundry@owens-pc" for 3 minutes while
+    Crucible stopped the engine (the PC, 2026-10-03)."""
+    from types import SimpleNamespace
+
+    from crucible.api.routes.activity import _lane_row
+    from crucible.desktop_app import screens
+
+    job = SimpleNamespace(
+        id="j1", type="load-model", model="qwen3.5-9b", status="running", progress=0.0,
+        message="vllm loading", created="t", started="t", client="foundry@owens-pc",
+        cancel_requested=False,
+    )
+    store = SimpleNamespace(position=lambda _job: 0)
+    row = _lane_row(store, job)
+    assert row["cancelling"] is False and row["message"] == "vllm loading"
+    job.cancel_requested = True
+    row = _lane_row(store, job)
+    assert row["cancelling"] is True
+    assert row["message"] == "cancelled by foundry@owens-pc; Crucible is stopping it"
+    shown = screens.job_progress(row)
+    assert shown.title == "Stopping a cancelled load-model with qwen3.5-9b"
+    assert "for foundry" not in shown.title and shown.cancel is None

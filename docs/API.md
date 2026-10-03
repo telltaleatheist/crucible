@@ -1114,6 +1114,7 @@ A running or queued job, as `GET /v1/activity` shows it.
 | `created` | string | yes | — |  |
 | `started` | string or null | yes | — |  |
 | `client` | string or null | yes | — |  |
+| `cancelling` | boolean or null | no | — |  |
 | `waited_s` | integer or number or null | no | — |  |
 | `max_wait_s` | integer or null | no | — |  |
 | `waiting_for` | QueueWaitingFor or null | no | — |  |

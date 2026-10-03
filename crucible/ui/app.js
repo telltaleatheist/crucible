@@ -805,7 +805,7 @@
     }
     for (var index = 0; index < activity.running.length; index += 1) {
       var row = activity.running[index];
-      if (row.job_id === data.job_id) {
+      if (row.job_id === data.job_id && !row.cancelling) {
         row.progress = data.fraction;
         row.message = data.message;
         renderStatus();
@@ -884,6 +884,11 @@
     if (activity.running && activity.running.length) {
       for (var index = 0; index < activity.running.length; index += 1) {
         var job = activity.running[index];
+        if (job.cancelling) {
+          rows.push(['a cancelled job', 'stopping ' + job.type + ' — ' +
+            (job.model === null ? 'no model' : job.model) + ' (' + job.message + ')']);
+          continue;
+        }
         var text = job.type + ' — ' + (job.model === null ? 'no model' : job.model);
         text += ', ' + job.status;
         if (job.progress !== null && job.progress !== undefined) {

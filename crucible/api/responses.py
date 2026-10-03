@@ -376,6 +376,7 @@ class ActivityJob(_Open):
     created: str
     started: str | None
     client: str | None
+    cancelling: bool | None = None
     waited_s: Number | None = None
     max_wait_s: int | None = None
     waiting_for: QueueWaitingFor | None = None
