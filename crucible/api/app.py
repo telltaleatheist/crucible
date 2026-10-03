@@ -30,6 +30,7 @@ from ..jobs import build_registry, disabled_error
 from ..jobs.base import TERMINAL_STATES
 from ..jobs.line import WaitingLine
 from ..jobs.queue import JobStore
+from ..loopwatch import LoopWatch
 from ..queuepump import QueuePump
 from ..queuesessions import QueueSession, QueueSessions
 from ..residency import Residency
@@ -363,6 +364,8 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         store: JobStore = app.state.store
         events: EventHub = app.state.events
         events.bind(asyncio.get_running_loop())
+        watch = LoopWatch(asyncio.get_running_loop())
+        watch.start()
         app.state.started_at = time.monotonic()
         store.restore()
         residency.start_reclaiming()
@@ -374,6 +377,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
         try:
             yield
         finally:
+            watch.stop()
             events.stop("the server is shutting down")
             await app.state.tasks.stop()
             await app.state.queue_pump.stop()
