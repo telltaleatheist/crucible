@@ -18,9 +18,14 @@ KILL_WAIT_SECONDS = 10.0
 
 STOP_TIMEOUT_SECONDS = 180.0
 
-# SIGTERM is sent again this often while a stop waits. A vLLM API server cancelled while
-# it loaded weights ignored the first one (its engine core was dying under it) and left
-# at once on a second, sent by hand 3 minutes later (the PC, 2026-10-03).
+# SIGTERM is sent again this often while a stop waits. Measured on the PC (2026-10-03,
+# vLLM 0.29.0 on Python 3.11, a load cancelled at "Loading safetensors checkpoint shards"):
+# the first SIGTERM is handled - vLLM's startup handler raises KeyboardInterrupt and the
+# engine core exits - but the API server then sits in asyncio.Runner.close(), whose
+# shutdown_default_executor() waits with no timeout (3.11) for a thread-pool task that
+# never finishes; its main thread is in poll(). vLLM's handler is still installed, so the
+# next SIGTERM raises KeyboardInterrupt inside that wait and the process exits. One
+# SIGTERM held the slot 180 s; with the resend the reproduction exited in ~11 s.
 RESEND_SECONDS = 10.0
 
 LOG_TAIL_LINES = 40
