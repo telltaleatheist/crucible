@@ -35,6 +35,9 @@
     page: null,
     jobs: [],
     numbered: 0,
+    current: null,
+    waiting: false,
+    player: null,
     timer: null
   };
 
@@ -766,8 +769,21 @@
       count = isNaN(count) ? 1 : Math.max(1, Math.min(MAX_BATCH, count));
       generate(page, paramsOf(page.fields, form), count);
     });
-    body.appendChild(form);
-    body.appendChild(el('div', { id: 'job-body', class: 'jobs' }));
+    if (page.media === 'audio') {
+      document.getElementById('main').classList.add('wide');
+      body.appendChild(el('div', { class: 'studio' }, [
+        el('div', { class: 'studio-form' }, [form]),
+        el('aside', { class: 'queue', 'aria-label': 'Queue' }, [
+          el('div', { class: 'queue-head', text: 'Queue' }),
+          el('div', { class: 'queue-hint', text: 'Generated songs line up here in the order they play. Click one to play it.' }),
+          el('div', { id: 'job-body', class: 'queue-list' })
+        ])
+      ]));
+      buildPlayer();
+    } else {
+      body.appendChild(form);
+      body.appendChild(el('div', { id: 'job-body', class: 'jobs' }));
+    }
   }
 
   function render() {
@@ -870,6 +886,242 @@
   // and never rebuilt, so one result plays on while later ones are sent, queue and run; only
   // a card's status line is redrawn as its job moves (Owen, 2026-10-03: "generate another
   // while listening", "generate [x] in a row").
+  // AUDIO: a queue on the right (oldest first, the order it plays in) and one player bar at
+  // the bottom - play/pause, previous, next, scrub - like a video site's queue (Owen,
+  // 2026-10-03). Generating items sit in the queue with one progress bar each; a finished
+  // one plays when the player is idle, and the player moves on to the next finished one
+  // when a song ends. Images and video keep the card list.
+  function isAudioPage() {
+    return state.page !== null && state.page.media === 'audio';
+  }
+
+  function clockText(seconds) {
+    if (!isFinite(seconds) || seconds < 0) {
+      return '0:00';
+    }
+    var whole = Math.floor(seconds);
+    var minutes = Math.floor(whole / 60);
+    var rest = whole % 60;
+    return minutes + ':' + (rest < 10 ? '0' : '') + rest;
+  }
+
+  function describe(job) {
+    var params = job.params || {};
+    return params.tags || params.prompt || '';
+  }
+
+  function buildQueueItem(job) {
+    job.title = el('div', { class: 'q-title' });
+    job.sub = el('div', { class: 'q-sub' });
+    job.bar = el('div', { class: 'bar q-bar' }, [el('span')]);
+    job.status_box = el('div', { class: 'q-status' });
+    job.result_box = el('div', { hidden: true });
+    job.download = el('a', { class: 'q-icon', hidden: true, title: 'Download', text: '⤓' });
+    job.cancel_button = el('button', {
+      type: 'button',
+      class: 'button small',
+      onclick: function () {
+        cancel(job);
+      }
+    }, ['Cancel']);
+    job.dismiss_button = el('button', {
+      type: 'button',
+      class: 'q-icon',
+      title: 'Remove from the queue',
+      onclick: function () {
+        dismiss(job);
+      }
+    }, ['×']);
+    job.card = el('div', {
+      class: 'q-item',
+      onclick: function (event) {
+        if (event.target.closest('button, a')) {
+          return;
+        }
+        if (job.result) {
+          playJob(job);
+        }
+      }
+    }, [
+      el('div', { class: 'q-main' }, [job.title, job.sub, job.bar, job.status_box]),
+      el('div', { class: 'q-actions' }, [job.download, job.cancel_button, job.dismiss_button])
+    ]);
+  }
+
+  function renderQueueItem(job) {
+    var active = isActive(job);
+    job.title.textContent = jobLabel(job);
+    job.sub.textContent = describe(job);
+    job.cancel_button.hidden = !cancellable(job);
+    job.dismiss_button.hidden = active;
+    job.bar.hidden = !active;
+    if (active) {
+      var install = job.status === 'installing' ? job.install : null;
+      var known = install !== null
+        ? Boolean(install.bytesTotal) && install.bytesDone !== null
+        : job.status === 'running' && job.fraction !== null;
+      job.bar.className = known ? 'bar q-bar' : 'bar q-bar indeterminate';
+      var share = !known ? 0 : install !== null ? install.bytesDone / install.bytesTotal : job.fraction;
+      job.bar.firstChild.style.width = known ? (share * 100).toFixed(1) + '%' : '';
+    }
+    job.status_box.textContent = '';
+    var text = job.status === 'done' && job.result && job.result.seconds
+      ? clockText(job.result.seconds) + (job.seed === null ? '' : ' · seed ' + job.seed)
+      : statusText(job);
+    if (text) {
+      job.status_box.appendChild(el('span', { text: text }));
+    }
+    var refusal = refusalBox(job.refusal);
+    if (refusal) {
+      job.status_box.appendChild(refusal);
+    }
+    if (job.result && job.download.hidden) {
+      job.download.href = job.result.url;
+      job.download.setAttribute('download', job.result.file);
+      job.download.hidden = false;
+      resultReady(job);
+    }
+    job.card.classList.toggle('playable', Boolean(job.result));
+    job.card.classList.toggle('current', state.current === job);
+  }
+
+  function resultReady(job) {
+    var probe = new Audio();
+    probe.preload = 'metadata';
+    probe.addEventListener('loadedmetadata', function () {
+      job.result.seconds = probe.duration;
+      renderQueueItem(job);
+    });
+    probe.src = job.result.url;
+    if (state.current === null || state.waiting) {
+      playJob(job);
+    }
+  }
+
+  function playable() {
+    return state.jobs.filter(function (job) {
+      return Boolean(job.result);
+    });
+  }
+
+  function playJob(job) {
+    var player = state.player;
+    state.current = job;
+    state.waiting = false;
+    player.audio.src = job.result.url;
+    player.audio.play().catch(function () {
+      // A browser that blocks autoplay leaves it paused; the play button starts it.
+      updatePlayer();
+    });
+    state.jobs.forEach(function (other) {
+      if (other.card) {
+        other.card.classList.toggle('current', other === job);
+      }
+    });
+    updatePlayer();
+  }
+
+  function step(direction) {
+    var list = playable();
+    if (list.length === 0) {
+      return;
+    }
+    var at = list.indexOf(state.current);
+    var next = list[at + direction];
+    if (next) {
+      playJob(next);
+    } else if (direction > 0) {
+      // Nothing after it yet: play the next one the moment it finishes.
+      state.waiting = true;
+      updatePlayer();
+    }
+  }
+
+  function previous() {
+    var audio = state.player.audio;
+    if (audio.currentTime > 3 || playable().indexOf(state.current) <= 0) {
+      audio.currentTime = 0;
+      return;
+    }
+    step(-1);
+  }
+
+  function updatePlayer() {
+    var player = state.player;
+    if (!player) {
+      return;
+    }
+    var job = state.current;
+    var audio = player.audio;
+    player.title.textContent = job === null
+      ? 'Nothing playing yet - finished songs play here'
+      : jobLabel(job) + (describe(job) ? ' — ' + describe(job) : '');
+    player.play.textContent = audio.paused ? '▶' : '❚❚';
+    player.play.disabled = job === null;
+    var list = playable();
+    var at = list.indexOf(job);
+    player.prev.disabled = job === null;
+    player.next.disabled = job === null || at === list.length - 1;
+    var duration = isFinite(audio.duration) ? audio.duration : 0;
+    if (!player.seeking) {
+      player.scrub.max = String(duration || 0);
+      player.scrub.value = String(audio.currentTime || 0);
+    }
+    player.time.textContent = clockText(audio.currentTime) + ' / ' + clockText(duration);
+    player.scrub.disabled = job === null;
+  }
+
+  function buildPlayer() {
+    var audio = new Audio();
+    var player = {
+      audio: audio,
+      seeking: false,
+      prev: el('button', { type: 'button', class: 'p-button', title: 'Previous' }, ['⏮']),
+      play: el('button', { type: 'button', class: 'p-button p-play', title: 'Play / pause' }, ['▶']),
+      next: el('button', { type: 'button', class: 'p-button', title: 'Next' }, ['⏭']),
+      scrub: el('input', { type: 'range', class: 'p-scrub', min: '0', max: '0', step: '0.1', value: '0' }),
+      time: el('span', { class: 'p-time', text: '0:00 / 0:00' }),
+      title: el('span', { class: 'p-title' })
+    };
+    player.prev.addEventListener('click', previous);
+    player.next.addEventListener('click', function () {
+      step(1);
+    });
+    player.play.addEventListener('click', function () {
+      if (state.current === null) {
+        return;
+      }
+      if (audio.paused) {
+        audio.play();
+      } else {
+        audio.pause();
+      }
+    });
+    player.scrub.addEventListener('input', function () {
+      player.seeking = true;
+      player.time.textContent = clockText(Number(player.scrub.value)) + ' / ' +
+        clockText(isFinite(audio.duration) ? audio.duration : 0);
+    });
+    player.scrub.addEventListener('change', function () {
+      audio.currentTime = Number(player.scrub.value);
+      player.seeking = false;
+      updatePlayer();
+    });
+    ['timeupdate', 'play', 'pause', 'loadedmetadata', 'durationchange'].forEach(function (name) {
+      audio.addEventListener(name, updatePlayer);
+    });
+    audio.addEventListener('ended', function () {
+      step(1);
+    });
+    state.player = player;
+    document.body.classList.add('has-player');
+    document.body.appendChild(el('div', { class: 'player', role: 'region', 'aria-label': 'Player' }, [
+      el('div', { class: 'p-buttons' }, [player.prev, player.play, player.next]),
+      el('div', { class: 'p-middle' }, [player.title, el('div', { class: 'p-line' }, [player.scrub, player.time])])
+    ]));
+    updatePlayer();
+  }
+
   function jobList() {
     return document.getElementById('job-body');
   }
@@ -906,6 +1158,10 @@
   }
 
   function renderCard(job) {
+    if (isAudioPage()) {
+      renderQueueItem(job);
+      return;
+    }
     job.title.textContent = jobLabel(job);
     var active = isActive(job);
     job.cancel_button.hidden = !cancellable(job);
@@ -958,10 +1214,16 @@
   }
 
   function addCard(job) {
-    buildCard(job);
-    renderCard(job);
     var list = jobList();
-    list.insertBefore(job.card, list.firstChild);
+    if (isAudioPage()) {
+      buildQueueItem(job);
+      renderQueueItem(job);
+      list.appendChild(job.card);
+    } else {
+      buildCard(job);
+      renderCard(job);
+      list.insertBefore(job.card, list.firstChild);
+    }
     if (state.timer === null) {
       state.timer = window.setInterval(renderJobs, TICK_MS);
     }
@@ -978,6 +1240,12 @@
     state.jobs = state.jobs.filter(function (other) {
       return other !== job;
     });
+    if (state.current === job) {
+      state.player.audio.pause();
+      state.player.audio.removeAttribute('src');
+      state.current = null;
+      updatePlayer();
+    }
   }
 
   function stopStreams() {
