@@ -95,6 +95,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.post("/uploads", status_code=201)
     async def upload(request: Request, file: UploadFile) -> dict[str, Any]:
+        """Store one file (multipart field `file`) for a later job. Answers a `blob_id`,
+        its `bytes` and `sha256`; a job input then names it as `{"blob_id": ...}`. The way
+        to send anything too big for a JSON body."""
         blob = await store_upload(ctx.config.uploads_dir, file.read, file.filename)
         return blob.receipt()
 
@@ -141,6 +144,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         responses=NOT_FOUND,
     )
     async def get_job(job_id: str) -> dict[str, Any]:
+        """One job's state: `status`, `progress`, `message`, its artifacts and, when it
+        ended, its result or its error. Following `/events` is better than polling this."""
         store = ctx.store
         job = store.get(job_id)
         ctx.line.touch(job_id=job.id)
@@ -157,6 +162,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/jobs/{job_id}/events")
     async def job_events(request: Request, job_id: str) -> StreamingResponse:
+        """The job's events as SSE, from the first: `queued`, `started`, `warming`,
+        `progress`, `note`, then one of `done` (with its artifacts and the job type's result
+        fields), `failed` (with `error`), `cancelled` or `removed`, after which the stream
+        ends. Send `Last-Event-ID` to resume after the last event you saw
+        (docs/EVENTS.md)."""
         store = ctx.store
         job = store.get(job_id)
         ctx.line.touch(job_id=job.id)
@@ -179,6 +189,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/jobs/{job_id}/artifacts/{name}")
     async def job_artifact(job_id: str, name: str) -> FileResponse:
+        """One artifact's bytes, by the name the `done` event lists, with its media type.
+        Every artifact has a `<name>.provenance.json` beside it saying what made it."""
         store = ctx.store
         job = store.get(job_id)
         try:

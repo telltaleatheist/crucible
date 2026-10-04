@@ -17,9 +17,15 @@ class SegmentPoint(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    x: float = Field(ge=0)
-    y: float = Field(ge=0)
-    label: Literal[0, 1]
+    x: float = Field(
+        ge=0, description="Pixels from the input's left edge, under its width."
+    )
+    y: float = Field(
+        ge=0, description="Pixels from the input's top edge, under its height."
+    )
+    label: Literal[0, 1] = Field(
+        description="1 keeps what is under the point, 0 leaves it out."
+    )
 
 
 class SegmentParams(BaseModel):
@@ -27,8 +33,20 @@ class SegmentParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    points: list[SegmentPoint] | None = Field(default=None, min_length=1, max_length=MAX_POINTS)
-    box: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    points: list[SegmentPoint] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_POINTS,
+        description="`sam2.1-hiera-large` only: 1 to 64 clicks in the input's "
+        "pixels, at least one label 1 unless there is a box. `birefnet` refuses it.",
+    )
+    box: list[float] | None = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+        description="`sam2.1-hiera-large` only: [x0, y0, x1, y1] in the input's "
+        "pixels, top-left first, x1 > x0 and y1 > y0. `birefnet` refuses it.",
+    )
 
     @field_validator("box")
     @classmethod

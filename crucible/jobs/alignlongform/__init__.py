@@ -21,9 +21,17 @@ class LongformSentence(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    index: int = Field(ge=0)
-    text: str
-    kind: str = "prose"
+    index: int = Field(
+        ge=0,
+        description="The sentence's number; unique, and the list must be in "
+        "reading order (ascending).",
+    )
+    text: str = Field(description="The sentence as the book has it; not blank.")
+    kind: str = Field(
+        default="prose",
+        description="The client's label for the sentence; `heading` puts a "
+        "`NOTE heading` before its cue in the VTT.",
+    )
 
     @field_validator("text")
     @classmethod
@@ -42,13 +50,44 @@ class AlignLongformParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    language: str
-    sentences: list[LongformSentence]
-    rough_model: str = "small"
-    chunk_s: float = Field(default=240.0, gt=0)
-    hole_min_s: float = Field(default=2.0, ge=0)
-    snap_silence_s: float = Field(default=0.35, ge=0)
-    silence_source: str = "decoded"
+    language: str = Field(
+        description="The narration's language as an ISO code: en, de, fr, es, it, "
+        "pt, ru, ja, ko, zh or yue; anything else is refused."
+    )
+    sentences: list[LongformSentence] = Field(
+        description="The whole book, one row per sentence, in reading order; not "
+        "empty."
+    )
+    rough_model: str = Field(
+        default="small",
+        description="The faster-whisper ASR id for the rough transcript that places "
+        "each sentence, e.g. `whisper-large-v3-turbo`; it must be installed here. "
+        "The default `small` names no shipped manifest (`unknown_rough_model`), so "
+        "send one.",
+    )
+    chunk_s: float = Field(
+        default=240.0,
+        gt=0,
+        description="Seconds of audio per window the aligner places words in; above "
+        "0 and at most 300, the aligner's limit.",
+    )
+    hole_min_s: float = Field(
+        default=2.0,
+        ge=0,
+        description="Seconds, 0 or more. Accepted and checked, but not read by this "
+        "build's stages.",
+    )
+    snap_silence_s: float = Field(
+        default=0.35,
+        ge=0,
+        description="Seconds, 0 or more. Accepted and checked, but not read by this "
+        "build's stages.",
+    )
+    silence_source: str = Field(
+        default="decoded",
+        description="Only `decoded` (the audio this job was given) is accepted; any "
+        "other value is refused.",
+    )
 
     @field_validator("language")
     @classmethod

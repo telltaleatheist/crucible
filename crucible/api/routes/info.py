@@ -124,6 +124,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/health")
     async def health() -> dict[str, Any]:
+        """Is this process alive, in one cheap read: `status` (`ok`, `busy` running a job,
+        `warming` loading a model), the queue depth and what is resident."""
         store = ctx.store
         if residency.warming is not None:
             status = "warming"

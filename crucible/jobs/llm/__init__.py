@@ -98,8 +98,22 @@ def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
 class LoadParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
-    context: int | None = Field(default=None, ge=MIN_LOAD_CONTEXT, strict=True)
+    timeout_s: float = Field(
+        default=DEFAULT_READY_TIMEOUT_SECONDS,
+        ge=30,
+        le=7200,
+        description="Seconds to wait for the engine to come up and answer before "
+        "the load fails, 30 to 7200 (default 900).",
+    )
+    context: int | None = Field(
+        default=None,
+        ge=MIN_LOAD_CONTEXT,
+        strict=True,
+        description="The context length in tokens to start the engine at, at least "
+        "2048; null uses the model's own default. Above this host's ceiling it is "
+        "refused `context_over_limit`; loading the resident model at a new context "
+        "is a reload.",
+    )
 
 
 MANIFESTS: ManifestCatalog[ModelManifest] = ManifestCatalog(

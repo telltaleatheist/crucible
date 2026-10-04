@@ -192,8 +192,14 @@ class AlignChunk(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    index: int = Field(ge=0)
-    text: str
+    index: int = Field(
+        ge=0,
+        description="The chunk's number, unique in the job; its audio input is "
+        "named `<index>.<ext>`.",
+    )
+    text: str = Field(
+        description="The words spoken in that chunk's audio; not empty."
+    )
 
     @field_validator("text")
     @classmethod
@@ -211,8 +217,16 @@ class AlignParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    language: str
-    chunks: list[AlignChunk] = Field(min_length=1)
+    language: str = Field(
+        description="The spoken language as an ISO code: en, de, fr, es, it, pt, ru, "
+        "ja, ko, zh or yue. Anything else is refused; there is no fallback to "
+        "English."
+    )
+    chunks: list[AlignChunk] = Field(
+        min_length=1,
+        description="One per audio input, each window at most 300 s; at least one, "
+        "indexes unique.",
+    )
 
     @field_validator("language")
     @classmethod

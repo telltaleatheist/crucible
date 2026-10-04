@@ -108,22 +108,66 @@ def _base_assets() -> "rvcbase.RvcBaseAssets":
 class RvcParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    index_rate: float = Field(ge=0.0, le=1.0)
-    protect_rate: float = Field(ge=0.0, le=PROTECT_RATE_OFF_INVERTED_SCALE)
+    index_rate: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="How much of the model's .index feature retrieval is blended "
+        "in, 0 to 1; a model with no .index takes only 0 (`model_has_no_index`).",
+    )
+    protect_rate: float = Field(
+        ge=0.0,
+        le=PROTECT_RATE_OFF_INVERTED_SCALE,
+        description="Consonant and breath protection, 0 to 0.5, inverted: lower "
+        "protects more and 0.5 turns it off. Only matters when retrieval runs.",
+    )
 
-    n_semitones: int = Field(ge=-24, le=24)
+    n_semitones: int = Field(
+        ge=-24,
+        le=24,
+        description="Pitch shift in semitones, -24 to 24.",
+    )
 
-    f0_method: str | None = None
+    f0_method: str | None = Field(
+        default=None,
+        description="The pitch extractor urvc uses, e.g. `rmvpe`; null leaves "
+        "urvc's own default.",
+    )
 
-    hop_length: int | None = Field(default=None, ge=1, le=512)
+    hop_length: int | None = Field(
+        default=None,
+        ge=1,
+        le=512,
+        description="urvc's pitch-extraction hop length in samples, 1 to 512; null "
+        "leaves urvc's own default.",
+    )
 
-    piece_s: float | None = None
-    overlap_s: float | None = None
-    crossfade_s: float | None = None
+    piece_s: float | None = Field(
+        default=None,
+        description="The longest piece in seconds a long input is cut into at quiet "
+        "points, 10 to 600; null is 60. Memory is bounded by a piece.",
+    )
+    overlap_s: float | None = Field(
+        default=None,
+        description="Seconds of real audio converted on each side of a piece and "
+        "then dropped, 0 to 5 and under half a piece; null is 0.5.",
+    )
+    crossfade_s: float | None = Field(
+        default=None,
+        description="The fade in seconds at each seam, 0 to 1 and at most twice "
+        "`overlap_s`; null is 0.02.",
+    )
 
-    output_rate: Literal["native", "input"] = "native"
+    output_rate: Literal["native", "input"] = Field(
+        default="native",
+        description="`native`: the higher of the input's rate and the rate urvc "
+        "writes (48 kHz for the published models); `input`: the input's rate.",
+    )
 
-    output_channels: Literal["input", "mono"] = "input"
+    output_channels: Literal["input", "mono"] = Field(
+        default="input",
+        description="`input`: the input's channel count, the one converted voice in "
+        "every channel; `mono`: one channel.",
+    )
 
     @field_validator("piece_s")
     @classmethod

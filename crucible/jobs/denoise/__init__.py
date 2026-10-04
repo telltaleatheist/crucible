@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ... import workers
 from ...backend import CUDA_LINUX
@@ -168,7 +168,12 @@ def occupy_separator(
 class DenoiseParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    stems: Literal["primary", "all"] = PRIMARY_STEM_ONLY
+    stems: Literal["primary", "all"] = Field(
+        default=PRIMARY_STEM_ONLY,
+        description='"primary" returns only the separator\'s answer (the vocals, the dry '
+        'voice); "all" also returns what was separated from it (the instrumental, the '
+        "noise), the primary first.",
+    )
 
 
 MANIFESTS: ManifestCatalog[DenoiseManifest] = ManifestCatalog(

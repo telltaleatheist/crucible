@@ -32,16 +32,70 @@ class VideoParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str
-    negative_prompt: str | None = None
-    width: int | None = Field(default=None, ge=1, le=8192)
-    height: int | None = Field(default=None, ge=1, le=8192)
-    duration_s: float | None = Field(default=None, gt=0.0, le=600.0)
-    num_frames: int | None = Field(default=None, ge=1, le=10_000)
-    fps: int | None = Field(default=None, ge=1, le=240)
-    seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
-    steps: int | None = Field(default=None, ge=1, le=1000)
-    audio: bool = True
+    prompt: str = Field(
+        description="The shot, the motion, the light and the sound, in one "
+        "paragraph (docs/VIDEO.md); not blank."
+    )
+    negative_prompt: str | None = Field(
+        default=None,
+        description="Refused by name (`video_param_unsupported`): the distilled "
+        "checkpoint runs without guidance and would never read it.",
+    )
+    width: int | None = Field(
+        default=None,
+        ge=1,
+        le=8192,
+        description="Frame width in pixels, sent with `height` or not at all (null: "
+        "the model's default, 1280x704). A multiple of 32 (64 on a Mac), sides 256 "
+        "to 1280, at most 901,120 pixels.",
+    )
+    height: int | None = Field(
+        default=None,
+        ge=1,
+        le=8192,
+        description="Frame height in pixels, sent with `width` or not at all; the "
+        "same rules as `width`.",
+    )
+    duration_s: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=600.0,
+        description="Seconds of clip, rounded to the model's 8k+1 frame grid; null "
+        "is the model's default (5). Not with `num_frames`.",
+    )
+    num_frames: int | None = Field(
+        default=None,
+        ge=1,
+        le=10_000,
+        description="The exact frame count instead of `duration_s`; must be 8k+1 "
+        "(49, 97, 121, …).",
+    )
+    fps: int | None = Field(
+        default=None,
+        ge=1,
+        le=240,
+        description="Frames per second, 24 or 25 for ltx-2.5-distilled; null is the "
+        "model's default (24).",
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_SEED,
+        description="0 to 4294967295; null lets the server choose one and report it. "
+        "A seed reproduces a clip on the machine that made it.",
+    )
+    steps: int | None = Field(
+        default=None,
+        ge=1,
+        le=1000,
+        description="Must equal the model's fixed step count (8 for the distilled "
+        "checkpoint) or be left out; any other value is refused.",
+    )
+    audio: bool = Field(
+        default=True,
+        description="false makes a silent clip: the sound is generated with the "
+        "picture but not decoded.",
+    )
 
     @field_validator("prompt")
     @classmethod

@@ -68,6 +68,7 @@ from .routes import (
     voices,
 )
 from .routes import catalog as catalog_routes
+from .routes import docs as docs_routes
 from .routes import (
     events as event_routes,
 )
@@ -94,6 +95,7 @@ ROUTE_MODULES = (
     resumable,
     tasks,
     updating_routes,
+    docs_routes,
     openai,
     decide,
 )
@@ -464,7 +466,8 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
         lifespan=_lifespan(residency),
         docs_url=None,
         redoc_url=None,
-        openapi_url=None,
+        # Served beside the reference at /docs (crucible/api/routes/docs.py).
+        openapi_url="/v1/openapi.json",
     )
     app.state.config = config
     app.state.backend = backend

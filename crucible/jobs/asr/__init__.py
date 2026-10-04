@@ -8,6 +8,7 @@ from typing import Any, Callable
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     StrictBool,
     StrictStr,
     field_validator,
@@ -115,18 +116,69 @@ class AsrParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    language: str
-    vad_filter: bool
-    word_timestamps: bool
-    initial_prompt: StrictStr | None = None
-    context: StrictStr | None = None
-    piece_s: float | None = None
-    overlap_s: float | None = None
-    speech_only: StrictBool | None = None
-    speech_threshold: float | None = None
-    speech_pad_s: float | None = None
-    speech_min_gap_s: float | None = None
-    resume: StrictStr | None = None
+    language: str = Field(
+        description="The spoken language as an ISO code, e.g. `en`. `auto` asks "
+        "Whisper to detect it; Qwen3-ASR takes only en, de, fr, es, it, pt, ru, ja, "
+        "ko, zh or yue."
+    )
+    vad_filter: bool = Field(
+        description="true runs faster-whisper's own voice-activity filter; refused "
+        "on engines without one (mlx-whisper, Qwen3-ASR) and together with "
+        "`speech_only: true`."
+    )
+    word_timestamps: bool = Field(
+        description="true adds `words` with their own start and end seconds to each "
+        "segment; on Qwen3-ASR it runs the forced aligner after transcription."
+    )
+    initial_prompt: StrictStr | None = Field(
+        default=None,
+        description="Whisper only: text the model is primed with as if it were the "
+        "transcript so far (a title, the names in it); not blank.",
+    )
+    context: StrictStr | None = Field(
+        default=None,
+        description="Qwen3-ASR only: the instruction and vocabulary it reads in its "
+        "system turn before every piece; at most 8192 characters, not blank.",
+    )
+    piece_s: float | None = Field(
+        default=None,
+        description="Qwen3-ASR only: the longest piece in seconds the audio is cut "
+        "into, 5 to 180; null is 30.",
+    )
+    overlap_s: float | None = Field(
+        default=None,
+        description="Qwen3-ASR only: seconds of audio each piece also hears on each "
+        "side, 0 to 5 and under half a piece; null is 0.4 with word timestamps, "
+        "else 0. Above 0 needs `word_timestamps`.",
+    )
+    speech_only: StrictBool | None = Field(
+        default=None,
+        description="true takes stretches without speech out before transcribing "
+        "and lists them in the transcript's `removed`, keeping the original "
+        "timeline. Null follows `not vad_filter`, so it is on unless `vad_filter` "
+        "is true.",
+    )
+    speech_threshold: float | None = Field(
+        default=None,
+        description="With `speech_only`: the detector score at which a frame counts "
+        "as speech, 0.1 to 0.7 (lower keeps more); null is 0.3.",
+    )
+    speech_pad_s: float | None = Field(
+        default=None,
+        description="With `speech_only`: seconds of audio kept either side of "
+        "speech, 0.1 to 2; null is 0.3.",
+    )
+    speech_min_gap_s: float | None = Field(
+        default=None,
+        description="With `speech_only`: the shortest stretch without speech that "
+        "is taken out, in seconds, 1 to 60; null is 2.",
+    )
+    resume: StrictStr | None = Field(
+        default=None,
+        description="The `resume_id` of an earlier run of this same job, to read its "
+        "finished pieces back instead of redoing them. Qwen3-ASR only "
+        "(`resume_unsupported` on Whisper).",
+    )
 
     @field_validator("speech_threshold")
     @classmethod

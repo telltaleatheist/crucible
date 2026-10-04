@@ -27,16 +27,63 @@ class AudioParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str | None = None
-    tags: str | None = None
-    lyrics: str | None = None
-    negative_prompt: str | None = None
-    duration_s: float | None = Field(default=None, gt=0)
-    seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
-    steps: int | None = Field(default=None, ge=1)
-    cfg: float | None = Field(default=None, ge=0)
-    instrumental: bool | None = None
-    format: Literal["flac", "wav", "mp3"] = "flac"
+    prompt: str | None = Field(
+        default=None,
+        description="Sound effects and music (Stable Audio): the sound described "
+        "(docs/AUDIO.md); required there, refused by a song model.",
+    )
+    tags: str | None = Field(
+        default=None,
+        description="Songs (YuE2): the style as comma-separated genre, instruments, "
+        "voice, language and tempo; required there, refused by Stable Audio.",
+    )
+    lyrics: str | None = Field(
+        default=None,
+        description="Songs (YuE2): sections tagged [Verse], [Chorus] and so on, "
+        "separated by blank lines; required unless `instrumental`, where only "
+        "section tags are allowed.",
+    )
+    negative_prompt: str | None = Field(
+        default=None,
+        description="Taken only by a model whose manifest lists it; the shipped "
+        "models refuse it by name.",
+    )
+    duration_s: float | None = Field(
+        default=None,
+        gt=0,
+        description="Seconds of sound, for models that take it (Stable Audio: at "
+        "most 120 sfx, 380 music); null is the model's default. A song's length "
+        "follows its lyrics.",
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_SEED,
+        description="0 to 4294967295; null lets the server choose one and report it.",
+    )
+    steps: int | None = Field(
+        default=None,
+        ge=1,
+        description="Denoising steps, for models that take them (Stable Audio, up to "
+        "its ceiling); null is the model's default.",
+    )
+    cfg: float | None = Field(
+        default=None,
+        ge=0,
+        description="Guidance toward the tags and lyrics, for models that take it "
+        "(YuE2, up to its ceiling); above 1 runs the model twice per token. Null is "
+        "the model's default.",
+    )
+    instrumental: bool | None = Field(
+        default=None,
+        description="Songs (YuE2): true renders the planned melody on an instrument, "
+        "so nothing is sung. Null is false.",
+    )
+    format: Literal["flac", "wav", "mp3"] = Field(
+        default="flac",
+        description="The artifact: `flac` (24-bit), `wav` (24-bit PCM) or `mp3` "
+        "(192 kbps CBR).",
+    )
 
     @field_validator(*TEXT_FIELDS)
     @classmethod

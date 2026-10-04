@@ -43,8 +43,12 @@ DURATION_TOLERANCE_SECONDS = 0.05
 class TtsChunk(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    index: int = Field(ge=0)
-    text: str
+    index: int = Field(
+        ge=0,
+        description="The chunk's number, 0 or more and unique in the job; its "
+        "artifact is `<index>.flac`.",
+    )
+    text: str = Field(description="The text to speak; not blank.")
 
     @field_validator("text")
     @classmethod
@@ -60,12 +64,39 @@ class TtsChunk(BaseModel):
 class TtsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    language: str
-    take: int = Field(ge=0)
-    chunks: list[TtsChunk] = Field(min_length=1)
-    retake: bool = False
-    band: dict[str, Any] | None = None
-    width: int | None = Field(default=None, ge=1)
+    language: str = Field(
+        description="The language narrator renders in, e.g. `en`; not blank."
+    )
+    take: int = Field(
+        ge=0,
+        description="The rung of the voice's retake ladder to render at (`takes` on "
+        "GET /v1/voices); no default. A take past the ladder's end renders at the "
+        "voice's own sampling in that take's seed lane.",
+    )
+    chunks: list[TtsChunk] = Field(
+        min_length=1,
+        description="The text to render, one FLAC per chunk; at least one, indexes "
+        "unique.",
+    )
+    retake: bool = Field(
+        default=False,
+        description="true renders through the guarded arm, which re-rolls a chunk "
+        "whose pace falls outside `band`; it then needs `band` "
+        "(`retake_without_band`). false renders bare.",
+    )
+    band: dict[str, Any] | None = Field(
+        default=None,
+        description="The pace band in characters per second: `pace_chars_per_sec`, "
+        "`min_chars_per_sec`, `max_chars_per_sec`, all three, positive, min < pace < "
+        "max (`band_malformed`). Never read off the voice: the caller states it.",
+    )
+    width: int | None = Field(
+        default=None,
+        ge=1,
+        description="How many chunks are in flight at once. Null sends none, and the "
+        "engine renders at the width it was started at; on cuda-linux a width above "
+        "the voice's serving width is refused `width_over_serving`.",
+    )
 
     @field_validator("language")
     @classmethod

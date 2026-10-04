@@ -108,16 +108,70 @@ class ImageParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str
-    negative_prompt: str | None = None
-    width: int = Field(default=DEFAULT_SIDE, ge=MIN_SIDE, le=MAX_SIDE)
-    height: int = Field(default=DEFAULT_SIDE, ge=MIN_SIDE, le=MAX_SIDE)
-    seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
-    steps: int = Field(default=DEFAULT_STEPS, ge=1, le=MAX_STEPS)
-    guidance: float = Field(default=1.0, ge=1.0, le=MAX_GUIDANCE)
-    image_strength: float | None = Field(default=None, gt=0.0, lt=1.0)
-    mask: str | None = None
-    mask_blur: int | None = Field(default=None, ge=0, le=inpaint.MAX_MASK_BLUR)
+    prompt: str = Field(
+        description="The picture to make, described in full (docs/IMAGE.md); not "
+        "blank."
+    )
+    negative_prompt: str | None = Field(
+        default=None,
+        description="What to guide away from; only read, and only allowed, with "
+        "`guidance` above 1.0.",
+    )
+    width: int = Field(
+        default=DEFAULT_SIDE,
+        ge=MIN_SIDE,
+        le=MAX_SIDE,
+        description="Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); "
+        "width x height at most 1,048,576.",
+    )
+    height: int = Field(
+        default=DEFAULT_SIDE,
+        ge=MIN_SIDE,
+        le=MAX_SIDE,
+        description="Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); "
+        "width x height at most 1,048,576.",
+    )
+    seed: int | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_SEED,
+        description="0 to 4294967295; null lets the server choose one and report it. "
+        "The same seed and params give the same picture on the same backend.",
+    )
+    steps: int = Field(
+        default=DEFAULT_STEPS,
+        ge=1,
+        le=MAX_STEPS,
+        description="Denoising steps, 1 to 100; fewer is faster and rougher.",
+    )
+    guidance: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=MAX_GUIDANCE,
+        description="1.0 to 10.0. Above 1.0 runs true classifier-free guidance (two "
+        "passes per step, twice the time) and needs `negative_prompt`.",
+    )
+    image_strength: float | None = Field(
+        default=None,
+        gt=0.0,
+        lt=1.0,
+        description="Image-to-image: how much of the one input image survives, "
+        "between 0 and 1 (useful range 0.03 to 0.3). With `mask` it is optional "
+        "and applies to the masked region only.",
+    )
+    mask: str | None = Field(
+        default=None,
+        description="Inpainting and outpainting: the name of the input that carries "
+        "the mask (white, 128 and up, is regenerated). The job then carries exactly "
+        "the image and the mask.",
+    )
+    mask_blur: int | None = Field(
+        default=None,
+        ge=0,
+        le=inpaint.MAX_MASK_BLUR,
+        description="Pixels inside the mask's edge over which the new picture fades "
+        "into the kept one, 0 to 256; only with `mask`, where null is 8.",
+    )
 
     @field_validator("prompt")
     @classmethod

@@ -42,16 +42,36 @@ __all__ = [
 class ReferenceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    data: str
-    transcript: str
-    name: str | None = None
+    data: str = Field(
+        description="The reference clip: a WAV file, base64-encoded with no `data:` "
+        "prefix and no whitespace; at most 30 s and 32 MiB."
+    )
+    transcript: str = Field(
+        description="The exact words spoken in the clip; required and not blank."
+    )
+    name: str | None = Field(
+        default=None,
+        description="A short label for the clip, reported back on the load's "
+        "`reference`; omit it or send a non-blank string.",
+    )
 
 
 class LoadVoiceParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    timeout_s: float = Field(default=DEFAULT_READY_TIMEOUT_SECONDS, ge=30, le=7200)
-    reference: ReferenceInput | None = None
+    timeout_s: float = Field(
+        default=DEFAULT_READY_TIMEOUT_SECONDS,
+        ge=30,
+        le=7200,
+        description="Seconds to wait for narrator to come up with the voice before "
+        "the load fails, 30 to 7200 (default 900).",
+    )
+    reference: ReferenceInput | None = Field(
+        default=None,
+        description="The clip a `zeroshot` voice is conditioned on, with its "
+        "transcript; required for a zeroshot voice (`reference_required`) and "
+        "refused for every other kind (`reference_not_allowed`).",
+    )
 
 
 @dataclass(frozen=True)

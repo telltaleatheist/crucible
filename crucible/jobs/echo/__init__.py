@@ -16,7 +16,13 @@ _SLICE_SECONDS = 0.02
 class EchoParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    delay_ms: int = Field(default=25, ge=0, le=60_000)
+    delay_ms: int = Field(
+        default=25,
+        ge=0,
+        le=60_000,
+        description="Milliseconds to wait before copying the inputs to artifacts, "
+        "0 to 60000; a cancel is honoured during the wait.",
+    )
 
 
 class EchoJobType:

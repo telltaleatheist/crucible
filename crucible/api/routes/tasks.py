@@ -28,6 +28,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/tasks/{task_id}")
     async def get_task(task_id: str) -> dict[str, Any]:
+        """One task's state: type, status, progress, and its error when it failed."""
         return ctx.tasks.get(task_id).to_dict()
 
     @private.delete("/tasks/{task_id}")
@@ -41,6 +42,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @private.get("/tasks/{task_id}/events")
     async def task_events(request: Request, task_id: str) -> StreamingResponse:
+        """The task's events as SSE, ending with `done`, `failed` or `cancelled`; the same
+        shape and resume rules as a job's."""
         tasks = ctx.tasks
         task = tasks.get(task_id)
         return sse.job_events(request, tasks, task, sse.last_event_id(request))
