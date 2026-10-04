@@ -324,7 +324,17 @@
     var params = {};
     for (var index = 0; index < fields.length; index += 1) {
       var field = fields[index];
+      if (field.kind === 'tags') {
+        var joined = document.getElementById('param-' + field.name + '-box').tagValue();
+        if (joined !== '') {
+          params[field.name] = joined;
+        }
+        continue;
+      }
       var control = form.elements[field.name];
+      if (control.disabled) {
+        continue;
+      }
       if (field.kind === 'boolean') {
         params[field.name] = control.checked;
         continue;
@@ -468,6 +478,130 @@
     return chip('not available', 'warn');
   }
 
+  // A comma-separated text param shown as removable chips (YuE2's style tags). The chips are
+  // the value; a phrase is committed by a comma, Enter, a paste with commas, leaving the
+  // box, or clicking a suggestion. The joined value is what the request sends.
+  function tagInput(field) {
+    var id = 'param-' + field.name;
+    var tags = [];
+    var box = el('div', { class: 'tag-input', id: id + '-box' });
+    var list = el('span', { class: 'tag-list' });
+    var typed = el('input', {
+      id: id,
+      type: 'text',
+      autocomplete: 'off',
+      placeholder: field.placeholder || null
+    });
+    var pills = [];
+
+    function has(tag) {
+      var wanted = tag.toLowerCase();
+      for (var index = 0; index < tags.length; index += 1) {
+        if (tags[index].toLowerCase() === wanted) {
+          return index;
+        }
+      }
+      return -1;
+    }
+
+    function render() {
+      list.textContent = '';
+      tags.forEach(function (tag, index) {
+        list.appendChild(el('span', { class: 'tag' }, [
+          el('span', { text: tag }),
+          el('button', {
+            type: 'button',
+            class: 'tag-remove',
+            'aria-label': 'Remove ' + tag,
+            onclick: function () {
+              tags.splice(index, 1);
+              render();
+            }
+          }, ['\u00d7'])
+        ]));
+      });
+      pills.forEach(function (pill) {
+        pill.classList.toggle('picked', has(pill.dataset.tag) >= 0);
+      });
+      typed.placeholder = tags.length ? '' : (field.placeholder || '');
+      typed.required = field.required && tags.length === 0;
+    }
+
+    function add(text) {
+      text.split(',').forEach(function (part) {
+        var tag = part.trim();
+        if (tag !== '' && has(tag) < 0) {
+          tags.push(tag);
+        }
+      });
+      render();
+    }
+
+    function commitTyped() {
+      if (typed.value.trim() !== '') {
+        add(typed.value);
+      }
+      typed.value = '';
+    }
+
+    typed.addEventListener('keydown', function (event) {
+      if (event.key === ',' || event.key === 'Enter') {
+        event.preventDefault();
+        commitTyped();
+      } else if (event.key === 'Backspace' && typed.value === '' && tags.length) {
+        tags.pop();
+        render();
+      }
+    });
+    typed.addEventListener('input', function () {
+      if (typed.value.indexOf(',') >= 0) {
+        commitTyped();
+      }
+    });
+    typed.addEventListener('blur', commitTyped);
+    box.addEventListener('click', function (event) {
+      if (event.target === box || event.target === list) {
+        typed.focus();
+      }
+    });
+    box.appendChild(list);
+    box.appendChild(typed);
+
+    var groups = el('div', { class: 'tag-suggestions' });
+    (field.suggestions || []).forEach(function (group) {
+      var row = el('div', { class: 'tag-group' }, [
+        el('span', { class: 'tag-group-name', text: group.group })
+      ]);
+      group.tags.forEach(function (tag) {
+        var pill = el('button', {
+          type: 'button',
+          class: 'tag-pill',
+          text: tag,
+          onclick: function () {
+            var at = has(tag);
+            if (at >= 0) {
+              tags.splice(at, 1);
+              render();
+            } else {
+              add(tag);
+            }
+          }
+        });
+        pill.dataset.tag = tag;
+        pills.push(pill);
+        row.appendChild(pill);
+      });
+      groups.appendChild(row);
+    });
+
+    box.tagValue = function () {
+      commitTyped();
+      return tags.join(', ');
+    };
+    render();
+    return { box: box, suggestions: groups };
+  }
+
   function control(field) {
     var id = 'param-' + field.name;
     if (field.kind === 'text') {
@@ -511,6 +645,18 @@
   }
 
   function fieldBlock(field) {
+    if (field.kind === 'tags') {
+      var tagged = tagInput(field);
+      var block = el('div', { class: 'field wide' }, [
+        el('label', { class: 'field-label', for: 'param-' + field.name, text: field.label }),
+        tagged.box
+      ]);
+      if (field.hint) {
+        block.appendChild(el('span', { class: 'field-hint', text: field.hint }));
+      }
+      block.appendChild(tagged.suggestions);
+      return block;
+    }
     var label = el('label', { class: field.kind === 'text' ? 'field wide' : 'field' }, [
       el('span', { class: 'field-label', text: field.label }),
       control(field)
@@ -566,7 +712,22 @@
     var narrow = el('div', { class: 'fields' });
     for (var index = 0; index < page.fields.length; index += 1) {
       var field = page.fields[index];
-      (field.kind === 'text' ? wide : narrow).appendChild(fieldBlock(field));
+      (field.kind === 'text' || field.kind === 'tags' ? wide : narrow).appendChild(fieldBlock(field));
+    }
+    // An instrumental sings nothing, so its lyrics box is off while the switch is on: a
+    // filled box under a ticked switch had its words silently dropped.
+    var instrumental = form.elements.instrumental;
+    var lyrics = form.elements.lyrics;
+    if (instrumental && lyrics) {
+      lyrics.dataset.placeholder = lyrics.placeholder;
+      var syncLyrics = function () {
+        lyrics.disabled = instrumental.checked;
+        lyrics.placeholder = instrumental.checked
+          ? 'Instrumental: nothing is sung. Untick Instrumental to sing lyrics.'
+          : lyrics.dataset.placeholder;
+      };
+      instrumental.addEventListener('change', syncLyrics);
+      syncLyrics();
     }
     form.appendChild(wide);
     form.appendChild(narrow);

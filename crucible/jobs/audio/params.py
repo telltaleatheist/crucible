@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,6 +14,10 @@ MAX_SEED = 2**32 - 1
 FORMATS: tuple[str, ...] = ("flac", "wav")
 
 TEXT_FIELDS: tuple[str, ...] = ("prompt", "tags", "lyrics", "negative_prompt")
+
+# A lyrics line that is only a section tag ([Verse], [Chorus], ...): all an instrumental's
+# lyrics may hold, since it sings nothing (a sung word there was silently dropped, 2026-10-03).
+SECTION_TAG = re.compile(r"\[[^\[\]]+\]")
 
 
 class AudioParams(BaseModel):
@@ -84,6 +89,19 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
         )
     if params.lyrics is not None and not manifest.takes_lyrics:
         raise _not_taken("lyrics", manifest, spec)
+    if params.instrumental and params.lyrics is not None:
+        sung = [line for line in params.lyrics.splitlines()
+                if line.strip() and not SECTION_TAG.fullmatch(line.strip())]
+        if sung:
+            raise _refusal(
+                "audio_param_conflict",
+                f"an instrumental sings nothing, but these lyrics have words to sing "
+                f"({sung[0].strip()!r} first). Untick instrumental to sing them, or send "
+                "only section tags such as [Verse] and [Chorus] to shape the instrumental",
+                manifest,
+                spec,
+                param="lyrics",
+            )
     # An instrumental song sings nothing: lyrics, if sent, only shape the score YuE2 plans
     # (its sections), so they are not required.
     sung = manifest.takes_lyrics and not params.instrumental

@@ -99,3 +99,29 @@ def test_an_empty_or_truncated_plan_is_refused_by_name(monkeypatch: pytest.Monke
     job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True)
     with pytest.raises(RuntimeError, match="another seed"):
         engine._instrumental_plan(job, SimpleNamespace(abc=SCORE, truncated=True))
+
+
+def test_an_instrumental_with_words_in_its_lyrics_is_refused_not_silently_unsung() -> None:
+    """Owen ticked Instrumental over a full set of lyrics: the words were dropped without a
+    word and YuE2 sang nonsense to the vocal tags (PC, 2026-10-03)."""
+    _check("yue2-3b", tags=TAGS, instrumental=True, lyrics="[Intro]\n\n[Verse]\n\n[Chorus]\n")
+    with pytest.raises(ApiError) as caught:
+        _check("yue2-3b", tags=TAGS, instrumental=True,
+               lyrics="[Verse]\nDarla married Dwayne in the summer of '92\n")
+    assert caught.value.code == "audio_param_conflict"
+    assert "Darla married Dwayne" in caught.value.message and "Untick instrumental" in caught.value.message
+
+
+def test_the_song_tag_suggestions_are_grouped_phrases_without_commas() -> None:
+    from crucible import playground
+
+    groups = playground.song_tag_suggestions()
+    names = [group["group"] for group in groups]
+    assert {"Genre", "Mood", "Vocal", "Instruments", "Language"} <= set(names)
+    assert all(tag and "," not in tag for group in groups for tag in group["tags"])
+    manifest = load_all_audio_manifests()["yue2-3b"]
+    tags = playground.audio_fields(manifest, manifest.spec("cuda-linux"))[0]
+    assert (tags["name"], tags["kind"], tags["required"]) == ("tags", "tags", True)
+    assert tags["suggestions"] == groups
+    music = load_all_audio_manifests()["stable-audio-3-medium"]
+    assert playground.audio_fields(music, music.spec("cuda-linux"))[0]["kind"] == "text"

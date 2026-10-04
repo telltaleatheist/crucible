@@ -1,0 +1,57 @@
+# The style tags the playground offers as one-click chips for a song model (YuE2).
+#
+# YuE2 publishes no tag vocabulary: its docs say only "put genre, instruments, vocal
+# character, language, and tempo in `style`", as comma-separated phrases (YuE docs/generation.md;
+# its example: "English, warm piano pop, expressive female voice, acoustic piano, rounded bass and
+# light drums, lyrical memorable melody, unhurried phrasing, 88 BPM"). These are suggestions in
+# that shape, not a closed list - any phrase can be typed. Language lists only what YuE2's docs
+# name. Edit freely; the playground reads this file on every page build.
+
+[[group]]
+name = "Language"
+tags = ["English", "Chinese"]
+
+[[group]]
+name = "Genre"
+tags = [
+  "pop", "piano pop", "rock", "hard rock", "heavy metal", "groove metal", "punk rock",
+  "country", "bluegrass", "folk", "blues", "jazz", "soul", "R&B", "funk",
+  "hip hop", "trap", "boom bap", "EDM", "house", "synthwave", "lo-fi", "indie",
+  "reggae", "latin", "orchestral", "cinematic", "acoustic ballad", "power ballad",
+]
+
+[[group]]
+name = "Mood"
+tags = [
+  "emotional", "melancholic", "bittersweet", "uplifting", "energetic", "aggressive",
+  "dark", "dreamy", "romantic", "nostalgic", "playful", "sassy", "epic", "calm",
+  "hard-hitting", "catchy",
+]
+
+[[group]]
+name = "Vocal"
+tags = [
+  "male vocal", "female vocal", "deep male voice", "soft female voice", "raspy vocal",
+  "gritty male vocal", "powerful belting vocal", "breathy vocal", "rap vocal",
+  "three-part harmonies", "duet",
+]
+
+[[group]]
+name = "Instruments"
+tags = [
+  "acoustic guitar", "electric guitar", "distorted guitar", "palm-muted riffs",
+  "pinch harmonics", "bass guitar", "piano", "synth", "strings", "fiddle", "banjo",
+  "mandolin", "harp", "saxophone", "trumpet", "organ", "808 bass", "drums",
+  "double-kick drums", "light drums",
+]
+
+[[group]]
+name = "Tempo & sound"
+tags = [
+  "70 BPM", "90 BPM", "110 BPM", "128 BPM", "140 BPM", "slow", "mid-tempo", "fast",
+  "polished production", "live recording", "vintage sound", "wide stereo",
+]
+
+[[group]]
+name = "Instrumental"
+tags = ["Instrumental", "no vocals", "no singing"]

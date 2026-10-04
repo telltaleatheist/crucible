@@ -51,6 +51,7 @@ crucible = [
   "asr/*.toml",
   "image/*.toml",
   "audio/*.toml",
+  "audio/tags/*.toml",
   "segment/*.toml",
   "video/*.toml",
   "envs/**/*",

@@ -6,7 +6,9 @@ downloads what it lacks. Only what that cannot fix is unavailable, with the reas
 from __future__ import annotations
 
 import math
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from . import catalog, installonsubmit, weights
@@ -34,6 +36,31 @@ INTEGER = "integer"
 NUMBER = "number"
 BOOLEAN = "boolean"
 CHOICE = "choice"
+TAGS = "tags"
+
+# One-click style chips for a song model's `tags` (crucible/audio/tags/song.toml). Read on
+# every page build so an edit to the file shows without a restart.
+SONG_TAGS_FILE = Path(__file__).resolve().parent / "audio" / "tags" / "song.toml"
+
+
+def song_tag_suggestions() -> list[dict[str, Any]]:
+    with SONG_TAGS_FILE.open("rb") as handle:
+        document = tomllib.load(handle)
+    groups = document.get("group")
+    if not isinstance(groups, list) or not groups:
+        raise ValueError(f"{SONG_TAGS_FILE} has no [[group]] tables")
+    suggestions = []
+    for group in groups:
+        name, tags = group.get("name"), group.get("tags")
+        if not isinstance(name, str) or not isinstance(tags, list) or not all(
+            isinstance(tag, str) and tag.strip() and "," not in tag for tag in tags
+        ):
+            raise ValueError(
+                f"{SONG_TAGS_FILE}: every [[group]] needs a name and a list of tags, "
+                "each a non-empty phrase with no comma"
+            )
+        suggestions.append({"group": name, "tags": list(tags)})
+    return suggestions
 
 IMAGE_EXAMPLE = (
     "A lighthouse on a basalt cliff at dusk, warm light in the lantern room, long "
@@ -111,10 +138,15 @@ def video_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
 
 
 def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
-    fields = [
-        field(manifest.text_param, AUDIO_LABELS[manifest.kind], TEXT, required=True,
-              placeholder=AUDIO_EXAMPLES[manifest.kind]),
-    ]
+    if manifest.text_param == "tags":
+        first = field("tags", AUDIO_LABELS[manifest.kind], TAGS, required=True,
+                      placeholder=AUDIO_EXAMPLES[manifest.kind],
+                      suggestions=song_tag_suggestions(),
+                      hint="type a phrase and a comma to add it, or click a suggestion")
+    else:
+        first = field(manifest.text_param, AUDIO_LABELS[manifest.kind], TEXT, required=True,
+                      placeholder=AUDIO_EXAMPLES[manifest.kind])
+    fields = [first]
     if manifest.takes_lyrics:
         unsung = "instrumental" in spec.takes
         fields.append(field("lyrics", "Lyrics", TEXT, required=not unsung,

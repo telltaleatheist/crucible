@@ -110,7 +110,7 @@ first planned.
 | param | who takes it | default | rule |
 | --- | --- | --- | --- |
 | `prompt` | sfx, music | required | not blank; a song model refuses it by name (send `tags`) |
-| `tags` | song | required | the style: comma-separated genre, instruments, voice, language, tempo |
+| `tags` | song | required | the style: comma-separated genre, instruments, voice, language, tempo. The playground shows it as chips (type a phrase and a comma, or click a suggestion from `crucible/audio/tags/song.toml`) |
 | `instrumental` | song | false | true renders the planned melody on an instrument instead of a voice (above) |
 | `lyrics` | song | required (optional when `instrumental`) | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. Refused by name on sfx and music |
 | `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
