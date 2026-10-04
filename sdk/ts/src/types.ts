@@ -1629,6 +1629,12 @@ export interface AudioOptions {
   readonly steps?: number;
   readonly cfg?: number;
   readonly format?: 'flac' | 'wav';
+  /**
+   * A song model only (YuE2): write the melody, then play it on an instrument instead of
+   * singing it. Lyrics become optional and only shape the sections. A server whose song model
+   * cannot do it refuses by name.
+   */
+  readonly instrumental?: boolean;
 }
 
 /** An `audio` job's effective parameters and measurements, read by {@link readAudioResult}. */
@@ -1648,6 +1654,8 @@ export interface AudioResult {
   readonly steps: number | null;
   readonly cfg: number | null;
   readonly format: 'flac' | 'wav';
+  /** Whether the song was made instrumental; null from a server older than `instrumental`. */
+  readonly instrumental: boolean | null;
   /** The audio artifact's name, `audio.flac` or `audio.wav`. */
   readonly artifact: string;
   /** `score.abc`, the song's ABC score, when the model wrote one; else null. */
@@ -1662,6 +1670,59 @@ export interface AudioResult {
   readonly memoryBytesEstimate: number;
   readonly memoryBasis: string;
   readonly artifacts: readonly string[];
+}
+
+/** One field of a playground form, as `GET /v1/playground` states it. */
+export interface PlaygroundField {
+  readonly name: string;
+  readonly label: string;
+  /** `text`, `tags`, `integer`, `number`, `boolean` or `choice`. */
+  readonly kind: string;
+  readonly required: boolean;
+  readonly default: unknown;
+  readonly placeholder: string | null;
+  readonly hint: string | null;
+  readonly min: number | null;
+  readonly max: number | null;
+  readonly step: number | null;
+  readonly options: readonly unknown[] | null;
+  /** A `tags` field's suggested tags, by group. */
+  readonly suggestions: readonly PlaygroundTagGroup[] | null;
+  /** A `tags` field's contradictions: lower-cased tag -> the tags it clashes with, each with why. */
+  readonly conflicts: Readonly<Record<string, readonly PlaygroundTagConflict[]>> | null;
+}
+
+export interface PlaygroundTagGroup {
+  readonly group: string;
+  readonly tags: readonly string[];
+}
+
+export interface PlaygroundTagConflict {
+  readonly tag: string;
+  readonly why: string;
+}
+
+/** One model's playground page: its form, and whether it can run here. */
+export interface PlaygroundPage {
+  readonly jobType: string;
+  readonly id: string;
+  readonly name: string;
+  readonly media: string;
+  readonly kind: string;
+  readonly makes: string;
+  /** `ready`; `download` (its first job installs what it lacks); `unavailable` (see `reason`). */
+  readonly standing: 'ready' | 'download' | 'unavailable';
+  readonly available: boolean;
+  readonly reason: string | null;
+  readonly downloadBytes: number | null;
+  readonly fields: readonly PlaygroundField[];
+}
+
+/** A named preset of a playground form, kept on the server: the form's params, never a seed. */
+export interface PlaygroundPreset {
+  readonly name: string;
+  readonly params: Readonly<Record<string, string | number | boolean>>;
+  readonly savedAt: string;
 }
 
 /** One click for a `select` model, in the input's own pixels from its top-left corner. */

@@ -122,6 +122,9 @@ import {
   type ModelInfo,
   type PagesEngine,
   type Ping,
+  type PlaygroundField,
+  type PlaygroundPage,
+  type PlaygroundPreset,
   type ProgressData,
   type QueueChoice,
   type QueueEvent,
@@ -1832,6 +1835,7 @@ export class CrucibleClient {
       ['steps', 'steps'],
       ['cfg', 'cfg'],
       ['format', 'format'],
+      ['instrumental', 'instrumental'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
@@ -1843,6 +1847,50 @@ export class CrucibleClient {
       params,
       inputs: {},
     });
+  }
+
+  /**
+   * `GET /v1/playground` — one page per image, video and audio model this server's build
+   * declares: its form (defaults and limits from the model's manifest, a song model's tag
+   * suggestions and conflicts) and its standing here.
+   */
+  async playground(): Promise<PlaygroundPage[]> {
+    const body = await this.#json('/v1/playground', { method: 'GET' }, 'playground');
+    return asArray(field(body, 'pages', 'playground'), 'playground.pages').map((value, index) =>
+      readPlaygroundPage(asObject(value, `playground.pages[${index}]`), `playground.pages[${index}]`));
+  }
+
+  /** `GET /v1/playground/presets/{model}` — the presets saved for `model` on this server. */
+  async playgroundPresets(model: string): Promise<PlaygroundPreset[]> {
+    const path = `/v1/playground/presets/${encodeURIComponent(requireText(model, 'model'))}`;
+    const body = await this.#json(path, { method: 'GET' }, 'playgroundPresets');
+    return asArray(field(body, 'presets', 'presets'), 'presets.presets').map((value, index) =>
+      readPlaygroundPreset(asObject(value, `presets[${index}]`), `presets[${index}]`));
+  }
+
+  /**
+   * `PUT /v1/playground/presets/{model}/{name}` — save (or replace) a preset: the form's own
+   * params as text, numbers and true/false. A seed is refused by name (a preset is a sound,
+   * not one take of it).
+   */
+  async savePlaygroundPreset(
+    model: string,
+    name: string,
+    params: Readonly<Record<string, string | number | boolean>>,
+  ): Promise<PlaygroundPreset> {
+    const path = `/v1/playground/presets/${encodeURIComponent(requireText(model, 'model'))}/${encodeURIComponent(requireText(name, 'name'))}`;
+    const body = await this.#json(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ params }),
+    }, 'savePlaygroundPreset');
+    return readPlaygroundPreset(objectField(body, 'preset', 'savePlaygroundPreset'), 'savePlaygroundPreset.preset');
+  }
+
+  /** `DELETE /v1/playground/presets/{model}/{name}` — 404 `preset_not_found` when there is none. */
+  async deletePlaygroundPreset(model: string, name: string): Promise<void> {
+    const path = `/v1/playground/presets/${encodeURIComponent(requireText(model, 'model'))}/${encodeURIComponent(requireText(name, 'name'))}`;
+    await this.#json(path, { method: 'DELETE' }, 'deletePlaygroundPreset');
   }
 
   /** Queue a `load-audio` job (warm an audio model up before the first request) and return its id. */
@@ -3431,6 +3479,7 @@ export function readAudioResult(done: DoneData): AudioResult {
     steps: nullableNum(audio, 'steps', at),
     cfg: nullableNum(audio, 'cfg', at),
     format: oneOf(str(audio, 'format', at), ['flac', 'wav'] as const, `${at}.format`),
+    instrumental: optBool(audio, 'instrumental', at),
     artifact: str(audio, 'artifact', at),
     score: nullableStr(audio, 'score', at),
     audioSeconds: nullableNum(audio, 'audio_seconds', at),
@@ -3443,6 +3492,77 @@ export function readAudioResult(done: DoneData): AudioResult {
     memoryBytesEstimate: num(audio, 'memory_bytes_estimate', at),
     memoryBasis: str(audio, 'memory_basis', at),
     artifacts: done.artifacts ?? [],
+  };
+}
+
+function readPlaygroundPage(page: Json, where: string): PlaygroundPage {
+  return {
+    jobType: str(page, 'job_type', where),
+    id: str(page, 'id', where),
+    name: str(page, 'name', where),
+    media: str(page, 'media', where),
+    kind: str(page, 'kind', where),
+    makes: str(page, 'makes', where),
+    standing: oneOf(str(page, 'standing', where), ['ready', 'download', 'unavailable'] as const, `${where}.standing`),
+    available: bool(page, 'available', where),
+    reason: nullableStr(page, 'reason', where),
+    downloadBytes: nullableNum(page, 'download_bytes', where),
+    fields: arrayField(page, 'fields', where).map((value, index) =>
+      readPlaygroundField(asObject(value, `${where}.fields[${index}]`), `${where}.fields[${index}]`)),
+  };
+}
+
+function readPlaygroundField(raw: Json, where: string): PlaygroundField {
+  const suggestions = optRawArray(raw, 'suggestions', where);
+  const conflicts = optObject(raw, 'conflicts', where);
+  return {
+    name: str(raw, 'name', where),
+    label: str(raw, 'label', where),
+    kind: str(raw, 'kind', where),
+    required: bool(raw, 'required', where),
+    default: raw['default'] ?? null,
+    placeholder: optStr(raw, 'placeholder', where),
+    hint: optStr(raw, 'hint', where),
+    min: optNum(raw, 'min', where),
+    max: optNum(raw, 'max', where),
+    step: optNum(raw, 'step', where),
+    options: optRawArray(raw, 'options', where),
+    suggestions: suggestions === null ? null : suggestions.map((value, index) => {
+      const at = `${where}.suggestions[${index}]`;
+      const group = asObject(value, at);
+      return { group: str(group, 'group', at), tags: strArray(group, 'tags', at) };
+    }),
+    conflicts: conflicts === null ? null : Object.fromEntries(
+      Object.entries(conflicts).map(([tag, rules]) => [
+        tag,
+        asArray(rules, `${where}.conflicts.${tag}`).map((rule, index) => {
+          const at = `${where}.conflicts.${tag}[${index}]`;
+          const row = asObject(rule, at);
+          return { tag: str(row, 'tag', at), why: str(row, 'why', at) };
+        }),
+      ]),
+    ),
+  };
+}
+
+/** An array that may be absent (not every field kind has it), else exactly an array. */
+function optRawArray(object: Json, key: string, where: string): unknown[] | null {
+  const value = object[key];
+  if (value === undefined || value === null) return null;
+  return asArray(value, `${where}.${key}`);
+}
+
+function readPlaygroundPreset(preset: Json, where: string): PlaygroundPreset {
+  const params = objectField(preset, 'params', where);
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+      throw new CrucibleProtocolError(`${where}.params.${key} is not text, a number or true/false`);
+    }
+  }
+  return {
+    name: str(preset, 'name', where),
+    params: params as Record<string, string | number | boolean>,
+    savedAt: str(preset, 'saved_at', where),
   };
 }
 
