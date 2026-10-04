@@ -293,6 +293,30 @@ def test_a_run_publishes_every_stem_and_names_the_primary(
         }
 
 
+def test_stems_all_publishes_what_was_separated_too_primary_first(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """Keep either side: the music taken out from under a voice, or the backing track."""
+    events = run_job(ready, auth, params={"stems": "all"})
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    assert data["artifacts"][0] == data["primary_stem"]
+    assert sorted(data["artifacts"]) == sorted(data["stems"])
+    assert len(data["artifacts"]) == 2
+    job_id = events[0]["job_id"]
+    for name in data["artifacts"]:
+        got = ready.get(f"/v1/jobs/{job_id}/artifacts/{name}", headers=auth)
+        assert got.status_code == 200 and name.encode() in got.content
+
+
+def test_stems_names_only_primary_or_all(
+    denoise_client: TestClient, auth: dict[str, str]
+) -> None:
+    response = submit(denoise_client, auth, params={"stems": "instrumental"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_params"
+
+
 def _place_files(home: Path, model_id: str) -> None:
     manifest = load_denoise_manifest(model_id)
     root = denoise_job.denoise_models_dir_for(home)

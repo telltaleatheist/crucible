@@ -401,7 +401,7 @@ BookForge's `crucible` provider follows).
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
-| `denoise` | separator id | `{}` — and that is the contract | exactly one audio file |
+| `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary — no separation knob is on the wire | exactly one audio file, at the separator's own rate (44.1 kHz); nothing is resampled |
 | `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
 | `load-image` | image model id | `{}` — warms the model up before the first prompt | none |
 | `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs)`[, "duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |

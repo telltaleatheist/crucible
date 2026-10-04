@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -59,9 +59,18 @@ JOB_TYPE = DENOISE_JOB.name
 ENV_JOB_TYPE = RVC_ENV.name
 
 NO_PARAMS = (
-    "denoise takes no params — every separation knob is an engine default this "
-    "server does not put on the wire (docs/internals/asr-and-align.md)"
+    "denoise takes one param, `stems` (\"primary\" or \"all\") — every separation "
+    "knob is an engine default this server does not put on the wire "
+    "(docs/internals/asr-and-align.md)"
 )
+
+# Which stems a run publishes. "primary" is the manifest's answer (the dry voice, the
+# vocals) and is what a book's denoise wants; "all" also returns what was separated
+# from it (the instrumental, the noise), so a caller can keep either side - talking
+# over a music video with its music taken out, or the backing track without the
+# singer (Owen, 2026-10-04).
+PRIMARY_STEM_ONLY = "primary"
+EVERY_STEM = "all"
 
 OUTPUT_FORMAT = "WAV"
 
@@ -158,6 +167,8 @@ def occupy_separator(
 
 class DenoiseParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    stems: Literal["primary", "all"] = PRIMARY_STEM_ONLY
 
 
 MANIFESTS: ManifestCatalog[DenoiseManifest] = ManifestCatalog(
@@ -311,7 +322,7 @@ class DenoiseJobType(ResidentWorker):
 
 
     def run(self, job: Job, ctx: JobContext) -> None:
-        DenoiseParams.model_validate(job.params)
+        params = DenoiseParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         manifest, spec, python, root = as_job_error(self.requirements, model)
 
@@ -363,7 +374,12 @@ class DenoiseJobType(ResidentWorker):
 
         stems = results[0]["stems"]
         primary = self._check(manifest, outcome.ready, stems)
-        ctx.artifact(primary["name"], output_dir / primary["name"])
+        published = [primary]
+        if params.stems == EVERY_STEM:
+            published += [stem for stem in stems if stem is not primary]
+        for stem in published:
+            self._same_timeline(manifest, outcome.ready, stem)
+            ctx.artifact(stem["name"], output_dir / stem["name"])
         ctx.progress(
             1.0,
             f"{len(stems)} stem(s) from {source.name} through {manifest.display}",
@@ -437,23 +453,28 @@ class DenoiseJobType(ResidentWorker):
                 "produces; two means nothing here can say which one is the "
                 "denoised audio",
             )
-        primary = hits[0]
-        if primary["sample_rate"] != manifest.sample_rate:
+        return hits[0]
+
+    @staticmethod
+    def _same_timeline(
+        manifest: DenoiseManifest, ready: dict[str, Any], stem: dict[str, Any]
+    ) -> None:
+        """A published stem lines up sample for sample with the input it came from."""
+        if stem["sample_rate"] != manifest.sample_rate:
             raise JobError(
                 "denoise_resampled",
-                f"{primary['name']} came back at {primary['sample_rate']} Hz and "
+                f"{stem['name']} came back at {stem['sample_rate']} Hz and "
                 f"the input was {manifest.sample_rate} Hz — the model resampled "
                 "it, which invalidates every sample offset the caller sliced by",
             )
-        if primary["frames"] != ready["frames"]:
+        if stem["frames"] != ready["frames"]:
             raise JobError(
                 "denoise_length_changed",
-                f"{primary['name']} is {primary['frames']} frames and the input "
+                f"{stem['name']} is {stem['frames']} frames and the input "
                 f"was {ready['frames']} — the model changed the length. Slicing "
                 "a stem back at the input's offsets is only safe because it does "
                 "not",
             )
-        return primary
 
 
 class UnloadDenoiserJobType(UnloadJobType):
