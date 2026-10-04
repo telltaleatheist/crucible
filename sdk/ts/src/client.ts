@@ -796,6 +796,18 @@ export class CrucibleClient {
         yield event;
         if (terminal.includes(event.event)) return;
       }
+    } catch (cause) {
+      if (cause instanceof CrucibleError) throw cause;
+      // The connection broke mid-read - WebKit's "Load failed" when a phone locks, undici's
+      // "terminated". That is the same weather a failed connect is, so it is raised the same
+      // way: a caller that follows again on CrucibleUnreachable (with lastEventId) recovers
+      // (B-Side on an iPhone, 2026-10-04).
+      throw new CrucibleUnreachable(
+        this.url,
+        `the event stream for ${what} broke after event ${previousId} (${describeCause(cause)}). ` +
+          `Follow it again with lastEventId ${previousId}`,
+        cause,
+      );
     } finally {
       await stream.cancel().catch(() => undefined);
     }
@@ -1312,6 +1324,15 @@ export class CrucibleClient {
         const delta = readChatDelta(frame.data);
         if (delta !== null) yield delta;
       }
+    } catch (cause) {
+      if (cause instanceof CrucibleError) throw cause;
+      // The caller's own abort is theirs to see as it is, as #fetch does.
+      if (options.signal !== undefined && options.signal.aborted) throw cause;
+      throw new CrucibleUnreachable(
+        this.url,
+        `the chat completion stream broke mid-answer (${describeCause(cause)}); the answer is truncated`,
+        cause,
+      );
     } finally {
       await stream.cancel().catch(() => undefined);
     }
