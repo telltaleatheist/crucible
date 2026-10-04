@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import tomli_w
 
@@ -121,6 +122,9 @@ class Config:
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
+    # Web origins whose pages may call this server (crucible/api/cors.py): exact
+    # `scheme://host[:port]`, empty unless configured.
+    cors_origins: tuple[str, ...] = ()
     open_pairing: bool = True
     retention_days: int = DEFAULT_RETENTION_DAYS
     desktop_allowance_note: str = ""
@@ -334,6 +338,51 @@ def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
         if authority not in cleaned:
             cleaned.append(authority)
     return tuple(cleaned)
+
+
+def _cors_origins(table: dict[str, Any]) -> tuple[str, ...]:
+    """`[server] cors_origins`: the web origins allowed to call this server.
+
+    Each is an exact origin - a scheme and a host, a port when it is not the scheme's
+    own, nothing else - because that is what a browser sends in `Origin` and what is
+    compared. `*` is refused: the token is what protects this server, and a wildcard
+    would hand every page on the internet the answers to whatever token it can find.
+    """
+    server = table.get("server")
+    if not isinstance(server, dict) or "cors_origins" not in server:
+        return ()
+    raw = server["cors_origins"]
+    if not isinstance(raw, list) or not all(isinstance(entry, str) for entry in raw):
+        raise ConfigError(
+            "config [server] cors_origins: must be a list of origins "
+            '(e.g. cors_origins = ["capacitor://localhost"])'
+        )
+    origins: list[str] = []
+    for entry in raw:
+        if entry == "*":
+            raise ConfigError(
+                "config [server] cors_origins: '*' is refused; name each origin whose "
+                "pages may call this server (e.g. capacitor://localhost)"
+            )
+        parsed = urlsplit(entry)
+        if not parsed.scheme or not parsed.netloc or parsed.path or parsed.query or parsed.fragment:
+            raise ConfigError(
+                f"config [server] cors_origins: {entry!r} is not an origin; an origin is "
+                "a scheme and a host with nothing after it (capacitor://localhost, "
+                "http://192.168.68.20:7300)"
+            )
+        if entry not in origins:
+            origins.append(entry)
+    return tuple(origins)
+
+
+def _kept_cors_origins(home: Path) -> tuple[str, ...]:
+    """The origins the file on disk lists, for a rewrite that was not asked to change them."""
+    try:
+        with open(config_path(home), "rb") as handle:
+            return _cors_origins(tomllib.load(handle))
+    except (OSError, tomllib.TOMLDecodeError):
+        return ()
 
 
 def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
@@ -785,6 +834,7 @@ def load_config(
         advertise=_advertised(table),
         tailscale_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("tailscale_advertise", [])}}),
         lan_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("lan_advertise", [])}}),
+        cors_origins=_cors_origins(table),
         token=_require(table, "auth", "token", str),
         open_pairing=_open_pairing(table),
         backend_kind=_require(table, "backend", "kind", str),
@@ -884,6 +934,7 @@ def write_config(
     advertise: tuple[str, ...] = (),
     tailscale_advertise: tuple[str, ...] = (),
     lan_advertise: tuple[str, ...] = (),
+    cors_origins: tuple[str, ...] | None = None,
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
     tts_engines: tuple[EngineFootprint, ...] = (),
     carried_tables: dict[str, Any] | None = None,
@@ -950,6 +1001,11 @@ def write_config(
         document["server"]["tailscale_advertise"] = list(tailscale_advertise)
     if lan_advertise:
         document["server"]["lan_advertise"] = list(lan_advertise)
+    # [server] is this writer's table, so a key it does not write is lost on the next
+    # `crucible install`. The origins a person listed are kept unless a caller says otherwise.
+    origins = _kept_cors_origins(home) if cors_origins is None else cors_origins
+    if origins:
+        document["server"]["cors_origins"] = list(origins)
     if routes:
         document["routes"] = {entry.capability: entry.model for entry in routes}
     if tts_engines:

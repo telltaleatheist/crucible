@@ -70,6 +70,7 @@ def configure_box(
     capability: Any = None,
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
     tts_engines: Any = None,
+    cors_origins: tuple[str, ...] = (),
 ) -> None:
     if desktop_allowance_bytes is None:
         desktop_allowance_bytes = (
@@ -101,6 +102,7 @@ def configure_box(
         desktop_allowance_note="",
         capability=capability,
         open_pairing=open_pairing,
+        cors_origins=cors_origins,
         tts_engines=(
             declared_tts_footprints(backend.kind)
             if tts_engines is None

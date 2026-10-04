@@ -41,6 +41,7 @@ from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
 from ..voicecatalog import seed_unresolved
 from .context import AppContext, Routers, Services
+from .cors import AllowListedOrigins
 from .deps import (
     BeforeEveryRequest,
     error_response,
@@ -461,6 +462,9 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.residency = residency
     app.state.bind_host = config.host
     app.state.bind_port = config.port
+    # Added first, so it runs INSIDE the config follower: the allow-list it reads is
+    # the file as just re-read.
+    app.add_middleware(AllowListedOrigins, config=config)
     app.add_middleware(BeforeEveryRequest, step=ConfigFollower(config, keeper))
     _services(config, backend, residency, keeper).publish(app)
     Path(config.jobs_dir).mkdir(parents=True, exist_ok=True)
