@@ -833,9 +833,38 @@ class JobStore:
             removal=removal if isinstance(removal, dict) else None,
             session=document.get("session"),
         )
-        if status == REMOVED and job.removal is not None:
-            self.append_event(job, "removed", job.removal)
+        self._replay_ending(job)
         return job
+
+    def _replay_ending(self, job: Job) -> None:
+        """Give a job read back after a restart the ending its stream had.
+
+        Events live in memory, so a restart lost every recovered job's history. Its
+        stream then sent nothing and never closed: an SDK client following it (and
+        reconnecting with Last-Event-ID) waited forever for a job the record says
+        failed (B-Side, 2026-10-04: a song killed by a deploy). So the ending is
+        rebuilt from the record exactly as `_finish` wrote it live - `done` with its
+        artifacts and done_extra (what readAudioResult and the like read), `failed`
+        with its error, `cancelled`, `removed` - and an interrupted job gets the note
+        it got live. The events are final either way: the stream ends once sent.
+        """
+        if job.status == DONE:
+            self.append_event(job, "done", {"artifacts": list(job.artifacts), **job.done_extra})
+        elif job.status == FAILED:
+            self.append_event(job, "failed", {"error": job.error})
+        elif job.status == CANCELLED:
+            self.append_event(job, "cancelled", {"status": CANCELLED})
+        elif job.status == REMOVED and job.removal is not None:
+            self.append_event(job, "removed", job.removal)
+        elif job.status == INTERRUPTED:
+            self.append_event(
+                job,
+                "note",
+                {"message": f"the server stopped while job {job.id} ran, so it "
+                            "ended interrupted. Collect what landed from "
+                            f"GET /v1/jobs/{job.id} and submit the rest again."},
+            )
+        job.events_final = True
 
 
     RECORD_NAME = "job.json"

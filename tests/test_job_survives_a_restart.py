@@ -280,3 +280,35 @@ def test_a_job_the_lane_failed_out_of_band_comes_back_failed(tmp_path: Path) -> 
     restored = again.get(job.id)
     assert restored.status == FAILED
     assert restored.error["code"] == "queue_failed"
+
+
+@pytest.mark.parametrize(
+    ("status", "fields", "event", "data"),
+    [
+        (DONE, {"artifacts": ["audio.mp3"], "done_extra": {"audio": {"seed": 7}}},
+         "done", {"artifacts": ["audio.mp3"], "audio": {"seed": 7}}),
+        (FAILED, {"error": {"code": "worker_failed", "message": "the worker exited -15"}},
+         "failed", {"error": {"code": "worker_failed", "message": "the worker exited -15"}}),
+        (CANCELLED, {}, "cancelled", {"status": CANCELLED}),
+    ],
+)
+def test_a_job_that_ended_gets_its_ending_event_back_and_its_events_are_final(
+    tmp_path: Path, status: str, fields: dict[str, Any], event: str, data: dict[str, Any]
+) -> None:
+    # Events live in memory; without this a recovered job's stream sent nothing, forever.
+    _record(tmp_path / "jkl012", status=status, finished="2026-09-20T18:30:00+00:00", **fields)
+    store = _store(tmp_path)
+    store.restore()
+    job = store.get("jkl012")
+    assert [(e["event"], e["data"]) for e in job.events] == [(event, data)]
+    assert job.events_final
+
+
+def test_an_interrupted_job_gets_its_note_and_its_events_are_final(tmp_path: Path) -> None:
+    _record(tmp_path / "mno345", status=RUNNING)
+    store = _store(tmp_path)
+    store.restore()
+    job = store.get("mno345")
+    assert [e["event"] for e in job.events] == ["note"]
+    assert "interrupted" in job.events[0]["data"]["message"]
+    assert job.events_final

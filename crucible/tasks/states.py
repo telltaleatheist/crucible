@@ -50,6 +50,8 @@ class Task:
     finished: str | None = None
     error: dict[str, str] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    # True when no more events will come (see Job.events_final); a task's stream then ends.
+    events_final: bool = False
     unmet: list[dict[str, str]] = field(default_factory=list)
     cancel_requested: bool = False
     on_submit: bool = False

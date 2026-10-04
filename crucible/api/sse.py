@@ -58,6 +58,9 @@ class Feed:
     ends: frozenset[str]
     moved: Callable[[int], None]
     close: Callable[[], None]
+    # True once nothing more will be written to this feed (a job read back after a
+    # restart): the stream ends after what is there, instead of waiting for nothing.
+    final: Callable[[], bool]
 
 
 def stopping_frame(hub: EventHub) -> str:
@@ -85,6 +88,8 @@ async def events_after(
                 yield format_event(event)
                 if event["event"] in feed.ends:
                     return
+            if feed.final():
+                return
             if hub.stopped:
                 yield stopping_frame(hub)
                 return
@@ -118,6 +123,7 @@ def _job_feed(store: JobStore | TaskStore, job: Job | Task) -> Feed:
         ends=TERMINAL_EVENTS,
         moved=lambda _: None,
         close=lambda: store.unsubscribe(job, waiter),
+        final=lambda: job.events_final,
     )
 
 
@@ -139,6 +145,7 @@ def _session_feed(session: StreamSession, delivered: int) -> Feed:
         ends=SESSION_END,
         moved=moved,
         close=lambda: session.detach(reader),
+        final=lambda: False,
     )
 
 
@@ -162,6 +169,7 @@ def _queue_feed(line: WaitingLine) -> Feed:
         ends=frozenset(),
         moved=lambda _: None,
         close=lambda: line.unsubscribe(waiter),
+        final=lambda: False,
     )
 
 
@@ -177,6 +185,7 @@ def _queue_session_feed(sessions: QueueSessions, session: QueueSession) -> Feed:
         ends=ENDING_EVENTS,
         moved=lambda _: None,
         close=lambda: sessions.unsubscribe(session, waiter),
+        final=lambda: False,
     )
 
 
@@ -240,6 +249,7 @@ def _hub_feed(
         ends=ENDS,
         moved=moved,
         close=lambda: hub.unsubscribe(subscriber),
+        final=lambda: False,
     )
 
 

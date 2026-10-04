@@ -127,6 +127,9 @@ class Job:
     waiting: dict[str, Any] | None = None
     removal: dict[str, Any] | None = None
     session: str | None = None
+    # True for a job read back from disk after a restart: its events were rebuilt from
+    # its record and no more will come, so a stream that has sent them ends (sse.py).
+    events_final: bool = False
 
     @property
     def error(self) -> dict[str, str] | None:
