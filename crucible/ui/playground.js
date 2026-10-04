@@ -714,7 +714,10 @@
       var field = page.fields[index];
       (field.kind === 'text' || field.kind === 'tags' ? wide : narrow).appendChild(fieldBlock(field));
     }
-    // An instrumental sings nothing, so its lyrics box is off while the switch is on: a
+    form.appendChild(wide);
+    form.appendChild(narrow);
+    // After the fields are in the form (form.elements finds nothing before). An
+    // instrumental sings nothing, so its lyrics box is off while the switch is on: a
     // filled box under a ticked switch had its words silently dropped.
     var instrumental = form.elements.instrumental;
     var lyrics = form.elements.lyrics;
@@ -729,8 +732,6 @@
       instrumental.addEventListener('change', syncLyrics);
       syncLyrics();
     }
-    form.appendChild(wide);
-    form.appendChild(narrow);
     form.appendChild(
       el('div', { class: 'controls' }, [
         el('button', { id: 'generate', class: 'button primary', type: 'submit' }, [
