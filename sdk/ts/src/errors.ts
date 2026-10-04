@@ -377,6 +377,28 @@ export class CrucibleServerError extends CrucibleError {
   }
 }
 
+/** The server's code for "a deploy is about to restart me; nothing was admitted". */
+export const SERVER_UPDATING = 'server_updating';
+
+/**
+ * 503 `server_updating`: a deploy holds the server for a restart, so it admitted nothing. The
+ * client waits these out by itself (it sends again once the new server answers), so a caller
+ * sees one only when the wait outlasted its budget.
+ */
+export class CrucibleUpdating extends CrucibleServerError {
+  /** The release being installed, when the deploy said. */
+  readonly release: string | null;
+  /** When the hold lapses by itself if nothing restarts the server. */
+  readonly until: string | null;
+
+  constructor(status: number, code: string, serverMessage: string, details: unknown) {
+    super(status, code, serverMessage, details);
+    const fields = typeof details === 'object' && details !== null ? (details as Record<string, unknown>) : {};
+    this.release = typeof fields['release'] === 'string' ? fields['release'] : null;
+    this.until = typeof fields['until'] === 'string' ? fields['until'] : null;
+  }
+}
+
 /** The server's code for "I cannot see my own accelerator at the moment". */
 export const ACCELERATOR_UNREADABLE = 'accelerator_unreadable';
 

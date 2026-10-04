@@ -26,12 +26,16 @@ class ApiError(CrucibleError):
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(f"{code}: {message}")
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details
+        # Response headers the refusal carries (a Retry-After), whichever door raised it.
+        self.headers = headers
 
     def body(self) -> dict[str, Any]:
         error: dict[str, Any] = {"code": self.code, "message": self.message}

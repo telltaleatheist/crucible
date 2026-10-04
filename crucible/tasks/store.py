@@ -12,6 +12,7 @@ from ..config import Config
 from ..errors import ApiError
 from ..events import TASK, EventHub
 from ..settle import Held
+from ..updating import UpdateHold
 from ..weights import PullCancelled, WeightsError
 from . import hostdoor, runner
 from .states import (
@@ -64,6 +65,8 @@ class TaskStore:
         self._subscribers: dict[str, list[asyncio.Event]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.events = EventHub()
+        # The deploy's hold (crucible/updating.py); the app hands every work owner the same one.
+        self.updating = UpdateHold()
 
     async def stop(self) -> None:
         runner_task, self._runner = self._runner, None
@@ -127,6 +130,7 @@ class TaskStore:
 
     def submit(self, request: dict[str, Any], *, on_submit: bool = False) -> Task:
         validate_request(self._config, self._backend, request)
+        self.updating.refuse_if_holding(f"a {request['type']} task")
         self.refuse_if_busy()
         if touches_the_registry(request) and not on_submit:
             self.refuse_if_the_card_is_held()

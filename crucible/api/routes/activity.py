@@ -215,6 +215,11 @@ def _slots_section(ctx: AppContext) -> dict[str, Any]:
     }
 
 
+def _updating_section(ctx: AppContext) -> dict[str, Any] | None:
+    holding = ctx.updating.current()
+    return None if holding is None else holding.to_dict()
+
+
 def activity_body(ctx: AppContext) -> dict[str, Any]:
     residency = ctx.residency
     store = ctx.store
@@ -239,6 +244,7 @@ def activity_body(ctx: AppContext) -> dict[str, Any]:
             None if queue_session is None else ctx.sessions.state(queue_session)
         ),
         "slots": _slots_section(ctx),
+        "updating": _updating_section(ctx),
         "running": [] if running is None else [_activity_row(store, running)],
         "queued": [_activity_row(store, job) for job in queued],
     }

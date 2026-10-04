@@ -526,6 +526,7 @@ What this server is doing and how far along, in one read with no job id. A displ
 | `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
 | `session` | SessionState or null | yes | — |  |
 | `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
+| `updating` | object or null | no | — |  |
 | `running` | array of ActivityJob | yes | — |  |
 | `queued` | array of ActivityJob | yes | — |  |
 | `accelerator` | object or null | no | — |  |
@@ -1036,6 +1037,29 @@ One answer distribution per question, read off the resident model's next-token l
 
 *Answers:* `200`, `422` HTTPValidationError
 
+### `POST /v1/server/updating`
+
+Stop admitting work so a deploy can restart this server, if nothing is working. The hold is taken first and the server read second, so nothing slips in between: idle, it answers `holding: true` and every door that creates work refuses `503 server_updating` until the restart, a `DELETE`, or `seconds` pass; working, it lets the hold go at once and refuses `409 server_working`, naming the work.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `seconds` | integer | no | `600` | How long the hold stands if nothing restarts the server or lets it go. |
+| `release` | string or null | no | — | The release about to be installed, for the refusals to name. |
+
+*Answers:* `200`, `422` HTTPValidationError
+
+### `DELETE /v1/server/updating`
+
+Let go of an update hold (a deploy whose install failed): work is admitted again.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
 ## Features
 
 `GET /v1/info` answers `features`, the names below, so an app checks for what it needs instead of comparing versions. A name says the routes and fields exist in this build; whether a job type is enabled on this host is `job_types`. Defined in `crucible/features.py`.
@@ -1097,6 +1121,7 @@ Every request and answer schema the routes above refer to, for a reader followin
 | `catalog` | ActivityCatalog | yes | — | Recent removals through `DELETE /v1/catalog/{kind}/{id}`. |
 | `session` | SessionState or null | yes | — |  |
 | `slots` | ActivitySlots | yes | — | Every lane this server admits work through. |
+| `updating` | object or null | no | — |  |
 | `running` | array of ActivityJob | yes | — |  |
 | `queued` | array of ActivityJob | yes | — |  |
 | `accelerator` | object or null | no | — |  |
@@ -1381,6 +1406,15 @@ One request to the engine, timed by Crucible.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `detail` | array of ValidationError | no | — |  |
+
+### `HoldRequest`
+
+`POST /v1/server/updating`.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `seconds` | integer | no | `600` | How long the hold stands if nothing restarts the server or lets it go. |
+| `release` | string or null | no | — | The release about to be installed, for the refusals to name. |
 
 ### `Info`
 

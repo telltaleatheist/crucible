@@ -20,6 +20,7 @@ from ..errors import ApiError, JobCancelled, JobError
 from ..events import JOB, EventHub
 from ..journal import Journals
 from ..procgroup import STOP_TIMEOUT_SECONDS, stop_budget_seconds
+from ..updating import UpdateHold
 from .base import (
     CANCELLED,
     DONE,
@@ -198,6 +199,8 @@ class JobStore:
         self._consumed_blobs: dict[str, str] = {}
         self._admitted = LaneSlot()
         self._wake = asyncio.Event()
+        # The deploy's hold (crucible/updating.py); the app hands every work owner the same one.
+        self.updating = UpdateHold()
         self._worker: asyncio.Task[None] | None = None
         self._running_id: str | None = None
         self._lane_lock = threading.Lock()
@@ -411,6 +414,7 @@ class JobStore:
         hold: bool = False,
         session: str | None = None,
     ) -> Job:
+        self.updating.refuse_if_holding(f"a {job_type} job")
         job_id = uuid.uuid4().hex
         directory = Path(self._config.jobs_dir) / job_id
         (directory / "inputs").mkdir(parents=True, exist_ok=False)

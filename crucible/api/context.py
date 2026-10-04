@@ -26,6 +26,7 @@ from ..sessionqueue import SessionCloser
 from ..settle import Settlement
 from ..tasks import TaskStore
 from ..ttsstream import StreamManager
+from ..updating import UpdateHold
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class Services:
     settlement: Settlement
     tasks: TaskStore
     installs: InstallOnSubmit
+    updating: UpdateHold
 
     def publish(self, app: FastAPI) -> None:
         for one in fields(self):
@@ -115,6 +117,10 @@ class AppContext:
     @property
     def installs(self) -> InstallOnSubmit:
         return self.app.state.installs
+
+    @property
+    def updating(self) -> UpdateHold:
+        return self.app.state.updating
 
     @property
     def peer(self) -> peer_module.PeerState:

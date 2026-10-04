@@ -35,6 +35,7 @@ from typing import Any, Callable
 from . import clock
 from .errors import ApiError
 from .protocol import CLIENT_HEADER
+from .updating import UpdateHold
 
 SESSION_PREFIX = "ses-"
 DEFAULT_IDLE_S = 300
@@ -132,6 +133,8 @@ class QueueSessions:
         self._in_flight: Callable[[QueueSession], list[dict[str, Any]]] = lambda session: []
         self._stream: Callable[[QueueSession], dict[str, Any] | None] = lambda session: None
         self._publish: Callable[[str, dict[str, Any]], None] = lambda event, data: None
+        # The deploy's hold (crucible/updating.py); the app hands every work owner the same one.
+        self.updating = UpdateHold()
 
     def when_said(self, publish: Callable[[str, dict[str, Any]], None]) -> None:
         """Where every state change is also published (GET /v1/events)."""
@@ -177,6 +180,7 @@ class QueueSessions:
         self, *, act: str, client: str | None, model: str | None, idle_s: int,
         max_wait_s: int,
     ) -> QueueSession:
+        self.updating.refuse_if_holding("a queue session")
         session = QueueSession(
             act=act, client=client, model=model, idle_s=idle_s,
             max_wait_s=max_wait_s, created=self._now(),

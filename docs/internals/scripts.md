@@ -165,6 +165,17 @@ different operator has a different list.
   asked over loopback; `running`, `queued`, `streaming`, a chat in flight or an open queue session refuses
   by name, `--interrupt` overrides. A resident model with nothing using it is not busy. A
   deploy on 2026-09-20 restarted the PC six minutes into a 128-chunk render and lost all of it.
+- **The hold comes before the question** (1.0.105, `crucible/updating.py`). Asking first and
+  restarting half a minute later left a window: 1.0.102 killed a phone song admitted 8 s after
+  an idle answer. The probe now sends `POST /v1/server/updating` (release, 900 s): the server
+  stops creating work FIRST (jobs, queued calls, chats, queue sessions, TTS streams and tasks
+  all refuse a retryable `503 server_updating`, which the SDK waits out until the restarted
+  server answers) and only then reads whether anything works. Idle answers `held`; working
+  lets the hold go at once and answers `409 server_working` naming the work, which the probe
+  reports as `busy(...)`. An install that fails, or never restarts the server, lets the hold
+  go with `DELETE`; a deploy that dies mid-way leaves one that lapses by itself. A server
+  older than the hold answers 404 and is asked the old way (`idle(it predates the update
+  hold ...)`), so the first deploy onto it still has the gap.
 - **The probe reads the machine the way the server does.** Home is `CRUCIBLE_HOME`, else
   `$HOME/.crucible`; token, `port` and `host` come from that `config.toml` (`0.0.0.0` → loopback,
   `::` → `[::1]`); the JSON is read with `<home>/server/bin/python`, else `python3`. Nothing

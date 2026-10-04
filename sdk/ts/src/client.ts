@@ -18,10 +18,12 @@ import {
   CrucibleSessionClosed,
   CrucibleSessionHeld,
   SERVER_BUSY,
+  SERVER_UPDATING,
   SESSION_CLOSED,
   SESSION_OPEN,
   UNKNOWN_QUEUE_SESSION,
   CrucibleServerError,
+  CrucibleUpdating,
   CrucibleUnreachable,
   CrucibleVersionError,
   UPSTREAM_TEST_REFUSALS,
@@ -2026,7 +2028,51 @@ export class CrucibleClient {
     }
   }
 
+  /**
+   * One request, waiting out a deploy's restart: a `503 server_updating` admitted nothing, so it is
+   * sent again once the new server answers - never before, so a request is not sent to a server
+   * that is going away - within {@link UPDATE_WAIT_MS}. A caller sees the refusal only when the
+   * update outlasted that.
+   */
   async #fetch(path: string, init: RequestInit, authenticated: boolean): Promise<Response> {
+    const deadline = Date.now() + UPDATE_WAIT_MS;
+    for (;;) {
+      const answered = await this.#attempt(path, init, authenticated);
+      if (answered.status !== 503) return answered;
+      // Read once and handed on whole, so the caller's #failure reads the same refusal.
+      const text = await answered.text();
+      const response = new Response(text, {
+        status: answered.status,
+        statusText: answered.statusText,
+        headers: answered.headers,
+      });
+      const retryAfterS = updatingRetryAfter(text, response.headers);
+      if (retryAfterS === null || Date.now() >= deadline) return response;
+      const signal = init.signal ?? undefined;
+      await pause(Math.min(retryAfterS * 1000, Math.max(0, deadline - Date.now())), signal ?? NEVER);
+      if (signal !== undefined && signal.aborted) return response;
+      await this.#untilAnswering(deadline, signal);
+    }
+  }
+
+  /** Wait until something answers `GET /v1/ping` (the restarted server), or the deadline. */
+  async #untilAnswering(deadline: number, signal: AbortSignal | undefined): Promise<void> {
+    while (Date.now() < deadline && !(signal !== undefined && signal.aborted)) {
+      try {
+        const probe = AbortSignal.timeout(UPDATE_PROBE_MS);
+        await fetch(`${this.url}/v1/ping`, {
+          method: 'GET',
+          signal: signal === undefined ? probe : AbortSignal.any([signal, probe]),
+        });
+        return;
+      } catch {
+        // Not up yet: the old server has stopped and the new one is starting.
+      }
+      await pause(UPDATE_PROBE_MS, signal ?? NEVER);
+    }
+  }
+
+  async #attempt(path: string, init: RequestInit, authenticated: boolean): Promise<Response> {
     const bound = this.#session;
     if (bound !== null && bound.end !== null) throw endedSession(bound.id, bound.end);
     const headers = new Headers(init.headers);
@@ -2077,6 +2123,9 @@ export class CrucibleClient {
     }
     const details = 'details' in envelope ? envelope['details'] : null;
     if (response.status >= 500) {
+      if (code === SERVER_UPDATING) {
+        return new CrucibleUpdating(response.status, code, message, details);
+      }
       if (code === ACCELERATOR_UNREADABLE) {
         return new CrucibleAcceleratorUnreadable(response.status, code, message, details);
       }
@@ -2373,6 +2422,25 @@ class Backoff {
     await pause(ms, signal);
     return !signal.aborted;
   }
+}
+
+/** How long a request waits out a deploy's restart before the refusal reaches its caller. */
+const UPDATE_WAIT_MS = 10 * 60_000;
+/** How often a waiting request asks whether the restarted server answers yet. */
+const UPDATE_PROBE_MS = 2_000;
+const NEVER = new AbortController().signal;
+
+/** The seconds a 503's body asks a client to wait when it is `server_updating`, else null. */
+function updatingRetryAfter(text: string, headers: Headers): number | null {
+  let code: unknown;
+  try {
+    code = (JSON.parse(text) as { error?: { code?: unknown } }).error?.code;
+  } catch {
+    return null;
+  }
+  if (code !== SERVER_UPDATING) return null;
+  const said = Number(headers.get('Retry-After'));
+  return Number.isFinite(said) && said > 0 ? said : UPDATE_PROBE_MS / 1000;
 }
 
 function pause(ms: number, signal: AbortSignal): Promise<void> {

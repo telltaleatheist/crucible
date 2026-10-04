@@ -71,7 +71,8 @@ def fleet(tmp_path: Path, before: str, want: str) -> dict[str, str]:
         '[ "$CRUCIBLE_TEST_GUEST_DOWN" = "1" ] && exit 1\n'
         'case "$last" in\n'
         '  *installation.json*) cat "$CRUCIBLE_TEST_STATE/guest.json" 2>/dev/null ;;\n'
-        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY:-idle}" ;;\n'
+        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY:-held}" ;;\n'
+        '  *v1/server/updating*) echo "pc release-hold" >> "$CRUCIBLE_TEST_STATE/order"; echo released ;;\n'
         '  *) exit 0 ;;\n'
         'esac\n',
     )
@@ -80,7 +81,8 @@ def fleet(tmp_path: Path, before: str, want: str) -> dict[str, str]:
         'last="${@: -1}"\n'
         'case "$last" in\n'
         '  *installation.json*) cat "$CRUCIBLE_TEST_STATE/mac.json" 2>/dev/null ;;\n'
-        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY_MAC:-idle}" ;;\n'
+        '  *v1/activity*) echo "${CRUCIBLE_TEST_BUSY_MAC:-held}" ;;\n'
+        '  *v1/server/updating*) echo "mac release-hold" >> "$CRUCIBLE_TEST_STATE/order"; echo released ;;\n'
         '  true) exit 0 ;;\n'
         '  *)\n'
         '    echo "mac start" >> "$CRUCIBLE_TEST_STATE/order"\n'
@@ -165,11 +167,11 @@ def test_deploy_never_drives_the_guest_itself() -> None:
             continue
         reads_only = any(
             allowed in line
-            for allowed in ("installation.json", "exit 0", "busy_probe", "command -v")
+            for allowed in ("installation.json", "exit 0", '"$probe"', "command -v")
         )
         assert reads_only, (
             "deploy.sh reaches into the distro for something other than its "
-            "record or its read-only busy probe: %s" % line.strip()
+            "record or its server probes (the update hold): %s" % line.strip()
         )
 
 
@@ -365,3 +367,31 @@ def test_the_pc_is_refused_up_front_when_this_is_not_the_windows_pc(tmp_path: Pa
     mac_only = run_deploy(environment, "1.0.3", "--yes", "--only", "mac")
     assert mac_only.returncode == 0, mac_only.stdout + mac_only.stderr
     assert "mac: now runs 1.0.3" in mac_only.stdout, mac_only.stdout
+
+
+def test_the_hold_is_taken_before_the_install_and_let_go_when_the_install_fails(
+    tmp_path: Path,
+) -> None:
+    """The update hold (crucible/updating.py) is what the busy check now asks for; an
+    install that never restarted the server lets it go, so work is admitted again."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert '"$(hold_probe "$release")"' in text
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    environment["CRUCIBLE_TEST_FAIL"] = "mac"
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "holds new work for the update" in done.stdout, done.stdout
+    order = marks(tmp_path)
+    assert "mac release-hold" in order, order
+    assert order.index("mac release-hold") > order.index("mac end"), order
+    assert "pc release-hold" not in order, order
+    assert "mac: update hold: released" in done.stdout, done.stdout
+
+
+def test_a_server_working_when_asked_to_hold_is_left_alone(tmp_path: Path) -> None:
+    environment = fleet(tmp_path, "1.0.2", "1.0.3")
+    environment["CRUCIBLE_TEST_BUSY"] = "busy(job abc (audio) 40% done for b-side)"
+    done = run_deploy(environment, "1.0.3", "--yes")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "pc is WORKING" in done.stdout and "b-side" in done.stdout, done.stdout
+    assert "pc start" not in marks(tmp_path), marks(tmp_path)

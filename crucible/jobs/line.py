@@ -298,6 +298,7 @@ class WaitingLine:
         return item
 
     def join_call(self, call: Call, max_wait_s: int) -> WaitingCall:
+        self._store.updating.refuse_if_holding(f"a {call.type} call")
         self.refuse_if_full(call.client)
         now = clock.now()
         item = WaitingCall(

@@ -11,6 +11,7 @@ from ..cardkinds import KIND_TTS
 from ..engines import NarratorEngine
 from ..errors import ApiError, JobError
 from ..residency import Residency, describe_resident
+from ..updating import UpdateHold
 from ..voices import VoiceManifest
 from .session import WATCHDOG_POLL_SECONDS, StreamSession
 
@@ -29,6 +30,8 @@ class StreamManager:
         self._session: StreamSession | None = None
         self._watchdog: threading.Thread | None = None
         self._stop_watchdog = threading.Event()
+        # The deploy's hold (crucible/updating.py); the app hands every work owner the same one.
+        self.updating = UpdateHold()
 
     @property
     def session(self) -> StreamSession | None:
@@ -55,6 +58,7 @@ class StreamManager:
         client: str | None,
         loop: asyncio.AbstractEventLoop,
     ) -> StreamSession:
+        self.updating.refuse_if_holding("a TTS stream")
         residency = self._residency
         with self._lock:
             self._refuse_a_second_session()

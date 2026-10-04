@@ -39,6 +39,7 @@ from ..settle import Settlement
 from ..tasks import TaskStore
 from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
+from ..updating import UpdateHold
 from ..voicecatalog import seed_unresolved
 from .context import AppContext, Routers, Services
 from .cors import AllowListedOrigins
@@ -73,6 +74,7 @@ from .routes import (
 from .routes import playground as playground_routes
 from .routes import queue as queue_routes
 from .routes import sessions as session_routes
+from .routes import updating as updating_routes
 
 ROUTE_MODULES = (
     pairing,
@@ -91,6 +93,7 @@ ROUTE_MODULES = (
     playground_routes,
     resumable,
     tasks,
+    updating_routes,
     openai,
     decide,
 )
@@ -248,6 +251,11 @@ def _services(
     )
     for owner in (store, residency, inflight, task_store, settings_history):
         owner.events = events
+    # One deploy hold for every owner that creates work (crucible/updating.py): an owner
+    # left with its own would keep admitting while the deploy believes the server held.
+    updating = UpdateHold()
+    for owner in (store, inflight, sessions, streams, task_store):
+        owner.updating = updating
     return Services(
         events=events,
         sessions=sessions,
@@ -264,6 +272,7 @@ def _services(
         settlement=settlement,
         tasks=task_store,
         installs=InstallOnSubmit(config, backend, task_store),
+        updating=updating,
     )
 
 
@@ -393,7 +402,7 @@ def _lifespan(residency: Residency) -> Callable[[FastAPI], Any]:
 def _answer_refusals(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return error_response(exc)
+        return error_response(exc, exc.headers)
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:

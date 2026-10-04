@@ -408,6 +408,8 @@ class Activity(_Open):
     catalog: ActivityCatalog
     session: SessionState | None
     slots: ActivitySlots
+    # The deploy hold (POST /v1/server/updating): who took it, for which release, until when.
+    updating: dict[str, Any] | None = None
     running: list[ActivityJob]
     queued: list[ActivityJob]
     accelerator: dict[str, Any] | None = None

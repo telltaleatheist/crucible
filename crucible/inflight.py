@@ -13,6 +13,7 @@ from .clock import utcnow
 from .errors import ApiError
 from .events import CHAT, EventHub
 from .protocol import ACT_HEADER
+from .updating import UpdateHold
 
 RECENT_DURATIONS = 20
 
@@ -73,6 +74,8 @@ class InFlight:
         self._recent: list[float] = []
         self._on_close: Any = lambda: None
         self.events = EventHub()
+        # The deploy's hold (crucible/updating.py); the app hands every work owner the same one.
+        self.updating = UpdateHold()
 
     def when_closed(self, callback: Any) -> None:
         self._on_close = callback
@@ -81,6 +84,7 @@ class InFlight:
         self, *, act: str | None, model: str, client: str | None,
         session: str | None = None,
     ) -> Entry:
+        self.updating.refuse_if_holding("a chat completion")
         entry = Entry(
             id=next(self._ids),
             act=act,

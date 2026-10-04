@@ -218,7 +218,8 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work" 2>/dev/null || echo "deploy: could not remove $work" >&2' EXIT
 
-busy_probe() {
+# Where this machine's server listens and the token to ask it with, read from its config.
+probe_preamble() {
   cat <<'PROBE'
 home="${CRUCIBLE_HOME:-$HOME/.crucible}"
 config="$home/config.toml"
@@ -232,10 +233,45 @@ case "$host" in ""|0.0.0.0) host=127.0.0.1 ;; "::") host="[::1]" ;; *:*) host="[
 py="$home/server/bin/python"
 [ -x "$py" ] || py="$(command -v python3 || true)"
 [ -n "$py" ] || { echo "unknown(no python at $home/server/bin/python to read the answer with)"; exit 0; }
+PROBE
+}
+
+# Take the update hold (crucible/updating.py) BEFORE asking whether the server works: it
+# stops admitting work first and answers second, so nothing is admitted between the answer
+# and the restart (1.0.102 killed a phone song admitted 8 s after an idle answer). Prints
+# held, idle(...) when nothing listens, busy(...) or unknown(...).
+hold_probe() {
+  probe_preamble
+  printf 'release=%s\n' "$(shquote "$1")"
+  cat <<'PROBE'
+hold_rc=0
+answer=$(curl -sS -m 8 -w '\n%{http_code}' -X POST \
+  -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" -H "Content-Type: application/json" \
+  -d "{\"release\": \"$release\", \"seconds\": 900}" \
+  "http://$host:$port/v1/server/updating" 2>/dev/null) || hold_rc=$?
+if [ "$hold_rc" = "7" ]; then echo "idle(nothing listens on $host:$port)"; exit 0; fi
+[ "$hold_rc" = "0" ] || { echo "unknown(curl exited $hold_rc asking $host:$port to hold for the update)"; exit 0; }
+code=$(printf '%s' "$answer" | tail -n 1)
+body=$(printf '%s' "$answer" | sed '$d')
+case "$code" in
+  200) echo "held"; exit 0 ;;
+  409)
+    printf '%s' "$body" | "$py" -c '
+import json, sys
+try:
+    print("busy(" + "; ".join(json.load(sys.stdin)["error"]["details"]["working"]) + ")")
+except Exception as exc:
+    print("unknown(a 409 to the update hold that names no work: %s)" % exc)
+'
+    exit 0 ;;
+  404) ;;
+  *) echo "unknown(HTTP $code to the update hold: $(printf '%s' "$body" | head -c 200))"; exit 0 ;;
+esac
+# 404: this server predates the hold (1.0.104 and older). Ask it the old way; the gap
+# between its answer and the restart stays open for this one deploy.
 probe_rc=0
 body=$(curl -sS -m 8 -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" \
   "http://$host:$port/v1/activity" 2>/dev/null) || probe_rc=$?
-if [ "$probe_rc" = "7" ]; then echo "idle(nothing listens on $host:$port)"; exit 0; fi
 [ "$probe_rc" = "0" ] || { echo "unknown(curl exited $probe_rc asking $host:$port/v1/activity)"; exit 0; }
 [ -n "$body" ] || { echo "unknown($host:$port/v1/activity answered nothing)"; exit 0; }
 printf '%s' "$body" | "$py" -c '
@@ -264,21 +300,33 @@ if held:
     busy.append("a queue session held by %s for %s since %s" % (
         held.get("client") or "an unnamed client", held.get("act"),
         held.get("opened_at")))
-print(("busy(" + "; ".join(busy) + ")") if busy else "idle")
-' 
+print(("busy(" + "; ".join(busy) + ")") if busy else
+      "idle(it predates the update hold, so it was asked without one)")
+'
 PROBE
 }
 
-busy_pc() {
-  local said
-  said="$(wsl.exe -d "$DISTRO" --exec bash -c "$(busy_probe)" </dev/null 2>/dev/null)" \
+# Let go of the hold when the install did not restart the server, so it admits work
+# again now rather than when the hold lapses.
+release_probe() {
+  probe_preamble
+  cat <<'PROBE'
+curl -sS -m 8 -X DELETE -H "Authorization: Bearer $tok" -H "X-Crucible-Api: 1" \
+  "http://$host:$port/v1/server/updating" >/dev/null 2>&1 && echo "released" \
+  || echo "not released (it lapses by itself within 15 minutes)"
+PROBE
+}
+
+on_pc() {
+  local said probe="$1"
+  said="$(wsl.exe -d "$DISTRO" --exec bash -c "$probe" </dev/null 2>/dev/null)" \
     || { echo "unknown(the probe would not run inside $DISTRO)"; return; }
   [ -n "$said" ] && echo "$said" || echo "unknown(the probe in $DISTRO printed nothing)"
 }
 
-busy_mac() {
-  local said
-  said="$(ssh -n -o ConnectTimeout=8 -o BatchMode=yes mac "$(busy_probe)" 2>/dev/null)" \
+on_mac() {
+  local said probe="$1"
+  said="$(ssh -n -o ConnectTimeout=8 -o BatchMode=yes mac "$probe" 2>/dev/null)" \
     || { echo "unknown(ssh mac would not run the probe)"; return; }
   [ -n "$said" ] && echo "$said" || echo "unknown(the probe on mac printed nothing)"
 }
@@ -293,9 +341,11 @@ deploy_one() {
     else
       echo "still reports $after a minute after installing $want"
       echo "reports:$after" > "$work/$machine.why"
+      echo "update hold: $("on_$machine" "$(release_probe)")"
     fi
   else
     echo "installer failed" > "$work/$machine.why"
+    echo "update hold: $("on_$machine" "$(release_probe)")"
   fi
   echo $(( $(date +%s) - started )) > "$work/$machine.seconds"
 }
@@ -312,7 +362,7 @@ for machine in $FLEET; do
   fi
 
   if [ "$interrupt" != "1" ]; then
-    state="$("busy_$machine")"
+    state="$("on_$machine" "$(hold_probe "$release")")"
     case "$state" in
       busy*)
         echo
@@ -322,8 +372,12 @@ for machine in $FLEET; do
         echo "deploy:   Wait for it, or re-run with --interrupt to take it anyway."
         failed="$failed $machine(busy)"
         continue ;;
+      held)
+        echo
+        echo "deploy: $machine is idle and holds new work for the update until it restarts" ;;
       idle|idle\(*)
-        ;;
+        echo
+        echo "deploy: $machine is idle: ${state#idle}" ;;
       *)
         echo
         echo "deploy: $machine was not touched: whether it is working could not be learned: ${state#unknown}"
