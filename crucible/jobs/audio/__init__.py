@@ -445,6 +445,7 @@ def generate_request(
         "seed": settled.seed,
         "steps": settled.steps,
         "cfg": settled.cfg,
+        "instrumental": settled.instrumental,
         "sample_rate": needs.spec.sample_rate,
         "channels": needs.spec.channels,
         "format": params.format,
@@ -479,6 +480,7 @@ def effective_params(
         "seed": settled.seed,
         "steps": settled.steps,
         "cfg": settled.cfg,
+        "instrumental": settled.instrumental,
         "format": params.format,
         "artifact": artifact,
         "score": SCORE_ARTIFACT if wrote_score else None,
@@ -492,6 +494,7 @@ def effective_params(
         "memory_bytes_estimate": spec.memory_bytes_estimate,
         "memory_basis": spec.memory_basis,
         "versions": result.get("versions"),
+        "notes": result.get("notes"),
     }
 
 

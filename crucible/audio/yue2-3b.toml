@@ -30,7 +30,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg"]
+takes = ["cfg", "instrumental"]
 default_cfg = 1.0
 max_cfg = 20.0
 
@@ -85,7 +85,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg"]
+takes = ["cfg", "instrumental"]
 default_cfg = 1.0
 max_cfg = 20.0
 

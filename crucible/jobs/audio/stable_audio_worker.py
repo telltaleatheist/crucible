@@ -59,6 +59,7 @@ def _version_of(distribution: str):
 
 class StableAudio3Engine:
     name = "stable-audio-3"
+    notes = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:

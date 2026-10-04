@@ -97,6 +97,7 @@ class FakeEngine:
             raise RuntimeError("fake audio worker was told not to load")
         self.device = request["device"]
         self.versions = {"fake": "1.0", "engine": request["engine"]}
+        self.notes = None
 
     def generate(self, job, progress):
         _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "kind": job.kind})

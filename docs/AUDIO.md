@@ -32,7 +32,7 @@ crucible init --enable-audio          # or [jobs] enable_audio = true
 crucible install audio                # builds one env per audio engine this machine runs
 crucible models pull stable-audio-3-small-sfx
 crucible models pull stable-audio-3-medium
-crucible models pull yue2-3b          # PC only
+crucible models pull yue2-3b
 ```
 
 None of these is needed by hand: a job for a missing env or model starts the install and
@@ -85,11 +85,34 @@ A song:
             "seed": 3}}
 ```
 
+An instrumental (YuE2 writes the score, its vocal melody moves note for note to the
+instrument, and that score is rendered with only section tags - nothing is sung; YuE2's own
+yue2-music workflow, vendored in `crucible/jobs/audio/yue2music/`):
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "Instrumental, slow somber piano and strings, no vocals, no singing, no choir, 66 BPM",
+            "instrumental": true,
+            "seed": 3}}
+```
+
+`lyrics` is optional for an instrumental: send section tags (`[Intro]
+
+[Verse]
+
+[Chorus]
+...`)
+to shape its form; without them YuE2 plans `[Intro] [Verse] [Chorus] [Outro]`. The render's
+`effective_params.notes` carries YuE2's transfer report (how many notes moved) and the score it
+first planned.
+
 | param | who takes it | default | rule |
 | --- | --- | --- | --- |
 | `prompt` | sfx, music | required | not blank; a song model refuses it by name (send `tags`) |
 | `tags` | song | required | the style: comma-separated genre, instruments, voice, language, tempo |
-| `lyrics` | song | required | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. Refused by name on sfx and music |
+| `instrumental` | song | false | true renders the planned melody on an instrument instead of a voice (above) |
+| `lyrics` | song | required (optional when `instrumental`) | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. Refused by name on sfx and music |
 | `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
 | `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
 | `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |

@@ -28,6 +28,7 @@ class AudioParams(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
     steps: int | None = Field(default=None, ge=1)
     cfg: float | None = Field(default=None, ge=0)
+    instrumental: bool | None = None
     format: Literal["flac", "wav"] = "flac"
 
     @field_validator(*TEXT_FIELDS)
@@ -83,9 +84,12 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
         )
     if params.lyrics is not None and not manifest.takes_lyrics:
         raise _not_taken("lyrics", manifest, spec)
+    # An instrumental song sings nothing: lyrics, if sent, only shape the score YuE2 plans
+    # (its sections), so they are not required.
+    sung = manifest.takes_lyrics and not params.instrumental
     missing = [
         name
-        for name in (wanted, *(["lyrics"] if manifest.takes_lyrics else []))
+        for name in (wanted, *(["lyrics"] if sung else []))
         if getattr(params, name) is None
     ]
     if missing:
@@ -140,6 +144,7 @@ class Settled:
     duration_s: float | None
     steps: int | None
     cfg: float | None
+    instrumental: bool
     seed: int
 
 
@@ -155,6 +160,7 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
         ),
         steps=None if "steps" not in spec.takes else chosen(params.steps, spec.default_steps),
         cfg=None if "cfg" not in spec.takes else float(chosen(params.cfg, spec.default_cfg)),
+        instrumental=bool(params.instrumental),
         seed=seed,
     )
 

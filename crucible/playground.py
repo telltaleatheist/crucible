@@ -116,9 +116,15 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
               placeholder=AUDIO_EXAMPLES[manifest.kind]),
     ]
     if manifest.takes_lyrics:
-        fields.append(field("lyrics", "Lyrics", TEXT, required=True,
+        unsung = "instrumental" in spec.takes
+        fields.append(field("lyrics", "Lyrics", TEXT, required=not unsung,
                             placeholder=LYRICS_EXAMPLE,
-                            hint="the song is as long as its lyrics"))
+                            hint=("the song is as long as its lyrics; for an instrumental they "
+                                  "are optional and only shape its sections (never sung)")
+                            if unsung else "the song is as long as its lyrics"))
+    if "instrumental" in spec.takes:
+        fields.append(field("instrumental", "Instrumental (no vocals)", BOOLEAN, default=False,
+                            hint="YuE2 writes the melody, then plays it on an instrument instead of singing it"))
     if "duration_s" in spec.takes:
         fields.append(field("duration_s", "Length (seconds)", NUMBER,
                             default=spec.default_duration_s, min=1,

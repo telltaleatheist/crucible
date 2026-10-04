@@ -50,7 +50,7 @@ TEXT_PARAM: dict[str, str] = {SFX: "prompt", MUSIC: "prompt", SONG: "tags"}
 
 LYRICS_KINDS: frozenset[str] = frozenset({SONG})
 
-OPTIONAL_PARAMS: tuple[str, ...] = ("negative_prompt", "duration_s", "steps", "cfg")
+OPTIONAL_PARAMS: tuple[str, ...] = ("negative_prompt", "duration_s", "steps", "cfg", "instrumental")
 
 MEMORY_BASES = frozenset({"measured", "declared"})
 

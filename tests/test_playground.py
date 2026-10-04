@@ -49,7 +49,7 @@ def _fields(page: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _defaults(fields: list[dict[str, Any]]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     for field in fields:
-        if field["required"]:
+        if field["required"] or (field["kind"] == "text" and field.get("placeholder")):
             params[field["name"]] = field["placeholder"]
         elif field["default"] is not None:
             params[field["name"]] = field["default"]
@@ -123,8 +123,9 @@ def test_an_installed_model_is_ready_and_a_missing_one_downloads_its_weights(
     assert sfx["seed"]["default"] is None and not sfx["seed"]["required"]
 
     song = _fields(pages[SONG])
-    assert list(song) == ["tags", "lyrics", "cfg", "format", "seed"]
-    assert song["lyrics"]["required"]
+    assert list(song) == ["tags", "lyrics", "instrumental", "cfg", "format", "seed"]
+    assert not song["lyrics"]["required"], "an instrumental needs none; the server refuses a sung song without"
+    assert song["instrumental"]["kind"] == "boolean" and song["instrumental"]["default"] is False
 
 
 def test_a_model_with_weights_but_no_engine_downloads_the_engine_and_says_its_size(
@@ -143,6 +144,13 @@ def test_a_model_with_no_build_for_this_backend_cannot_be_generated(
     make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Every audio model has a Mac build now (YuE2 since 2026-10-03), so the song's is hidden.
+    from crucible.audiomodels import AudioManifest
+
+    monkeypatch.setattr(
+        AudioManifest, "supports",
+        lambda self, kind: kind in self.backends and not (self.id == SONG and kind == FAKE_MAC_BACKEND.kind),
+    )
     _audio_envs(home, FAKE_MAC_BACKEND.kind, monkeypatch)
     with make_client(enable_audio=True, backend=FAKE_MAC_BACKEND) as client:
         page = _pages(client, auth)[SONG]

@@ -15,6 +15,10 @@ audiocore = workerio.load_sibling("audiocore", __file__)
 
 LABEL = "yue2"
 
+# The sections an instrumental is planned with when the job sends no lyrics: the yue2-music
+# skill's own default (skills/yue2-music/instrumental/scripts/instrumental.py).
+INSTRUMENTAL_SECTIONS = "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Outro]\n"
+
 GIB = 1024**3
 
 YUE2_RESERVE_GIB = 2
@@ -90,6 +94,7 @@ def _version_of(distribution: str):
 class YuE2Engine:
     name = "yue2"
     spans = SPANS
+    notes = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -142,6 +147,36 @@ class YuE2Engine:
         gc.collect()
         self._reset_peak()
 
+    def _instrumental_plan(self, job, planned):
+        """YuE2's instrumental workflow (the yue2-music skill, vendored in yue2music/): the
+        score YuE2 just wrote has its vocal melody moved, note for note, into the
+        instrumental voice - the skill's own checks refuse any change of pitch, onset,
+        duration, meter, tempo or harmony - and YuE2 then renders THAT fixed score with
+        lyrics that are only its section tags, so nothing is sung."""
+        tools = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yue2music")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+        from abc_tools import parse_abc
+        from instrumental import lyric_tags, validate_score
+        from instrumentalize import convert_score
+
+        if planned.truncated or not planned.abc:
+            raise RuntimeError(
+                "YuE2's score for this instrumental came back empty or truncated, so there "
+                "is no melody to move to the instrument; send it again with another seed"
+            )
+        converted, transfer = convert_score(planned.abc)
+        validate_score(converted)
+        cot = "full" if parse_abc(converted).voices["Vocal"].chords else "melody"
+        fixed = self._pipe.plan(
+            job.tags, lyric_tags(converted), abc=converted, cot=cot,
+            seed=job.seed, cfg_scale=job.cfg,
+        )
+        if fixed.abc != converted:
+            raise RuntimeError("YuE2 did not keep the instrumental score it was given")
+        self.notes = {"instrumental_transfer": transfer, "planned_score": planned.abc}
+        return fixed
+
     def _stages(self, job, progress, peaks):
         pipe = self._pipe
         stop = lambda: progress.asked_to_stop
@@ -149,12 +184,15 @@ class YuE2Engine:
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
         plan = pipe.plan(
             job.tags,
-            job.lyrics,
+            job.lyrics if job.lyrics is not None else INSTRUMENTAL_SECTIONS,
             seed=job.seed,
             cfg_scale=job.cfg,
             cancelled=stop,
             on_token=lambda *_: ticks.tick(),
         )
+        self.notes = None
+        if job.instrumental:
+            plan = self._instrumental_plan(job, plan)
         self._close_stage(peaks, "scoring")
         progress.enter("composing", SONG_TOKENS)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)

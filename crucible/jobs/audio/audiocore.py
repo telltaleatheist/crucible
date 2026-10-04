@@ -125,6 +125,7 @@ class Job:
         self.seed = required("seed", int)
         self.steps = nullable("steps", int)
         self.cfg = nullable("cfg", (int, float))
+        self.instrumental = required("instrumental", bool)
         self.sample_rate = required("sample_rate", int)
         self.channels = required("channels", int)
         self.format = required("format", str)
@@ -202,6 +203,9 @@ class Worker:
             "stage_peak_bytes": peaks,
             "peak_bytes": max(peaks.values()) if peaks else None,
             "versions": self.engine.versions,
+            # What the engine did to this one render beyond its parameters (YuE2's
+            # instrumental voice transfer); None when nothing.
+            "notes": self.engine.notes,
         }
 
     def generate(self, request: dict) -> None:

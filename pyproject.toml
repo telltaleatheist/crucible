@@ -38,6 +38,7 @@ include = ["crucible*"]
 
 [tool.setuptools.package-data]
 crucible = [
+  "jobs/audio/yue2music/LICENSE",
   "ui/*",
   "ui/**/*",
   "models/*.toml",
