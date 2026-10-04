@@ -1,6 +1,6 @@
 {
   "name": "bookforge",
-  "version": "1.0.99+add0741094a3",
+  "version": "1.0.100+add0741094a3",
   "job_types": [
     {
       "type": "llm",
