@@ -9,6 +9,8 @@
   var TICK_MS = 1000;
   var RECONNECT_MS = 2000;
   var INSTALL_ROUNDS = 5;
+  var MAX_SEED = 4294967295;
+  var MAX_BATCH = 20;
 
   var MEDIA_TYPES = {
     png: 'image/png',
@@ -31,8 +33,8 @@
     pages: null,
     refusal: null,
     page: null,
-    job: null,
-    stream: null,
+    jobs: [],
+    numbered: 0,
     timer: null
   };
 
@@ -198,7 +200,7 @@
   function signOut(refusal) {
     forgetToken();
     state.token = null;
-    stopStream();
+    stopStreams();
     stopTimer();
     showGate(refusal);
   }
@@ -741,15 +743,18 @@
         el('button', { id: 'generate', class: 'button primary', type: 'submit' }, [
           'Generate'
         ]),
-        el('button', {
-          id: 'cancel',
-          class: 'button',
-          type: 'button',
-          hidden: true,
-          onclick: function () {
-            cancel();
-          }
-        }, ['Cancel'])
+        el('label', { class: 'batch' }, [
+          el('input', {
+            id: 'batch-count',
+            type: 'number',
+            min: '1',
+            max: String(MAX_BATCH),
+            step: '1',
+            value: '1',
+            inputmode: 'numeric'
+          }),
+          el('span', { text: 'in a row' })
+        ])
       ])
     );
     form.addEventListener('submit', function (event) {
@@ -757,11 +762,12 @@
       if (!form.reportValidity()) {
         return;
       }
-      generate(page, paramsOf(page.fields, form));
+      var count = parseInt(document.getElementById('batch-count').value, 10);
+      count = isNaN(count) ? 1 : Math.max(1, Math.min(MAX_BATCH, count));
+      generate(page, paramsOf(page.fields, form), count);
     });
     body.appendChild(form);
-    body.appendChild(el('div', { id: 'job-body', class: 'job' }));
-    renderJob();
+    body.appendChild(el('div', { id: 'job-body', class: 'jobs' }));
   }
 
   function render() {
@@ -853,32 +859,59 @@
     return el('div', { class: 'result' }, [
       media,
       el('p', { class: 'note' }, [
-        el('a', { href: result.url, download: result.file, id: 'download' }, [
+        el('a', { href: result.url, download: result.file, class: 'download' }, [
           'Download ' + result.file
         ])
       ])
     ]);
   }
 
-  function renderJob() {
-    var box = document.getElementById('job-body');
-    if (box === null) {
-      return;
-    }
-    box.textContent = '';
-    var job = state.job;
+  // Every generation is its own card in a list, newest first. A card's player is built once
+  // and never rebuilt, so one result plays on while later ones are sent, queue and run; only
+  // a card's status line is redrawn as its job moves (Owen, 2026-10-03: "generate another
+  // while listening", "generate [x] in a row").
+  function jobList() {
+    return document.getElementById('job-body');
+  }
+
+  function jobLabel(job) {
+    return '#' + job.number + (job.batch > 1 ? ' (' + job.index + ' of ' + job.batch + ')' : '') +
+      (job.seed === null ? '' : ' · seed ' + job.seed);
+  }
+
+  function buildCard(job) {
+    job.title = el('div', { class: 'job-title' });
+    job.status_box = el('div', { class: 'job-status' });
+    job.result_box = el('div', { class: 'job-result' });
+    job.cancel_button = el('button', {
+      type: 'button',
+      class: 'button small',
+      onclick: function () {
+        cancel(job);
+      }
+    }, ['Cancel']);
+    job.dismiss_button = el('button', {
+      type: 'button',
+      class: 'button small',
+      'aria-label': 'Remove this result',
+      onclick: function () {
+        dismiss(job);
+      }
+    }, ['×']);
+    job.card = el('div', { class: 'job-card' }, [
+      el('div', { class: 'job-head' }, [job.title, job.cancel_button, job.dismiss_button]),
+      job.status_box,
+      job.result_box
+    ]);
+  }
+
+  function renderCard(job) {
+    job.title.textContent = jobLabel(job);
     var active = isActive(job);
-    var generate = document.getElementById('generate');
-    var cancelButton = document.getElementById('cancel');
-    if (generate !== null) {
-      generate.disabled = active;
-    }
-    if (cancelButton !== null) {
-      cancelButton.hidden = !cancellable(job);
-    }
-    if (job === null) {
-      return;
-    }
+    job.cancel_button.hidden = !cancellable(job);
+    job.dismiss_button.hidden = active;
+    var box = job.status_box;
+    box.textContent = '';
     var text = statusText(job);
     if (text) {
       var line = el('div', { class: 'progress-line', text: text, role: 'status' });
@@ -908,16 +941,53 @@
     if (refusal) {
       box.appendChild(refusal);
     }
-    if (job.result) {
-      box.appendChild(resultView(job));
+    if (job.result && !job.result_box.firstChild) {
+      job.result_box.appendChild(resultView(job));
     }
   }
 
-  function stopStream() {
-    if (state.stream !== null) {
-      state.stream.abort();
-      state.stream = null;
+  function renderJobs() {
+    state.jobs.forEach(function (job) {
+      if (isActive(job)) {
+        renderCard(job);
+      }
+    });
+    if (!state.jobs.some(isActive)) {
+      stopTimer();
     }
+  }
+
+  function addCard(job) {
+    buildCard(job);
+    renderCard(job);
+    var list = jobList();
+    list.insertBefore(job.card, list.firstChild);
+    if (state.timer === null) {
+      state.timer = window.setInterval(renderJobs, TICK_MS);
+    }
+  }
+
+  function dismiss(job) {
+    if (isActive(job)) {
+      return;
+    }
+    if (job.result) {
+      URL.revokeObjectURL(job.result.url);
+    }
+    job.card.remove();
+    state.jobs = state.jobs.filter(function (other) {
+      return other !== job;
+    });
+  }
+
+  function stopStreams() {
+    state.jobs.forEach(function (job) {
+      job.gone = true;
+      if (job.stream !== null) {
+        job.stream.abort();
+        job.stream = null;
+      }
+    });
   }
 
   function stopTimer() {
@@ -927,18 +997,17 @@
     }
   }
 
-  function forgetResult() {
-    if (state.job && state.job.result) {
-      URL.revokeObjectURL(state.job.result.url);
-    }
-  }
-
-  function newJob() {
+  function newJob(index, batch) {
+    state.numbered += 1;
     return {
+      number: state.numbered,
+      index: index,
+      batch: batch,
+      of: null,
       id: null,
       status: 'submitting',
       position: null,
-      of: null,
+      line: null,
       fraction: null,
       message: null,
       seed: null,
@@ -946,7 +1015,9 @@
       refusal: null,
       result: null,
       since: Date.now(),
-      ended: null
+      ended: null,
+      stream: null,
+      gone: false
     };
   }
 
@@ -967,8 +1038,7 @@
   function finish(job, status) {
     job.status = status;
     job.ended = Date.now();
-    stopTimer();
-    renderJob();
+    renderCard(job);
   }
 
   function pause(ms) {
@@ -977,16 +1047,32 @@
     });
   }
 
-  async function generate(page, params) {
-    stopStream();
-    stopTimer();
-    forgetResult();
-    var job = newJob();
-    state.job = job;
-    renderJob();
-    state.timer = window.setInterval(renderJob, TICK_MS);
+  // `count` jobs, sent one after another so the server's queue holds them in order. A fixed
+  // seed becomes seed, seed+1, ... so the run is not one song `count` times; with no seed
+  // the server draws a fresh one for each.
+  async function generate(page, params, count) {
+    var jobs = [];
+    for (var index = 1; index <= count; index += 1) {
+      var job = newJob(index, count);
+      job.params = Object.assign({}, params);
+      if (typeof params.seed === 'number') {
+        job.params.seed = Math.min(params.seed + index - 1, MAX_SEED);
+      }
+      state.jobs.push(job);
+      addCard(job);
+      jobs.push(job);
+    }
+    for (var at = 0; at < jobs.length; at += 1) {
+      await submit(page, jobs[at]);
+    }
+  }
+
+  async function submit(page, job) {
     var receipt = null;
     for (var round = 0; receipt === null; round += 1) {
+      if (job.gone) {
+        return;
+      }
       try {
         receipt = await call('/v1/jobs', {
           method: 'POST',
@@ -994,11 +1080,11 @@
           body: JSON.stringify({
             type: page.job_type,
             model: page.id,
-            params: params
+            params: job.params
           })
         });
       } catch (refusal) {
-        if (state.job !== job) {
+        if (job.gone) {
           return;
         }
         if (!isInstalling(refusal) || round >= INSTALL_ROUNDS) {
@@ -1008,9 +1094,9 @@
         }
         job.status = 'installing';
         job.install = newInstall(refusal.details);
-        renderJob();
+        renderCard(job);
         var outcome = await followInstall(job, job.install);
-        if (state.job !== job) {
+        if (job.gone) {
           return;
         }
         if (outcome === 'cancelled') {
@@ -1024,7 +1110,7 @@
         }
         job.status = 'submitting';
         job.install = null;
-        renderJob();
+        renderCard(job);
       }
     }
     job.id = receipt.job_id;
@@ -1034,7 +1120,7 @@
     } else {
       job.status = 'running';
     }
-    renderJob();
+    renderCard(job);
     follow(job, page);
   }
 
@@ -1049,11 +1135,11 @@
 
   async function followInstall(job, install) {
     var cursor = { last: 0 };
-    while (state.job === job) {
+    while (!job.gone) {
       try {
-        await readEvents(taskEventsPath(install.taskId), cursor, function (name, data) {
+        await readEvents(job, taskEventsPath(install.taskId), cursor, function (name, data) {
           applyInstallEvent(install, name, data);
-          renderJob();
+          renderCard(job);
         });
       } catch (refusal) {
         if (refusal instanceof Refusal && refusal.status !== 0) {
@@ -1099,12 +1185,12 @@
 
   async function follow(job, page) {
     var cursor = { last: 0 };
-    while (state.job === job && isActive(job) && job.status !== 'fetching') {
+    while (!job.gone && isActive(job) && job.status !== 'fetching') {
       try {
-        await readEvents(jobEventsPath(job.id), cursor, function (name, data) {
-          if (state.job === job) {
+        await readEvents(job, jobEventsPath(job.id), cursor, function (name, data) {
+          if (!job.gone) {
             applyEvent(job, page, name, data);
-            renderJob();
+            renderCard(job);
           }
         });
       } catch (refusal) {
@@ -1114,16 +1200,16 @@
           return;
         }
       }
-      if (state.job !== job || !isActive(job) || job.status === 'fetching') {
+      if (job.gone || !isActive(job) || job.status === 'fetching') {
         return;
       }
       await pause(RECONNECT_MS);
     }
   }
 
-  async function readEvents(path, cursor, onEvent) {
+  async function readEvents(job, path, cursor, onEvent) {
     var controller = new AbortController();
-    state.stream = controller;
+    job.stream = controller;
     var extra = { Accept: 'text/event-stream' };
     if (cursor.last > 0) {
       extra['Last-Event-ID'] = String(cursor.last);
@@ -1255,7 +1341,7 @@
       finish(job, 'failed');
       return;
     }
-    if (state.job !== job) {
+    if (job.gone) {
       return;
     }
     var extension = extensionOf(name);
@@ -1277,8 +1363,7 @@
     return job.id !== null;
   }
 
-  async function cancel() {
-    var job = state.job;
+  async function cancel(job) {
     if (!cancellable(job)) {
       return;
     }
@@ -1287,7 +1372,7 @@
       await call(path, { method: 'DELETE' });
     } catch (refusal) {
       job.refusal = refusal;
-      renderJob();
+      renderCard(job);
     }
   }
 
