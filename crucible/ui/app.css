@@ -908,16 +908,34 @@ a.button {
 }
 
 .tag-suggestions {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+  margin-top: 8px;
+  padding: 4px 12px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.tag-suggestions-title {
+  font-size: 11px;
+  color: var(--ink-3);
+  padding: 4px 0 2px;
 }
 
 .tag-group {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+
+.tag-suggestions-title + .tag-group {
+  border-top: 0;
+}
+
+.tag-group-pills {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: 5px;
 }
 
@@ -927,7 +945,14 @@ a.button {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-3);
-  min-width: 92px;
+  padding-top: 4px;
+}
+
+@media (max-width: 620px) {
+  .tag-group {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
 }
 
 .tag-pill {

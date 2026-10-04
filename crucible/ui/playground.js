@@ -567,10 +567,14 @@
     box.appendChild(list);
     box.appendChild(typed);
 
-    var groups = el('div', { class: 'tag-suggestions' });
+    var groups = el('div', { class: 'tag-suggestions' }, [
+      el('div', { class: 'tag-suggestions-title', text: 'Suggestions - click to add or remove' })
+    ]);
     (field.suggestions || []).forEach(function (group) {
+      var pillsOfGroup = el('div', { class: 'tag-group-pills' });
       var row = el('div', { class: 'tag-group' }, [
-        el('span', { class: 'tag-group-name', text: group.group })
+        el('span', { class: 'tag-group-name', text: group.group }),
+        pillsOfGroup
       ]);
       group.tags.forEach(function (tag) {
         var pill = el('button', {
@@ -589,7 +593,7 @@
         });
         pill.dataset.tag = tag;
         pills.push(pill);
-        row.appendChild(pill);
+        pillsOfGroup.appendChild(pill);
       });
       groups.appendChild(row);
     });
