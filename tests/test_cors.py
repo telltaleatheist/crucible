@@ -40,6 +40,25 @@ def test_a_listed_origin_s_preflight_is_answered_with_what_it_may_send(
     assert "POST" in answer.headers["access-control-allow-methods"]
 
 
+def test_every_header_the_sdk_sends_is_allowed() -> None:
+    """WebKit refuses a call whose preflight does not allow a header the page set; the SDK
+    sets these (sdk/ts/src). Read from its source, so a new one cannot be forgotten."""
+    import re
+
+    from crucible.api.cors import ALLOW_HEADERS
+
+    sdk = Path(__file__).resolve().parents[1] / "sdk" / "ts" / "src"
+    named = {
+        match
+        for source in sdk.glob("*.ts")
+        for match in re.findall(r"'(User-Agent|Authorization|Content-Type|Last-Event-ID|Range|X-Crucible-[A-Za-z-]+)'",
+                                source.read_text(encoding="utf-8"))
+    }
+    assert {"User-Agent", "X-Crucible-Session", "Authorization"} <= named, named
+    allowed = {header.strip().lower() for header in ALLOW_HEADERS.split(",")}
+    assert {header.lower() for header in named} <= allowed
+
+
 def test_an_unlisted_origin_is_answered_exactly_as_before(make_client: Callable[..., TestClient]) -> None:
     with make_client(cors_origins=(PHONE,)) as client:
         answer = preflight(client, "/v1/pairing/start", "https://evil.example")

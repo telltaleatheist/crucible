@@ -154,7 +154,7 @@ def wait_until_running(client: TestClient, auth: dict[str, str], job_id: str) ->
         (SONG, {"tags": TAGS, "lyrics": LYRICS, "duration_s": 60}, "audio_param_unsupported", "as long as its lyrics"),
         (SONG, {"tags": TAGS, "lyrics": LYRICS, "steps": 8}, "audio_param_unsupported", "32-step"),
         (SONG, {"tags": TAGS, "lyrics": LYRICS, "cfg": 21}, "audio_param_out_of_range", "ceiling of 20"),
-        (SFX, {"prompt": PROMPT, "format": "mp3"}, "invalid_params", "format"),
+        (SFX, {"prompt": PROMPT, "format": "ogg"}, "invalid_params", "format"),
         (SFX, {"prompt": PROMPT, "quality": 9}, "invalid_params", "Extra inputs are not permitted"),
         (SFX, {"prompt": "  "}, "invalid_params", "is empty"),
     ],
@@ -218,6 +218,36 @@ def test_defaults_come_from_the_arm_and_wav_is_offered(
     assert (audio["duration_s"], audio["steps"], audio["format"]) == (60.0, 8, "wav")
     body = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.wav", headers=auth).content
     assert body[:4] == b"RIFF" and body[8:12] == b"WAVE"
+
+
+def test_a_song_can_be_an_mp3_at_192_kbps_cbr_served_as_audio_mpeg_with_ranges(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    pytest.importorskip("soundfile")
+    job_id, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "format": "mp3"})
+    assert events[-1]["event"] == "done", events[-1]
+    audio = events[-1]["data"]["audio"]
+    assert (audio["format"], audio["artifact"]) == ("mp3", "audio.mp3")
+    whole = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.mp3", headers=auth)
+    assert whole.headers["content-type"] == "audio/mpeg"
+    body = whole.content
+    assert body[:2] == bytes([0xFF, 0xFB])
+    # MPEG-1 Layer III header: bitrate index 1011 is 192 kbps, sample-rate index 00 is 44.1 kHz.
+    assert (body[2] >> 4, (body[2] >> 2) & 0x3) == (0b1011, 0b00)
+    # Every frame says the same: constant bitrate.
+    frame = 144 * 192_000 // 44100
+    assert body[frame] == 0xFF and (body[frame + 2] >> 4) == 0b1011
+    part = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.mp3", headers={**auth, "Range": "bytes=0-99"})
+    assert part.status_code == 206
+    assert part.headers["content-range"] == f"bytes 0-99/{len(body)}"
+    assert part.content == body[:100]
+
+
+def test_a_flac_artifact_is_served_as_audio_flac(ready: TestClient, auth: dict[str, str]) -> None:
+    job_id, events = run_job(ready, auth)
+    assert events[-1]["event"] == "done", events[-1]
+    answer = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.flac", headers=auth)
+    assert answer.headers["content-type"] == "audio/flac"
 
 
 def test_a_song_publishes_its_score_beside_the_audio(

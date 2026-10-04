@@ -72,6 +72,9 @@ WORKER_SCRIPTS: dict[str, Path] = {
 AUDIO_MAGIC: dict[str, tuple[bytes, int]] = {
     "flac": (b"fLaC", 0),
     "wav": (b"WAVE", 8),
+    # An MPEG-1 Layer III frame header with no CRC: what libsndfile's LAME writer
+    # begins with (it writes no ID3 tag).
+    "mp3": (b"\xff\xfb", 0),
 }
 
 WORKER_ENVIRONMENT = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}

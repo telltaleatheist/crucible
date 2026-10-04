@@ -1812,7 +1812,7 @@ export class CrucibleClient {
     });
   }
 
-  /** Queue an `audio` job (one `audio.flac` or `audio.wav`, plus `score.abc` for a song) and return its id. */
+  /** Queue an `audio` job (one `audio.flac`, `audio.wav` or `audio.mp3`, plus `score.abc` for a song) and return its id. */
   async audio(options: AudioOptions): Promise<string> {
     const given = options as Partial<AudioOptions> | undefined;
     if (given === undefined || given === null) {
@@ -3478,7 +3478,7 @@ export function readAudioResult(done: DoneData): AudioResult {
     seed: num(audio, 'seed', at),
     steps: nullableNum(audio, 'steps', at),
     cfg: nullableNum(audio, 'cfg', at),
-    format: oneOf(str(audio, 'format', at), ['flac', 'wav'] as const, `${at}.format`),
+    format: oneOf(str(audio, 'format', at), ['flac', 'wav', 'mp3'] as const, `${at}.format`),
     instrumental: optBool(audio, 'instrumental', at),
     artifact: str(audio, 'artifact', at),
     score: nullableStr(audio, 'score', at),

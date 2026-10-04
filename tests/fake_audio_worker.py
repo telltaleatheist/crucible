@@ -65,6 +65,13 @@ class TinyAudio:
 
     def save(self, path: str, audio_format: str) -> None:
         samples = self._samples()
+        if audio_format == "mp3":
+            # The real writer (libsndfile's LAME, 192 kbps CBR): an encoder is not worth faking.
+            import numpy
+
+            mono = numpy.array(samples, dtype="float32") / 32768.0
+            audiocore.ArrayAudio(numpy.stack([mono] * self.channels, axis=1), self.sample_rate).save(path, "mp3")
+            return
         if audio_format == "wav":
             with wave.open(path, "wb") as handle:
                 handle.setnchannels(self.channels)

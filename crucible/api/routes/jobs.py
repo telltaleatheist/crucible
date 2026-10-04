@@ -72,9 +72,21 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
     }
 
 
+# What a player needs to be told to play an artifact straight from its URL (an <audio>
+# element or AVPlayer streaming with Range). Anything else is bytes.
+ARTIFACT_MEDIA_TYPES: dict[str, str] = {
+    ".flac": "audio/flac",
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
+
+
 def _artifact_media_type(name: str) -> str:
     if name.endswith(".provenance.json"):
         return "application/json"
+    for suffix, media_type in ARTIFACT_MEDIA_TYPES.items():
+        if name.endswith(suffix):
+            return media_type
     return "application/octet-stream"
 
 

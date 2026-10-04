@@ -23,16 +23,23 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from ..config import Config
 
 ALLOW_METHODS = "GET, POST, PUT, DELETE"
+# Every header @crucible/client sets (tests/test_cors.py reads them out of the SDK's own
+# source, so a header the SDK starts sending cannot be forgotten here). User-Agent is in it
+# on purpose: the SDK sets it on every request, and WebKit treats a script-set User-Agent
+# as a header the preflight must allow - without it every authenticated call from B-Side's
+# iPhone app failed with "Load failed" (1.0.101).
 ALLOW_HEADERS = ", ".join(
     [
         "Authorization",
         "Content-Type",
         "Range",
         "Last-Event-ID",
+        "User-Agent",
         "X-Crucible-Api",
         "X-Crucible-Client",
         "X-Crucible-Act",
         "X-Crucible-Queue-Ticket",
+        "X-Crucible-Session",
     ]
 )
 EXPOSE_HEADERS = "Content-Range, Accept-Ranges, Content-Length"

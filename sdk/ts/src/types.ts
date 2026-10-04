@@ -1628,7 +1628,8 @@ export interface AudioOptions {
   readonly seed?: number;
   readonly steps?: number;
   readonly cfg?: number;
-  readonly format?: 'flac' | 'wav';
+  /** `mp3` is 192 kbps CBR. */
+  readonly format?: 'flac' | 'wav' | 'mp3';
   /**
    * A song model only (YuE2): write the melody, then play it on an instrument instead of
    * singing it. Lyrics become optional and only shape the sections. A server whose song model
@@ -1653,10 +1654,10 @@ export interface AudioResult {
   readonly seed: number;
   readonly steps: number | null;
   readonly cfg: number | null;
-  readonly format: 'flac' | 'wav';
+  readonly format: 'flac' | 'wav' | 'mp3';
   /** Whether the song was made instrumental; null from a server older than `instrumental`. */
   readonly instrumental: boolean | null;
-  /** The audio artifact's name, `audio.flac` or `audio.wav`. */
+  /** The audio artifact's name: `audio.flac`, `audio.wav` or `audio.mp3`. */
   readonly artifact: string;
   /** `score.abc`, the song's ABC score, when the model wrote one; else null. */
   readonly score: string | null;

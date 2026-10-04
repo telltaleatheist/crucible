@@ -11,7 +11,9 @@ from ...errors import ApiError
 
 MAX_SEED = 2**32 - 1
 
-FORMATS: tuple[str, ...] = ("flac", "wav")
+# flac first: it is the default. mp3 is 192 kbps CBR (audiocore.MP3_CBR_192_LEVEL), for
+# players and phones that want small files (B-Side, Owen 2026-10-04).
+FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 
 TEXT_FIELDS: tuple[str, ...] = ("prompt", "tags", "lyrics", "negative_prompt")
 
@@ -34,7 +36,7 @@ class AudioParams(BaseModel):
     steps: int | None = Field(default=None, ge=1)
     cfg: float | None = Field(default=None, ge=0)
     instrumental: bool | None = None
-    format: Literal["flac", "wav"] = "flac"
+    format: Literal["flac", "wav", "mp3"] = "flac"
 
     @field_validator(*TEXT_FIELDS)
     @classmethod
