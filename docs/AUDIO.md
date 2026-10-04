@@ -15,12 +15,15 @@ back, and how to write a prompt each model understands.
 stable-audio-3-small-sfx", "can make music, using stable-audio-3-medium", "can make songs with
 vocals, using yue2-3b", each with the fit reason, or why not.
 
-**YuE2 is not on the Mac.** Its official code supports Linux with an NVIDIA card; its pinned
-torch (2.10) silently corrupts the bfloat16 attention it runs on Apple's Metal backend
-(YuE issue #176; the fix, PR #181, is unmerged, and the bug is fixed in torch 2.13, which
-YuE2 does not allow), and the model is bfloat16-only. The MLX ports on Hugging Face are
-community work nobody at m-a-p stands behind. A Mac that asks for `yue2-3b` is refused
-`backend_unsupported` by name; send songs to the PC.
+**YuE2 runs on the Mac too (2026-10-03), on the official code with a newer torch.** Its
+pinned torch (2.10) can silently corrupt the bfloat16 causal attention it runs on Apple's
+Metal backend - a query sees up to three future tokens (YuE issue #176, pytorch#195910,
+fixed in torch 2.13). The Mac's env therefore pins torch 2.14.0 and installs `yue2-infer`
+without its own dependencies (`# crucible: no-deps` in the recipe). Because the bug depends
+on the chip and macOS (it showed on an M4 Pro and an M5 Max, not on the M1 Ultra), the
+worker re-proves the kernel on every load - YuE2's own `sdpa` with `is_causal` against an
+explicit causal mask - and refuses to generate if they disagree; each render's provenance
+carries the figures (`versions.mps_causal_check`). The community MLX ports are not used.
 
 ## Turning it on
 

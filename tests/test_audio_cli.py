@@ -78,7 +78,7 @@ def test_doctor_reports_one_audio_env_per_engine(
     capsys.readouterr()
     assert cli.main(["doctor", "--json"]) == 1
     report = json.loads(capsys.readouterr().out)
-    assert sorted(report["audio_envs"]) == ["audio-stable-audio-3"]
+    assert sorted(report["audio_envs"]) == ["audio-stable-audio-3", "audio-yue2"]
     assert report["audio_envs"]["audio-stable-audio-3"]["installed"] is False
     assert any("crucible install audio" in problem for problem in report["problems"])
 

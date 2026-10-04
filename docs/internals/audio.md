@@ -63,11 +63,16 @@ it up so we can use them."*
   benchmarks. Stability's fast Mac path (`optimized/mlx` in their repo, weights in the
   ungated `stabilityai/stable-audio-3-optimized`) is a folder of scripts with no package
   metadata, so pip cannot install it; adopting it means vendoring code, left for a later pass.
-- **YuE2 is cuda-linux only.** Official support is Linux with a 24 GB NVIDIA card; on Apple
-  Silicon its pinned torch 2.10 corrupts bfloat16 causal SDPA prefill (issue #176, fix PR #181
-  unmerged; torch 2.13 fixes it but `yue2-infer` pins 2.10), and the pipeline hard-codes
-  bfloat16. Community MLX ports (`ahmadw/YuE2-3B-MLX`, `vanch007/mlx-Yue2-3B`) exist and are
-  not official. The song class on a Mac therefore reads "cannot make songs with vocals".
+- **YuE2 on mlx-darwin runs the official `yue2-infer` on torch 2.14.0, device `mps`.** Its pinned
+  torch 2.10 corrupts bfloat16 causal SDPA prefill on some Apple chips (issue #176, fix PR #181
+  unmerged; fixed in torch 2.13). `envs/audio/yue2-mlx-darwin.txt` pins 2.14.0 and marks
+  `yue2-infer` `# crucible: no-deps` (jobenv installs it apart, after the rest, so its own
+  torch pin cannot pull 2.10 back; every dependency is still pinned and drift-checked).
+  `yue2_worker.mps_causal_is_sound` re-proves the kernel on each Mac load (relative error of
+  `is_causal` vs an explicit tril at lengths 17/128/705; sound ~0.003, leaking 0.3-0.6; limit
+  0.02) and refuses otherwise. Measured 2026-10-03: the issue's repro is clean on the M1 Ultra
+  under both torch 2.10 and 2.14. The Mac memory figure (13 GB) is declared from the issue's
+  M4 Pro report until measured here. Community MLX ports are not used.
 - Windows (`llama-windows`) is never an audio backend (`WSL_ONLY_JOB_TYPES`).
 
 ## Envs

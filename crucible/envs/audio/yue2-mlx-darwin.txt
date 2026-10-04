@@ -1,0 +1,42 @@
+# archive-bytes: 166230577  docs/internals/audio.md "Envs", the wheels of this resolution summed from PyPI, 2026-10-03
+#
+# The Mac's YuE2 env. torch is 2.14.0, not yue2-infer's pinned 2.10.0: on Apple's Metal
+# backend torch <= 2.12.1 can apply bfloat16 is_causal attention per block of four query
+# rows, so a query sees up to three future keys (YuE issue #176, pytorch#195910, fixed in
+# 2.13.0); YuE2 is bfloat16-only and prefills through that kernel. yue2-infer is installed
+# without its own dependencies so its torch==2.10.0 pin cannot pull 2.10 back; every one of
+# them is pinned here instead, and the env check compares each pin with what is installed.
+# The worker re-proves the kernel on every load (yue2_worker.py, mps_causal_is_sound).
+
+accelerate==1.13.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+filelock==4.0.10
+fsspec==2026.9.0
+hf-xet==1.6.0
+huggingface_hub==0.36.2
+idna==3.20
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+mpmath==1.3.0
+networkx==3.6.1
+numpy==2.2.6
+packaging==26.3
+psutil==7.2.2
+pycparser==3.0
+PyYAML==6.0.3
+regex==2026.9.29
+requests==2.34.2
+safetensors==0.7.0
+soundfile==0.13.1
+sympy==1.14.0
+tiktoken==0.12.0
+tokenizers==0.22.2
+torch==2.14.0
+tqdm==4.70.1
+transformers==4.57.6
+typing_extensions==4.16.0
+urllib3==2.8.0
+# crucible: no-deps yue2-infer
+yue2-infer @ git+https://github.com/multimodal-art-projection/YuE@18a07bb628f070c2eede44c3143834818e856a73

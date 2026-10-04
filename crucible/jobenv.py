@@ -425,6 +425,37 @@ def _requirement_lines(path: Path) -> Iterator[str]:
         yield stripped
 
 
+# `# crucible: no-deps <name>` in a recipe: <name> is installed with `--no-deps` after the
+# rest. For a package whose own metadata pins something the recipe deliberately does not
+# (yue2-infer's torch==2.10.0 on the Mac, where 2.10 corrupts bfloat16 causal attention):
+# pip would refuse the whole recipe. The recipe still pins every dependency, and the env
+# check compares each pin with what is installed, so nothing goes unpinned.
+_NO_DEPS = re.compile(r"^#\s*crucible:\s*no-deps\s+(?P<name>[A-Za-z0-9._-]+)\s*$")
+
+
+def _requirement_name(line: str) -> str:
+    match = _DIRECT_REFERENCE.match(line)
+    name = match.group("name") if match else line.partition("==")[0]
+    return name.strip().lower().replace("_", "-")
+
+
+def recipe_no_deps(path: Path) -> tuple[str, ...]:
+    """The recipe lines its `# crucible: no-deps` directives name, in recipe order."""
+    named = [
+        m.group("name").lower().replace("_", "-")
+        for m in (_NO_DEPS.match(line.strip()) for line in path.read_text(encoding="utf-8").splitlines())
+        if m
+    ]
+    lines = {_requirement_name(line): line for line in _requirement_lines(path)}
+    missing = [name for name in named if name not in lines]
+    if missing:
+        raise EnvError(
+            f"{path.name} says `crucible: no-deps` for {missing}, which it does not list; "
+            "the directive names a requirement line of the same recipe"
+        )
+    return tuple(lines[name] for name in named)
+
+
 def recipe_pins(path: Path) -> dict[str, str]:
     pins: dict[str, str] = {}
     for stripped in _requirement_lines(path):
@@ -967,11 +998,33 @@ def _install_recipe(
     spec: EnvSpec, backend_kind: str, python: Path, recipe: Path,
     directory: Path, on_line: Any,
 ) -> None:
-    _run(
-        [str(python), "-m", "pip", "install", "-r", str(recipe)],
-        f"could not install {recipe} into {directory}",
-        on_line,
-    )
+    apart = recipe_no_deps(recipe)
+    if not apart:
+        _run(
+            [str(python), "-m", "pip", "install", "-r", str(recipe)],
+            f"could not install {recipe} into {directory}",
+            on_line,
+        )
+    else:
+        rest = directory / f".{recipe.stem}.with-deps.txt"
+        rest.write_text(
+            "".join(line + "\n" for line in _requirement_lines(recipe) if line not in apart),
+            encoding="utf-8",
+        )
+        try:
+            _run(
+                [str(python), "-m", "pip", "install", "-r", str(rest)],
+                f"could not install {recipe} (all but {len(apart)} no-deps line(s)) into {directory}",
+                on_line,
+            )
+        finally:
+            rest.unlink()
+        for line in apart:
+            _run(
+                [str(python), "-m", "pip", "install", "--no-deps", line],
+                f"could not install {line} (no-deps, per {recipe.name}) into {directory}",
+                on_line,
+            )
     try:
         envpatches.apply(
             spec.job_type, directory, python, recipe_pins(recipe), on_line=on_line

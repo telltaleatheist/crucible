@@ -31,10 +31,10 @@ def test_the_three_models_are_declared_with_what_they_make_and_where() -> None:
         "stable-audio-3-medium": "music",
         "yue2-3b": "song",
     }
-    assert sorted(manifests["yue2-3b"].backends) == ["cuda-linux"]
-    for model in ("stable-audio-3-small-sfx", "stable-audio-3-medium"):
+    for model in ("stable-audio-3-small-sfx", "stable-audio-3-medium", "yue2-3b"):
         assert sorted(manifests[model].backends) == ["cuda-linux", "mlx-darwin"]
         assert manifests[model].spec("mlx-darwin").device == "mps"
+    for model in ("stable-audio-3-small-sfx", "stable-audio-3-medium"):
         assert all(spec.gated for spec in manifests[model].backends.values())
     song = manifests["yue2-3b"].spec("cuda-linux")
     assert not song.gated and [c.hf_repo for c in song.companions] == ["m-a-p/YuE2-Vae"]
@@ -116,7 +116,7 @@ bytes = 1
 
 def test_each_backend_builds_one_env_per_engine_from_its_own_recipe() -> None:
     assert [spec.key for spec in jobenv.audio_envs("cuda-linux")] == ["audio-stable-audio-3", "audio-yue2"]
-    assert [spec.key for spec in jobenv.audio_envs("mlx-darwin")] == ["audio-stable-audio-3"]
+    assert [spec.key for spec in jobenv.audio_envs("mlx-darwin")] == ["audio-stable-audio-3", "audio-yue2"]
     for backend_kind in ("cuda-linux", "mlx-darwin"):
         for spec in jobenv.audio_envs(backend_kind):
             recipe = jobenv.recipe_for(spec)
@@ -126,9 +126,11 @@ def test_each_backend_builds_one_env_per_engine_from_its_own_recipe() -> None:
             assert jobenv.SMOKE_IMPORT[spec.key][backend_kind]
     cuda = jobenv.recipe_direct_references(jobenv.recipe_for(jobenv.audio_env("stable-audio-3", "cuda-linux")))
     assert cuda["flash-attn"] == DIGEST
-    with pytest.raises(jobenv.EnvError) as caught:
-        jobenv.audio_env("yue2", "mlx-darwin")
-    assert "the audio engines there are ['stable-audio-3']" in str(caught.value)
+    mac_yue = jobenv.recipe_for(jobenv.audio_env("yue2", "mlx-darwin"))
+    assert jobenv.recipe_pins(mac_yue)["torch"] == "2.14.0", (
+        "torch <= 2.12.1 corrupts bfloat16 causal attention on Metal (YuE issue #176)"
+    )
+    assert [line.partition(" @ ")[0] for line in jobenv.recipe_no_deps(mac_yue)] == ["yue2-infer"]
 
 
 def test_a_wheel_url_is_pinned_by_its_digest_and_read_back_off_pips_record(
@@ -178,7 +180,7 @@ def test_install_on_submit_names_the_audio_installer_and_sums_its_recipes() -> N
         ("song", "cuda-linux", True, "can make songs with vocals, using yue2-3b"),
         ("sfx", "mlx-darwin", True, "can make sound effects, using stable-audio-3-small-sfx"),
         ("music", "mlx-darwin", True, "can make music, using stable-audio-3-medium"),
-        ("song", "mlx-darwin", False, "cannot make songs with vocals"),
+        ("song", "mlx-darwin", True, "can make songs with vocals, using yue2-3b"),
     ],
 )
 def test_the_capability_rows_say_what_this_host_can_make_and_with_what(
@@ -259,9 +261,50 @@ def test_the_catalog_lists_audio_models_as_models_of_the_audio_job(home: Path) -
     assert sorted(rows) == ["stable-audio-3-medium", "stable-audio-3-small-sfx", "yue2-3b"]
     assert all(s.kind == "model" and s.installed() is None for s in rows.values())
     mac = {s.id for s in catalog.subjects(config, FAKE_MAC_BACKEND) if s.job_type == "audio"}
-    assert mac == {"stable-audio-3-medium", "stable-audio-3-small-sfx"}
-    assert catalog.backends_declaring("model", "yue2-3b") == ["cuda-linux"]
+    assert mac == {"stable-audio-3-medium", "stable-audio-3-small-sfx", "yue2-3b"}
+    assert catalog.backends_declaring("model", "yue2-3b") == ["cuda-linux", "mlx-darwin"]
 
 
 def test_the_desktop_packages_screen_has_words_for_audio() -> None:
     assert JOB_TYPE_WORDS["audio"][0] == "Audio generation"
+
+
+def test_the_mac_causal_check_passes_a_sound_kernel_and_refuses_a_leaking_one() -> None:
+    """YuE issue #176: torch <= 2.12.1 on Metal applied bfloat16 is_causal per block of four
+    query rows, so a query saw up to three future keys, silently. The worker proves the
+    kernel on every Mac load; here a CPU kernel stands in for a sound one and a block-of-four
+    mask for the broken one."""
+    import importlib.util
+
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+
+    path = Path(__file__).resolve().parents[1] / "crucible" / "jobs" / "audio" / "yue2_worker.py"
+    source = path.read_text(encoding="utf-8")
+    start = source.index("CAUSAL_CHECK_LENGTHS")
+    end = source.index("def _version_of")
+    namespace: dict[str, Any] = {}
+    exec(compile(source[start:end], str(path), "exec"), namespace)
+    check = namespace["mps_causal_is_sound"]
+
+    def grouped(q, k, v):
+        groups = q.shape[1] // k.shape[1]
+        return q, k.repeat_interleave(groups, dim=1), v.repeat_interleave(groups, dim=1)
+
+    def sound(q, k, v, *, attn_mask=None, is_causal=False):
+        q, k, v = grouped(q, k, v)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+
+    def leaking(q, k, v, *, attn_mask=None, is_causal=False):
+        q, k, v = grouped(q, k, v)
+        if is_causal:
+            n = q.shape[2]
+            rows = torch.arange(n)[:, None] // 4 * 4 + 3
+            attn_mask = torch.arange(n)[None, :] <= rows
+            is_causal = False
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+
+    errors = check(torch, sound, device="cpu")
+    assert all(error < 0.02 for _, error in errors), errors
+    with pytest.raises(RuntimeError, match="not causal"):
+        check(torch, leaking, device="cpu")

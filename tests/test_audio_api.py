@@ -313,7 +313,7 @@ def test_a_card_without_room_is_refused_before_the_worker_starts(
     assert loads(transcript) == []
 
 
-def test_the_mac_runs_stable_audio_on_metal_and_has_no_song_arm(
+def test_the_mac_runs_stable_audio_on_metal_and_takes_songs_too(
     make_client: Callable[..., TestClient], home: Path, auth: dict[str, str],
     monkeypatch: pytest.MonkeyPatch, transcript: Path,
 ) -> None:
@@ -326,8 +326,9 @@ def test_the_mac_runs_stable_audio_on_metal_and_has_no_song_arm(
     assert events[-1]["event"] == "done", events[-1]
     load = loads(transcript)[0]
     assert (load["device"], load["dtype"], load["memory_cap_bytes"]) == ("mps", "float32", None)
-    assert refused["code"] == "backend_unsupported"
-    assert refused["details"]["declared"] == ["cuda-linux"]
+    # A song is no longer refused by backend (YuE2 runs on the Mac's Metal with a torch that
+    # fixed bfloat16 causal attention, 2026-10-03): the missing yue2 env starts installing.
+    assert refused["code"] == "installing", refused
 
 
 def test_a_gated_model_without_a_token_is_refused_with_the_page_to_accept(

@@ -24,13 +24,14 @@ YUE2 = "yue2"
 
 AUDIO_BACKEND_ENGINES: dict[str, frozenset[str]] = {
     CUDA_LINUX: frozenset({STABLE_AUDIO_3, YUE2}),
-    MLX_DARWIN: frozenset({STABLE_AUDIO_3}),
+    MLX_DARWIN: frozenset({STABLE_AUDIO_3, YUE2}),
 }
 
 ENGINE_DEVICE: dict[tuple[str, str], str] = {
     (STABLE_AUDIO_3, CUDA_LINUX): "cuda",
     (STABLE_AUDIO_3, MLX_DARWIN): "mps",
     (YUE2, CUDA_LINUX): "cuda",
+    (YUE2, MLX_DARWIN): "mps",
 }
 
 SFX = "sfx"
