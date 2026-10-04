@@ -125,3 +125,19 @@ def test_the_song_tag_suggestions_are_grouped_phrases_without_commas() -> None:
     assert tags["suggestions"] == groups
     music = load_all_audio_manifests()["stable-audio-3-medium"]
     assert playground.audio_fields(music, music.spec("cuda-linux"))[0]["kind"] == "text"
+
+
+def test_tag_conflicts_are_symmetric_and_name_only_offered_tags() -> None:
+    """Owen: picked tags that contradict each other light up red."""
+    from crucible import playground
+
+    conflicts = playground.song_tag_conflicts()
+    offered = {tag.casefold() for g in playground.song_tag_suggestions() for tag in g["tags"]}
+    assert set(conflicts) <= offered
+    for tag, rules in conflicts.items():
+        for rule in rules:
+            assert rule["tag"].casefold() in offered and rule["why"]
+            assert any(back["tag"].casefold() == tag for back in conflicts[rule["tag"].casefold()])
+    assert {r["tag"] for r in conflicts["light drums"]} == {"double-kick drums"}
+    assert "male vocal" in {r["tag"] for r in conflicts["instrumental"]}
+    assert "jazz" not in conflicts, "genre blends are allowed"

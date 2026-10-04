@@ -570,6 +570,50 @@ One page per image, video and audio model this build declares: the params its fo
 
 *Answers:* `200`
 
+### `GET /v1/playground/presets/{model}`
+
+The presets saved for `model` on this server, by name: each a form's params (no seed) and when it was saved.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | path | yes | string |  |
+
+*Answers:* `200`, `422` HTTPValidationError
+
+### `PUT /v1/playground/presets/{model}/{name}`
+
+Save (or replace) the preset `name` for `model`: `{"params": {...}}` with the form's own fields - text, numbers and true/false; a seed is refused by name.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | path | yes | string |  |
+| `name` | path | yes | string |  |
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `params` | object | yes | — |  |
+
+*Answers:* `200`, `422` HTTPValidationError
+
+### `DELETE /v1/playground/presets/{model}/{name}`
+
+Remove the preset `name` of `model`; 404 when there is none.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | path | yes | string |  |
+| `name` | path | yes | string |  |
+
+*Answers:* `200`, `422` HTTPValidationError
+
 ## Catalog
 
 Everything this build can serve, of every kind, and what is on disk. Removing a subject here is how weights are reclaimed.
@@ -1181,6 +1225,12 @@ An artifact of a previous job on this server, taken as an input.
 | --- | --- | --- | --- | --- |
 | `job_id` | string | yes | — |  |
 | `name` | string | yes | — |  |
+
+### `Body_save_playground_preset_v1_playground_presets__model___name__put`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `params` | object | yes | — |  |
 
 ### `Body_upload_v1_uploads_post`
 

@@ -43,9 +43,47 @@ TAGS = "tags"
 SONG_TAGS_FILE = Path(__file__).resolve().parent / "audio" / "tags" / "song.toml"
 
 
-def song_tag_suggestions() -> list[dict[str, Any]]:
+def _song_tags_document() -> dict[str, Any]:
     with SONG_TAGS_FILE.open("rb") as handle:
-        document = tomllib.load(handle)
+        return tomllib.load(handle)
+
+
+def song_tag_conflicts() -> dict[str, list[dict[str, str]]]:
+    """Each tag (lower-cased) -> the tags it contradicts, each with why, from the file's
+    [[conflict]] tables: `exclusive` (any two clash) and `between` (each side against the
+    other). Every tag a conflict names must be one of the file's suggestions."""
+    document = _song_tags_document()
+    known = {tag.casefold() for group in document.get("group", []) for tag in group.get("tags", [])}
+    pairs: dict[str, dict[str, str]] = {}
+
+    def clash(a: str, b: str, why: str) -> None:
+        for tag in (a, b):
+            if tag.casefold() not in known:
+                raise ValueError(f"{SONG_TAGS_FILE}: conflict names {tag!r}, which no [[group]] offers")
+        if a.casefold() != b.casefold():
+            pairs.setdefault(a.casefold(), {})[b] = why
+            pairs.setdefault(b.casefold(), {})[a] = why
+
+    for rule in document.get("conflict", []):
+        why = rule.get("why")
+        if not isinstance(why, str) or not why:
+            raise ValueError(f"{SONG_TAGS_FILE}: every [[conflict]] says why")
+        if "exclusive" in rule:
+            for index, a in enumerate(rule["exclusive"]):
+                for b in rule["exclusive"][index + 1:]:
+                    clash(a, b, why)
+        elif "between" in rule and len(rule["between"]) == 2:
+            for a in rule["between"][0]:
+                for b in rule["between"][1]:
+                    clash(a, b, why)
+        else:
+            raise ValueError(f"{SONG_TAGS_FILE}: a [[conflict]] has `exclusive` or a two-sided `between`")
+    return {tag: [{"tag": other, "why": why} for other, why in sorted(found.items())]
+            for tag, found in sorted(pairs.items())}
+
+
+def song_tag_suggestions() -> list[dict[str, Any]]:
+    document = _song_tags_document()
     groups = document.get("group")
     if not isinstance(groups, list) or not groups:
         raise ValueError(f"{SONG_TAGS_FILE} has no [[group]] tables")
@@ -142,6 +180,7 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
         first = field("tags", AUDIO_LABELS[manifest.kind], TAGS, required=True,
                       placeholder=AUDIO_EXAMPLES[manifest.kind],
                       suggestions=song_tag_suggestions(),
+                      conflicts=song_tag_conflicts(),
                       hint="type a phrase and a comma to add it, or click a suggestion")
     else:
         first = field(manifest.text_param, AUDIO_LABELS[manifest.kind], TEXT, required=True,

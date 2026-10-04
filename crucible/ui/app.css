@@ -977,6 +977,52 @@ a.button {
   background: var(--accent-soft);
 }
 
+.tag.conflict {
+  color: var(--bad);
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+
+.tag-pill.conflict {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.tag-pill.picked.conflict {
+  background: var(--bad-soft);
+}
+
+.tag-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preset-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.preset-bar select,
+.preset-bar input[type="text"] {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.preset-bar input[type="text"] {
+  width: 180px;
+}
+
 .field input[type="checkbox"] {
   width: 18px;
   height: 18px;

@@ -55,3 +55,42 @@ tags = [
 [[group]]
 name = "Instrumental"
 tags = ["Instrumental", "no vocals", "no singing"]
+
+# CONFLICTS - tags that contradict each other, shown red in the playground when both are
+# picked (and a suggestion that would contradict a picked tag is outlined red). Only true
+# contradictions: genre blends (jazz + metal) are allowed and not listed.
+#   exclusive = [...]          any two of these conflict (pick one)
+#   between = [[...], [...]]   every tag on one side conflicts with every tag on the other
+
+[[conflict]]
+why = "one tempo"
+exclusive = ["70 BPM", "90 BPM", "110 BPM", "128 BPM", "140 BPM"]
+
+[[conflict]]
+why = "one pace"
+exclusive = ["slow", "mid-tempo", "fast"]
+
+[[conflict]]
+why = "a slow tempo is not a fast song"
+between = [["slow", "70 BPM"], ["fast", "128 BPM", "140 BPM"]]
+
+[[conflict]]
+why = "an instrumental has no singer"
+between = [
+  ["Instrumental", "no vocals", "no singing"],
+  ["male vocal", "female vocal", "deep male voice", "soft female voice", "raspy vocal",
+   "gritty male vocal", "powerful belting vocal", "breathy vocal", "rap vocal",
+   "three-part harmonies", "duet"],
+]
+
+[[conflict]]
+why = "light drums or a double-kick pounding, not both"
+between = [["light drums"], ["double-kick drums"]]
+
+[[conflict]]
+why = "calm is not aggressive or driving"
+between = [["calm"], ["aggressive", "energetic", "hard-hitting"]]
+
+[[conflict]]
+why = "lo-fi is not polished"
+between = [["lo-fi"], ["polished production"]]

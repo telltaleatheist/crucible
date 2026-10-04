@@ -498,6 +498,18 @@
       placeholder: field.placeholder || null
     });
     var pills = [];
+    var conflicts = field.conflicts || {};
+
+    // The picked tags `tag` contradicts, each with why (crucible/audio/tags/song.toml).
+    function clashesWith(tag, picked) {
+      var found = [];
+      (conflicts[tag.toLowerCase()] || []).forEach(function (rule) {
+        if (picked.some(function (other) { return other.toLowerCase() === rule.tag.toLowerCase(); })) {
+          found.push(rule.tag + ' (' + rule.why + ')');
+        }
+      });
+      return found;
+    }
 
     function has(tag) {
       var wanted = tag.toLowerCase();
@@ -512,7 +524,11 @@
     function render() {
       list.textContent = '';
       tags.forEach(function (tag, index) {
-        list.appendChild(el('span', { class: 'tag' }, [
+        var clash = clashesWith(tag, tags);
+        list.appendChild(el('span', {
+          class: clash.length ? 'tag conflict' : 'tag',
+          title: clash.length ? 'Conflicts with ' + clash.join(', ') : null
+        }, [
           el('span', { text: tag }),
           el('button', {
             type: 'button',
@@ -526,7 +542,11 @@
         ]));
       });
       pills.forEach(function (pill) {
-        pill.classList.toggle('picked', has(pill.dataset.tag) >= 0);
+        var picked = has(pill.dataset.tag) >= 0;
+        var clash = clashesWith(pill.dataset.tag, tags);
+        pill.classList.toggle('picked', picked);
+        pill.classList.toggle('conflict', clash.length > 0);
+        pill.title = clash.length ? 'Conflicts with ' + clash.join(', ') : '';
       });
       typed.placeholder = tags.length ? '' : (field.placeholder || '');
       typed.required = field.required && tags.length === 0;
@@ -607,6 +627,11 @@
       commitTyped();
       return tags.join(', ');
     };
+    box.setTags = function (text) {
+      tags = [];
+      typed.value = '';
+      add(text || '');
+    };
     render();
     return { box: box, suggestions: groups };
   }
@@ -653,11 +678,148 @@
     });
   }
 
+  // Clipboard: the async API where the page is a secure context (localhost), else the old
+  // selection copy, which works over a plain-http LAN address.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    var area = el('textarea', { readonly: '', style: 'position:fixed;opacity:0' });
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+    return Promise.resolve();
+  }
+
+  // Named presets, kept on this server (the playground presets routes, GET/PUT/DELETE):
+  // a sound, not a take, so the seed is never saved.
+  function presetBar(page, form) {
+    var model = encodeURIComponent(page.id);
+    var path = `/v1/playground/presets/${model}`;
+    var saved = [];
+    var choose = el('select', { id: 'preset-choose', 'aria-label': 'Presets' });
+    var name = el('input', { id: 'preset-name', type: 'text', placeholder: 'Preset name', maxlength: '80' });
+    var said = el('span', { class: 'field-hint' });
+    var remove = el('button', { type: 'button', class: 'button small' }, ['Delete']);
+    var save = el('button', { type: 'button', class: 'button small' }, ['Save preset']);
+
+    function fill() {
+      var keep = choose.value;
+      choose.textContent = '';
+      choose.appendChild(el('option', { value: '', text: saved.length ? 'Load a preset…' : 'No presets yet' }));
+      saved.forEach(function (preset) {
+        choose.appendChild(el('option', { value: preset.name, text: preset.name }));
+      });
+      choose.value = saved.some(function (p) { return p.name === keep; }) ? keep : '';
+      remove.disabled = choose.value === '';
+    }
+
+    async function load() {
+      try {
+        saved = (await call(path)).presets;
+      } catch (refusal) {
+        said.textContent = 'Presets unavailable: ' + refusal;
+        saved = [];
+      }
+      fill();
+    }
+
+    function apply(params) {
+      page.fields.forEach(function (field) {
+        if (field.name === 'seed' || !(field.name in params)) {
+          return;
+        }
+        var value = params[field.name];
+        if (field.kind === 'tags') {
+          document.getElementById('param-' + field.name + '-box').setTags(String(value));
+          return;
+        }
+        var control = form.elements[field.name];
+        if (!control) {
+          return;
+        }
+        if (field.kind === 'boolean') {
+          control.checked = Boolean(value);
+          control.dispatchEvent(new Event('change'));
+        } else {
+          control.value = String(value);
+        }
+      });
+    }
+
+    choose.addEventListener('change', function () {
+      remove.disabled = choose.value === '';
+      var preset = saved.find(function (p) { return p.name === choose.value; });
+      if (preset) {
+        apply(preset.params);
+        name.value = preset.name;
+        said.textContent = 'Loaded ' + preset.name;
+      }
+    });
+    save.addEventListener('click', async function () {
+      var wanted = name.value.trim();
+      if (wanted === '') {
+        name.focus();
+        said.textContent = 'Name the preset first';
+        return;
+      }
+      var params = paramsOf(page.fields, form);
+      delete params.seed;
+      try {
+        var preset = encodeURIComponent(wanted);
+        await call(`/v1/playground/presets/${model}/${preset}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ params: params })
+        });
+        said.textContent = 'Saved ' + wanted;
+        await load();
+        choose.value = wanted;
+        remove.disabled = false;
+      } catch (refusal) {
+        said.textContent = 'Not saved: ' + refusal;
+      }
+    });
+    remove.addEventListener('click', async function () {
+      var gone = choose.value;
+      if (gone === '') {
+        return;
+      }
+      try {
+        var preset = encodeURIComponent(gone);
+        await call(`/v1/playground/presets/${model}/${preset}`, { method: 'DELETE' });
+        said.textContent = 'Deleted ' + gone;
+        await load();
+      } catch (refusal) {
+        said.textContent = 'Not deleted: ' + refusal;
+      }
+    });
+    load();
+    return el('div', { class: 'preset-bar' }, [choose, remove, name, save, said]);
+  }
+
   function fieldBlock(field) {
     if (field.kind === 'tags') {
       var tagged = tagInput(field);
+      var copied = el('span', { class: 'field-hint copied', hidden: true, text: 'Copied' });
       var block = el('div', { class: 'field wide' }, [
-        el('label', { class: 'field-label', for: 'param-' + field.name, text: field.label }),
+        el('div', { class: 'tag-head' }, [
+          el('label', { class: 'field-label', for: 'param-' + field.name, text: field.label }),
+          el('button', {
+            type: 'button',
+            class: 'button small',
+            title: 'Copy these tags as one comma-separated line',
+            onclick: function () {
+              copyText(tagged.box.tagValue()).then(function () {
+                copied.hidden = false;
+                window.setTimeout(function () { copied.hidden = true; }, 1500);
+              });
+            }
+          }, ['Copy']),
+          copied
+        ]),
         tagged.box
       ]);
       if (field.hint) {
@@ -717,6 +879,7 @@
     }
 
     var form = el('form', { id: 'generate-form', class: 'generate' });
+    form.appendChild(presetBar(page, form));
     var wide = el('div', { class: 'fields' });
     var narrow = el('div', { class: 'fields' });
     for (var index = 0; index < page.fields.length; index += 1) {
