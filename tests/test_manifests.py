@@ -289,7 +289,7 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 
 
 SHIPPED = [
-    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b",
+    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-bside", "qwen3.5-9b",
     "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
 ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl"]
@@ -298,6 +298,7 @@ CONTEXTS = {
     "dots-ocr": 32768,
     "qwen3.5-9b": 16384,
     "qwen3.5-4b": 16384,
+    "qwen3.5-4b-bside": 16384,
     "qwen3.5-2b": 16384,
     "qwen3.5-0.8b": 8192,
     "qwen3.8-27b-8bit": 12288,
@@ -308,6 +309,8 @@ BACKENDS = {
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
+    # Owen's B-Side fine-tune ships merged safetensors only: no GGUF, so no Windows engine.
+    "qwen3.5-4b-bside": ["cuda-linux", "mlx-darwin"],
     "qwen3.5-2b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-0.8b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b-8bit": ["mlx-darwin"],

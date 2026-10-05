@@ -23,7 +23,7 @@ WITH_LOCAL = [
     "qwen3.8-27b-4bit",
 ]
 WITHOUT_LOCAL = [
-    "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit",
+    "qwen3.5-4b-bside", "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit",
 ]
 
 CLASSES = {
@@ -126,7 +126,7 @@ def test_the_generator_writes_a_file_its_own_check_accepts(tmp_path: Path) -> No
     wrote = _run("--verbose", "--output", str(target))
     assert wrote.returncode == 0, wrote.stderr
     assert "omitted qwen3.8-27b-8bit: no [local] table" in wrote.stdout
-    assert "6 model(s) with a local form, 3 omitted" in wrote.stdout
+    assert "6 model(s) with a local form, 4 omitted" in wrote.stdout
     assert lineup.content(json.loads(target.read_text(encoding="utf-8"))) == (
         lineup.content(_checked_in())
     )

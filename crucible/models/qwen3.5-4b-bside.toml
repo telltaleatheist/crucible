@@ -1,0 +1,62 @@
+[model]
+id = "qwen3.5-4b-bside"
+# Its own family, so no capability class (decide, routing, cleanup, ...) ever offers it:
+# it answers one client's prompt and is asked for by name, never chosen.
+family = "bside"
+params_b = 4
+context_default = 16384
+
+trained_context = 262144
+modalities = ["text"]
+display = "Qwen 3.5 · 4B · B-Side"
+description = "Qwen3.5-4B fine-tuned to answer B-Side's describe prompt: a song page's tag menu as the system prompt and a free-text description in, the tags and lyrics as JSON out. Text only; serve with thinking off."
+
+[defaults]
+thinking = false
+
+# Owen's own weights: the LoRA trained on B-Side's 2,162 describe answers (lyrics_v1, step
+# 256), merged into the base snapshot's full layout, so both engines load it exactly as they
+# load the base (the vision tower is the base's, unchanged and unused). A retrain is a new
+# revision of the same private repo, repinned here.
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "owenmorgan/qwen3.5-4b-bside"
+revision = "e9a563d216895b6c472e1ebd5d3a48541835d731"
+serves = ["text"]
+memory_bytes_estimate = 13_393_958_393
+engine_args = [
+    "--dtype", "bfloat16",
+    "--gpu-memory-utilization", "0.52",
+    "--max-num-seqs", "16",
+    "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+]
+max_context = 131072
+
+[backends.cuda-linux.memory]
+weights_bytes = 9_216_572_511
+overhead_bytes = 3_516_504_474
+kv_bytes_per_token = 40_337
+basis = "computed"
+measured_at_context = 16384
+
+# mlx-lm reads the full HF layout itself: its qwen3_5 sanitize drops the vision tower and
+# renames the language model's keys, so the same repo serves the Mac.
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "owenmorgan/qwen3.5-4b-bside"
+revision = "e9a563d216895b6c472e1ebd5d3a48541835d731"
+serves = ["text"]
+memory_bytes_estimate = 11_017_420_134
+engine_args = [
+    "--decode-concurrency", "16",
+    "--prompt-concurrency", "4",
+    "--prompt-cache-size", "10",
+]
+max_context = 131072
+
+[backends.mlx-darwin.memory]
+weights_bytes = 8_411_504_128
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 32_768
+basis = "declared"
+measured_at_context = 16384
