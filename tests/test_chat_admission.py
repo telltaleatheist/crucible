@@ -329,6 +329,20 @@ def test_vllm_is_started_with_the_cap_the_reader_clamps_to() -> None:
     )
 
 
+def test_vllm_constrains_json_with_llguidance_not_xgrammar() -> None:
+    """xgrammar's maxLength string admits no escapes, so a capped string can hold no
+    newline (B-Side's lyrics, 2026-10-05); llguidance keeps them."""
+    from crucible.manifests import load_manifest
+
+    manifest = load_manifest("qwen3.5-4b-bside")
+    args = engine_load_args(
+        manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None,
+        context=manifest.context_for("cuda-linux"),
+    )
+    config = args[args.index("--structured-outputs-config") + 1]
+    assert __import__("json").loads(config) == {"backend": "guidance"}
+
+
 def test_a_decide_reading_with_no_basis_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,18 @@ DECIDE_ARGS: tuple[str, ...] = (
     "--enable-prompt-tokens-details",
 )
 
+# The grammar behind response_format json_schema. vLLM 0.29's "auto" picks xgrammar, whose
+# rule for a string with `maxLength` admits no escape sequence at all: a capped string can
+# never hold a newline, a quote or a backslash. B-Side's describe caps its lyrics at 2,400
+# chars, so on the PC every song came back as one paragraph per section while the same
+# request on the Mac (mlx-lm) and uncapped on the PC wrote the lines (2026-10-05).
+# llguidance 1.7.6, in the same env, accepts the escapes capped and uncapped (measured with
+# both matchers on Qwen3.5's tokenizer); tests/test_chat_admission.py pins the choice.
+STRUCTURED_OUTPUTS_ARGS: tuple[str, ...] = (
+    "--structured-outputs-config",
+    '{"backend": "guidance"}',
+)
+
 
 ENVIRONMENT: dict[str, str] = {
     "VLLM_NO_USAGE_STATS": "1",
@@ -73,6 +85,7 @@ class VllmEngine(SubprocessEngine):
             "--max-model-len",
             str(context),
             *DECIDE_ARGS,
+            *STRUCTURED_OUTPUTS_ARGS,
             *card_flags,
             *plan_flags(plan),
         ]
