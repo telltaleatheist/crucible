@@ -272,6 +272,8 @@ JOB_DOCS: dict[str, JobDoc] = {
             "`params.resume` set to it (docs/RESUMABLE-JOBS.md). Whisper refuses "
             "`resume` (`resume_unsupported`).",
             "More than one input is `invalid_inputs`.",
+            "Pieces decode 8 at a time on cuda-linux and one at a time on a Mac; each "
+            "job loads its own engine. See Throughput.",
             INSTALLS_ON_SUBMIT,
         ),
     ),
@@ -391,6 +393,8 @@ JOB_DOCS: dict[str, JobDoc] = {
             "If any input produces no output the job fails `rvc_output_missing`, "
             "naming them.",
             "Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`).",
+            "Send many files as one job: up to 96 pieces share one conversion process "
+            "and one load of the voice. See Throughput.",
             INSTALLS_ON_SUBMIT,
         ),
     ),
@@ -421,6 +425,9 @@ JOB_DOCS: dict[str, JobDoc] = {
             "A model not installed yet is installed on submit where the server allows "
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",
+            "The separator stays loaded between jobs; send a file whole rather than "
+            "in chunks. Its overlap is the model's own: `vocals-roformer` 4, "
+            "`denoise-roformer` 8. See Throughput.",
         ),
     ),
     "unload-denoiser": _unload(

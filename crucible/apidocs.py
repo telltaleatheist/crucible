@@ -359,6 +359,55 @@ def render_features() -> list[str]:
     return out + [""]
 
 
+THROUGHPUT: tuple[tuple[str, str], ...] = (
+    (
+        "Chat (`/v1/chat/completions`)",
+        "Each resident LLM takes several chats at once and its engine batches them: "
+        "`GET /v1/activity` gives `chat.max_in_flight` (16 for the shipped vLLM and mlx-lm "
+        "models). Send independent chats concurrently, up to that many, not one after "
+        "another. Past it a chat waits for a slot, or with `\"queue\": false` is refused "
+        "503 `chat_queue_full` at no cost.",
+    ),
+    (
+        "`asr` (Qwen3-ASR)",
+        "One job is one file, cut into pieces server-side; send a long recording whole "
+        "rather than pre-cut. On cuda-linux (vLLM) the pieces decode `max_batch` (8) at a "
+        "time; on a Mac one at a time. Every job starts its own ASR engine and aligner "
+        "(about 30 s on the PC before the first piece), so many short files each pay it. "
+        "On a Mac `qwen3-asr-1.7b-mlx` decodes about 2.5x faster than `qwen3-asr-1.7b` and "
+        "hears slightly fewer fillers.",
+    ),
+    (
+        "`rvc`",
+        "One job takes many inputs: send a batch of files as one job, not one job per "
+        "file. The server runs up to 96 pieces through each conversion process, so the "
+        "voice loads once per batch rather than once per file.",
+    ),
+    (
+        "`denoise` (separators)",
+        "One input per job, and the separator stays loaded between jobs, so separate jobs "
+        "cost no reload. There is nothing to gain from cutting a file into chunks: send "
+        "it whole. The separator works in overlapping windows; each model's overlap is "
+        "its manifest's (`vocals-roformer` 4, `denoise-roformer` 8), and time is about "
+        "proportional to it.",
+    ),
+)
+
+
+def render_throughput() -> list[str]:
+    out = [
+        "## Throughput",
+        "",
+        "What the server already runs together, and what a client sends to get it.",
+        "",
+        "| work | what to send |",
+        "| --- | --- |",
+    ]
+    for work, advice in THROUGHPUT:
+        out.append("| " + work + " | " + cell(advice) + " |")
+    return out + [""]
+
+
 def first_sentence(text: str | None) -> str:
     flat = cell(text)
     end = flat.find(". ")
@@ -485,6 +534,7 @@ def render(app: Any, enabled: frozenset[str] | None = None) -> str:
     ]
 
     out += render_index(spec)
+    out += render_throughput()
 
     by_group: dict[int, list[tuple[str, str, dict[str, Any]]]] = {}
     for path, methods in spec.get("paths", {}).items():

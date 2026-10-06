@@ -123,6 +123,17 @@ Job types are submitted with `POST /v1/jobs` (`{"type", "model", "params", "inpu
 | `unload-video` | Takes the resident video generator off the card now, whichever job put it there (video or load-video). |
 | `load-video` | Puts a video model on the card and leaves it there, so the first job that uses it starts at once. |
 
+## Throughput
+
+What the server already runs together, and what a client sends to get it.
+
+| work | what to send |
+| --- | --- |
+| Chat (`/v1/chat/completions`) | Each resident LLM takes several chats at once and its engine batches them: `GET /v1/activity` gives `chat.max_in_flight` (16 for the shipped vLLM and mlx-lm models). Send independent chats concurrently, up to that many, not one after another. Past it a chat waits for a slot, or with `"queue": false` is refused 503 `chat_queue_full` at no cost. |
+| `asr` (Qwen3-ASR) | One job is one file, cut into pieces server-side; send a long recording whole rather than pre-cut. On cuda-linux (vLLM) the pieces decode `max_batch` (8) at a time; on a Mac one at a time. Every job starts its own ASR engine and aligner (about 30 s on the PC before the first piece), so many short files each pay it. On a Mac `qwen3-asr-1.7b-mlx` decodes about 2.5x faster than `qwen3-asr-1.7b` and hears slightly fewer fillers. |
+| `rvc` | One job takes many inputs: send a batch of files as one job, not one job per file. The server runs up to 96 pieces through each conversion process, so the voice loads once per batch rather than once per file. |
+| `denoise` (separators) | One input per job, and the separator stays loaded between jobs, so separate jobs cost no reload. There is nothing to gain from cutting a file into chunks: send it whole. The separator works in overlapping windows; each model's overlap is its manifest's (`vocals-roformer` 4, `denoise-roformer` 8), and time is about proportional to it. |
+
 ## Discovery
 
 Answered without a token. How a client finds a server and learns its api version.
@@ -1415,6 +1426,7 @@ Transcribes one audio file to timed text with Whisper (faster-whisper on cuda-li
 - `speech_only` (Crucible's speech detector) defaults to the opposite of `vad_filter`, so it is ON unless you send `vad_filter: true`; send `speech_only: false` to transcribe every stretch. Its knobs (`speech_threshold`, `speech_pad_s`, `speech_min_gap_s`) are refused without it.
 - Qwen3-ASR keeps a resume journal: the submit answers `resume_id` beside `job_id`; after a failure or cancel, submit the same job with `params.resume` set to it (docs/RESUMABLE-JOBS.md). Whisper refuses `resume` (`resume_unsupported`).
 - More than one input is `invalid_inputs`.
+- Pieces decode 8 at a time on cuda-linux and one at a time on a Mac; each job loads its own engine. See Throughput.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 
 ```json
@@ -1589,6 +1601,7 @@ Voice conversion: re-voices every input through an RVC model, keeping each input
 - A stereo input gets one converted voice in both channels; it is not a per-channel conversion.
 - If any input produces no output the job fails `rvc_output_missing`, naming them.
 - Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`).
+- Send many files as one job: up to 96 pieces share one conversion process and one load of the voice. See Throughput.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 
 ```json
@@ -1628,6 +1641,7 @@ Separates audio into stems with a source-separation model: `vocals-roformer` spl
 - Nothing is resampled: another sample rate is refused by name.
 - A model not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 - `vocals` means every voice in the track, singing included.
+- The separator stays loaded between jobs; send a file whole rather than in chunks. Its overlap is the model's own: `vocals-roformer` 4, `denoise-roformer` 8. See Throughput.
 
 ```json
 {
