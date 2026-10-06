@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
+from . import accelerator
 from .accelerator import (
     ProcessIdentity,
     ask_pid_to_stop,
@@ -21,6 +22,7 @@ from .accelerator import (
     process_alive,
     process_identity,
 )
+from .backend import CUDA_LINUX
 from .cardkinds import (
     KIND_ALIGN,
     KIND_AUDIO,
@@ -476,6 +478,11 @@ class Residency:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._resident: Resident | None = None
+        # What the resident's load took off the card, read from the card itself (cuda-linux
+        # only): the manifest's estimate is not what an engine holds once it sizes itself
+        # to the card (vLLM's KV pool takes the free room, so qwen3.5-4b-bside's 13.4 GB
+        # estimate held 19 GB). None where nothing was measured.
+        self._measured: int | None = None
         self._engine: SubprocessEngine | None = None
         self._session: WorkerSession | None = None
         self._dying: DyingResident | None = None
@@ -848,9 +855,25 @@ class Residency:
         return pids
 
     def reclaimable_bytes(self, excluding: str | None = None) -> int:
+        """What unloading the resident would give back: the larger of its estimate and
+        what its load was measured to take. Counting only the estimate made the rest of
+        an engine's real footprint read as a process Crucible did not start, and a load
+        that would have evicted it was refused as accelerator_busy (B-Side, 2026-10-06:
+        an image item waited 18 min behind its own session's LLM)."""
         if self._resident is None or self._resident.id == excluding:
             return 0
-        return self._resident.memory_bytes_estimate
+        estimate = self._resident.memory_bytes_estimate
+        return estimate if self._measured is None else max(estimate, self._measured)
+
+    def _card_used_bytes(self, say: Callable[[str], None]) -> int | None:
+        if self._config.backend_kind != CUDA_LINUX:
+            return None
+        try:
+            free, total = accelerator.probe_vram()
+        except accelerator.ProbeError as exc:
+            say(f"could not read the card to measure this load ({exc}); its estimate stands")
+            return None
+        return total - free
 
 
     def _evict(self, say: Callable[[str], None], incoming: str) -> None:
@@ -883,6 +906,7 @@ class Residency:
         self._evict(say, subject_id)
         self.begin_warming(subject_id, kind)
         try:
+            before = self._card_used_bytes(say)
             occupant = start()
         finally:
             self.end_warming()
@@ -894,15 +918,18 @@ class Residency:
                 f"{resident.id!r} instead; it was stopped. That is a bug in the "
                 f"job package that built it: report it with {resident.log_path}"
             )
+        after = None if before is None else self._card_used_bytes(say)
         self._engine = occupant.engine
         self._session = occupant.session
         self._resident = resident
+        self._measured = None if after is None else max(0, after - before)
         at = "" if occupant.base_url is None else f" at {occupant.base_url}"
         say(f"{subject_id} is resident{at}")
         self._record_residents()
         self.events.publish(CARD, "card.loaded", {
             **_card_change(resident.id, resident.kind, engine_name(resident)),
             "memory_bytes_estimate": resident.memory_bytes_estimate,
+            "measured_bytes": self._measured,
             "since": resident.loaded_at,
         })
         return resident
@@ -914,6 +941,7 @@ class Residency:
             raise KeyError(subject_id)
         leaving = Occupant(resident, self._engine, self._session)
         self._resident = None
+        self._measured = None
         self._engine = None
         self._session = None
         self._dying = DyingResident(

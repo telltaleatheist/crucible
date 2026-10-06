@@ -21,6 +21,7 @@ from crucible.config import DEFAULT_OPEN_PAIRING, load_config, mint_token, write
 from crucible.manifests import load_manifest
 from crucible.memorybudget import GIB
 from crucible.narratorengines import declared_tts_footprints
+from crucible.residency import Residency
 
 from .fake_engine import FakeEngine
 
@@ -238,6 +239,13 @@ def fake_weights(home: Path) -> Callable[[str], Path]:
         return directory
 
     return stamp
+
+
+@pytest.fixture(autouse=True)
+def unmeasured_loads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A load measures what it took off the card (crucible/residency.py). Tests never read
+    the real card: a test that wants a measurement stubs the probe and restores this."""
+    monkeypatch.setattr(Residency, "_card_used_bytes", lambda self, say: None)
 
 
 @pytest.fixture

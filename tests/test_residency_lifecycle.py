@@ -21,7 +21,7 @@ from crucible.engines import (
     engine_load_args,
     engine_model_name,
 )
-from crucible.engines.vllm import DECIDE_ARGS
+from crucible.engines.vllm import DECIDE_ARGS, STRUCTURED_OUTPUTS_ARGS
 from crucible.errors import JobError
 from crucible.manifests import NO_DEFAULTS
 from crucible.residency import (
@@ -264,7 +264,9 @@ def test_each_engine_builds_its_own_argv() -> None:
     here = Path("/w")
     assert engine_load_args(
         manifest, _spec("vllm"), here, Plan(), context=8, card_args=("--card",)
-    ) == ["--a", "--max-model-len", "8", *DECIDE_ARGS, "--card", "--plan"]
+    ) == [
+        "--a", "--max-model-len", "8", *DECIDE_ARGS, *STRUCTURED_OUTPUTS_ARGS, "--card", "--plan",
+    ]
     assert engine_load_args(
         manifest, _spec("llama-server", file="x.gguf", mmproj="p.gguf"), here, None,
         context=8,
