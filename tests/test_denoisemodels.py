@@ -29,6 +29,7 @@ model_filename = "demo_denoise.ckpt"
 config_filename = "demo_denoise_config.yaml"
 primary_stem = "dry"
 sample_rate = 44100
+overlap = 8
 
 [backends.cuda-linux]
 engine = "audio-separator"
@@ -129,6 +130,7 @@ def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
         (GOOD.replace("config_bytes = 1621", "config_bytes = 0"),
          "config_bytes"),
         (GOOD.replace("sample_rate = 44100", "sample_rate = 0"), "sample_rate"),
+        (GOOD.replace("overlap = 8", "overlap = 0"), "overlap"),
         (GOOD.replace('engine = "audio-separator"', 'engine = "vllm"'),
          "does not denoise"),
         (GOOD.replace("[backends.cuda-linux]", "[backends.windows]"),
@@ -191,6 +193,7 @@ def shipped_with_test_digests(model_id: str = "denoise-roformer"):
         config_filename=manifest.config_filename,
         primary_stem=manifest.primary_stem,
         sample_rate=manifest.sample_rate,
+        overlap=manifest.overlap,
         backends=backends,
         path=manifest.path,
     )
@@ -416,6 +419,7 @@ def test_denoise_pull_refuses_a_backend_with_no_block(
         config_filename=manifest.config_filename,
         primary_stem=manifest.primary_stem,
         sample_rate=manifest.sample_rate,
+        overlap=manifest.overlap,
         backends={"mlx-darwin": manifest.backends["mlx-darwin"]},
         path=manifest.path,
     )

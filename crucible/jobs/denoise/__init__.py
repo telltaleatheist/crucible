@@ -121,7 +121,7 @@ def occupy_separator(
         )
         say(
             f"loading {manifest.id} ({manifest.model_filename}) with "
-            f"use_autocast={use_autocast}; log {log_path}"
+            f"use_autocast={use_autocast}, overlap {manifest.overlap}; log {log_path}"
         )
         outcome = session.start(
             {
@@ -129,6 +129,7 @@ def occupy_separator(
                 "model_file_dir": str(model_file_dir),
                 "model_filename": manifest.model_filename,
                 "use_autocast": use_autocast,
+                "overlap": manifest.overlap,
                 "memory_cap_bytes": workers.torch_memory_cap(
                     spec.backend, spec.memory_bytes_estimate
                 ),

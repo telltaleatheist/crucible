@@ -5,6 +5,9 @@ model_filename = "vocals_mel_band_roformer.ckpt"
 config_filename = "vocals_mel_band_roformer.yaml"
 primary_stem = "vocals"
 sample_rate = 44100
+# Owen, 2026-10-06: overlap 4, not the library's 8 — about half the time per chunk
+# (ContentStudio's voice isolation: 427.7 s of audio took 50 s on the Mac at 8).
+overlap = 4
 
 [backends.cuda-linux]
 engine = "audio-separator"

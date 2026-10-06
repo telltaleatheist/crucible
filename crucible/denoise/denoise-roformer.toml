@@ -5,6 +5,8 @@ model_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt"
 config_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959_config.yaml"
 primary_stem = "dry"
 sample_rate = 44100
+# The library's default, unchanged.
+overlap = 8
 
 [backends.cuda-linux]
 engine = "audio-separator"
