@@ -37,7 +37,7 @@ _MODEL_REQUIRED: dict[str, type] = {
     "config_filename": str,
     "primary_stem": str,
     "sample_rate": int,
-    "overlap": int,
+    "hop_s": int,
 }
 _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
@@ -103,10 +103,12 @@ class DenoiseManifest:
     config_filename: str
     primary_stem: str
     sample_rate: int
-    # audio-separator's MDXC overlap: how many overlapping windows each stretch of audio
-    # is separated in and averaged over. Time is about proportional to it; the library's
-    # default is 8.
-    overlap: int
+    # Seconds between the starts of two windows. audio-separator calls it `overlap`, but
+    # for a Roformer its MDXC path steps by `overlap * sample_rate` samples, so it is a hop:
+    # a SMALLER value means MORE windows and more time (4 took twice as long as 8 on the
+    # Mac, 2026-10-06). The window itself is the model's (hop_length x (dim_t - 1)): 11 s
+    # for vocals-roformer, 8 s for denoise-roformer. The library's default is 8.
+    hop_s: int
     backends: dict[str, DenoiseBackendSpec]
     path: Path
 
@@ -137,7 +139,7 @@ class DenoiseManifest:
             "config_filename": self.config_filename,
             "primary_stem": self.primary_stem,
             "sample_rate": self.sample_rate,
-            "overlap": self.overlap,
+            "hop_s": self.hop_s,
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -212,9 +214,9 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
             f"{path.name}: model.sample_rate must be positive, got "
             f"{model['sample_rate']}"
         )
-    if model["overlap"] < 1:
+    if model["hop_s"] < 1:
         raise DenoiseManifestError(
-            f"{path.name}: model.overlap must be at least 1, got {model['overlap']}"
+            f"{path.name}: model.hop_s must be at least 1, got {model['hop_s']}"
         )
 
     backends_table = document["backends"]
@@ -292,7 +294,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
         config_filename=model["config_filename"],
         primary_stem=model["primary_stem"],
         sample_rate=model["sample_rate"],
-        overlap=model["overlap"],
+        hop_s=model["hop_s"],
         backends=backends,
         path=path,
     )

@@ -53,7 +53,7 @@ def load(request: dict) -> None:
     model_file_dir = require(request, "model_file_dir", str)
     model_filename = require(request, "model_filename", str)
     use_autocast = require(request, "use_autocast", bool)
-    overlap = require(request, "overlap", int)
+    hop_s = require(request, "hop_s", int)
     if "memory_cap_bytes" not in request:
         raise KeyError(
             "the denoise request has no 'memory_cap_bytes'; it is required, and "
@@ -73,15 +73,16 @@ def load(request: dict) -> None:
             f"({exc}). Build it with `crucible install rvc`."
         ) from None
 
-    # The library's own MDXC settings with only the overlap replaced (the manifest's), so
-    # its other defaults stay whatever this version of audio-separator says they are.
+    # The library's own MDXC settings with only `overlap` replaced, so its other defaults
+    # stay whatever this version of audio-separator says they are. For a Roformer that key
+    # is the hop in seconds between windows (step = overlap * sample_rate), not a count.
     mdxc_params = dict(inspect.signature(Separator.__init__).parameters["mdxc_params"].default)
     if "overlap" not in mdxc_params:
         raise RuntimeError(
             f"audio-separator's default mdxc_params {sorted(mdxc_params)} has no "
-            "'overlap'; this worker cannot set the manifest's overlap on this version"
+            "'overlap'; this worker cannot set the manifest's hop_s on this version"
         )
-    mdxc_params["overlap"] = overlap
+    mdxc_params["overlap"] = hop_s
     separator = Separator(
         model_file_dir=model_file_dir,
         output_dir=os.path.join(model_file_dir, ".crucible-separator-unset"),

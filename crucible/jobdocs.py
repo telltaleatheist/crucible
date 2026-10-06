@@ -426,8 +426,7 @@ JOB_DOCS: dict[str, JobDoc] = {
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",
             "The separator stays loaded between jobs; send a file whole rather than "
-            "in chunks. Its overlap is the model's own: `vocals-roformer` 4, "
-            "`denoise-roformer` 8. See Throughput.",
+            "in chunks. See Throughput.",
         ),
     ),
     "unload-denoiser": _unload(

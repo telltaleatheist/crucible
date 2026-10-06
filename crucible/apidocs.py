@@ -387,9 +387,10 @@ THROUGHPUT: tuple[tuple[str, str], ...] = (
         "`denoise` (separators)",
         "One input per job, and the separator stays loaded between jobs, so separate jobs "
         "cost no reload. There is nothing to gain from cutting a file into chunks: send "
-        "it whole. The separator works in overlapping windows; each model's overlap is "
-        "its manifest's (`vocals-roformer` 4, `denoise-roformer` 8), and time is about "
-        "proportional to it.",
+        "it whole. The separator runs the model on one window at a time (11 s for "
+        "`vocals-roformer`, 8 s for `denoise-roformer`), starting one every `hop_s` "
+        "seconds (8 for both); time is about inversely proportional to the hop. It does "
+        "not batch windows.",
     ),
 )
 
