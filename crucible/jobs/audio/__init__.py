@@ -180,10 +180,9 @@ def start_audio_session(
             "hf_repo": spec.hf_repo,
             "device": spec.device,
             "dtype": spec.dtype,
-            "memory_cap_bytes": workers.torch_memory_cap(
-                spec.backend, spec.memory_bytes_estimate
-            ),
-            "memory_budget_bytes": spec.memory_bytes_estimate,
+            "memory_cap_bytes": workers.torch_memory_cap(spec.backend, needs.need_bytes),
+            "memory_budget_bytes": needs.need_bytes,
+            "low_vram": needs.low_vram,
         },
         ready_silence_timeout=ready_silence_timeout,
         on_ready=on_ready,
@@ -223,7 +222,7 @@ def occupy_audio(
             device=spec.device,
             dtype=spec.dtype,
             versions=dict(loaded.get("versions") or {}),
-            memory_bytes_estimate=spec.memory_bytes_estimate,
+            memory_bytes_estimate=needs.need_bytes,
             log_path=log_path,
             loaded_at=utcnow(),
         )
@@ -256,6 +255,15 @@ class Needs:
     spec: AudioBackendSpec
     python: Path
     weights_dir: Path
+    # This host's `[audio] low_vram`, for a model whose manifest can honour it.
+    low_vram: bool = False
+
+    @property
+    def need_bytes(self) -> int:
+        if self.low_vram:
+            assert self.spec.low_vram_memory_bytes_estimate is not None
+            return self.spec.low_vram_memory_bytes_estimate
+        return self.spec.memory_bytes_estimate
 
 
 class _Generation:
@@ -344,9 +352,16 @@ class AudioJobType(ResidentWorker):
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
         spec = _require_block(manifest, model_id, backend_kind)
-        worker_type.refuse_if_larger_than_host(self._backend, model_id, spec.memory_bytes_estimate)
+        low_vram = (
+            self._config.audio_low_vram and spec.low_vram_memory_bytes_estimate is not None
+        )
+        need = spec.low_vram_memory_bytes_estimate if low_vram else spec.memory_bytes_estimate
+        assert need is not None
+        worker_type.refuse_if_larger_than_host(self._backend, model_id, need)
         python = require_audio_python(self._config, spec, model_id)
-        return Needs(manifest, spec, python, require_audio_weights(self._config, manifest, spec))
+        return Needs(
+            manifest, spec, python, require_audio_weights(self._config, manifest, spec), low_vram
+        )
 
     def requirements(self, model_id: str, params: AudioParams) -> Needs:
         manifest = MANIFESTS.known(model_id)
@@ -364,13 +379,13 @@ class AudioJobType(ResidentWorker):
         self._residency.refuse_if_claimed(f"{doing} {model!r}")
         if self._residency.is_resident(KIND_AUDIO, model):
             return
-        self._guard(model, needs.spec.memory_bytes_estimate)
+        self._guard(model, needs.need_bytes)
 
     def _worker(self, ctx: JobContext, model: str, needs: Needs) -> workers.WorkerSession:
         return self._session(
             ctx,
             model,
-            needs.spec.memory_bytes_estimate,
+            needs.need_bytes,
             lambda: occupy_audio(self._residency, needs, on_progress=ctx.warming),
         )
 
@@ -494,8 +509,9 @@ def effective_params(
         "stage_seconds": result.get("stage_seconds"),
         "peak_bytes": result.get("peak_bytes"),
         "stage_peak_bytes": result.get("stage_peak_bytes"),
-        "memory_bytes_estimate": spec.memory_bytes_estimate,
+        "memory_bytes_estimate": needs.need_bytes,
         "memory_basis": spec.memory_basis,
+        "low_vram": needs.low_vram,
         "versions": result.get("versions"),
         "notes": result.get("notes"),
     }

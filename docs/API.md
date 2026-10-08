@@ -1803,6 +1803,7 @@ Makes sound from words: sound effects and instrumental music with Stable Audio 3
 
 - Which params a model takes is its own: Stable Audio reads `prompt` and takes `duration_s` and `steps`; YuE2 reads `tags` and `lyrics` (sections like `[Verse]`, optional with `instrumental: true`) and takes `cfg`. Anything else is refused `audio_param_unsupported` with the list it does take; a missing one `audio_param_missing`.
 - Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), `audio_param_out_of_range`. A song's length follows its lyrics.
+- A host with `[audio] low_vram = true` in its config holds only half of YuE2 on the card at a time (for an 8 GiB card); `audio.low_vram` in the `done` event says which ran (docs/AUDIO.md).
 - The Stable Audio repos are gated: until the licence is accepted on Hugging Face and the server has a token, `409 model_gated` says what to do (docs/AUDIO.md).
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.

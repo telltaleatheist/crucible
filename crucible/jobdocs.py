@@ -510,6 +510,9 @@ JOB_DOCS: dict[str, JobDoc] = {
             "does take; a missing one `audio_param_missing`.",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics.",
+            "A host with `[audio] low_vram = true` in its config holds only half of YuE2 "
+            "on the card at a time (for an 8 GiB card); `audio.low_vram` in the `done` "
+            "event says which ran (docs/AUDIO.md).",
             "The Stable Audio repos are gated: until the licence is accepted on "
             "Hugging Face and the server has a token, `409 model_gated` says what to "
             "do (docs/AUDIO.md).",

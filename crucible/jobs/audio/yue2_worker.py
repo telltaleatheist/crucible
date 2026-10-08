@@ -82,6 +82,99 @@ def mps_causal_is_sound(torch, sdpa, device: str = "mps") -> list[tuple[int, flo
     return errors
 
 
+def _halves(model) -> tuple[list, list]:
+    """The backbone's two halves. Each DecoderLayer holds AR modules (`self_attn`, `mlp` and
+    their norms), used to write the score and the song tokens and to prefill synthesis,
+    and `nar_*` modules, used only by the synthesis ODE solve (yue2/nar.py). Embeddings
+    and lm_head go with AR; the small adapters (vae2llm, time_embedder, latent_pos_embed)
+    stay on the card throughout."""
+    ar, nar = [model.model.embed_tokens, model.lm_head], []
+    for layer in model.model.layers:
+        for name, child in layer.named_children():
+            (nar if name.startswith("nar_") else ar).append(child)
+    if not nar:
+        raise RuntimeError("this YuE2 has no nar_* modules; low_vram cannot split it")
+    return ar, nar
+
+
+def hold_halves(pipe, torch) -> None:
+    """`[audio] low_vram`: only the half a stage uses is on the card, the other waits in
+    host memory. Measured on the 3090 Ti (2026-10-08): 6.37 to 6.62 GiB over the desktop
+    against 8.73, the audio within -105 dB of the whole model, about the same time.
+
+    Two of yue2-infer's internals are replaced, and both are checked first so another
+    version is refused rather than half-applied: the pipeline's `_load_model` (which moves
+    the whole model to the card on every stage) and `yue2.nar._offload_ar` (which only
+    moves AR off for the solve, leaving NAR where it was)."""
+    import contextlib
+    import inspect
+
+    import yue2.nar as nar_module
+    from yue2.modeling_yue2 import YuE2ForCausalLM
+
+    expected = ["model", "enabled"]
+    found = list(inspect.signature(getattr(nar_module, "_offload_ar", lambda: None)).parameters)
+    if found != expected or not hasattr(pipe, "_load_model"):
+        raise RuntimeError(
+            f"low_vram is written against yue2-infer's nar._offload_ar{tuple(expected)} and "
+            f"YuE2Pipeline._load_model; this yue2-infer has _offload_ar{tuple(found)}. Turn "
+            "[audio] low_vram off or bring the env to its recipe (`crucible install audio`)"
+        )
+    device = pipe.device
+
+    def load(for_nar=False):
+        if pipe._model is None:
+            pipe._model = YuE2ForCausalLM.from_pretrained(
+                pipe.model_dir, local_files_only=True, torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            ).eval()
+        model = pipe._model
+        ar, nar = _halves(model)
+        for module in nar:
+            module.to("cpu")
+        for name, child in model.named_children():
+            if name != "model":
+                child.to(device)
+        for name, part in model.model.named_children():
+            if name != "layers":
+                part.to(device)
+        for module in ar:
+            module.to(device)
+        misplaced = [
+            name for name, tensor in model.named_parameters()
+            if (".nar_" in name) != (tensor.device.type == "cpu")
+        ]
+        if misplaced:
+            raise RuntimeError(
+                f"low_vram left {len(misplaced)} tensor(s) on the wrong side, e.g. {misplaced[:3]}"
+            )
+        return model
+
+    @contextlib.contextmanager
+    def swap(model, enabled):
+        if not enabled:
+            yield
+            return
+        ar, nar = _halves(model)
+        for module in ar:
+            module.to("cpu")
+        torch.cuda.empty_cache()
+        for module in nar:
+            module.to(device)
+        try:
+            yield
+        finally:
+            for module in nar:
+                module.to("cpu")
+            torch.cuda.empty_cache()
+            for module in ar:
+                module.to(device)
+
+    pipe._load_model = load
+    pipe.offload_ar = True
+    nar_module._offload_ar = swap
+
+
 def _version_of(distribution: str):
     from importlib import metadata
 
@@ -107,6 +200,12 @@ class YuE2Engine:
             raise RuntimeError(f"the load request names parts {sorted(parts)}; YuE2 needs its 'vae'")
         self.device = workerio.require(request, "device", str, LABEL, audiocore.WHY_REQUIRED)
         budget = workerio.require(request, "memory_budget_bytes", int, LABEL, audiocore.WHY_REQUIRED)
+        low_vram = workerio.require(request, "low_vram", bool, LABEL, audiocore.WHY_REQUIRED)
+        if low_vram and self.device != "cuda":
+            raise RuntimeError(
+                f"low_vram holds half of YuE2 on a CUDA card at a time; this worker runs on "
+                f"{self.device}, where no manifest offers it"
+            )
         self.causal_check = None
         if self.device == "mps":
             from yue2.modeling_yue2 import sdpa
@@ -119,6 +218,16 @@ class YuE2Engine:
             memory_budget_gib=budget / GIB + YUE2_RESERVE_GIB,
             progress=False,
         )
+        if low_vram:
+            hold_halves(self._pipe, torch)
+            # YuE2 capped this process at the card less 2 GiB, which on an 8 GiB card is
+            # below the 6.05 GiB a halved composing stage reserves. Crucible admitted the
+            # load against its own measured need, so that need is the cap.
+            workerio.cap_memory(
+                torch,
+                workerio.require(request, "memory_cap_bytes", int, LABEL, audiocore.WHY_REQUIRED),
+            )
+        self.low_vram = low_vram
         self.versions = {
             "yue2-infer": _version_of("yue2-infer"),
             "torch": torch.__version__,

@@ -90,6 +90,8 @@ _BACKEND_OPTIONAL: dict[str, Any] = {
     "max_cfg": (int, float),
     "not_taken": dict,
     "companions": list,
+    "low_vram_memory_bytes_estimate": int,
+    "low_vram_memory_note": str,
 }
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
@@ -167,6 +169,10 @@ class AudioBackendSpec:
     max_cfg: float | None = None
     not_taken: tuple[tuple[str, str], ...] = ()
     companions: tuple[Companion, ...] = ()
+    # What the model needs when a host's `[audio] low_vram` holds only the part a stage
+    # uses on the card; None for a model that cannot be split.
+    low_vram_memory_bytes_estimate: int | None = None
+    low_vram_memory_note: str | None = None
 
     @property
     def device(self) -> str:
@@ -196,6 +202,8 @@ class AudioBackendSpec:
             "default_cfg": self.default_cfg,
             "max_cfg": self.max_cfg,
             "companions": [companion.to_dict() for companion in self.companions],
+            "low_vram_memory_bytes_estimate": self.low_vram_memory_bytes_estimate,
+            "low_vram_memory_note": self.low_vram_memory_note,
         }
 
 
@@ -337,7 +345,28 @@ def _check_engine(where: str, kind: str, block: dict[str, Any]) -> None:
         )
 
 
+def _check_low_vram(where: str, block: dict[str, Any]) -> None:
+    keys = ("low_vram_memory_bytes_estimate", "low_vram_memory_note")
+    present = [key in block for key in keys]
+    if not any(present):
+        return
+    if not all(present):
+        raise AudioManifestError(
+            f"{where}: {keys[0]} and {keys[1]} go together; a low-VRAM figure says what "
+            "it was measured on"
+        )
+    need = block["low_vram_memory_bytes_estimate"]
+    if not 0 < need < block["memory_bytes_estimate"]:
+        raise AudioManifestError(
+            f"{where}: low_vram_memory_bytes_estimate must be positive and below "
+            f"memory_bytes_estimate ({block['memory_bytes_estimate']}), got {need}"
+        )
+    if not block["low_vram_memory_note"].strip():
+        raise AudioManifestError(f"{where}: low_vram_memory_note is empty")
+
+
 def _check_memory(where: str, block: dict[str, Any]) -> None:
+    _check_low_vram(where, block)
     if block["memory_bytes_estimate"] <= 0:
         raise AudioManifestError(f"{where}: memory_bytes_estimate must be positive")
     if block["memory_basis"] not in MEMORY_BASES:
@@ -463,6 +492,8 @@ def _parse_backend(path: Path, kind: str, block: Any) -> AudioBackendSpec:
         max_cfg=None if "max_cfg" not in block else float(block["max_cfg"]),
         not_taken=_not_taken(where, block, takes),
         companions=companions,
+        low_vram_memory_bytes_estimate=block.get("low_vram_memory_bytes_estimate"),
+        low_vram_memory_note=block.get("low_vram_memory_note"),
     )
 
 

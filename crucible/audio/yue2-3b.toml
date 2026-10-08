@@ -33,6 +33,10 @@ max_duration_s = 360
 takes = ["cfg", "instrumental"]
 default_cfg = 1.0
 max_cfg = 20.0
+# With `[audio] low_vram = true` in a host's config (for a card too small to hold YuE2
+# whole, e.g. an 8 GiB laptop): only the half of the backbone a stage uses is on the card.
+low_vram_memory_bytes_estimate = 7_300_000_000
+low_vram_memory_note = "measured 2026-10-08 on the RTX 3090 Ti through crucible/jobs/audio/yue2_worker.py with low_vram and a torch cap at this figure (Oh Banana, seed 3306096576): the highest stage reserved 6.50 GB for 204 s of song, 6.79 GB for 303 s and 6.74 GB for 312 s, and the whole card was 6.37 to 6.62 GiB over the desktop, against 8.73 GiB holding YuE2 whole. 7.3 GB covers the 360 s ceiling, which was not reached. The audio differs from the whole model by at most 5.4e-6 (-105 dB). The AR half (2.83 GB, plus embeddings and lm_head 1.51 GB) writes the score and the song; the NAR half (2.82 GB) solves the synthesis; each waits in host memory while the other runs"
 
 [backends.cuda-linux.not_taken]
 duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); add or remove sections of lyrics to change the length"

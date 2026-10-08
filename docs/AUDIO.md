@@ -39,6 +39,31 @@ None of these is needed by hand: a job for a missing env or model starts the ins
 answers `409 installing`, like every other type. The one step Crucible cannot take for you is
 accepting a licence (next section).
 
+### A card too small for YuE2 whole: `[audio] low_vram`
+
+YuE2's 7.26 GB backbone is two halves that never run together: the AR half (2.83 GB, plus
+the 1.51 GB of embeddings and output layer) writes the score and the song, and the NAR half
+(the `nar_*` modules, 2.82 GB) solves the synthesis. A host whose card cannot hold the model
+whole (an 8 GiB laptop) sets
+
+```toml
+[audio]
+low_vram = true
+```
+
+and only the half a stage uses is on the card; the other waits in host memory. Measured on
+the 3090 Ti on 2026-10-08 through the worker, capped as an 8 GiB card: 6.37 to 6.62 GiB of
+card over the desktop for songs of 204 to 312 s, against 8.73 GiB holding YuE2 whole; about
+the same render time; and the audio within 5.4e-6 (-105 dB) of the whole model's. The load is admitted against the manifest's
+`low_vram_memory_bytes_estimate` instead of `memory_bytes_estimate`, and the `done` event's
+`audio.low_vram` says which ran.
+
+It is off unless a host's config says so (Owen, 2026-10-08: *"this would be a configuration
+for systems with low ram, not for high ram systems like this pc"*), and only a model whose
+manifest declares a low-VRAM figure honours it: today `yue2-3b` on cuda-linux. `[audio]` is
+not a table `crucible install` writes, so a reinstall keeps it. Restart the server after
+changing it.
+
 ### The Stable Audio models are gated
 
 Hugging Face serves `stabilityai/stable-audio-3-small-sfx` and `stabilityai/stable-audio-3-medium`

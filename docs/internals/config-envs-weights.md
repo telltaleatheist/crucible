@@ -86,6 +86,7 @@ default. Values of the wrong type are refused, not coerced; for example,
 | `[auth] open_pairing` | true | Owen 2026-09-17: *"ollama allows anybody to connect if they can reach it. make that the case with crucible servers as well"* |
 | `[jobs] retention_days` | 7 | Owen 2026-09-18. This is a backstop: a job is reaped as soon as its artifacts are fetched. 0 and negative values are refused, because retention cannot be turned off. |
 | `[jobs] install_on_submit` | true | Owen 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*. `POST /v1/jobs` reads it on every request. |
+| `[audio] low_vram` | absent (off) | Owen 2026-10-08: *"a configuration for systems with low ram, not for high ram systems like this pc. only for victoria's laptop"*. Holds only the half of YuE2 a stage uses on the card (docs/AUDIO.md); a model without a `low_vram_memory_bytes_estimate` ignores it. Read at start. `write_config` does not own `[audio]`, so a rewrite keeps it. |
 | `[queue] max_session_hold_s` | absent (no limit) | Owen 2026-10-01: some runs take a day, so a queue session stays open as long as its client keeps using it. Set it to end any session open longer than this many seconds (reason `max_hold`); 0 is no limit, a negative value is refused. Read live. `write_config` does not own `[queue]`, so a rewrite keeps it. |
 
 Always-written keys (`install_on_submit`, `retention_days`,

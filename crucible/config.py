@@ -135,6 +135,11 @@ class Config:
     local_models: tuple[LocalModelRecord, ...] = ()
     tts_engines: tuple[EngineFootprint, ...] = ()
     max_session_hold_s: int = DEFAULT_MAX_SESSION_HOLD_S
+    # `[audio] low_vram`: hold only the part of an audio model a stage uses on the card
+    # (crucible/jobs/audio/yue2_worker.py), for a card too small to hold it whole. Off
+    # unless a host's config says so; only models whose manifest declares a low-VRAM
+    # figure honour it.
+    audio_low_vram: bool = False
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -269,6 +274,15 @@ def _max_session_hold_s(table: dict[str, Any]) -> int:
             f"seconds, got {value}"
         )
     return value
+
+
+def _audio_low_vram(table: dict[str, Any]) -> bool:
+    """`[audio] low_vram`: absent is off. [audio] is not a writer-owned table, so
+    `crucible install` carries it as it is (_unowned_tables)."""
+    section = table.get("audio")
+    if section is None or "low_vram" not in section:
+        return False
+    return _require(table, "audio", "low_vram", bool)
 
 
 def _install_on_submit(table: dict[str, Any]) -> bool:
@@ -862,6 +876,7 @@ def load_config(
         upstreams=upstreams,
         tts_engines=_tts_engine_records(table),
         max_session_hold_s=_max_session_hold_s(table),
+        audio_low_vram=_audio_low_vram(table),
         stamp=stamp,
     )
 
