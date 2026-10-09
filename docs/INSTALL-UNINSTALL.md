@@ -222,6 +222,14 @@ ends on the line that says the Linux engine is running ("Done. …") or on what 
 an app, it waits ten seconds and hands over, printing the one line that follows the move
 from any terminal. If the move stops, the tray icon's menu says so and offers "Try again".
 
+**No `config.toml` in `%LOCALAPPDATA%\Crucible` is normal** once the Linux engine runs. That
+file belongs to the Windows engine, and the tray writes it only if it ever starts that engine:
+on a first install it does, briefly, before the move (and the move carries its token into the
+guest); on a re-install over a `crucible` distro that is still there it never does. The
+engine's config is the guest's (`~/.crucible/config.toml` of the `crucible` user; `crucible
+guest <verb>` reaches it from Windows); the Windows side has `pairing`, `host`,
+`installation.json` and the tray's own files.
+
 What the install creates on the Windows side: `%LOCALAPPDATA%\Crucible\host` (Python and
 Crucible), the Startup item that starts the tray at login, and the **Start Menu item
 "Crucible"** that opens the Crucible window (`crucible app`). On a first install typed at

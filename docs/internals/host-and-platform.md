@@ -426,6 +426,18 @@ Try again appears only for outcome `cannot` or `failed`; a disabled restart line
   --force --config-from <file>` carrying `auth.token`, `[routes]`, `[upstreams]` and
   `[accelerator]` (extracted textually, never round-tripped through a TOML writer). Host,
   port, name, backend and job flags belong to the guest.
+- **A Windows `config.toml` exists only if the Windows engine ever ran.** The tray writes it
+  (`crucible init`, `Host._host_mode_unready`) the first time it starts the native engine,
+  which `Host.start` does only when there is no `crucible` distro yet and nothing answers.
+  On a first install that is the normal path, so the home has a `config.toml` and
+  `migrate-config` carries its token into the guest; nothing removes the Windows file
+  afterwards. When the distro is already there at the tray's first start (a re-install
+  over a kept distro), the tray boots the guest and never starts the Windows engine, so no
+  `config.toml` is written, and `migrate-config` logs "no Windows config to carry over":
+  the guest keeps the token `install.sh` minted. Both are correct. With a guest, the token
+  that counts is the guest's (`~crucible/.crucible/config.toml`); the Windows side reads it
+  through `%LOCALAPPDATA%\Crucible\pairing`, and an absent Windows `config.toml` reads as
+  neither `[orchestrator]` key set (`hostconfig.declined_wsl`, `consented_distro`).
 - **Model retirement follows verified activation.** Pull each subject into the guest and wait
   until the guest's catalog says installed; stop the Windows server; verify guest ownership and
   pairing; only then retire native files through the catalog owner functions
