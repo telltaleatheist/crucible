@@ -4805,8 +4805,10 @@ function readStopping(body: Json, where: string): Stopping | null {
 }
 
 function readUpdateHold(body: Json, where: string): UpdateHold | null {
-  // Absent on a server from before the hold, which can hold nothing: the same as null.
-  const data = optObject(body, 'updating', where);
+  // Every server in the fleet is kept current (Owen, 2026-10-09: "we should expect everything
+  // to be fully up to date. if it isnt, we'll update them"), so the key is required; null is
+  // no hold.
+  const data = nullableObject(body, 'updating', where);
   if (data === null) return null;
   const at = `${where}.updating`;
   return {
@@ -4912,6 +4914,7 @@ function readActivityJob(data: Json, where: string): ActivityJob {
     created: str(data, 'created', where),
     started: nullableStr(data, 'started', where),
     client: nullableStr(data, 'client', where),
+    // Absent by design, not by age: a waiting call's row is never cancelling.
     cancelling: optBool(data, 'cancelling', where),
     waitedS: optNum(data, 'waited_s', where),
     maxWaitS: optNum(data, 'max_wait_s', where),

@@ -186,13 +186,13 @@ class LowVram:
             )
         if self.auto and self.on:
             return (
-                f"{LOW_VRAM_SETTING} is on, because {self.need.words}. Crucible turned "
-                f"it on and decides it again with the card; `{TURN_OFF}` turns it off "
+                f"{LOW_VRAM_SETTING} is on, set automatically, because {self.need.words}. "
+                f"Crucible decides it again with the card; `{TURN_OFF}` turns it off "
                 "for good"
             )
         if self.auto:
             return (
-                f"{LOW_VRAM_SETTING} is off, and Crucible decides it: {self.need.words}"
+                f"{LOW_VRAM_SETTING} is off, set automatically: {self.need.words}"
             )
         said = "on" if self.on else "off"
         nudge = ""
@@ -204,7 +204,7 @@ class LowVram:
                 "turn it off"
             )
         return (
-            f"{LOW_VRAM_SETTING} is {said}, set by a person, and Crucible leaves it as it "
+            f"{LOW_VRAM_SETTING} is {said}, set manually, and Crucible leaves it as it "
             f"is ({self.need.words}){nudge}"
         )
 

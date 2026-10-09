@@ -55,7 +55,7 @@ const ACTIVITY = {
   server: { name: 'crucible@pc', version: '1.0.75', api_version: 1, backend: 'cuda-linux', uptime_s: 1 },
   resident: null, stopping: null, warming: null, claim: null, streaming: null,
   chat: { in_flight: 0, max_in_flight: null, max_in_flight_basis: null, rows: [] },
-  settings: { writes: [] }, catalog: { removals: [] }, session: null,
+  settings: { writes: [] }, catalog: { removals: [] }, session: null, updating: null,
   slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: true } },
   running: [], queued: [],
 };

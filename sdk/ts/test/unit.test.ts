@@ -435,6 +435,7 @@ const ACTIVITY_WITH_SESSION = {
   settings: { writes: [] },
   catalog: { removals: [] },
   session: null,
+  updating: null,
   slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
   running: [],
   queued: [],
@@ -549,9 +550,10 @@ test('a deploy hold reads as who, for what release, and until when', async () =>
 
   answer(200, { ...ACTIVITY_WITH_SESSION, updating: null });
   assert.equal((await client().activity()).updating, null);
-  // A server from before the hold can hold nothing: the absent key reads as no hold.
-  answer(200, ACTIVITY_WITH_SESSION);
-  assert.equal((await client().activity()).updating, null);
+  // The fleet is kept current, so a server that leaves the key out is a protocol error.
+  const { updating: _omitted, ...withoutHold } = { ...ACTIVITY_WITH_SESSION, updating: null };
+  answer(200, withoutHold);
+  await assert.rejects(client().activity(), /updating/);
 });
 
 test('a hold without its own times is a protocol error', async () => {

@@ -480,6 +480,7 @@ test('activity reads the open session', async () => {
       chat: { in_flight: 0, max_in_flight: null, max_in_flight_basis: null, rows: [] },
       settings: { writes: [] }, catalog: { removals: [] },
       session: state({ client: 'briefcase', model: 'qwen3.5-9b' }),
+      updating: null,
       slots: { accelerated: { busy: 0, of: 1, queue_depth: 0, accepts_work: false } },
       running: [], queued: [],
     });

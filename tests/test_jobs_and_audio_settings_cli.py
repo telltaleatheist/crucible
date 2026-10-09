@@ -229,7 +229,7 @@ def test_the_card_decision_turned_it_on_and_the_setter_says_who_did(
     assert cli.main(["audio", "low-vram"]) == 0
     out = capsys.readouterr().out
     assert "[audio] low_vram is on in" in out
-    assert "because this card needs it" in out and "Crucible turned it on" in out
+    assert "because this card needs it" in out and "set automatically" in out
 
 
 def test_off_by_hand_on_a_card_that_needs_it_stays_off(
@@ -238,7 +238,7 @@ def test_off_by_hand_on_a_card_that_needs_it_stays_off(
     assert cli.main(["audio", "low-vram", "off"]) == 0
     out = capsys.readouterr().out
     assert "[audio] low_vram = false" in out
-    assert "set by a person" in out
+    assert "set manually" in out
     assert _document(home)["audio"] == {"low_vram": False}
     _decided(capsys)  # the card decided again does not undo a person's off
     assert _document(home)["audio"] == {"low_vram": False}
