@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { API_VERSION, crucibleAddress, startPairing, pollPairing, CrucibleConnectionError, CrucibleClient, CrucibleProtocolError } from '../src/index.js';
+import { API_VERSION, crucibleAddress, looksLikeLanAddress, startPairing, pollPairing, CrucibleConnectionError, CrucibleClient, CrucibleProtocolError } from '../src/index.js';
 
 test('IP and hostname discovery uses the canonical port, preserving explicit ports and HTTPS', () => {
   assert.equal(crucibleAddress('192.168.1.9'), 'http://192.168.1.9:7100');
@@ -156,4 +156,77 @@ test('trusted apps list and approve pairing through authenticated API calls', as
     shape = 'no-code';
     await assert.rejects(client.listPairingRequests(), /has no field "user_code"/);
   } finally { server.close(); server.closeAllConnections(); }
+});
+
+
+// A friend's laptop, 2026-10-09: Crucible in its WSL2 guest, bound to loopback, and B-Side
+// on another device "refused with no hint". From that device nothing answers at all (no
+// listener on the LAN address, and Windows Firewall drops the SYN unanswered), so the server
+// never sees the attempt and cannot name the cause. The client is the one place it can be.
+const refusedFetch = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+
+const silentFetch = ((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+  init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+})) as typeof fetch;
+
+async function refusal(run: () => Promise<unknown>): Promise<CrucibleConnectionError> {
+  try {
+    await run();
+  } catch (error) {
+    assert.ok(error instanceof CrucibleConnectionError, `got ${String(error)}`);
+    return error;
+  }
+  assert.fail('it answered');
+}
+
+test('a LAN address that refuses names `crucible lan enable`, the Public network and Local Network access', async () => {
+  const error = await refusal(() => startPairing('192.168.68.40', 'B-Side', { fetch: refusedFetch }));
+  assert.equal(error.code, 'connection_unreachable');
+  assert.match(error.message, /^Nothing answered at 192\.168\.68\.40:7100\./);
+  assert.match(error.message, /`crucible lan enable` in PowerShell/);
+  assert.match(error.message, /Share on your network/);
+  assert.match(error.message, /marked Public/);
+  assert.match(error.message, /Local Network/);
+});
+
+test('a LAN address that never answers is a timeout, named as one, with the same hint', async () => {
+  const error = await refusal(() => startPairing('kylies-pc', 'B-Side', { fetch: silentFetch, timeoutMs: 30 }));
+  assert.equal(error.code, 'connection_timed_out', 'a firewall drop is not a cancel');
+  assert.match(error.message, /^Nothing answered within 0 s at kylies-pc:7100\./);
+  assert.match(error.message, /crucible lan enable/);
+});
+
+test('a cancel by the caller is a cancel, not a network fault', async () => {
+  const controller = new AbortController();
+  const pending = refusal(() => startPairing('192.168.1.9', 'B-Side', { fetch: silentFetch, signal: controller.signal }));
+  controller.abort();
+  const error = await pending;
+  assert.equal(error.code, 'connection_cancelled');
+  assert.doesNotMatch(error.message, /lan enable/);
+});
+
+test('an address beyond the local network is not told about the Windows LAN door', async () => {
+  const error = await refusal(() => startPairing('engine.example.com', 'B-Side', { fetch: refusedFetch }));
+  assert.equal(error.code, 'connection_unreachable');
+  assert.doesNotMatch(error.message, /lan enable/);
+  assert.match(error.message, /^Nothing answered at engine\.example\.com:7100\. Check the address/);
+});
+
+test('something that answers but not with JSON is not a Crucible, not an unreachable one', async () => {
+  const html = (async () => new Response('<html>router login</html>', { status: 200 })) as unknown as typeof fetch;
+  const error = await refusal(() => startPairing('192.168.1.1', 'B-Side', { fetch: html }));
+  assert.equal(error.code, 'not_crucible');
+  assert.match(error.message, /192\.168\.1\.1:7100 answered HTTP 200, but not as a Crucible/);
+});
+
+test('what counts as an address on this network', () => {
+  for (const url of ['http://192.168.68.40:7100', 'http://10.0.0.5:7100', 'http://172.20.1.2:7100',
+    'http://169.254.3.4:7100', 'http://mac-studio.local:7100', 'http://kylies-pc:7100',
+    'http://[fd00::1]:7100', 'http://[fe80::1]:7100']) {
+    assert.equal(looksLikeLanAddress(url), true, url);
+  }
+  for (const url of ['http://100.64.0.3:7100', 'http://8.8.8.8:7100', 'http://172.32.0.1:7100',
+    'http://engine.example.com', 'http://localhost:7100', 'http://[2001:db8::1]:7100']) {
+    assert.equal(looksLikeLanAddress(url), false, url);
+  }
 });

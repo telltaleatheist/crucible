@@ -152,6 +152,7 @@ import {
   type RouteSetting,
   type CrucibleRole,
   type ServerInfo,
+  type ServerNetwork,
   type ServerSetup,
   type SettingsDocument,
   type SettingsPatch,
@@ -2198,6 +2199,7 @@ export class CrucibleClient {
       pairing: strArray(body, 'pairing', 'setup'),
       jobTypes: strArray(body, 'job_types', 'setup'),
       configPath: str(body, 'config_path', 'setup'),
+      network: readNetwork(optObject(body, 'network', 'setup')),
     };
   }
 
@@ -4959,6 +4961,19 @@ function isStaleConnection(cause: unknown): boolean {
     error = (error as Error & { cause?: unknown }).cause;
   }
   return false;
+}
+
+function readNetwork(body: Json | null): ServerNetwork | null {
+  if (body === null) return null;
+  const where = 'setup.network';
+  return {
+    reachable: bool(body, 'reachable', where),
+    urls: strArray(body, 'urls', where),
+    sentence: str(body, 'sentence', where),
+    how: nullableStr(body, 'how', where),
+    command: nullableStr(body, 'command', where),
+    changes: nullableStr(body, 'changes', where),
+  };
 }
 
 function describeCause(cause: unknown): string {

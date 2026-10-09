@@ -126,7 +126,20 @@ test('setup reads every field of section 3.1', async () => {
     pairing: SETUP.pairing,
     jobTypes: ['llm', 'tts'],
     configPath: '/Users/telltale/.crucible/config.toml',
+    network: null,
   });
+});
+
+test("setup reads the server's own network report, and null from a server that predates it", async () => {
+  const network = {
+    reachable: false, urls: [], sentence: 'Only this PC can reach Crucible.',
+    how: 'run `crucible lan enable` in PowerShell on this PC', command: 'crucible lan enable',
+    changes: 'It adds two things to Windows.',
+  };
+  answer(200, { ...SETUP, network });
+  assert.deepEqual((await client().setup()).network, network);
+  answer(200, { ...SETUP, network: { ...network, reachable: 'no' } });
+  await assert.rejects(() => client().setup(), /setup\.network\.reachable is not a boolean/);
 });
 
 test('a pairing line off setup opens a client with no typing', async () => {

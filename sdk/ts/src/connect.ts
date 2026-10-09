@@ -53,19 +53,76 @@ export function crucibleAddress(address: string): string {
   catch { throw new CrucibleConnectionError('invalid_address', 'The server address is not valid'); }
 }
 
+/**
+ * Whether a server URL names a machine on this device's own network: a private IPv4
+ * (RFC 1918), a link-local address, an IPv6 unique-local or link-local address, a
+ * `.local` name, or a bare computer name. Tailnet (100.64/10) and public addresses are not.
+ */
+export function looksLikeLanAddress(url: string): boolean {
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  }
+  if (host.includes(':')) return /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host);
+  return host.endsWith('.local') || (!host.includes('.') && host !== 'localhost');
+}
+
+/**
+ * What to say when a machine on this network does not answer. Nothing answering at all is
+ * what a loopback-only Crucible looks like from another device: the server never sees the
+ * connection, so it cannot refuse it by name, and this is the only place the cause can be
+ * named. On Windows the usual one is that sharing was never turned on.
+ */
+function lanSilence(where: string, how: string): string {
+  return `${how} at ${where}. If Crucible runs on that computer, it answers only that computer `
+    + 'until it is opened to the network: on Windows, run `crucible lan enable` in PowerShell there '
+    + '(or, in the Crucible window, Settings, then Share under "Share on your network"); it also says '
+    + 'if Windows has that network marked Public, which keeps other devices out. Then check that this '
+    + 'device is on the same network (guest Wi-Fi often keeps devices apart) and, on an iPhone or '
+    + 'iPad, that this app is allowed Local Network access (Settings > Privacy & Security > Local Network).';
+}
+
+function silence(url: string, timedOut: boolean, timeoutMs: number): CrucibleConnectionError {
+  const where = new URL(url).host;
+  const how = timedOut ? `Nothing answered within ${Math.round(timeoutMs / 1000)} s` : 'Nothing answered';
+  if (looksLikeLanAddress(url)) {
+    return new CrucibleConnectionError(timedOut ? 'connection_timed_out' : 'connection_unreachable', lanSilence(where, how));
+  }
+  return new CrucibleConnectionError(timedOut ? 'connection_timed_out' : 'connection_unreachable',
+    `${how} at ${where}. Check the address, and that Crucible is running on that computer and shared with the network it is reached on.`);
+}
+
 async function read(url: string, path: string, options: PairingOptions, body?: unknown): Promise<Record<string, unknown>> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const abort = () => controller.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted) abort();
+  const unanswered = (): CrucibleConnectionError => (timedOut || !controller.signal.aborted
+    ? silence(url, timedOut, timeoutMs)
+    : new CrucibleConnectionError('connection_cancelled', 'The connection check was cancelled'));
   try {
-    const response = await (options.fetch ?? globalThis.fetch)(url + path, {
-      method: body === undefined ? 'GET' : 'POST', redirect: 'error',
-      headers: { 'X-Crucible-Api': String(API_VERSION), 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal,
-    });
-    const value: unknown = await response.json();
+    let response: Response;
+    try {
+      response = await (options.fetch ?? globalThis.fetch)(url + path, {
+        method: body === undefined ? 'GET' : 'POST', redirect: 'error',
+        headers: { 'X-Crucible-Api': String(API_VERSION), 'Content-Type': 'application/json' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal,
+      });
+    } catch {
+      throw unanswered();
+    }
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      if (controller.signal.aborted) throw unanswered();
+      throw new CrucibleConnectionError('not_crucible', `${new URL(url).host} answered HTTP ${response.status}, but not as a Crucible`);
+    }
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new CrucibleConnectionError('invalid_response', 'The address did not return a Crucible response');
     const object = value as Record<string, unknown>;
     if (!response.ok) {
@@ -74,10 +131,6 @@ async function read(url: string, path: string, options: PairingOptions, body?: u
         typeof error?.message === 'string' ? error.message : `Crucible returned HTTP ${response.status}`);
     }
     return object;
-  } catch (error) {
-    if (error instanceof CrucibleConnectionError) throw error;
-    throw new CrucibleConnectionError(controller.signal.aborted ? 'connection_cancelled' : 'connection_unreachable',
-      controller.signal.aborted ? 'The connection check was cancelled or timed out' : 'Crucible did not answer at this address. Check the address and that network sharing is enabled on that computer.');
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener('abort', abort);
