@@ -427,7 +427,7 @@ def test_a_persons_on_stays_on_a_card_that_does_not_need_it(
     assert "Crucible turned" not in _step(home, BIG_CARD, capsys)
     assert _audio_table(home) == {"low_vram": True}
     words = capabilitystore.low_vram_for(load_config(home), BIG_CARD).words
-    assert "set by hand" in words and "`crucible audio low-vram auto`" in words
+    assert "set by a person" in words and "`crucible audio low-vram auto`" in words
 
 
 def test_crucibles_own_on_comes_off_on_a_card_that_holds_it_whole(
@@ -546,7 +546,7 @@ def test_doctor_names_the_setting_in_each_state(
     by_hand = _doctor(home)
     assert by_hand["problems"] == []
     assert (by_hand["audio_low_vram"]["on"], by_hand["audio_low_vram"]["set_by"]) == (True, "person")
-    assert "is on, set by hand" in by_hand["audio_low_vram"]["words"]
+    assert "is on, set by a person" in by_hand["audio_low_vram"]["words"]
 
     _set_low_vram(home, False)
     off = _doctor(home)["audio_low_vram"]

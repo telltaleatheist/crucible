@@ -1749,7 +1749,7 @@
     var heading = el('p', { class: 'note' }, [
       chip(entry.on ? 'on' : 'off', entry.on ? 'accent' : ''),
       ' ',
-      chip(byCrucible ? 'Crucible decides' : 'set by hand'),
+      chip(byCrucible ? 'Crucible decides' : 'set by a person'),
       ' ',
       card ? chip(card[0], card[1]) : null
     ]);

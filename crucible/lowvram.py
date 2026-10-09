@@ -1,7 +1,7 @@
 """`[audio] low_vram`: what this card makes of it, and the one rule that turns it on.
 
 A friend's 8 GiB RTX 3070 laptop, 2026-10-08: songs needed `[audio] low_vram`, and it had
-to be turned on by hand inside a WSL distro its owner did not know existed; nothing
+to be turned on in a config file inside a WSL distro its owner did not know existed; nothing
 offered it. Owen, the same day: it is "a configuration for systems with low ram, not for
 high ram systems like this pc". So Crucible decides it from the card, and only where the
 card needs it:
@@ -204,7 +204,7 @@ class LowVram:
                 "turn it off"
             )
         return (
-            f"{LOW_VRAM_SETTING} is {said}, set by hand, and Crucible leaves it as it "
+            f"{LOW_VRAM_SETTING} is {said}, set by a person, and Crucible leaves it as it "
             f"is ({self.need.words}){nudge}"
         )
 
