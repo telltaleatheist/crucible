@@ -61,8 +61,20 @@ where it disagrees with them, it says so (§6).
    is loaded even when the estimate says it won't fit. Only Crucible's own automatic pick
    respects the card. If the load fails, the error says why, with the numbers (engine out of
    memory, the bytes it wanted, what the card had).
-8. **Apps call verbs.** A chat request may name a verb instead of a model, and is served by
-   whatever this server registered for it. B-Side calls `lyrics` and gets the bf16 model on the
+8. **Apps call verbs, and may narrow them per request.** Owen: *"any app can programmatically
+   tell crucible which model OR which model maximum to use with a verb. so if 27b is more than
+   necessary for a chat job, the app can programmatically request the 9b. or they can set the
+   maximum model size programmatically, so if they request the 9b instead of the 27b but
+   theyre on an 8 gb card, it wont automatically try to use the 9b, itll use the biggest
+   available up to 9b."* A request may carry:
+   - a **verb** alone, served by what this server registered for it;
+   - a **model**: exactly that, tried even when it won't fit (rule 7);
+   - a **ceiling** (a size such as 9B): the automatic pick (rule 3) runs with the goal lowered
+     to the ceiling, so on an 8 GiB card a 9B ceiling gets the biggest variant that fits up
+     to 9B, never a 9B that doesn't fit. A ceiling above the verb's goal changes nothing.
+
+   A chat request may name a verb instead of a model, and is served by whatever this server
+   registered for it. B-Side calls `lyrics` and gets the bf16 model on the
    PC and the Mac and the 4-bit one on an 8 GiB laptop. Its own chooser (b-side 798c6bf) comes
    out.
 
@@ -84,7 +96,7 @@ Missing:
      way `qwen3.5-4b-bside-w4a16` was (compressed-tensors, round-to-nearest; Marlin on Ampere).
    - mlx-darwin: mlx-community's 4- and 8-bit conversions.
 3. The **`lyrics`** verb.
-4. **Verb-addressed chat**: a request naming a verb, resolved to the registered model.
+4. **Verb-addressed chat**: a request naming a verb, resolved to the registered model, optionally narrowed by a model or a size ceiling (rule 8).
 5. The **ladder for every verb**: measure the largest fitting variant per lineup, record it.
 6. **`[routes]` for every verb**, and a Settings page in the app.
 7. **Named loads that try** instead of being refused upfront, with an error that says why when
