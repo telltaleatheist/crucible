@@ -193,6 +193,22 @@ export interface Stopping {
   readonly pids: readonly number[];
 }
 
+/**
+ * A deploy's hold on this server (`POST /v1/server/updating`): while it stands, every door that
+ * creates work answers `503 server_updating` (the SDK's `CrucibleUpdating`) and admits nothing. It ends
+ * with the restart, a `DELETE`, or by itself at `until`.
+ */
+export interface UpdateHold {
+  /** The release the deploy is installing, or `null` when it did not say. */
+  readonly release: string | null;
+  /** Who took the hold, or `null` when it did not say. */
+  readonly by: string | null;
+  /** When it was taken, in {@link ActivityJob.started}'s format. */
+  readonly since: string;
+  /** When it lapses by itself if nothing ends it first. */
+  readonly until: string;
+}
+
 /** `GET /v1/health`. */
 export interface Health {
   readonly status: string;
@@ -219,6 +235,12 @@ export interface ActivityJob {
   readonly started: string | null;
   /** The submitting User-Agent. */
   readonly client: string | null;
+  /**
+   * `true` while a running job's client has cancelled it and Crucible is still stopping it (the
+   * `message` then says so); `null` on a row that does not say, which is a waiting call or a
+   * server from before the field.
+   */
+  readonly cancelling: boolean | null;
   /** Seconds this job has waited in the server's queue; `null` unless it is waiting there. */
   readonly waitedS: number | null;
   /** How long it may wait before it is removed `expired`; `null` unless it is waiting. */
@@ -409,6 +431,11 @@ export interface Activity {
   /** The open queue session, which holds the server until it closes, or null. */
   readonly session: QueueSessionState | null;
   readonly slots: { readonly accelerated: ActivitySlot };
+  /**
+   * The deploy hold, while one stands: new work is refused until the restart. `null` when none
+   * stands, and from a server from before the field.
+   */
+  readonly updating: UpdateHold | null;
   readonly running: readonly ActivityJob[];
   readonly queued: readonly ActivityJob[];
 }

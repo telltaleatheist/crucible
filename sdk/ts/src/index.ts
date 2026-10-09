@@ -283,6 +283,7 @@ export type {
   TaskStepData,
   TerminalEventName,
   TtsCapability,
+  UpdateHold,
   UploadResult,
   UpstreamName,
   UpstreamSetting,

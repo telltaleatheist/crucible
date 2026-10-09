@@ -167,6 +167,7 @@ import {
   type TaskStatus,
   type UnmetNeed,
   type TaskStepData,
+  type UpdateHold,
   type UploadResult,
   type UpstreamName,
   type UpstreamSetting,
@@ -4803,6 +4804,19 @@ function readStopping(body: Json, where: string): Stopping | null {
   };
 }
 
+function readUpdateHold(body: Json, where: string): UpdateHold | null {
+  // Absent on a server from before the hold, which can hold nothing: the same as null.
+  const data = optObject(body, 'updating', where);
+  if (data === null) return null;
+  const at = `${where}.updating`;
+  return {
+    release: nullableStr(data, 'release', at),
+    by: nullableStr(data, 'by', at),
+    since: str(data, 'since', at),
+    until: str(data, 'until', at),
+  };
+}
+
 function readHeldBy(
   resident: Json,
 ): { fact: string; who: string; details: Record<string, unknown> } | null {
@@ -4876,6 +4890,7 @@ function readActivity(body: Json): Activity {
         acceptsWork: bool(slot, 'accepts_work', 'activity.slots.accelerated'),
       },
     },
+    updating: readUpdateHold(body, 'activity'),
     running: asArray(field(body, 'running', 'activity'), 'activity.running').map(
       (entry, index) => readActivityJob(asObject(entry, `activity.running[${index}]`), `activity.running[${index}]`),
     ),
@@ -4897,6 +4912,7 @@ function readActivityJob(data: Json, where: string): ActivityJob {
     created: str(data, 'created', where),
     started: nullableStr(data, 'started', where),
     client: nullableStr(data, 'client', where),
+    cancelling: optBool(data, 'cancelling', where),
     waitedS: optNum(data, 'waited_s', where),
     maxWaitS: optNum(data, 'max_wait_s', where),
     waitingFor: readWaitingFor(data, where),
