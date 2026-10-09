@@ -21,6 +21,14 @@ from __future__ import annotations
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..config import Config
+from ..protocol import (
+    ACT_HEADER,
+    API_HEADER,
+    CLIENT_HEADER,
+    QUEUE_TICKET_HEADER,
+    SESSION_HEADER,
+    USER_AGENT_HEADER,
+)
 
 ALLOW_METHODS = "GET, POST, PUT, DELETE"
 # Every header @crucible/client sets (tests/test_cors.py reads them out of the SDK's own
@@ -34,12 +42,12 @@ ALLOW_HEADERS = ", ".join(
         "Content-Type",
         "Range",
         "Last-Event-ID",
-        "User-Agent",
-        "X-Crucible-Api",
-        "X-Crucible-Client",
-        "X-Crucible-Act",
-        "X-Crucible-Queue-Ticket",
-        "X-Crucible-Session",
+        USER_AGENT_HEADER,
+        API_HEADER,
+        CLIENT_HEADER,
+        ACT_HEADER,
+        QUEUE_TICKET_HEADER,
+        SESSION_HEADER,
     ]
 )
 EXPOSE_HEADERS = "Content-Range, Accept-Ranges, Content-Length"
