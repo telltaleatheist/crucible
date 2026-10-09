@@ -72,6 +72,22 @@ rvc 3.3, align 2.9, asr 1.3 on cuda-linux, ~0.9 GB for the Mac's — and those
 are ARCHIVE sizes, so an unpacked env is larger. They come from the mirrors per
 machine now, and only when the recipe moved.
 
+`crucible install <type>` turns its type on when the card can hold it, and places
+Crucible's ffmpeg whatever the type. After that, nothing about a type needs a hand edit of
+config.toml, nor `init --force` (which mints a new token):
+
+```bash
+crucible jobs list                    # every type: on or off, fits or not, env built or not
+crucible jobs enable audio            # refused by name if the card cannot hold it or its env is missing
+crucible jobs disable audio           # its env and models stay
+crucible audio low-vram on            # [audio] low_vram, for a card too small for YuE2 whole
+crucible service restart              # one step; the tray does not take it for a crash
+```
+
+On a Windows PC the engine is the `crucible` WSL distribution, run as its own user; prefix
+any of these with `crucible guest` from Windows (`crucible guest jobs enable audio`) rather
+than opening the distro by hand.
+
 ### What an UPGRADE downloads
 
 The wheel, its digest, and whatever of `pyproject.toml`'s dependencies actually

@@ -269,6 +269,22 @@ host never loops on restart because the systemd unit is `Restart=always`. Recove
 guest's system unit (touches only Crucible's unit, so allowed in any distro); host mode
 respawns the child. Every down-to-up edge re-asserts the claim.
 
+Before it recovers a guest unit, the watch asks systemd what the unit is doing
+(`PresenceWatcher.probe_activity`: `systemctl show crucible.service` ActiveState, SubState,
+Result), because silence on `/v1/ping` is not always a failure:
+
+| unit | the watch says | recovery |
+|---|---|---|
+| active, activating, deactivating, reloading | `starting`: systemd is bringing it up (`crucible service restart`, or `Restart=always` after a crash) | none; a second `systemctl start` would race systemd and change nothing |
+| inactive, Result=success | `stopped`: stopped inside the distro (`crucible service stop`, `systemctl stop`); Start engine brings it back | none, and nothing more is asked until it answers again |
+| failed, or systemd could not be asked | as before | the one recovery |
+
+The middle row is the fix for 2026-10-08: a laptop's `crucible service stop` was undone
+seconds later by `recovery system-unit-start: ok`, so stop-then-start fought the tray. With
+`Restart=always`, a server that exits of its own accord is `activating` again, never
+inactive-with-success, so that state means someone stopped it. `crucible service restart`
+is the one-step verb for a restart from inside the guest.
+
 ### The door (127.0.0.1:7101, `controller_door.py`)
 
 - One route table per method (`GET_ROUTES`, `POST_ROUTES`: path → handler function) and one

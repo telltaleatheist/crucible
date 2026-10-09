@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import sys
+import time
 
 from .. import service
 from ..backend import Backend
@@ -106,6 +107,72 @@ def cmd_service_stop(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+RESTART_ANSWER_SECONDS = 120.0
+RESTART_SAY_EVERY_SECONDS = 15.0
+
+
+def wait_for_answer(
+    config: Config,
+    backend: Backend,
+    *,
+    budget_s: float = RESTART_ANSWER_SECONDS,
+    say_every_s: float = RESTART_SAY_EVERY_SECONDS,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> float | None:
+    """Wait for this config's server to answer /v1/info; the seconds it took, or None.
+
+    A restart is not done when systemd returns (Type=simple returns as soon as the
+    process is spawned) but when the server answers, so this waits, saying so."""
+    started = clock()
+    said = started
+    while True:
+        if common.server_here(config, backend) is not None:
+            return clock() - started
+        now = clock()
+        if now - started >= budget_s:
+            return None
+        if now - said >= say_every_s:
+            said = now
+            print(f"still waiting for it to answer, {now - started:.0f} s", flush=True)
+        sleep(1.0)
+
+
+def cmd_service_restart(args: argparse.Namespace) -> int:
+    resolved = _service_context()
+    if isinstance(resolved, int):
+        return resolved
+    config, backend, mechanism = resolved
+    try:
+        lines = service.restart(
+            mechanism, home=service.user_home(), runner=service.subprocess_runner
+        )
+    except service.ServiceError as exc:
+        return _fail(str(exc))
+    for line in lines:
+        print(line)
+    url = common.loopback_url(config)
+    print(
+        f"waiting up to {RESTART_ANSWER_SECONDS:.0f} s for the server to answer on "
+        f"{url} (it loads its job types first)",
+        flush=True,
+    )
+    took = wait_for_answer(config, backend)
+    if took is None:
+        log = (
+            f"`journalctl -u {service.UNIT_NAME}`"
+            if mechanism == service.SYSTEMD
+            else str(service.serve_log_path(config.home))
+        )
+        return _fail(
+            f"restart_not_answering: the service restarted, and nothing answered on "
+            f"{url} within {RESTART_ANSWER_SECONDS:.0f} s. `crucible service status` "
+            f"says whether it is running, and {log} why it is not answering"
+        )
+    print(f"answering on {url} after {took:.0f} s")
+    return EXIT_OK
+
+
 def cmd_service_status(args: argparse.Namespace) -> int:
     resolved = _service_context()
     if isinstance(resolved, int):
@@ -182,6 +249,16 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "stop", help="stop the service without forgetting it"
     )
     service_stop.set_defaults(func=cmd_service_stop)
+
+    service_restart = service_commands.add_parser(
+        "restart",
+        help=(
+            "stop and start the installed service in one step, then wait for it to "
+            "answer. Use this rather than stop then start: on a Windows PC the "
+            "tray's watchdog starts a stopped engine itself"
+        ),
+    )
+    service_restart.set_defaults(func=cmd_service_restart)
 
     service_status = service_commands.add_parser(
         "status",

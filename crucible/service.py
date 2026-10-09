@@ -765,6 +765,50 @@ def start(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
 
 
+def restart(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
+    """Stop and start the service in one step, as its manager's own restart.
+
+    One verb, not `stop` then `start`: between those two a supervisor watching the
+    engine (the Windows tray's watchdog) sees a stopped unit and starts it itself, so
+    the operator's `start` races the tray's. systemd's `restart` and launchd's
+    `kickstart -k` leave the unit activating the whole time, which the tray reads as
+    systemd bringing it up (crucible/host/presence.py, PresenceWatcher.poll).
+    """
+    path = definition_path(mechanism, home)
+    if not path.is_file():
+        raise ServiceError(
+            f"there is no Crucible service on this host: {path} does not exist. "
+            "Run `crucible service install` first"
+        )
+    if mechanism == SYSTEMD:
+        scope = acting_scope(home, "restart")
+        _require(
+            runner,
+            [*writing_door(scope), *systemctl_argv(scope, "restart", UNIT_NAME)],
+            f"systemd would not restart {UNIT_NAME}",
+        )
+        return [f"restarted {UNIT_NAME}"]
+
+    if mechanism == LAUNCHD:
+        lines: list[str] = []
+        if not _agent_is_loaded(runner):
+            _require(
+                runner,
+                ["launchctl", "bootstrap", _domain(), str(path)],
+                f"launchd would not load {path}",
+            )
+            lines.append(f"loaded {LAUNCHD_LABEL}")
+        _require(
+            runner,
+            ["launchctl", "kickstart", "-k", _agent_target()],
+            f"launchd would not restart {LAUNCHD_LABEL}",
+        )
+        lines.append(f"restarted {LAUNCHD_LABEL}")
+        return lines
+
+    raise ServiceError(f"there is no service mechanism called {mechanism!r}")
+
+
 def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     if mechanism == SYSTEMD:
         scope = installed_scope(home)
@@ -811,6 +855,7 @@ __all__ = [
     "parse_systemctl_show",
     "plist_path",
     "read_linger",
+    "restart",
     "serve_log_path",
     "start",
     "status",

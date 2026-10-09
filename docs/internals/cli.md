@@ -18,11 +18,13 @@ usage (argparse's own).
 | `init` | `init`, `--config-from` carrying, the desktop-reserve decision |
 | `install` | `install` and its smoke import; the installer tables (`INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`) live in `crucible/jobenv.py` |
 | `capability` | `capability`, `ladder`, and the measure and capability steps `install` runs |
+| `jobs_cmd` | `jobs list/enable/disable`: one `[jobs] enable_<type>` flag, through `config.rewrite_config` |
+| `audio_cmd` | `audio low-vram [on|off]`: `[audio] low_vram`, through `config.rewrite_config` |
 | `weights` | `remove`, `models`, `rvc`, `denoise` |
 | `voices` | `voices list/pull/pin/check/card/export` |
 | `orchestrator` | `orchestrator`, `guest` |
 | `serve` | `serve` |
-| `service_cmd` | `service install/uninstall/start/stop/status` |
+| `service_cmd` | `service install/uninstall/start/stop/restart/status` |
 | `doctor` | `doctor`, `env patch` |
 | `uninstall_cmd` | `uninstall` |
 | `token` | `token`, and the pairing-file helpers `init`, `serve` and `service install` share |
@@ -177,6 +179,12 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 - Host and port are read from `config.toml` at install time and baked into the unit. After
   changing either, re-run `service install`. A unit that re-read the config would change
   behaviour without anyone installing anything.
+- `service restart` is the manager's own restart (`systemctl restart`, `launchctl
+  kickstart -k`), then a wait of up to 120 s for the server to answer `/v1/info`, saying
+  so every 15 s; nothing answering is `restart_not_answering` with where to look. It is
+  one step rather than `stop` then `start` because the Windows tray's watch starts a
+  stopped engine; a restart keeps the unit activating, which the watch waits for
+  (docs/internals/host-and-platform.md, "Presence and watch").
 - `service status` exits 0 only when the service is running, so scripts can gate on it.
   `running` is three-state: `None` means no manager could be asked, and is not reported as
   "no". On systemd, linger is reported and never assumed.
@@ -203,6 +211,14 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
   server offers this type", which needs the env too, and only `install` knows that.
   `--measure-desktop` re-measures the reserve, refuses by name while anything of
   Crucible's is on the card, prints old and new, and writes.
+- **`crucible jobs enable|disable <type>`** change one `[jobs]` flag through
+  `rewrite_config`, so the token and every other table survive. `enable` holds the same
+  line as `capability --write`: it is refused by name when the recorded capability says
+  no class of the type fits (`job_type_cannot_hold`), when nothing has decided the card
+  (`job_type_undecided`, pointing at `capability --write`), and when the type's env is not
+  built (`env_not_built`, pointing at the `install` that builds it and turns it on). It
+  reads the record, never re-decides. A running server adopts the change on its next
+  request (`ConfigFollower`); `disable` is honoured at once by `jobs.resolve`.
 - **`install` order**: build the env from its recipe (the only path; there are no packs)
   → `_smoke_import` → `_ensure_tools` → `_measure_step` → `_capability_step`.
   - `SMOKE_IMPORT` holds import names, not distribution names (`mlx-lm` → `mlx_lm`,
@@ -211,8 +227,14 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
     vs `mlx_whisper`). The tts key is the env directory's name, which carries the engine
     on cuda-linux (`tts-higgs-v3`). An env that cannot import its library is not
     installed, whatever pip said.
+  - The env build prints `install.EnvProgress` lines without `--verbose`: every 20 s a
+    `still installing, N s: <where pip is>` line (packages collected, the wheel being
+    built, how many are being installed), on its own clock so a wheel that builds for
+    minutes is still accounted for. pip's own lines stay behind `--verbose`.
   - `_ensure_tools`: Owen, 2026-09-26 (fresh-install #25). ffmpeg comes from Crucible's
-    own `tools` release, pinned by sha256, and every `install` places it. It runs before
+    own `tools` release, pinned by sha256, and every `install` places it (`audio` too,
+    since 2026-10-08: it had skipped the step, so `doctor` said "installing any job type
+    puts it there" right after `install audio`). It runs before
     the capability step, so no flag turns on without ffmpeg. Re-running retries only
     ffmpeg. The silero VAD for `asr`'s `speech_only` is placed too, but its failure is not
     a refusal: a `speech_only` job fetches it itself.
