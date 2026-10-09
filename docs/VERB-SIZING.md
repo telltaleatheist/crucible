@@ -57,9 +57,9 @@ where it disagrees with them, it says so (§6).
 6. **The user can set it per verb**, in `config.toml` (`[routes]`, grown to cover every verb)
    and in the app's settings page: every variant is listed, with the ones that don't fit greyed
    out but selectable (`MODEL-CHOICE.md` §4).
-7. **Asked for by name, Crucible tries.** An app naming a model, or a user's per-verb choice,
-   is loaded even when the estimate says it won't fit. Only Crucible's own automatic pick
-   respects the card. If the load fails, the error says why, with the numbers (engine out of
+7. **Configured by the user, Crucible tries.** A model the user set for a verb in Crucible's
+   settings is loaded even when the estimate says it won't fit (narrowed by §1a.4: an app's
+   named model is not, and the try has guards). If the load fails, the error says why, with the numbers (engine out of
    memory, the bytes it wanted, what the card had).
 8. **Apps call verbs, and may narrow them per request.** Owen: *"any app can programmatically
    tell crucible which model OR which model maximum to use with a verb. so if 27b is more than
@@ -68,7 +68,8 @@ where it disagrees with them, it says so (§6).
    theyre on an 8 gb card, it wont automatically try to use the 9b, itll use the biggest
    available up to 9b."* A request may carry:
    - a **verb** alone, served by what this server registered for it;
-   - a **model**: exactly that, tried even when it won't fit (rule 7);
+   - a **model**: exactly that, when it fits; one the estimate says won't fit is refused
+     with the verb's ceiling named (only a user's configured model is tried past it, §1a.4);
    - a **ceiling** (a size such as 9B): the automatic pick (rule 3) runs with the goal lowered
      to the ceiling, so on an 8 GiB card a 9B ceiling gets the biggest variant that fits up
      to 9B, never a 9B that doesn't fit. A ceiling above the verb's goal changes nothing.
@@ -77,6 +78,50 @@ where it disagrees with them, it says so (§6).
    registered for it. B-Side calls `lyrics` and gets the bf16 model on the
    PC and the Mac and the 4-bit one on an 8 GiB laptop. Its own chooser (b-side 798c6bf) comes
    out.
+
+## 1a. The holes, and Owen's answers (2026-10-09)
+
+Five holes raised in review; Owen's answers, verbatim, then what they mean.
+
+1. **One card, many verbs (swap churn).** *"i figured this would be on the calling app to use
+   crucible efficiently, and on crucible to allow sessions to use the same model back-to-back,
+   which it already does."* The pick does not trade quality for fewer swaps. A queue session
+   keeps its model on the card between its items; an app that wants no churn batches its work
+   by verb, or asks for one model across verbs (rule 8).
+2. **Fit includes working room, not just weights.** *"i agree on the fix. maybe crucible
+   dynamically decides which is the biggest model thatll fit based on the context being
+   delivered. also, thats the purpose of the "maximum" setting, where a user can pick the max
+   model parameters, for speed purposes or context purposes."* A model fits a verb only with
+   room for the verb's working context and concurrency (FITS-AND-THE-CARD.md). Where a request
+   states its context (`?context_tokens=`, or the prompt's own length), the pick is made
+   against that, so a long request may get a smaller model than a short one. The per-verb and
+   per-request maximum (rule 8) is how a person or an app chooses speed or context over size.
+3. **Who wins when settings disagree.** *"i agree with your fix."* Precedence, first that
+   applies: an exact model in the request, then a ceiling in the request, then the user's
+   per-verb setting, then Crucible's own pick.
+4. **"Try it" hurting what's running.** *"only try this if the user directly configures a model
+   in crucible settings. this is a kind of "dont stop the user from hitting themselves in the
+   face" type of thing. but yes, we can put sensible guards/protections on it."* This narrows
+   rule 7:
+   - Only a model the USER configured in Crucible's settings is tried past the estimate. An app
+     naming a model that the estimate says won't fit gets a refusal that names the verb's
+     ceiling instead.
+   - Guards on the try: only when the card is idle; never evicting a job, session or stream in
+     progress; a load that fails stops cleanly, leaves the card as it was, and says why with
+     the numbers.
+5. **Measuring every size of every verb.** *"we dont need to measure every size of every verb.
+   we just need to measure the highest model weights/quant it can handle, and we can assign
+   every verb within that range. might only take one or two measurements total. and that
+   measurement might just be "how much memory does this card have?" and downloading the right
+   model for that, and seeing how much headroom is there when it runs. then setting the final
+   maximum model size based on that single measurement"*
+   - The ladder becomes ONE measurement per card: from the card's memory, pick the largest text
+     variant the estimate says fits; download it; load it under its verb's working context;
+     read the real headroom.
+   - That headroom sets the card's CEILING in bytes, recorded with the card's facts.
+   - Every verb is then assigned within it from the catalog's figures, with no further
+     measurement. A second measurement runs only if the first variant didn't load, or left
+     enough headroom for the next size up.
 
 ## 2. What exists and what doesn't
 

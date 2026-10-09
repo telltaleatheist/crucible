@@ -792,6 +792,13 @@ EXCLUDED: dict[str, str] = {
     "GET /v1/capability/plan": "the operator page's install modal reads its sentences",
     "GET /v1/voices/{voice_id}/manifest": "the operator page's voice editor reads it",
     "GET /v1/playground": "the operator page's playground reads its forms",
+    "GET /v1/playground/presets/{model}": "the playground's and B-Side's preset bars read them",
+    "PUT /v1/playground/presets/{model}/{name}": "the playground's and B-Side's preset bars save them",
+    "DELETE /v1/playground/presets/{model}/{name}": "the playground's preset bar removes them",
+    "POST /v1/server/updating": "scripts/deploy.sh takes the update hold before it installs",
+    "DELETE /v1/server/updating": "scripts/deploy.sh releases the update hold after a failed install",
+    "GET /v1/docs": "the reference itself, for an app or an agent; `/docs` serves the page",
+    "GET /v1/docs.md": "the reference itself, for an app or an agent; `/docs` serves the page",
 }
 
 
