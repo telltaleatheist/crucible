@@ -77,21 +77,29 @@ Ruling (Owen, 2026-09-13): *"it uses what is available on the system. the user
 doesnt set those. crucible does."* The client picks the capability class and
 therefore the model family. Crucible picks the quantization.
 
-1. **Best first by declared size.** Candidates are ordered by
-   `memory_bytes_estimate` descending, then by id, and the first that fits
-   wins. Within one family on one backend a bigger estimate means less
-   quantization, so no `precision` key exists. Crucible never takes the
-   smallest model that fits.
+1. **A goal, then the most parameters, then the highest precision**
+   (docs/VERB-SIZING.md rules 2 and 3, built 2026-10-09). A text class carries a
+   `Goal` (`CapabilityClass.goal`, in `params_b`): 27B for `generate`, `translate`,
+   `simplify` and `analysis`, 9B for `decide` and `clean`. The automatic pick
+   (`CapabilityClass.pick_order`) takes, among the candidates at or below the goal
+   that fit, the most `[model] params_b`, then the most bits (each backend block's
+   stated `bits`), then a model's own form before its `weights_of` alias; the
+   catalog's order (`memory_bytes_estimate` descending, then id) settles the rest.
+   It never takes one above the goal; Settings can. A class with no goal (the media
+   classes) keeps the old rule: the first that fits by declared size. The record
+   says which: *"qwen3.5-9b (goal 9B; bf16 fits with 2.2 GiB to spare)"*, or below
+   the goal *"(goal 27B; the largest that fits this card)"*.
 2. **The bar is total memory minus the desktop allowance, not free memory.**
    A capability describes the host, and free VRAM only describes this second.
    "Is there room right now" belongs to the accelerator guard at load time.
 3. **There is no margin term.** The desktop allowance is the margin. Owen,
    2026-09-13: *"I've been using this system the way it is for months and it
    works fine. Use the current settings for each."*
-4. **Known-good checks** (in `tests/test_capability.py`): a 3090 Ti (24 GiB,
-   3 GiB reserve) runs translate on `qwen3.8-27b-4bit`. A 64 GiB Studio (25%
-   reserve) runs translate on the 4-bit model and refuses bf16 (51.7 GiB
-   against 48.0).
+4. **Known-good checks** (in `tests/test_capability.py` and
+   `tests/test_verb_goals.py`): a 3090 Ti (24 GiB, 3 GiB reserve) translates on
+   `qwen3.8-27b-4bit` and decides on `qwen3.5-9b`. A 64 GiB Studio (25% reserve)
+   translates on the 8-bit 27B and decides on `qwen3.5-9b`. An 8 GiB card runs every
+   text verb on `qwen3.5-0.8b`.
 5. **Generation before memory** (fresh-install #48). First, the precision
    the card can run the candidate at. Second, whether it can start the
    candidate at all.
@@ -152,10 +160,11 @@ first, then a smaller model.
   say so. `simplify` and `analysis` stay separate from `translate` (Owen,
   2026-09-13: *"they can't lie to the user and say a translate job is running
   when it's actually a simplify job"*).
-- **9B floor** for clean/translate/simplify/analysis (Owen, 2026-09-16: *"they cant
-  pick smaller than 9b"*), compared against `[model] params_b` and stated
-  explicitly in `min_params_b`. It must not be implied by whatever models
-  happen to ship. `decide` has no floor, because a 0.8B can answer it.
+- **No floor** (REVERSED 2026-10-09, docs/VERB-SIZING.md section 5). The 9B floor
+  for clean/translate/simplify/analysis and `min_params_b` are gone: every text
+  verb's lineup runs down to the 0.8B, so a small card gets a smaller model, never
+  "off". Only a card that cannot hold even the smallest is refused, by name. The
+  goal (above) caps the automatic pick from the other side.
 - `generate` is the one client-sized class (Owen, 2026-09-23: *"make it one
   class and give it the ability to set the context limit"*). The default is
   8192 tokens. A larger request is checked against the host ceiling and refused

@@ -276,9 +276,16 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
     assert by_name["tts"].reason == capabilitywords.NEEDS_WSL_REASON
 
 
-def test_a_small_card_turns_the_27b_off_with_the_number(
+def test_a_small_card_translates_on_the_largest_that_fits_and_names_its_goal(
 ) -> None:
     verdict = _decide("translate", 12 * GIB, WINDOWS_RESERVE, "nvidia")
+    assert verdict.enabled is True
+    assert verdict.selected == "qwen3.5-4b", "the Q4 27B and the Q8 9B need more than 9 GiB"
+    assert "(goal 27B; the largest that fits this card)" in verdict.summary
+
+
+def test_a_card_too_small_for_the_0_8b_turns_translate_off_with_the_number() -> None:
+    verdict = _decide("translate", 4 * GIB, WINDOWS_RESERVE, "nvidia")
     assert verdict.enabled is False
     assert verdict.shortfall_bytes > 0
     assert "short by" in verdict.reason

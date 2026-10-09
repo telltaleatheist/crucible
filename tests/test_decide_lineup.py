@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from crucible import capabilityclasses, classnames, fit
+from crucible import capabilityclasses, classnames
 from crucible.backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
-from crucible.capabilityclasses import BY_NAME, NINE_B_FLOOR, classes_for_model
+from crucible.capabilityclasses import BY_NAME, CHAT_GOAL, DECIDE_GOAL, classes_for_model
 from crucible.enginespec import UNSTATED_ENGINE_CONCURRENCY
 from crucible.errors import ApiError
 from crucible.inflight import ACT_NAMES, read_act
@@ -18,6 +18,7 @@ from .conftest import FAKE_BACKEND
 GIB = 1024 ** 3
 
 TEXT_CLASSES = ("clean", "translate", "simplify", "analysis")
+TEXT_VERBS = ("clean", "translate", "simplify", "analysis", "generate", "decide")
 SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
 
 
@@ -32,7 +33,7 @@ def test_decide_is_a_class_an_act_and_not_routable() -> None:
     assert entry.routable is False
     assert "decide" not in classnames.ROUTABLE_CLASSES
     assert "decide" in classnames.SELECTABLE_CLASSES
-    assert entry.min_params_b is None
+    assert entry.goal is DECIDE_GOAL and entry.goal.params_b == 9
     assert "decide" in ACT_NAMES
     assert read_act({"X-Crucible-Act": "decide"}) == "decide"
 
@@ -51,26 +52,37 @@ def test_decide_work_cites_the_door_and_is_not_sixteen_states() -> None:
     assert f"{UNSTATED_ENGINE_CONCURRENCY} questions" in work.source
 
 
-def test_the_nine_b_floor_is_explicit_on_the_four_text_classes() -> None:
-    for name in TEXT_CLASSES:
-        assert BY_NAME[name].min_params_b == NINE_B_FLOOR == 9, name
+def test_every_text_verb_has_its_goal_and_no_floor() -> None:
+    """docs/VERB-SIZING.md rule 2 and section 5: the 9B floor is gone; a goal caps the
+    automatic pick instead."""
+    goals = {name: BY_NAME[name].goal for name in TEXT_VERBS}
+    assert {name: goal.params_b for name, goal in goals.items()} == {
+        "clean": 9, "translate": 27, "simplify": 27, "analysis": 27, "generate": 27,
+        "decide": 9,
+    }
+    for name in ("translate", "simplify", "analysis", "generate"):
+        assert goals[name] is CHAT_GOAL, name
+    assert not hasattr(BY_NAME["clean"], "min_params_b")
 
 
-BEFORE = {
-    ("clean", CUDA_LINUX): ["qwen3.5-9b"],
-    ("clean", MLX_DARWIN): ["qwen3.5-9b"],
-    ("clean", LLAMA_WINDOWS): ["qwen3.5-9b"],
-    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b"],
-    ("translate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
-    ("translate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b"],
+LINEUPS = {
+    ("clean", CUDA_LINUX): ["qwen3.5-9b", *SMALL_TIERS],
+    ("clean", MLX_DARWIN): ["qwen3.5-9b", *SMALL_TIERS],
+    ("clean", LLAMA_WINDOWS): ["qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
+    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
+    ("translate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
+                                *SMALL_TIERS],
+    ("translate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
 }
 
 
 @pytest.mark.parametrize("backend", [CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS])
-def test_the_text_classes_offer_exactly_what_they_did(backend: str) -> None:
-    assert ids("clean", backend) == BEFORE[("clean", backend)]
-    for name in ("translate", "simplify", "analysis"):
-        assert ids(name, backend) == BEFORE[("translate", backend)], name
+def test_the_text_classes_run_down_to_the_0_8b(backend: str) -> None:
+    """Rule 1: every verb's lineup reaches the smallest text model, so a small card
+    gets a smaller model, never "off"."""
+    assert ids("clean", backend) == LINEUPS[("clean", backend)]
+    for name in ("translate", "simplify", "analysis", "generate"):
+        assert ids(name, backend) == LINEUPS[("translate", backend)], name
 
 
 @pytest.mark.parametrize("backend", [CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS])
@@ -88,8 +100,8 @@ def test_decide_offers_every_tier_best_first(backend: str) -> None:
 
 
 @pytest.mark.parametrize("model_id", SMALL_TIERS)
-def test_a_small_tier_serves_decide_and_nothing_else(model_id: str) -> None:
-    assert classes_for_model(model_id) == ("decide",)
+def test_a_small_tier_serves_every_text_verb(model_id: str) -> None:
+    assert set(classes_for_model(model_id)) == set(TEXT_VERBS)
 
 
 def test_the_nine_b_and_the_27bs_keep_their_classes_and_gain_decide() -> None:
@@ -98,13 +110,6 @@ def test_the_nine_b_and_the_27bs_keep_their_classes_and_gain_decide() -> None:
         assert "decide" in classes
         assert {"translate", "simplify", "analysis"} <= set(classes)
     assert "clean" in classes_for_model("qwen3.5-9b")
-
-
-def test_a_floor_is_a_comparison_not_a_family(tmp_path: Path) -> None:
-    source = BY_NAME["clean"].candidates
-    unfloored = fit.CatalogCandidates(source.load, source.families, None)
-    assert "qwen3.5-4b" in [c.id for c in unfloored(CUDA_LINUX)]
-    assert "qwen3.5-4b" not in ids("clean", CUDA_LINUX)
 
 
 def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:
@@ -118,7 +123,7 @@ def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:
         audio_low_vram=False,
     )
     assert verdict.enabled is True
-    assert verdict.selected in ("qwen3.8-27b-4bit", "qwen3.5-9b")
+    assert verdict.selected == "qwen3.5-9b"
     nine = next(c for c in verdict.candidates if c.id == "qwen3.5-9b")
     assert nine.need_bytes(BY_NAME["decide"].work) <= verdict.available_bytes
 
@@ -156,7 +161,7 @@ PINS = {
 def test_the_small_tiers_are_pinned_to_the_official_repos(model_id: str) -> None:
     manifest = load_manifest(model_id)
     assert manifest.family == "qwen3.5"
-    assert manifest.params_b < NINE_B_FLOOR
+    assert manifest.params_b < DECIDE_GOAL.params_b
     assert manifest.defaults.thinking is False
     for backend, (repo, revision) in PINS[model_id].items():
         spec = manifest.spec(backend)
@@ -324,10 +329,13 @@ def test_with_no_image_model_the_refusal_says_to_drop_the_images() -> None:
     assert "without `images`" in caught.value.message
 
 
-def test_the_mac_studio_still_decides_text_on_the_27b() -> None:
+def test_the_mac_studio_decides_on_the_9b_not_the_27b() -> None:
+    """It decided on the 27B at 8 bits until the goal; decide's goal is 9B, and the 9B's
+    text form is taken before its vision alias (the same weights, more to hold)."""
     verdict = decide(
         BY_NAME["decide"], MLX_DARWIN, total_bytes=64 * GIB,
         desktop_allowance_bytes=3 * GIB, gpu_vendor="apple", chosen=None,
         audio_low_vram=False,
     )
-    assert verdict.selected == "qwen3.8-27b-8bit"
+    assert verdict.selected == "qwen3.5-9b"
+    assert "goal 9B" in verdict.summary

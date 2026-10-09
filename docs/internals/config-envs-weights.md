@@ -106,9 +106,15 @@ only when they are non-empty.
 - On `cuda-linux` the reserve is VRAM the desktop holds that belongs to no job. The
   WSL2 driver shim does not list desktop apps as compute apps. `crucible init`
   measures it on NVIDIA (`ladder.measure_desktop_reserve`). The measurement is capped
-  at `DEFAULT_DESKTOP_ALLOWANCE_BYTES` (3 GiB), which is also the fallback when
-  nothing can be measured. 3 GiB was right for owens-pc, which streams, and held
-  back half of kylies-pc's 6 GB card.
+  at `DEFAULT_DESKTOP_ALLOWANCE_BYTES` (3 GiB). When nothing can be measured, a card
+  keeps `CARD_DESKTOP_ALLOWANCE_FRACTION` (an eighth) of itself, between 1 GiB and
+  3 GiB (Owen 2026-10-09, docs/VERB-SIZING.md 1b: *"we shouldnt plan to hit the 8 gb
+  wall, but we can get pretty close in most cases"*). An eighth agrees with both cards
+  measured: the 24 GiB 3090 Ti at 3 GiB and Victoria's 8 GiB laptop at 1 GiB. The
+  flat 3 GiB it replaced left an 8 GiB card 5 GiB and held back half of kylies-pc's
+  6 GB card. A CPU build (system memory) keeps the flat 3 GiB. The default applies
+  when a config is written; an existing `declared` reserve keeps its number until
+  `crucible capability --measure-desktop` or a fresh init.
 - On `mlx-darwin` the reserve is `MLX_DESKTOP_ALLOWANCE_FRACTION` (25%) of unified
   memory. That is the complement of Metal's `recommendedMaxWorkingSetSize`, which is
   about 75%. A flat 3 GiB would let the 64 GB Studio select the bf16 27B and leave
@@ -607,8 +613,11 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   request wins over the manifest, and a field neither states is left to the engine.
   `crucible/sampling.py` applies this and reports the source of each value. An
   integer `temperature = 0` is accepted.
-- `params_b` is load-bearing: the 9B floor for clean, translate, simplify and
-  analysis compares against it, so 0.8 is not rounded. `trained_context`
+- `params_b` is load-bearing: it is the first key of a goal class's automatic
+  pick and what its goal is compared against, so 0.8 is not rounded. Each backend
+  block's `bits` (4 to 32) is the second key; it is stated on every qwen manifest,
+  checked against what the block's file, repo or dtype implies
+  (`precision.implied_bits`), and wins over that reading where both exist. `trained_context`
   (`max_position_embeddings` at the pin) is required. Without it the card-derived
   ceiling was unbounded: the 9B on the Mac was offered 1,389,135 tokens.
 - `display` and `description` are required when `[local]` exists. `[local]` is
@@ -691,8 +700,8 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   - mlx: peak 20.38 GB at 12,198 tokens. RSS reads lower because weights are
     memory-mapped. At batch 16 the total is 32.14 GiB of 51.84.
   - llama-windows: Q8_0, because cleanup is where a wrong word is silently wrong.
-  - The 9B is the local floor for translate and simplify (Owen 2026-09-16: *"they
-    cant pick smaller than 9b"*).
+  - The 9B is the goal for `decide` and `clean` (docs/VERB-SIZING.md). It was the
+    local floor for translate and simplify until 2026-10-09; that floor is gone.
 - **qwen3.8-27b-4bit** (the PC's 27B):
   - cuda-linux uses `avyukth/...-AWQ-INT4`, one 18.57 GB file. cyankiwi's build
     (21.02 GB) does not fit with KV.
@@ -716,7 +725,8 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   gpu"*): the weights (29,501,218,479 B) are the hub's blob sum. The residual is
   the 4-bit's (a double-counted KV term was removed 2026-09-23). At decode 8 and
   prompt 1 the total is 49.66 GiB of 51.84. A second concurrent prefill would page.
-- **qwen3.5-4b / 2b / 0.8b** (decide only, below the 9B floor): official Qwen repos.
+- **qwen3.5-4b / 2b / 0.8b** (every text verb's small end since 2026-10-09; decide
+  only before): official Qwen repos.
   The 2B is full precision everywhere (Owen 2026-09-24: *"full quant when
   possible"*). Images are served on cuda-linux and llama-windows, text only on
   mlx-darwin.

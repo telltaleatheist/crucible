@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN, CardFacts
+from .backend import CPU_VENDOR, CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN, CardFacts
 from .capabilityclasses import CLASSES, CapabilityClass
 from .capabilityrecord import CapabilityRecord, CapabilityRow
 from .capabilitywords import (
@@ -11,8 +11,10 @@ from .capabilitywords import (
     LOCAL_ANSWER_PREFIX,
     NEEDS_WSL_REASON,
     UPSTREAM_OFFER,
+    above_goal_note,
     barred_note,
     feature_order,
+    goal_phrase,
     low_vram_offer,
     low_vram_refusal_note,
     low_vram_refusal_summary,
@@ -38,7 +40,6 @@ POOL_NAME: dict[str, str] = {
     LLAMA_WINDOWS: "card",
 }
 
-CPU_VENDOR = "cpu"
 CPU_POOL_NAME = "system memory"
 
 WSL_ONLY_JOB_TYPES: frozenset[str] = frozenset(
@@ -59,6 +60,8 @@ class Decision:
     candidates: tuple[Candidate, ...]
     fit_count: int
     lacking_features: tuple[str, ...] = ()
+    # The model is the one chosen for this class in settings, not the automatic pick.
+    chosen: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +75,7 @@ class Decision:
             "lacking_features": list(self.lacking_features),
             "available_bytes": self.available_bytes,
             "fit_count": self.fit_count,
+            "chosen": self.chosen,
             "candidates": [c.to_dict() for c in self.candidates],
         }
 
@@ -130,7 +134,15 @@ class _Weighing:
     usable: tuple[Candidate, ...]
     barred: tuple[Candidate, ...]
     fitting: tuple[Candidate, ...]
+    # The usable candidates in the class's pick order (CapabilityClass.pick_order): at
+    # or below its goal, best first. A class without a goal: `usable` as it is.
+    ranked: tuple[Candidate, ...]
     cpu_note: str
+
+    @property
+    def picks(self) -> tuple[Candidate, ...]:
+        """What the automatic pick may take on this host: ranked, and fitting."""
+        return tuple(c for c in self.ranked if c in self.fitting)
 
     @property
     def offer(self) -> str:
@@ -149,6 +161,7 @@ def _decision(
     summary: str,
     shortfall_bytes: int = 0,
     lacking_features: tuple[str, ...] = (),
+    chosen: bool = False,
 ) -> Decision:
     return Decision(
         capability=entry.name,
@@ -162,6 +175,7 @@ def _decision(
         candidates=found,
         fit_count=len(fitting),
         lacking_features=lacking_features,
+        chosen=chosen,
     )
 
 
@@ -187,7 +201,9 @@ def _refuse(
     )
 
 
-def _grant(w: _Weighing, picked: Candidate, reason: str) -> Decision:
+def _grant(
+    w: _Weighing, picked: Candidate, reason: str, *, why: str = "", chosen: bool = False
+) -> Decision:
     return _decision(
         w.entry,
         w.budget,
@@ -197,8 +213,10 @@ def _grant(w: _Weighing, picked: Candidate, reason: str) -> Decision:
         selected=picked.id,
         reason=reason,
         summary=f"can {w.entry.plainly}, using {picked.id}"
+        + (f" ({why})" if why else "")
         + serving_summary(picked, w.budget)
         + low_vram_summary(picked),
+        chosen=chosen,
     )
 
 
@@ -330,6 +348,7 @@ def _chosen_granted(w: _Weighing, picked: Candidate) -> Decision:
             precision_note(picked, w.card),
             serving_note(picked, w.budget),
         ),
+        chosen=True,
     )
 
 
@@ -348,19 +367,27 @@ def _decide_chosen(w: _Weighing, chosen: str) -> Decision:
 
 
 def _best_fit(w: _Weighing) -> Decision:
-    best = w.fitting[0]
+    best = w.picks[0]
+    why = (
+        ""
+        if w.entry.goal is None
+        else goal_phrase(w.entry, best, w.ranked, w.work, w.budget, w.card)
+    )
     return _grant(
         w,
         best,
         with_notes(
-            f"{best.id} fits: it needs {spell_chosen(best, w.work, w.budget)} and "
+            f"{best.id} {f'({why})' if why else 'fits'}: it needs "
+            f"{spell_chosen(best, w.work, w.budget)} and "
             f"there is {w.arithmetic}; {len(w.fitting)} of {len(w.found)} "
             f"{w.entry.noun} fit{w.cpu_note}",
+            above_goal_note(w.entry, w.fitting),
             barred_note(w.barred, w.card),
             skipped_ladder_note(w.usable, best, w.budget),
             precision_note(best, w.card),
             serving_note(best, w.budget),
         ),
+        why=why,
     )
 
 
@@ -388,11 +415,10 @@ def _none_can_start(w: _Weighing) -> Decision:
 
 def _none_fits(w: _Weighing) -> Decision:
     entry = w.entry
-    smallest = w.usable[-1]
+    smallest = [c for c in w.usable if c in w.ranked][-1]
     shortfall = smallest.floor_bytes(w.work) - w.budget
     low_vram = low_vram_offer(w.usable, w.budget)
-    note = f" {entry.binary_note}" if entry.binary_note else ""
-    note = serving_refusal_note(smallest, w.budget) + low_vram_refusal_note(low_vram) + note
+    note = serving_refusal_note(smallest, w.budget) + low_vram_refusal_note(low_vram)
     of_these = (
         f"{len(w.found)} {entry.noun}"
         if not w.barred
@@ -446,6 +472,15 @@ def _weigh(
 ) -> _Weighing:
     budget = available_bytes(total_bytes, desktop_allowance_bytes)
     usable = tuple(c for c in found if not c.lacks(card))
+    ranked = entry.pick_order(usable)
+    if usable and not ranked:
+        assert entry.goal is not None, "pick_order keeps every candidate of a goalless class"
+        raise ValueError(
+            f"{entry.name}'s goal is {entry.goal.words}, and "
+            f"every one of its {len(usable)} {entry.noun} on {backend_kind} is above "
+            "it, so its automatic pick could never take anything; a goal names a size "
+            "its lineup reaches"
+        )
     return _Weighing(
         entry=entry,
         backend_kind=backend_kind,
@@ -460,6 +495,7 @@ def _weigh(
         usable=usable,
         barred=tuple(c for c in found if c.lacks(card)),
         fitting=tuple(c for c in usable if _fits(entry, c, work, budget)),
+        ranked=ranked,
         cpu_note=(
             f" {CPU_BUILD_REASON}."
             if backend_kind == LLAMA_WINDOWS and gpu_vendor == CPU_VENDOR
@@ -505,7 +541,7 @@ def decide_capabilities(
     )
     if chosen is not None:
         return _decide_chosen(weighing, chosen)
-    if weighing.fitting:
+    if weighing.picks:
         return _best_fit(weighing)
     if not weighing.usable:
         return _none_can_start(weighing)

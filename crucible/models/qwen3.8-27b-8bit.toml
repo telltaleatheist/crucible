@@ -14,6 +14,7 @@ description = "The 27B at 8 bits — the best translation a 64 GB Mac can hold. 
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-8bit"
 revision = "815b83c0df8ffd1d1b5244cf75fd6ef14fca9ef9"
+bits = 8
 memory_bytes_estimate = 41_688_522_448
 engine_args = [
     "--decode-concurrency", "8",

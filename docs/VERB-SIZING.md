@@ -1,6 +1,7 @@
 # Every verb, sized to the card — the plan
 
-Owen, 2026-10-09. NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
+Owen, 2026-10-09. Phase 1 (§3 item 1) BUILT on `feat/verb-goals`, not merged (§7); the rest
+NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
 where it disagrees with them, it says so (§6).
 
 ## 0. The ruling, in his words
@@ -150,6 +151,7 @@ Already there:
 
 Missing:
 1. A per-verb **goal** and a fit-gated pick against it (today the pick is the biggest that fits).
+   **Built in phase 1 (§7).**
 2. **Small variants**, so every verb reaches every card:
    - cuda-linux (vLLM): W4A16 and W8A16 checkpoints of the 9B, the 4B and the 0.8B, built the
      way `qwen3.5-4b-bside-w4a16` was (compressed-tensors, round-to-nearest; Marlin on Ampere).
@@ -164,7 +166,8 @@ Missing:
 ## 3. Order of work
 
 1. Goals + the pick + always-available lineups, on the variants that exist today. Then decide
-   moves to the 9B on the PC and the Mac.
+   moves to the 9B on the PC and the Mac. **BUILT 2026-10-09 on `feat/verb-goals` (§7); not
+   yet measured on a card.**
 2. The `lyrics` verb and verb-addressed chat; B-Side calls `lyrics`, its chooser comes out.
 3. Small variants: build, upload (private HF, like the bside 4-bit), measure, ship.
 4. The ladder for every verb, so picks come from measurement.
@@ -197,3 +200,86 @@ an 8 GiB card (Victoria's laptop, when it's awake) before the next.
 - B-Side's own tag-model chooser (b-side 798c6bf) is replaced by the `lyrics` verb.
 - The 9B floor for translate/simplify (MODEL-CHOICE.md §0) and the class floors
   (MODEL-CHOICE.md addendum 2026-09-23) no longer refuse a smaller model.
+
+## 7. Phase 1, as built (2026-10-09, `feat/verb-goals`)
+
+Built on the variants that exist today. Nothing was run on a card: every figure below is the
+catalog's estimate against each card's budget, computed by the tests, not measured.
+
+**Where each fact lives (one owner each).**
+
+- **The goal** is the class's: `CapabilityClass.goal`, a `Goal(params_b, source)` in
+  `crucible/capabilityclasses.py`. `CHAT_GOAL` (27) on `generate`, `translate`, `simplify`,
+  `analysis`; `DECIDE_GOAL` (9) on `decide`; `CLEAN_GOAL` (9) on `clean`. The media classes
+  have none and pick as before (the first that fits by declared size).
+- **The pick order** is the class's too: `CapabilityClass.pick_order`. At or below the goal;
+  most `[model] params_b`; then most bits; then a model's own form before its `weights_of`
+  alias (the same weights with a vision tower to hold); the catalog's order (largest need
+  first) settles the rest. `verdict._best_fit` takes the first of these that fits.
+- **Bits are a stated manifest fact**: `bits` on each `[backends.<kind>]` block, stated on every
+  qwen manifest. `precision.weight_bits` reads it first; the parse refuses a value under 4,
+  over 32, or one that disagrees with what the block's GGUF file, repo name or `--dtype` implies
+  (`precision.implied_bits`, the reading that was the only source before). `dots-ocr` states none
+  (its class has no goal; its cuda-linux block's precision is not stated anywhere today).
+- **The floors are gone**: `min_params_b`, `NINE_B_FLOOR`, `NINE_B_TEXT_MODELS` and every
+  text class's `binary_note`. `clean` reads the qwen3.5 family down to the 0.8B; the other
+  four chat-shaped classes and `decide` read qwen3.8 and qwen3.5 down to the 0.8B.
+- **Fit** is unchanged (`Candidate.holds`, with the class's working context). It never counts
+  system memory, so nothing is picked that fits only by spilling (§1b).
+- **The unmeasured card reserve scales with the card** (§1b): `config.default_desktop_allowance_bytes`
+  gives a card an eighth of its VRAM, between 1 GiB and 3 GiB (`CARD_DESKTOP_ALLOWANCE_FRACTION`).
+  An eighth matches both cards measured: the 24 GiB PC at 3 GiB, Victoria's 8 GiB laptop at
+  1 GiB. A measured or stated reserve is used as it is; a CPU build keeps the flat 3 GiB (its
+  pool is system memory, shared with the OS); the Mac keeps 25%. It applies when a config is
+  written (`crucible init`): an existing `declared` 3 GiB stays until
+  `crucible capability --measure-desktop` or a fresh init.
+
+**What the surfaces say.** The record's `reason` and `summary`, so `crucible capability`,
+`/v1/capability`, doctor and the install plan all say it: *"can decide, using qwen3.5-9b (goal 9B;
+bf16 fits with 2.2 GiB to spare)"*, and below the goal *"(goal 27B; the largest that fits this
+card)"*. A fitting model above the goal is named in the reason (*"qwen3.8-27b-4bit also fits, and
+is above the 9B goal, which the automatic pick never exceeds; Settings can still choose it."*).
+`/v1/capability` rows carry `goal` (`params_b`, `source`); install-plan rows carry `goal`, and
+their `best` is the best within the goal. `Decision.chosen` says a Settings choice decided it.
+Doctor reports a record whose model differs from what this build decides (`capability_stale`),
+since a deploy does not re-record by itself: **the PC and the Mac keep deciding on the 27B
+until `crucible capability --write` runs on each.**
+
+**Precedence (§1a.3).** Unchanged where it exists: a model chosen in settings (`local_models`)
+wins over the automatic pick, above or below the goal; `[routes]` sends the class upstream. The
+request-level model and ceiling are phase 2.
+
+**What each card picks** (estimates; PC = 24 GiB cuda-linux with its stated 3 GiB reserve, Mac =
+64 GiB unified with the 25% reserve, 8 GiB = cuda-linux):
+
+| verb | PC before | PC now | Mac before | Mac now | 8 GiB before (3 GiB reserve) | 8 GiB now (1 GiB reserve) |
+|---|---|---|---|---|---|---|
+| decide | qwen3.8-27b-4bit | **qwen3.5-9b** | qwen3.8-27b-8bit | **qwen3.5-9b** | qwen3.5-0.8b | qwen3.5-0.8b |
+| clean | qwen3.5-9b | qwen3.5-9b | qwen3.5-9b | qwen3.5-9b | off | **qwen3.5-0.8b** |
+| translate, simplify, analysis | qwen3.8-27b-4bit | same | qwen3.8-27b-8bit | same | off | **qwen3.5-0.8b** |
+| generate | qwen3.8-27b-4bit | same | qwen3.8-27b-8bit | same | off | **qwen3.5-0.8b** |
+| sfx | small-sfx | same | small-sfx | same | small-sfx | small-sfx |
+| music | stable-audio-3-medium | same | same | same | off (short 1.3 GiB) | **stable-audio-3-medium** |
+| song | yue2-3b | same | same | same | off (short 1.8 GiB with low_vram) | **yue2-3b** with `[audio] low_vram` |
+
+On the 8 GiB card the 2B and 4B do not fit even at 7 GiB: their cuda-linux estimates carry the
+3.5 GB image reserve of a block that serves images (the 2B needs 7.8 GiB at decide's context).
+So every text verb lands on the 0.8B there until the 4- and 8-bit variants of phase 3 exist.
+
+**decide on the small models.** The small tiers were added for decide (history/PHASE22-DECIDE.md
+2.9) and the door's reading is per engine, not per model: vLLM (`--logprobs-mode raw_logprobs`,
+run live on the 0.8B, 8a), mlx-lm (the patched logprobs, a live 2B triage on the Mac, 2.10) and
+llama-server. Nothing found blocks a small model from decide. Two things to know: on the Mac the
+small tiers serve text only (an image decision needs `qwen3.5-9b-vl`), and on vLLM the prefix
+cache's 544-token blocks are the 0.8B's own measurement.
+
+**Left for later phases or for Owen.**
+- Measure phase 1 on the three cards (§3's rule), and re-record the PC and the Mac.
+- `qwen3.5-9b`'s `[local] minimum_for = ["translate", "simplify"]` still marks it the Foundry
+  lineup's floor for those two (`foundry-lineup.json` `floors`, and `modules.resolve_class`'s
+  default model for a module that names the class). It refuses nothing in Crucible; whether it
+  goes with the floor is Owen's call.
+- On a tie of size and bits the pick takes a model's own form before its vision alias, so the
+  Mac decides on `qwen3.5-9b` (mlx-lm, 16 wide), not `qwen3.5-9b-vl` (mlx-vlm, width 1), though
+  both fit. PHASE22's picker note said "the vision form when it fits"; that was the app's rule,
+  and this is Crucible's.

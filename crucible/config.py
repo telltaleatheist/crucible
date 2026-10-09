@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import tomli_w
 
+from .backend import CPU_VENDOR
 from .capabilityrecord import DESKTOP_BASES, CapabilityRecord, CapabilityRow
 from .classnames import ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .errors import ConfigError
@@ -41,15 +42,35 @@ DEFAULT_MAX_SESSION_HOLD_S = 0
 DEFAULT_PORT = 7100
 TOKEN_BYTES = 32
 
+# The most a card's desktop is ever reserved without being stated: the cap on a measured
+# reserve (ladder.desktop_allowance_from), and an unmeasured large card's default.
 DEFAULT_DESKTOP_ALLOWANCE_BYTES = 3 * 1024 ** 3
+
+# An unmeasured card's reserve scales with the card (Owen, 2026-10-09: "we shouldnt plan to
+# hit the 8 gb wall, but we can get pretty close in most cases"; docs/VERB-SIZING.md 1b).
+# An eighth agrees with both cards measured: owens-pc's 24 GiB 3090 Ti at the 3 GiB cap,
+# and Victoria's 8 GiB laptop at 1 GiB. A flat 3 GiB left an 8 GiB card 5 GiB.
+CARD_DESKTOP_ALLOWANCE_FRACTION = 0.125
+
+# Never less than the smallest reserve a measurement can give: peak + max(peak, 1 GiB).
+MIN_CARD_DESKTOP_ALLOWANCE_BYTES = 1 * 1024 ** 3
 
 MLX_DESKTOP_ALLOWANCE_FRACTION = 0.25
 
 
-def default_desktop_allowance_bytes(backend_kind: str, total_bytes: int) -> int:
+def default_desktop_allowance_bytes(
+    backend_kind: str, total_bytes: int, gpu_vendor: str
+) -> int:
+    """The reserve for a desktop nobody measured. Unified memory and a CPU build share
+    their pool with the whole OS: a quarter of unified memory, and the flat 3 GiB of
+    system memory. A card holds only the desktop's share of VRAM: an eighth of it,
+    between 1 GiB and 3 GiB."""
     if backend_kind == "mlx-darwin":
         return int(total_bytes * MLX_DESKTOP_ALLOWANCE_FRACTION)
-    return DEFAULT_DESKTOP_ALLOWANCE_BYTES
+    if gpu_vendor == CPU_VENDOR:
+        return DEFAULT_DESKTOP_ALLOWANCE_BYTES
+    scaled = int(total_bytes * CARD_DESKTOP_ALLOWANCE_FRACTION)
+    return min(DEFAULT_DESKTOP_ALLOWANCE_BYTES, max(MIN_CARD_DESKTOP_ALLOWANCE_BYTES, scaled))
 
 
 WINDOWS_HOME_DIRNAME = "Crucible"

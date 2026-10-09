@@ -445,20 +445,30 @@ def test_unattributed_never_goes_below_zero() -> None:
     assert accelerator.unattributed_bytes(state, 3 * GIB) == 0
 
 
-def test_the_cuda_reserve_is_flat_and_the_mac_reserve_scales() -> None:
+def test_an_unmeasured_card_reserve_scales_with_the_card_and_the_mac_reserve_scales() -> None:
+    """Owen 2026-10-09 (docs/VERB-SIZING.md 1b): plan close to the card's limit. An
+    unmeasured card keeps an eighth of itself, between 1 GiB and 3 GiB: the 24 GiB PC
+    keeps the 3 GiB it always had, and an 8 GiB card keeps 1 GiB, not 3."""
     from crucible.config import (
         DEFAULT_DESKTOP_ALLOWANCE_BYTES,
         default_desktop_allowance_bytes,
     )
 
-    for total in (12 * GIB, 24 * GIB, 80 * GIB):
-        assert (
-            default_desktop_allowance_bytes("cuda-linux", total)
-            == DEFAULT_DESKTOP_ALLOWANCE_BYTES
-        )
+    expected = {6 * GIB: 1 * GIB, 8 * GIB: 1 * GIB, 12 * GIB: GIB * 3 // 2,
+                16 * GIB: 2 * GIB, 24 * GIB: 3 * GIB, 80 * GIB: 3 * GIB}
+    for backend in ("cuda-linux", "llama-windows"):
+        for total, reserve in expected.items():
+            assert default_desktop_allowance_bytes(backend, total, "nvidia") == reserve
+    assert DEFAULT_DESKTOP_ALLOWANCE_BYTES == 3 * GIB
 
-    small = default_desktop_allowance_bytes("mlx-darwin", 16 * GIB)
-    large = default_desktop_allowance_bytes("mlx-darwin", 192 * GIB)
+    for total in (8 * GIB, 64 * GIB):
+        assert (
+            default_desktop_allowance_bytes("llama-windows", total, "cpu")
+            == DEFAULT_DESKTOP_ALLOWANCE_BYTES
+        ), "a CPU build's pool is system memory, shared with the OS: the flat 3 GiB"
+
+    small = default_desktop_allowance_bytes("mlx-darwin", 16 * GIB, "apple")
+    large = default_desktop_allowance_bytes("mlx-darwin", 192 * GIB, "apple")
     assert large == 12 * small
 
 
@@ -605,7 +615,7 @@ def test_the_mac_reserve_is_a_share_and_leaves_macos_a_quarter() -> None:
     from crucible.config import default_desktop_allowance_bytes
 
     total = 64 * 1000 ** 3
-    reserve = default_desktop_allowance_bytes("mlx-darwin", total)
+    reserve = default_desktop_allowance_bytes("mlx-darwin", total, "apple")
     available = total - reserve
     assert reserve == total // 4, "the reserve stopped being a quarter"
 

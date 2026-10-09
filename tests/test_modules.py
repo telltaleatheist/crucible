@@ -128,8 +128,13 @@ def test_a_class_with_a_floor_resolves_to_the_floor() -> None:
 
 
 def test_a_class_with_one_candidate_resolves_to_it() -> None:
-    assert modules.resolve_class("clean", None) == "qwen3.5-9b"
     assert modules.resolve_class("pages", None) == "dots-ocr"
+
+
+def test_clean_now_reaches_the_small_tiers_and_needs_its_model_named() -> None:
+    with pytest.raises(ModuleError) as caught:
+        modules.resolve_class("clean", None)
+    assert "qwen3.5-0.8b" in str(caught.value) and "model =" in str(caught.value)
 
 
 def test_a_class_with_several_candidates_and_no_floor_is_refused() -> None:

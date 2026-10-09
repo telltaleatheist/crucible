@@ -310,6 +310,35 @@ def _low_vram_findings(config: Config, backend: Backend) -> list[Finding]:
     return found
 
 
+def _pick_findings(config: Config, backend: Backend) -> list[Finding]:
+    """A record decided by an older pick rule or catalog (docs/VERB-SIZING.md rule 5: the
+    registration is re-made when the catalog changes): the classes whose recorded model,
+    or whether they run at all, differ from what this build decides on this card. The
+    audio classes are _low_vram_findings' and are left to it."""
+    record = config.capability
+    assert record is not None
+    found: list[Finding] = []
+    for decision in decide_for(config, backend):
+        if any(c.low_vram_bytes is not None for c in decision.candidates):
+            continue
+        if config.route_model(decision.capability) is not None:
+            continue
+        stored = record.row(decision.capability)
+        if stored is None:
+            continue
+        if (stored.enabled, stored.selected) == (decision.enabled, decision.selected):
+            continue
+        said = stored.selected if stored.enabled else "NO"
+        now = decision.selected if decision.enabled else "NO"
+        found.append(Finding(
+            "capability_stale",
+            f"the record says {decision.capability}: {said or 'yes'}, and this build "
+            f"decides {now or 'yes'} — {decision.reason}; re-run `{CAPABILITY_WRITE}`",
+            CAPABILITY_WRITE,
+        ))
+    return found
+
+
 def check_capability(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None:
@@ -319,7 +348,7 @@ def check_capability(host: Host) -> Section:
         return Section("capability", {"capability": None})
     findings = _stale_findings(config, backend)
     if not findings:
-        findings = _low_vram_findings(config, backend)
+        findings = _low_vram_findings(config, backend) + _pick_findings(config, backend)
     could_enable: list[str] = []
     for name in sorted({cls.job_type for cls in capabilityclasses.CLASSES}):
         rows = [record.row(cls.name) for cls in capabilityclasses.classes_for_job_type(name)]

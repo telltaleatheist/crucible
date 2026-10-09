@@ -31,6 +31,9 @@ ALIASES = {
 }
 MMPROJ = "mmproj-F16.gguf"
 
+# Every text class reaches down to these since the floor went (docs/VERB-SIZING.md).
+SMALL = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
+
 
 def _config(home: Path, backend_kind: str) -> Config:
     home.mkdir(parents=True, exist_ok=True)
@@ -177,7 +180,8 @@ def test_an_alias_of_itself_is_weights_of_chain(catalog_dir: Path) -> None:
         ('hf_repo = "Qwen/Qwen3.5-9B"', 'hf_repo = "Qwen/Qwen3.5-9B-Base"', "hf_repo"),
         (
             'file = "Qwen3.5-9B-Q8_0.gguf"',
-            'file = "Qwen3.5-9B-Q4_K_M.gguf"',
+            # another 8-bit file, so the block's stated bits still agree with it
+            'file = "Qwen3.5-9B-UD-Q8_K_XL.gguf"',
             "file",
         ),
     ],
@@ -370,11 +374,11 @@ def test_decide_lists_the_aliases_and_the_text_classes_do_not() -> None:
         ],
     }
     text = {
-        "clean": {k: ["qwen3.5-9b"] for k in (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)},
+        "clean": {k: ["qwen3.5-9b", *SMALL] for k in (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)},
         "translate": {
-            CUDA_LINUX: ["qwen3.8-27b-4bit", "qwen3.5-9b"],
-            MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b"],
-            LLAMA_WINDOWS: ["qwen3.8-27b-4bit", "qwen3.5-9b"],
+            CUDA_LINUX: ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
+            MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
+            LLAMA_WINDOWS: ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL],
         },
     }
     for backend, ids in expected_decide.items():
@@ -394,7 +398,9 @@ def test_the_small_tiers_are_untouched() -> None:
         manifest = load_manifest(model_id)
         assert manifest.weights_of is None
         assert aliases_of(manifest) == ()
-        assert classes_for_model(model_id) == ("decide",)
+        assert classes_for_model(model_id) == (
+            "clean", "translate", "simplify", "analysis", "generate", "decide",
+        )
 
 
 def test_every_alias_the_catalog_ships_is_one_of_the_two() -> None:
