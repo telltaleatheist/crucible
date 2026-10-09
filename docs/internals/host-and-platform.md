@@ -102,6 +102,13 @@ maintained; this file is the short list of things that must stay true.
   setup exe, which runs that script, is covered too), and the host refuses the same way in
   `crucible local register|install-cli|install-desktop|tray|start`, `crucible orchestrator`
   and every controller spawn. Reading verbs (`status`) are not refused.
+- **Removing is refused the same way.** `crucible uninstall` (dry run included) and
+  `install.ps1 -Uninstall` refuse `packaged_shell` with the removal's own sentence ("Nothing
+  has been removed"): inside a package the process sees that app's private folder laid over
+  the real AppData, so what it deletes is not reliably what is on the disk, and a half-done
+  removal of a split install (the guest's half, then a host half that only partly went) is
+  worse than none. A dry run is refused too because its reading is of the same overlay. The
+  guest's own `crucible uninstall` runs on Linux and is never asked.
 
 ## Reading wsl.exe
 

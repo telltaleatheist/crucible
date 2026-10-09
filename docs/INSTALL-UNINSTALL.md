@@ -212,7 +212,9 @@ irm https://github.com/telltaleatheist/crucible/releases/latest/download/install
 Run it from an **ordinary PowerShell window**. A terminal inside a Store/MSIX app (the
 Claude desktop app's, for one) has its AppData writes redirected into that app's private
 folder, so the script refuses `packaged_shell` before it writes anything
-(`docs/internals/host-and-platform.md`).
+(`docs/internals/host-and-platform.md`). The same goes for removing it: `install.ps1
+-Uninstall` and `crucible uninstall` refuse from inside such a terminal before they touch
+anything.
 
 Typed at a terminal, the script then follows the move in that window, step by step, and
 ends on the line that says the Linux engine is running ("Done. …") or on what is needed

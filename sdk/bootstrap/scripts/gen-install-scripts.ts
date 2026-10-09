@@ -342,11 +342,18 @@ function wslConfPrintf(): string {
 
 const ORDINARY_POWERSHELL = 'Open an ordinary PowerShell window (Start, type PowerShell, press Enter) and run it there.';
 
-export function packagedRefusalPs1(what: string): string {
+const PACKAGED_WRITES = "Windows quietly redirects what such a process writes under AppData into that app's own private folder, "
+  + 'so Crucible would land where only that app can see it, and would not start when you sign in. Nothing has been written. ';
+
+const PACKAGED_REMOVES = "Windows shows such a process that app's own private folder laid over the real AppData, so what it "
+  + 'removes there is not reliably what is on the disk: an uninstall from inside it could take away part of Crucible and '
+  + 'leave the rest, a split install neither half of which can be started or finished. Nothing has been removed. ';
+
+/** crucible/platform/packaged.py's refusal_sentence, word for word (tests/test_packaged_shell.py holds them together). */
+export function packagedRefusalPs1(what: string, removes = false): string {
   return `packaged_shell: ${what} is running inside the Windows app package $PackageName (an app installed from the Store `
-    + 'or as an MSIX, such as the Claude desktop app, and anything started from a terminal inside it). Windows quietly '
-    + "redirects what such a process writes under AppData into that app's own private folder, so Crucible would land where "
-    + 'only that app can see it, and would not start when you sign in. Nothing has been written. '
+    + 'or as an MSIX, such as the Claude desktop app, and anything started from a terminal inside it). '
+    + (removes ? PACKAGED_REMOVES : PACKAGED_WRITES)
     + ORDINARY_POWERSHELL;
 }
 
@@ -376,6 +383,7 @@ export function packagedCheckPs1(): string[] {
     '}',
     "$PackageName = ''",
     '$PackageCode = [CruciblePackage]::Ask([ref]$PackageName)',
+    `if ($PackageCode -eq 0 -and $Uninstall) { Die "${packagedRefusalPs1('this uninstall', true)}" }`,
     `if ($PackageCode -eq 0) { Die "${packagedRefusalPs1('this installer')}" }`,
     `if ($PackageCode -ne 15700) { Die "package_check_failed: GetCurrentPackageFullName returned $PackageCode, so it is not known whether this PowerShell runs inside an app package. ${ORDINARY_POWERSHELL}" }`,
   ];
