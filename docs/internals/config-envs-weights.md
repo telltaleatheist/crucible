@@ -70,6 +70,13 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   true, nor a rewriter written before `image` existed turn the image type off. A config
   with no `enable_image` key (every config before 2026-09-28) reads it as false.
   `enable_audio`, `enable_segment` and `enable_video` (all 2026-09-29) follow the same rule.
+- **`rewrite_config(config, flags=, audio_low_vram=)`** writes a loaded config back with
+  only the named settings changed: token, capability record, routes, upstreams, local
+  models, `[tts.*]`, advertise lists, `cors_origins`, `install_on_submit` and every
+  unowned table are passed through. It is the door for `crucible jobs enable|disable` and
+  `crucible audio low-vram`, which exist because the only other way to turn a type on
+  after install was a hand edit in a distro the operator may not know exists, or
+  `init --force`, which mints a new token (2026-10-08, a laptop install).
 - `carried_tables` (used only by `crucible init --config-from`) copies whole tables
   unchanged, so keys this build does not know are preserved. A table that is both
   typed and carried is refused.
@@ -86,7 +93,7 @@ default. Values of the wrong type are refused, not coerced; for example,
 | `[auth] open_pairing` | true | Owen 2026-09-17: *"ollama allows anybody to connect if they can reach it. make that the case with crucible servers as well"* |
 | `[jobs] retention_days` | 7 | Owen 2026-09-18. This is a backstop: a job is reaped as soon as its artifacts are fetched. 0 and negative values are refused, because retention cannot be turned off. |
 | `[jobs] install_on_submit` | true | Owen 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*. `POST /v1/jobs` reads it on every request. |
-| `[audio] low_vram` | absent (off) | Owen 2026-10-08: *"a configuration for systems with low ram, not for high ram systems like this pc. only for victoria's laptop"*. Holds only the half of YuE2 a stage uses on the card (docs/AUDIO.md); a model without a `low_vram_memory_bytes_estimate` ignores it. Read at start. `write_config` does not own `[audio]`, so a rewrite keeps it. |
+| `[audio] low_vram` | absent (off) | Owen 2026-10-08: *"a configuration for systems with low ram, not for high ram systems like this pc. only for victoria's laptop"*. Holds only the half of YuE2 a stage uses on the card (docs/AUDIO.md); a model without a `low_vram_memory_bytes_estimate` ignores it. Read at each load (the server follows the file). `write_config` does not own `[audio]`, so a rewrite keeps it; `crucible audio low-vram on|off` sets the one key through `write_config(audio_low_vram=)`, which keeps the rest of the table. |
 | `[queue] max_session_hold_s` | absent (no limit) | Owen 2026-10-01: some runs take a day, so a queue session stays open as long as its client keeps using it. Set it to end any session open longer than this many seconds (reason `max_hold`); 0 is no limit, a negative value is refused. Read live. `write_config` does not own `[queue]`, so a rewrite keeps it. |
 
 Always-written keys (`install_on_submit`, `retention_days`,
