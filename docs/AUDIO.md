@@ -47,16 +47,9 @@ accepting a licence (next section).
 
 YuE2's 7.26 GB backbone is two halves that never run together: the AR half (2.83 GB, plus
 the 1.51 GB of embeddings and output layer) writes the score and the song, and the NAR half
-(the `nar_*` modules, 2.82 GB) solves the synthesis. A host whose card cannot hold the model
-whole (an 8 GiB laptop) runs
-
-```bash
-crucible audio low-vram on            # `crucible guest audio low-vram on` on a Windows PC
-```
-
-which writes `[audio] low_vram = true` into config.toml and nothing else,
-
-and only the half a stage uses is on the card; the other waits in host memory. Measured on
+(the `nar_*` modules, 2.82 GB) solves the synthesis. On a host whose card cannot hold the
+model whole (an 8 GiB laptop), Crucible turns `[audio] low_vram` on by itself, and only the
+half a stage uses is on the card; the other waits in host memory. Measured on
 the 3090 Ti on 2026-10-08 through the worker, capped as an 8 GiB card: 6.37 to 6.62 GiB of
 card over the desktop for songs of 204 to 312 s, against 8.73 GiB holding YuE2 whole; about
 the same render time; and the audio within 5.4e-6 (-105 dB) of the whole model's. The load is admitted against the manifest's
@@ -67,20 +60,62 @@ The capability verdict weighs the same figure: `audiomodels.held_need` is the on
 which need a host uses, and the audio job, `crucible capability`, `crucible install audio`,
 `crucible doctor`, the Settings model choices and `/v1/info`'s `vram_bytes` all read it. On
 an 8 GiB card with a 1 GiB desktop allowance, `song` is granted "with [audio] low_vram"
-(6.8 GiB of 14.9 GiB whole); with the setting off it is refused, and the refusal names the
-setting as the fix rather than a 7.9 GiB shortfall alone. A capability record decided
+(6.8 GiB of 14.9 GiB whole); with a person's off it is refused, and the refusal names
+`crucible audio low-vram on` (or `auto`) as the fix rather than a 7.9 GiB shortfall alone. A capability record decided
 before the setting changed is reported stale by `crucible doctor`.
 
-It is off unless a host's config says so (Owen, 2026-10-08: *"this would be a configuration
-for systems with low ram, not for high ram systems like this pc"*), and only a model whose
-manifest declares a low-VRAM figure honours it: today `yue2-3b` on cuda-linux, and
-`crucible audio low-vram on` is refused (`low_vram_not_offered`) on a backend where no model
-does. `[audio]` is not a table `crucible install` writes, so a reinstall keeps it.
-`crucible audio low-vram on|off` writes the setting and decides the card's audio verdict
-again (the capability record and `[jobs] enable_audio`), so nothing is left stale; after a
-hand edit of config.toml, run `crucible capability --write`. A running server reads the
-change on its next request; a model already resident keeps the way it was loaded until it
-comes off the card. `crucible audio low-vram` with no argument shows the setting.
+**Who turns it on.** A friend's 8 GiB laptop (2026-10-08) needed it, and it had to be set by
+hand inside a WSL distribution its owner did not know existed. So whenever Crucible decides
+the card (`crucible install audio`'s capability step, `crucible capability --write`, the
+server deciding a card it has no record for, a new desktop allowance in Settings), it
+applies one rule, `crucible/lowvram.py`: a model that declares a low-VRAM figure and does
+not fit whole in what the card gives a job, but does fit at that figure, turns it on. It is
+written with the capability record, in the same write, and said in one sentence:
+
+```
+Crucible turned [audio] low_vram on: yue2-3b needs 14.9 GiB whole and this card gives a job
+7.0 GiB, so it now holds only the part each stage uses (6.8 GiB); the audio is the same, and
+`crucible audio low-vram off` turns it off
+```
+
+On a card that holds the model whole it stays off and config.toml gets no `[audio]` table
+(Owen, 2026-10-08: *"this would be a configuration for systems with low ram, not for high
+ram systems like this pc"*), and Crucible's own on comes back off if the same config is
+decided on a bigger card. The rule weighs what the card gives a job, after the desktop
+reserve: an 8 GiB card whose reserve was never measured keeps Crucible's 3 GiB default and
+gives 5.0 GiB, which YuE2 does not fit even split, so the setting stays off and `song` says
+it is short (`crucible capability --measure-desktop` measures the reserve; Victoria's laptop
+measured 1 GiB).
+
+**Who owns it.** The file says, in two keys:
+
+| `[audio]` | means |
+|---|---|
+| neither key | Crucible decides, and it is off |
+| `low_vram = true`, `low_vram_auto = true` | Crucible turned it on for this card, and decides it again with the card |
+| `low_vram = true` or `false` alone | a person set it; nothing but a person changes it |
+
+```bash
+crucible audio low-vram               # the setting, who set it, and what this card makes of it
+crucible audio low-vram on            # yours: on, whatever the card
+crucible audio low-vram off           # yours: off, and Crucible will not turn it back on
+crucible audio low-vram auto          # hand it back to Crucible
+```
+
+(`crucible guest audio low-vram ...` on a Windows PC.) The operator console's Settings panel
+has the same switch, through `PUT /v1/settings/audio/low-vram`, which writes through the
+same door. Each writes the setting and decides the card's audio verdict again (the
+capability record and `[jobs] enable_audio`), so nothing is left stale; after a hand edit
+of config.toml, run `crucible capability --write`. `crucible doctor` says which of the
+three it is, and reports `capability_stale` when Crucible would change its own setting for
+this card and has not written it yet. A running server reads a change on its next request;
+a model already resident keeps the way it was loaded until it comes off the card.
+
+Only a model whose manifest declares a low-VRAM figure honours it: today `yue2-3b` on
+cuda-linux, and `on` is refused (`low_vram_not_offered`) on a backend where no model does.
+`[audio]` is not a table `crucible install` writes, so a reinstall keeps it. Two keys rather
+than `low_vram = "auto"`: every reader acts on the one boolean, and an older Crucible reads
+`low_vram` and ignores `low_vram_auto`, so rolling back keeps the card working.
 
 ### The Stable Audio models are gated
 

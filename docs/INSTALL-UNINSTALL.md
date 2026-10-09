@@ -85,7 +85,8 @@ config.toml, nor `init --force` (which mints a new token):
 crucible jobs list                    # every type: on or off, fits or not, env built or not
 crucible jobs enable audio            # refused by name if the card cannot hold it or its env is missing
 crucible jobs disable audio           # its env and models stay
-crucible audio low-vram on            # [audio] low_vram, for a card too small for YuE2 whole
+crucible audio low-vram              # [audio] low_vram: on where the card cannot hold YuE2 whole, by itself
+crucible audio low-vram off           # yours from then on; `auto` hands it back to Crucible
 crucible service restart              # one step; the tray does not take it for a crash
 ```
 

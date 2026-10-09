@@ -9,7 +9,7 @@ from typing import Any
 from .. import cardfacts, installplan, ladder, memorybudget, verdict
 from ..backend import MLX_DARWIN, Backend
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
-from ..capabilitystore import decide_for, write_capability
+from ..capabilitystore import Redecided, decide_for, low_vram_for, redecide, write_capability
 from ..config import Config
 from ..memorybudget import GIB, gib_text
 from . import common
@@ -94,6 +94,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
             desktop_allowance_note=reserve.note,
         )
     decisions = decide_for(config, backend)
+    low_vram = low_vram_for(config, backend)
 
     turn_off = {
         f"enable_{name}": False
@@ -136,6 +137,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
                     },
                     "written": bool(args.write or args.measure_desktop),
                     "turned_off": sorted(turn_off),
+                    "audio_low_vram": low_vram.to_dict(),
                 },
                 indent=2,
             )
@@ -153,15 +155,19 @@ def cmd_capability(args: argparse.Namespace) -> int:
 
     if not args.write and before is None:
         if not args.json:
+            if low_vram.changed:
+                print(f"audio:    {low_vram.words}")
             print(
                 "dry run: nothing written. Pass --write to record this in "
                 f"{config.path}"
             )
         return EXIT_OK
 
-    written = write_capability(config, backend, decisions, turn_off)
+    recorded = write_capability(config, backend, decisions, turn_off)
     if not args.json:
-        print(f"recorded in {written}")
+        print(f"recorded in {recorded.path}")
+        if recorded.low_vram_change is not None:
+            print(recorded.low_vram_change)
         for flag in sorted(turn_off):
             print(f"TURNED OFF: [jobs] {flag} — this host cannot hold it")
         if not turn_off:
@@ -210,24 +216,28 @@ def cmd_ladder(args: argparse.Namespace) -> int:
 
 
 def _capability_step(config: Config, backend: Backend, *job_types: str) -> int:
-    decisions = decide_for(config, backend)
-    flags: dict[str, bool] = {}
+    return _print_redecided(config, backend, redecide(config, backend, *job_types), job_types)
+
+
+def _print_redecided(
+    config: Config, backend: Backend, redecided: Redecided, job_types: tuple[str, ...]
+) -> int:
+    decisions, flags, recorded = redecided.decisions, redecided.flags, redecided.recorded
     disabled: list[str] = []
     print("capability:")
     for job_type in job_types:
-        enabled = verdict.job_type_enabled(job_type, decisions)
-        flags[f"enable_{job_type}"] = enabled
         mine = [d for d in decisions if d.job_type == job_type]
         for decision in mine:
             mark = "yes" if decision.enabled else "NO"
             print(f"  {decision.capability:<10} {mark:<4} {decision.reason}")
-        if not enabled:
+        if not flags[f"enable_{job_type}"]:
             disabled.append(
                 f"{job_type!r} is DISABLED on this host: "
                 + "; ".join(f"{d.capability} — {d.reason}" for d in mine)
             )
-    written = write_capability(config, backend, decisions, flags)
-    print(f"recorded in {written}")
+    print(f"recorded in {recorded.path}")
+    if recorded.low_vram_change is not None:
+        print(recorded.low_vram_change)
     card = cardfacts.card_for(config.home, backend.gpu)
     pool = verdict.pool_name(backend.kind, backend.gpu.vendor)
     for job_type in job_types:

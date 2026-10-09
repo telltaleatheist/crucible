@@ -200,3 +200,76 @@ def test_audio_low_vram_is_refused_where_no_model_can_be_split(
     assert cli.main(["audio", "low-vram", "on"]) == 1
     assert "low_vram_not_offered" in capsys.readouterr().err
     assert load_config(home).audio_low_vram is False
+
+
+EIGHT_GIG = Backend(
+    kind="cuda-linux",
+    platform="linux",
+    arch="x86_64",
+    gpu=Gpu(vendor="nvidia", name="NVIDIA GeForce RTX 3070 Laptop GPU", vram_bytes=8 * 1024**3),
+    detail="test double",
+)
+
+
+@pytest.fixture
+def laptop(home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Victoria's laptop as `crucible install` left it: a measured 1 GiB desktop, the
+    card decided, and nobody has touched [audio]."""
+    from .conftest import configure_box
+
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: EIGHT_GIG)
+    configure_box(home, enable_audio=True, backend=EIGHT_GIG, desktop_allowance_bytes=1024**3)
+    _decided(capsys)
+
+
+def test_the_card_decision_turned_it_on_and_the_setter_says_who_did(
+    home: Path, laptop: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _document(home)["audio"] == {"low_vram": True, "low_vram_auto": True}
+    assert cli.main(["audio", "low-vram"]) == 0
+    out = capsys.readouterr().out
+    assert "[audio] low_vram is on in" in out
+    assert "because this card needs it" in out and "Crucible turned it on" in out
+
+
+def test_off_by_hand_on_a_card_that_needs_it_stays_off(
+    home: Path, laptop: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["audio", "low-vram", "off"]) == 0
+    out = capsys.readouterr().out
+    assert "[audio] low_vram = false" in out
+    assert "set by hand" in out
+    assert _document(home)["audio"] == {"low_vram": False}
+    _decided(capsys)  # the card decided again does not undo a person's off
+    assert _document(home)["audio"] == {"low_vram": False}
+    assert load_config(home).capability.row("song").enabled is False
+
+    assert cli.main(["audio", "low-vram", "auto"]) == 0
+    out = capsys.readouterr().out
+    assert "[audio] low_vram = true" in out
+    assert "Crucible turned [audio] low_vram on" in out
+    assert _document(home)["audio"] == {"low_vram": True, "low_vram_auto": True}
+    assert load_config(home).capability.row("song").enabled is True
+
+
+def test_on_by_hand_takes_crucibles_on_as_the_persons(
+    home: Path, laptop: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["audio", "low-vram", "on"]) == 0
+    capsys.readouterr()
+    assert _document(home)["audio"] == {"low_vram": True}
+    assert cli.main(["audio", "low-vram", "on"]) == 0
+    assert "already on" in capsys.readouterr().out
+
+
+def test_auto_on_a_big_card_is_off_and_writes_no_audio_table(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["init"]) == 0
+    _decided(capsys)
+    assert cli.main(["audio", "low-vram", "on"]) == 0
+    assert cli.main(["audio", "low-vram", "auto"]) == 0
+    out = capsys.readouterr().out
+    assert "[audio] low_vram = false" in out
+    assert "this card does not need it" in out
+    assert "audio" not in _document(home)

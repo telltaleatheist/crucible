@@ -72,9 +72,12 @@ def upstream_offer() -> str:
 UPSTREAM_OFFER = upstream_offer()
 
 
+# Crucible turns the setting on by itself where the card needs it (crucible/lowvram.py),
+# so a refusal that names it is a host where a person turned it off.
 LOW_VRAM_STEPS = (
-    f"set `{LOW_VRAM_SETTING} = true` in this host's config.toml, run "
-    "`crucible capability --write`, and restart the server"
+    "`crucible audio low-vram on` turns it on (`crucible guest audio low-vram on` on a "
+    "Windows PC), or `crucible audio low-vram auto` lets Crucible decide it from this "
+    "card; Settings has the same switch"
 )
 
 

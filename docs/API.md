@@ -75,6 +75,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `DELETE /v1/server/updating` | Let go of an update hold (a deploy whose install failed): work is admitted again. |
 | `GET /v1/settings` | Where each class's work runs and which upstreams are configured. |
 | `PUT /v1/settings` | Apply a partial settings patch, whole or not at all, live without a restart. |
+| `PUT /v1/settings/audio/low-vram` | Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off` are the operator's and Crucible never changes them; `auto` lets Crucible turn it on exactly where this card cannot hold a splittable audio model whole. |
 | `POST /v1/settings/upstreams/{name}/test` | List what an upstream serves, using the body's `key` or `url` when given, else the stored record. |
 | `GET /v1/setup` | Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`. |
 | `GET /v1/tasks` | The last few tasks, newest first. |
@@ -299,6 +300,14 @@ Where each class's work runs and which upstreams are configured. A key is never 
 ### `PUT /v1/settings`
 
 Apply a partial settings patch, whole or not at all, live without a restart. Answers the full settings document after the write.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
+### `PUT /v1/settings/audio/low-vram`
+
+Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off` are the operator's and Crucible never changes them; `auto` lets Crucible turn it on exactly where this card cannot hold a splittable audio model whole. Decides the audio capability and `[jobs] enable_audio` again, as `crucible audio low-vram` does. Answers the full settings document after the write.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1803,7 +1812,7 @@ Makes sound from words: sound effects and instrumental music with Stable Audio 3
 
 - Which params a model takes is its own: Stable Audio reads `prompt` and takes `duration_s` and `steps`; YuE2 reads `tags` and `lyrics` (sections like `[Verse]`, optional with `instrumental: true`) and takes `cfg`. Anything else is refused `audio_param_unsupported` with the list it does take; a missing one `audio_param_missing`.
 - Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), `audio_param_out_of_range`. A song's length follows its lyrics.
-- A host with `[audio] low_vram = true` in its config holds only half of YuE2 on the card at a time (for an 8 GiB card); `audio.low_vram` in the `done` event says which ran (docs/AUDIO.md).
+- A host with `[audio] low_vram = true` in its config holds only half of YuE2 on the card at a time; Crucible turns it on by itself on a card too small to hold YuE2 whole (an 8 GiB card), and `audio.low_vram` in the `done` event says which ran (docs/AUDIO.md).
 - The Stable Audio repos are gated: until the licence is accepted on Hugging Face and the server has a token, `409 model_gated` says what to do (docs/AUDIO.md).
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.

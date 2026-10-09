@@ -742,6 +742,7 @@ COVERED: dict[str, str] = {
     "GET /v1/settings": "api settings",
     "PUT /v1/settings": "api settings --patch",
     "POST /v1/settings/upstreams/{name}/test": "api upstream-test",
+    "PUT /v1/settings/audio/low-vram": "api low-vram",
     "GET /v1/pairing/requests": "api pairing-requests",
     "POST /v1/pairing/decision": "api pairing-decide",
     "GET /v1/openai/models": "api openai-models",
@@ -827,4 +828,14 @@ def test_capability_passes_a_client_size_through_for_the_server_to_judge(
                "--context-tokens", "40960", "--concurrency", "1") == 0
     assert recorded[-1]["path"] == (
         "/v1/capability?class=generate&context_tokens=40960&concurrency=1"
+    )
+
+
+def test_low_vram_reaches_the_settings_route_and_answers_the_document(
+    base: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(base, "low-vram", "auto") == 0
+    entry = json.loads(capsys.readouterr().out)["audio_low_vram"]
+    assert (entry["state"], entry["on"], entry["card"]["verdict"]) == (
+        "auto", False, "not_needed"
     )
