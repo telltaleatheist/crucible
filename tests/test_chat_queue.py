@@ -16,6 +16,7 @@ from crucible.inflight import InFlight
 from crucible.jobs.line import Call, WaitingLine
 from crucible.queuesessions import QueueSessions
 from crucible.settle import Settlement
+from crucible.updating import UpdateHold
 
 from .fake_engine import FakeEngine
 from .live_server import run_job, serve
@@ -317,6 +318,8 @@ class _Store:
     def __init__(self) -> None:
         self.line: Any = None
         self.events = EventHub()
+        # The deploy's hold, which the line asks before it admits a call.
+        self.updating = UpdateHold()
 
     def attach_line(self, line: Any) -> None:
         self.line = line
