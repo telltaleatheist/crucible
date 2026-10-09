@@ -38,7 +38,7 @@ VIAddVersionKey "LegalCopyright" "Owen Morgan"
 !define MUI_WELCOMEPAGE_TEXT "Crucible runs AI models on this computer: language models, narration voices, transcription and more.$\r$\n$\r$\nSetup downloads Python ${PY_VERSION} and Crucible ${VERSION} (about 60 MB), checks each download against the fingerprint built into this setup, and installs them for you only. No administrator rights are needed.$\r$\n$\r$\nClick Next to continue."
 !define MUI_DIRECTORYPAGE_TEXT_TOP "Crucible keeps its programs, settings and downloaded models in this folder. Models are large: choose a disk with plenty of free space."
 !define MUI_FINISHPAGE_TITLE "Crucible is installed"
-!define MUI_FINISHPAGE_TEXT "Crucible is in your Start Menu, and its icon sits by the clock. The first start sets up its Linux engine in the background; the Crucible window shows how that is going."
+!define MUI_FINISHPAGE_TEXT "Crucible is in your Start Menu, and its icon sits by the clock. It is now setting up its Linux engine by itself, in the background, which takes several minutes; there is nothing to click. If that stops or needs a Windows restart, the menu of the Crucible icon by the clock says so."
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Open Crucible"
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenCrucible

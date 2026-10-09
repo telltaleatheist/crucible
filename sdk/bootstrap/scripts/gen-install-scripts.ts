@@ -614,7 +614,7 @@ export function generateInstallPs1(): string {
     "if ($FromApp) { $Watch += '--brief' }",
     'Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }',
     'if ($LASTEXITCODE -ne 0) {',
-    '  Say "The Linux engine sets itself up in the background; the Crucible icon by the clock shows how it is going."',
+    '  Say "The Linux engine sets itself up in the background, which takes several minutes; there is nothing to click. If it stops or needs a Windows restart, the menu of the Crucible icon by the clock says so."',
     '}',
     ...openAppPs1(),
     '',

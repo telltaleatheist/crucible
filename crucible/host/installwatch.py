@@ -38,14 +38,28 @@ ENDING_LIMIT = 1500
 
 WIDTH = 78
 
+WAIT_FOR = (
+    "It takes several minutes, longer on a slow connection. Wait for the line "
+    "that says Crucible's Linux engine is running (it starts with \"Done.\"), or "
+    "for one that says what is needed because it stopped (a Windows restart, for one)."
+)
+
 APP_SENTENCE = (
-    "It is setting up its Linux engine now; the app you installed from will "
-    "show its progress."
+    "Crucible is now setting up its Linux engine by itself, in the background; "
+    "there is nothing to click. If an app started this install, that app shows "
+    "the progress. To follow it in a terminal instead, run the line below, which "
+    "shows each step. " + WAIT_FOR
+)
+
+APP_AFTER = (
+    "If it stops, the Crucible icon by the clock (it may be behind the ^ arrow "
+    "there) says so in its menu, and offers \"Try again\" or names the restart it needs."
 )
 
 CONSOLE_START = (
-    "Setting up the Linux engine. Each step is shown here. You can close this "
-    "window at any time: the setup carries on by itself in the background."
+    "Setting up the Linux engine. Each step is shown here. " + WAIT_FOR + " You "
+    "can close this window at any time: the setup carries on by itself in the "
+    "background."
 )
 
 DONE_SENTENCE = (
@@ -72,8 +86,8 @@ DECLINED_SENTENCE = (
 
 UNDECIDED_SENTENCE = (
     "Crucible has not started setting up its Linux engine yet. It does that by "
-    "itself in the background, and the Crucible icon by the clock shows how it "
-    "is going. There is nothing you need to do now."
+    "itself in the background, and if it stops, the Crucible icon by the clock "
+    "says so in its menu. There is nothing you need to do now."
 )
 
 STARTING_TRAY_SENTENCE = (
@@ -308,8 +322,18 @@ def _watch_briefly(
             )
             return 0
         sleep(0.5)
-    console.say(APP_SENTENCE)
+    console.paragraph(APP_SENTENCE)
+    console.say("  " + follow_command(home, since))
+    console.paragraph(APP_AFTER)
     return 0
+
+
+def follow_command(home: Path, since: datetime) -> str:
+    stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        f'& "{Path(sys.executable)}" -m crucible.host.installwatch '
+        f'--home "{home}" --since {stamp}'
+    )
 
 
 class _Watch:
