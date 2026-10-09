@@ -13,6 +13,7 @@ from .backend import (
     feature_floor,
     sm_name,
 )
+from .capabilityclasses import API_KEY_ADVICE_BELOW_PARAMS_B
 from .fit import Candidate, WorkingContext
 from .memorybudget import gib_text
 from .precision import label as precision_label
@@ -70,6 +71,24 @@ def upstream_offer() -> str:
 
 
 UPSTREAM_OFFER = upstream_offer()
+
+# Where a person gives this server an upstream: the Settings page's accounts block (the
+# operator page's own heading), or the same tables in config.toml.
+UPSTREAM_SETTINGS_BLOCK = "Accounts this engine may spend"
+
+
+def api_key_advice(entry: "CapabilityClass") -> str:
+    """The one sentence a small automatic pick adds (CapabilityClass.advises_api_key),
+    without its closing stop: what to do for better results, and exactly where."""
+    keyed = [
+        UPSTREAM_DISPLAY[name] for name in UPSTREAM_NAMES if UPSTREAM_FIELD[name] == "key"
+    ]
+    return (
+        f"models under {API_KEY_ADVICE_BELOW_PARAMS_B:g}B give weaker results, so for "
+        f"better ones add an API key for {either(keyed)} in Settings, under "
+        f"\"{UPSTREAM_SETTINGS_BLOCK}\", and send {entry.name} to it in the same page "
+        "(or set [upstreams] and [routes] in config.toml)"
+    )
 
 
 # Crucible turns the setting on by itself where the card needs it (crucible/lowvram.py),
@@ -406,6 +425,8 @@ def describe_card(card: "CardFacts | None", total_bytes: int, pool: str) -> str:
 
 __all__ = [
     "CPU_BUILD_REASON",
+    "UPSTREAM_SETTINGS_BLOCK",
+    "api_key_advice",
     "above_goal_note",
     "goal_phrase",
     "LOCAL_ANSWER_PREFIX",

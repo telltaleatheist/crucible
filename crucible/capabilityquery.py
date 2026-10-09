@@ -162,7 +162,7 @@ def _redecided_row(
     )
     fresh = decision.row()
     model = routes.get(entry.name)
-    return (fresh if model is None else routed_row(fresh, model)).to_dict()
+    return (fresh if model is None else routed_row(fresh, model)).to_wire()
 
 
 def served_rows(
@@ -199,7 +199,7 @@ def served_rows(
 
     rows: list[dict[str, Any]] = []
     for stored in record.rows:
-        row = stored.to_dict()
+        row = stored.to_wire()
         found = BY_NAME.get(stored.capability)
         if found is None:
             row["work"] = None

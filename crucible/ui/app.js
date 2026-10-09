@@ -2587,9 +2587,6 @@
     block.appendChild(title);
 
     var middle = el('span', { class: 'chips' });
-    for (var index = 0; index < row.floors.length; index += 1) {
-      middle.appendChild(chip('minimum for ' + row.floors[index], 'floor'));
-    }
     if (row.license) {
       middle.appendChild(chip(row.license, 'floor'));
     }

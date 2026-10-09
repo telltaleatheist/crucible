@@ -14,6 +14,7 @@ from ... import decide as decide_core
 from ... import decide_items, enginespec, upstreamrecord
 from ...callqueue import take_a_turn
 from ...capabilityclasses import BY_NAME
+from ...config import Config
 from ...decide import DecideItemsResponse, DecideRequest, DecideResponse
 from ...engines import chat_admission, decide_items_reading, decide_reading
 from ...engines.items_forward import ITEMS_PATH
@@ -115,6 +116,55 @@ def _image_models(backend_kind: str) -> list[str]:
     ]
 
 
+def _registered_model(config: Config, n_images: int) -> str:
+    """The model a decision that names none is served by: what this server registered
+    for `decide` (its capability record's row), or for a decision with images, the model
+    that row names for one (docs/VERB-SIZING.md section 8). A model that is not resident
+    is loaded for it in the line, as for a named one; a switch between the text and the
+    vision form is a reload of the same download."""
+    record = config.capability
+    row = None if record is None else record.row("decide")
+    if row is None:
+        raise ApiError(
+            503,
+            "capability_undecided",
+            "this decision names no model, and this server has registered nothing for "
+            "decide: its capability record "
+            + ("does not exist" if record is None else "predates the decide class")
+            + ". Run `crucible capability --write`, or name a `model`",
+            {"capability": "decide"},
+        )
+    if not row.enabled:
+        raise ApiError(
+            409,
+            "capability_disabled",
+            f"this decision names no model, and this server cannot decide: "
+            f"{row.reason}",
+            {"capability": "decide", "shortfall_bytes": row.shortfall_bytes},
+        )
+    if not n_images:
+        return row.selected
+    if row.with_images is None:
+        raise ApiError(
+            503,
+            "capability_undecided",
+            "this decision carries images and names no model, and this server's "
+            "capability record was written before it registered a model for a "
+            "decision with images. Run `crucible capability --write`, or name a "
+            "`model` that serves images",
+            {"capability": "decide", "images": n_images},
+        )
+    if not row.with_images:
+        raise ApiError(
+            409,
+            "no_image_model_fits",
+            f"this decision carries {n_images} image(s) and names no model, and no "
+            f"model that reads images fits this server: {row.with_images_reason}",
+            {"capability": "decide", "images": n_images, "text_model": row.selected},
+        )
+    return row.with_images
+
+
 def _refuse_an_upstream(model: str) -> None:
     if upstreamrecord.split_model(model) is None:
         return
@@ -128,18 +178,20 @@ def _refuse_an_upstream(model: str) -> None:
     )
 
 
-def _refuse_a_malformed_decision(body: DecideRequest, backend_kind: str) -> None:
+def _refuse_a_malformed_decision(
+    body: DecideRequest, model: str, backend_kind: str
+) -> None:
     """What a queued decision would be refused for once its model is resident is
     refused now, before it waits."""
     n_images = decide_core.check_image_count(body.images)
     if n_images:
         try:
-            manifest = load_manifest(body.model)
+            manifest = load_manifest(model)
         except Exception:
             manifest = None
         if manifest is not None:
             decide_core.refuse_images_not_served(
-                body.model, manifest, backend_kind, n_images,
+                model, manifest, backend_kind, n_images,
                 lambda: _image_models(backend_kind),
             )
     if body.items is not None:
@@ -150,7 +202,7 @@ def _refuse_a_malformed_decision(body: DecideRequest, backend_kind: str) -> None
 
 
 def _log_timing(
-    body: DecideRequest, client: str | None, arrived: float, started: float
+    body: DecideRequest, model: str, client: str | None, arrived: float, started: float
 ) -> None:
     finished = time.monotonic()
     asked = (
@@ -158,7 +210,7 @@ def _log_timing(
         else f"{len(body.questions or {})} question(s)"
     )
     print(
-        f"crucible: decide on {body.model!r} for {client or 'an unnamed client'}: "
+        f"crucible: decide on {model!r} for {client or 'an unnamed client'}: "
         f"{asked}, waited {(started - arrived) * 1000:.0f} ms, "
         f"answered in {(finished - started) * 1000:.0f} ms",
         file=sys.stderr,
@@ -180,11 +232,18 @@ def register(routers: Routers, ctx: AppContext) -> None:
         Every refusal a caller can cause is made before anything is decided. A decision
         whose model is not resident, or whose engine has every slot taken, waits in the
         server's line and its model is loaded for it; with `"queue": false` it is
-        refused at once instead.
+        refused at once instead. With no `model`, the decision is served by the model
+        this server registered for decide, or with `images`, the one it registered for
+        a decision with images (`GET /v1/capability`, the decide row's `with_images`).
         """
         arrived = time.monotonic()
         act = read_act(request.headers)
-        _refuse_an_upstream(body.model)
+        model = (
+            body.model
+            if body.model is not None
+            else _registered_model(ctx.config, decide_core.check_image_count(body.images))
+        )
+        _refuse_an_upstream(model)
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)
         session = queue_session(request, ctx.sessions)
@@ -192,10 +251,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         turn: Any = None
         max_wait_s = max_wait_of(body.queue)
         if max_wait_s is not None:
-            _refuse_a_malformed_decision(body, backend.kind)
+            _refuse_a_malformed_decision(body, model, backend.kind)
             turn = await take_a_turn(
                 request, line=ctx.line, residency=residency, inflight=inflight,
-                settle=chat_over, kind="decide", model=body.model, act=act,
+                settle=chat_over, kind="decide", model=model, act=act,
                 client=client_agent(request), max_wait_s=max_wait_s,
                 session=session,
             )
@@ -208,8 +267,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         try:
             async with residency.settled_for("a decision"):
                 resident = residency.resident_model
-                if resident is None or resident.model_id != body.model:
-                    raise model_not_resident(body.model, resident, "a decision")
+                if resident is None or resident.model_id != model:
+                    raise model_not_resident(model, resident, "a decision")
                 refuse_an_exited_engine(residency, resident)
 
                 n_images = decide_core.check_image_count(body.images)
@@ -276,7 +335,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 response: Response = caller_gone(resident)
             else:
                 response = JSONResponse(content=answered.model_dump(mode="json"))
-                _log_timing(body, client_agent(request), arrived, started)
+                _log_timing(body, model, client_agent(request), arrived, started)
             inflight.close(entry)
             response.background = BackgroundTask(chat_over)
             return response

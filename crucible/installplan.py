@@ -7,6 +7,7 @@ from .backend import CardFacts
 from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass, classes_for_job_type
 from .capabilityrecord import desktop_reserve_words
 from .capabilitywords import (
+    api_key_advice,
     describe_card,
     goal_phrase,
     needs_phrase,
@@ -83,6 +84,15 @@ def _class_line(
     best = _best(entry, decision)
     if best is not None and best.id != picked.id:
         line += _why_not_best(decision, best, entry.work, card)
+    if decision.with_images is not None:
+        line += (
+            f" With images, {decision.with_images.selected}."
+            if decision.with_images.selected
+            else f" With images, {decision.with_images.reason}."
+        )
+    if not decision.chosen and entry.advises_api_key(picked):
+        advice = api_key_advice(entry)
+        line += f" {advice[0].upper()}{advice[1:]}."
     return line
 
 
@@ -101,6 +111,9 @@ def _class_row(
         "reduced_precision": False if picked is None else picked.degraded_on(card),
         "best": None if best is None else best.id,
         "goal": None if entry.goal is None else entry.goal.to_dict(),
+        "with_images": (
+            None if decision.with_images is None else decision.with_images.selected
+        ),
         "lacking_features": list(decision.lacking_features),
         "line": _class_line(entry, decision, card),
     }

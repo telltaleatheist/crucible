@@ -990,8 +990,12 @@ export interface DecideYesNoQuestion {
 export type DecideQuestion = DecideChoiceQuestion | DecideScoreQuestion | DecideYesNoQuestion;
 
 export interface DecideRequest {
-  /** The model to read the decision from. */
-  readonly model: string;
+  /**
+   * The model to read the decision from. Omitted: the model the server registered for `decide`,
+   * or with `images`, the one it registered for a decision with images (the response's `model`
+   * names which served it).
+   */
+  readonly model?: string;
   /** What the questions are about: a string, or any JSON value. */
   readonly state: unknown;
   /** Image FILES, base64-encoded (at most 8; more is 400 `too_many_images`). */
@@ -1102,7 +1106,8 @@ export interface DecideItem {
 
 /** The items form of `POST /v1/decide`: choice questions about one state, answered in item order. */
 export interface DecideItemsRequest {
-  readonly model: string;
+  /** As {@link DecideRequest.model}: omitted, the server's registered decide model. */
+  readonly model?: string;
   readonly state: unknown;
   readonly images?: readonly string[];
   readonly instructions?: string;
@@ -1951,8 +1956,8 @@ export interface CatalogRow {
   /** An alias's own files that are not on disk, or null on a row that is not an alias. */
   readonly missingFiles: readonly string[] | null;
   /**
-   * The capability classes this model is the FLOOR for — the smallest model the class may run on at
-   * all.
+   * Always empty: the class floors were retired on 2026-10-09 (no manifest carries
+   * `minimum_for`). The server still sends `[]` so SDKs that read it keep working.
    */
   readonly floors: readonly string[];
   /** Always null: no manifest carries a licence. */

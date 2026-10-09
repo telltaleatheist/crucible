@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import audioweights, denoisemodels, lineup, llamacpp, rvcbase, videoweights, weights
+from . import audioweights, denoisemodels, llamacpp, rvcbase, videoweights, weights
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .audiomodels import load_all_audio_manifests
@@ -566,14 +566,6 @@ def remove_subject(
     return Removed(subject=subject, found=found, path=subject.remove())
 
 
-def _floors_by_model() -> dict[str, list[str]]:
-    built, _omitted = lineup.build()
-    inverted: dict[str, list[str]] = {}
-    for capability_class, model_id in lineup.floors(built).items():
-        inverted.setdefault(model_id, []).append(capability_class)
-    return inverted
-
-
 def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[str, Any]]:
     resident = residency.resident
 
@@ -584,7 +576,6 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
         return resident.kind == wanted and resident.id == subject.id
 
     try:
-        floors = _floors_by_model()
         built: list[dict[str, Any]] = []
         for subject in subjects(config, backend):
             found = subject.installed()
@@ -603,11 +594,9 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
                         if subject.missing_files is None
                         else subject.missing_files()
                     ),
-                    "floors": (
-                        list(floors.get(subject.id, []))
-                        if subject.kind == "model"
-                        else []
-                    ),
+                    # Retired with the manifests' `[local] minimum_for` (2026-10-09):
+                    # always empty, and still sent because SDKs before then demand it.
+                    "floors": [],
                     "license": None,
                     "source": subject.source,
                     "resident": is_resident(subject),

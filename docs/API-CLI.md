@@ -251,6 +251,9 @@ grammar is **snap's own** (`snap decide`), so a person moving from snap types th
 same thing against a different address. `--choice`, `--score` and `--yesno` repeat
 and keep the order they were typed in; `--image` repeats and is sent base64-encoded;
 `--state` may be left out when an image is given, and the state is then `""`.
+`--model` may be left out: the server then decides on the model it registered for
+`decide`, or with `--image`, the one it registered for a decision with images
+(`crucible api capability`, the decide row's `with_images`).
 
 The prompt, the letters and the renormalisation are the server's — this verb sends
 the order and prints the answer unchanged. Like chat it never loads a model

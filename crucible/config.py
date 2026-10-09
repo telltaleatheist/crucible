@@ -502,6 +502,11 @@ _CAPABILITY_ROW_REQUIRED: dict[str, type] = {
     "summary": str,
     "shortfall_bytes": int,
 }
+# Written together, only on a granted row of a class that takes images.
+_CAPABILITY_ROW_IMAGES: dict[str, type] = {
+    "with_images": str,
+    "with_images_reason": str,
+}
 
 
 def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
@@ -540,12 +545,26 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
         where = f"config [[capability.classes]][{index}]"
         if not isinstance(raw, dict):
             raise ConfigError(f"{where} must be a table")
-        unknown = sorted(set(raw) - set(_CAPABILITY_ROW_REQUIRED))
+        unknown = sorted(
+            set(raw) - set(_CAPABILITY_ROW_REQUIRED) - set(_CAPABILITY_ROW_IMAGES)
+        )
         if unknown:
             raise ConfigError(
                 f"{where}: unknown key(s) {unknown}; a row takes "
-                f"{sorted(_CAPABILITY_ROW_REQUIRED)}"
+                f"{sorted(_CAPABILITY_ROW_REQUIRED)}, and "
+                f"{sorted(_CAPABILITY_ROW_IMAGES)} together"
             )
+        images = [key for key in _CAPABILITY_ROW_IMAGES if key in raw]
+        if images and len(images) != len(_CAPABILITY_ROW_IMAGES):
+            raise ConfigError(
+                f"{where}: has {images} without the rest of "
+                f"{sorted(_CAPABILITY_ROW_IMAGES)}; they are written together"
+            )
+        for key in images:
+            if not isinstance(raw[key], str):
+                raise ConfigError(
+                    f"{where}: {key} must be str, got {type(raw[key]).__name__}"
+                )
         for key, kind in _CAPABILITY_ROW_REQUIRED.items():
             if key not in raw:
                 raise ConfigError(f"{where}: missing required key {key!r}")
@@ -572,6 +591,8 @@ def _capability_record(table: dict[str, Any]) -> CapabilityRecord | None:
                 reason=raw["reason"],
                 shortfall_bytes=raw["shortfall_bytes"],
                 summary=raw["summary"],
+                with_images=raw.get("with_images"),
+                with_images_reason=raw.get("with_images_reason"),
             )
         )
     return CapabilityRecord(

@@ -47,8 +47,12 @@ class Candidate:
     # The manifest's `[model] params_b`, where its catalog states one: the first key of a
     # goal class's pick (docs/VERB-SIZING.md rule 3).
     params_b: float | None = None
-    # A `weights_of` alias: the same weights as its base, served another way.
-    alias: bool = False
+    # The base whose weights this alias serves another way (`[model] weights_of`), or None
+    # for a model's own form.
+    weights_of: str | None = None
+    # This backend's block serves images (`serves` names "image"): what a request that
+    # carries images needs.
+    serves_images: bool = False
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
@@ -72,8 +76,18 @@ class Candidate:
             ),
             low_vram_bytes=getattr(spec, "low_vram_memory_bytes_estimate", None),
             params_b=getattr(manifest, "params_b", None),
-            alias=getattr(manifest, "weights_of", None) is not None,
+            weights_of=getattr(manifest, "weights_of", None),
+            serves_images="image" in getattr(spec, "serves", ()),
         )
+
+    @property
+    def alias(self) -> bool:
+        """A `weights_of` alias: the same weights as its base, served another way."""
+        return self.weights_of is not None
+
+    def form_of(self, model_id: str) -> bool:
+        """This candidate is `model_id` itself or an alias of its weights."""
+        return self.id == model_id or self.weights_of == model_id
 
     @property
     def held_low_vram(self) -> bool:
@@ -181,6 +195,8 @@ class Candidate:
             "whole_bytes": self.whole_bytes,
             "params_b": self.params_b,
             "alias": self.alias,
+            "weights_of": self.weights_of,
+            "serves_images": self.serves_images,
         }
 
 

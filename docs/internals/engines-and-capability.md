@@ -765,8 +765,8 @@ wire, not a log scrape.
 ## Foundry lineup (`lineup`)
 
 `foundry-lineup.json` is read from the manifests (`[model]`, `[local]`) and
-`capability.classes_for_model`. Rows without `[local]` are omitted. `floors`
-is derived from `minimum_for`, and two rows flooring one class is a refusal.
-The catalog owns every floor it names, and a consumer must not average in a
-smaller one of its own. `--check` ignores `generated_from`, which always
-trails by one commit.
+`capability.classes_for_model`. Rows without `[local]` are omitted. Schema 3
+(2026-10-09) dropped `floors` and each row's `minimum` and `minimumFor` with the
+manifests' `[local] minimum_for`: no class has a floor (docs/VERB-SIZING.md
+section 7). `--check` ignores `generated_from`, which always trails by one
+commit.

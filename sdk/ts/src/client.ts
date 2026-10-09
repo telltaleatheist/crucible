@@ -1423,16 +1423,15 @@ export class CrucibleClient {
   async decide(request: DecideRequest, options: DecideOptions = {}): Promise<DecideResponse> {
     const given = request as Partial<DecideRequest> | undefined;
     if (given === undefined || given === null) {
-      throw new CrucibleConfigError('request', 'decide(...) needs {model, state, questions}');
+      throw new CrucibleConfigError('request', 'decide(...) needs {state, questions}');
     }
     if (!('state' in given) || given.state === undefined) {
       throw new CrucibleConfigError('state', 'is required and was not given');
     }
     const questions = readDecideQuestions(given.questions);
-    const payload: Record<string, unknown> = {
-      model: requireText(given.model, 'model'),
-      state: given.state,
-    };
+    const payload: Record<string, unknown> = {};
+    if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     payload['questions'] = questions;
     let report = false;
@@ -1455,17 +1454,16 @@ export class CrucibleClient {
   async decideItems(request: DecideItemsRequest, options: DecideOptions = {}): Promise<DecideItemsResponse> {
     const given = request as Partial<DecideItemsRequest> | undefined;
     if (given === undefined || given === null) {
-      throw new CrucibleConfigError('request', 'decideItems(...) needs {model, state, items}');
+      throw new CrucibleConfigError('request', 'decideItems(...) needs {state, items}');
     }
     if (!('state' in given) || given.state === undefined) {
       throw new CrucibleConfigError('state', 'is required and was not given');
     }
     const shared = given.options === undefined ? undefined : readOptionMap(given.options, 'options');
     const items = readDecideItems(given.items, shared);
-    const payload: Record<string, unknown> = {
-      model: requireText(given.model, 'model'),
-      state: given.state,
-    };
+    const payload: Record<string, unknown> = {};
+    if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     if (given.instructions !== undefined) payload['instructions'] = requireText(given.instructions, 'instructions');
     if (shared !== undefined) payload['options'] = shared;

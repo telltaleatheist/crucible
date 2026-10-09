@@ -71,7 +71,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """What this server can hold, per capability class, and why not; `enabled:
         false` is an answer, not an error. A row's `goal` is the size its automatic pick
         aims at and never exceeds (`params_b`, and the ruling it comes from), or null for
-        a class that has none. A client-sized class may be sized with
+        a class that has none. A row's `with_images` is the model that serves a request
+        of that class carrying images (decide's: the vision form of `selected` when it
+        fits, else the largest model that reads images and fits at or below the goal; ""
+        when none fits, and `with_images_reason` says what would), or null for a class
+        that takes no images. A client-sized class may be sized with
         `?class=&context_tokens=&concurrency=`.
         """
         record = config.capability

@@ -1,7 +1,8 @@
 # Every verb, sized to the card — the plan
 
-Owen, 2026-10-09. Phase 1 (§3 item 1) BUILT on `feat/verb-goals`, not merged (§7); the rest
-NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
+Owen, 2026-10-09. Phase 1 (§3 item 1) BUILT and merged (§7). Decide's image form, the
+9B marker's removal and the API-key recommendation BUILT on `feat/decide-vision-and-api-hint`,
+not merged (§8). The rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
 where it disagrees with them, it says so (§6).
 
 ## 0. The ruling, in his words
@@ -275,11 +276,93 @@ cache's 544-token blocks are the 0.8B's own measurement.
 
 **Left for later phases or for Owen.**
 - Measure phase 1 on the three cards (§3's rule), and re-record the PC and the Mac.
-- `qwen3.5-9b`'s `[local] minimum_for = ["translate", "simplify"]` still marks it the Foundry
-  lineup's floor for those two (`foundry-lineup.json` `floors`, and `modules.resolve_class`'s
-  default model for a module that names the class). It refuses nothing in Crucible; whether it
-  goes with the floor is Owen's call.
+- ~~`qwen3.5-9b`'s `[local] minimum_for = ["translate", "simplify"]` still marks it the
+  Foundry lineup's floor.~~ Removed (§8b).
 - On a tie of size and bits the pick takes a model's own form before its vision alias, so the
   Mac decides on `qwen3.5-9b` (mlx-lm, 16 wide), not `qwen3.5-9b-vl` (mlx-vlm, width 1), though
   both fit. PHASE22's picker note said "the vision form when it fits"; that was the app's rule,
-  and this is Crucible's.
+  and this is Crucible's. A decision that carries images now switches by itself (§8a).
+
+## 8. Decide with images, the 9B marker, and an API key below 4B (2026-10-09, `feat/decide-vision-and-api-hint`)
+
+Two rulings of Owen's from 2026-10-09, built together. Nothing was run on a card; the picks
+below are the catalog's estimates against each card's budget, computed by the tests.
+
+### 8a. Decide switches to a vision form by itself when a request carries images
+
+> *"we do use vision sometimes for decide, so thatll have to be an option at a bare minimum."*
+
+The vision form is the same model, so no less capable, but it costs throughput: on a Mac
+mlx-vlm serves one request at a time against mlx-lm's 16, and on a 24 GB PC card the tower and
+image reserve leave about 1,700 tokens of KV. So decide stays on the text form, and:
+
+- **The pick.** `CapabilityClass.takes_images` (true on `decide` only) makes the verdict
+  record a second model per granted decision, `Decision.with_images` (`verdict._image_pick`):
+  1. the vision form of the text pick, when this host has one and it fits: a candidate that
+     serves `image` here and is the pick itself or a `weights_of` alias of it
+     (`Candidate.form_of`; `Candidate` now carries `weights_of` and `serves_images`);
+  2. else the first of the class's pick order (at or below the 9B goal, most parameters,
+     then most bits) that serves `image` and fits;
+  3. else nothing (`""`), and the reason names what was passed over and what the smallest
+     image model would need, and says to send without images or to a bigger server.
+
+  A choice made in Settings is served with images by its own vision form the same way.
+- **What each card gets** (estimates):
+
+  | card | decide | with images | why |
+  |---|---|---|---|
+  | PC, 24 GiB cuda-linux, 3 GiB reserve | qwen3.5-9b | **qwen3.5-4b** | qwen3.5-9b-vl needs 21.5 GiB at decide's working context; there are 21.0 |
+  | Mac Studio, 64 GiB | qwen3.5-9b | qwen3.5-9b-vl | the vision form of the same weights fits |
+  | 32 GiB cuda-linux | qwen3.5-9b | qwen3.5-9b-vl | fits |
+  | 16 GiB llama-windows | qwen3.5-9b | qwen3.5-9b-vl | fits (Q8_0 with its projector) |
+  | 8 GiB cuda-linux | qwen3.5-0.8b | qwen3.5-0.8b | its own cuda-linux block reads images |
+  | 16 GiB Mac | qwen3.5-4b | **nothing** | the small tiers serve text only on mlx; the 9B vision form is the smallest that reads images there |
+
+- **The record shows both.** A capability row carries `with_images` and
+  `with_images_reason` (written together, only on decide's granted row; absent from records
+  written before this). `/v1/capability` answers both on every row (null where a class takes no
+  images); decide's summary reads *"can decide, using qwen3.5-9b (goal 9B; …); with images,
+  qwen3.5-4b"*, its reason (and so the doctor line) adds *"With images: …"*, and the install
+  plan's row and line name it. Doctor reports a record whose image model differs from this
+  build's, or that has none, as `capability_stale`.
+- **The door.** `POST /v1/decide`'s `model` is optional now (`crucible api decide --model`
+  and the TS SDK's `decide`/`decideItems` follow). No `model`: the decide row's `selected`,
+  or with images its `with_images`. A named `model` keeps today's rules (`400
+  model_text_only` when it serves no images). Refusals by name: `503 capability_undecided`
+  (no record, or one from before the image pick: run `crucible capability --write`), `409
+  capability_disabled`, `409 no_image_model_fits` (with the record's reason). The answer's
+  `model` already names which weights served it.
+- **Residency.** The door already handled a model that is not resident: the decision waits
+  in the server's line and the model is loaded for it when its turn comes (`"queue": false`
+  refuses `409 model_not_resident` instead). One model is resident at a time, so switching
+  between the text form and the vision form is a reload; `qwen3.5-9b-vl` is `weights_of =
+  "qwen3.5-9b"`, so it is served from the 9B's one download (no second pull). The tests load
+  the 9B, decide with images (the 4B is loaded), decide without (the 9B again), and on a
+  32 GiB card serve `qwen3.5-9b-vl` from the 9B's stamped weights alone.
+
+### 8b. The 9B floor marker is gone
+
+> *"we can remove it, yes."*
+
+`[local] minimum_for` is no longer a manifest key (a manifest that still carries it is
+refused as an unknown key), and everything that read it went with it:
+`foundry-lineup.json` drops `floors` and each row's `minimum` and `minimumFor` (schema 3);
+`modules.resolve_class` no longer resolves a class to a floor, so a module that needs a class
+with several candidates names its model, as `clean` already did; the operator page's
+"minimum for" chip is gone. `GET /v1/catalog` still sends `floors`, always `[]`, because the
+SDKs released before this demand the key (as `license` is always null).
+
+### 8c. An API key recommended below 4B
+
+> *"but it can recommend using an api key if the models are under a certain size."*
+
+- When a routable text verb's automatic pick (`clean`, `translate`, `simplify`, `analysis`,
+  `generate`) has fewer than 4B parameters, its reason, summary, doctor line and install-plan
+  line add one sentence: *"Models under 4B give weaker results, so for better ones add an API
+  key for Anthropic or OpenAI in Settings, under "Accounts this engine may spend", and send
+  translate to it in the same page (or set [upstreams] and [routes] in config.toml)."*
+- The threshold has one owner: `API_KEY_ADVICE_BELOW_PARAMS_B = 4` in
+  `crucible/capabilityclasses.py`, read by `CapabilityClass.advises_api_key`. 4B is the
+  chosen default: the 0.8B and the 2B are what small cards get today.
+- It never refuses and never changes the pick. `decide` is never advised (no upstream returns
+  the logprobs it reads), and neither is a model a person chose in Settings.

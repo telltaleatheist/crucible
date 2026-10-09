@@ -38,7 +38,7 @@ CLASSES = {
     "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "generate", "decide"],
 }
 
-ROW_KEYS = ["id", "classes", "label", "description", "local", "minimum", "minimumFor"]
+ROW_KEYS = ["id", "classes", "label", "description", "local"]
 OLLAMA_KEYS = ["kind", "tag", "downloadGB", "needsGB"]
 GGUF_KEYS = ["kind", "hf_repo", "revision", "file", "mmproj", "downloadGB", "needsGB"]
 
@@ -84,9 +84,9 @@ def test_the_checked_in_lineup_equals_the_generators_output() -> None:
 
 def test_the_checked_in_file_names_the_commit_it_was_generated_from() -> None:
     doc = _checked_in()
-    assert list(doc) == [lineup.PROVENANCE_KEY, "schema", "floors", "models"]
+    assert list(doc) == [lineup.PROVENANCE_KEY, "schema", "models"]
     assert _SHA.match(doc[lineup.PROVENANCE_KEY])
-    assert doc["schema"] == lineup.SCHEMA == 2
+    assert doc["schema"] == lineup.SCHEMA == 3
 
 
 def test_the_checked_in_file_is_exactly_what_render_writes() -> None:
@@ -150,8 +150,6 @@ def test_every_row_has_exactly_the_keys_foundry_reads(model_id: str) -> None:
     assert isinstance(row["label"], str) and row["label"]
     assert isinstance(row["description"], str) and row["description"]
     assert row["classes"] == CLASSES[model_id]
-    assert isinstance(row["minimum"], bool)
-    assert isinstance(row["minimumFor"], list)
     local = row["local"]
     assert list(local) == (OLLAMA_KEYS if local["kind"] == "ollama" else GGUF_KEYS)
     assert isinstance(local["downloadGB"], float)
@@ -176,8 +174,6 @@ def test_the_first_row_is_the_page_reader_as_a_gguf_pair() -> None:
             "downloadGB": 3.24,
             "needsGB": {"value": 4.74, "basis": "declared"},
         },
-        "minimum": False,
-        "minimumFor": [],
     }
 
 
@@ -189,25 +185,22 @@ def test_the_cleanup_model_is_the_bf16_ollama_tag() -> None:
         "downloadGB": 19.32,
         "needsGB": {"value": 20.82, "basis": "declared"},
     }
-    assert row["minimum"] is True
-    assert row["minimumFor"] == ["translate", "simplify"]
-    assert set(row["minimumFor"]) <= set(row["classes"])
 
 
-def test_the_27b_no_longer_floors_anything() -> None:
+def test_the_27b_row_is_its_ollama_tag() -> None:
     row = next(r for r in _checked_in()["models"] if r["id"] == "qwen3.8-27b-4bit")
     assert row["local"]["kind"] == "ollama"
     assert row["local"]["tag"] == "qwen3.8:27b"
     assert row["local"]["downloadGB"] == 17.74
-    assert row["minimum"] is False
-    assert row["minimumFor"] == []
 
 
-def test_a_class_has_exactly_one_floor_and_it_is_the_9b() -> None:
-    assert _checked_in()["floors"] == {
-        "simplify": "qwen3.5-9b",
-        "translate": "qwen3.5-9b",
-    }
+def test_no_class_has_a_floor_any_more() -> None:
+    # Owen 2026-10-09, of the 9B's `minimum_for = ["translate", "simplify"]`: "we can
+    # remove it, yes" (docs/VERB-SIZING.md section 7).
+    doc = _checked_in()
+    assert "floors" not in doc
+    for row in doc["models"]:
+        assert "minimum" not in row and "minimumFor" not in row
 
 
 def test_gigabytes_are_decimal_at_two_places() -> None:
@@ -237,8 +230,6 @@ FIXTURE = """
 [model]
 id = "{id}"
 family = "{family}"
-# 9, not 1: the text classes carry a 9B floor since 2026-09-23, and this
-# fixture stands in for a cleanup-class qwen3.5.
 params_b = 9
 context_default = 4096
 trained_context = 262144
@@ -279,24 +270,6 @@ def test_a_local_model_no_class_names_is_refused(
     )
 
 
-def test_a_floor_for_a_class_the_model_does_not_serve_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _catalog(
-        monkeypatch,
-        tmp_path,
-        id="demo-1b",
-        family="qwen3.5",
-        extra='minimum_for = ["pages"]\n',
-    )
-    with pytest.raises(LineupError) as caught:
-        lineup.build()
-    assert "minimum_for names ['pages'], which this model does not serve" in (
-        str(caught.value)
-    )
-    assert "clean" in str(caught.value)
-
-
 def test_a_fixture_catalog_builds_the_same_shape(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -317,8 +290,6 @@ def test_a_fixture_catalog_builds_the_same_shape(
                 "downloadGB": 1.0,
                 "needsGB": {"value": 2.5, "basis": "declared"},
             },
-            "minimum": False,
-            "minimumFor": [],
         }
     ]
 
@@ -330,7 +301,7 @@ def test_check_reads_a_broken_file_as_a_named_problem() -> None:
         "the checked-in file is not valid JSON: Expecting value: line 1 column 1 (char 0)"
     ]
     assert lineup.check("[]", fresh) == ["the checked-in file is not a JSON object"]
-    assert lineup.check('{"schema": 2}', fresh) == [
+    assert lineup.check('{"schema": 3}', fresh) == [
         "models: the checked-in file has no models list"
     ]
 
@@ -357,37 +328,13 @@ def test_check_ignores_provenance_and_nothing_else() -> None:
     fresh = lineup.document(rows, "0" * 40)
     other = lineup.document(rows, "f" * 40)
     assert lineup.check(lineup.render(other), fresh) == []
-    schema = dict(fresh, schema=3)
+    schema = dict(fresh, schema=2)
     assert lineup.check(lineup.render(schema), fresh) == [
-        "schema: checked in 3, generator says 2"
+        "schema: checked in 2, generator says 3"
     ]
 
-def test_floors_names_one_model_per_class_and_only_where_a_manifest_says_so() -> None:
-    rows, _ = lineup.build()
-    table = lineup.floors(rows)
-    assert table == {"simplify": "qwen3.5-9b", "translate": "qwen3.5-9b"}
-    for name, model in table.items():
-        row = next(r for r in rows if r["id"] == model)
-        assert name in row["minimumFor"]
-    assert "analysis" not in table
-    assert "clean" not in table and "pages" not in table
-
-
-def test_two_models_flooring_one_class_is_refused_rather_than_picked() -> None:
-    rows = [
-        {"id": "small", "minimumFor": ["translate"]},
-        {"id": "large", "minimumFor": ["translate"]},
-    ]
-    with pytest.raises(lineup.LineupError) as raised:
-        lineup.floors(rows)
-    assert "two models floor the 'translate' class" in str(raised.value)
-    assert "'small'" in str(raised.value) and "'large'" in str(raised.value)
-
-
-def test_the_document_carries_the_floors_the_rows_state() -> None:
+def test_the_document_is_provenance_schema_and_rows() -> None:
     rows, _ = lineup.build()
     doc = lineup.document(rows, "0" * 40)
-    assert doc["schema"] == 2
-    assert doc["floors"] == lineup.floors(rows)
-    assert list(doc) == ["generated_from", "schema", "floors", "models"]
-
+    assert doc["schema"] == 3
+    assert list(doc) == ["generated_from", "schema", "models"]
