@@ -758,9 +758,30 @@ _REFUSALS_SAID: set[tuple[str, str]] = set()
 _log = logging.getLogger(__name__)
 
 
+def _serves_tts() -> bool:
+    from .config import crucible_home, job_type_on_or_unknown
+    from .errors import ConfigError
+
+    try:
+        home = crucible_home()
+    except ConfigError:
+        return True
+    return job_type_on_or_unknown(home, "tts")
+
+
 def _say_once(voice_id: str, pin: Pin, why: str) -> None:
+    """Warn, once, that a pinned voice is not served - on a host that serves voices.
+
+    A host with [jobs] enable_tts off serves no voice at all, so "not served" is no
+    news there: on 2026-10-08 `crucible install audio` on such a host opened with five
+    of these warnings, one per packaged pin, because deciding the card reads every
+    capability class's candidates. The refusal is still returned to whoever asked
+    (load_pinned's second half); only the warning is the TTS operator's.
+    """
     key = (voice_id, why)
     if key in _REFUSALS_SAID:
+        return
+    if not _serves_tts():
         return
     _REFUSALS_SAID.add(key)
     _log.warning(
