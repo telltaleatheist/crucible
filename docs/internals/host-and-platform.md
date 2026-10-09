@@ -288,6 +288,16 @@ host never loops on restart because the systemd unit is `Restart=always`. Recove
 guest's system unit (touches only Crucible's unit, so allowed in any distro); host mode
 respawns the child. Every down-to-up edge re-asserts the claim.
 
+**Boot waits on the unit's own state before it calls anything a failure**
+(`PresenceWatcher.boot`). It gives `/v1/ping` `BOOT_WAIT_SECONDS` (30); if nothing answers it
+asks `systemctl is-active` and, while the unit is `active`, `activating` or `reloading` (the
+server is up and still importing, which a first start after an install does for longer), it
+waits up to `UNIT_START_BUDGET_SECONDS` (120) more, saying so in `host.log`. Only a unit that
+is not starting, or one that stayed silent through both budgets, gets "running the recovery".
+Measured on the friend's laptop, 2026-10-08: the first guest boot answered about one second
+past the 30 s, and the log read as a failure (`recovery system-unit-start: ok`) when nothing
+had failed. `PRESENCE_SETTLE_CEILING_SECONDS` includes the budget.
+
 ### The door (127.0.0.1:7101, `controller_door.py`)
 
 - One route table per method (`GET_ROUTES`, `POST_ROUTES`: path → handler function) and one

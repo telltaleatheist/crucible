@@ -44,6 +44,8 @@ PRESENCE_SETTLE_CEILING_SECONDS = (
     presence_module.WATCH_SECONDS
     + presence_module.RECIPE_TIMEOUT_SECONDS
     + presence_module.BOOT_WAIT_SECONDS
+    + presence_module.RECIPE_TIMEOUT_SECONDS
+    + presence_module.UNIT_START_BUDGET_SECONDS
 )
 
 HOST_CHILD_START_WAIT_SECONDS = 30.0
