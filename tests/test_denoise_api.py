@@ -147,6 +147,14 @@ def terminal(events: list[dict]) -> dict:
     return events[-1]
 
 
+def assert_settled_off_the_card(events: list[dict], model: str) -> None:
+    """A job nothing holds the card for ends with the settlement taking its model off
+    (crucible/settle.py), and the done event says what is resident after that: nothing."""
+    note = next(event["data"] for event in events if event["event"] == "note")
+    assert note["unloaded"] == model
+    assert terminal(events)["data"]["resident"] is None
+
+
 def test_info_advertises_denoise(
     denoise_client: TestClient, auth: dict[str, str]
 ) -> None:
@@ -275,7 +283,7 @@ def test_a_run_publishes_every_stem_and_names_the_primary(
     assert data["frames"] == 441000
     assert data["separate_seconds"] == 8.25
     assert data["load_seconds"] > 0
-    assert data["resident"] == MODEL
+    assert_settled_off_the_card(events, MODEL)
 
     job_id = events[0]["job_id"]
     for name in data["artifacts"]:
@@ -350,7 +358,7 @@ def test_the_vocals_separator_loads_its_own_checkpoint_and_keeps_vocals(
     assert data["primary_stem"] == "block_00_(vocals)_vocals_mel_band_roformer.wav"
     assert data["artifacts"] == [data["primary_stem"]]
     assert len(data["stems"]) == 2
-    assert data["resident"] == VOCALS_MODEL
+    assert_settled_off_the_card(events, VOCALS_MODEL)
 
     manifest = load_denoise_manifest(VOCALS_MODEL)
     load = json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])
@@ -394,7 +402,7 @@ def test_two_separators_each_load_their_own_checkpoint(
     monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_STEMS", VOCALS_STEMS)
     second = run_job(ready, auth, model=VOCALS_MODEL)
     assert terminal(second)["event"] == "done", terminal(second)
-    assert terminal(second)["data"]["resident"] == VOCALS_MODEL
+    assert_settled_off_the_card(second, VOCALS_MODEL)
     assert terminal(second)["data"]["load_seconds"] > 0
 
     loads = [

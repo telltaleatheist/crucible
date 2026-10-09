@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from .protocol import API_HEADER, API_VERSION
+
+# The version header as a protected route needs it, spelled from the protocol.
+VERSION_HEADER_LINE = f"`{API_HEADER}: {API_VERSION}`"
+
 GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/ping",
@@ -418,9 +423,9 @@ def first_sentence(text: str | None) -> str:
 def door_of(scope: tuple[bool, bool]) -> str:
     needs_token, needs_version = scope
     if needs_token:
-        return "token + `X-Crucible-Api: 1`"
+        return f"token + {VERSION_HEADER_LINE}"
     if needs_version:
-        return "`X-Crucible-Api: 1` only"
+        return f"{VERSION_HEADER_LINE} only"
     return "open"
 
 
@@ -524,7 +529,7 @@ def render(app: Any, enabled: frozenset[str] | None = None) -> str:
         "type's params schema) and `GET /v1/openapi.json`. None of them needs a token.",
         "",
         "Every route is under `/v1` unless it says otherwise. Protected routes need",
-        "`Authorization: Bearer <token>` **and** `X-Crucible-Api: 1`, checked in that order.",
+        f"`Authorization: Bearer <token>` **and** {VERSION_HEADER_LINE}, checked in that order.",
         "An error is always a JSON body under an `error` key holding `code`, `message` and",
         "sometimes `details`. Crucible refuses by name and with numbers: branch on `code`,",
         "show a person the `message`.",

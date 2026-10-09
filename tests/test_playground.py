@@ -119,7 +119,7 @@ def test_an_installed_model_is_ready_and_a_missing_one_downloads_its_weights(
     assert sfx["prompt"]["required"] and sfx["prompt"]["kind"] == "text"
     assert sfx["duration_s"]["default"] == 10 and sfx["duration_s"]["max"] == 120
     assert sfx["steps"]["default"] == 8 and sfx["steps"]["max"] == 50
-    assert sfx["format"]["options"] == ["flac", "wav"]
+    assert sfx["format"]["options"] == ["flac", "wav", "mp3"]
     assert sfx["seed"]["default"] is None and not sfx["seed"]["required"]
 
     song = _fields(pages[SONG])

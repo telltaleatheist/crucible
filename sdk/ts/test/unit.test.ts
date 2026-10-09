@@ -527,6 +527,68 @@ test('a chat in flight is named as the act it IS, and does not gate work', async
   assert.equal(seen.slots.accelerated.busy, 0);
 });
 
+test('a deploy hold reads as who, for what release, and until when', async () => {
+  // POST /v1/server/updating (crucible/updating.py): while it stands every door that creates
+  // work refuses `503 server_updating`. A bench reads it to say why nothing is being admitted.
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    updating: {
+      release: '1.0.117',
+      by: 'deploy.sh@owens-pc',
+      since: '2026-10-09T12:00:00+00:00',
+      until: '2026-10-09T12:10:00+00:00',
+    },
+  });
+  const seen = await client().activity();
+  assert.deepEqual(seen.updating, {
+    release: '1.0.117',
+    by: 'deploy.sh@owens-pc',
+    since: '2026-10-09T12:00:00+00:00',
+    until: '2026-10-09T12:10:00+00:00',
+  });
+
+  answer(200, { ...ACTIVITY_WITH_SESSION, updating: null });
+  assert.equal((await client().activity()).updating, null);
+  // A server from before the hold can hold nothing: the absent key reads as no hold.
+  answer(200, ACTIVITY_WITH_SESSION);
+  assert.equal((await client().activity()).updating, null);
+});
+
+test('a hold without its own times is a protocol error', async () => {
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    updating: { release: null, by: null, since: '2026-10-09T12:00:00+00:00' },
+  });
+  await assert.rejects(client().activity(), /activity\.updating has no field "until"/);
+});
+
+test('a cancelled running job says Crucible is stopping it', async () => {
+  // A running job whose client cancelled it is the server's to finish stopping (2026-10-03):
+  // the lane row says so, and a waiting call's row does not carry the key at all.
+  const row = {
+    job_id: 'j-1', type: 'load-model', model: 'qwen3.5-9b', status: 'running', position: null,
+    progress: 0.2, message: 'cancelled by foundry/0.9.0; Crucible is stopping it',
+    created: '2026-10-09T12:00:00+00:00', started: '2026-10-09T12:00:01+00:00',
+    client: 'foundry/0.9.0',
+  };
+  const call = {
+    job_id: 'c-1', type: 'chat', model: 'qwen3.5-9b', status: 'queued', position: 1,
+    progress: 0, message: null, created: '2026-10-09T12:00:02+00:00', started: null,
+    client: 'b-side/1.0', waited_s: 3, max_wait_s: 60, kind: 'call', waiting_for: null,
+  };
+  answer(200, {
+    ...ACTIVITY_WITH_SESSION,
+    running: [{ ...row, cancelling: true }],
+    queued: [call],
+  });
+  const seen = await client().activity();
+  assert.equal(seen.running[0]?.cancelling, true);
+  assert.equal(seen.queued[0]?.cancelling, null);
+
+  answer(200, { ...ACTIVITY_WITH_SESSION, running: [{ ...row, cancelling: 'yes' }] });
+  await assert.rejects(client().activity(), /activity\.running\[0\]\.cancelling is present but is not a boolean/);
+});
+
 // ------------------------------------- what was told to go and has not gone
 
 /**

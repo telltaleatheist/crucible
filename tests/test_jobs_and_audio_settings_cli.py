@@ -238,7 +238,7 @@ def test_off_by_hand_on_a_card_that_needs_it_stays_off(
     assert cli.main(["audio", "low-vram", "off"]) == 0
     out = capsys.readouterr().out
     assert "[audio] low_vram = false" in out
-    assert "set by hand" in out
+    assert "set by a person" in out
     assert _document(home)["audio"] == {"low_vram": False}
     _decided(capsys)  # the card decided again does not undo a person's off
     assert _document(home)["audio"] == {"low_vram": False}

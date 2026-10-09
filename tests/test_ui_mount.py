@@ -82,14 +82,31 @@ def test_the_api_still_needs_its_token(client: TestClient) -> None:
     assert client.get("/v1/setup").status_code == 401
 
 
+# Pages of the server itself that the operator page links to (opened, never fetched by
+# the page). They are routes of the server, not files of the page, so they are named from
+# the server's root, as app.js names every /v1 route it calls.
+SERVER_PAGES_LINKED = {"/docs"}
+
+
 def test_the_page_asks_for_exactly_its_own_two_files_by_relative_name() -> None:
     html = _read(INDEX)
     assert 'href="app.css"' in html
     assert 'src="app.js"' in html
     referenced = set(re.findall(r'(?:src|href)="([^"]+)"', html))
-    assert referenced == {"app.css", "app.js", "#main", "playground.html"}, referenced
-    for value in referenced:
-        assert not value.startswith("/"), value
+    own = {value for value in referenced if not value.startswith("/")}
+    assert own == {"app.css", "app.js", "#main", "playground.html"}, own
+    assert referenced - own == SERVER_PAGES_LINKED, referenced - own
+
+
+def test_every_server_page_the_page_links_to_opens_without_a_token(
+    client: TestClient,
+) -> None:
+    # A link opens in a new tab, which carries no bearer token: the page it names must
+    # be one the server answers in the open.
+    for path in SERVER_PAGES_LINKED:
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith("text/html"), path
 
 
 def test_no_file_of_the_page_reaches_for_another_host() -> None:

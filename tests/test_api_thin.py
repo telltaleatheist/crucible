@@ -304,6 +304,7 @@ def test_one_events_after_loop_serves_a_job_and_ends_at_its_terminal_event() -> 
         ends=sse.TERMINAL_EVENTS,
         moved=lambda _: None,
         close=lambda: closed.append(True),
+        final=lambda: False,
     )
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(events=EventHub())))
