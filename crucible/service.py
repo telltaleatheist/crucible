@@ -199,8 +199,14 @@ Runner = Callable[[Sequence[str]], Ran]
 
 
 def subprocess_runner(argv: Sequence[str]) -> Ran:
+    # No stdin, like every other door: these are `sudo -n systemctl ...` and, without
+    # passwordless sudo, a nested `wsl.exe -u root` through interop. Given the
+    # caller's terminal, sudo (Ubuntu's `Defaults use_pty`) takes it into raw mode to
+    # relay it, and a nested wsl.exe attaches to the outer session's console; neither
+    # needs anything from it, and nothing here ever answers a prompt.
     completed = subprocess.run(
-        list(argv), capture_output=True, text=True, timeout=120
+        list(argv), capture_output=True, text=True, timeout=120,
+        stdin=subprocess.DEVNULL,
     )
     return Ran(
         argv=tuple(argv),

@@ -93,3 +93,23 @@ def test_a_restart_nothing_answers_is_refused_by_name_after_its_budget(
     )
     assert took is None
     assert "still waiting for it to answer" in capsys.readouterr().out
+
+
+def test_the_service_runner_never_hands_its_child_the_callers_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The root door is `sudo -n` (use_pty relays a terminal stdin in raw mode) or a
+    # nested `wsl.exe -u root` (which attaches to the outer session's console). A
+    # `crucible service stop` typed into `wsl -d crucible` must give them neither.
+    import subprocess
+
+    seen: dict = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    service.subprocess_runner(["systemctl", "stop", service.UNIT_NAME])
+    assert seen.get("stdin") is subprocess.DEVNULL
+    assert seen.get("capture_output") is True
