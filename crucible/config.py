@@ -278,7 +278,8 @@ def _max_session_hold_s(table: dict[str, Any]) -> int:
 
 def _audio_low_vram(table: dict[str, Any]) -> bool:
     """`[audio] low_vram`: absent is off. [audio] is not a writer-owned table, so
-    `crucible install` carries it as it is (_unowned_tables)."""
+    `crucible install` carries it as it is (_unowned_tables); `crucible audio
+    low-vram on|off` sets the one key through write_config(audio_low_vram=)."""
     section = table.get("audio")
     if section is None or "low_vram" not in section:
         return False
@@ -307,6 +308,13 @@ def _kept_jobs_flag(home: Path, key: str, default: bool) -> bool:
     except (OSError, tomllib.TOMLDecodeError):
         return default
     return value if isinstance(value, bool) else default
+
+
+def job_type_on_or_unknown(home: Path, job_type: str) -> bool:
+    """Whether `[jobs] enable_<job_type>` is on in the config at `home`, answering True
+    when the file cannot say (missing, unreadable, or without the key): a caller that
+    stays quiet about an off type must not go quiet because the config is broken."""
+    return _kept_jobs_flag(home, f"enable_{job_type}", True)
 
 
 def _advertised(table: dict[str, Any]) -> tuple[str, ...]:
@@ -953,6 +961,7 @@ def write_config(
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
     tts_engines: tuple[EngineFootprint, ...] = (),
     carried_tables: dict[str, Any] | None = None,
+    audio_low_vram: bool | None = None,
 ) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
@@ -1040,6 +1049,10 @@ def write_config(
         }
     for table_name, table in _unowned_tables(path).items():
         document[table_name] = table
+    if audio_low_vram is not None:
+        # [audio] stays a table this writer does not own: only the one key is set,
+        # and anything else a person put in [audio] is carried as it was.
+        document["audio"] = {**document.get("audio", {}), "low_vram": audio_low_vram}
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
@@ -1063,6 +1076,54 @@ def write_config(
     finally:
         staged.unlink(missing_ok=True)
     return path
+
+
+def rewrite_config(
+    config: Config,
+    *,
+    flags: dict[str, bool] | None = None,
+    audio_low_vram: bool | None = None,
+) -> Path:
+    """Write `config` back to its own file with only the named settings changed.
+
+    The token, the capability record, routes, upstreams, local models, the [tts]
+    footprints, the advertised addresses and every table this writer does not own
+    are written as they were read. This is the door for `crucible jobs enable` and
+    `crucible audio low-vram`: a setting that changes one key must never cost a new
+    token, which is what `crucible init --force` would.
+    """
+    changed = dict(flags or {})
+    unknown = sorted(set(changed) - set(CAPABILITY_FLAGS))
+    if unknown:
+        raise ConfigError(
+            f"{unknown} are not [jobs] flags; the flags are {list(CAPABILITY_FLAGS)}"
+        )
+    values = {flag: changed.get(flag, getattr(config, flag)) for flag in CAPABILITY_FLAGS}
+    return write_config(
+        config.home,
+        name=config.name,
+        host=config.host,
+        port=config.port,
+        token=config.token,
+        backend_kind=config.backend_kind,
+        desktop_allowance_bytes=config.desktop_allowance_bytes,
+        desktop_allowance_basis=config.desktop_allowance_basis,
+        desktop_allowance_note=config.desktop_allowance_note,
+        retention_days=config.retention_days,
+        install_on_submit=config.install_on_submit,
+        capability=config.capability,
+        routes=config.routes,
+        local_models=config.local_models,
+        upstreams=config.upstreams,
+        advertise=config.advertise,
+        tailscale_advertise=config.tailscale_advertise,
+        lan_advertise=config.lan_advertise,
+        cors_origins=config.cors_origins,
+        open_pairing=config.open_pairing,
+        tts_engines=config.tts_engines,
+        audio_low_vram=audio_low_vram,
+        **values,
+    )
 
 
 def config_mode(path: Path) -> str:

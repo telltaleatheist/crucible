@@ -7,11 +7,13 @@ from ..config import CRUCIBLE_HOME_ENV
 from . import (
     api_cmd,
     app_cmd,
+    audio_cmd,
     capability,
     common,
     doctor,
     init,
     install,
+    jobs_cmd,
     orchestrator,
     pair,
     serve,
@@ -47,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     init.add_parser(subparsers)
     install.add_parser(subparsers)
+    jobs_cmd.add_parser(subparsers)
+    audio_cmd.add_parser(subparsers)
     capability.add_parser(subparsers)
     weights.add_model_parsers(subparsers)
     voices.add_parser(subparsers)

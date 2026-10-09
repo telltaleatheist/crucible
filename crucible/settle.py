@@ -146,6 +146,12 @@ class Settlement:
             return None
         return self._unheld_since
 
+    @property
+    def resident_id(self) -> str | None:
+        """What is on the card now, as the residency says."""
+        resident = self._residency.resident
+        return None if resident is None else resident.id
+
     def held_by(self) -> Held | None:
         return self.holder()
 

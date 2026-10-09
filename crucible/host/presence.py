@@ -99,6 +99,57 @@ class UnitProbe:
     detail: str
 
 
+# systemd ActiveStates in which the unit is up or on its way up or down - a restart
+# in flight, or Restart=always bringing a crashed server back. systemd owns those; a
+# recovery's `systemctl start` would race it and change nothing.
+UNIT_COMING_UP: frozenset[str] = frozenset({"active", "activating", "deactivating", "reloading"})
+
+
+NOT_ANSWERING = "the engine is not answering"
+
+STOPPED_ON_PURPOSE = (
+    f"{UNIT_NAME} was stopped inside the distro (`crucible service stop` or "
+    "`systemctl stop`), so this tray leaves it stopped; Start engine or "
+    "`crucible service start` brings it back"
+)
+
+
+@dataclass(frozen=True)
+class UnitActivity:
+    readable: bool
+    active: str
+    sub: str
+    result: str
+    detail: str
+
+    @property
+    def coming_up(self) -> bool:
+        return self.readable and self.active in UNIT_COMING_UP
+
+    @property
+    def stopped_on_purpose(self) -> bool:
+        """Inactive, and its last run did not fail: something ran `systemctl stop`
+        (`crucible service stop`). With Restart=always, a server that exited of its own
+        accord would be activating again, not inactive."""
+        return self.readable and self.active == "inactive" and self.result == "success"
+
+
+def parse_unit_activity(result: RunResult) -> UnitActivity:
+    properties: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep:
+            properties[key] = value
+    active = properties.get("ActiveState", "")
+    if not result.ok or active == "":
+        return UnitActivity(False, active, "", "", f"systemctl show: {result.output_tail()}")
+    sub = properties.get("SubState", "")
+    outcome = properties.get("Result", "")
+    return UnitActivity(
+        True, active, sub, outcome, f"{UNIT_NAME} is {active}/{sub} (result {outcome})"
+    )
+
+
 @dataclass(frozen=True)
 class FoundEngine:
     distro: str
@@ -139,6 +190,7 @@ class PresenceWatcher:
         self.held: Child | None = None
         self.held_distro: str | None = None
         self._recovery_spent = False
+        self._quiet_detail = NOT_ANSWERING
 
     @property
     def distro(self) -> str:
@@ -198,6 +250,19 @@ class PresenceWatcher:
         if state in UNIT_STATES:
             return UnitProbe(True, state, f"{UNIT_NAME} is {state}")
         return UnitProbe(False, state, f'no system {UNIT_NAME} in "{self._distro}" ({result.output_tail()})')
+
+    def probe_activity(self) -> UnitActivity:
+        result = self._runner.run(
+            wsl.root_argv(
+                self._distro,
+                [
+                    "systemctl", "show", UNIT_NAME,
+                    "--property=ActiveState", "--property=SubState", "--property=Result",
+                ],
+            ),
+            timeout_s=RECIPE_TIMEOUT_SECONDS,
+        )
+        return parse_unit_activity(result)
 
     def running_owner(self, distro: Distro, detail: str) -> Presence:
         if not self.consented:
@@ -372,10 +437,13 @@ class PresenceWatcher:
                 Owner.FOUND,
             )
         if self._recovery_spent:
-            return Presence(
-                distro, Engine.STOPPED, "the engine is not answering", owner
-            )
+            return Presence(distro, Engine.STOPPED, self._quiet_detail, owner)
+        if distro is Distro.PRESENT:
+            deliberate = self._deliberate(distro, owner)
+            if deliberate is not None:
+                return deliberate
         self._recovery_spent = True
+        self._quiet_detail = NOT_ANSWERING
         if distro is Distro.PRESENT:
             if self.recover():
                 return Presence(
@@ -397,6 +465,34 @@ class PresenceWatcher:
             owner,
         )
 
+
+    def _deliberate(self, distro: Distro, owner: Owner) -> Presence | None:
+        """The unit's own state, when it says the silence is not a failure.
+
+        `crucible service restart` (or systemd's Restart=always after a crash) leaves
+        the unit activating while the server boots; `crucible service stop` leaves it
+        inactive with a successful result. Neither is the tray's to recover: on
+        2026-10-08 a laptop's `crucible service stop` was undone seconds later by
+        "recovery system-unit-start: ok". Only a failed unit, or one systemd cannot
+        be asked about, goes on to the recovery.
+        """
+        activity = self.probe_activity()
+        if activity.coming_up:
+            return Presence(
+                distro,
+                Engine.STARTING,
+                f"{activity.detail}: systemd is bringing it up, and this tray waits "
+                "for it to answer rather than starting it a second time",
+                owner,
+            )
+        if activity.stopped_on_purpose:
+            # Nothing to recover, so nothing more to ask until it answers again: the
+            # watch stays quiet, as it does after a spent recovery.
+            self._recovery_spent = True
+            self._quiet_detail = STOPPED_ON_PURPOSE
+            self._log.write(f"watch: {activity.detail} - stopped on purpose; no recovery")
+            return Presence(distro, Engine.STOPPED, STOPPED_ON_PURPOSE, owner)
+        return None
 
     def hold(self, distro: str) -> Child:
         if self.held is not None and self.held.poll() is None:

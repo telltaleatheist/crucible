@@ -484,3 +484,45 @@ def test_the_grace_of_a_slow_stop_does_not_delay_the_answer(
     assert started, "the card was never cleared"
     assert started[0] >= before
     assert not is_resident(resident, auth)
+
+
+def _echo_that_reports_the_card(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    from crucible.jobs.echo import EchoJobType
+
+    residency = client.app.state.residency
+    original = EchoJobType.run
+
+    def run(self: Any, job: Any, ctx: Any) -> None:
+        original(self, job, ctx)
+        ctx.done_extra(resident=residency.resident_id)
+
+    monkeypatch.setattr(EchoJobType, "run", run)
+
+
+def test_the_done_event_says_what_is_resident_after_the_settlement_cleared_it(
+    resident: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _echo_that_reports_the_card(monkeypatch, resident)
+    events = echoed(resident, auth)
+    note = next(row["data"] for row in events if row["event"] == "note")
+    done = next(row["data"] for row in events if row["event"] == "done")
+    assert note["unloaded"] == MODEL
+    assert done["resident"] is None, (
+        "the note said the model came off the card, so the done event after it "
+        "must not say it is still there"
+    )
+    assert not is_resident(resident, auth)
+
+
+def test_the_done_event_keeps_the_resident_when_a_session_holds_the_card(
+    resident: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _echo_that_reports_the_card(monkeypatch, resident)
+    session_id = a_session(resident, auth)
+    events = echoed(resident, auth)
+    done = next(row["data"] for row in events if row["event"] == "done")
+    assert done["resident"] == MODEL
+    assert not [row for row in events if row["event"] == "note"]
+    close(resident, auth, session_id)

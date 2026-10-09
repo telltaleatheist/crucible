@@ -28,6 +28,9 @@ SERVICE_COMMANDS = [
     ServiceCommand(command="crucible service status", does="is it installed, and is it up"),
     ServiceCommand(command="crucible service start", does="start it now"),
     ServiceCommand(command="crucible service stop", does="stop it"),
+    ServiceCommand(
+        command="crucible service restart", does="stop and start it in one step"
+    ),
     ServiceCommand(command="crucible service install", does="have the machine run it at boot"),
     ServiceCommand(command="crucible service uninstall", does="stop having it do that"),
     ServiceCommand(command="crucible token --url", does="print the pairing lines again"),

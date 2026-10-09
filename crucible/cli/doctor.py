@@ -861,7 +861,8 @@ def lines_capability(report: dict[str, Any]) -> Iterator[str]:
         yield (
             f"note:    this host can hold {name}, and [jobs] enable_{name} "
             f"is off — `crucible install {INSTALLER_FOR[name]}` builds its "
-            "env and turns it on"
+            f"env and turns it on; with the env built, `crucible jobs enable {name}` "
+            "turns it on"
         )
 
 

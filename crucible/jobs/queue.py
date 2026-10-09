@@ -40,6 +40,10 @@ REAP_INTERVAL_SECONDS = 60.0
 
 SECONDS_PER_DAY = 86_400.0
 
+# The done-event key in which a job type reports what is resident on the card
+# (audio, image, segment, video, align, denoise, the load and unload types).
+RESIDENT_KEY = "resident"
+
 
 def _params_for_artifact(params: dict[str, Any], index: int | None) -> dict[str, Any]:
     if index is None:
@@ -1083,6 +1087,11 @@ class JobStore:
             return
         if settled is not None:
             self.append_event(job, "note", settled.to_dict())
+            if RESIDENT_KEY in job.done_extra:
+                # A job that reports what is resident read it when it finished; the
+                # settlement has just taken that off the card, and the done event
+                # written next must say what is there now.
+                job.done_extra[RESIDENT_KEY] = self._settlement.resident_id
 
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         job.status = FAILED

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
+import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .. import capabilitywords, hosttools, interpreter, jobenv, llamacpp, verdict
 from ..backend import LLAMA_WINDOWS, Backend
@@ -13,6 +16,95 @@ from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _capability_step, _measure_step
 from .common import _env_spec, _fail
+
+PROGRESS_SECONDS = 20.0
+
+_COLLECTING = re.compile(r"^Collecting (?P<name>[A-Za-z0-9._-]+)")
+_BUILDING = re.compile(r"^\s*Building wheel for (?P<name>[A-Za-z0-9._-]+)")
+_INSTALLING = "Installing collected packages: "
+
+
+class EnvProgress:
+    """What an env build is doing, said while pip says nothing to this terminal.
+
+    pip runs for minutes (132 s and 166 s for the two audio envs on 2026-10-08), and
+    without --verbose its lines are kept back, so the build was silent between
+    "target:" and "installed in". This reads the lines it is fed and says, every
+    PROGRESS_SECONDS, how long it has been and where pip is: how many packages it has
+    collected, which wheel it is building, how many it is installing. It speaks on its
+    own clock, so a wheel that takes minutes to build is still accounted for.
+    """
+
+    def __init__(
+        self,
+        say: Callable[[str], None],
+        *,
+        every: float = PROGRESS_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._say = say
+        self._every = every
+        self._clock = clock
+        self._started = clock()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.collected = 0
+        self.building: str | None = None
+        self.installing: int | None = None
+        self.finished = False
+
+    def feed(self, line: str) -> None:
+        announce: str | None = None
+        with self._lock:
+            if _COLLECTING.match(line):
+                self.collected += 1
+                self.building = None
+                self.installing = None
+                self.finished = False
+            elif line.startswith("Successfully installed"):
+                self.installing = None
+                self.finished = True
+            elif (found := _BUILDING.match(line)) is not None:
+                self.building = None if "finished with status" in line else found.group("name")
+            elif line.startswith(_INSTALLING):
+                self.building = None
+                self.installing = len(
+                    [name for name in line[len(_INSTALLING):].split(",") if name.strip()]
+                )
+                announce = f"  installing {self.installing} packages"
+        if announce is not None:
+            self._say(announce)
+
+    def sentence(self) -> str:
+        with self._lock:
+            if self.installing is not None:
+                return f"installing {self.installing} packages"
+            if self.building is not None:
+                return f"building the wheel for {self.building}"
+            if self.finished:
+                return "pip has finished; finishing the env"
+            if self.collected:
+                return f"{self.collected} packages collected so far"
+            return "setting up the venv and pip"
+
+    def tick(self) -> None:
+        elapsed = self._clock() - self._started
+        self._say(f"  still installing, {elapsed:.0f} s: {self.sentence()}")
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._every):
+            self.tick()
+
+    def __enter__(self) -> "EnvProgress":
+        self._thread = threading.Thread(target=self._run, name="crucible-env-progress", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
 
 
 def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
@@ -81,14 +173,19 @@ def _build_env(
     print(f"recipe:  {recipe}")
     print(f"target:  {jobenv.env_dir(config.home, spec)}")
     started = time.monotonic()
+    def say(line: str) -> None:
+        print(line, flush=True)
+
+    def on_line(line: str) -> None:
+        progress.feed(line)
+        if args.verbose:
+            say(f"  {line}")
+
     try:
-        status = jobenv.install_env(
-            config.home,
-            spec,
-            backend.kind,
-            force=args.force,
-            on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
-        )
+        with EnvProgress(say) as progress:
+            status = jobenv.install_env(
+                config.home, spec, backend.kind, force=args.force, on_line=on_line
+            )
     except (jobenv.EnvError, interpreter.InterpreterError) as exc:
         return str(exc)
     elapsed = time.monotonic() - started
@@ -127,6 +224,9 @@ def _install_audio(config: Config, backend: Backend, args: argparse.Namespace) -
                 f"{refusal}. The audio envs already built are kept; running "
                 "`crucible install audio` again builds only what is missing"
             )
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(config, backend, jobenv.AUDIO_JOB_TYPE)
 

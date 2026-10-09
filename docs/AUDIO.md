@@ -28,15 +28,19 @@ carries the figures (`versions.mps_causal_check`). The community MLX ports are n
 ## Turning it on
 
 ```bash
-crucible init --enable-audio          # or [jobs] enable_audio = true
-crucible install audio                # builds one env per audio engine this machine runs
+crucible install audio                # builds one env per audio engine this machine runs,
+                                      # places ffmpeg, and turns [jobs] enable_audio on
 crucible models pull stable-audio-3-small-sfx
 crucible models pull stable-audio-3-medium
 crucible models pull yue2-3b
 ```
 
 None of these is needed by hand: a job for a missing env or model starts the install and
-answers `409 installing`, like every other type. The one step Crucible cannot take for you is
+answers `409 installing`, like every other type. `crucible jobs enable audio` and
+`crucible jobs disable audio` turn the type on or off without touching anything else in
+config.toml (the token stays); `enable` is refused by name when the card cannot hold any
+audio model or the envs are not built. On a Windows PC these run in the Linux engine:
+`crucible guest jobs enable audio`. The one step Crucible cannot take for you is
 accepting a licence (next section).
 
 ### A card too small for YuE2 whole: `[audio] low_vram`
@@ -44,12 +48,13 @@ accepting a licence (next section).
 YuE2's 7.26 GB backbone is two halves that never run together: the AR half (2.83 GB, plus
 the 1.51 GB of embeddings and output layer) writes the score and the song, and the NAR half
 (the `nar_*` modules, 2.82 GB) solves the synthesis. A host whose card cannot hold the model
-whole (an 8 GiB laptop) sets
+whole (an 8 GiB laptop) runs
 
-```toml
-[audio]
-low_vram = true
+```bash
+crucible audio low-vram on            # `crucible guest audio low-vram on` on a Windows PC
 ```
+
+which writes `[audio] low_vram = true` into config.toml and nothing else,
 
 and only the half a stage uses is on the card; the other waits in host memory. Measured on
 the 3090 Ti on 2026-10-08 through the worker, capped as an 8 GiB card: 6.37 to 6.62 GiB of
@@ -68,9 +73,14 @@ before the setting changed is reported stale by `crucible doctor`.
 
 It is off unless a host's config says so (Owen, 2026-10-08: *"this would be a configuration
 for systems with low ram, not for high ram systems like this pc"*), and only a model whose
-manifest declares a low-VRAM figure honours it: today `yue2-3b` on cuda-linux. `[audio]` is
-not a table `crucible install` writes, so a reinstall keeps it. After changing it, run
-`crucible capability --write` and restart the server.
+manifest declares a low-VRAM figure honours it: today `yue2-3b` on cuda-linux, and
+`crucible audio low-vram on` is refused (`low_vram_not_offered`) on a backend where no model
+does. `[audio]` is not a table `crucible install` writes, so a reinstall keeps it.
+`crucible audio low-vram on|off` writes the setting and decides the card's audio verdict
+again (the capability record and `[jobs] enable_audio`), so nothing is left stale; after a
+hand edit of config.toml, run `crucible capability --write`. A running server reads the
+change on its next request; a model already resident keeps the way it was loaded until it
+comes off the card. `crucible audio low-vram` with no argument shows the setting.
 
 ### The Stable Audio models are gated
 
