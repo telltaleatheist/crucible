@@ -68,6 +68,17 @@ def whoami_argv(distro: str) -> list[str]:
     return default_user_argv(distro, ["id", "-un"])
 
 
+SET_DEFAULT_USER_FLAG = "--set-default-user"
+
+
+def help_argv() -> list[str]:
+    return [WSL_EXE, "--help"]
+
+
+def set_default_user_argv(distro: str, user: str) -> list[str]:
+    return [WSL_EXE, "--manage", distro, SET_DEFAULT_USER_FLAG, user]
+
+
 def import_argv(distro: str, destination: str, archive: str) -> list[str]:
     return [WSL_EXE, "--import", distro, destination, archive, "--version", "2"]
 

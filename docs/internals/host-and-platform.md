@@ -64,6 +64,20 @@ maintained; this file is the short list of things that must stay true.
   systemd) could live on under the controller's `sleep infinity` hold, and a hand
   `wsl -d crucible --exec bash -lc '~/.crucible/...'` looked in `/root` (the friend's
   laptop, 2026-10-08). Nothing needs root as the default: every root act names `-u root`.
+
+  Between the restart and the final question, the default user is also written where WSL
+  itself keeps it: `wsl --manage crucible --set-default-user crucible`, which sets the
+  distro's `DefaultUid` in its registration (`installer._register_default_user`). wsl.conf
+  is read only inside a booting distro; the registration is what wsl.exe reads for a
+  session that names no user, so it holds whatever the boot did. Whether this WSL has the
+  option is asked of `wsl --help` (option names are not translated), never guessed from a
+  version: present (it is in WSL 2.5.7) means it runs, and a failure is
+  `distro_default_user` with what wsl.exe said; absent means wsl.conf is the only thing
+  naming the user, the install says so in a line, and goes on to the same check. If that
+  check then finds root, the refusal names `wsl --update` as what brings the option. A
+  `wsl --help` that is not usage text at all is `wsl_read_failed`, not a "no". The order
+  matters: who it enters as is read BEFORE the registry is told, because after that the
+  answer no longer says whether the distro booted with its conf (and so with systemd).
 - **A distro terminates seconds after its last wsl.exe session ends**, even with systemd units
   running and linger on. Only a Windows-side process can keep the VM up, so the orchestrator
   holds `wsl -d <distro> --exec sleep infinity` for as long as a WSL engine is meant to run
