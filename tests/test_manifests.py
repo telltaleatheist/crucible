@@ -492,13 +492,11 @@ def test_an_ollama_local_form_parses() -> None:
     assert local.download_bytes == 1_000_000_000
     assert local.needs_bytes == 2_500_000_000
     assert local.needs_basis == "declared"
-    assert local.minimum_for == ()
     assert local.to_dict() == {
         "kind": "ollama",
         "download_bytes": 1_000_000_000,
         "needs_bytes": 2_500_000_000,
         "needs_basis": "declared",
-        "minimum_for": [],
         "tag": "demo:1b",
     }
 
@@ -522,10 +520,12 @@ def test_a_text_only_gguf_carries_no_projector() -> None:
     assert local.mmproj is None
 
 
-def test_minimum_for_is_kept_in_the_manifests_order() -> None:
-    local = parse(OLLAMA + 'minimum_for = ["translate", "clean"]\n').local
-    assert local is not None
-    assert local.minimum_for == ("translate", "clean")
+def test_minimum_for_is_no_longer_a_local_key() -> None:
+    # The 9B floor marker is gone (docs/VERB-SIZING.md section 8b, Owen 2026-10-09);
+    # a [local] table that still carries it is refused like any unknown key.
+    with pytest.raises(ManifestError) as caught:
+        parse(OLLAMA + 'minimum_for = ["translate"]\n')
+    assert "minimum_for" in str(caught.value)
 
 
 def test_a_manifest_without_a_local_table_says_so() -> None:
@@ -679,33 +679,6 @@ def test_a_bool_is_not_a_byte_count() -> None:
     assert "[local]: needs_bytes must be int, got bool" in str(caught.value)
 
 
-def test_minimum_for_must_name_a_capability_class() -> None:
-    with pytest.raises(ManifestError) as caught:
-        parse(OLLAMA + 'minimum_for = ["translate", "summarise"]\n')
-    assert "minimum_for[1] is 'summarise', which is not a capability class" in (
-        str(caught.value)
-    )
-    assert "'translate'" in str(caught.value)
-
-
-def test_minimum_for_entries_are_strings() -> None:
-    with pytest.raises(ManifestError) as caught:
-        parse(OLLAMA + "minimum_for = [27]\n")
-    assert "minimum_for[0] must be a string, got int" in str(caught.value)
-
-
-def test_an_empty_minimum_for_is_refused() -> None:
-    with pytest.raises(ManifestError) as caught:
-        parse(OLLAMA + "minimum_for = []\n")
-    assert "minimum_for is empty" in str(caught.value)
-
-
-def test_minimum_for_may_not_repeat_a_class() -> None:
-    with pytest.raises(ManifestError) as caught:
-        parse(OLLAMA + 'minimum_for = ["translate", "translate"]\n')
-    assert "minimum_for lists a class twice" in str(caught.value)
-
-
 def test_a_local_table_that_is_not_a_table_is_refused() -> None:
     with pytest.raises(ManifestError) as caught:
         parse('local = "ollama"\n' + NAMED)
@@ -744,15 +717,13 @@ def test_the_cleanup_model_is_the_bf16_tag_the_clean_text_ruling_names() -> None
     assert isinstance(local, OllamaLocal)
     assert local.tag == "qwen3.5:9b-bf16"
     assert local.download_bytes == 19_321_189_044
-    assert local.minimum_for == ("translate", "simplify")
 
 
-def test_the_27b_no_longer_floors_anything() -> None:
+def test_the_27b_local_form_is_the_ollama_tag() -> None:
     local = load_manifest("qwen3.8-27b-4bit").local
     assert isinstance(local, OllamaLocal)
     assert local.tag == "qwen3.8:27b"
     assert local.download_bytes == 17_741_872_172
-    assert local.minimum_for == ()
 
 
 def test_the_page_reader_is_a_gguf_pair_at_a_pinned_sha() -> None:

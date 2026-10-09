@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import VERSION, lineup, modules
+from crucible import VERSION, modules
 from crucible.modules import ModuleError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -120,11 +120,14 @@ def test_the_same_content_hashes_the_same_and_a_change_moves_it() -> None:
     assert modules.version_of(moved) != modules.version_of(body)
 
 
-def test_a_class_with_a_floor_resolves_to_the_floor() -> None:
-    floors = lineup.floors(lineup.build()[0])
-    assert floors, "this build declares no floors, so this test proves nothing"
-    for capability_class, model_id in floors.items():
-        assert modules.resolve_class(capability_class, None) == model_id
+def test_translate_and_simplify_no_longer_resolve_to_a_9b_floor() -> None:
+    # The 9B floor marker is gone (Owen 2026-10-09): a module that needs these classes
+    # names its model, as it does for every other class with several candidates.
+    for name in ("translate", "simplify"):
+        with pytest.raises(ModuleError) as caught:
+            modules.resolve_class(name, None)
+        assert "model =" in str(caught.value)
+        assert "floor" not in str(caught.value)
 
 
 def test_a_class_with_one_candidate_resolves_to_it() -> None:

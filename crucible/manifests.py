@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
-from .classnames import CLASS_NAMES
 from .errors import CrucibleError
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
@@ -123,9 +122,6 @@ _LOCAL_COMMON_REQUIRED: dict[str, type] = {
     "download_bytes": int,
     "needs_bytes": int,
     "needs_basis": str,
-}
-_LOCAL_COMMON_OPTIONAL: dict[str, type] = {
-    "minimum_for": list,
 }
 _LOCAL_KIND_REQUIRED: dict[str, dict[str, type]] = {
     "ollama": {
@@ -262,7 +258,6 @@ class LocalForm:
     download_bytes: int
     needs_bytes: int
     needs_basis: str
-    minimum_for: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -270,7 +265,6 @@ class LocalForm:
             "download_bytes": self.download_bytes,
             "needs_bytes": self.needs_bytes,
             "needs_basis": self.needs_basis,
-            "minimum_for": list(self.minimum_for),
         }
 
 
@@ -535,32 +529,6 @@ def _check_local_sizes(where: str, table: dict[str, Any]) -> None:
         )
 
 
-def _local_minimum_for(where: str, table: dict[str, Any]) -> tuple[str, ...]:
-    minimum_for = table.get("minimum_for", [])
-    if "minimum_for" in table and not minimum_for:
-        raise ManifestError(
-            f"{where}: minimum_for is empty. A model that is the floor for no "
-            "class says so by omitting the key; an empty list reads as a "
-            "decision somebody made and then forgot to write down"
-        )
-    for index, entry in enumerate(minimum_for):
-        if not isinstance(entry, str):
-            raise ManifestError(
-                f"{where}: minimum_for[{index}] must be a string, got "
-                f"{type(entry).__name__}"
-            )
-        if entry not in CLASS_NAMES:
-            raise ManifestError(
-                f"{where}: minimum_for[{index}] is {entry!r}, which is not a "
-                f"capability class; this build knows {sorted(CLASS_NAMES)}"
-            )
-    if len(set(minimum_for)) != len(minimum_for):
-        raise ManifestError(
-            f"{where}: minimum_for lists a class twice: {minimum_for}"
-        )
-    return tuple(minimum_for)
-
-
 def _ollama_local(
     where: str, table: dict[str, Any], common: dict[str, Any], modalities: tuple[str, ...]
 ) -> OllamaLocal:
@@ -629,7 +597,7 @@ def _parse_local(
         where,
         table,
         {**_LOCAL_COMMON_REQUIRED, **_LOCAL_KIND_REQUIRED[kind]},
-        {**_LOCAL_COMMON_OPTIONAL, **_LOCAL_KIND_OPTIONAL[kind]},
+        _LOCAL_KIND_OPTIONAL[kind],
         error=ManifestError,
     )
     _check_local_sizes(where, table)
@@ -638,7 +606,6 @@ def _parse_local(
         "download_bytes": table["download_bytes"],
         "needs_bytes": table["needs_bytes"],
         "needs_basis": table["needs_basis"],
-        "minimum_for": _local_minimum_for(where, table),
     }
     return _LOCAL_BUILDERS[kind](where, table, common, modalities)
 

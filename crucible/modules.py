@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from . import VERSION, catalog, lineup
+from . import VERSION, catalog
 from .backend import LLAMA_WINDOWS
 from .capabilityclasses import BY_NAME, models_by_class
 from .errors import ApiError, CrucibleError
@@ -57,15 +57,12 @@ def resolve_class(capability_class: str, named: str | None) -> str:
             )
         return named
 
-    floor = lineup.floors(lineup.build()[0]).get(capability_class)
-    if floor is not None:
-        return floor
     if len(candidates) == 1:
         return next(iter(candidates))
     raise ModuleError(
-        f"the {capability_class!r} class is served by {sorted(candidates)} and "
-        f"none of them declares itself the floor, so which one an app needs is "
-        f"the app's choice and not this generator's. Say it in the declaration: "
+        f"the {capability_class!r} class is served by {sorted(candidates)}, so "
+        f"which one an app needs is the app's choice and not this generator's. "
+        f"Say it in the declaration: "
         f'`model = "{sorted(candidates)[0]}"`'
     )
 

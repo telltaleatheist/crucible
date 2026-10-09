@@ -16,7 +16,9 @@ from .manifests import (
     load_all_manifests,
 )
 
-SCHEMA = 2
+# 3 (2026-10-09): `floors` and each row's `minimum` and `minimumFor` are gone with the
+# manifests' `[local] minimum_for` (docs/VERB-SIZING.md section 7, the 9B floor).
+SCHEMA = 3
 
 FILE_NAME = "foundry-lineup.json"
 
@@ -76,21 +78,12 @@ def model_row(manifest: ModelManifest, classes: tuple[str, ...]) -> dict[str, An
             "class table is missing a class or this model has no business in "
             "the lineup"
         )
-    stray = [name for name in local.minimum_for if name not in classes]
-    if stray:
-        raise LineupError(
-            f"{manifest.id}: [local] minimum_for names {stray}, which this model "
-            f"does not serve — its classes are {list(classes)}. A model can only "
-            "be the floor for a class it can run"
-        )
     return {
         "id": manifest.id,
         "classes": list(classes),
         "label": manifest.display,
         "description": manifest.description,
         "local": local_row(local),
-        "minimum": any(name in classes for name in local.minimum_for),
-        "minimumFor": list(local.minimum_for),
     }
 
 
@@ -105,25 +98,10 @@ def build() -> tuple[list[dict[str, Any]], list[str]]:
     return rows, omitted
 
 
-def floors(rows: list[dict[str, Any]]) -> dict[str, str]:
-    found: dict[str, str] = {}
-    for row in rows:
-        for name in row["minimumFor"]:
-            if name in found:
-                raise LineupError(
-                    f"two models floor the {name!r} class: {found[name]!r} and "
-                    f"{row['id']!r}. A class has one floor; remove `minimum_for = "
-                    f"[\"{name}\"]` from one of their `[local]` tables."
-                )
-            found[name] = row["id"]
-    return dict(sorted(found.items()))
-
-
 def document(rows: list[dict[str, Any]], generated_from: str) -> dict[str, Any]:
     return {
         PROVENANCE_KEY: generated_from,
         "schema": SCHEMA,
-        "floors": floors(rows),
         "models": rows,
     }
 

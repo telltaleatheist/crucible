@@ -7,7 +7,7 @@ from typing import Any, Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import catalog, denoisemodels, lineup, rvcbase
+from crucible import catalog, denoisemodels, rvcbase
 from crucible.alignmodels import load_all_align_manifests
 from crucible.asrmodels import load_all_asr_manifests
 from crucible.audiomodels import load_all_audio_manifests
@@ -118,25 +118,13 @@ def test_source_is_the_backend_block_s_repo(
     assert row["source"] == f"hf:{spec.hf_repo}"
 
 
-def test_floors_come_from_the_lineup_and_nowhere_else(
+def test_floors_are_retired_and_always_empty(
     client: TestClient, auth: dict[str, str]
 ) -> None:
-    rows = fetch(client, auth)
-    declared = lineup.floors(lineup.build()[0])
-    for capability_class, model_id in declared.items():
-        assert capability_class in by_id(rows, "model", model_id)["floors"]
-    floored = {
-        row["id"] for row in rows if row["kind"] == "model" and row["floors"]
-    }
-    assert floored == set(declared.values())
-
-
-def test_nothing_but_a_model_ever_carries_a_floor(
-    client: TestClient, auth: dict[str, str]
-) -> None:
+    # The class floors went with the manifests' `minimum_for` (2026-10-09); the key
+    # stays, always [], because SDKs before then demand it.
     for row in fetch(client, auth):
-        if row["kind"] != "model":
-            assert row["floors"] == []
+        assert row["floors"] == []
 
 
 def test_expected_bytes_is_declared_where_a_file_is_named_and_null_otherwise(
