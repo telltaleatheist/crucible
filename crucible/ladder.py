@@ -485,35 +485,33 @@ def _run_script(python: Path, script: str) -> tuple[dict[str, Any] | None, str, 
     return None, f"exited {process.returncode}: {tail}", watch
 
 
-def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
+def _installed_envs(home: Path, backend_kind: str) -> dict[str, tuple[Any, Path]]:
     from . import jobenv
 
-    found: dict[str, Path] = {}
     if backend_kind != CUDA_LINUX:
-        return found
-    llm = jobenv.env_python(home, jobenv.llm_env(backend_kind))
-    if llm.is_file():
-        found["llm"] = llm
-    for job_type in jobenv.WORKER_JOB_TYPES:
-        python = jobenv.env_python(home, jobenv.worker_env(job_type, backend_kind))
+        return {}
+    found: dict[str, tuple[Any, Path]] = {}
+    for spec in jobenv.every_env(backend_kind):
+        python = jobenv.env_python(home, spec)
         if python.is_file():
-            found[job_type] = python
+            found[spec.key] = (spec, python)
     return found
+
+
+def installed_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
+    """The installed envs on this backend, by env key (llm, asr, tts-higgs-v3,
+    audio-yue2, ...); jobenv.every_env is the list walked."""
+    return {key: python for key, (_spec, python) in _installed_envs(home, backend_kind).items()}
 
 
 def installed_torch_env_pythons(home: Path, backend_kind: str) -> dict[str, Path]:
     from . import jobenv
 
-    found: dict[str, Path] = {}
-    for name, python in installed_env_pythons(home, backend_kind).items():
-        spec = (
-            jobenv.llm_env(backend_kind)
-            if name == "llm"
-            else jobenv.worker_env(name, backend_kind)
-        )
-        if "torch" in jobenv.recipe_pins(jobenv.recipe_for(spec)):
-            found[name] = python
-    return found
+    return {
+        key: python
+        for key, (spec, python) in _installed_envs(home, backend_kind).items()
+        if "torch" in jobenv.recipe_pins(jobenv.recipe_for(spec))
+    }
 
 
 def rung_env(home: Path, backend: Backend, desktop_allowance_bytes: int) -> RungResult:

@@ -290,6 +290,34 @@ def worker_env(job_type: str, backend_kind: str) -> EnvSpec:
     )
 
 
+def every_env(backend_kind: str) -> tuple[EnvSpec, ...]:
+    """Every env this backend can build, one spec per venv under envs/.
+
+    The llm env, the worker envs, one tts env per narrator engine on cuda-linux (one
+    on mlx-darwin), and one per audio and video engine. A reader that wants "the envs
+    installed here" walks this, never its own list: the ladder's env rung once knew
+    only llm and the worker envs, and so said "no env that ships torch is installed
+    yet" right after `crucible install audio` built two that do.
+    """
+    specs: list[EnvSpec] = [llm_env(backend_kind)]
+    specs += [
+        worker_env(job_type, backend_kind)
+        for job_type in WORKER_JOB_TYPES
+        if (job_type, backend_kind) in WORKER_HEADLINE_PACKAGE
+    ]
+    if backend_kind == CUDA_LINUX:
+        from .narratorengines import NARRATOR_ENGINE_SAMPLING
+
+        specs += [tts_env(engine, backend_kind) for engine in sorted(NARRATOR_ENGINE_SAMPLING)]
+    else:
+        specs.append(tts_env("", backend_kind))
+    if audio_engines_on(backend_kind):
+        specs += audio_envs(backend_kind)
+    if video_engines_on(backend_kind):
+        specs += video_envs(backend_kind)
+    return tuple(specs)
+
+
 @dataclass(frozen=True)
 class EnvStatus:
 
