@@ -320,6 +320,12 @@ seconds later by `recovery system-unit-start: ok`, so stop-then-start fought the
 `Restart=always`, a server that exits of its own accord is `activating` again, never
 inactive-with-success, so that state means someone stopped it. `crucible service restart`
 is the one-step verb for a restart from inside the guest.
+The move's own restart uses it too: `migrate-config` carries the Windows token into the
+guest and then runs `crucible capability --write && crucible service restart`
+(`installer._restart_guest_engine`), so the step ends when the guest server answers, and a
+server that does not answer inside the restart's 120 s fails the step
+`guest_restart_failed` with `restart_not_answering` in its tail, rather than the catalog wait
+after it timing out with less to say.
 
 ### The door (127.0.0.1:7101, `controller_door.py`)
 

@@ -144,6 +144,12 @@ def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
 
 GUEST_RESTART_BUDGET_SECONDS = 180.0
 
+# `crucible capability --write` then `crucible service restart`, which waits up to
+# its own RESTART_ANSWER_SECONDS (120) for the server to answer before it says
+# restart_not_answering. This is the outer bound on both, so it must never be the
+# one that ends the wait first (tests/test_guest_restart.py holds that).
+GUEST_RESTART_TIMEOUT_SECONDS = QUICK_TIMEOUT_SECONDS
+
 
 @dataclass
 class Event:
@@ -795,15 +801,23 @@ class EngineInstall:
             )
 
     def _restart_guest_engine(self) -> None:
+        # `service restart`, never stop then start: between those two the tray's
+        # watch sees a stopped unit and starts it itself. And restart is done when
+        # the server ANSWERS (it waits up to RESTART_ANSWER_SECONDS, saying so),
+        # not when systemctl returns, so a server that never comes back fails this
+        # step by name (restart_not_answering, in the tail) instead of the next.
         restarted = self._stream_guest([
             "bash", "-c", 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
             'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
             f'"{GUEST_CRUCIBLE}" capability --write && '
-            f'"{GUEST_CRUCIBLE}" service stop && '
-            f'"{GUEST_CRUCIBLE}" service start',
-        ], QUICK_TIMEOUT_SECONDS)
+            f'"{GUEST_CRUCIBLE}" service restart',
+        ], GUEST_RESTART_TIMEOUT_SECONDS)
         if not restarted.ok:
-            raise self._fail("guest_restart_failed", restarted.output_tail())
+            raise self._fail(
+                "guest_restart_failed",
+                f"`crucible capability --write && crucible service restart` failed "
+                f"inside \"{self._distro}\": {restarted.output_tail()}",
+            )
 
     def _wait_for_guest_catalog(self, guest: CatalogPort) -> None:
         deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS
