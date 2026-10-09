@@ -121,15 +121,20 @@ an 8 GiB card (Victoria's laptop, when it's awake) before the next.
 - stable-audio-3-medium: 6.2 GB at 380 s (declared 8).
 - qwen3.5-4b-bside-4bit: 3.11 GiB of weights, about 5.3 GB serving one request at 8k context.
 
-## 5. Open
+## 5. Settled
 
-- **The 9B floor (MODEL-CHOICE.md §0, 2026-09-16):** "they cant pick smaller than 9b" for
-  translate/simplify. Rule 1 ("always have access to every verb … even … an 0.8b 4 bit") reads
-  as superseding it for the *automatic* pick. To confirm with Owen: does a small card run
-  translate on a sub-9B model, or show it below its floor?
+- **The 9B floor (MODEL-CHOICE.md §0, 2026-09-16) is gone.** Owen, 2026-10-09: *"regarding
+  translate and simplify - i think we should make them available. it will be low quality, but
+  let it work anyway. rely on the user to know that some models are more powerful than others
+  and theyll get bad results if they try weaker models"*. translate, simplify and analysis run
+  down the same lineup as every verb; below the goal they are smaller, not refused. Crucible
+  states which model served the request, as it does for every verb, and makes no
+  quality judgement of its own.
 
 ## 6. What this reverses
 
 - `decide` stops auto-picking the biggest model; its goal is 9B.
 - A model the estimate says won't fit is no longer refused when named; it's tried.
 - B-Side's own tag-model chooser (b-side 798c6bf) is replaced by the `lyrics` verb.
+- The 9B floor for translate/simplify (MODEL-CHOICE.md §0) and the class floors
+  (MODEL-CHOICE.md addendum 2026-09-23) no longer refuse a smaller model.
