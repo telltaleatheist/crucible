@@ -35,6 +35,14 @@ from .jobs.unload import UnloadParams
 from .jobs.video import LoadVideoParams
 from .jobs.video.params import VideoParams
 
+# A job type's done event reports `resident` as the queue writes it, after the
+# settlement (crucible/settle.py) has cleared a card nothing holds.
+RESIDENT_AFTER_A_JOB = (
+    "(what is on the card as the job ends: the model while a session, a claim, a "
+    "chat or a waiting call holds the card, otherwise null, because the server "
+    "took it off first and said so in a `note`)"
+)
+
 
 @dataclass(frozen=True)
 class JobDoc:
@@ -289,7 +297,7 @@ JOB_DOCS: dict[str, JobDoc] = {
         "`{index, items: [{text, start, end}]}` in seconds from that window's start, or "
         "`{index, error}`. Items are the model's own tokens, not your words. A `cue` "
         "event goes out as each chunk lands. The `done` event gives `chunks`, `failed` "
-        "(the failed indexes) and `resident`.",
+        "(the failed indexes) and `resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "align",
             "model": "qwen3-aligner",
@@ -445,7 +453,7 @@ JOB_DOCS: dict[str, JobDoc] = {
         returns="`image.png`, and with a mask also `generated.png` (the model's "
         "picture before the paste-back). The `done` event gives `image`, every "
         "effective parameter (seed included) plus timings and memory, and "
-        "`resident`.",
+        "`resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "image",
             "model": "qwen-image-2.1",
@@ -491,7 +499,7 @@ JOB_DOCS: dict[str, JobDoc] = {
         returns="`audio.flac` (24-bit, the default), `audio.wav` or `audio.mp3` (192 "
         "kbps), per `format`; a song adds `score.abc`, the score YuE2 writes first. "
         "The `done` event gives `audio`, every effective parameter (seed included) "
-        "plus timings and memory, and `resident`.",
+        "plus timings and memory, and `resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "audio",
             "model": "stable-audio-3-small-sfx",
@@ -541,7 +549,8 @@ JOB_DOCS: dict[str, JobDoc] = {
         returns="`mask.png` (8-bit grey, 255 = selected; soft edges from birefnet, "
         "hard from SAM) and `cutout.png` (the input as RGBA with the mask as alpha), "
         "both at the input's size. The `done` event gives `segment` (effective "
-        "parameters, `score`, `coverage`, timings, memory) and `resident`.",
+        "parameters, `score`, `coverage`, timings, memory) and `resident` "
+        + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "segment",
             "model": "sam2.1-hiera-large",
@@ -579,7 +588,7 @@ JOB_DOCS: dict[str, JobDoc] = {
         returns="`video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. "
         "The `done` event gives `video`, every effective parameter (mode, size, "
         "`num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy "
-        "figures, and `resident`.",
+        "figures, and `resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
             "type": "video",
             "model": "ltx-2.5-distilled",

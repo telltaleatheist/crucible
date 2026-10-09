@@ -1461,7 +1461,7 @@ Forced alignment: places known text in time inside short audio windows with Qwen
 
 *Inputs:* One audio file per chunk, named `<index>.<ext>` (e.g. `0.flac`), each at most 300 s, any format ffmpeg decodes. Every chunk needs a file and every file a chunk.
 
-*Returns:* `alignment.json`: model, revision, language, and `chunks`, each `{index, items: [{text, start, end}]}` in seconds from that window's start, or `{index, error}`. Items are the model's own tokens, not your words. A `cue` event goes out as each chunk lands. The `done` event gives `chunks`, `failed` (the failed indexes) and `resident`.
+*Returns:* `alignment.json`: model, revision, language, and `chunks`, each `{index, items: [{text, start, end}]}` in seconds from that window's start, or `{index, error}`. Items are the model's own tokens, not your words. A `cue` event goes out as each chunk lands. The `done` event gives `chunks`, `failed` (the failed indexes) and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - `language` is one of en, de, fr, es, it, pt, ru, ja, ko, zh, yue; there is no fallback to English.
 - A chunk that fails is reported alone in `failed`; the job still ends `done`.
@@ -1705,7 +1705,7 @@ Makes one picture from a prompt (text-to-image), redraws an input picture (image
 
 *Inputs:* None for text-to-image. Exactly one PNG, JPEG or WebP with `image_strength`. With `mask`, exactly two: the image and the mask, `mask` naming the mask input; the mask is the image's exact size, white (128 and up) is regenerated.
 
-*Returns:* `image.png`, and with a mask also `generated.png` (the model's picture before the paste-back). The `done` event gives `image`, every effective parameter (seed included) plus timings and memory, and `resident`.
+*Returns:* `image.png`, and with a mask also `generated.png` (the model's picture before the paste-back). The `done` event gives `image`, every effective parameter (seed included) plus timings and memory, and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - Width and height are 256 to 2048 and multiples of 16 (32 on cuda-linux, `image_size_not_supported`), at most 1,048,576 pixels (`image_too_large`).
 - `guidance` above 1.0 needs `negative_prompt`, and `negative_prompt` needs it; `mask_blur` needs `mask`.
@@ -1799,7 +1799,7 @@ Makes sound from words: sound effects and instrumental music with Stable Audio 3
 
 *Inputs:* None; an audio job reads no files (`invalid_inputs`).
 
-*Returns:* `audio.flac` (24-bit, the default), `audio.wav` or `audio.mp3` (192 kbps), per `format`; a song adds `score.abc`, the score YuE2 writes first. The `done` event gives `audio`, every effective parameter (seed included) plus timings and memory, and `resident`.
+*Returns:* `audio.flac` (24-bit, the default), `audio.wav` or `audio.mp3` (192 kbps), per `format`; a song adds `score.abc`, the score YuE2 writes first. The `done` event gives `audio`, every effective parameter (seed included) plus timings and memory, and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - Which params a model takes is its own: Stable Audio reads `prompt` and takes `duration_s` and `steps`; YuE2 reads `tags` and `lyrics` (sections like `[Verse]`, optional with `instrumental: true`) and takes `cfg`. Anything else is refused `audio_param_unsupported` with the list it does take; a missing one `audio_param_missing`.
 - Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), `audio_param_out_of_range`. A song's length follows its lyrics.
@@ -1883,7 +1883,7 @@ Makes a mask from a picture: the main subject by itself (`birefnet`, background 
 
 *Inputs:* Exactly one PNG, JPEG or WebP of at most 40,000,000 pixels.
 
-*Returns:* `mask.png` (8-bit grey, 255 = selected; soft edges from birefnet, hard from SAM) and `cutout.png` (the input as RGBA with the mask as alpha), both at the input's size. The `done` event gives `segment` (effective parameters, `score`, `coverage`, timings, memory) and `resident`.
+*Returns:* `mask.png` (8-bit grey, 255 = selected; soft edges from birefnet, hard from SAM) and `cutout.png` (the input as RGBA with the mask as alpha), both at the input's size. The `done` event gives `segment` (effective parameters, `score`, `coverage`, timings, memory) and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - `birefnet` takes no params (`segment_param_unsupported`); `sam2.1-hiera-large` needs `points` (1 to 64, `label` 1 keeps, 0 leaves out), `box` `[x0, y0, x1, y1]`, or both (`segment_param_missing`).
 - Coordinates are the input's stored pixels from the top-left; EXIF orientation is not applied. Outside the picture is `segment_prompt_outside_picture`.
@@ -1982,7 +1982,7 @@ Makes a video clip with its own sound from a prompt (text-to-video), or brings a
 
 *Inputs:* None for text-to-video, or exactly one PNG, JPEG or WebP: the first frame, cropped to the clip's shape and resized.
 
-*Returns:* `video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. The `done` event gives `video`, every effective parameter (mode, size, `num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy figures, and `resident`.
+*Returns:* `video.mp4`: H.264 (yuv420p) with AAC stereo at 48 kHz, faststart. The `done` event gives `video`, every effective parameter (mode, size, `num_frames`, `fps`, `duration_s`, seed, …) plus timings and GPU-busy figures, and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
 - Send `width` and `height` together or neither (default 1280x704); `duration_s` or `num_frames`, not both. `num_frames` is 8k+1 (`video_frames_not_supported`).
 - Every limit is refused by name before anything loads: `video_size_not_supported` (multiples of 32, 64 on a Mac; sides 256 to 1280), `video_too_large`, `video_too_long`, and `video_param_unsupported` (`negative_prompt`, `steps` other than 8, `fps` other than 24 or 25). docs/VIDEO.md has the per-backend figures.
