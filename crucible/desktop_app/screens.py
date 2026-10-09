@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
+from .. import reach
+from ..backend import LLAMA_WINDOWS
+from ..platform import lan_door
 from ..platform.paths import INSTALL_ONE_LINER
 from ..platform.wsl_table import RELEASE_REPOSITORY
 from .api import ApiError
@@ -268,7 +271,7 @@ def queue_fact(queue: Any) -> Fact:
 
 
 def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
-              capability: Any, queue: Any = None) -> HomeView:
+              capability: Any, queue: Any = None, network: Fact | None = None) -> HomeView:
     if isinstance(status, Exception):
         return not_installed_view(status)
     if status.get("state") != "running":
@@ -281,6 +284,8 @@ def home_view(status: Mapping[str, Any] | Exception, info: Any, activity: Any,
     if isinstance(activity, Mapping):
         facts.append(resident_fact(activity))
         facts.append(queue_fact(queue))
+    if network is not None:
+        facts.append(network)
     work = activity_work(activity if isinstance(activity, Mapping) else None)
     detail = "Working" if work else "Ready, and nothing is running"
     return HomeView(headline="Crucible is running", tone=OK, detail=detail,
@@ -466,10 +471,19 @@ def allowance_text(settings: Any) -> str:
     return str(settings.get("desktop_reserve") or size_text(settings.get("desktop_allowance_bytes")))
 
 
+SHARE_OFFER = (
+    "Only this computer can use Crucible. Share lets phones and other computers on "
+    "this network use it. "
+)
+
+
 def lan_text(record: Mapping[str, Any] | None, settings: Any) -> tuple[bool, str]:
     advertised = list((settings or {}).get("lan_advertise") or []) if isinstance(settings, Mapping) else []
     if record is None:
-        return False, "Only this computer can use Crucible."
+        return False, SHARE_OFFER + lan_door.ELEVATION_SENTENCE
+    if record.get("state") != "configured":
+        found = reach.wsl_door_reach(dict(record))
+        return True, " ".join(found.lines())
     where = ", ".join(advertised) or ", ".join(record.get("authorities") or [])
     return True, f"Other computers on this network can pair with it{': ' + where if where else ''}."
 
@@ -594,21 +608,50 @@ class SettingsView:
     allowance_gib: str
 
 
-def posix_lan_words(setup: Any) -> tuple[bool, str]:
-    urls = [url for url in (setup or {}).get("urls") or []] if isinstance(setup, Mapping) else []
-    shared = [url for url in urls if "127.0.0.1" not in url and "localhost" not in url]
-    if shared:
-        return True, "Other computers on this network can reach it at " + ", ".join(shared) + "."
-    return False, ("Only this computer can use Crucible. Switching network sharing on from this "
-                   "window works on Windows; on this computer it is chosen when Crucible is installed.")
+PREDATES_NETWORK = (
+    "This Crucible does not say whether other devices can reach it: it predates "
+    "that report. Update it to see."
+)
+
+
+def network_words(setup: Any) -> tuple[bool, str]:
+    if not isinstance(setup, Mapping):
+        return False, ""
+    network = setup.get("network")
+    if not isinstance(network, Mapping):
+        return False, PREDATES_NETWORK
+    said = [str(network[key]) for key in ("sentence", "how") if network.get(key)]
+    return network.get("reachable") is True, " ".join(said)
+
+
+def shares_from_window(setup: Any, lan_supported: bool) -> bool:
+    native = isinstance(setup, Mapping) and setup.get("backend") == LLAMA_WINDOWS
+    return lan_supported and not native
+
+
+def network_fact(setup: Any, lan_record: Mapping[str, Any] | None, lan_supported: bool) -> Fact:
+    if shares_from_window(setup, lan_supported):
+        if lan_record is None:
+            return Fact("Network", "only this computer; Settings, Share on your network, "
+                                   "lets phones and other computers use it")
+        if lan_record.get("state") != "configured":
+            return Fact("Network", "shared, but Windows keeps other devices out; Settings says why")
+        return Fact("Network", "shared: " + ", ".join(lan_record.get("authorities") or []))
+    network = setup.get("network") if isinstance(setup, Mapping) else None
+    if not isinstance(network, Mapping):
+        return Fact("Network", "")
+    if network.get("reachable") is True:
+        return Fact("Network", "shared: " + ", ".join(str(url) for url in network.get("urls") or []))
+    return Fact("Network", "only this computer; Settings says how to share it")
 
 
 def settings_view(settings: Any, setup: Any, lan_record: Mapping[str, Any] | None,
                   lan_supported: bool) -> SettingsView:
+    lan_supported = shares_from_window(setup, lan_supported)
     if lan_supported:
         lan_on, words = lan_text(lan_record, settings)
     else:
-        lan_on, words = posix_lan_words(setup)
+        lan_on, words = network_words(setup)
     allowance = (settings or {}).get("desktop_allowance_bytes") if isinstance(settings, Mapping) else None
     return SettingsView(
         pairing=pairing_lines(setup), lan_supported=lan_supported, lan_on=lan_on, lan_words=words,

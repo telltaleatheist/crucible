@@ -41,6 +41,11 @@ capability-write  crucible capability --write
 done              crucible token --url  →  the crucible:// pairing line
 ```
 
+`install.sh` (not the app-driven `install()`) also says, just before the pairing line, how
+another device reaches this server: `crucible lan offer` prints whether anything but this
+machine can, and when nothing can, the one thing that opens it and what that changes (§4.1).
+It never opens anything itself.
+
 `init` is skipped when `<home>/config.toml` exists, **and its token is kept**. That is what
 makes a reinstall over an existing home leave every paired app paired.
 
@@ -228,6 +233,51 @@ finishes. `crucible uninstall` closes the window and removes both shortcuts. A l
 on the tray icon opens the window, and its X hides it back to the tray; the tray menu's
 "Quit" closes the window and the tray. The engine keeps serving after Quit; the menu's
 "Stop Crucible" stops it.
+
+### 4.1 Reaching it from another device (a phone, B-Side on an iPhone, another PC)
+
+> **A friend's laptop, 2026-10-09.** The engine came up in the guest bound to loopback,
+> nothing she was shown said that only her PC could reach it, and B-Side on her phone got
+> no answer at all. The friend found `crucible lan enable` herself, after switching her Wi-Fi
+> from Public to Private.
+
+The Linux engine binds `127.0.0.1` inside WSL2, so **after an install only this PC can
+reach it**. That stays so until the owner opens it, because exposing a server is the
+owner's choice. Opening it is one action, either of:
+
+- the Crucible window: **Settings → Share on your network → Share**;
+- PowerShell on Windows (not inside WSL): `crucible lan enable`.
+
+Both run the same code (`lan.enable`). Windows asks for administrator once, on this PC's
+screen, and two things are added: a port forward from this PC's network addresses on port
+7100 to the engine, and an inbound firewall rule "Crucible engine (LAN)" for TCP 7100 on
+**Private networks only**. A network Windows has marked Public stays shut: `crucible lan
+enable` reads each network's category before the prompt and says so by name, offers to mark
+it Private when it can ask (or `--make-private`), and otherwise names the Settings path
+(Settings > Network & internet > Wi-Fi > the network's properties > Network profile type:
+Private). `crucible lan disable` removes exactly the two rows. `crucible lan status` says
+what stands in the way when sharing is on and still nothing gets in.
+
+**The installer asks, once, and only the person at the PC.** A fresh `install.ps1` typed at
+the PC itself (a console, not over ssh, not driven by an app) ends, after the Linux engine is
+running, with what `crucible lan offer --ask` prints: that only this PC can reach Crucible,
+what sharing changes, and *"Let phones and other computers on this network use Crucible?
+[y/N]"*. No (the default) changes nothing and repeats where the switch is; yes runs
+`lan.enable` in that window, with its administrator prompt and its Public-network question.
+An upgrade or an ssh session is told and never asked. An app driving the script (the setup
+`.exe`) is neither told nor asked: the Crucible window it opens shows **Network: only this
+computer** on Home, and the Share row in Settings says what Share changes. If the Linux
+engine is not running yet when the script ends (a restart is owed), nothing is offered,
+because the Windows engine's answer would be the wrong one; the window offers it once the
+engine runs.
+
+From another device, a Crucible that only its own PC can reach does not refuse anything: no
+listener holds the LAN address and Windows Firewall drops the connection unanswered, so the
+server never sees it and cannot name a cause. The client is where it is named:
+`@crucible/client`'s `startPairing` answers `connection_unreachable` (refused) or
+`connection_timed_out` (dropped) and, for an address on the local network, says to run
+`crucible lan enable` on that computer, that a Public network keeps devices out, and that an
+iPhone app needs Local Network access. `crucible pair` says the same from a terminal.
 
 ### The Windows setup (`crucible-setup-<version>.exe`)
 

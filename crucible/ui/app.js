@@ -1106,6 +1106,12 @@
     }
 
     if (setup) {
+      pairs.push(['Network', el('span', null, [
+        networkChip(setup.network),
+        setup.network && !setup.network.reachable
+          ? ' — “Connect an app” says how to open it'
+          : null
+      ])]);
       pairs.push(['Config', mono(setup.config_path)]);
     }
 
@@ -2659,6 +2665,40 @@
     ]);
   }
 
+  // Whether other devices can reach this server is the server's own report
+  // (`/v1/setup`'s `network`). Opening it is not a button here: on Windows it
+  // takes administrator on the PC itself and a change only the Windows host can
+  // make, and this page talks to its own server and nothing else. So the page
+  // shows the one command, and the Crucible window carries the button.
+  function networkChip(network) {
+    if (!network) {
+      return chip('not reported', 'warn');
+    }
+    return network.reachable
+      ? chip('other devices can reach it', 'ok')
+      : chip('this computer only', 'warn');
+  }
+
+  function networkBox(setup) {
+    var network = setup.network;
+    if (!network) {
+      return el('p', { class: 'empty', text:
+        'This Crucible does not say whether other devices can reach it: it ' +
+        'predates that report. Update it to see.' });
+    }
+    var parts = [el('p', { class: 'lead' }, [networkChip(network), ' ', network.sentence])];
+    if (network.how) {
+      parts.push(el('p', { text: network.how }));
+    }
+    if (network.command) {
+      parts.push(lineItem(network.command, 'Copy command', 'copy-network-command'));
+    }
+    if (network.changes) {
+      parts.push(el('p', { class: 'empty', text: network.changes }));
+    }
+    return el('div', { class: 'block', id: 'network-box' }, parts);
+  }
+
   function renderConnect() {
     var body = document.getElementById('connect-body');
     body.textContent = '';
@@ -2674,6 +2714,7 @@
     }
     var setup = state.setup;
 
+    body.appendChild(networkBox(setup));
     body.appendChild(el('p', { class: 'lead', text:
       'Apps on this computer connect automatically. On another computer, enter this computer’s IP or hostname in BookForge or Foundry, then approve its matching code here.' }));
     var pairingRefusal = refusalBox(state.refusals.pairing);

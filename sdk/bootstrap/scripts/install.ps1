@@ -273,8 +273,12 @@ Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) {
   Say "The Linux engine sets itself up in the background, which takes several minutes; there is nothing to click. If it stops or needs a Windows restart, the menu of the Crucible icon by the clock says so."
 }
-Say "Crucible is in your Start Menu: search for Crucible."
 $Interactive = [Environment]::UserInteractive -and -not $FromApp -and -not $env:SSH_CONNECTION
+$null = @(Native { & $Cmd lan offer --help })
+if (($LASTEXITCODE -eq 0) -and -not $FromApp) {
+  if ($Fresh -and $Interactive) { & $Cmd lan offer --ask } else { Native { & $Cmd lan offer } | Show }
+}
+Say "Crucible is in your Start Menu: search for Crucible."
 if ($Fresh -and $Interactive) {
   Say "opening Crucible"
   Start-Process -FilePath $Pythonw -ArgumentList "-m","crucible.cli","app"

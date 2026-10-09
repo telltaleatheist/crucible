@@ -76,7 +76,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/settings` | Where each class's work runs and which upstreams are configured. |
 | `PUT /v1/settings` | Apply a partial settings patch, whole or not at all, live without a restart. |
 | `POST /v1/settings/upstreams/{name}/test` | List what an upstream serves, using the body's `key` or `url` when given, else the stored record. |
-| `GET /v1/setup` | Everything an app needs to be pointed at this server in one read, including its token and pairing lines. |
+| `GET /v1/setup` | Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`. |
 | `GET /v1/tasks` | The last few tasks, newest first. |
 | `POST /v1/tasks` | Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name. |
 | `GET /v1/tasks/{task_id}` | One task's state: type, status, progress, and its error when it failed. |
@@ -218,7 +218,7 @@ The operator page's own door: it hands out a token and the pairing line.
 
 ### `GET /v1/setup`
 
-Everything an app needs to be pointed at this server in one read, including its token and pairing lines.
+Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`.
 
 *Door:* token + `X-Crucible-Api: 1`
 

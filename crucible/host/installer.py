@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .. import wsl
+from .. import reach, wsl
 from ..errors import CrucibleError
 from ..memorybudget import gib_text
 from ..platform import lan_door
@@ -985,8 +985,10 @@ class EngineInstall:
         if not self._lan_wanted():
             self._finish(
                 "lan-door",
-                "Local engine access is ready. Network sharing is optional and must be "
-                "enabled explicitly; installation changes no port forwards or firewall rules.",
+                "Local engine access is ready; only this PC can reach it. Network sharing "
+                "is optional and must be enabled explicitly; installation changes no port "
+                f"forwards or firewall rules. To share it, {reach.WINDOW_ACTION}, or run "
+                f"`{reach.LAN_COMMAND}` in PowerShell.",
             )
             return
         from .. import lan

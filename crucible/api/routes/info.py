@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ... import VERSION, features, pairing, weights
+from ... import VERSION, features, pairing, reach, weights
 from ... import pages as pages_module
 from ... import peer as peer_module
 from ...errors import ApiError
@@ -149,12 +149,17 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @private.get("/setup")
     async def setup() -> dict[str, Any]:
         """Everything an app needs to be pointed at this server in one read, including
-        its token and pairing lines.
+        its token and pairing lines, and `network`: whether other devices can reach it
+        (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open
+        it, the one `command` that does (when one exists) and what that `changes`.
         """
         host, port = ctx.bind_host, ctx.bind_port
         try:
             urls = pairing.reachable_urls(
                 host, port, config.advertise + config.tailscale_advertise + config.lan_advertise
+            )
+            network = reach.for_server(
+                config, place=reach.place_of(backend.kind), host=host, port=port
             )
         except InterfaceError as exc:
             raise ApiError(
@@ -174,4 +179,5 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "pairing": pairing.pairing_lines(config.name, urls, config.token),
             "job_types": sorted(ctx.store.registry),
             "config_path": str(config.path),
+            "network": network.to_dict(),
         }

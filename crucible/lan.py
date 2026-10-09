@@ -5,14 +5,17 @@ import base64
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlsplit
 
+from . import reach
 from .atomicjson import write_json
 from .backend import LLAMA_WINDOWS
-from .config import crucible_home
+from .config import crucible_home, load_config
 from .errors import CrucibleError
-from .platform import lan_door
+from .platform import hostconfig, lan_door
 from .platform.paths import ENGINE_PORT
 from .platform.powershell import POWERSHELL, quote, runas_argv
 from .platform.runner import ProcessRunner, Runner, RunResult
@@ -23,6 +26,8 @@ RECORD = "landoor.json"
 ELEVATION_TIMEOUT = 180.0
 
 FORWARD_TIMEOUT = 5.0
+
+OFFER_WIDTH = 78
 
 Say = Callable[[str], None]
 
@@ -87,13 +92,24 @@ def read(home: Path) -> dict[str, Any] | None:
 
 
 def _require_windows(runner: Runner) -> None:
-    if runner.platform != "win32":
+    if runner.platform == "win32":
+        return
+    from .service import in_wsl
+
+    if in_wsl():
         raise LanError(
-            "lan_not_windows: this door is the Windows-to-WSL crossing. On this "
-            "platform the engine's own bind is the whole answer — set [server] "
-            "host to 0.0.0.0 in config.toml, or install with --host 0.0.0.0, and "
-            "open the port in whatever firewall this machine runs"
+            "lan_inside_wsl: this is the WSL2 guest, and the door other devices "
+            "come in by is on Windows: Windows has to forward the port and let it "
+            "through its firewall, which nothing inside WSL2 can do. On Windows, "
+            f"{reach.WINDOW_ACTION}, or run `{reach.LAN_COMMAND}` in PowerShell "
+            "(not inside WSL)"
         )
+    raise LanError(
+        "lan_not_windows: this door is the Windows-to-WSL crossing. On this "
+        "platform the engine's own bind is the whole answer — set [server] "
+        "host to 0.0.0.0 in config.toml, or install with --host 0.0.0.0, and "
+        "open the port in whatever firewall this machine runs"
+    )
 
 
 def _refuse_a_native_engine(engine: PairedEngine, port: int) -> None:
@@ -192,8 +208,9 @@ def _verdict(networks: list[dict[str, Any]], forward: bool) -> tuple[str, str, s
             f"Other computers on {names} cannot reach Crucible: Windows has that "
             "network marked Public, which keeps them out. If it is your home or "
             "office network, run `crucible lan enable` again and answer yes when "
-            "it asks to mark it Private (or add --make-private). On a cafe, hotel "
-            "or other shared network, leave it Public."
+            "it asks to mark it Private (or add --make-private). "
+            f"{lan_door.PRIVATE_BY_HAND}. On a cafe, hotel or other shared "
+            "network, leave it Public."
         )
     return "degraded", "blocked_by_windows" if len(blocked) == len(networks) else "partly_blocked", (
         "Other computers cannot reach Crucible on "
@@ -294,14 +311,36 @@ def _door_to_enable(home: Path, runner: Runner, engine: PairedEngine, port: int,
     return door
 
 
-def _networks_to_mark(candidates: list[lan_door.NetworkInterface],
-                      facts: lan_door.NetworkFacts,
-                      ask_private: AskPrivate | None) -> list[lan_door.NetworkInterface]:
-    shut = [
+def _shut_public(candidates: list[lan_door.NetworkInterface],
+                 facts: lan_door.NetworkFacts) -> list[lan_door.NetworkInterface]:
+    return [
         interface for interface in candidates
         if interface.profile == "Public" and not lan_door.admits(interface, facts)[0]
     ]
+
+
+def _networks_to_mark(shut: list[lan_door.NetworkInterface],
+                      ask_private: AskPrivate | None) -> list[lan_door.NetworkInterface]:
     return list(shut) if shut and ask_private is not None and ask_private(shut) else []
+
+
+def public_warning(left: Sequence[lan_door.NetworkInterface], *, everything: bool) -> str:
+    names = ", ".join(interface.label for interface in left)
+    plural = len(left) > 1
+    after = (
+        "so after this no other device can reach Crucible" if everything
+        else f"so devices on {'those networks' if plural else 'that network'} "
+        "still cannot reach Crucible"
+    )
+    return (
+        f"This PC's network{'s' if plural else ''} {names} "
+        f"{'are' if plural else 'is'} marked Public. Windows keeps other devices "
+        "out of a Public network, and the firewall rule this adds covers Private "
+        f"networks only, {after}. If it is your home or office network, mark it "
+        "Private: run `crucible lan enable --make-private`, or do it in Windows. "
+        f"{lan_door.PRIVATE_BY_HAND}. Leave a cafe, hotel or other shared "
+        "network Public."
+    )
 
 
 def _pending_record(port: int, candidates: list[lan_door.NetworkInterface],
@@ -347,7 +386,11 @@ def enable(home: Path, runner: Runner, engine: PairedEngine, *, port: int = ENGI
     door = _door_to_enable(home, runner, engine, port, adopt)
     facts = _network(runner)
     candidates = _candidates(facts)
-    to_mark = _networks_to_mark(candidates, facts, ask_private)
+    shut = _shut_public(candidates, facts)
+    to_mark = _networks_to_mark(shut, ask_private)
+    left = [interface for interface in shut if interface not in to_mark]
+    if left:
+        _say(say, public_warning(left, everything=len(left) == len(candidates)))
     record = _pending_record(port, candidates, to_mark)
     _write(home, record)
     missing = _missing_commands(door, port, to_mark)
@@ -464,8 +507,110 @@ def reconcile(home: Path, runner: Runner | None = None, *,
     return enable(home, runner, engine, port=record["port"], adopt=True)
 
 
+ENGINE_SILENT = (
+    "Crucible's engine is not answering yet, so whether other devices can reach "
+    "it cannot be checked now. Once it runs, the Crucible window says so under "
+    'Settings, "Share on your network", and `crucible lan status` says so in '
+    "PowerShell."
+)
+
+NOT_MOVED_YET = (
+    "Only this PC can reach Crucible for now: it is still on its Windows engine, "
+    "because its Linux engine is not running yet (the menu of the Crucible icon "
+    "by the clock says why). Other devices reach the Linux engine; once it runs, "
+    'the Crucible window offers it under Settings, "Share on your network", and '
+    f"`{reach.LAN_COMMAND}` does it from PowerShell."
+)
+
+OFFER_QUESTION = "Let phones and other computers on this network use Crucible? [y/N] "
+
+Ask = Callable[[str], bool]
+
+
+def _native_reach(engine: PairedEngine) -> reach.Reach:
+    setup = engine.request("GET", "setup")
+    try:
+        bind = urlsplit(str(setup["bind"]))
+        if bind.hostname is None or bind.port is None:
+            raise ValueError(f"bind {setup['bind']!r} names no host and port")
+        return reach.engine_reach(
+            place=reach.WINDOWS, bind_host=bind.hostname, port=bind.port,
+            urls=[str(url) for url in setup["urls"]], advertised_urls=(),
+            config_path=str(setup["config_path"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LanError(
+            f"lan_engine_setup_unreadable: the engine on {engine.target} answered "
+            f"GET /v1/setup without the bind, urls and config_path this reads ({exc})"
+        ) from exc
+
+
+def reach_here(home: Path, engine: PairedEngine) -> reach.Reach:
+    try:
+        engine.verify()
+        info = engine.request("GET", "info")
+    except CrucibleError:
+        return reach.Reach(reachable=False, urls=(), sentence=ENGINE_SILENT)
+    host = info.get("host")
+    if isinstance(host, dict) and host.get("backend") == LLAMA_WINDOWS:
+        if hostconfig.declined_wsl(home):
+            return _native_reach(engine)
+        return reach.Reach(reachable=False, urls=(), sentence=NOT_MOVED_YET)
+    return reach.wsl_door_reach(read(home))
+
+
+def offer(home: Path, runner: Runner, engine: PairedEngine, *, ask: Ask | None,
+          ask_private: AskPrivate | None, say: Say) -> dict[str, Any]:
+    found = reach_here(home, engine)
+    for line in found.lines():
+        say(line)
+    if ask is None or found.command != reach.LAN_COMMAND:
+        return {"asked": False, "enabled": False, "network": found.to_dict()}
+    if not ask(OFFER_QUESTION):
+        say(f"Nothing was changed. {found.how}")
+        return {"asked": True, "enabled": False, "network": found.to_dict()}
+    report = enable(home, runner, engine, ask_private=ask_private, say=say)
+    now = reach.wsl_door_reach(read(home))
+    for line in ([report["next"]] if report.get("next") else []) + [now.sentence]:
+        say(line)
+    return {"asked": True, "enabled": True, "network": now.to_dict(), "lan": report}
+
+
+def offer_here(home: Path) -> reach.Reach:
+    config = load_config(home)
+    return reach.for_server(
+        config, place=reach.place_of(config.backend_kind), host=config.host, port=config.port
+    )
+
+
 def _to_stderr(line: str) -> None:
     print(f"crucible: {line}", file=sys.stderr, flush=True)
+
+
+def _paragraph(line: str) -> None:
+    print(textwrap.fill(line, OFFER_WIDTH, break_on_hyphens=False), flush=True)
+
+
+def _ask_yes(question: str) -> bool:
+    print(question, end="", flush=True)
+    return sys.stdin.readline().strip().lower() in ("y", "yes")
+
+
+def _offer(args: argparse.Namespace, home: Path, runner: Runner) -> int:
+    print("Reaching Crucible from another device:", flush=True)
+    if runner.platform != "win32":
+        for line in offer_here(home).lines():
+            _paragraph(line)
+        return 0
+    asks = args.ask and sys.stdin is not None and sys.stdin.isatty()
+    try:
+        engine = PairedEngine(home, "lan")
+    except CrucibleError:
+        _paragraph(ENGINE_SILENT)
+        return 0
+    offer(home, runner, engine, ask=_ask_yes if asks else None,
+          ask_private=_ask_on_terminal if asks else None, say=_paragraph)
+    return 0
 
 
 def _asker(args: argparse.Namespace) -> AskPrivate | None:
@@ -495,6 +640,8 @@ def command(args: argparse.Namespace) -> int:
         if args.lan_action == "explain":
             print(lan_door.ELEVATION_SENTENCE)
             return 0
+        if args.lan_action == "offer":
+            return _offer(args, home, runner)
         result = _answer(args, home, runner)
         print(json.dumps(result, indent=2))
         if result.get("next"):
@@ -511,8 +658,15 @@ def add_parser(subparsers: Any) -> None:
         help="let other devices on this network reach the WSL engine (Windows)",
     )
     actions = parser.add_subparsers(dest="lan_action", required=True)
-    for name in ("enable", "disable", "status", "reconcile", "explain"):
+    for name in ("enable", "disable", "status", "reconcile", "explain", "offer"):
         action = actions.add_parser(name)
+        if name == "offer":
+            action.add_argument(
+                "--ask",
+                action="store_true",
+                help="on Windows, typed at a terminal: ask whether to open it to the "
+                     "network, and do so on yes (an installer's last step)",
+            )
         if name == "enable":
             action.add_argument("--port", type=int, default=ENGINE_PORT)
             action.add_argument(

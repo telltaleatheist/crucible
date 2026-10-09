@@ -264,6 +264,9 @@ export function generateInstallSh(): string {
     }
   }
   lines.push(openAppSh());
+  // A rollback installs a wheel older than `lan offer`; it is asked whether it has the verb
+  // rather than told to run one it does not know at the very end of a finished install.
+  lines.push('if "$CRUCIBLE" lan offer --help >/dev/null 2>&1; then "$CRUCIBLE" lan offer; fi');
   lines.push('say "installed. Pair an app with the line below."');
   lines.push('"$CRUCIBLE" token --url');
   lines.push('');
@@ -281,10 +284,28 @@ export function openAppSh(): string {
   ].join('\n');
 }
 
+/**
+ * How another device reaches this server, said at the end of every install typed at a
+ * terminal. Only a FRESH install typed at the PC itself asks whether to open it to the
+ * network (`--ask`, which `crucible lan offer` honours only with a terminal on stdin);
+ * an upgrade and an ssh session are told, never asked, and an app driving the script
+ * is neither (its Crucible window says it). Exposing the server is the owner's choice,
+ * so nothing here opens it unasked. A rollback's older wheel has no `lan offer`, and is
+ * asked whether it has the verb before it is told to run it.
+ */
+export function offerLanPs1(): string[] {
+  return [
+    '$Interactive = [Environment]::UserInteractive -and -not $FromApp -and -not $env:SSH_CONNECTION',
+    '$null = @(Native { & $Cmd lan offer --help })',
+    'if (($LASTEXITCODE -eq 0) -and -not $FromApp) {',
+    '  if ($Fresh -and $Interactive) { & $Cmd lan offer --ask } else { Native { & $Cmd lan offer } | Show }',
+    '}',
+  ];
+}
+
 export function openAppPs1(): string[] {
   return [
     'Say "Crucible is in your Start Menu: search for Crucible."',
-    '$Interactive = [Environment]::UserInteractive -and -not $FromApp -and -not $env:SSH_CONNECTION',
     'if ($Fresh -and $Interactive) {',
     '  Say "opening Crucible"',
     '  Start-Process -FilePath $Pythonw -ArgumentList "-m","crucible.cli","app"',
@@ -616,6 +637,7 @@ export function generateInstallPs1(): string {
     'if ($LASTEXITCODE -ne 0) {',
     '  Say "The Linux engine sets itself up in the background, which takes several minutes; there is nothing to click. If it stops or needs a Windows restart, the menu of the Crucible icon by the clock says so."',
     '}',
+    ...offerLanPs1(),
     ...openAppPs1(),
     '',
   ];

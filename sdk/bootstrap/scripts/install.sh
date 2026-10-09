@@ -352,5 +352,6 @@ if [ "$(uname -s)" = Darwin ] && [ -d "$HOME/Applications/Crucible.app" ]; then
     open "$HOME/Applications/Crucible.app" || say "open Crucible from your Applications folder"
   fi
 fi
+if "$CRUCIBLE" lan offer --help >/dev/null 2>&1; then "$CRUCIBLE" lan offer; fi
 say "installed. Pair an app with the line below."
 "$CRUCIBLE" token --url
