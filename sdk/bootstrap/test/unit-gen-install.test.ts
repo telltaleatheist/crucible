@@ -503,3 +503,24 @@ test('install.ps1 opens the Crucible window only on a fresh install typed at the
   assert.match(tail, /if \(\$Fresh -and \$Interactive\) \{/);
   assert.match(tail, /Start-Process -FilePath \$Pythonw -ArgumentList "-m","crucible.cli","app"/);
 });
+
+test('install.ps1 says how other devices reach it, and asks only a fresh install typed at the PC', () => {
+  const ps1 = generateInstallPs1();
+  const tail = ps1.slice(ps1.indexOf('crucible.host.installwatch'));
+  const offer = tail.indexOf('& $Cmd lan offer --ask');
+  assert.ok(offer > 0, 'the offer follows the move, so it can see which engine runs');
+  assert.ok(offer < tail.indexOf('"-m","crucible.cli","app"'), 'it is asked before the window opens');
+  assert.match(tail, /if \(\(\$LASTEXITCODE -eq 0\) -and -not \$FromApp\) \{/,
+    'an app driving the script is never asked; its Crucible window says it');
+  assert.match(tail, /if \(\$Fresh -and \$Interactive\) \{ & \$Cmd lan offer --ask \} else \{ Native \{ & \$Cmd lan offer \} \| Show \}/,
+    'an upgrade or an ssh session is told, never asked');
+  assert.ok(tail.indexOf('Native { & $Cmd lan offer --help }') < offer,
+    'a rollback wheel without the verb is asked whether it has it first');
+});
+
+test('install.sh says how other devices reach it, and the pairing line stays last', () => {
+  const sh = generateInstallSh();
+  const offer = sh.indexOf('if "$CRUCIBLE" lan offer --help >/dev/null 2>&1; then "$CRUCIBLE" lan offer; fi');
+  assert.ok(offer > 0 && offer < sh.indexOf('"$CRUCIBLE" token --url'));
+  assert.doesNotMatch(sh, /lan offer --ask/, 'nothing on a Mac or a Linux box opens a port by asking');
+});

@@ -40,6 +40,15 @@ matching code with `client.decidePairing(id, userCode, true)`. Only after approv
 does the requester receive the pairing credential to persist in trusted storage.
 The optional Crucible console supports the same approval API.
 
+When nothing answers, `startPairing` throws `CrucibleConnectionError` with code
+`connection_unreachable` (refused), `connection_timed_out` (dropped, which is what
+Windows Firewall does) or `connection_cancelled` (your `signal`). Show its `message`:
+for an address on the local network (`looksLikeLanAddress`) it says that a Crucible
+answers only its own computer until it is opened to the network (`crucible lan enable`
+on Windows, or Share in the Crucible window), that a network marked Public keeps devices
+out, and that an iPhone or iPad app needs Local Network access. A server that does
+answer says whether other devices can reach it in `setup().network`.
+
 This uses a canonical port, not arbitrary port scanning or multicast discovery.
 Network sharing must already make the remote endpoint reachable. Knowing its IP
 does not authorize a connection. Old servers without approval support require an
@@ -108,7 +117,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
 | `align(options)` | `POST /v1/jobs {type: "align"}` | the job id; `readAlignment(bytes)` reads its `alignment.json` |
-| `setup()` | `GET /v1/setup` | `ServerSetup` — urls, token, one pairing line per url |
+| `setup()` | `GET /v1/setup` | `ServerSetup` — urls, token, one pairing line per url, and `network` (who can reach it, and what opens it) |
 | `catalog()` | `GET /v1/catalog` | `CatalogRow[]` — every subject this backend can hold |
 | `submitTask(request)` | `POST /v1/tasks` | the task id |
 | `task(id)` | `GET /v1/tasks/{id}` | `TaskStatus` |

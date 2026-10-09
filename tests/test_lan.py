@@ -158,7 +158,10 @@ def test_the_encoded_payload_is_quote_safe_by_construction() -> None:
     assert "'name=it''s got ''quotes'''" in _decoded(argv)
 
 
-def test_this_door_refuses_to_exist_anywhere_but_windows(tmp_path) -> None:
+def test_this_door_refuses_to_exist_anywhere_but_windows(tmp_path, monkeypatch) -> None:
+    from crucible import service
+
+    monkeypatch.setattr(service, "in_wsl", lambda: False)
     runner = Runner()
     runner.platform = "linux"
     with pytest.raises(lan.LanError, match="lan_not_windows"):
@@ -378,3 +381,132 @@ def test_disable_cleans_up_after_a_failed_publish(tmp_path) -> None:
     assert lan.disable(tmp_path, runner, engine)["state"] == "disabled"
     assert runner.forward is False and runner.firewall is False
     assert not (tmp_path / lan.RECORD).exists()
+
+
+def test_inside_the_wsl_guest_it_names_windows_as_where_the_door_is(tmp_path, monkeypatch) -> None:
+    from crucible import service
+
+    monkeypatch.setattr(service, "in_wsl", lambda: True)
+    runner = Runner()
+    runner.platform = "linux"
+    with pytest.raises(lan.LanError, match="lan_inside_wsl") as refused:
+        lan.enable(tmp_path, runner, Engine())
+    assert "PowerShell" in str(refused.value) and "Share on your network" in str(refused.value)
+    assert "0.0.0.0" not in str(refused.value), "binding the NAT'd guest wide opens nothing"
+    assert runner.calls == []
+
+
+def test_a_public_network_is_named_BEFORE_the_prompt_when_nobody_can_answer(tmp_path) -> None:
+    runner, said = Runner(profile=PUBLIC), []
+
+    def say(line: str) -> None:
+        said.append(f"{len(runner.elevations)}:{line}")
+
+    lan.enable(tmp_path, runner, Engine(), say=say)
+    warning = [line for line in said if "marked Public" in line]
+    assert len(warning) == 1
+    assert warning[0].startswith("0:"), "said before the administrator prompt, not after"
+    assert "no other device can reach Crucible" in warning[0]
+    assert "Network profile type: Private" in warning[0], "the Settings path to fix it by hand"
+    assert "--make-private" in warning[0]
+
+
+def test_a_public_network_the_person_marks_private_draws_no_warning(tmp_path) -> None:
+    runner, said = Runner(profile=PUBLIC), []
+    lan.enable(tmp_path, runner, Engine(), ask_private=lambda _public: True, say=said.append)
+    assert not [line for line in said if "marked Public" in line]
+    assert any("Set-NetConnectionProfile" in _decoded(argv) for argv in runner.elevations)
+
+
+def test_a_private_network_draws_no_public_warning(tmp_path) -> None:
+    said: list[str] = []
+    lan.enable(tmp_path, Runner(), Engine(), say=said.append)
+    assert not [line for line in said if "Public" in line]
+
+
+def test_the_public_verdict_names_the_settings_path(tmp_path) -> None:
+    result = lan.enable(tmp_path, Runner(profile=PUBLIC), Engine())
+    assert landoor.PRIVATE_BY_HAND in result["next"]
+
+
+class NativeEngine(Engine):
+
+    def __init__(self) -> None:
+        super().__init__(backend="llama-windows")
+
+    def request(self, method="GET", path="settings", body=None):
+        if path == "setup":
+            return {"bind": "http://127.0.0.1:7100", "urls": ["http://127.0.0.1:7100"],
+                    "config_path": r"C:\Crucible\config.toml"}
+        return super().request(method, path, body)
+
+
+class SilentEngine(Engine):
+
+    def verify(self) -> None:
+        raise lan.LanError("lan_engine_unreachable: GET /v1/ping: refused")
+
+
+def _offer(tmp_path, engine, *, answer: bool | None, runner=None):
+    runner = Runner() if runner is None else runner
+    said: list[str] = []
+    asked: list[str] = []
+
+    def ask(question: str) -> bool:
+        asked.append(question)
+        return bool(answer)
+
+    report = lan.offer(tmp_path, runner, engine, ask=None if answer is None else ask,
+                       ask_private=None, say=said.append)
+    return report, said, asked, runner
+
+
+def test_offer_on_an_unshared_wsl_pc_says_what_opening_changes_and_asks(tmp_path) -> None:
+    report, said, asked, runner = _offer(tmp_path, Engine(), answer=True)
+    assert asked == [lan.OFFER_QUESTION]
+    assert said[0].startswith("Only this PC can reach Crucible.")
+    assert any(landoor.RULE_NAME in line and "administrator" in line for line in said)
+    assert report["enabled"] is True and report["network"]["reachable"] is True
+    assert len(runner.elevations) == 1, "the same enable, one prompt"
+    assert said[-1].startswith("Other devices on the network reach Crucible at http://192.168.68.100:7100")
+
+
+def test_offer_answered_no_changes_nothing_and_says_how_to_do_it_later(tmp_path) -> None:
+    report, said, _asked, runner = _offer(tmp_path, Engine(), answer=False)
+    assert report == {"asked": True, "enabled": False, "network": report["network"]}
+    assert runner.elevations == [] and lan.read(tmp_path) is None
+    assert said[-1].startswith("Nothing was changed.") and "crucible lan enable" in said[-1]
+
+
+def test_offer_with_nobody_to_ask_only_tells(tmp_path) -> None:
+    report, said, asked, runner = _offer(tmp_path, Engine(), answer=None)
+    assert asked == [] and runner.calls == [] and report["asked"] is False
+    assert report["network"]["command"] == "crucible lan enable"
+    assert any("crucible lan enable" in line for line in said)
+
+
+def test_offer_on_a_shared_pc_says_where_and_asks_nothing(tmp_path) -> None:
+    lan.enable(tmp_path, Runner(), Engine())
+    report, said, asked, _runner = _offer(tmp_path, Engine(), answer=True)
+    assert asked == [] and report["network"]["reachable"] is True
+    assert said == ["Other devices on the network reach Crucible at "
+                    "http://192.168.68.100:7100, http://100.64.0.1:7100."]
+
+
+def test_offer_before_the_linux_engine_runs_neither_asks_nor_gives_native_advice(tmp_path) -> None:
+    report, said, asked, runner = _offer(tmp_path, NativeEngine(), answer=True)
+    assert asked == [] and runner.calls == []
+    assert said == [lan.NOT_MOVED_YET] and "0.0.0.0" not in said[0]
+
+
+def test_offer_on_a_pc_that_keeps_its_windows_engine_says_how_that_engine_opens(tmp_path) -> None:
+    (tmp_path / "config.toml").write_text('[orchestrator]\nwsl = "never"\n', encoding="utf-8")
+    report, said, asked, _runner = _offer(tmp_path, NativeEngine(), answer=True)
+    assert asked == [] and report["network"]["reachable"] is False
+    assert 'host = "0.0.0.0"' in said[1] and "refuses" in said[1]
+    assert report["network"]["command"] is None, "there is no one command for this engine"
+
+
+def test_offer_with_the_engine_silent_says_it_cannot_tell_yet(tmp_path) -> None:
+    report, said, asked, _runner = _offer(tmp_path, SilentEngine(), answer=True)
+    assert asked == [] and said == [lan.ENGINE_SILENT] and report["enabled"] is False

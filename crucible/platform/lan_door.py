@@ -449,11 +449,17 @@ def make_private_argv(interface: NetworkInterface) -> list[str]:
     )
 
 
+PRIVATE_BY_HAND = (
+    "To mark it Private yourself: Settings > Network & internet > Wi-Fi (or "
+    "Ethernet) > this network's properties > Network profile type: Private"
+)
+
 ELEVATION_SENTENCE = (
     "Crucible needs administrator once, to let other devices on your network "
     "reach the engine. It adds two things to Windows: a port forward from this "
     f"machine's network addresses on port {ENGINE_PORT} to the Linux engine, and "
     f'an inbound rule named "{RULE_NAME}" allowing TCP {ENGINE_PORT} on '
-    f"{RULE_PROFILE} networks. Both stay until you run `crucible lan disable`, "
-    "which removes exactly these two and nothing else."
+    f"{RULE_PROFILE} networks only. A network Windows has marked Public stays "
+    "shut; Crucible says so and offers to mark it Private. Both stay until you "
+    "run `crucible lan disable`, which removes exactly these two and nothing else."
 )

@@ -263,6 +263,7 @@ export type {
   ResponseFormat,
   RouteSetting,
   ServerInfo,
+  ServerNetwork,
   ServerSetup,
   LocalModelChoice,
   SettingsDocument,
@@ -300,5 +301,5 @@ export type {
 } from './types.js';
 
 export { SDK_VERSION } from './version.js';
-export { startPairing, pollPairing, crucibleAddress, DEFAULT_CRUCIBLE_PORT, CrucibleConnectionError } from './connect.js';
+export { startPairing, pollPairing, crucibleAddress, looksLikeLanAddress, DEFAULT_CRUCIBLE_PORT, CrucibleConnectionError } from './connect.js';
 export type { PairingRequest, PairingResult, PairingOptions, PendingPairing } from './connect.js';

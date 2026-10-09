@@ -1874,6 +1874,27 @@ export interface ServerSetup {
   /** `/v1/info`'s list, repeated so a page draws from one read. */
   readonly jobTypes: readonly string[];
   readonly configPath: string;
+  /**
+   * Whether other devices can reach this server, as the server itself reports it; `null` from a
+   * server that predates the report.
+   */
+  readonly network: ServerNetwork | null;
+}
+
+/** `GET /v1/setup`'s `network`: who can reach this server, and what opens it when nobody else can. */
+export interface ServerNetwork {
+  /** Whether a device other than this machine can reach it. */
+  readonly reachable: boolean;
+  /** The addresses other devices reach it on; empty when only this machine can. */
+  readonly urls: readonly string[];
+  /** The state, said for a person. */
+  readonly sentence: string;
+  /** When it is not reachable: what opens it, said for a person. */
+  readonly how: string | null;
+  /** The one command that opens it, when there is one (`crucible lan enable` on Windows). */
+  readonly command: string | null;
+  /** What opening it changes on that machine, including any administrator prompt. */
+  readonly changes: string | null;
 }
 
 /** The kinds of thing a subject can be. */

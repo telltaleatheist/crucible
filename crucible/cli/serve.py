@@ -3,9 +3,17 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .. import API_VERSION, VERSION, pairing
+from .. import API_VERSION, VERSION, pairing, reach
+from ..config import Config
 from . import common, token
 from .common import EXIT_OK, _fail
+
+
+def reach_banner(config: Config, backend_kind: str, host: str, port: int) -> str:
+    if not reach.is_loopback_host(host):
+        return "bound beyond loopback: the bearer token is the only lock."
+    found = reach.for_server(config, place=reach.place_of(backend_kind), host=host, port=port)
+    return "bound to loopback: " + " ".join(found.lines())
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -31,13 +39,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"crucible {VERSION} (api {API_VERSION}) — {config.name}")
     print(f"backend: {backend.kind} ({backend.gpu.name})")
     print(f"listening on http://{host}:{port}/v1")
-    if host in ("127.0.0.1", "localhost", "::1"):
-        print(
-            "bound to loopback: only this host can reach it. To serve the tailnet, "
-            "pass --host 0.0.0.0 (or the tailnet IP); the bearer token is the lock."
-        )
-    else:
-        print("bound beyond loopback: the bearer token is the only lock.")
+    print(reach_banner(config, backend.kind, host, port))
 
     if getattr(args, "controller_stdin", False):
         from ..host.child_lifecycle import run_owned_server

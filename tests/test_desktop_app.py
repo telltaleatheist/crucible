@@ -102,7 +102,11 @@ SETTINGS = {
 
 SETUP = {"urls": ["http://127.0.0.1:7100", "http://pc.example:7100"],
          "pairing": ["crucible://crucible%40test@127.0.0.1:7100/#secret-token",
-                     "crucible://crucible%40test@pc.example:7100/#secret-token"]}
+                     "crucible://crucible%40test@pc.example:7100/#secret-token"],
+         "backend": "cuda-linux",
+         "network": {"reachable": True, "urls": ["http://pc.example:7100"],
+                     "sentence": "Other devices on the network reach Crucible at http://pc.example:7100.",
+                     "how": None, "command": None, "changes": None}}
 
 
 class FakeApi:
@@ -168,7 +172,7 @@ class FakeHost:
 
     def set_lan(self, on: bool, ask) -> dict:
         self.lan_calls.append(on)
-        self.lan = {"authorities": ["192.168.1.5:7100"]} if on else None
+        self.lan = {"authorities": ["192.168.1.5:7100"], "state": "configured"} if on else None
         return {"state": "configured" if on else "disabled"}
 
     def open_logs(self) -> Path:
@@ -352,6 +356,55 @@ def test_a_mac_says_how_it_is_shared_without_offering_a_switch() -> None:
     view = c.view("settings")
     assert not view.lan_supported and view.lan_on
     assert "http://pc.example:7100" in view.lan_words
+
+
+def test_an_unshared_windows_pc_says_so_on_home_and_settings_says_what_share_changes() -> None:
+    from crucible.platform import lan_door
+
+    c = controller(host=FakeHost())
+    c.refresh_now("home")
+    facts = {fact.label: fact.value for fact in c.view("home").facts}
+    assert facts["Network"].startswith("only this computer")
+    assert "Share on your network" in facts["Network"], "home names where the switch is"
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert view.lan_supported and not view.lan_on
+    assert view.lan_words.startswith("Only this computer can use Crucible.")
+    for said in ("administrator", "port forward", lan_door.RULE_NAME, "Public",
+                 "crucible lan disable"):
+        assert said in view.lan_words, f"the Share row does not say {said!r}"
+
+
+def test_a_shared_pc_that_windows_still_blocks_is_not_called_shared() -> None:
+    host = FakeHost()
+    host.lan = {"authorities": [], "state": "degraded"}
+    c = controller(host=host)
+    c.refresh_now("home")
+    facts = {fact.label: fact.value for fact in c.view("home").facts}
+    assert facts["Network"].startswith("shared, but Windows keeps other devices out")
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert view.lan_on, "the rows exist, so the switch is on and offers Stop sharing"
+    assert "crucible lan status" in view.lan_words
+
+
+def test_a_native_windows_engine_gets_no_share_switch_and_says_what_opens_it() -> None:
+    setup = {**SETUP, "backend": "llama-windows", "network": {
+        "reachable": False, "urls": [], "sentence": "Only this PC can reach Crucible.",
+        "how": 'set host = "0.0.0.0" under [server]', "command": None, "changes": "x"}}
+    c = controller(api=FakeApi({"/v1/setup": setup}), host=FakeHost())
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert not view.lan_supported, "Share would be refused lan_native_engine; it is not offered"
+    assert view.lan_words == 'Only this PC can reach Crucible. set host = "0.0.0.0" under [server]'
+
+
+def test_a_server_that_predates_the_network_report_says_so_rather_than_guessing() -> None:
+    setup = {key: value for key, value in SETUP.items() if key != "network"}
+    c = controller(api=FakeApi({"/v1/setup": setup}), host=FakeHost(lan_supported=False))
+    c.refresh_now("settings")
+    view = c.view("settings")
+    assert view.lan_words == screens.PREDATES_NETWORK and not view.lan_on
 
 
 def test_a_pull_asks_with_the_servers_plan_then_follows_its_progress() -> None:

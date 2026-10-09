@@ -36,7 +36,7 @@ SLOW_SECONDS = 15.0
 SLOW_ANSWER_BUDGET_SECONDS = 30.0
 
 NEEDS = {
-    "home": ("info", "activity", "queue", "capability", "tasks"),
+    "home": ("info", "activity", "queue", "capability", "tasks", "setup"),
     "models": ("catalog", "tasks", "capability"),
     "voices": ("voices", "catalog", "tasks", "info"),
     "packages": ("info", "capability", "tasks"),
@@ -183,7 +183,7 @@ class Controller:
             self.start_events()
             self._idle_passed()
             self._read(NEEDS.get(screen, ()))
-            if screen == "settings":
+            if screen in ("home", "settings"):
                 self._read_lan()
             self._follow_running_task()
         self.changed()
@@ -453,7 +453,9 @@ class Controller:
             return screens.HomeView(headline="Looking for Crucible", tone=screens.IDLE,
                                     detail="Checking whether it is running")
         view = screens.home_view(self.status, self.doc("info"), self.doc("activity"),
-                                 self.doc("capability"), self.doc("queue"))
+                                 self.doc("capability"), self.doc("queue"),
+                                 screens.network_fact(self.doc("setup"), self.lan,
+                                                      self.host.lan_supported()))
         watch = self.watch_view()
         if watch is None or not self.running():
             return view

@@ -711,6 +711,52 @@ run) **and removed by `remove-desktop`** (which `crucible uninstall` runs):
 - `enable` is `_door_to_enable` (every refusal, returning the detected door), the
   record written pending (`_pending_record`), then `_publish_admitted` (authorities,
   then the advertisement).
+- **A Public network is said before the prompt, not after.** `_shut_public` reads which
+  offered networks are Public and not admitted (from the same facts `admits` reads). Those
+  the person does not mark Private are named through `say` before the administrator
+  prompt (`public_warning`): the rule covers Private only, so devices there still cannot
+  get in, with `--make-private` and the Settings path (`lan_door.PRIVATE_BY_HAND`). The
+  verdict's `next` names the same path afterwards.
+- **Inside the WSL2 guest** `lan` refuses `lan_inside_wsl`, naming Windows (the window's
+  Share, or `crucible lan enable` in PowerShell). Its old advice there, bind `0.0.0.0`,
+  opens nothing in a NAT'd guest.
+
+## Who can reach this server (`reach.py`)
+
+One answer, read by every surface: `crucible serve`'s banner, `/v1/setup`'s `network`, the
+desktop window, the operator page and `crucible lan offer`. A `Reach` is `reachable`, the
+`urls` other devices use, a `sentence`, and when nothing else can reach it, `how` to open
+it, the one `command` that does when there is one, and what that `changes`.
+
+- **The owner of the fact differs by place** (`reach.place_of`): a WSL2 guest is reachable
+  only where Windows advertises it (`lan_advertise`, `tailscale_advertise`, `advertise`),
+  never by its own bind (its vEthernet address is not the LAN), and its opening is
+  `crucible lan enable` on Windows. A native Windows engine and a Mac or Linux box are
+  reachable at their non-loopback bind URLs, and their opening is `[server] host` plus a
+  restart (no single command; `lan enable` refuses a native engine).
+- **On the Windows host** the door record is the owner (`reach.wsl_door_reach`): shared only
+  when the record's `state` is `configured`, the verified state. `lan.reach_here` asks the
+  engine which backend answers; a native engine on a machine that has not declined WSL is
+  mid-move, so it is told nothing about opening the Windows engine (`NOT_MOVED_YET`).
+- **`crucible lan offer [--ask]`** prints that answer for a person. With `--ask` and a
+  terminal on stdin, and only for an unshared WSL engine, it asks *"Let phones and other
+  computers on this network use Crucible? [y/N]"* and runs `lan.enable` on yes. It is the
+  last step of `install.ps1` typed at the PC (asking only on a fresh install, never over ssh
+  or for an app) and of `install.sh` (which never asks), before the pairing line.
+- **The operator page shows the command, not a button.** Opening the door takes
+  administrator on Windows and a change only the host can make; the page talks to its own
+  server and nothing else (`tests/test_ui_mount.py`), and a WSL engine has no channel to the
+  host door. The Crucible window, which runs on that PC as that user, carries the button
+  (`LocalHost.set_lan`, the same `lan.enable`).
+- **A LAN client that gets no answer is told why on the client.** A loopback-only server
+  never sees the connection, so it cannot refuse it by name. `@crucible/client`'s
+  `startPairing` separates a refusal (`connection_unreachable`), a drop
+  (`connection_timed_out`, what Windows Firewall does) and the caller's cancel
+  (`connection_cancelled`), and for a local-network address (`looksLikeLanAddress`) names
+  `crucible lan enable`, a Public network and iOS Local Network access.
+- With the portproxy, a LAN pairing request reaches the engine from `127.0.0.1` (the forward
+  connects from loopback), so `GET /v1/pairing/requests`' `address` is `127.0.0.1` for
+  every device that came through it.
 
 ## Elevation (UAC)
 
