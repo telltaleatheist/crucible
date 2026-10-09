@@ -18,7 +18,7 @@ import {
 import { releaseAssetUrl } from './release.js';
 import { installRuntime, probeGuest, refuseMissingTools, SERVER_SUBDIR } from './runtime.js';
 import { processRunner, type OutputStream, type Runner } from './runner.js';
-import { installSteps, renderArgv, type RefName, type StepPlan } from './steps.js';
+import { INIT_TOKEN_ENV, installSteps, renderArgv, type RefName, type StepPlan } from './steps.js';
 import { describeTarget, resolveTarget, streamOn, type Target } from './target.js';
 import { BOOTSTRAP_VERSION } from './version.js';
 
@@ -279,13 +279,18 @@ export async function install(options: InstallOptions, runner: Runner = processR
     return step;
   };
 
-  const runStep = async (name: string, argv: readonly string[], timeoutMs: number, redacted?: readonly string[]): Promise<void> => {
-    const shown = redacted ?? argv;
-    const step = report({ name, argv: shown, status: 'running', detail: '' });
+  const runStep = async (
+    name: string,
+    argv: readonly string[],
+    timeoutMs: number,
+    secretEnv?: Readonly<Record<string, string>>,
+  ): Promise<void> => {
+    const step = report({ name, argv, status: 'running', detail: '' });
     const tail: string[] = [];
+    const stepEnv = secretEnv === undefined ? env : { ...env, ...secretEnv };
     const result = await streamOn(runner, target, argv, {
       timeoutMs,
-      ...(env === undefined ? {} : { env }),
+      ...(stepEnv === undefined ? {} : { env: stepEnv }),
       onLine: (line, stream) => {
         tail.push(`${stream === 'stderr' ? '! ' : ''}${line}`);
         if (tail.length > TAIL_LINES) tail.shift();
@@ -299,7 +304,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
         result.code,
         tail,
         [...done],
-        `install step "${name}" ${why} inside ${describeTarget(target)}: ${shown.join(' ')}`,
+        `install step "${name}" ${why} inside ${describeTarget(target)}: ${argv.join(' ')}`,
         { detail: tail.join('\n') },
       );
     }
@@ -367,10 +372,7 @@ export async function install(options: InstallOptions, runner: Runner = processR
           break;
         }
         if (step.words === null) throw new Error('unreachable: the init step has no argv');
-        const token = mintToken();
-        const argv = renderArgv(step.words, { ...values, token });
-        const redacted = renderArgv(step.words, { ...values, token: '<redacted>' });
-        await runStep('init', argv, timeouts[step.timeout], redacted);
+        await runStep('init', renderArgv(step.words, values), timeouts[step.timeout], { [INIT_TOKEN_ENV]: mintToken() });
         break;
       }
       default: {

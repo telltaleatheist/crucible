@@ -60,6 +60,14 @@ def status_argv() -> list[str]:
     return [WSL_EXE, "--status"]
 
 
+def terminate_argv(distro: str) -> list[str]:
+    return [WSL_EXE, "--terminate", distro]
+
+
+def whoami_argv(distro: str) -> list[str]:
+    return default_user_argv(distro, ["id", "-un"])
+
+
 def import_argv(distro: str, destination: str, archive: str) -> list[str]:
     return [WSL_EXE, "--import", distro, destination, archive, "--version", "2"]
 

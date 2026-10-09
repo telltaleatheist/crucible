@@ -57,6 +57,13 @@ maintained; this file is the short list of things that must stay true.
   start; commands run straight after the import ran as root, the engine landed in
   `/root/.crucible`, and a later run minted a second home with a new token (every later
   upgrade then failed 401). A consented foreign distro keeps its own default user.
+  The import step also ENDS on the conf it wrote (`installer._settle_wsl_conf`): it asks
+  the distro who a plain `wsl -d crucible` enters as (`id -un`, no `-u`), and if that is
+  not `crucible` it runs `wsl --terminate crucible` once and asks again; still not
+  `crucible` is `distro_default_user`. Without it the import's first boot (root, no
+  systemd) could live on under the controller's `sleep infinity` hold, and a hand
+  `wsl -d crucible --exec bash -lc '~/.crucible/...'` looked in `/root` (the friend's
+  laptop, 2026-10-08). Nothing needs root as the default: every root act names `-u root`.
 - **A distro terminates seconds after its last wsl.exe session ends**, even with systemd units
   running and linger on. Only a Windows-side process can keep the VM up, so the orchestrator
   holds `wsl -d <distro> --exec sleep infinity` for as long as a WSL engine is meant to run
@@ -83,6 +90,18 @@ maintained; this file is the short list of things that must stay true.
   orchestrator's cwd (inside `Crucible\host`) keeps a handle on that directory after exit and
   blocks the next upgrade's `Move-Item`. The systemd unit uses `CRUCIBLE_HOME` as
   `WorkingDirectory` for the same reason. Tray children get `CREATE_NO_WINDOW`.
+- **Nothing that writes the Windows home runs inside an app package** (`platform/packaged.py`,
+  `packaged_shell`). A process with MSIX package identity (a terminal inside the Claude
+  desktop app, for one) has every write under `%LOCALAPPDATA%`/`%APPDATA%` silently redirected
+  to `%LOCALAPPDATA%\Packages\<family>\LocalCache\`. Measured 2026-10-08 on a friend's laptop:
+  the home, `installation.json` and its recorded "home" landed in Claude's LocalCache, the
+  Startup and Start-menu shortcuts pointed at a `pythonw.exe` that exists only in that
+  package's view, the distro's `ext4.vhdx` (written by the WSL service, outside the package)
+  landed at the real path, and after a sign-out nothing started. The check is
+  `GetCurrentPackageFullName`: `install.ps1` asks before it writes or removes anything (so the
+  setup exe, which runs that script, is covered too), and the host refuses the same way in
+  `crucible local register|install-cli|install-desktop|tray|start`, `crucible orchestrator`
+  and every controller spawn. Reading verbs (`status`) are not refused.
 
 ## Reading wsl.exe
 
@@ -268,6 +287,16 @@ Watch every 15 s. **One recovery per down-edge**, then a named state and a menu 
 host never loops on restart because the systemd unit is `Restart=always`. Recovery starts the
 guest's system unit (touches only Crucible's unit, so allowed in any distro); host mode
 respawns the child. Every down-to-up edge re-asserts the claim.
+
+**Boot waits on the unit's own state before it calls anything a failure**
+(`PresenceWatcher.boot`). It gives `/v1/ping` `BOOT_WAIT_SECONDS` (30); if nothing answers it
+asks `systemctl is-active` and, while the unit is `active`, `activating` or `reloading` (the
+server is up and still importing, which a first start after an install does for longer), it
+waits up to `UNIT_START_BUDGET_SECONDS` (120) more, saying so in `host.log`. Only a unit that
+is not starting, or one that stayed silent through both budgets, gets "running the recovery".
+Measured on the friend's laptop, 2026-10-08: the first guest boot answered about one second
+past the 30 s, and the log read as a failure (`recovery system-unit-start: ok`) when nothing
+had failed. `PRESENCE_SETTLE_CEILING_SECONDS` includes the budget.
 
 ### The door (127.0.0.1:7101, `controller_door.py`)
 

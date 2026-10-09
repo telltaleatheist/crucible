@@ -33,7 +33,7 @@ install and an app-driven install "cannot differ"), so this list is the same one
 host-facts        CRUCIBLE_HOME, the user, free disk, curl/tar
 prerequisites     (install.sh only) the card, the driver, ffmpeg, the disk
 server            the pinned CPython into <home>/server (ONCE), then pip <this release's wheel>
-init              crucible init --token … [--host …] [--port …]      (SKIPPED when a config exists)
+init              CRUCIBLE_INIT_TOKEN=… crucible init --token-env [--host …] [--port …]   (SKIPPED when a config exists)
 install-<type>    crucible install <type>                            (only what --install named)
 service-install   crucible service install
 linger            loginctl enable-linger <user>                      (systemd only)
@@ -189,9 +189,20 @@ Install:
 
 ```powershell
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
-# the tray appears; its menu's "Install the WSL2 engine…" runs 4.3, which
-# imports the distro and runs install.sh INSIDE it. One sequence, the host's.
+# the tray appears and starts the WSL engine move BY ITSELF (PHASE19): it imports
+# the distro and runs install.sh INSIDE it. One sequence, the host's; nothing to click.
 ```
+
+Run it from an **ordinary PowerShell window**. A terminal inside a Store/MSIX app (the
+Claude desktop app's, for one) has its AppData writes redirected into that app's private
+folder, so the script refuses `packaged_shell` before it writes anything
+(`docs/internals/host-and-platform.md`).
+
+Typed at a terminal, the script then follows the move in that window, step by step, and
+ends on the line that says the Linux engine is running ("Done. …") or on what is needed
+(a Windows restart, for one); closing the window early does not stop the move. Driven by
+an app, it waits ten seconds and hands over, printing the one line that follows the move
+from any terminal. If the move stops, the tray icon's menu says so and offers "Try again".
 
 What the install creates on the Windows side: `%LOCALAPPDATA%\Crucible\host` (Python and
 Crucible), the Startup item that starts the tray at login, and the **Start Menu item
@@ -631,7 +642,7 @@ nothing else.
 .\install.ps1 -Uninstall -WslToo -DryRun      # read it
 .\install.ps1 -Uninstall -WslToo
 # back again
-irm .../install.ps1 | iex                      # tray, then its menu's WSL install
+irm .../install.ps1 | iex                      # tray, then the WSL move it starts itself
 ```
 
 ```bash

@@ -17,11 +17,14 @@ from .controller_client import LocalError, request
 from .errors import ConfigError, CrucibleError
 from .pairing import parse_pairing_line
 from .platform.installation import installed_control, publish_installation
+from .platform.packaged import refuse_packaged
 from .platform.paths import LOG_NAME
 from .platform.quarantine import quarantine
 from .protocol import API_VERSION, DOOR_PORT
 
 TRAY_VERBS = ("tray", "install-desktop", "remove-desktop")
+
+HOME_WRITERS = ("register", "install-cli", "install-desktop", "tray", "start")
 
 BROWSER_PAGES = {
     "open-console": ("/", "Crucible's console"),
@@ -361,6 +364,8 @@ def _no_tray_verbs(verb: str) -> None:
 
 
 def _answer(action: str, tray_verbs: Callable[[str], None]) -> dict | None:
+    if action in HOME_WRITERS:
+        refuse_packaged(f"`crucible local {action}`")
     if action == "shutdown":
         shutdown()
         return {"closed": True}

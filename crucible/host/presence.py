@@ -17,6 +17,10 @@ from .wslstate import read_wsl_distros, wsl_answer_line
 BOOT_WAIT_SECONDS = 30
 WATCH_SECONDS = 15
 
+UNIT_START_BUDGET_SECONDS = 120
+
+STARTING_UNIT_STATES: frozenset[str] = frozenset({"active", "activating", "reloading"})
+
 PING_TIMEOUT_SECONDS = 4.0
 WSL_LIST_TIMEOUT_SECONDS = 20.0
 WSL_BOOT_TIMEOUT_SECONDS = 120.0
@@ -252,10 +256,9 @@ class PresenceWatcher:
         if self.wait_for_ping(self._boot_wait_s):
             self._recovery_spent = False
             return self.running_owner(distro, "the engine answered /v1/ping")
-        self._log.write(
-            f"boot: nothing on {engine_url('/v1/ping')} after {self._boot_wait_s:.0f}s; "
-            "running the recovery"
-        )
+        if self._wait_for_a_starting_unit():
+            self._recovery_spent = False
+            return self.running_owner(distro, f"the engine answered /v1/ping once {UNIT_NAME} had started")
         if self.recover():
             self._recovery_spent = False
             return self.running_owner(distro, "a recovery recipe brought it up")
@@ -274,6 +277,38 @@ class PresenceWatcher:
             if self._monotonic() >= deadline:
                 return False
             self._sleep(1.0)
+
+    def unit_active_state(self) -> str:
+        result = self._runner.run(
+            system_systemctl_argv(self._distro, "is-active"),
+            timeout_s=RECIPE_TIMEOUT_SECONDS,
+        )
+        return _printed_state(result)
+
+    def _wait_for_a_starting_unit(self) -> bool:
+        state = self.unit_active_state()
+        if state not in STARTING_UNIT_STATES:
+            self._log.write(
+                f"boot: nothing on {engine_url('/v1/ping')} after {self._boot_wait_s:.0f}s "
+                f"and {UNIT_NAME} is {state or 'unreadable'}, so it is not starting; "
+                "running the recovery"
+            )
+            return False
+        self._log.write(
+            f"boot: nothing on {engine_url('/v1/ping')} yet after {self._boot_wait_s:.0f}s, "
+            f"and {UNIT_NAME} is {state}: the server is still starting (the first start "
+            "after an install imports and compiles everything it serves with before it "
+            f"binds the port), so it gets up to {UNIT_START_BUDGET_SECONDS}s more before "
+            "anything is called a failure"
+        )
+        if self.wait_for_ping(UNIT_START_BUDGET_SECONDS):
+            return True
+        self._log.write(
+            f"boot: {UNIT_NAME} was {state} and nothing answered on "
+            f"{engine_url('/v1/ping')} within "
+            f"{self._boot_wait_s + UNIT_START_BUDGET_SECONDS:.0f}s; running the recovery"
+        )
+        return False
 
     def recover(self) -> bool:
         probe = self.probe_unit()

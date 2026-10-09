@@ -527,7 +527,43 @@ class EngineInstall:
         self._clear_half_import(destination)
         archive = self._download_ubuntu_image(downloads)
         self._unpack_ubuntu_image(archive, destination)
+        self._settle_wsl_conf()
         self._finish("import-distro", f'Imported {archive.name} as "{self._distro}"')
+
+    def _default_user(self) -> str:
+        asked = self._runner.run(wsl.whoami_argv(self._distro), timeout_s=QUICK_TIMEOUT_SECONDS)
+        if not asked.ok:
+            raise self._fail(
+                "wsl_read_failed",
+                f'"{self._distro}" would not say who it enters as: {asked.output_tail()}',
+            )
+        return asked.stdout.strip()
+
+    def _settle_wsl_conf(self) -> None:
+        if self._default_user() == wsl.GUEST_USER:
+            return
+        self._line(
+            f'Restarting "{self._distro}" so its /etc/wsl.conf takes effect: WSL reads '
+            f"it only when a distro starts, and it is what turns on systemd and makes "
+            f"{wsl.GUEST_USER} the user a plain `wsl -d {self._distro}` enters as"
+        )
+        stopped = self._runner.run(wsl.terminate_argv(self._distro), timeout_s=QUICK_TIMEOUT_SECONDS)
+        if not stopped.ok:
+            raise self._fail(
+                "distro_restart_failed",
+                f'"{self._distro}" would not stop to restart with its /etc/wsl.conf: '
+                f"{stopped.output_tail()}",
+            )
+        user = self._default_user()
+        if user != wsl.GUEST_USER:
+            raise self._fail(
+                "distro_default_user",
+                f'"{self._distro}" enters as "{user}" after a restart, though its '
+                f"/etc/wsl.conf says [user] default={wsl.GUEST_USER}. The engine lives in "
+                f"/home/{wsl.GUEST_USER}, so a hand command typed at that distro would "
+                f"look for it in the wrong home. Read the file with: wsl -d {self._distro} "
+                f"-u root --exec cat /etc/wsl.conf  then {TRY_AGAIN_HINT}.",
+            )
 
     def _keep_the_imported_distro(self) -> None:
         marked = self._runner.run(
@@ -545,6 +581,7 @@ class EngineInstall:
                 f"inside that distro), then {TRY_AGAIN_HINT}.",
             )
         self._line(f'"{self._distro}" is already imported')
+        self._settle_wsl_conf()
         self._finish("import-distro", f'"{self._distro}" was already there')
 
     def _download_ubuntu_image(self, downloads: Path) -> Path:

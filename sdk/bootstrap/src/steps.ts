@@ -9,7 +9,14 @@ import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, guestProbeScript, PARTI
 export type Word = string | { ref: RefName } | { sh: string };
 
 /** The values a step's argv can refer to. */
-export type RefName = 'crucible' | 'release' | 'backend' | 'home' | 'token' | 'user';
+export type RefName = 'crucible' | 'release' | 'backend' | 'home' | 'user';
+
+/**
+ * The environment variable `crucible init --token-env` reads its token from. Never argv: a
+ * process's command line is readable by every user on the box (`ps aux`), its environment
+ * only by its own user and root.
+ */
+export const INIT_TOKEN_ENV = 'CRUCIBLE_INIT_TOKEN';
 
 /** How the generated scripts spell each ref. */
 export const SHELL_VARIABLE: Readonly<Record<RefName, string>> = {
@@ -17,7 +24,6 @@ export const SHELL_VARIABLE: Readonly<Record<RefName, string>> = {
   release: 'RELEASE',
   backend: 'BACKEND',
   home: 'CRUCIBLE_HOME',
-  token: 'TOKEN',
   user: 'GUEST_USER',
 };
 
@@ -299,14 +305,14 @@ export function installSteps(plan: StepPlan): StepDef[] {
     {
       name: 'init',
       what: 'write config.toml with a token this side minted',
-      words: [crucible, 'init', '--token', { ref: 'token' }, ...plan.bind, ...plan.enableFlags],
+      words: [crucible, 'init', '--token-env', ...plan.bind, ...plan.enableFlags],
       sh: `if [ -f "$CRUCIBLE_HOME/config.toml" ]; then\n`
         + `  say "init: $CRUCIBLE_HOME/config.toml exists; its token is kept"\n`
         + `else\n`
         + `  if [ -z "\${TOKEN:-}" ]; then\n`
         + `    TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"\n`
         + `  fi\n`
-        + `  ${renderSh([crucible, 'init', '--token', { ref: 'token' }, ...plan.bind, ...plan.enableFlags])} || die "step_failed: init"\n`
+        + `  ${INIT_TOKEN_ENV}="$TOKEN" ${renderSh([crucible, 'init', '--token-env', ...plan.bind, ...plan.enableFlags])} || die "step_failed: init"\n`
         + `fi\n`,
       skip: 'config-exists',
       timeout: 'quickMs',

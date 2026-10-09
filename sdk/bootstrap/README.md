@@ -49,7 +49,7 @@ release into `<CRUCIBLE_HOME>/server`, and every verb runs
 | Verb | Does | Refuses by name |
 |---|---|---|
 | `detectHost({distro?, home?, release?})` | what this host (or its guest) has: `{platform, backend, wsl, wslState, gpu, guest, server, refusals}` | `wsl_missing` (with `wsl --install --no-distribution`), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `guest_missing_tool` |
-| `install({distro?, exact?, jobTypes, home?, release?, onLine, onStep?, bind?})` | host-facts → server-pack → `crucible init --token …` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `two_local_crucibles`, the pack refusals (`pack_manifest_unreadable`, `pack_not_published`, `pack_download_failed`, `pack_sha_mismatch`, `pack_disk`, `pack_unpack_failed`), `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
+| `install({distro?, exact?, jobTypes, home?, release?, onLine, onStep?, bind?})` | host-facts → server-pack → `crucible init --token-env` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `two_local_crucibles`, the pack refusals (`pack_manifest_unreadable`, `pack_not_published`, `pack_download_failed`, `pack_sha_mismatch`, `pack_disk`, `pack_unpack_failed`), `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
 | `ensureDistro({release, installDir?, downloadDir?, rootfsUrl?, onLine?})` | win32: the `crucible` distro exists, runs systemd and came from our rootfs — idempotent | `distro_unmarked`, `distro_import_failed`, `pack_download_failed`, `pack_sha_mismatch`, `wsl1_only`, `unsupported_platform` |
 | `detectWslState({release, appDistro?, requiredBytes?, checkNetwork?, guestUser?})` | win32: the first row of PHASE14 4c that matches, with the sentence and the action | nothing — every state IS an answer, `wsl_ready` included |
 | `ensureRunning({distro?, exact?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, started}` — a no-op when it already is | `no_server_pack`, `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config` |
@@ -106,9 +106,10 @@ await install({
   deleted one at a time (peak extra disk is one part), the sha256 is computed in the guest
   and compared here, and the unpack is renamed into place only after the tree runs its own
   `--version`. A stamp that already matches the manifest is a skip.
-- **The token is minted here** and handed to `crucible init --token`, so the app already
-  holds what `readLocalConfig()` would read back. It is never logged: the step's recorded
-  argv spells it `<redacted>`, and `onLine` only sees what the step printed. `init` is
+- **The token is minted here** and handed to `crucible init --token-env` in that one
+  step's environment (`CRUCIBLE_INIT_TOKEN`), never on its command line, where `ps aux`
+  would show it to every user of the box. It is never logged: the recorded argv has no
+  token in it, and `onLine` only sees what the step printed. `init` is
   **skipped** when a config already exists, and that config's token is kept.
 - **Pulls are not part of install.** Weights are the app's, later, per model.
 - `home` is `CRUCIBLE_HOME` for every verb, spelled as the target spells it (a guest path

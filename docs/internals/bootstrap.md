@@ -115,8 +115,9 @@ the code does not say by itself.
   nothing to patch.
 - A start request accepted by launchd/systemd does not prove the API is up; the
   final `local-start` step waits for the authenticated identity before success.
-- The token is minted on the client (`crucible init --token`) unless the operator
-  passed `--token` (the droplet case). Reported argv spells it `<redacted>`.
+- The token is minted on the client unless the operator passed install.sh `--token`
+  (the droplet case), and reaches `crucible init --token-env` through
+  `$CRUCIBLE_INIT_TOKEN` in that one command's environment, never its argv.
 - The hand installer's progress lines use `crucible/interpreter.py`'s progress
   wire (written in `steps.ts`, parsed there by `parse_progress_line`, tied by
   `tests/test_host.py`) rather than curl's CR-separated meter. `bytes_total` is

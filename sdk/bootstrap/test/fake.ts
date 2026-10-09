@@ -373,7 +373,7 @@ export const HOST_DONE_DATA = {
   steps: [
     { name: 'host-facts', argv: [], status: 'ok', detail: 'crucible: CRUCIBLE_HOME /home/crucible/.crucible, user crucible, 380.0 GiB free' },
     { name: 'server', argv: [GUEST_CRUCIBLE], status: 'ok', detail: 'python 3.11.16, then the 0.6.0 wheel' },
-    { name: 'init', argv: [GUEST_CRUCIBLE, 'init', '--token', '<redacted>', '--enable-llm'], status: 'ok', detail: 'exit 0' },
+    { name: 'init', argv: [GUEST_CRUCIBLE, 'init', '--token-env', '--enable-llm'], status: 'ok', detail: 'exit 0' },
     { name: 'service-install', argv: [GUEST_CRUCIBLE, 'service', 'install'], status: 'ok', detail: 'exit 0' },
     { name: 'linger', argv: ['loginctl', 'enable-linger', 'crucible'], status: 'ok', detail: 'granted' },
     { name: 'capability-write', argv: [GUEST_CRUCIBLE, 'capability', '--write'], status: 'ok', detail: 'exit 0' },

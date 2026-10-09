@@ -48,6 +48,14 @@ def cmd_orchestrator(args: argparse.Namespace) -> int:
             "are asking."
         )
 
+    from ..platform.errors import LocalError
+    from ..platform.packaged import refuse_packaged
+
+    try:
+        refuse_packaged("`crucible orchestrator`")
+    except LocalError as exc:
+        return _fail(str(exc))
+
     if getattr(args, "try_again", False):
         return _orchestrator_try_again()
 

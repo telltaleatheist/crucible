@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,28 @@ from ..narratorengines import declared_tts_footprints
 from . import common
 from .common import EXIT_OK, _backend_mismatch, _fail
 from .token import PAIRING_NOT_PRINTED, _pairing_permission, _write_pairing_file
+
+
+INIT_TOKEN_ENV = "CRUCIBLE_INIT_TOKEN"
+
+
+def _given_token(args: argparse.Namespace) -> str | None:
+    if args.token_env and args.token is not None:
+        raise ConfigError(
+            "--token and --token-env both name a token, and two answers to one "
+            "question is not a thing this command picks between. Pass one."
+        )
+    if not args.token_env:
+        return args.token
+    value = os.environ.get(INIT_TOKEN_ENV)
+    if value is None or value == "":
+        raise ConfigError(
+            f"token_env_empty: --token-env reads the token from ${INIT_TOKEN_ENV}, "
+            "and it is not set in this command's environment. Set it for this one "
+            f"command ({INIT_TOKEN_ENV}=<token> crucible init --token-env), or drop "
+            "--token-env and let init mint one."
+        )
+    return value
 
 
 def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
@@ -177,8 +200,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         return _fail(str(exc))
 
     carried: dict[str, Any] = {}
+    try:
+        given = _given_token(args)
+    except ConfigError as exc:
+        return _fail(str(exc))
     if args.config_from is not None:
-        if args.token is not None:
+        if given is not None:
             return _fail(
                 "--config-from and --token both name a token, and two answers to "
                 "one question is not a thing this command picks between. Pass one."
@@ -187,8 +214,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             token, carried = carried_from(Path(args.config_from))
         except ConfigError as exc:
             return _fail(str(exc))
-    elif args.token is not None:
-        token = args.token
+    elif given is not None:
+        token = given
         if token.strip() == "" or any(ch.isspace() for ch in token):
             return _fail("--token must be a non-empty string with no whitespace")
     else:
@@ -257,7 +284,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         + (
             "carried; "
             if args.config_from is not None
-            else ("as given; " if args.token is not None else "minted; ")
+            else ("as given; " if given is not None else "minted; ")
         )
         + "print it with `crucible token --show`"
     )
@@ -296,10 +323,19 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         "--token",
         default=None,
         help=(
-            "use this bearer token instead of minting one. For an installer "
-            "that mints on its own side (@crucible/bootstrap). It still appears "
-            "in the pairing line this command ends with, which is the point of "
-            "that line"
+            "use this bearer token instead of minting one. It is on this "
+            "command's line, which every user of the machine can read (`ps aux`) "
+            "while it runs; an installer passes --token-env instead"
+        ),
+    )
+    init.add_argument(
+        "--token-env",
+        action="store_true",
+        help=(
+            f"read the bearer token from ${INIT_TOKEN_ENV} instead of minting one, "
+            "so it is never on a command line. For an installer that mints on its "
+            "own side (install.sh, @crucible/bootstrap). It still appears in the "
+            "pairing line this command ends with, which is the point of that line"
         ),
     )
     init.add_argument(
