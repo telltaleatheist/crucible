@@ -123,6 +123,20 @@ Five holes raised in review; Owen's answers, verbatim, then what they mean.
      measurement. A second measurement runs only if the first variant didn't load, or left
      enough headroom for the next size up.
 
+## 1b. How close to the wall (Owen, 2026-10-09)
+
+> *"in most cases the os will start pushing things into swap if it needs more room for a
+> model. we shouldnt plan to hit the 8 gb wall, but we can get pretty close in most cases"*
+
+- Fit plans close to the card's real limit with a modest margin, never a large blanket
+  reserve. A flat 3 GiB desktop allowance on an unmeasured 8 GiB card throws away most of the
+  headroom (the low_vram agent's open question, 2026-10-09). Where the desktop's share hasn't
+  been measured, the default allowance scales with the card instead of being a flat 3 GiB, and
+  the measurement (§1a.5) replaces it as soon as it runs.
+- Spilling into system memory is a safety net, not a plan. It's slower, and whether CUDA
+  inside WSL2 spills at all (rather than failing) is unmeasured; measure it before relying on
+  it. The pick never chooses a model that only fits by spilling.
+
 ## 2. What exists and what doesn't
 
 Already there:
