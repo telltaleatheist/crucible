@@ -17,7 +17,7 @@ from crucible import residency as residency_module
 from crucible.accelerator import ComputeApp
 from crucible.config import DEFAULT_DESKTOP_ALLOWANCE_BYTES
 from crucible.engines import ENGINES
-from crucible.engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS
+from crucible.engines.vllm import DECIDE_ARGS as VLLM_DECIDE_ARGS, STRUCTURED_OUTPUTS_ARGS
 from crucible.manifests import load_manifest
 from crucible.memorybudget import GIB
 from crucible.settle import SETTLEMENT_HOLDER
@@ -479,7 +479,9 @@ memory_bytes_estimate = 3000000000
         )
         events = run_job(client, auth, type="load-model", model="shifty")
         assert events[-1]["event"] == "done", events[-1]
-        assert engines[0].args == ["--max-model-len", "8192", *VLLM_DECIDE_ARGS]
+        assert engines[0].args == [
+            "--max-model-len", "8192", *VLLM_DECIDE_ARGS, *STRUCTURED_OUTPUTS_ARGS,
+        ]
 
         write(32768)
         row = client.get("/v1/models", headers=auth).json()[0]
@@ -754,6 +756,7 @@ def test_the_4bit_27b_actually_loads_on_a_free_24_gib_card(
         "--language-model-only",
         "--max-model-len", "16384",
         *VLLM_DECIDE_ARGS,
+        *STRUCTURED_OUTPUTS_ARGS,
         "--kv-cache-memory-bytes", str(pool),
         "--gpu-memory-utilization", f"{budget / total:.4f}",
     ]
