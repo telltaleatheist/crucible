@@ -212,13 +212,14 @@ def test_low_vram_that_still_does_not_fit_says_it_is_already_on() -> None:
 
 
 def test_music_on_the_same_card_is_weighed_whole_with_or_without_the_setting() -> None:
-    # stable-audio-3-medium declares no low-VRAM figure: 8.0 GB (7.45 GiB) against 7.0 GiB.
+    # stable-audio-3-medium declares no low-VRAM figure, so the setting changes nothing for
+    # it: measured 6.8 GB (6.3 GiB) at 380 s fits 7.0 GiB whole either way.
     medium = load_audio_manifest("stable-audio-3-medium").spec(FAKE_BACKEND.kind)
+    assert medium.low_vram_memory_bytes_estimate is None
+    assert medium.memory_bytes_estimate < 7 * GIB
     for low_vram in (False, True):
         music = _verdict("music", low_vram)
-        assert music.enabled is False
-        assert music.shortfall_bytes == medium.memory_bytes_estimate - 7 * GIB
-        assert "short by 0.5 GiB" in music.reason
+        assert music.enabled is True
         assert "low_vram" not in music.reason + music.summary
 
 

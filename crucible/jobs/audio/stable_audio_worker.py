@@ -21,6 +21,9 @@ LABEL = "stable audio"
 T5GEMMA_DIR = "t5gemma-b-b-ul2"
 
 SPANS = (("encoding", 0.05), ("denoising", 0.8), ("decoding", 0.1), ("saving", 0.05))
+# How much shorter than asked the audio may come back (one latent frame and rounding)
+# before it is not the request.
+SHORT_TOLERANCE_S = 0.1
 
 
 def localise_text_encoder(node, t5_dir: str):
@@ -123,10 +126,15 @@ class StableAudio3Engine:
                 peaks["denoising"] = self.peak_bytes()
                 progress.enter("decoding")
 
+        # The package's generate() defaults sample_size to 5,292,032 samples (120 s at 44.1
+        # kHz) and clamps the duration to it, so a longer request came back 120 s long
+        # without a word (stable-audio-3-medium asked for 380 s on 2026-10-09). The model's
+        # own config states its window (380.4 s for Medium); the package's CLI passes it.
         audio = self._model.generate(
             prompt=job.prompt,
             negative_prompt=job.negative_prompt,
             duration=float(job.duration_s),
+            sample_size=int(self._model.model_config["sample_size"]),
             steps=job.steps,
             seed=job.seed,
             callback=on_step,
@@ -136,6 +144,12 @@ class StableAudio3Engine:
         samples = audio[0].to(self._torch.float32).cpu().numpy().T.copy()
         del audio
         self._release()
+        made_s = samples.shape[0] / float(self.sample_rate)
+        if made_s + SHORT_TOLERANCE_S < float(job.duration_s):
+            raise RuntimeError(
+                f"stable-audio-3 made {made_s:.1f} s of audio for a {float(job.duration_s):.1f} s "
+                "request; a shorter file is not the request, so nothing is returned"
+            )
         return audiocore.ArrayAudio(samples, self.sample_rate), None, peaks
 
 

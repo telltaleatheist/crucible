@@ -13,9 +13,9 @@ hf_repo = "stabilityai/stable-audio-3-medium"
 revision = "27b5a21b791b1b033d193a9e1e3ce78493f102f9"
 gated = true
 dtype = "float16"
-memory_bytes_estimate = 8000000000
-memory_basis = "declared"
-memory_note = "declared 2026-09-29 from the files and Stability's own table, not measured through Crucible: 10.4 GB of float32 weights (DiT with SAME-L 9.22 GB, T5Gemma 1.18 GB) cast to float16 is 5.2 GB; Stability's README reports 6.52 GB peak allocated at 380 s on an H200 with flash-attn, unchunked decode (5.14 GB at 120 s chunked); 8 GB leaves the CUDA context and allocator slack. Fits a 24 GB card with a 3 GB desktop allowance several times over"
+memory_bytes_estimate = 6_800_000_000
+memory_basis = "measured"
+memory_note = "measured 2026-10-09 on the RTX 3090 Ti through crucible/jobs/audio/stable_audio_worker.py at the longest request, 380 s, 8 steps: torch reserved 5.87 GB encoding and denoising and 6.21 GB decoding, and the whole card was 6.14 GiB over the desktop; 6.8 GB adds the CUDA context and allocator slack. The declared figure before it was 8 GB (from Stability's 6.52 GB peak on an H200). Until that day every request over 120 s had come back 120 s long, because the package's generate() defaults its window to 120 s, so no earlier run measured a long one"
 files = [
   "model_config.json",
   "model.safetensors",

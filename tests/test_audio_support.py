@@ -40,7 +40,9 @@ def test_the_three_models_are_declared_with_what_they_make_and_where() -> None:
     assert not song.gated and [c.hf_repo for c in song.companions] == ["m-a-p/YuE2-Vae"]
     for manifest in manifests.values():
         for spec in manifest.backends.values():
-            assert spec.memory_basis == "declared" and spec.memory_note
+            assert spec.memory_basis in ("declared", "measured") and spec.memory_note
+    # Measured through the worker at its longest request, 380 s (2026-10-09).
+    assert manifests["stable-audio-3-medium"].spec("cuda-linux").memory_basis == "measured"
 
 
 def test_medium_fits_the_pc_card_with_its_desktop_allowance() -> None:
