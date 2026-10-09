@@ -288,6 +288,18 @@ several questions the shared prefix is sent alone
 first so the engine caches it, then questions run under a concurrency gate; the
 failure reported is the first in the request's question order.
 
+A decision that names no `model` is served by what this server registered for
+`decide` (`_registered_model` in `api/routes/decide.py`, reading the capability
+record's decide row): `selected`, or with images, `with_images` (docs/VERB-SIZING.md
+section 8). It then walks the same line as a named model: a model that is not
+resident is loaded for it while it waits, and a switch between the text form and
+the vision form is a reload of the one shared download. Refusals, by name:
+`503 capability_undecided` (no record, or one written before the image pick:
+`crucible capability --write`), `409 capability_disabled` (this card cannot
+decide), `409 no_image_model_fits` (images, and nothing that reads them fits; the
+message carries the record's reason, which names what would). A named model keeps
+today's rules, `model_text_only` included.
+
 ### The items form
 
 One request carries an ordered list of items about ONE state; the answers come

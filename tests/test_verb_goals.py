@@ -78,8 +78,13 @@ def test_clean_never_goes_above_its_9b_goal(card: tuple[str, int, int, str]) -> 
 # --- params first, then bits ------------------------------------------------------------
 
 
-def candidate(model_id: str, params_b: float, bits: int, need: int, alias: bool = False) -> Candidate:
-    return Candidate(id=model_id, memory_bytes_estimate=need, params_b=params_b, bits=bits, alias=alias)
+def candidate(
+    model_id: str, params_b: float, bits: int, need: int, weights_of: str | None = None
+) -> Candidate:
+    return Candidate(
+        id=model_id, memory_bytes_estimate=need, params_b=params_b, bits=bits,
+        weights_of=weights_of,
+    )
 
 
 def test_more_parameters_beat_more_bits_and_bits_settle_a_size() -> None:
@@ -100,7 +105,7 @@ def test_more_parameters_beat_more_bits_and_bits_settle_a_size() -> None:
 
 def test_a_models_own_form_is_taken_before_its_alias() -> None:
     entry = BY_NAME["decide"]
-    found = (candidate("9b-vl", 9, 16, 22 * GIB, alias=True), candidate("9b", 9, 16, 20 * GIB))
+    found = (candidate("9b-vl", 9, 16, 22 * GIB, weights_of="9b"), candidate("9b", 9, 16, 20 * GIB))
     assert [c.id for c in entry.pick_order(found)] == ["9b", "9b-vl"]
 
 
@@ -178,7 +183,11 @@ def test_an_8_gib_card_runs_every_text_verb_on_a_smaller_model(
     verdict = on(card, name)
     assert verdict.enabled is True
     assert verdict.selected == "qwen3.5-0.8b"
-    assert verdict.summary.endswith("(goal " + BY_NAME[name].goal.words + "; the largest that fits this card)")
+    assert verdict.summary.startswith(
+        f"can {BY_NAME[name].plainly}, using qwen3.5-0.8b (goal "
+        + BY_NAME[name].goal.words
+        + "; the largest that fits this card)"
+    )
 
 
 @pytest.mark.parametrize("name", TEXT_VERBS)

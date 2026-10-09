@@ -126,11 +126,17 @@ class DecideItem(_Strict):
 class DecideRequest(_Strict):
     """`POST /v1/decide`: one forward pass per question at the resident model, or a list of items about one state; nothing decoded or loaded."""
 
-    model: _NonEmpty
+    model: _NonEmpty | None = None
     """The Crucible model id. One that is not resident is loaded for the
     decision while it waits in the line (`409 model_not_resident` with
     `"queue": false`). An upstream id (`<upstream>/<id>`) is
-    refused `400 decide_needs_logprobs`: no upstream returns a distribution."""
+    refused `400 decide_needs_logprobs`: no upstream returns a distribution.
+    Absent: the model this server registered for `decide` (`GET /v1/capability`,
+    the decide row's `selected`), or, when `images` are sent, the one it
+    registered for a decision with images (that row's `with_images`: the vision
+    form of the same weights when it fits, else the largest model that reads
+    images and fits at or below decide's 9B goal). The answer's `model` names
+    which one served it."""
     state: Any
     """What the questions are about: a string, used verbatim, or any other JSON
     value, serialised as compact JSON. Required and never null; may be `""` only
@@ -158,8 +164,11 @@ class DecideRequest(_Strict):
     images: list[str] | None = None
     """Base64 image files (PNG, JPEG, GIF or WebP; standard alphabet, padded, no
     whitespace, no `data:` prefix), read as part of the state, after its text.
-    At most 8 (`too_many_images`), and only on a model whose manifest declares
-    `image` (`400 model_text_only` otherwise). `[]` is the same as none."""
+    At most 8 (`too_many_images`). A named `model` must serve `image` on this
+    backend (`400 model_text_only` otherwise); with no `model`, the server
+    takes the model it registered for a decision with images, and refuses
+    `409 no_image_model_fits` when nothing that reads images fits its card.
+    `[]` is the same as none."""
     missing: Literal["refuse", "report"] = "refuse"
     """What to do when a label is not among the top tokens the engine returned.
     `refuse` (the default): the decision is `502 label_not_in_probs` naming the

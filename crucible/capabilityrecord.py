@@ -33,15 +33,33 @@ class CapabilityRow:
     reason: str
     shortfall_bytes: int
     summary: str
+    # A class whose requests may carry images (CapabilityClass.takes_images), granted: the
+    # model that serves a request with images, "" when none fits, and why. None on every
+    # other row, and on a record written before 2026-10-09.
+    with_images: str | None = None
+    with_images_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "capability": self.capability,
             "enabled": self.enabled,
             "selected": self.selected,
             "reason": self.reason,
             "summary": self.summary,
             "shortfall_bytes": self.shortfall_bytes,
+        }
+        if self.with_images is not None:
+            document["with_images"] = self.with_images
+            document["with_images_reason"] = self.with_images_reason
+        return document
+
+    def to_wire(self) -> dict[str, Any]:
+        """The row as `/v1/capability` answers it: `with_images` and its reason on every
+        row, null where the class takes no images (to_dict leaves them out for TOML)."""
+        return {
+            **self.to_dict(),
+            "with_images": self.with_images,
+            "with_images_reason": self.with_images_reason,
         }
 
 

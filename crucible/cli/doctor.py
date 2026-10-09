@@ -25,7 +25,7 @@ from .. import (
 from ..audiomodels import LOW_VRAM_SETTING
 from ..backend import LLAMA_WINDOWS, MLX_DARWIN, Backend
 from ..capabilitystore import decide_for, low_vram_for
-from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
+from ..capabilityrecord import DESKTOP_BASIS_MEASURED, CapabilityRow, desktop_reserve_words
 from ..config import Config, config_mode, crucible_home
 from ..errors import ConfigError, NoViableBackend
 from ..jobenv import INSTALLER_FOR
@@ -310,6 +310,27 @@ def _low_vram_findings(config: Config, backend: Backend) -> list[Finding]:
     return found
 
 
+def _image_pick_findings(
+    stored: CapabilityRow, decision: verdict.Decision
+) -> list[Finding]:
+    """A class that takes images whose recorded model for a request with images differs
+    from this build's, or was never recorded (a record written before 2026-10-09)."""
+    fresh = decision.row()
+    if stored.with_images == fresh.with_images:
+        return []
+    def words(model: str | None, unset: str) -> str:
+        return unset if model is None else model or "nothing fits"
+
+    why = "" if fresh.with_images_reason is None else f" — {fresh.with_images_reason}"
+    return [Finding(
+        "capability_stale",
+        f"the record says {decision.capability} with images: "
+        f"{words(stored.with_images, 'nothing recorded')}, and this build decides "
+        f"{words(fresh.with_images, 'none')}{why}; re-run `{CAPABILITY_WRITE}`",
+        CAPABILITY_WRITE,
+    )]
+
+
 def _pick_findings(config: Config, backend: Backend) -> list[Finding]:
     """A record decided by an older pick rule or catalog (docs/VERB-SIZING.md rule 5: the
     registration is re-made when the catalog changes): the classes whose recorded model,
@@ -327,6 +348,7 @@ def _pick_findings(config: Config, backend: Backend) -> list[Finding]:
         if stored is None:
             continue
         if (stored.enabled, stored.selected) == (decision.enabled, decision.selected):
+            found.extend(_image_pick_findings(stored, decision))
             continue
         said = stored.selected if stored.enabled else "NO"
         now = decision.selected if decision.enabled else "NO"

@@ -385,7 +385,9 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
         state = ""
     else:
         state = read_text_argument(args.state, "--state")
-    body: dict[str, Any] = {"model": args.model, "state": state}
+    body: dict[str, Any] = {"state": state}
+    if args.model is not None:
+        body["model"] = args.model
     if images:
         body["images"] = images
     body["questions"] = decide_questions(args.questions)
@@ -998,7 +1000,12 @@ SESSION_VERBS = (
 )
 
 DECIDE_ARGS = (
-    arg("--model", required=True, help="the resident model to read the decision from"),
+    arg(
+        "--model", default=None,
+        help="the model to read the decision from. Omitted: the one this server "
+             "registered for decide, or with --image, the one it registered for a "
+             "decision with images",
+    ),
     arg(
         "--state", default=None,
         help="what the questions are about: text, or @file. May be left out "

@@ -68,6 +68,14 @@ class Goal:
         return {"params_b": self.params_b, "source": self.source}
 
 
+# Below this many parameters, a routable text verb's automatic pick recommends an API key
+# (docs/VERB-SIZING.md section 8). Owen 2026-10-09: "it can recommend using an api key if
+# the models are under a certain size". 4B is the chosen default: the 0.8B and the 2B are
+# what cards under 16 GiB get for every text verb today, and they are the ones whose answers
+# fall furthest short. It only recommends: it never refuses and never changes the pick.
+API_KEY_ADVICE_BELOW_PARAMS_B = 4
+
+
 @dataclass(frozen=True)
 class CapabilityClass:
     name: str
@@ -80,6 +88,20 @@ class CapabilityClass:
     work: "WorkingContext | None" = None
     client_sized: bool = False
     goal: "Goal | None" = None
+    # A request of this class may carry images, so its record names the model that serves
+    # those too (docs/VERB-SIZING.md section 8): `decide`.
+    takes_images: bool = False
+
+    def advises_api_key(self, picked: Candidate) -> bool:
+        """The automatic pick is small enough to recommend an API key instead: a routable
+        class (an upstream can take its work; `decide` reads logprobs no upstream returns)
+        with a goal, whose pick has fewer than API_KEY_ADVICE_BELOW_PARAMS_B parameters."""
+        return (
+            self.routable
+            and self.goal is not None
+            and picked.params_b is not None
+            and picked.params_b < API_KEY_ADVICE_BELOW_PARAMS_B
+        )
 
     def pick_order(self, found: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
         """The candidates the automatic pick may take, best first (docs/VERB-SIZING.md
@@ -257,6 +279,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         noun=TEXT_FAMILIES_NOUN,
         candidates=_from_catalog(load_all_manifests, *TEXT_FAMILIES, aliases=True),
         goal=DECIDE_GOAL,
+        takes_images=True,
     ),
     CapabilityClass(
         name="pages",
@@ -429,6 +452,7 @@ def classes_for_model(model_id: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "API_KEY_ADVICE_BELOW_PARAMS_B",
     "BATCHED_BLOCKS_WORK",
     "BY_NAME",
     "CATALOG_DIRECTORY",

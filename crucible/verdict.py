@@ -12,6 +12,7 @@ from .capabilitywords import (
     NEEDS_WSL_REASON,
     UPSTREAM_OFFER,
     above_goal_note,
+    api_key_advice,
     barred_note,
     feature_order,
     goal_phrase,
@@ -48,6 +49,21 @@ WSL_ONLY_JOB_TYPES: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True)
+class ImagePick:
+    """What serves a request that carries images, for a class that takes them
+    (CapabilityClass.takes_images; docs/VERB-SIZING.md section 8): the vision form of the
+    text pick when it fits, else the largest model that reads images and fits at or below
+    the goal. `selected` is "" when nothing that reads images fits, and `reason` then says
+    what would."""
+
+    selected: str
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"selected": self.selected, "reason": self.reason}
+
+
+@dataclass(frozen=True)
 class Decision:
     capability: str
     job_type: str
@@ -62,6 +78,8 @@ class Decision:
     lacking_features: tuple[str, ...] = ()
     # The model is the one chosen for this class in settings, not the automatic pick.
     chosen: bool = False
+    # A granted class that takes images: what serves a request carrying them.
+    with_images: ImagePick | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +94,7 @@ class Decision:
             "available_bytes": self.available_bytes,
             "fit_count": self.fit_count,
             "chosen": self.chosen,
+            "with_images": None if self.with_images is None else self.with_images.to_dict(),
             "candidates": [c.to_dict() for c in self.candidates],
         }
 
@@ -87,6 +106,10 @@ class Decision:
             reason=self.reason,
             summary=self.summary,
             shortfall_bytes=self.shortfall_bytes,
+            with_images=None if self.with_images is None else self.with_images.selected,
+            with_images_reason=(
+                None if self.with_images is None else self.with_images.reason
+            ),
         )
 
 
@@ -162,6 +185,7 @@ def _decision(
     shortfall_bytes: int = 0,
     lacking_features: tuple[str, ...] = (),
     chosen: bool = False,
+    with_images: ImagePick | None = None,
 ) -> Decision:
     return Decision(
         capability=entry.name,
@@ -176,6 +200,7 @@ def _decision(
         fit_count=len(fitting),
         lacking_features=lacking_features,
         chosen=chosen,
+        with_images=with_images,
     )
 
 
@@ -201,9 +226,65 @@ def _refuse(
     )
 
 
+def _image_pick(w: _Weighing, text: Candidate) -> ImagePick:
+    """The model a request with images is served by, when the text pick is `text`."""
+    entry, kind = w.entry, w.backend_kind
+    readers = tuple(c for c in w.found if c.serves_images)
+    if not readers:
+        return ImagePick(
+            "",
+            f"none of the {len(w.found)} {entry.noun} this build ships for {entry.name} "
+            f"reads images on {kind}; send the request without images, or to another "
+            "server",
+        )
+    form = next((c for c in readers if c.form_of(text.id)), None)
+    if form is not None and form in w.usable and _fits(entry, form, w.work, w.budget):
+        what = (
+            f"{form.id} itself, which reads images on {kind}"
+            if form.id == text.id
+            else f"{form.id}, the vision form of {text.id} (the same weights)"
+        )
+        return ImagePick(form.id, f"{what}: it needs {spell_chosen(form, w.work, w.budget)}")
+    if form is None:
+        passed = f"{text.id} has no form that reads images on {kind}"
+    elif form not in w.usable:
+        passed = (
+            f"{form.id}, the vision form of {text.id}, cannot start on this card: it "
+            f"needs {needs_phrase(form.lacks(w.card), w.card)}"
+        )
+    else:
+        passed = (
+            f"{form.id}, the vision form of {text.id}, needs "
+            f"{spell_floor(form, w.work)} and there is only {gib_text(w.budget)}"
+        )
+    smaller = next((c for c in w.picks if c.serves_images), None)
+    if smaller is not None:
+        within = "" if entry.goal is None else f" at or below the {entry.goal.words} goal"
+        return ImagePick(
+            smaller.id,
+            f"{smaller.id}, the largest model that reads images and fits{within}, "
+            f"because {passed}",
+        )
+    ranked = [c for c in w.ranked if c.serves_images] or list(readers)
+    smallest = ranked[-1]
+    short = smallest.floor_bytes(w.work) - w.budget
+    return ImagePick(
+        "",
+        f"nothing that reads images fits this card: {passed}, and the smallest model "
+        f"that reads images, {smallest.id}, needs {spell_floor(smallest, w.work)}, "
+        f"{gib_text(short)} more than there is. Send the request without images, or "
+        "to a server with more memory",
+    )
+
+
 def _grant(
     w: _Weighing, picked: Candidate, reason: str, *, why: str = "", chosen: bool = False
 ) -> Decision:
+    """A granted decision. A class that takes images also names what serves a request
+    carrying them; an automatic pick small enough (CapabilityClass.advises_api_key) also
+    recommends an API key. A choice made in Settings is the person's and is not advised."""
+    images = _image_pick(w, picked) if w.entry.takes_images else None
+    advice = api_key_advice(w.entry) if not chosen and w.entry.advises_api_key(picked) else ""
     return _decision(
         w.entry,
         w.budget,
@@ -211,12 +292,23 @@ def _grant(
         w.fitting,
         enabled=True,
         selected=picked.id,
-        reason=reason,
+        reason=with_notes(
+            reason,
+            "" if images is None else f" With images: {images.reason}.",
+            f" {advice[0].upper()}{advice[1:]}." if advice else "",
+        ),
         summary=f"can {w.entry.plainly}, using {picked.id}"
         + (f" ({why})" if why else "")
         + serving_summary(picked, w.budget)
-        + low_vram_summary(picked),
+        + low_vram_summary(picked)
+        + (
+            ""
+            if images is None
+            else f"; with images, {images.selected or 'nothing fits this card'}"
+        )
+        + (f" — {advice}" if advice else ""),
         chosen=chosen,
+        with_images=images,
     )
 
 
