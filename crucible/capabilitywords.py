@@ -326,6 +326,52 @@ def low_vram_refusal_summary(entry: "CapabilityClass", candidate: Candidate) -> 
     )
 
 
+def goal_phrase(
+    entry: "CapabilityClass",
+    picked: Candidate,
+    ranked: "tuple[Candidate, ...]",
+    work: "WorkingContext | None",
+    budget: int,
+    card: "CardFacts | None",
+) -> str:
+    """What a goal class's automatic pick took, against its goal (docs/VERB-SIZING.md
+    rule 3): "goal 9B; bf16 fits with 2.1 GiB to spare", or below the goal, "goal 27B;
+    the largest that fits this card". `ranked` is the class's pick order on this host."""
+    goal = entry.goal
+    assert goal is not None and picked.params_b is not None and picked.bits is not None
+    if picked.params_b < goal.params_b:
+        return f"goal {goal.words}; the largest that fits this card"
+    spare = gib_text(budget - picked.need_bytes(work))
+    precision = picked.precision_on(card)
+    finer = any(
+        c.params_b == picked.params_b and c.bits is not None and c.bits > picked.bits
+        for c in ranked
+    )
+    if finer:
+        return (
+            f"goal {goal.words}; {precision}, the highest precision of it that fits, "
+            f"with {spare} to spare"
+        )
+    return f"goal {goal.words}; {precision} fits with {spare} to spare"
+
+
+def above_goal_note(entry: "CapabilityClass", fitting: "tuple[Candidate, ...]") -> str:
+    """The fitting candidates a goal class's automatic pick passed over for being above
+    its goal: a person may still choose one in Settings."""
+    goal = entry.goal
+    if goal is None:
+        return ""
+    above = [c.id for c in fitting if c.params_b is not None and c.params_b > goal.params_b]
+    if not above:
+        return ""
+    return (
+        f" {', '.join(above)} also {'fits' if len(above) == 1 else 'fit'}, and "
+        f"{'is' if len(above) == 1 else 'are'} above the {goal.words} goal, which the "
+        f"automatic pick never exceeds; Settings can still choose "
+        f"{'it' if len(above) == 1 else 'one'}."
+    )
+
+
 def with_notes(text: str, *notes: str) -> str:
     said = "".join(notes)
     if not said:
@@ -360,6 +406,8 @@ def describe_card(card: "CardFacts | None", total_bytes: int, pool: str) -> str:
 
 __all__ = [
     "CPU_BUILD_REASON",
+    "above_goal_note",
+    "goal_phrase",
     "LOCAL_ANSWER_PREFIX",
     "LOW_VRAM_STEPS",
     "MEASURED_WORDS",

@@ -7,7 +7,7 @@ context_default = 98304
 trained_context = 262144
 modalities = ["text"]
 display = "Qwen 3.8 · 27B (4-bit)"
-description = "The 27B standard for translation, simplification and analysis, quantized to fit a 24 GB card. The smallest model those three may run on."
+description = "The 27B, quantized to fit a 24 GB card: the goal for translation, simplification, analysis and generation."
 
 [local]
 kind = "ollama"
@@ -20,6 +20,7 @@ needs_basis = "declared"
 engine = "vllm"
 hf_repo = "avyukth/Qwen3.8-27B-AWQ-INT4"
 revision = "5a2ee524cbc9f3ac5df12729ecf0c4b57f311192"
+bits = 4
 memory_bytes_estimate = 21_633_171_456
 context_default = 16384
 max_context = 32768
@@ -41,6 +42,7 @@ measured_at_context = 16384
 engine = "mlx-lm"
 hf_repo = "mlx-community/Qwen3.8-27B-4bit"
 revision = "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+bits = 4
 memory_bytes_estimate = 33_873_484_870
 engine_args = [
     "--decode-concurrency", "16",
@@ -53,6 +55,7 @@ max_context = 131072
 engine = "llama-server"
 hf_repo = "unsloth/Qwen3.8-27B-GGUF"
 revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+bits = 4
 file = "Qwen3.8-27B-UD-Q4_K_M.gguf"
 memory_bytes_estimate = 17_964_440_224
 context_default = 16384

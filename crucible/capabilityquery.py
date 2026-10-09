@@ -203,6 +203,7 @@ def served_rows(
         found = BY_NAME.get(stored.capability)
         if found is None:
             row["work"] = None
+            row["goal"] = None
             row["context_ceilings"] = None
             rows.append(row)
             continue
@@ -221,6 +222,7 @@ def served_rows(
                 card=card,
             )
         row["work"] = None if work is None else {**work.to_dict(), "from": basis}
+        row["goal"] = None if found.goal is None else found.goal.to_dict()
         row["context_ceilings"] = None
         if found.client_sized and work is not None:
             row["context_ceilings"] = [

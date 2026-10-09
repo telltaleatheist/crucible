@@ -15,6 +15,11 @@ def settings_client(make_client: Callable[..., TestClient]):
     with make_client(enable_llm=True, capability=decided()) as instance:
         yield instance
 
+# translate's lineup on cuda-linux, down to the 0.8B since the floor went (docs/VERB-SIZING.md)
+PC_TEXT_LINEUP = (
+    "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
+)
+
 
 def document(client: TestClient, auth: dict[str, str]) -> dict[str, Any]:
     response = client.get("/v1/settings", headers=auth)
@@ -30,11 +35,8 @@ def test_the_document_offers_every_selectable_class_and_null_for_automatic(setti
     assert "echo" not in body["local_model_choices"]
 
     offered = body["local_model_choices"]["translate"]
-    assert [row["id"] for row in offered] == [
-        "qwen3.8-27b-4bit",
-        "qwen3.5-9b",
-    ]
-    assert [row["fits"] for row in offered] == [True, True]
+    assert [row["id"] for row in offered] == list(PC_TEXT_LINEUP)
+    assert [row["fits"] for row in offered] == [True] * 5
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
     assert all(isinstance(row["installed"], bool) for row in offered)
 
@@ -98,7 +100,7 @@ def test_the_8bit_27b_is_not_a_choice_on_cuda_linux(settings_client, auth, home)
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
     assert error["details"]["model"] == "qwen3.8-27b-8bit"
-    assert error["details"]["choices"] == ["qwen3.8-27b-4bit", "qwen3.5-9b"]
+    assert error["details"]["choices"] == list(PC_TEXT_LINEUP)
     assert load_config(home).local_model("translate") is None
 
 
@@ -131,10 +133,7 @@ def test_an_unknown_model_is_refused_and_names_what_there_was(settings_client, a
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["code"] == "local_model_unknown"
-    assert error["details"]["choices"] == [
-        "qwen3.8-27b-4bit",
-        "qwen3.5-9b",
-    ]
+    assert error["details"]["choices"] == list(PC_TEXT_LINEUP)
     assert error["details"]["field"] == "local_models.translate"
 
 

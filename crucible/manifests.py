@@ -9,7 +9,7 @@ from typing import Any
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .classnames import CLASS_NAMES
 from .errors import CrucibleError
-from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits
+from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
@@ -92,6 +92,7 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "memory_bytes_estimate": int,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
+    "bits": int,
     "engine_args": list,
     "file": str,
     "mmproj": str,
@@ -205,6 +206,7 @@ class BackendSpec:
     file: str | None = None
     mmproj: str | None = None
     serves: tuple[str, ...] = ()
+    bits: int | None = None
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -224,6 +226,7 @@ class BackendSpec:
             "file": self.file,
             "mmproj": self.mmproj,
             "serves": list(self.serves),
+            "bits": self.bits,
         }
 
 
@@ -1019,6 +1022,33 @@ def _parse_memory(where: str, block: dict[str, Any], served: int) -> MemoryTerms
     return terms
 
 
+MAX_STATED_BITS = 32
+
+
+def _check_stated_bits(where: str, spec: BackendSpec) -> None:
+    """`bits` is the block's weight precision, the second key of the automatic pick
+    (docs/VERB-SIZING.md rule 3). Stated, so the pick never reads it out of a name; checked
+    against what the block's file, repo and dtype imply, so the two can never disagree."""
+    if spec.bits is None:
+        return
+    if below_floor(spec.bits):
+        raise ManifestError(
+            f"{where}: bits = {spec.bits}, and nothing under {MIN_WEIGHT_BITS} bits "
+            "is ever offered (Owen, 2026-09-26: \"no less than 4\")"
+        )
+    if spec.bits > MAX_STATED_BITS:
+        raise ManifestError(
+            f"{where}: bits = {spec.bits}; no weights are wider than "
+            f"{MAX_STATED_BITS} bits"
+        )
+    implied = implied_bits(replace(spec, bits=None))
+    if implied is not None and implied != spec.bits:
+        raise ManifestError(
+            f"{where}: bits = {spec.bits}, but the block's file, repo or dtype says "
+            f"{implied}-bit; one of the two is wrong"
+        )
+
+
 def _backend_block(where: str, kind: str, block: Any) -> dict[str, Any]:
     if kind not in BACKEND_ENGINES:
         raise ManifestError(
@@ -1050,7 +1080,7 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
     backend_context = _backend_context(where, block, trained)
     served = backend_context or model["context_default"]
     block_max = _backend_max_context(where, block, trained, served)
-    return BackendSpec(
+    spec = BackendSpec(
         backend=kind,
         engine=block["engine"],
         hf_repo=block["hf_repo"],
@@ -1063,7 +1093,10 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
         file=block.get("file"),
         mmproj=block.get("mmproj"),
         serves=serves_here,
+        bits=block.get("bits"),
     )
+    _check_stated_bits(where, spec)
+    return spec
 
 
 def _parse_backends(table: Any, path: Path, model: dict[str, Any]) -> dict[str, BackendSpec]:

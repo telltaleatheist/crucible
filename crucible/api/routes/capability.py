@@ -69,7 +69,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
     @private.get("/capability")
     async def capability(request: Request) -> dict[str, Any]:
         """What this server can hold, per capability class, and why not; `enabled:
-        false` is an answer, not an error. A client-sized class may be sized with
+        false` is an answer, not an error. A row's `goal` is the size its automatic pick
+        aims at and never exceeds (`params_b`, and the ruling it comes from), or null for
+        a class that has none. A client-sized class may be sized with
         `?class=&context_tokens=&concurrency=`.
         """
         record = config.capability

@@ -47,12 +47,25 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
 def _from_catalog(
     load: Callable[..., dict[str, Any]],
     *families: str,
-    min_params_b: float | None = None,
     aliases: bool = False,
 ) -> CatalogCandidates:
-    return CatalogCandidates(
-        load, families or None, min_params_b, aliases, CATALOG_DIRECTORY.get(load)
-    )
+    return CatalogCandidates(load, families or None, aliases, CATALOG_DIRECTORY.get(load))
+
+
+@dataclass(frozen=True)
+class Goal:
+    """The size a verb is meant to run at (docs/VERB-SIZING.md rule 2). The automatic pick
+    never goes above it; below it the verb is smaller, never off."""
+
+    params_b: float
+    source: str
+
+    @property
+    def words(self) -> str:
+        return f"{self.params_b:g}B"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"params_b": self.params_b, "source": self.source}
 
 
 @dataclass(frozen=True)
@@ -63,19 +76,34 @@ class CapabilityClass:
     plainly: str
     noun: str
     candidates: Callable[[str], tuple[Candidate, ...]] | None
-    binary_note: str = ""
     routable: bool = False
     work: "WorkingContext | None" = None
     client_sized: bool = False
+    goal: "Goal | None" = None
 
-    @property
-    def min_params_b(self) -> float | None:
-        if isinstance(self.candidates, CatalogCandidates):
-            return self.candidates.min_params_b
-        return None
+    def pick_order(self, found: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
+        """The candidates the automatic pick may take, best first (docs/VERB-SIZING.md
+        rule 3): at or below the goal, the most parameters, then the highest precision,
+        then a model's own form before a `weights_of` alias of it (the alias is the same
+        weights with more to hold). The catalog's order, largest need first, settles the
+        rest. A class with no goal keeps the catalog's order whole."""
+        if self.goal is None:
+            return found
+        for candidate in found:
+            if candidate.params_b is None or candidate.bits is None:
+                missing = "params_b" if candidate.params_b is None else "bits"
+                raise ValueError(
+                    f"{candidate.id} is a candidate for {self.name}, whose goal is "
+                    f"{self.goal.words}, and its manifest states no {missing} for this "
+                    "backend: the pick ranks by both. State it in the manifest"
+                )
+        return tuple(
+            sorted(
+                (c for c in found if c.params_b <= self.goal.params_b),
+                key=lambda c: (-c.params_b, -c.bits, c.alias),
+            )
+        )
 
-
-NINE_B_FLOOR = 9
 
 DECIDE_STATE_TOKENS = 8192
 
@@ -98,14 +126,30 @@ BATCHED_BLOCKS_WORK = WorkingContext(
     ),
 )
 
-TRANSLATIONS_FLOOR_NOTE = (
-    "The floor for {work} is the 9B, for translation's reason: a host that "
-    "cannot hold a 9B cannot do this work at all."
+TEXT_MODELS = _from_catalog(load_all_manifests, *TEXT_FAMILIES)
+
+CHAT_GOAL = Goal(
+    params_b=27,
+    source=(
+        "Owen 2026-10-09: \"chat should shoot for 27b\"; translate, simplify and "
+        "analysis share it (docs/VERB-SIZING.md rule 2)"
+    ),
 )
 
+DECIDE_GOAL = Goal(
+    params_b=9,
+    source=(
+        "Owen 2026-10-09: \"decide shoots for 9b\" and \"each job should have a goal "
+        "- 9b 16 bit for decide, for example\" (docs/VERB-SIZING.md rule 2)"
+    ),
+)
 
-NINE_B_TEXT_MODELS = _from_catalog(
-    load_all_manifests, *TEXT_FAMILIES, min_params_b=NINE_B_FLOOR
+CLEAN_GOAL = Goal(
+    params_b=9,
+    source=(
+        "docs/VERB-SIZING.md rule 2: clean's goal is 9B; cleanup was always "
+        "9B-class work (docs/MODEL-CHOICE.md section 1)"
+    ),
 )
 
 
@@ -133,49 +177,41 @@ CLASSES: tuple[CapabilityClass, ...] = (
         purpose="cleanup and the other 9B-class text work",
         plainly="clean up text",
         noun="qwen3.5 variants",
-        candidates=_from_catalog(load_all_manifests, "qwen3.5", min_params_b=NINE_B_FLOOR),
-        binary_note=(
-            "This build ships no 4-bit 9B, and the 4B and 0.8B it does ship are "
-            "below cleanup's 9B floor, so there is nothing smaller to fall back "
-            "to (docs/internals/engines-and-capability.md, \"Classes\")."
-        ),
+        candidates=_from_catalog(load_all_manifests, "qwen3.5"),
+        goal=CLEAN_GOAL,
     ),
     CapabilityClass(
         name="translate",
         job_type="llm",
         routable=True,
         work=BATCHED_BLOCKS_WORK,
-        purpose="translation, which needs a 27B-class model",
+        purpose="translation, with a 27B as its goal",
         plainly="translate",
         noun=TEXT_FAMILIES_NOUN,
-        candidates=NINE_B_TEXT_MODELS,
-        binary_note=(
-            "The floor for translation is the 9B, not the 27B — so a host that "
-            "cannot translate cannot hold a 9B either, and nothing smaller is "
-            "coming (docs/MODEL-CHOICE.md section 1)."
-        ),
+        candidates=TEXT_MODELS,
+        goal=CHAT_GOAL,
     ),
     CapabilityClass(
         name="simplify",
         job_type="llm",
         routable=True,
         work=BATCHED_BLOCKS_WORK,
-        purpose="simplification, which runs on the same 27B translation needs",
+        purpose="simplification, with translation's 27B goal",
         plainly="simplify text",
         noun=TEXT_FAMILIES_NOUN,
-        candidates=NINE_B_TEXT_MODELS,
-        binary_note=TRANSLATIONS_FLOOR_NOTE.format(work="simplification"),
+        candidates=TEXT_MODELS,
+        goal=CHAT_GOAL,
     ),
     CapabilityClass(
         name="analysis",
         job_type="llm",
         routable=True,
         work=BATCHED_BLOCKS_WORK,
-        purpose="structured analysis answers, on the same 27B",
+        purpose="structured analysis answers, with translation's 27B goal",
         plainly="analyse text",
         noun=TEXT_FAMILIES_NOUN,
-        candidates=NINE_B_TEXT_MODELS,
-        binary_note=TRANSLATIONS_FLOOR_NOTE.format(work="analysis"),
+        candidates=TEXT_MODELS,
+        goal=CHAT_GOAL,
     ),
     CapabilityClass(
         name="generate",
@@ -194,11 +230,11 @@ CLASSES: tuple[CapabilityClass, ...] = (
                 "LOCAL_FIELD_CTX_MAX, 40960)"
             ),
         ),
-        purpose="open-ended text generation, on the 9B-and-up text models",
+        purpose="open-ended text generation, with a 27B as its goal",
         plainly="generate text",
         noun=TEXT_FAMILIES_NOUN,
-        candidates=NINE_B_TEXT_MODELS,
-        binary_note=TRANSLATIONS_FLOOR_NOTE.format(work="generation"),
+        candidates=TEXT_MODELS,
+        goal=CHAT_GOAL,
     ),
     CapabilityClass(
         name="decide",
@@ -220,6 +256,7 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="decide",
         noun=TEXT_FAMILIES_NOUN,
         candidates=_from_catalog(load_all_manifests, *TEXT_FAMILIES, aliases=True),
+        goal=DECIDE_GOAL,
     ),
     CapabilityClass(
         name="pages",
@@ -395,16 +432,18 @@ __all__ = [
     "BATCHED_BLOCKS_WORK",
     "BY_NAME",
     "CATALOG_DIRECTORY",
+    "CHAT_GOAL",
     "CLASSES",
+    "CLEAN_GOAL",
     "CapabilityClass",
+    "DECIDE_GOAL",
     "DECIDE_STATE_TOKENS",
     "GENERATE_DEFAULT_TOKENS",
-    "NINE_B_FLOOR",
-    "NINE_B_TEXT_MODELS",
+    "Goal",
     "ROUTABLE_CLASSES",
     "SELECTABLE_CLASSES",
     "TEXT_FAMILIES",
-    "TRANSLATIONS_FLOOR_NOTE",
+    "TEXT_MODELS",
     "classes_for_job_type",
     "classes_for_model",
     "models_by_class",

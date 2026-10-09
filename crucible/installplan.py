@@ -8,6 +8,7 @@ from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass, classes_for_jo
 from .capabilityrecord import desktop_reserve_words
 from .capabilitywords import (
     describe_card,
+    goal_phrase,
     needs_phrase,
     serving_refusal_note,
     serving_summary,
@@ -44,6 +45,25 @@ def _why_not_best(
     return f" {decision.selected} is the one chosen in Settings; {best.id} would also fit."
 
 
+def _best(entry: CapabilityClass, decision: Decision) -> "Candidate | None":
+    """The candidate the class would take on a card with room for all of them: the first
+    of its pick order (CapabilityClass.pick_order), so never one above its goal."""
+    ranked = entry.pick_order(decision.candidates)
+    return ranked[0] if ranked else None
+
+
+def _goal_words(
+    entry: CapabilityClass, decision: Decision, picked: Candidate, card: "CardFacts | None"
+) -> str:
+    if entry.goal is None or decision.chosen:
+        return ""
+    usable = tuple(c for c in decision.candidates if not c.lacks(card))
+    phrase = goal_phrase(
+        entry, picked, entry.pick_order(usable), entry.work, decision.available_bytes, card
+    )
+    return f" ({phrase})"
+
+
 def _class_line(
     entry: CapabilityClass, decision: Decision, card: "CardFacts | None"
 ) -> str:
@@ -57,10 +77,11 @@ def _class_line(
         return f"Can {entry.plainly}, using {decision.selected}."
     line = (
         f"Will {entry.plainly} with {picked.id}{shown_precision(picked, card)}"
+        f"{_goal_words(entry, decision, picked, card)}"
         f"{serving_summary(picked, decision.available_bytes)}."
     )
-    best = decision.candidates[0]
-    if best.id != picked.id:
+    best = _best(entry, decision)
+    if best is not None and best.id != picked.id:
         line += _why_not_best(decision, best, entry.work, card)
     return line
 
@@ -71,13 +92,15 @@ def _class_row(
     picked = next(
         (c for c in decision.candidates if c.id == decision.selected), None
     )
+    best = _best(entry, decision)
     return {
         "capability": entry.name,
         "enabled": decision.enabled,
         "selected": decision.selected,
         "precision": None if picked is None else picked.precision_on(card),
         "reduced_precision": False if picked is None else picked.degraded_on(card),
-        "best": None if not decision.candidates else decision.candidates[0].id,
+        "best": None if best is None else best.id,
+        "goal": None if entry.goal is None else entry.goal.to_dict(),
         "lacking_features": list(decision.lacking_features),
         "line": _class_line(entry, decision, card),
     }

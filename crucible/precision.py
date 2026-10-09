@@ -46,7 +46,9 @@ def repo_bits(hf_repo: str) -> int | None:
     return None
 
 
-def weight_bits(spec: Any) -> int | None:
+def implied_bits(spec: Any) -> int | None:
+    """The bits a block's other facts imply: its GGUF file's quantization, its repo's
+    precision suffix, or its stated dtype, in that order."""
     file = getattr(spec, "file", None)
     if file:
         found = gguf_bits(file)
@@ -61,6 +63,16 @@ def weight_bits(spec: Any) -> int | None:
     if dtype is not None:
         return _DTYPE_BITS.get(dtype)
     return None
+
+
+def weight_bits(spec: Any) -> int | None:
+    """A block's weight precision: its own `bits` where the manifest states it (every
+    model manifest in crucible/models does, and the parse refuses one that disagrees with
+    implied_bits), else what its other facts imply."""
+    stated = getattr(spec, "bits", None)
+    if stated is not None:
+        return stated
+    return implied_bits(spec)
 
 
 def below_floor(bits: int | None) -> bool:
@@ -87,6 +99,7 @@ __all__ = [
     "MIN_WEIGHT_BITS",
     "below_floor",
     "gguf_bits",
+    "implied_bits",
     "label",
     "repo_bits",
     "weight_bits",

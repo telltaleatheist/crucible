@@ -75,15 +75,12 @@ def test_serving_variant_has_one_home_both_ladders_use() -> None:
     assert asrplan.LADDER_BACKEND == CUDA_LINUX
 
 
-def test_the_batched_classes_share_one_working_context_and_one_floor_note() -> None:
+def test_the_batched_classes_share_one_working_context_and_one_goal() -> None:
     by_name = capabilityclasses.BY_NAME
     for name in ("translate", "simplify", "analysis"):
         assert by_name[name].work is capabilityclasses.BATCHED_BLOCKS_WORK
-    assert by_name["simplify"].binary_note == (
-        "The floor for simplification is the 9B, for translation's reason: a host "
-        "that cannot hold a 9B cannot do this work at all."
-    )
-    assert by_name["generate"].candidates is capabilityclasses.NINE_B_TEXT_MODELS
+        assert by_name[name].goal is capabilityclasses.CHAT_GOAL
+    assert by_name["generate"].candidates is capabilityclasses.TEXT_MODELS
 
 
 def _spec(args: tuple[str, ...]) -> BackendSpec:

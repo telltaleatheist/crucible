@@ -24,6 +24,7 @@ thinking = false
 engine = "vllm"
 hf_repo = "owenmorgan/qwen3.5-4b-bside-w4a16"
 revision = "8869af2a0add5fbd96c7f400a2376be48c805f36"
+bits = 4
 serves = ["text"]
 memory_bytes_estimate = 5_300_000_000
 engine_args = [

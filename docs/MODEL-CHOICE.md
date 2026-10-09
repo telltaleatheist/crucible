@@ -5,6 +5,12 @@ is the contract the settings doors in BookForge and Foundry are built against.
 
 NOT BUILT except where a section says otherwise. Written the day it was given.
 
+> **PARTLY REVERSED, 2026-10-09** (`docs/VERB-SIZING.md`, phase 1 built). The 9B floor of
+> sections 0 and 1 and the addendum of 2026-09-23 are gone: every text verb runs down to the
+> 0.8B, and a goal per verb (27B for translate, simplify, analysis and generate; 9B for clean
+> and decide) caps the automatic pick instead. The default of section 2 is now "the most
+> parameters at or below the goal that fit, then the most bits". The rest stands.
+
 ## 0. The ruling, in his words
 
 > *"the user can pick a model to use for translate/simplify/etc, but they cant
@@ -45,7 +51,8 @@ and
 That was Owen's ruling of 2026-09-13 — *"translation is binary per server as
 well. it should use a 27b to translate. if 27b doesnt fit on the card then it
 cant translate."* It is now withdrawn. **The floor for translate, simplify and
-analysis is the 9B**, not the 27B. `clean` is unchanged: it was always 9B-class.
+analysis is the 9B**, not the 27B. *(REVERSED 2026-10-09: there is no floor; see
+`docs/VERB-SIZING.md` section 5.)* `clean` is unchanged: it was always 9B-class.
 
 The three classes stay three classes. That part of the 2026-09-13 ruling stands
 for its own reason, which was never about size: *"they can't lie to the user and
@@ -55,7 +62,9 @@ say a translate job is running when it's actually a simplify job."*
 
 The old shape had Crucible pick: candidates ordered by declared size, best-first,
 take the first that fits. That is still the DEFAULT and is still what an app gets
-by choosing nothing. What changes is that the order is no longer the only
+by choosing nothing. *(REVERSED for the text classes 2026-10-09: the default is the most
+parameters at or below the class's goal that fit, then the most bits;
+`docs/VERB-SIZING.md` rule 3.)* What changes is that the order is no longer the only
 argument, because size is not the only axis a person cares about:
 
 > *"for some things, id want to use a 9b quantized to 16 bit instead of a 27b 4
@@ -232,6 +241,11 @@ comes out with the same change.
 produces cannot be told apart afterwards from one that fit.
 
 ## Addendum, 2026-09-23: the floor is a number on the class
+
+> **REVERSED 2026-10-09** (`docs/VERB-SIZING.md` sections 5 and 7). `min_params_b`,
+> `CatalogCandidates.min_params_b` and `NINE_B_FLOOR` are removed; the class carries a goal
+> (`CapabilityClass.goal`) instead, which caps the automatic pick from above and refuses
+> nothing smaller.
 
 Section 1's floor — *"they cant pick smaller than 9b"* — was, until today, a side effect:
 `clean` read the `qwen3.5` family and `translate`/`simplify`/`analysis` read `qwen3.8` and

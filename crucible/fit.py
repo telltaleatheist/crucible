@@ -44,6 +44,11 @@ class Candidate:
     # Set by on_host when this host holds the model under `[audio] low_vram`: the whole
     # figure memory_bytes_estimate stood at before it became the held one.
     whole_bytes: int | None = None
+    # The manifest's `[model] params_b`, where its catalog states one: the first key of a
+    # goal class's pick (docs/VERB-SIZING.md rule 3).
+    params_b: float | None = None
+    # A `weights_of` alias: the same weights as its base, served another way.
+    alias: bool = False
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
@@ -66,6 +71,8 @@ class Candidate:
                 or asrplan.ladder_for(manifest, spec, backend_kind)
             ),
             low_vram_bytes=getattr(spec, "low_vram_memory_bytes_estimate", None),
+            params_b=getattr(manifest, "params_b", None),
+            alias=getattr(manifest, "weights_of", None) is not None,
         )
 
     @property
@@ -172,6 +179,8 @@ class Candidate:
             "low_vram_bytes": self.low_vram_bytes,
             "low_vram": self.held_low_vram,
             "whole_bytes": self.whole_bytes,
+            "params_b": self.params_b,
+            "alias": self.alias,
         }
 
 
@@ -258,7 +267,6 @@ def forget_cached_catalogs() -> None:
 class CatalogCandidates:
     load: Callable[..., dict[str, Any]]
     families: tuple[str, ...] | None = None
-    min_params_b: float | None = None
     aliases: bool = False
     directory: Callable[[], Path] | None = None
 
@@ -277,8 +285,6 @@ class CatalogCandidates:
         found: list[Candidate] = []
         for manifest in catalog.values():
             if self.families is not None and manifest.family not in self.families:
-                continue
-            if self.min_params_b is not None and manifest.params_b < self.min_params_b:
                 continue
             if not self.aliases and getattr(manifest, "weights_of", None) is not None:
                 continue

@@ -28,9 +28,10 @@ WITHOUT_LOCAL = [
 
 CLASSES = {
     "dots-ocr": ["pages"],
-    "qwen3.5-0.8b": ["decide"],
-    "qwen3.5-2b": ["decide"],
-    "qwen3.5-4b": ["decide"],
+    # every text verb runs down to the small tiers (docs/VERB-SIZING.md rule 1)
+    "qwen3.5-0.8b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
+    "qwen3.5-2b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
+    "qwen3.5-4b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
     "qwen3.5-9b": [
         "clean", "translate", "simplify", "analysis", "generate", "decide"
     ],

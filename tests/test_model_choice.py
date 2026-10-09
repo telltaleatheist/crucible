@@ -7,6 +7,7 @@ from crucible.verdict import decide, decide_all
 
 THREE_NINETY_TI = 25_757_220_864
 TWELVE_GIG = 12 * 1024 ** 3
+FOUR_GIG = 4 * 1024 ** 3
 DESKTOP = 3 * 1024 ** 3
 
 
@@ -26,8 +27,10 @@ def test_simplify_and_analysis_moved_with_it() -> None:
         assert {c.id for c in a_class(name).candidates("cuda-linux")} == translate
 
 
-def test_clean_did_not_move() -> None:
-    assert {c.id for c in a_class("clean").candidates("cuda-linux")} == {"qwen3.5-9b"}
+def test_clean_reaches_down_to_the_0_8b_and_stays_in_its_family() -> None:
+    assert {c.id for c in a_class("clean").candidates("cuda-linux")} == {
+        "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"
+    }
 
 
 def test_the_best_model_is_still_chosen_by_default_on_a_card_that_holds_it() -> None:
@@ -71,7 +74,7 @@ def test_the_noun_names_the_set_it_counts() -> None:
         audio_low_vram=False,
     )
     assert "qwen3.8 and qwen3.5 variants" in decision.reason
-    assert "qwen3.5-9b" in decision.reason
+    assert decision.selected in decision.reason
 
 
 def test_a_refused_routable_class_names_the_upstream() -> None:
@@ -79,7 +82,7 @@ def test_a_refused_routable_class_names_the_upstream() -> None:
         decision = decide(
             a_class(name),
             "cuda-linux",
-            total_bytes=TWELVE_GIG,
+            total_bytes=FOUR_GIG,
             desktop_allowance_bytes=DESKTOP,
             gpu_vendor="nvidia",
             chosen=None,

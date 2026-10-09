@@ -15,6 +15,9 @@ MLX_DARWIN = "mlx-darwin"
 
 LLAMA_WINDOWS = "llama-windows"
 
+# The vendor a build with no accelerator reports: its pool is system memory.
+CPU_VENDOR = "cpu"
+
 BACKEND_KINDS: tuple[str, ...] = (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS)
 
 WSL_NVIDIA_SMI = "/usr/lib/wsl/lib/nvidia-smi"
@@ -326,7 +329,7 @@ def detect_windows(arch: str) -> Backend:
             kind=LLAMA_WINDOWS,
             platform="windows",
             arch=arch,
-            gpu=Gpu(vendor="cpu", name="cpu", vram_bytes=physical_memory_bytes()),
+            gpu=Gpu(vendor=CPU_VENDOR, name="cpu", vram_bytes=physical_memory_bytes()),
             detail="llama.cpp cpu build; no NVIDIA card answered nvidia-smi",
         )
     return Backend(

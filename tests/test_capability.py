@@ -30,7 +30,7 @@ CUDA_RESERVE = 3 * GIB
 
 THREE_NINETY = FAKE_BACKEND.gpu.vram_bytes
 STUDIO = FAKE_MAC_BACKEND.gpu.vram_bytes
-MAC_RESERVE = default_desktop_allowance_bytes("mlx-darwin", STUDIO)
+MAC_RESERVE = default_desktop_allowance_bytes("mlx-darwin", STUDIO, "apple")
 
 SIX_GIG = 6 * GIB
 
@@ -71,7 +71,7 @@ def test_the_mac_selects_the_8bit_27b_over_the_4bit() -> None:
     )
     ids = [c.id for c in verdict.candidates]
     assert ids[0] == "qwen3.8-27b-8bit", "best-first must still walk largest first"
-    assert verdict.fit_count == 3
+    assert verdict.fit_count == 6, "the two 27Bs, the 9B and the three small tiers"
 
 
 def test_best_precision_first_not_smallest_that_fits() -> None:
@@ -79,10 +79,10 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     assert verdict.selected == "qwen3.8-27b-8bit", (
         "with room for both, the rule must take the better one, not the smaller"
     )
-    assert verdict.fit_count == 3
+    assert verdict.fit_count == 6
     pc = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
     assert pc.selected == "qwen3.8-27b-4bit"
-    assert pc.fit_count == 2
+    assert pc.fit_count == 5
     assert "qwen3.8-27b-8bit" not in [c.id for c in pc.candidates]
 
 
@@ -111,10 +111,11 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
     )) is False
 
 
-def test_translate_is_binary_per_server_and_says_so_when_it_is_off() -> None:
+def test_translate_is_off_only_where_even_the_0_8b_does_not_fit_and_says_so() -> None:
     verdict = _decide("translate", "cuda-linux", SIX_GIG, CUDA_RESERVE)
     assert verdict.enabled is False
-    assert "cannot translate" in verdict.reason
+    assert "the smallest of 5 qwen3.8 and qwen3.5 variants is qwen3.5-0.8b" in verdict.reason
+    assert verdict.summary.startswith("cannot translate")
 
 
 def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
@@ -135,7 +136,7 @@ def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
     assert job_type_enabled("rvc", decisions) is True
 
 
-def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
+def test_llm_survives_and_translate_gets_smaller_rather_than_off() -> None:
     decisions = decide_all(
         "cuda-linux",
         total_bytes=24 * GIB,
@@ -146,7 +147,9 @@ def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["pages"].enabled is True
-    assert by_name["translate"].enabled is False
+    assert by_name["translate"].selected == "qwen3.5-4b", (
+        "16 GiB holds no 27B and no bf16 9B; translate runs on the largest that fits"
+    )
     assert job_type_enabled("llm", decisions) is True
 
 
@@ -705,12 +708,12 @@ def test_a_routed_class_summarises_where_the_work_goes() -> None:
     assert "cannot" not in row.summary
 
 
-def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
+def test_generate_is_one_routable_client_sized_class_with_the_27b_goal() -> None:
     entry = BY_NAME["generate"]
     assert entry.job_type == "llm"
     assert entry.routable is True
     assert entry.client_sized is True
-    assert entry.min_params_b == capabilityclasses.NINE_B_FLOOR == 9
+    assert entry.goal is capabilityclasses.CHAT_GOAL and entry.goal.params_b == 27
     assert entry.work is not None
     assert (entry.work.tokens, entry.work.concurrency) == (8192, 1)
     assert entry.work.tokens == capabilityclasses.GENERATE_DEFAULT_TOKENS
@@ -723,7 +726,7 @@ def test_generate_is_one_routable_client_sized_class_on_the_9b_floor() -> None:
     assert "generate" in classnames.ROUTABLE_CLASSES
     for kind in ("cuda-linux", "mlx-darwin", "llama-windows"):
         ids = {c.id for c in entry.candidates(kind)}
-        assert ids and not ids & {"qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"}, (kind, ids)
+        assert {"qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"} <= ids, (kind, ids)
 
 
 def test_a_ceiling_is_the_smaller_of_what_is_served_and_what_memory_affords() -> None:
@@ -822,21 +825,28 @@ def test_the_fit_follows_the_clients_stated_context(make_client, auth) -> None:
 def test_a_context_above_the_ceiling_is_refused_by_name_and_never_clamped(
     make_client, auth
 ) -> None:
+    """A long request gets a smaller model (docs/VERB-SIZING.md 1a.2): 70000 tokens is
+    past the 9B's 65536 and is served by the 4B; past every model's 131072 it is refused."""
     decided = _generate_record("cuda-linux", THREE_NINETY, CUDA_RESERVE, "nvidia")
     with make_client(capability=decided) as instance:
-        body = instance.get(
+        long = instance.get(
             "/v1/capability?class=generate&context_tokens=70000", headers=auth
         )
+        body = instance.get(
+            "/v1/capability?class=generate&context_tokens=140000", headers=auth
+        )
+    assert long.status_code == 200, long.text
+    assert _rows(long)["generate"]["selected"] == "qwen3.5-4b"
     assert body.status_code == 400, body.text
     error = body.json()["error"]
     assert error["code"] == "context_over_limit"
     details = error["details"]
-    assert details["requested"] == {"tokens": 70000, "concurrency": 1}
-    assert details["ceiling"]["tokens"] == 65536
-    assert details["ceiling"]["model"] == "qwen3.5-9b"
+    assert details["requested"] == {"tokens": 140000, "concurrency": 1}
+    assert details["ceiling"]["tokens"] == 131072
+    assert details["ceiling"]["model"] == "qwen3.5-4b"
     assert details["ceiling"]["bound_by"] == "served"
     assert details["ceiling"]["served_context_source"]
-    assert "70000" in error["message"] and "65536" in error["message"]
+    assert "140000" in error["message"] and "131072" in error["message"]
 
 
 def test_a_mac_serves_what_the_card_cannot(make_client, auth) -> None:

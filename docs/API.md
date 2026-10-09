@@ -271,7 +271,7 @@ Crucible's own verdict about this host: which classes are enabled, which model e
 
 ### `GET /v1/capability`
 
-What this server can hold, per capability class, and why not; `enabled: false` is an answer, not an error. A client-sized class may be sized with `?class=&context_tokens=&concurrency=`.
+What this server can hold, per capability class, and why not; `enabled: false` is an answer, not an error. A row's `goal` is the size its automatic pick aims at and never exceeds (`params_b`, and the ruling it comes from), or null for a class that has none. A client-sized class may be sized with `?class=&context_tokens=&concurrency=`.
 
 *Door:* token + `X-Crucible-Api: 1`
 

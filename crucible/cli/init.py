@@ -15,6 +15,7 @@ from ..capabilityrecord import (
     DESKTOP_BASIS_STATED,
 )
 from ..config import (
+    CARD_DESKTOP_ALLOWANCE_FRACTION,
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -147,7 +148,9 @@ def _decide_reserve(
                 "stated, kept from the config this replaced; "
                 "`crucible capability --measure-desktop` re-measures it",
             )
-    declared = default_desktop_allowance_bytes(backend.kind, backend.gpu.vram_bytes)
+    declared = default_desktop_allowance_bytes(
+        backend.kind, backend.gpu.vram_bytes, backend.gpu.vendor
+    )
     if backend.kind == MLX_DARWIN:
         return (
             declared,
@@ -414,10 +417,11 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "not count as somebody's job. Stating it always wins. Otherwise, on "
             "an NVIDIA card with nothing of Crucible's on it, init MEASURES the "
             "desktop (peak + max(peak, 1 GiB), at most 3 GiB); else defaults PER "
-            f"BACKEND: cuda {DEFAULT_DESKTOP_ALLOWANCE_BYTES} = 3 GiB flat, "
-            f"mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION * 100:.0f}%% of unified memory "
-            "because the model and the whole OS share one pool. Use 0 on a "
-            "headless box"
+            f"BACKEND: a card {CARD_DESKTOP_ALLOWANCE_FRACTION * 100:.1f}%% of its VRAM, "
+            f"between 1 GiB and {DEFAULT_DESKTOP_ALLOWANCE_BYTES} = 3 GiB (a CPU build "
+            f"3 GiB flat), mlx-darwin {MLX_DESKTOP_ALLOWANCE_FRACTION * 100:.0f}%% of "
+            "unified memory because the model and the whole OS share one pool. Use 0 "
+            "on a headless box"
         ),
     )
     init.set_defaults(func=cmd_init)
