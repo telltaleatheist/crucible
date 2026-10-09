@@ -285,8 +285,15 @@ One line, and it is the whole install:
 
 ```bash
 curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh \
-  | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm --min-free-gib 60
+  | CRUCIBLE_INIT_TOKEN="$CRUCIBLE_TOKEN" sh -s -- --token-env --host 0.0.0.0 --install llm --min-free-gib 60
 ```
+
+The token rides in the environment of `sh` (the `CRUCIBLE_INIT_TOKEN=... sh` prefix), and
+`--token-env` reads it from there. A process's environment is readable only by its own
+user and root; its argv is readable by every user of the box (`ps aux`) for as long as it
+runs, which for an install is minutes. `--token "$CRUCIBLE_TOKEN"` still works and puts
+the token on that list. `--token-env` with the variable unset or empty is refused
+`token_env_empty`, never a minted token in its place.
 
 It ends by printing the `crucible://` lines — one per address the box is reachable on —
 and that line is what gets pasted into an app's Connect door. There is **no pairing file
@@ -297,7 +304,7 @@ holds the loopback line; a remote server is connected by the connect code and no
 
 | | |
 |---|---|
-| **a token** | `--token` (or let it mint one and read it back with `crucible token --url`). Pick it before you start if two apps on two machines are going to use it. |
+| **a token** | `--token-env` with it in `$CRUCIBLE_INIT_TOKEN`, as above (or let it mint one and read it back with `crucible token --url`). Pick it before you start if two apps on two machines are going to use it. |
 | **the bind address** | `--host 0.0.0.0`. The default is `127.0.0.1` and a loopback-bound droplet is a droplet nothing can reach. `crucible serve` prints "bound beyond loopback: the bearer token is the only lock." |
 | **the port** | `7100` unless `--port` says otherwise. |
 | **the firewall** | Crucible opens nothing. The droplet's cloud firewall AND `ufw` (if the image enables it) both have to allow inbound `7100` from wherever the apps are. Prefer a tailnet address over the public IP; the bearer is the only other lock. |
@@ -318,7 +325,7 @@ rather than a guess:
 ### Installing a branch rather than a release
 
 ```bash
-curl -fsSL .../install.sh | sh -s -- --from-source feat/phase6-remote-render --token "$T" --host 0.0.0.0
+curl -fsSL .../install.sh | CRUCIBLE_INIT_TOKEN="$T" sh -s -- --from-source feat/phase6-remote-render --token-env --host 0.0.0.0
 ```
 
 A separate ROUTE and never a fallback: a download that failed is still

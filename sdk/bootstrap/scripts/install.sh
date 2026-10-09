@@ -12,7 +12,12 @@ usage() {
 crucible install.sh — install or remove a Crucible on this machine.
 
 Install:
-  --token <t>          use this bearer token instead of minting one
+  --token-env          read the bearer token from $CRUCIBLE_INIT_TOKEN instead of
+                       minting one, so it is never on a command line:
+                       curl ... | CRUCIBLE_INIT_TOKEN="$T" sh -s -- --token-env
+  --token <t>          use this bearer token instead of minting one. It is on
+                       sh's command line, which every user of the machine can
+                       read (ps aux) while the install runs; prefer --token-env
   --host <addr>        bind address for the server (default 127.0.0.1;
                        a rented box is reached over the network, so it
                        wants 0.0.0.0 — the bearer token is the lock)
@@ -41,6 +46,7 @@ UNINSTALL=0
 PURGE_WEIGHTS=0
 DRY_RUN=0
 TOKEN=""
+TOKEN_ENV=0
 BIND=""
 JOB_TYPES=""
 FROM_SOURCE=""
@@ -53,6 +59,7 @@ while [ $# -gt 0 ]; do
     --purge-weights) PURGE_WEIGHTS=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --token) need $# "--token"; shift; TOKEN="$1" ;;
+    --token-env) TOKEN_ENV=1 ;;
     --host) need $# "--host"; shift; BIND="$BIND --host $1" ;;
     --port) need $# "--port"; shift; BIND="$BIND --port $1" ;;
     --install) need $# "--install"; shift; JOB_TYPES="$JOB_TYPES $1" ;;
@@ -67,6 +74,12 @@ while [ $# -gt 0 ]; do
 done
 if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then
   die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"
+fi
+if [ "$TOKEN_ENV" = 1 ]; then
+  [ -z "$TOKEN" ] || die "token_twice: --token and --token-env both name a token, and two answers to one question is not a thing this installer picks between. Pass one"
+  TOKEN="${CRUCIBLE_INIT_TOKEN:-}"
+  [ -n "$TOKEN" ] || die "token_env_empty: --token-env reads the token from \$CRUCIBLE_INIT_TOKEN, and it is not set for this sh. Set it on sh itself (curl ... | CRUCIBLE_INIT_TOKEN=<token> sh -s -- --token-env), or drop --token-env and let the install mint one"
+  unset CRUCIBLE_INIT_TOKEN
 fi
 if [ "$UNINSTALL" = 1 ] && [ -n "$ROLLBACK_TO" ]; then
   die "flag_needs_install: --rollback-to names a release to INSTALL and means nothing with --uninstall"

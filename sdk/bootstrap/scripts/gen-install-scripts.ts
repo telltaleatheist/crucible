@@ -8,7 +8,7 @@ import { DESKTOP_PACKAGES, interpreterFor, interpreterUrl } from '../src/interpr
 import { HOST_BACKEND, RELEASE_REPO, wheelAssetName, wheelShaAssetName } from '../src/release.js';
 import { activateRuntimeSh, CURL_ARGS, DOWNLOADS_SUBDIR, HOST_SUBDIR, PARTIAL_SUFFIX, SERVER_SUBDIR, STAMP_NAME, TAR_ARGS } from '../src/runtime.js';
 import type { RunResult } from '../src/runner.js';
-import { installJobTypesSh, installSteps, interpreterSh, serverPreludeSh, uninstallSh, wheelFetchSh, wheelInstallSh, type StepPlan } from '../src/steps.js';
+import { INIT_TOKEN_ENV, installJobTypesSh, installSteps, interpreterSh, serverPreludeSh, uninstallSh, wheelFetchSh, wheelInstallSh, type StepPlan } from '../src/steps.js';
 import { BOOTSTRAP_VERSION } from '../src/version.js';
 import { probeArgv, wslStates, type ProbeKey, type WslStateDef } from '../src/wsl-states.js';
 
@@ -69,7 +69,12 @@ function argumentsSh(): string {
     'crucible install.sh — install or remove a Crucible on this machine.',
     '',
     'Install:',
-    '  --token <t>          use this bearer token instead of minting one',
+    `  --token-env          read the bearer token from $${INIT_TOKEN_ENV} instead of`,
+    '                       minting one, so it is never on a command line:',
+    `                       curl ... | ${INIT_TOKEN_ENV}="$T" sh -s -- --token-env`,
+    '  --token <t>          use this bearer token instead of minting one. It is on',
+    "                       sh's command line, which every user of the machine can",
+    '                       read (ps aux) while the install runs; prefer --token-env',
     '  --host <addr>        bind address for the server (default 127.0.0.1;',
     '                       a rented box is reached over the network, so it',
     '                       wants 0.0.0.0 — the bearer token is the lock)',
@@ -98,6 +103,7 @@ function argumentsSh(): string {
     'PURGE_WEIGHTS=0',
     'DRY_RUN=0',
     'TOKEN=""',
+    'TOKEN_ENV=0',
     'BIND=""',
     'JOB_TYPES=""',
     'FROM_SOURCE=""',
@@ -110,6 +116,7 @@ function argumentsSh(): string {
     '    --purge-weights) PURGE_WEIGHTS=1 ;;',
     '    --dry-run) DRY_RUN=1 ;;',
     '    --token) need $# "--token"; shift; TOKEN="$1" ;;',
+    '    --token-env) TOKEN_ENV=1 ;;',
     '    --host) need $# "--host"; shift; BIND="$BIND --host $1" ;;',
     '    --port) need $# "--port"; shift; BIND="$BIND --port $1" ;;',
     '    --install) need $# "--install"; shift; JOB_TYPES="$JOB_TYPES $1" ;;',
@@ -125,10 +132,29 @@ function argumentsSh(): string {
     'if [ "$UNINSTALL" = 0 ] && [ "$PURGE_WEIGHTS" = 1 ]; then',
     '  die "flag_needs_uninstall: --purge-weights deletes weights and only means something with --uninstall"',
     'fi',
+    ...tokenEnvSh(),
     'if [ "$UNINSTALL" = 1 ] && [ -n "$ROLLBACK_TO" ]; then',
     '  die "flag_needs_install: --rollback-to names a release to INSTALL and means nothing with --uninstall"',
     'fi',
   ].join('\n');
+}
+
+/**
+ * `--token-env`: the token arrives in $CRUCIBLE_INIT_TOKEN, the variable
+ * `crucible init --token-env` reads, so the one-liner never puts it on sh's
+ * argv. It is read into the script's own (unexported) TOKEN and the variable
+ * is unset at once, so no download, pip or systemctl this script runs inherits
+ * it; the init step hands it on again in that one command's environment.
+ */
+export function tokenEnvSh(): string[] {
+  return [
+    'if [ "$TOKEN_ENV" = 1 ]; then',
+    '  [ -z "$TOKEN" ] || die "token_twice: --token and --token-env both name a token, and two answers to one question is not a thing this installer picks between. Pass one"',
+    `  TOKEN="\${${INIT_TOKEN_ENV}:-}"`,
+    `  [ -n "$TOKEN" ] || die "token_env_empty: --token-env reads the token from \\$${INIT_TOKEN_ENV}, and it is not set for this sh. Set it on sh itself (curl ... | ${INIT_TOKEN_ENV}=<token> sh -s -- --token-env), or drop --token-env and let the install mint one"`,
+    `  unset ${INIT_TOKEN_ENV}`,
+    'fi',
+  ];
 }
 
 function prerequisitesSh(): string {

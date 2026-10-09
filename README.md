@@ -65,7 +65,7 @@ curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/
 
 # a rented Linux GPU box, reached over the network — the bearer token is the lock
 curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh \
-  | sh -s -- --token "$CRUCIBLE_TOKEN" --host 0.0.0.0 --install llm --min-free-gib 60
+  | CRUCIBLE_INIT_TOKEN="$CRUCIBLE_TOKEN" sh -s -- --token-env --host 0.0.0.0 --install llm --min-free-gib 60
 
 # and off again, keeping the weights
 curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/install.sh | sh -s -- --uninstall

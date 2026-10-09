@@ -250,6 +250,20 @@ test('both installers refuse to install over a newer release, and take an exact-
   assert.match(ps1, /install_would_downgrade: \$HostDir is the \$haveRelease release/);
 });
 
+test('install.sh --token-env takes the token from the environment, so the one-liner never puts it on sh\'s argv', () => {
+  const sh = generateInstallSh();
+  assert.match(sh, /--token-env\) TOKEN_ENV=1 ;;/);
+  // Read once into the script's own unexported TOKEN, then unset, so no
+  // curl, pip or systemctl this script starts inherits it; init gets it back
+  // through the one prefix assignment the init step already makes.
+  assert.match(sh, /TOKEN="\$\{CRUCIBLE_INIT_TOKEN:-\}"\n\s*\[ -n "\$TOKEN" \] \|\| die "token_env_empty: [^"]*\\\$CRUCIBLE_INIT_TOKEN[^"]*"\n\s*unset CRUCIBLE_INIT_TOKEN\n/);
+  assert.match(sh, /\[ -z "\$TOKEN" \] \|\| die "token_twice: --token and --token-env/);
+  // The branch is decided before anything is downloaded or installed.
+  assert.ok(sh.indexOf('if [ "$TOKEN_ENV" = 1 ]') < sh.indexOf('say "host-facts"'));
+  // --token stays, and its help says what it costs.
+  assert.match(sh, /--token <t> {10}use this bearer token instead of minting one\. It is on\n {23}sh's command line/);
+});
+
 test('install.sh mints its own token and keeps an existing config\'s', () => {
   const sh = generateInstallSh();
   assert.match(sh, /if \[ -f "\$CRUCIBLE_HOME\/config\.toml" \]; then/);
