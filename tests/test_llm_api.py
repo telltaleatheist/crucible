@@ -173,8 +173,9 @@ def test_models_lists_every_manifest_with_its_standing(
     assert response.status_code == 200
     rows = {row["id"]: row for row in response.json()}
     assert [row["id"] for row in response.json()] == [
-        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
-        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
+        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-bside",
+        "qwen3.5-4b-bside-4bit", MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
+        "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     row = rows[MODEL]
     assert row["family"] == "qwen3.5"
@@ -217,8 +218,9 @@ def test_info_gains_an_llm_capability(
     by_type = {entry["job_type"]: entry for entry in capabilities}
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
-        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", MODEL, "qwen3.5-9b-vl",
-        SMALL_BIG_MODEL, "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
+        PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-bside",
+        "qwen3.5-4b-bside-4bit", MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
+        "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     info = llm_client.get("/v1/info", headers=auth).json()
     assert "load-model" in info["job_types"]
