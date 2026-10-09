@@ -31,7 +31,8 @@ endpoint and never learns what a Crucible is.
 
 Windows is never a backend. On win32 every verb reaches into a WSL2 distro through
 `wsl.exe -d <distro> --exec …`, and **which distro has one rule** (`docs/history/PHASE14-ENVPACKS.md`
-4b): the distro Crucible owns — `crucible`, imported by `ensureDistro()` — when there is
+4b): the distro Crucible owns — `crucible`, imported by the Windows host's tray (`install()`
+hands the move to it) — when there is
 one, else the distro the app names, else `no_wsl_distro`. There is still no "the default
 distro": that is whatever `wsl --set-default` last said, and a server read from the wrong
 guest is the wrong server. A machine with a `crucible` distro AND a config in the app's
@@ -50,7 +51,6 @@ release into `<CRUCIBLE_HOME>/server`, and every verb runs
 |---|---|---|
 | `detectHost({distro?, home?, release?})` | what this host (or its guest) has: `{platform, backend, wsl, wslState, gpu, guest, server, refusals}` | `wsl_missing` (with `wsl --install --no-distribution`), `no_wsl_distro`, `wsl_read_failed`, `unsupported_platform`; and, as entries in `refusals` beside each null: `no_nvidia_driver`, `not_apple_silicon`, `guest_missing_tool` |
 | `install({distro?, exact?, jobTypes, home?, release?, onLine, onStep?, bind?})` | host-facts → server-pack → `crucible init --token-env` → `crucible install <type>`… → `crucible service install` → (win32) `loginctl enable-linger` as root → `crucible capability --write` | every `detectHost` refusal, `bad_job_type`, `two_local_crucibles`, the pack refusals (`pack_manifest_unreadable`, `pack_not_published`, `pack_download_failed`, `pack_sha_mismatch`, `pack_disk`, `pack_unpack_failed`), `config_unreadable`, `config_missing_key`, and `step_failed` (a `BootstrapStepFailed` with the step, exit code, tail and the steps that finished) |
-| `ensureDistro({release, installDir?, downloadDir?, rootfsUrl?, onLine?})` | win32: the `crucible` distro exists, runs systemd and came from our rootfs — idempotent | `distro_unmarked`, `distro_import_failed`, `pack_download_failed`, `pack_sha_mismatch`, `wsl1_only`, `unsupported_platform` |
 | `detectWslState({release, appDistro?, requiredBytes?, checkNetwork?, guestUser?})` | win32: the first row of PHASE14 4c that matches, with the sentence and the action | nothing — every state IS an answer, `wsl_ready` included |
 | `ensureRunning({distro?, exact?, home?})` | `{running: true, pid, mechanism, definition, linger, enableLinger, started}` — a no-op when it already is | `no_server_pack`, `service_not_installed`, `service_failed` (with the status output and where the logs are), `no_local_config` |
 | `readLocalConfig({distro?, exact?, home?})` | `{name, url, token, configPath, via}` from the server's own `config.toml` | `no_local_config`, `no_wsl_distro`, `two_local_crucibles`, `wsl_read_failed`, `config_unreadable`, `config_missing_key` |

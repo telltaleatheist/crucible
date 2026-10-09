@@ -262,12 +262,17 @@ the code does not say by itself.
   `wsl --import` from Canonical's WSL image (series `24.04`, `current/`). Reasons:
   no interactive first-run prompt, no writes to a person's own distro, systemd is
   written rather than probed, and the GPU comes from the Windows driver.
+- **The import is the Windows host's, and only the host's** (`crucible/host/installer.py`,
+  the move's `import-distro` step). `install()` on win32 hands the whole move to the host's
+  door (`installThroughHost`), so an app never imports a distro itself. `distro.ts` keeps
+  the FACTS the host reads, generated into `platform/wsl_table.py`: the image and its sums
+  URL, the marker, `WSL_CONF_TEXT` and `finishImportScript`. Its own `ensureDistro()` (an
+  import, finish and terminate written a second time, which no app called and which had
+  none of the host's default-user settling) was removed in 1.0.115.
 - Canonical's `SHA256SUMS` beside the image is the digest's only owner; we store
   none. The sums file lists every image, so the row is found by filename, and a
   sums file that does not name our download (what `current/` moving looks like)
-  is refused by name. A caller-supplied `rootfsUrl` has no sums file; the caller
-  vouches for it. The image is downloaded on the Windows side (`curl.exe`,
-  verified with `certutil -hashfile`), because `wsl --import` reads a Windows path.
+  is refused by name.
 - `finishImportScript` does what the image lacks, as one idempotent root script
   that is also emitted into `platform/wsl_table.py` for the host's importer: the
   `crucible` user, passwordless sudo, `/etc/cloud/cloud-init.disabled` (Canonical's
@@ -275,9 +280,8 @@ the code does not say by itself.
   for ~39 s looking for a datasource), a `WSLInterop` binfmt entry (with
   `systemd=true`, systemd-binfmt drops WSL's registration and every `.exe` from
   the guest fails "Exec format error"), and `/etc/wsl.conf`.
-- `# crucible-rootfs` in `/etc/wsl.conf` marks our distro. A `crucible` distro
-  without it and without a config is a partial import (unregistered and redone);
-  with a config it is someone else's (`distro_unmarked`).
+- `# crucible-rootfs` in `/etc/wsl.conf` marks our distro; the host refuses a
+  `crucible` distro without it (`distro_unmarked`) and never imports over it.
 - `resolveDistro`: `exact` wins; else the `crucible` distro; else the app's
   setting; else `no_wsl_distro`. A `crucible` distro plus a config in the app's
   distro is `two_local_crucibles`. A distro that does not answer is not "a distro
