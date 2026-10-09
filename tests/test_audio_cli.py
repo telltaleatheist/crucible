@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli, jobenv
+from crucible import cli, hosttools, jobenv
 from crucible.config import load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -38,6 +38,8 @@ def test_install_audio_builds_every_engine_env_of_this_backend(
     monkeypatch.setattr(cli.install, "_smoke_import", lambda *_: None)
     monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
     monkeypatch.setattr(cli.install, "_capability_step", lambda _c, _b, *types: stepped.append(types) or 0)
+    monkeypatch.setattr(hosttools, "ensure_ffmpeg", lambda home_dir, **_: "ffmpeg: ok")
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
     assert cli.main(["install", "audio"]) == 0
     assert built == ["audio-stable-audio-3", "audio-yue2"]
     assert stepped == [("audio",)]
@@ -92,3 +94,30 @@ def test_models_list_shows_the_audio_models(
     rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)}
     assert rows["yue2-3b"]["hf_repo"] == "m-a-p/YuE2-3B"
     assert "crucible models pull stable-audio-3-medium" in rows["stable-audio-3-medium"]["detail"]
+
+
+
+def test_install_audio_places_crucible_s_ffmpeg(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli.common, "detect_backend", lambda: FAKE_BACKEND)
+    assert cli.main(["init"]) == 0
+    capsys.readouterr()
+    placed: list[Path] = []
+    monkeypatch.setattr(
+        jobenv,
+        "install_env",
+        lambda home_dir, spec, kind, **_: jobenv.EnvStatus(
+            True, home_dir, "ok", "3.11.16", {spec.headline: "0.1"}
+        ),
+    )
+    monkeypatch.setattr(cli.install, "_smoke_import", lambda *_: None)
+    monkeypatch.setattr(cli.install, "_measure_step", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli.install, "_capability_step", lambda *_a: 0)
+    monkeypatch.setattr(
+        hosttools, "ensure_ffmpeg", lambda home_dir, **_: placed.append(home_dir) or "ffmpeg: placed"
+    )
+    monkeypatch.setattr(hosttools, "ensure_silero_vad", lambda home_dir: "speech detector: ok")
+    assert cli.main(["install", "audio"]) == 0
+    assert placed == [home]
+    assert "ffmpeg: placed" in capsys.readouterr().out
