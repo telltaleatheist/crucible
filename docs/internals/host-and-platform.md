@@ -57,6 +57,13 @@ maintained; this file is the short list of things that must stay true.
   start; commands run straight after the import ran as root, the engine landed in
   `/root/.crucible`, and a later run minted a second home with a new token (every later
   upgrade then failed 401). A consented foreign distro keeps its own default user.
+  The import step also ENDS on the conf it wrote (`installer._settle_wsl_conf`): it asks
+  the distro who a plain `wsl -d crucible` enters as (`id -un`, no `-u`), and if that is
+  not `crucible` it runs `wsl --terminate crucible` once and asks again; still not
+  `crucible` is `distro_default_user`. Without it the import's first boot (root, no
+  systemd) could live on under the controller's `sleep infinity` hold, and a hand
+  `wsl -d crucible --exec bash -lc '~/.crucible/...'` looked in `/root` (the friend's
+  laptop, 2026-10-08). Nothing needs root as the default: every root act names `-u root`.
 - **A distro terminates seconds after its last wsl.exe session ends**, even with systemd units
   running and linger on. Only a Windows-side process can keep the VM up, so the orchestrator
   holds `wsl -d <distro> --exec sleep infinity` for as long as a WSL engine is meant to run
