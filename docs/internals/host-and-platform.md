@@ -83,6 +83,18 @@ maintained; this file is the short list of things that must stay true.
   orchestrator's cwd (inside `Crucible\host`) keeps a handle on that directory after exit and
   blocks the next upgrade's `Move-Item`. The systemd unit uses `CRUCIBLE_HOME` as
   `WorkingDirectory` for the same reason. Tray children get `CREATE_NO_WINDOW`.
+- **Nothing that writes the Windows home runs inside an app package** (`platform/packaged.py`,
+  `packaged_shell`). A process with MSIX package identity (a terminal inside the Claude
+  desktop app, for one) has every write under `%LOCALAPPDATA%`/`%APPDATA%` silently redirected
+  to `%LOCALAPPDATA%\Packages\<family>\LocalCache\`. Measured 2026-10-08 on a friend's laptop:
+  the home, `installation.json` and its recorded "home" landed in Claude's LocalCache, the
+  Startup and Start-menu shortcuts pointed at a `pythonw.exe` that exists only in that
+  package's view, the distro's `ext4.vhdx` (written by the WSL service, outside the package)
+  landed at the real path, and after a sign-out nothing started. The check is
+  `GetCurrentPackageFullName`: `install.ps1` asks before it writes or removes anything (so the
+  setup exe, which runs that script, is covered too), and the host refuses the same way in
+  `crucible local register|install-cli|install-desktop|tray|start`, `crucible orchestrator`
+  and every controller spawn. Reading verbs (`status`) are not refused.
 
 ## Reading wsl.exe
 

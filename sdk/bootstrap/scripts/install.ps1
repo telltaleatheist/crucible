@@ -43,6 +43,32 @@ if ([System.Environment]::Is64BitOperatingSystem -ne $true) {
 if (-not $env:LOCALAPPDATA) {
   Die "host_no_localappdata: LOCALAPPDATA is not set, so there is no per-user place to install into."
 }
+try {
+  Add-Type -ErrorAction Stop -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+public static class CruciblePackage {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  static extern int GetCurrentPackageFullName(ref uint length, StringBuilder name);
+  public static int Ask(out string name) {
+    uint length = 0;
+    name = "";
+    int code = GetCurrentPackageFullName(ref length, null);
+    if (code != 122) { return code; }
+    StringBuilder buffer = new StringBuilder((int)length);
+    code = GetCurrentPackageFullName(ref length, buffer);
+    name = buffer.ToString();
+    return code;
+  }
+}
+'@
+} catch {
+  Die "package_check_failed: Windows could not be asked whether this PowerShell runs inside an app package ($($_.Exception.Message)), and a Crucible written from inside one is a Crucible nothing can start. Open an ordinary PowerShell window (Start, type PowerShell, press Enter) and run it there."
+}
+$PackageName = ''
+$PackageCode = [CruciblePackage]::Ask([ref]$PackageName)
+if ($PackageCode -eq 0) { Die "packaged_shell: this installer is running inside the Windows app package $PackageName (an app installed from the Store or as an MSIX, such as the Claude desktop app, and anything started from a terminal inside it). Windows quietly redirects what such a process writes under AppData into that app's own private folder, so Crucible would land where only that app can see it, and would not start when you sign in. Nothing has been written. Open an ordinary PowerShell window (Start, type PowerShell, press Enter) and run it there." }
+if ($PackageCode -ne 15700) { Die "package_check_failed: GetCurrentPackageFullName returned $PackageCode, so it is not known whether this PowerShell runs inside an app package. Open an ordinary PowerShell window (Start, type PowerShell, press Enter) and run it there." }
 
 if ($Uninstall) {
   if (-not (Test-Path $Cmd)) {

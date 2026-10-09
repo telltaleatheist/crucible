@@ -147,6 +147,9 @@ def is_up(*, send: Send = request) -> bool:
 
 
 def spawn(home: Path) -> None:
+    from .platform.packaged import refuse_packaged
+
+    refuse_packaged("starting Crucible's controller")
     executable = Path(sys.executable)
     if executable.name.lower() == "python.exe":
         executable = executable.with_name("pythonw.exe")
