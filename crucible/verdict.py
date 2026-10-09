@@ -13,6 +13,10 @@ from .capabilitywords import (
     UPSTREAM_OFFER,
     barred_note,
     feature_order,
+    low_vram_offer,
+    low_vram_refusal_note,
+    low_vram_refusal_summary,
+    low_vram_summary,
     needs_phrase,
     precision_note,
     serving_note,
@@ -25,7 +29,7 @@ from .capabilitywords import (
     too_old_phrase,
     with_notes,
 )
-from .fit import Candidate, WorkingContext
+from .fit import Candidate, WorkingContext, on_host
 from .memorybudget import available_bytes, gib_text
 
 POOL_NAME: dict[str, str] = {
@@ -193,7 +197,8 @@ def _grant(w: _Weighing, picked: Candidate, reason: str) -> Decision:
         selected=picked.id,
         reason=reason,
         summary=f"can {w.entry.plainly}, using {picked.id}"
-        + serving_summary(picked, w.budget),
+        + serving_summary(picked, w.budget)
+        + low_vram_summary(picked),
     )
 
 
@@ -287,6 +292,7 @@ def _chosen_over_served(w: _Weighing, picked: Candidate) -> Decision:
 def _chosen_too_big(w: _Weighing, picked: Candidate) -> Decision:
     entry = w.entry
     shortfall = picked.floor_bytes(w.work) - w.budget
+    low_vram = low_vram_offer((picked,), w.budget)
     return _refuse(
         entry,
         w.budget,
@@ -294,12 +300,20 @@ def _chosen_too_big(w: _Weighing, picked: Candidate) -> Decision:
         w.fitting,
         f"disabled: {picked.id} was chosen for {entry.name} and needs "
         f"{spell_floor(picked, w.work)}, and there is only "
-        f"{w.arithmetic} — short by {gib_text(shortfall)}. This choice fit "
-        f"the machine it was made on{w.cpu_note}."
+        f"{w.arithmetic} — short by {gib_text(shortfall)}."
+        + (
+            low_vram_refusal_note(low_vram)
+            if low_vram is not None
+            else f" This choice fit the machine it was made on{w.cpu_note}."
+        )
         + w.offer,
-        f"cannot {entry.plainly} — {picked.id} needs "
-        f"{gib_text(shortfall)} more memory than this machine has free. "
-        "A smaller choice, or another server",
+        low_vram_refusal_summary(entry, low_vram)
+        if low_vram is not None
+        else (
+            f"cannot {entry.plainly} — {picked.id} needs "
+            f"{gib_text(shortfall)} more memory than this machine has free. "
+            "A smaller choice, or another server"
+        ),
         shortfall_bytes=shortfall,
     )
 
@@ -376,8 +390,9 @@ def _none_fits(w: _Weighing) -> Decision:
     entry = w.entry
     smallest = w.usable[-1]
     shortfall = smallest.floor_bytes(w.work) - w.budget
+    low_vram = low_vram_offer(w.usable, w.budget)
     note = f" {entry.binary_note}" if entry.binary_note else ""
-    note = serving_refusal_note(smallest, w.budget) + note
+    note = serving_refusal_note(smallest, w.budget) + low_vram_refusal_note(low_vram) + note
     of_these = (
         f"{len(w.found)} {entry.noun}"
         if not w.barred
@@ -394,6 +409,7 @@ def _none_fits(w: _Weighing) -> Decision:
         f"{barred_note(w.barred, w.card)}{note}"
         + w.offer,
         serving_refusal_summary(entry, smallest, w.budget)
+        or (low_vram_refusal_summary(entry, low_vram) if low_vram is not None else "")
         or (
             f"cannot {entry.plainly} — the smallest option needs "
             f"{gib_text(shortfall)} more memory than this machine has free"
@@ -460,9 +476,12 @@ def decide_capabilities(
     desktop_allowance_bytes: int,
     gpu_vendor: str,
     chosen: str | None,
+    audio_low_vram: bool,
     work: "WorkingContext | None" = None,
     card: "CardFacts | None" = None,
 ) -> Decision:
+    """`audio_low_vram` is this host's `[audio] low_vram`: an audio candidate is weighed at
+    the need the audio job would admit it against (audiomodels.held_need)."""
     work = _work_for(entry, work)
     budget = available_bytes(total_bytes, desktop_allowance_bytes)
     if backend_kind == LLAMA_WINDOWS and entry.job_type in WSL_ONLY_JOB_TYPES:
@@ -470,7 +489,7 @@ def decide_capabilities(
     pool = pool_name(backend_kind, gpu_vendor)
     if entry.candidates is None:
         return _always_available(entry, budget)
-    found = entry.candidates(backend_kind)
+    found = on_host(entry.candidates(backend_kind), audio_low_vram)
     if not found:
         return _nothing_shipped(entry, backend_kind, budget)
     weighing = _weigh(
@@ -503,6 +522,7 @@ def decide_all(
     desktop_allowance_bytes: int,
     gpu_vendor: str,
     chosen: Mapping[str, str],
+    audio_low_vram: bool,
     card: "CardFacts | None" = None,
 ) -> tuple[Decision, ...]:
     return tuple(
@@ -513,6 +533,7 @@ def decide_all(
             desktop_allowance_bytes=desktop_allowance_bytes,
             gpu_vendor=gpu_vendor,
             chosen=chosen.get(entry.name),
+            audio_low_vram=audio_low_vram,
             card=card,
         )
         for entry in CLASSES

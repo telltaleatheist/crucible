@@ -31,6 +31,7 @@ def _decide(name: str) -> Any:
         desktop_allowance_bytes=3 * 1024**3,
         gpu_vendor=FAKE_BACKEND.gpu.vendor,
         chosen=None,
+        audio_low_vram=False,
     )
 
 

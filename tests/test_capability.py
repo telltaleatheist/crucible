@@ -50,6 +50,7 @@ def _decide(
         desktop_allowance_bytes=reserve,
         gpu_vendor=vendor,
         chosen=chosen,
+        audio_low_vram=False,
     )
 
 
@@ -106,6 +107,7 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )) is False
 
 
@@ -122,6 +124,7 @@ def test_a_six_gig_card_keeps_llm_only_if_something_behind_it_fits() -> None:
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["clean"].enabled is False
@@ -139,6 +142,7 @@ def test_llm_survives_when_one_of_its_three_classes_survives() -> None:
         desktop_allowance_bytes=8 * GIB,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["pages"].enabled is True
@@ -191,6 +195,7 @@ def test_a_class_with_nothing_on_this_backend_still_says_which_it_is() -> None:
         _pages_with_no_block_on_any_backend(), "mlx-darwin",
         total_bytes=STUDIO, desktop_allowance_bytes=MAC_RESERVE,
         gpu_vendor="apple", chosen=None,
+        audio_low_vram=False,
     )
     assert verdict.enabled is False
     assert verdict.candidates == ()
@@ -259,6 +264,7 @@ def test_the_capability_record_round_trips_through_config_toml(home: Path) -> No
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )
     written = verdict.record(
         "cuda-linux",
@@ -380,6 +386,7 @@ def test_the_llm_refusal_reads_every_class_behind_the_flag(home: Path) -> None:
         desktop_allowance_bytes=CUDA_RESERVE,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )
     rows = tuple(d.row() for d in decisions if d.job_type == "llm")
     config = _config_with(home, rows)
@@ -548,6 +555,7 @@ def test_the_capability_route_answers_every_class_and_its_reason(
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
             chosen={},
+            audio_low_vram=False,
         ),
         routes={},
     )
@@ -586,6 +594,7 @@ def test_the_route_says_which_job_type_each_class_feeds_and_what_builds_it(
             desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia",
             chosen={},
+            audio_low_vram=False,
         ),
         routes={},
     )
@@ -637,6 +646,7 @@ def test_every_decision_carries_a_summary_a_person_can_read() -> None:
                 entry, backend, total_bytes=total,
                 desktop_allowance_bytes=3 * 1024**3,
                 gpu_vendor=vendor, chosen=None,
+                audio_low_vram=False,
             )
             where = f"{entry.name} on {backend} at {total // 1024**3} GiB"
             assert verdict.summary, f"{where} has no summary"
@@ -654,6 +664,7 @@ def test_the_reported_pages_case_reads_both_ways() -> None:
     verdict = decide(
         pages, "mlx-darwin", total_bytes=64 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,
+        audio_low_vram=False,
     )
     assert verdict.enabled is False
     assert verdict.summary.startswith("cannot read pages")
@@ -670,6 +681,7 @@ def test_the_summary_reaches_the_wire_and_not_only_the_decision() -> None:
     verdict = decide(
         pages, "mlx-darwin", total_bytes=64 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="apple", chosen=None,
+        audio_low_vram=False,
     )
     served = verdict.row().to_dict()
     assert served["summary"] == verdict.summary
@@ -685,6 +697,7 @@ def test_a_routed_class_summarises_where_the_work_goes() -> None:
     verdict = decide(
         entry, "cuda-linux", total_bytes=6 * 1024**3,
         desktop_allowance_bytes=3 * 1024**3, gpu_vendor="nvidia", chosen=None,
+        audio_low_vram=False,
     )
     row = routed_row(verdict.row(), "anthropic/claude-sonnet-4")
     assert row.enabled is True
@@ -750,6 +763,7 @@ def _generate_record(backend_kind: str, total: int, allowance: int, vendor: str)
             desktop_allowance_bytes=allowance,
             gpu_vendor=vendor,
             chosen={},
+            audio_low_vram=False,
         ),
         routes={},
     )

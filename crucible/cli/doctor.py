@@ -21,7 +21,9 @@ from .. import (
     service,
     verdict,
 )
+from ..audiomodels import LOW_VRAM_SETTING
 from ..backend import LLAMA_WINDOWS, MLX_DARWIN, Backend
+from ..capabilitystore import decide_for
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
 from ..config import Config, config_mode, crucible_home
 from ..errors import ConfigError, NoViableBackend
@@ -273,6 +275,33 @@ def _stale_findings(config: Config, backend: Backend) -> list[Finding]:
     return [Finding("capability_stale", message, CAPABILITY_WRITE) for message in stale]
 
 
+def _low_vram_findings(config: Config, backend: Backend) -> list[Finding]:
+    """A record decided before `[audio] low_vram` changed (or before the verdict weighed
+    it) answers the wrong way for a class whose models declare a low-VRAM need; decide
+    those classes again and say where the record and this host disagree."""
+    record = config.capability
+    assert record is not None
+    found: list[Finding] = []
+    setting = "on" if config.audio_low_vram else "off"
+    for decision in decide_for(config, backend):
+        if not any(c.low_vram_bytes is not None for c in decision.candidates):
+            continue
+        if config.route_model(decision.capability) is not None:
+            continue
+        stored = record.row(decision.capability)
+        if stored is None or stored.enabled == decision.enabled:
+            continue
+        found.append(Finding(
+            "capability_stale",
+            f"the record says {decision.capability}: "
+            f"{'yes' if stored.enabled else 'NO'}, and with {LOW_VRAM_SETTING} {setting} "
+            f"this host decides {'yes' if decision.enabled else 'NO'} — {decision.reason}; "
+            f"re-run `{CAPABILITY_WRITE}`",
+            CAPABILITY_WRITE,
+        ))
+    return found
+
+
 def check_capability(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None:
@@ -281,6 +310,8 @@ def check_capability(host: Host) -> Section:
     if record is None:
         return Section("capability", {"capability": None})
     findings = _stale_findings(config, backend)
+    if not findings:
+        findings = _low_vram_findings(config, backend)
     could_enable: list[str] = []
     for name in sorted({cls.job_type for cls in capabilityclasses.CLASSES}):
         rows = [record.row(cls.name) for cls in capabilityclasses.classes_for_job_type(name)]

@@ -18,6 +18,7 @@ def decide_on(
     gpu_vendor: str,
     card: CardFacts | None,
     chosen: Mapping[str, str],
+    audio_low_vram: bool,
 ) -> tuple[verdict.Decision, ...]:
     return verdict.decide_all(
         backend_kind,
@@ -25,6 +26,7 @@ def decide_on(
         desktop_allowance_bytes=desktop_allowance_bytes,
         gpu_vendor=gpu_vendor,
         chosen=chosen,
+        audio_low_vram=audio_low_vram,
         card=card,
     )
 
@@ -38,6 +40,7 @@ def decide_for(
         desktop_allowance_bytes=config.desktop_allowance_bytes,
         gpu_vendor=backend.gpu.vendor,
         chosen={entry.capability: entry.model for entry in config.local_models},
+        audio_low_vram=config.audio_low_vram,
         card=card if card is not None else card_for(config.home, backend.gpu),
     )
 

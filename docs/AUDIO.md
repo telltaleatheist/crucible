@@ -58,11 +58,19 @@ the same render time; and the audio within 5.4e-6 (-105 dB) of the whole model's
 `low_vram_memory_bytes_estimate` instead of `memory_bytes_estimate`, and the `done` event's
 `audio.low_vram` says which ran.
 
+The capability verdict weighs the same figure: `audiomodels.held_need` is the one rule for
+which need a host uses, and the audio job, `crucible capability`, `crucible install audio`,
+`crucible doctor`, the Settings model choices and `/v1/info`'s `vram_bytes` all read it. On
+an 8 GiB card with a 1 GiB desktop allowance, `song` is granted "with [audio] low_vram"
+(6.8 GiB of 14.9 GiB whole); with the setting off it is refused, and the refusal names the
+setting as the fix rather than a 7.9 GiB shortfall alone. A capability record decided
+before the setting changed is reported stale by `crucible doctor`.
+
 It is off unless a host's config says so (Owen, 2026-10-08: *"this would be a configuration
 for systems with low ram, not for high ram systems like this pc"*), and only a model whose
 manifest declares a low-VRAM figure honours it: today `yue2-3b` on cuda-linux. `[audio]` is
-not a table `crucible install` writes, so a reinstall keeps it. Restart the server after
-changing it.
+not a table `crucible install` writes, so a reinstall keeps it. After changing it, run
+`crucible capability --write` and restart the server.
 
 ### The Stable Audio models are gated
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from . import asrplan, ttsplan
+from .audiomodels import LOW_VRAM_SETTING
 from .backend import (
     BF16,
     FEATURE_FLOORS,
@@ -71,8 +72,19 @@ def upstream_offer() -> str:
 UPSTREAM_OFFER = upstream_offer()
 
 
+LOW_VRAM_STEPS = (
+    f"set `{LOW_VRAM_SETTING} = true` in this host's config.toml, run "
+    "`crucible capability --write`, and restart the server"
+)
+
+
 def spell_out(candidate: Candidate, work: "WorkingContext | None") -> str:
     need = candidate.need_bytes(work)
+    if candidate.whole_bytes is not None:
+        return (
+            f"{gib_text(need)} with {LOW_VRAM_SETTING}, holding only the part each stage "
+            f"uses on the card ({gib_text(candidate.whole_bytes)} whole)"
+        )
     if work is None or candidate.memory is None:
         return gib_text(need)
     terms = candidate.memory
@@ -281,6 +293,36 @@ def serving_refusal_note(candidate: Candidate, budget: int) -> str:
     )
 
 
+def low_vram_summary(candidate: Candidate) -> str:
+    if candidate.whole_bytes is None:
+        return ""
+    return f" — with {LOW_VRAM_SETTING}, one part of it on the card at a time"
+
+
+def low_vram_offer(candidates: "tuple[Candidate, ...]", budget: int) -> "Candidate | None":
+    """The first of these that this host does not hold under `[audio] low_vram` and would
+    fit if it did."""
+    return next((c for c in candidates if c.would_fit_low_vram(budget)), None)
+
+
+def low_vram_refusal_note(candidate: "Candidate | None") -> str:
+    if candidate is None:
+        return ""
+    assert candidate.low_vram_bytes is not None
+    return (
+        f" {LOW_VRAM_SETTING} is off on this host. With it on, {candidate.id} holds only "
+        f"the part each stage uses on the card and needs {gib_text(candidate.low_vram_bytes)}, "
+        f"which fits: {LOW_VRAM_STEPS}."
+    )
+
+
+def low_vram_refusal_summary(entry: "CapabilityClass", candidate: Candidate) -> str:
+    return (
+        f"cannot {entry.plainly} — {candidate.id} fits this machine only with "
+        f"{LOW_VRAM_SETTING} on, and it is off: {LOW_VRAM_STEPS}"
+    )
+
+
 def with_notes(text: str, *notes: str) -> str:
     said = "".join(notes)
     if not said:
@@ -316,6 +358,7 @@ def describe_card(card: "CardFacts | None", total_bytes: int, pool: str) -> str:
 __all__ = [
     "CPU_BUILD_REASON",
     "LOCAL_ANSWER_PREFIX",
+    "LOW_VRAM_STEPS",
     "MEASURED_WORDS",
     "NEEDS_WSL_REASON",
     "TTS_WIDTH_LOAD_TEST_NOTE",
@@ -325,6 +368,10 @@ __all__ = [
     "describe_card",
     "either",
     "feature_order",
+    "low_vram_offer",
+    "low_vram_refusal_note",
+    "low_vram_refusal_summary",
+    "low_vram_summary",
     "needs_phrase",
     "precision_note",
     "serving_explained",

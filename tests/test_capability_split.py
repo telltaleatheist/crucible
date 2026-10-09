@@ -184,6 +184,7 @@ def _sized_capability_call() -> list[dict[str, object]]:
         capability_class="generate",
         context_tokens="16384",
         concurrency=None,
+        audio_low_vram=False,
     )
 
 

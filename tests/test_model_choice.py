@@ -39,6 +39,7 @@ def test_the_best_model_is_still_chosen_by_default_on_a_card_that_holds_it() -> 
             desktop_allowance_bytes=DESKTOP,
             gpu_vendor="nvidia",
             chosen={},
+            audio_low_vram=False,
         )
     }
     assert decisions["translate"].selected == "qwen3.8-27b-4bit"
@@ -53,6 +54,7 @@ def test_a_nine_b_can_be_chosen_for_translation() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen="qwen3.5-9b",
+        audio_low_vram=False,
     )
     assert decision.enabled
     assert decision.selected == "qwen3.5-9b"
@@ -66,6 +68,7 @@ def test_the_noun_names_the_set_it_counts() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert "qwen3.8 and qwen3.5 variants" in decision.reason
     assert "qwen3.5-9b" in decision.reason
@@ -80,6 +83,7 @@ def test_a_refused_routable_class_names_the_upstream() -> None:
             desktop_allowance_bytes=DESKTOP,
             gpu_vendor="nvidia",
             chosen=None,
+            audio_low_vram=False,
         )
         assert not decision.enabled, name
         assert UPSTREAM_OFFER.strip() in decision.reason, name
@@ -93,6 +97,7 @@ def test_pages_is_refused_without_the_offer() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert not decision.enabled
     assert UPSTREAM_OFFER.strip() not in decision.reason
@@ -107,6 +112,7 @@ def test_an_enabled_class_is_not_offered_an_upstream() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert decision.enabled
     assert UPSTREAM_OFFER.strip() not in decision.reason
