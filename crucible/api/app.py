@@ -208,9 +208,11 @@ class ConfigFollower:
 def _decider(config: Config, backend: Backend) -> Callable[[str], ApiError]:
     def decide_here(job_type: str) -> ApiError:
         try:
-            write_capability(config, backend, decide_for(config, backend), {})
+            recorded = write_capability(config, backend, decide_for(config, backend), {})
             config.adopt(load_config(config.home))
             _say("no capability record; decided this card and recorded it")
+            if recorded.low_vram_change is not None:
+                _say(recorded.low_vram_change)
         except Exception as exc:
             _say(f"could not decide this card: {type(exc).__name__}: {exc}")
         return disabled_error(job_type, config)

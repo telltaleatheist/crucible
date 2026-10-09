@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Mapping
 
-from . import capabilityclasses, classnames, memorybudget, upstreamrecord
+from . import capabilityclasses, classnames, lowvram, memorybudget, upstreamrecord
 from .backend import CardFacts
 from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .capabilitystore import decide_on, record_of
@@ -53,6 +53,20 @@ class History:
     def rows(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(reversed(self._rows))
+
+
+def _low_vram_on(config: Config, desktop_allowance_bytes: int) -> lowvram.LowVram | None:
+    """Decided against the card the record was decided on; None before any record,
+    when there is no card to decide it against."""
+    record = config.capability
+    if record is None:
+        return None
+    return lowvram.on_card(
+        config,
+        record.backend_kind,
+        total_bytes=record.total_bytes,
+        desktop_allowance_bytes=desktop_allowance_bytes,
+    )
 
 
 def local_selection(config: Config, name: str) -> str | None:
@@ -135,7 +149,18 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
         "backend_kind": config.backend_kind,
         "tailscale_advertise": list(config.tailscale_advertise),
         "lan_advertise": list(config.lan_advertise),
+        "audio_low_vram": low_vram_entry(config),
     }
+
+
+def low_vram_entry(config: Config) -> dict[str, Any] | None:
+    """`[audio] low_vram` for Settings: its state, who set it, and what the card the
+    record was decided on makes of it. None before any record, and on a machine where no
+    audio model can be split, so there is nothing to show or set."""
+    decided = _low_vram_on(config, config.desktop_allowance_bytes)
+    if decided is None or decided.need.verdict == lowvram.NOT_OFFERED:
+        return None
+    return decided.to_dict()
 
 
 class Resolved:
@@ -153,8 +178,15 @@ class Resolved:
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
         self.desktop_allowance_basis = config.desktop_allowance_basis
         self.desktop_allowance_note = config.desktop_allowance_note
-        # Not a settings key: what the host's `[audio] low_vram` makes an audio model need.
-        self.audio_low_vram = config.audio_low_vram
+        # Not a settings key: `[audio] low_vram` as this card is decided with
+        # (crucible/lowvram.py), which a new desktop allowance can change when Crucible
+        # owns it. It makes an audio model's need.
+        self.low_vram: lowvram.LowVram | None = _low_vram_on(
+            config, config.desktop_allowance_bytes
+        )
+        self.audio_low_vram = (
+            config.audio_low_vram if self.low_vram is None else self.low_vram.on
+        )
         self.tailscale_advertise = config.tailscale_advertise
         self.lan_advertise = config.lan_advertise
         self.removed: set[str] = set()
@@ -309,6 +341,9 @@ def _resolve_desktop_allowance(config: Config, resolved: Resolved, value: Any) -
     resolved.desktop_allowance_basis = DESKTOP_BASIS_STATED
     resolved.desktop_allowance_note = f"set in Settings on {utcnow()[:10]}"
     resolved.changed.append(f"desktop_allowance_bytes = {value}")
+    resolved.low_vram = _low_vram_on(config, value)
+    if resolved.low_vram is not None:
+        resolved.audio_low_vram = resolved.low_vram.on
 
 
 def _resolve_local_models(config: Config, resolved: Resolved, value: Any) -> None:
@@ -469,6 +504,9 @@ def resolve(config: Config, patch: Any) -> Resolved:
         if key in body:
             resolver(config, resolved, body[key])
     _validate(resolved)
+    if resolved.low_vram is not None and resolved.low_vram.changed:
+        # Crucible's own `[audio] low_vram` follows the card it is written with.
+        resolved.changed.append(resolved.low_vram.change_sentence)
     return resolved
 
 
@@ -535,7 +573,7 @@ def recomputed_capability(
         gpu_vendor=gpu_vendor,
         card=card,
         chosen=resolved.local_models,
-        audio_low_vram=config.audio_low_vram,
+        audio_low_vram=resolved.audio_low_vram,
     )
     return record_of(
         record.backend_kind,
@@ -590,6 +628,12 @@ def apply(
         tailscale_advertise=resolved.tailscale_advertise,
         lan_advertise=resolved.lan_advertise,
         open_pairing=config.open_pairing,
+        # Written with the record it was decided with, never apart from it.
+        audio_low_vram=(
+            resolved.low_vram.setting
+            if resolved.low_vram is not None and resolved.low_vram.changed
+            else None
+        ),
     )
     config.adopt(load_config(config.home))
 

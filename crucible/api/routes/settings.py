@@ -6,9 +6,11 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import catalog, upstreamrecord, upstreams
+from ... import catalog, lowvram, upstreamrecord, upstreams
 from ... import settings as settings_module
+from ...capabilitystore import low_vram_not_offered, set_low_vram
 from ...cardfacts import card_for
+from ...config import load_config
 from ...errors import ApiError
 from ...inflight import read_act
 from ..caller import client_agent
@@ -57,6 +59,53 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 changed=resolved.changed,
             )
         return settings_module.document(config, installed=_installed_subjects())
+
+    @private.put("/settings/audio/low-vram")
+    async def put_audio_low_vram(request: Request) -> dict[str, Any]:
+        """Set `[audio] low_vram` with `{"state": "on" | "off" | "auto"}`: `on` and `off`
+        are the operator's and Crucible never changes them; `auto` lets Crucible turn it
+        on exactly where this card cannot hold a splittable audio model whole. Decides
+        the audio capability and `[jobs] enable_audio` again, as `crucible audio
+        low-vram` does. Answers the full settings document after the write.
+        """
+        act = read_act(request.headers)
+        try:
+            body = json.loads(await request.body())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ApiError(
+                400, "invalid_request", f"the low_vram body is not JSON: {exc}"
+            ) from None
+        if not isinstance(body, dict) or set(body) != {"state"} or (
+            body["state"] not in lowvram.STATES
+        ):
+            raise ApiError(
+                400,
+                "invalid_request",
+                "the body is exactly {\"state\": ...} with one of "
+                f"{list(lowvram.STATES)}, got {body!r}",
+                {"field": "state", "choices": list(lowvram.STATES)},
+            )
+        state = body["state"]
+        if state == lowvram.ON and not lowvram.splittable(config.backend_kind):
+            raise ApiError(
+                409,
+                "low_vram_not_offered",
+                low_vram_not_offered(config.backend_kind),
+                {"field": "state"},
+            )
+        done = await asyncio.to_thread(lambda: set_low_vram(config, backend, state))
+        changed = [f"[audio] low_vram = {state}"]
+        if done.redecided.recorded.low_vram_change is not None:
+            changed.append(done.redecided.recorded.low_vram_change)
+        ctx.settings_history.record(
+            act=act, client=client_agent(request), changed=changed
+        )
+        # Not adopted here: the config follower adopts the file before the next request
+        # and takes up a job type the new verdict turned on, which adopting now would
+        # skip. The answer is read from the file just written.
+        return settings_module.document(
+            load_config(config.home), installed=_installed_subjects()
+        )
 
     @private.post("/settings/upstreams/{name}/test")
     async def test_upstream(request: Request, name: str) -> dict[str, Any]:

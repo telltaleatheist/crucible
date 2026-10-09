@@ -18,12 +18,13 @@ from .. import (
     jobenv,
     ladder,
     llamacpp,
+    lowvram,
     service,
     verdict,
 )
 from ..audiomodels import LOW_VRAM_SETTING
 from ..backend import LLAMA_WINDOWS, MLX_DARWIN, Backend
-from ..capabilitystore import decide_for
+from ..capabilitystore import decide_for, low_vram_for
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
 from ..config import Config, config_mode, crucible_home
 from ..errors import ConfigError, NoViableBackend
@@ -103,6 +104,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("llm_patches", list),
     ("tts_patches", list),
     ("capability", lambda: None),
+    ("audio_low_vram", lambda: None),
     ("path", lambda: None),
     ("stranded_weights", lambda: None),
     ("ffmpeg", lambda: None),
@@ -281,6 +283,12 @@ def _low_vram_findings(config: Config, backend: Backend) -> list[Finding]:
     those classes again and say where the record and this host disagree."""
     record = config.capability
     assert record is not None
+    low_vram = low_vram_for(config, backend)
+    if low_vram.changed:
+        # Crucible's own setting has not been decided for this card yet (a record written
+        # before it decided it, or a card that changed): one finding that says what the
+        # write will do, not one per class it moves.
+        return [Finding("capability_stale", low_vram.words, CAPABILITY_WRITE)]
     found: list[Finding] = []
     setting = "on" if config.audio_low_vram else "off"
     for decision in decide_for(config, backend):
@@ -335,7 +343,17 @@ def check_capability(host: Host) -> Section:
         "stale": any(finding.code == "capability_stale" for finding in findings),
         "could_enable": could_enable,
     }
-    return Section("capability", {"capability": entry}, tuple(findings))
+    low_vram = low_vram_for(config, backend)
+    return Section(
+        "capability",
+        {
+            "capability": entry,
+            "audio_low_vram": (
+                None if low_vram.need.verdict == lowvram.NOT_OFFERED else low_vram.to_dict()
+            ),
+        },
+        tuple(findings),
+    )
 
 
 def _plan_or_refusal(call: Callable[[], "jobenv.EnvPlan"]) -> "jobenv.EnvPlan | str":
@@ -857,6 +875,9 @@ def lines_capability(report: dict[str, Any]) -> Iterator[str]:
     for row in entry["classes"]:
         mark = "yes" if row["enabled"] else "NO"
         yield f"capability {row['capability']}: {mark} — {row['reason']}"
+    low_vram = report["audio_low_vram"]
+    if low_vram is not None:
+        yield f"audio:   {low_vram['words']}"
     for name in entry["could_enable"]:
         yield (
             f"note:    this host can hold {name}, and [jobs] enable_{name} "

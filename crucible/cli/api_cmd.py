@@ -257,6 +257,13 @@ def cmd_upstream_test(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_low_vram(connection: Connection, args: argparse.Namespace) -> int:
+    emit(call(
+        connection, "PUT", "/v1/settings/audio/low-vram", json_body={"state": args.state},
+    ))
+    return EXIT_OK
+
+
 def cmd_pairing_decide(connection: Connection, args: argparse.Namespace) -> int:
     emit(call(connection, "POST", "/v1/pairing/decision", json_body={
         "id": args.id, "user_code": args.code, "allow": args.allow,
@@ -1080,6 +1087,13 @@ API_VERBS = (
                  "@file. Omit to use the stored record",
         ),
     )),
+    Verb(
+        "low-vram",
+        "set [audio] low_vram on the server: on or off is the operator's, auto lets "
+        "Crucible decide it from the card",
+        cmd_low_vram,
+        (arg("state", choices=("on", "off", "auto")),),
+    ),
     Verb("pairing-requests", "connect requests waiting for a decision", cmd_pairing_requests),
     Verb("pairing-decide", "approve or deny one connect request", cmd_pairing_decide, (
         arg("--id", required=True),

@@ -19,7 +19,7 @@ usage (argparse's own).
 | `install` | `install` and its smoke import; the installer tables (`INSTALLABLE_JOB_TYPES`, `INSTALLER_FOR`, `SMOKE_IMPORT`) live in `crucible/jobenv.py` |
 | `capability` | `capability`, `ladder`, and the measure and capability steps `install` runs |
 | `jobs_cmd` | `jobs list/enable/disable`: one `[jobs] enable_<type>` flag, through `config.rewrite_config` |
-| `audio_cmd` | `audio low-vram [on|off]`: `[audio] low_vram`, through `config.rewrite_config` |
+| `audio_cmd` | `audio low-vram [on|off|auto]`: `[audio] low_vram`, through `capabilitystore.set_low_vram` (`config.rewrite_config`, then the audio verdict decided again); the Settings route `PUT /v1/settings/audio/low-vram` is the same door |
 | `weights` | `remove`, `models`, `rvc`, `denoise` |
 | `voices` | `voices list/pull/pin/check/card/export` |
 | `orchestrator` | `orchestrator`, `guest` |

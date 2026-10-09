@@ -108,6 +108,7 @@ crucible api catalog-remove <kind> <id>        delete an installed subject's fil
 crucible api settings                          GET the settings document
 crucible api settings --patch @patch.json      PUT a partial patch  [--act <class>]
 crucible api upstream-test <name> [--body …]   ask an upstream what it serves
+crucible api low-vram on|off|auto              set [audio] low_vram (auto: Crucible decides)
 crucible api pairing-requests                  connect requests awaiting a decision
 crucible api pairing-decide --id … --code … --allow|--deny
 ```

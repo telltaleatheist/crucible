@@ -136,10 +136,14 @@ class Config:
     tts_engines: tuple[EngineFootprint, ...] = ()
     max_session_hold_s: int = DEFAULT_MAX_SESSION_HOLD_S
     # `[audio] low_vram`: hold only the part of an audio model a stage uses on the card
-    # (crucible/jobs/audio/yue2_worker.py), for a card too small to hold it whole. Off
-    # unless a host's config says so; only models whose manifest declares a low-VRAM
-    # figure honour it.
+    # (crucible/jobs/audio/yue2_worker.py), for a card too small to hold it whole. Only
+    # models whose manifest declares a low-VRAM figure honour it. This is the value every
+    # reader acts on; who decided it is audio_low_vram_auto.
     audio_low_vram: bool = False
+    # True: Crucible decides `[audio] low_vram` from the card (crucible/lowvram.py), and
+    # may change it whenever the card is decided again. False: a person set it, and
+    # nothing but a person changes it.
+    audio_low_vram_auto: bool = True
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -276,14 +280,39 @@ def _max_session_hold_s(table: dict[str, Any]) -> int:
     return value
 
 
-def _audio_low_vram(table: dict[str, Any]) -> bool:
-    """`[audio] low_vram`: absent is off. [audio] is not a writer-owned table, so
-    `crucible install` carries it as it is (_unowned_tables); `crucible audio
-    low-vram on|off` sets the one key through write_config(audio_low_vram=)."""
-    section = table.get("audio")
-    if section is None or "low_vram" not in section:
-        return False
-    return _require(table, "audio", "low_vram", bool)
+@dataclass(frozen=True)
+class AudioLowVram:
+    """`[audio] low_vram` and who decided it.
+
+    In the file: `low_vram = true|false` alone is a person's choice, and nothing but a
+    person changes it. `low_vram = true` with `low_vram_auto = true` is Crucible's,
+    written because this card cannot hold a splittable model whole. Neither key is
+    Crucible's too, and off. Readers act on `on`; only crucible/lowvram.py decides an
+    `auto` one.
+    """
+
+    on: bool
+    auto: bool
+
+
+def _audio_low_vram(table: dict[str, Any]) -> AudioLowVram:
+    """[audio] is not a writer-owned table, so `crucible install` carries it as it is
+    (_unowned_tables); write_config(audio_low_vram=) sets these two keys and keeps the
+    rest of it."""
+    section = table.get("audio") or {}
+    if "low_vram_auto" in section:
+        auto = _require(table, "audio", "low_vram_auto", bool)
+        if "low_vram" not in section:
+            raise ConfigError(
+                "config [audio] low_vram_auto is set and low_vram is not. "
+                "low_vram_auto only says that Crucible wrote low_vram; delete it, or "
+                "run `crucible audio low-vram auto` to let Crucible decide"
+            )
+    else:
+        auto = "low_vram" not in section
+    if "low_vram" not in section:
+        return AudioLowVram(on=False, auto=True)
+    return AudioLowVram(on=_require(table, "audio", "low_vram", bool), auto=auto)
 
 
 def _install_on_submit(table: dict[str, Any]) -> bool:
@@ -841,6 +870,7 @@ def load_config(
 
     upstreams = _upstream_records(table)
     record = _capability_record(table)
+    low_vram = _audio_low_vram(table)
     if not tolerate_stale_record:
         _record_agrees(
             record,
@@ -884,7 +914,8 @@ def load_config(
         upstreams=upstreams,
         tts_engines=_tts_engine_records(table),
         max_session_hold_s=_max_session_hold_s(table),
-        audio_low_vram=_audio_low_vram(table),
+        audio_low_vram=low_vram.on,
+        audio_low_vram_auto=low_vram.auto,
         stamp=stamp,
     )
 
@@ -961,7 +992,7 @@ def write_config(
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
     tts_engines: tuple[EngineFootprint, ...] = (),
     carried_tables: dict[str, Any] | None = None,
-    audio_low_vram: bool | None = None,
+    audio_low_vram: AudioLowVram | None = None,
 ) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
@@ -1050,9 +1081,13 @@ def write_config(
     for table_name, table in _unowned_tables(path).items():
         document[table_name] = table
     if audio_low_vram is not None:
-        # [audio] stays a table this writer does not own: only the one key is set,
-        # and anything else a person put in [audio] is carried as it was.
-        document["audio"] = {**document.get("audio", {}), "low_vram": audio_low_vram}
+        # [audio] stays a table this writer does not own: only its two low_vram keys
+        # are set, and anything else a person put in [audio] is carried as it was.
+        audio = _low_vram_keys(document.get("audio", {}), audio_low_vram)
+        if audio:
+            document["audio"] = audio
+        else:
+            document.pop("audio", None)
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
@@ -1078,11 +1113,23 @@ def write_config(
     return path
 
 
+def _low_vram_keys(audio: dict[str, Any], setting: AudioLowVram) -> dict[str, Any]:
+    """[audio] with `setting` written into it (AudioLowVram says what each form means).
+    Crucible's own off is no keys at all, so a host that never needed it keeps a file
+    with no [audio] in it."""
+    kept = {k: v for k, v in audio.items() if k not in ("low_vram", "low_vram_auto")}
+    if setting.auto and setting.on:
+        return {**kept, "low_vram": True, "low_vram_auto": True}
+    if setting.auto:
+        return kept
+    return {**kept, "low_vram": setting.on}
+
+
 def rewrite_config(
     config: Config,
     *,
     flags: dict[str, bool] | None = None,
-    audio_low_vram: bool | None = None,
+    audio_low_vram: AudioLowVram | None = None,
 ) -> Path:
     """Write `config` back to its own file with only the named settings changed.
 

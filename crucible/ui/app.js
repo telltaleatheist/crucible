@@ -1703,6 +1703,86 @@
     body.appendChild(renderRouteRows());
     body.appendChild(renderUpstreamCards());
     body.appendChild(renderAllowance());
+    var lowVram = renderLowVram();
+    if (lowVram !== null) {
+      body.appendChild(lowVram);
+    }
+  }
+
+  var LOW_VRAM_CARD = {
+    needed: ['this card needs it', 'warn'],
+    not_needed: ['this card does not need it', 'ok'],
+    too_small: ['it would not help on this card', 'bad']
+  };
+
+  async function putLowVram(wanted) {
+    try {
+      state.settings = await call('/v1/settings/audio/low-vram', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: wanted })
+      });
+      setRefusal('low-vram', null);
+    } catch (refusal) {
+      setRefusal('low-vram', refusal);
+    } finally {
+      await loadCapability();
+      render();
+    }
+  }
+
+  // [audio] low_vram: null in the settings document where no audio model can be held
+  // part at a time, or before the card was decided, so there is nothing to show.
+  function renderLowVram() {
+    var entry = state.settings.audio_low_vram;
+    if (entry === null || entry === undefined) {
+      return null;
+    }
+    var byCrucible = entry.set_by === 'crucible';
+    var card = LOW_VRAM_CARD[entry.card.verdict];
+    var heading = el('p', { class: 'note' }, [
+      chip(entry.on ? 'on' : 'off', entry.on ? 'accent' : ''),
+      ' ',
+      chip(byCrucible ? 'Crucible decides' : 'set by hand'),
+      ' ',
+      card ? chip(card[0], card[1]) : null
+    ]);
+    var choices = [
+      ['on', 'On', 'hold one part of the model on the card at a time, whatever the card'],
+      ['off', 'Off', 'hold the model whole; Crucible will not turn it back on'],
+      ['auto', 'Let Crucible decide', 'on exactly when this card cannot hold the model whole']
+    ];
+    var actions = el('div', { class: 'setting-actions' });
+    for (var index = 0; index < choices.length; index += 1) {
+      var choice = choices[index];
+      var current = entry.state === choice[0];
+      actions.appendChild(
+        el('button', {
+          id: 'low-vram-' + choice[0],
+          class: current ? 'button primary' : 'button quiet',
+          type: 'button',
+          disabled: current,
+          title: choice[2],
+          'aria-pressed': current ? 'true' : 'false',
+          onclick: (function (wanted) {
+            return function () {
+              putLowVram(wanted);
+            };
+          })(choice[0])
+        }, [choice[1]])
+      );
+    }
+    var block = el('div', { class: 'block', id: 'low-vram' }, [
+      el('p', { class: 'subhead', text: 'Audio on a small card' }),
+      heading,
+      el('p', { class: 'note', text: entry.words }),
+      actions
+    ]);
+    var refusal = refusalBox(state.refusals['low-vram']);
+    if (refusal) {
+      block.appendChild(refusal);
+    }
+    return block;
   }
 
   function routedModels() {
