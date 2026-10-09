@@ -410,6 +410,7 @@ def test_the_capability_row_names_the_model_and_the_fit(
         decisions=verdict.decide_all(
             "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia", chosen={},
+            audio_low_vram=False,
         ),
         routes={},
     )
@@ -428,6 +429,7 @@ def test_a_card_that_cannot_hold_one_stage_is_disabled_with_the_numbers() -> Non
         BY_NAME["image"], "cuda-linux",
         total_bytes=12 * GIB, desktop_allowance_bytes=3 * GIB,
         gpu_vendor="nvidia", chosen=None,
+        audio_low_vram=False,
     )
     assert decided.enabled is False
     assert decided.summary.startswith("cannot generate images")

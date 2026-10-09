@@ -190,6 +190,7 @@ def test_the_capability_rows_say_what_this_host_can_make_and_with_what(
     decided = verdict.decide(
         BY_NAME[name], backend_kind, total_bytes=total, desktop_allowance_bytes=3 * GIB,
         gpu_vendor="nvidia" if backend_kind == "cuda-linux" else "apple", chosen=None,
+        audio_low_vram=False,
     )
     assert decided.enabled is enabled, decided.reason
     assert decided.summary.startswith(summary), decided.summary
@@ -197,7 +198,7 @@ def test_the_capability_rows_say_what_this_host_can_make_and_with_what(
 
 
 def test_a_small_card_keeps_sound_effects_and_loses_songs() -> None:
-    kwargs: dict[str, Any] = dict(total_bytes=12 * GIB, desktop_allowance_bytes=3 * GIB, gpu_vendor="nvidia", chosen=None)
+    kwargs: dict[str, Any] = dict(total_bytes=12 * GIB, desktop_allowance_bytes=3 * GIB, gpu_vendor="nvidia", chosen=None, audio_low_vram=False)
     assert verdict.decide(BY_NAME["sfx"], "cuda-linux", **kwargs).enabled is True
     song = verdict.decide(BY_NAME["song"], "cuda-linux", **kwargs)
     assert song.enabled is False and song.shortfall_bytes > 0

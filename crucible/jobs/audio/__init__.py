@@ -15,6 +15,7 @@ from ...audiomodels import (
     AudioBackendSpec,
     AudioManifest,
     AudioManifestError,
+    HeldNeed,
     load_all_audio_manifests,
 )
 from ...cardkinds import KIND_AUDIO
@@ -246,6 +247,7 @@ def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
         installed=lambda manifest, spec: audioweights.installed(config, manifest, spec)
         is not None,
         resident=lambda model_id: residency.is_resident(KIND_AUDIO, model_id),
+        estimate=lambda spec: spec.need_on(config.audio_low_vram).bytes,
     )
 
 
@@ -255,15 +257,17 @@ class Needs:
     spec: AudioBackendSpec
     python: Path
     weights_dir: Path
-    # This host's `[audio] low_vram`, for a model whose manifest can honour it.
-    low_vram: bool = False
+    # What this host holds the model against: AudioBackendSpec.need_on, the one rule the
+    # capability verdict weighs too.
+    need: HeldNeed
 
     @property
     def need_bytes(self) -> int:
-        if self.low_vram:
-            assert self.spec.low_vram_memory_bytes_estimate is not None
-            return self.spec.low_vram_memory_bytes_estimate
-        return self.spec.memory_bytes_estimate
+        return self.need.bytes
+
+    @property
+    def low_vram(self) -> bool:
+        return self.need.low_vram
 
 
 class _Generation:
@@ -321,7 +325,11 @@ class AudioJobType(ResidentWorker):
         return MANIFESTS.provenance(self._config.backend_kind, run_model(model, self.name))
 
     def vram_estimate(self, model: str | None) -> int:
-        return MANIFESTS.memory_estimate(run_model(model, self.name), self._config.backend_kind)
+        return MANIFESTS.memory_estimate(
+            run_model(model, self.name),
+            self._config.backend_kind,
+            estimate=lambda spec: spec.need_on(self._config.audio_low_vram).bytes,
+        )
 
     def check(self, backend: Any) -> JobTypeStatus:
         broken = _env_status(self._config, backend.kind)
@@ -352,15 +360,11 @@ class AudioJobType(ResidentWorker):
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
         spec = _require_block(manifest, model_id, backend_kind)
-        low_vram = (
-            self._config.audio_low_vram and spec.low_vram_memory_bytes_estimate is not None
-        )
-        need = spec.low_vram_memory_bytes_estimate if low_vram else spec.memory_bytes_estimate
-        assert need is not None
-        worker_type.refuse_if_larger_than_host(self._backend, model_id, need)
+        need = spec.need_on(self._config.audio_low_vram)
+        worker_type.refuse_if_larger_than_host(self._backend, model_id, need.bytes)
         python = require_audio_python(self._config, spec, model_id)
         return Needs(
-            manifest, spec, python, require_audio_weights(self._config, manifest, spec), low_vram
+            manifest, spec, python, require_audio_weights(self._config, manifest, spec), need
         )
 
     def requirements(self, model_id: str, params: AudioParams) -> Needs:

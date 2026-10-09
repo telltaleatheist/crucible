@@ -180,6 +180,7 @@ def test_the_capability_rows_say_what_this_host_can_select_and_with_what(
     decided = verdict.decide(
         BY_NAME[name], backend_kind, total_bytes=total, desktop_allowance_bytes=3 * GIB,
         gpu_vendor="nvidia" if backend_kind == "cuda-linux" else "apple", chosen=None,
+        audio_low_vram=False,
     )
     assert decided.enabled is True, decided.reason
     assert decided.summary.startswith(summary), decided.summary
@@ -189,6 +190,7 @@ def test_a_card_too_small_for_either_model_says_so() -> None:
     decided = verdict.decide(
         BY_NAME["cutout"], "cuda-linux", total_bytes=6 * GIB, desktop_allowance_bytes=3 * GIB,
         gpu_vendor="nvidia", chosen=None,
+        audio_low_vram=False,
     )
     assert decided.enabled is False and decided.shortfall_bytes > 0
     assert decided.summary.startswith("cannot cut out a picture's subject")

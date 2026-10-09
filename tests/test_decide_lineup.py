@@ -115,6 +115,7 @@ def test_the_3090ti_decides_on_the_9b_it_was_measured_on() -> None:
         desktop_allowance_bytes=3 * GIB,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert verdict.enabled is True
     assert verdict.selected in ("qwen3.8-27b-4bit", "qwen3.5-9b")
@@ -126,6 +127,7 @@ def test_a_six_gig_card_cannot_decide_even_on_the_0_8b() -> None:
     verdict = decide(
         BY_NAME["decide"], CUDA_LINUX, total_bytes=6 * GIB,
         desktop_allowance_bytes=3 * GIB, gpu_vendor="nvidia", chosen=None,
+        audio_low_vram=False,
     )
     assert verdict.enabled is False
     assert "qwen3.5-0.8b" in verdict.reason
@@ -326,5 +328,6 @@ def test_the_mac_studio_still_decides_text_on_the_27b() -> None:
     verdict = decide(
         BY_NAME["decide"], MLX_DARWIN, total_bytes=64 * GIB,
         desktop_allowance_bytes=3 * GIB, gpu_vendor="apple", chosen=None,
+        audio_low_vram=False,
     )
     assert verdict.selected == "qwen3.8-27b-8bit"

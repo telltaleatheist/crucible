@@ -146,6 +146,7 @@ def _redecided_row(
     gpu_vendor: str,
     chosen: Mapping[str, str],
     routes: Mapping[str, str],
+    audio_low_vram: bool,
     card: "CardFacts | None",
 ) -> dict[str, Any]:
     decision = decide_capabilities(
@@ -156,6 +157,7 @@ def _redecided_row(
         gpu_vendor=gpu_vendor,
         chosen=chosen.get(entry.name),
         work=requested,
+        audio_low_vram=audio_low_vram,
         card=card,
     )
     fresh = decision.row()
@@ -172,6 +174,7 @@ def served_rows(
     capability_class: str | None,
     context_tokens: str | None,
     concurrency: str | None,
+    audio_low_vram: bool,
     card: "CardFacts | None" = None,
 ) -> list[dict[str, Any]]:
     entry = _named_class(
@@ -214,6 +217,7 @@ def served_rows(
                 gpu_vendor=gpu_vendor,
                 chosen=chosen,
                 routes=routes,
+                audio_low_vram=audio_low_vram,
                 card=card,
             )
         row["work"] = None if work is None else {**work.to_dict(), "from": basis}

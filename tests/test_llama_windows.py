@@ -32,6 +32,7 @@ def _decide(name: str, total: int, reserve: int, vendor: str, chosen: str | None
         desktop_allowance_bytes=reserve,
         gpu_vendor=vendor,
         chosen=chosen,
+        audio_low_vram=False,
     )
 
 
@@ -265,6 +266,7 @@ def test_the_whole_record_reads_as_three_kinds_of_answer() -> None:
         desktop_allowance_bytes=WINDOWS_RESERVE,
         gpu_vendor="nvidia",
         chosen={},
+        audio_low_vram=False,
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["echo"].enabled is True

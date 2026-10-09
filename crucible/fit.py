@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from . import asrplan, ttsplan
+from .audiomodels import held_need
 from .backend import CardFacts
 from .enginespec import bf16_fallback, card_needs, declared_dtype, dtype_on
 from .manifests import MemoryTerms
@@ -38,6 +39,11 @@ class Candidate:
     dtype: str | None = None
     bf16_fallback: str | None = None
     serving: "tuple[ServingVariant, ...] | None" = None
+    # An audio model's declared need under `[audio] low_vram` (None: it cannot be split).
+    low_vram_bytes: int | None = None
+    # Set by on_host when this host holds the model under `[audio] low_vram`: the whole
+    # figure memory_bytes_estimate stood at before it became the held one.
+    whole_bytes: int | None = None
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
@@ -59,7 +65,30 @@ class Candidate:
                 ttsplan.ladder_for(manifest, spec, backend_kind)
                 or asrplan.ladder_for(manifest, spec, backend_kind)
             ),
+            low_vram_bytes=getattr(spec, "low_vram_memory_bytes_estimate", None),
         )
+
+    @property
+    def held_low_vram(self) -> bool:
+        return self.whole_bytes is not None
+
+    def on_host(self, audio_low_vram: bool) -> "Candidate":
+        """This candidate as a host with this `[audio] low_vram` holds it: the need is
+        audiomodels.held_need's, the rule the audio job admits against."""
+        if self.held_low_vram:
+            raise ValueError(f"{self.id} is already weighed for a host; weigh the catalog's")
+        need = held_need(self.memory_bytes_estimate, self.low_vram_bytes, audio_low_vram)
+        if not need.low_vram:
+            return self
+        return replace(self, memory_bytes_estimate=need.bytes, whole_bytes=self.memory_bytes_estimate)
+
+    def would_fit_low_vram(self, budget: int) -> bool:
+        """Not held low here, and its declared low-VRAM need fits: `[audio] low_vram`
+        is what this host lacks for it."""
+        if self.held_low_vram:
+            return False
+        would = held_need(self.memory_bytes_estimate, self.low_vram_bytes, True)
+        return would.low_vram and would.bytes <= budget
 
     def serving_on(self, budget: int) -> "ServingVariant | None":
         if self.serving is None:
@@ -140,7 +169,19 @@ class Candidate:
             "bits": self.bits,
             "dtype": self.dtype,
             "bf16_fallback": self.bf16_fallback,
+            "low_vram_bytes": self.low_vram_bytes,
+            "low_vram": self.held_low_vram,
+            "whole_bytes": self.whole_bytes,
         }
+
+
+def by_need(candidate: Candidate) -> tuple[int, str]:
+    return -candidate.memory_bytes_estimate, candidate.id
+
+
+def on_host(found: tuple[Candidate, ...], audio_low_vram: bool) -> tuple[Candidate, ...]:
+    """A class's candidates as this host holds them, largest need first."""
+    return tuple(sorted((c.on_host(audio_low_vram) for c in found), key=by_need))
 
 
 @dataclass(frozen=True)
@@ -247,7 +288,7 @@ class CatalogCandidates:
             if below_floor(candidate.bits):
                 continue
             found.append(candidate)
-        found.sort(key=lambda c: (-c.memory_bytes_estimate, c.id))
+        found.sort(key=by_need)
         return tuple(found)
 
 
@@ -256,7 +297,9 @@ __all__ = [
     "CatalogCandidates",
     "ContextCeiling",
     "WorkingContext",
+    "by_need",
     "cached_catalog",
     "catalog_fingerprint",
     "forget_cached_catalogs",
+    "on_host",
 ]

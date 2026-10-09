@@ -145,6 +145,29 @@ class Companion:
         }
 
 
+# The host setting that holds one part of a splittable audio model on the card at a time,
+# named as an operator writes it in config.toml.
+LOW_VRAM_SETTING = "[audio] low_vram"
+
+
+@dataclass(frozen=True)
+class HeldNeed:
+    """What one audio model needs on this host, and whether `[audio] low_vram` is why."""
+
+    bytes: int
+    low_vram: bool
+
+
+def held_need(whole_bytes: int, low_vram_bytes: int | None, host_low_vram: bool) -> HeldNeed:
+    """The one rule for which need a host uses for an audio model: the manifest's low-VRAM
+    figure when this host's `[audio] low_vram` is on and the model declares one, else the
+    whole figure. The audio job admits against it and the capability verdict weighs it, so
+    the two can never name different figures for one model on one host."""
+    if host_low_vram and low_vram_bytes is not None:
+        return HeldNeed(low_vram_bytes, True)
+    return HeldNeed(whole_bytes, False)
+
+
 @dataclass(frozen=True)
 class AudioBackendSpec:
 
@@ -177,6 +200,11 @@ class AudioBackendSpec:
     @property
     def device(self) -> str:
         return ENGINE_DEVICE[(self.engine, self.backend)]
+
+    def need_on(self, host_low_vram: bool) -> HeldNeed:
+        return held_need(
+            self.memory_bytes_estimate, self.low_vram_memory_bytes_estimate, host_low_vram
+        )
 
     def why_not(self, param: str) -> str | None:
         return dict(self.not_taken).get(param)
@@ -581,8 +609,10 @@ __all__ = [
     "AudioManifestError",
     "Companion",
     "CompanionFile",
+    "HeldNeed",
     "KINDS",
     "KIND_WORDS",
+    "LOW_VRAM_SETTING",
     "MUSIC",
     "OPTIONAL_PARAMS",
     "SFX",
@@ -591,6 +621,7 @@ __all__ = [
     "YUE2",
     "audio_manifests_dir",
     "engines_on",
+    "held_need",
     "load_all_audio_manifests",
     "load_audio_manifest",
     "load_music_manifests",

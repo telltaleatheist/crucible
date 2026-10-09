@@ -94,6 +94,7 @@ def test_the_refusal_names_all_four_terms() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert decision.enabled
     for phrase in ("weights", "overhead", "KV for", "4096 tokens x 4 in flight"):
@@ -109,6 +110,7 @@ def test_a_class_with_no_work_gets_the_sentence_it_always_got() -> None:
         desktop_allowance_bytes=DESKTOP,
         gpu_vendor="nvidia",
         chosen=None,
+        audio_low_vram=False,
     )
     assert "weights +" not in decision.reason
 
@@ -122,6 +124,7 @@ def test_the_card_still_decides_every_llm_class_on_owens_pc() -> None:
             desktop_allowance_bytes=DESKTOP,
             gpu_vendor="nvidia",
             chosen={},
+            audio_low_vram=False,
         )
     }
     assert decisions["clean"].selected == "qwen3.5-9b"

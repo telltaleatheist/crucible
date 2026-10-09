@@ -180,6 +180,7 @@ def test_the_capability_row_says_where_video_can_be_made(
     decided = verdict.decide(
         BY_NAME["video"], backend_kind, total_bytes=total, desktop_allowance_bytes=allowance,
         gpu_vendor="nvidia" if backend_kind == "cuda-linux" else "apple", chosen=None,
+        audio_low_vram=False,
     )
     assert decided.enabled is enabled, decided.reason
     assert decided.summary.startswith(summary), decided.summary

@@ -120,11 +120,17 @@ class ManifestCatalog(Generic[M]):
             else None,
         )
 
-    def memory_estimate(self, model_id: str, backend_kind: str) -> int:
+    def memory_estimate(
+        self,
+        model_id: str,
+        backend_kind: str,
+        *,
+        estimate: Callable[[Any], int] = lambda spec: spec.memory_bytes_estimate,
+    ) -> int:
         manifest: Any = self.known(model_id)
         if not manifest.supports(backend_kind):
             return 0
-        return manifest.spec(backend_kind).memory_bytes_estimate
+        return estimate(manifest.spec(backend_kind))
 
     def provenance(self, backend_kind: str, model: str | None) -> dict[str, Any] | None:
         if model is None:

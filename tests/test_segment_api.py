@@ -423,6 +423,7 @@ def test_the_capability_rows_name_the_model_of_each_class(
         decisions=verdict.decide_all(
             "cuda-linux", total_bytes=total, desktop_allowance_bytes=allowance,
             gpu_vendor="nvidia", chosen={},
+            audio_low_vram=False,
         ),
         routes={},
     )

@@ -7,10 +7,12 @@ from . import capabilityclasses, classnames, memorybudget, upstreamrecord
 from .backend import CardFacts
 from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .capabilitystore import decide_on, record_of
+from .capabilitywords import low_vram_refusal_note
 from .clock import utcnow
 from .config import Config, LocalModelRecord, RouteRecord, _advertised, load_config, write_config
 from .errors import ApiError, ConfigError
 from .events import SETTINGS, EventHub
+from .fit import on_host
 from .upstreamrecord import UPSTREAM_DISPLAY, UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
@@ -77,7 +79,7 @@ def _choices(
         entry = capabilityclasses.BY_NAME[name]
         assert entry.candidates is not None
         rows: list[dict[str, Any]] = []
-        for candidate in entry.candidates(record.backend_kind):
+        for candidate in on_host(entry.candidates(record.backend_kind), config.audio_low_vram):
             if candidate.id not in installed:
                 raise ApiError(
                     500,
@@ -92,6 +94,7 @@ def _choices(
                     "id": candidate.id,
                     "memory_bytes_estimate": candidate.memory_bytes_estimate,
                     "fits": candidate.memory_bytes_estimate <= budget,
+                    "low_vram": candidate.held_low_vram,
                     "installed": installed[candidate.id],
                 }
             )
@@ -150,6 +153,8 @@ class Resolved:
         self.desktop_allowance_bytes = config.desktop_allowance_bytes
         self.desktop_allowance_basis = config.desktop_allowance_basis
         self.desktop_allowance_note = config.desktop_allowance_note
+        # Not a settings key: what the host's `[audio] low_vram` makes an audio model need.
+        self.audio_low_vram = config.audio_low_vram
         self.tailscale_advertise = config.tailscale_advertise
         self.lan_advertise = config.lan_advertise
         self.removed: set[str] = set()
@@ -346,11 +351,11 @@ def _require_decided(
 
 
 def _offered_candidate(
-    record: CapabilityRecord, name: str, value: str, field: str
+    record: CapabilityRecord, resolved: Resolved, name: str, value: str, field: str
 ) -> Any:
     entry = capabilityclasses.BY_NAME[name]
     assert entry.candidates is not None
-    offered = entry.candidates(record.backend_kind)
+    offered = on_host(entry.candidates(record.backend_kind), resolved.audio_low_vram)
     picked = next((c for c in offered if c.id == value), None)
     if picked is not None:
         return picked
@@ -386,7 +391,8 @@ def _require_fits(
         f"is {budget / 2**30:.1f} GiB available "
         f"({record.total_bytes / 2**30:.1f} GiB less a "
         f"{resolved.desktop_allowance_bytes / 2**30:.1f} GiB desktop "
-        f"allowance) — short by {shortfall / 2**30:.1f} GiB",
+        f"allowance) — short by {shortfall / 2**30:.1f} GiB."
+        + (low_vram_refusal_note(picked) if picked.would_fit_low_vram(budget) else ""),
         {
             "field": field,
             "capability": name,
@@ -394,6 +400,7 @@ def _require_fits(
             "memory_bytes_estimate": picked.memory_bytes_estimate,
             "available_bytes": budget,
             "shortfall_bytes": shortfall,
+            "low_vram": picked.held_low_vram,
         },
     )
 
@@ -416,7 +423,7 @@ def _resolve_local_model(
             {"field": field},
         )
     decided = _require_decided(record, name, field)
-    picked = _offered_candidate(decided, name, value, field)
+    picked = _offered_candidate(decided, resolved, name, value, field)
     _require_fits(decided, resolved, picked, name, field)
     if resolved.local_models.get(name) != value:
         resolved.local_models[name] = value
@@ -528,6 +535,7 @@ def recomputed_capability(
         gpu_vendor=gpu_vendor,
         card=card,
         chosen=resolved.local_models,
+        audio_low_vram=config.audio_low_vram,
     )
     return record_of(
         record.backend_kind,
