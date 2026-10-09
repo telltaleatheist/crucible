@@ -416,6 +416,57 @@ def test_init_refuses_a_blank_or_spaced_token(home: Path, viable: None) -> None:
     assert not config_path(home).exists()
 
 
+def test_init_takes_the_installers_token_from_the_environment_not_argv(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.cli.init import INIT_TOKEN_ENV
+
+    given = "install-sh-minted-" + "y" * 30
+    monkeypatch.setenv(INIT_TOKEN_ENV, given)
+    assert cli.main(["init", "--token-env", "--enable-echo"]) == 0
+    assert load_config(home).token == given
+    out = capsys.readouterr().out
+    assert f"#{given}" in pairing.read_pairing_file(home)
+    assert given not in out
+    assert "token:    as given" in out
+
+
+def test_init_token_env_with_nothing_in_the_environment_is_refused_by_name(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.cli.init import INIT_TOKEN_ENV
+
+    monkeypatch.delenv(INIT_TOKEN_ENV, raising=False)
+    assert cli.main(["init", "--token-env"]) == 1
+    err = capsys.readouterr().err
+    assert "token_env_empty" in err and INIT_TOKEN_ENV in err
+    assert not config_path(home).exists(), "never a minted token in place of the one asked for"
+    monkeypatch.setenv(INIT_TOKEN_ENV, "has a space")
+    assert cli.main(["init", "--token-env"]) == 1
+    assert not config_path(home).exists()
+
+
+def test_init_takes_one_token_door_at_a_time(
+    home: Path, viable: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible.cli.init import INIT_TOKEN_ENV
+
+    monkeypatch.setenv(INIT_TOKEN_ENV, "z" * 40)
+    assert cli.main(["init", "--token-env", "--token", "q" * 40]) == 1
+    assert not config_path(home).exists()
+
+
+def test_every_installer_hands_init_its_token_through_the_one_variable() -> None:
+    from crucible.cli.init import INIT_TOKEN_ENV
+
+    root = Path(__file__).resolve().parent.parent
+    steps = (root / "sdk" / "bootstrap" / "src" / "steps.ts").read_text(encoding="utf-8")
+    install_sh = (root / "sdk" / "bootstrap" / "scripts" / "install.sh").read_text(encoding="utf-8")
+    assert f"export const INIT_TOKEN_ENV = '{INIT_TOKEN_ENV}';" in steps
+    assert f"{INIT_TOKEN_ENV}=\"$TOKEN\" \"$CRUCIBLE\" 'init' '--token-env'" in install_sh
+    assert "'init' '--token' " not in install_sh
+
+
 def test_every_installable_name_has_a_smoke_import() -> None:
     for backend_kind in ("cuda-linux", "mlx-darwin"):
         for job_type in jobenv.INSTALLABLE_JOB_TYPES:

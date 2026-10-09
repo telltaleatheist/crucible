@@ -107,9 +107,13 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
 
 ## `init`
 
-- **Token**: minted, or taken from `--token` (for `@crucible/bootstrap`, which mints on its
-  own side), or carried by `--config-from`. `--token` and `--config-from` together are
-  refused. A blank or whitespace token is refused.
+- **Token**: minted, or taken from `$CRUCIBLE_INIT_TOKEN` with `--token-env` (how
+  install.sh and `@crucible/bootstrap`, which mint on their own side, hand it over: a
+  command line is readable by every user of the box through `ps aux`, an environment only
+  by its own user and root), or from `--token` (a person typing at a terminal), or carried
+  by `--config-from`. Two of those together are refused, `--token-env` with the variable
+  unset or empty is `token_env_empty` (never a minted token instead), and a blank or
+  whitespace token is refused.
 - **`--config-from`** (written at 0600 by the host when it moves a Windows Crucible into
   the WSL guest) carries the token, `[routes]`, `[upstreams]` and the `[accelerator]`
   desktop reserve with its basis and note. Host, port, name, backend and job flags belong

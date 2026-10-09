@@ -293,7 +293,7 @@ else
   if [ -z "${TOKEN:-}" ]; then
     TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
   fi
-  "$CRUCIBLE" 'init' '--token' "$TOKEN" $BIND || die "step_failed: init"
+  CRUCIBLE_INIT_TOKEN="$TOKEN" "$CRUCIBLE" 'init' '--token-env' $BIND || die "step_failed: init"
 fi
 
 if [ -n "$JOB_TYPES" ]; then

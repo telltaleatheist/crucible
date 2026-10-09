@@ -28,6 +28,7 @@ import {
 import { interpreterFor, interpreterUrl } from '../src/interpreter.js';
 import { wheelShaUrl, wheelUrl } from '../src/release.js';
 import { guestProbeScript } from '../src/runtime.js';
+import { INIT_TOKEN_ENV } from '../src/steps.js';
 import {
   ARCHIVE,
   CRUCIBLE_BIN,
@@ -180,18 +181,13 @@ for (const [label, requests, pattern] of [
 
 // ---------------------------------------------------------- the native walk
 
-test('linux: the whole PHASE14 sequence, each step by name, the token redacted everywhere it could show', async () => {
+test('linux: the whole PHASE14 sequence, each step by name, the token on no command line and in no log', async () => {
   const c = collector();
-  let tokenSeen: string | null = null;
   const expectations: Expectation[] = [
     { argv: PROBE(), stdout: GUEST_BARE },
     ...SERVER,
     {
-      argv: (argv) => {
-        const ok = argv.slice(0, 2).join(' ') === `${CRUCIBLE_BIN} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--enable-llm --enable-tts';
-        tokenSeen = argv[3] ?? null;
-        return ok;
-      },
+      argv: N(CRUCIBLE_BIN, 'init', '--token-env', '--enable-llm', '--enable-tts'),
       lines: [['backend:  cuda-linux', 'stdout'], ['token:    minted; print it with `crucible token --show`', 'stdout']],
     },
     { argv: N(CRUCIBLE_BIN, 'install', 'llm', '--verbose'), lines: [['  Collecting vllm==0.29.0', 'stdout'], ['installed in 400s', 'stdout']] },
@@ -228,11 +224,17 @@ test('linux: the whole PHASE14 sequence, each step by name, the token redacted e
   assert.equal(result.crucible, CRUCIBLE_BIN);
   assert.equal('token' in result.server, false);
 
-  assert.ok(tokenSeen !== null && (tokenSeen as string).length >= 40, 'a token was minted and passed');
+  const initCall = runner.calls.find((call) => call.argv[1] === 'init');
+  const tokenSeen = initCall?.env?.[INIT_TOKEN_ENV];
+  assert.ok(tokenSeen !== undefined && tokenSeen.length >= 40, 'a token was minted and handed over in the environment');
   const init = result.steps.find((s) => s.name === 'init');
-  assert.deepEqual(init?.argv, [CRUCIBLE_BIN, 'init', '--token', '<redacted>', '--enable-llm', '--enable-tts']);
+  assert.deepEqual(init?.argv, [CRUCIBLE_BIN, 'init', '--token-env', '--enable-llm', '--enable-tts']);
+  const argvs = JSON.stringify(runner.calls.map((call) => call.argv));
+  assert.equal(argvs.includes(tokenSeen), false, 'the token is on no command line, where `ps aux` reads it');
+  const others = runner.calls.filter((call) => call !== initCall);
+  assert.equal(others.some((call) => call.env !== undefined && INIT_TOKEN_ENV in call.env), false, 'only init is handed the token');
   const everything = JSON.stringify(result) + c.lines.join('\n') + c.steps.join('\n');
-  assert.equal(everything.includes(tokenSeen as string), false, 'the token appears nowhere the host can log');
+  assert.equal(everything.includes(tokenSeen), false, 'the token appears nowhere the host can log');
 
   const server = result.steps.find((s) => s.name === 'server');
   assert.match(server?.detail ?? '', /python 3\.11\.16 from python-build-standalone into \/home\/owen\/\.crucible\/server, then the 0\.6\.0 wheel/);
@@ -455,7 +457,7 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
   const runner = linuxRunner([
     { argv: PROBE('/srv/crucible'), stdout: `home=/srv/crucible\nuser=owen\nfree_kib=400000000\ncrucible=${CRUCIBLE}\nversion=crucible 0.6.0\npython_sha256=${PY_SHA}\nrelease=0.6.0\n` },
     ...wheelFetch('/srv/crucible'),
-    { argv: (argv) => argv.slice(0, 2).join(' ') === `${CRUCIBLE} init` && argv[2] === '--token' && argv.slice(4).join(' ') === '--host 0.0.0.0 --port 7200 --enable-echo', env: ENV },
+    { argv: N(CRUCIBLE, 'init', '--token-env', '--host', '0.0.0.0', '--port', '7200', '--enable-echo') },
     { argv: N(CRUCIBLE, 'env', 'patch', 'llm'), env: ENV },
     { argv: N(CRUCIBLE, 'service', 'install'), env: ENV },
     { argv: N(CRUCIBLE, 'local', 'register'), env: ENV },
@@ -478,6 +480,9 @@ test('{home} travels as CRUCIBLE_HOME into every crucible verb, and {bind} into 
   }, runner);
   runner.assertDrained();
   assert.equal(result.server.configPath, '/srv/crucible/config.toml');
+  const init = runner.calls.find((call) => call.argv[1] === 'init');
+  assert.deepEqual(Object.keys(init?.env ?? {}).sort(), ['CRUCIBLE_HOME', INIT_TOKEN_ENV].sort());
+  assert.equal(init?.env?.['CRUCIBLE_HOME'], '/srv/crucible', 'the home travels with the token, not instead of it');
 });
 
 test('darwin: the same steps run natively, shasum instead of sha256sum, no linger step at all', async () => {

@@ -33,7 +33,7 @@ install and an app-driven install "cannot differ"), so this list is the same one
 host-facts        CRUCIBLE_HOME, the user, free disk, curl/tar
 prerequisites     (install.sh only) the card, the driver, ffmpeg, the disk
 server            the pinned CPython into <home>/server (ONCE), then pip <this release's wheel>
-init              crucible init --token … [--host …] [--port …]      (SKIPPED when a config exists)
+init              CRUCIBLE_INIT_TOKEN=… crucible init --token-env [--host …] [--port …]   (SKIPPED when a config exists)
 install-<type>    crucible install <type>                            (only what --install named)
 service-install   crucible service install
 linger            loginctl enable-linger <user>                      (systemd only)

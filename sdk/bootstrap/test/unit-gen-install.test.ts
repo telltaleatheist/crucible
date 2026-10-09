@@ -69,7 +69,7 @@ test('install.sh takes --host/--port through to init, which is what a droplet ne
   assert.match(sh, /--host\) need \$# "--host"; shift; BIND="\$BIND --host \$1" ;;/);
   assert.match(sh, /--port\) need \$# "--port"; shift; BIND="\$BIND --port \$1" ;;/);
   // Unquoted on purpose: `$BIND` holds two words and must split into two.
-  assert.match(sh, /init' '--token' "\$TOKEN" \$BIND \|\| die "step_failed: init"/);
+  assert.match(sh, /CRUCIBLE_INIT_TOKEN="\$TOKEN" "\$CRUCIBLE" 'init' '--token-env' \$BIND \|\| die "step_failed: init"/);
 });
 
 test('install.sh takes --token, and mints one only when nobody brought one', () => {
@@ -255,7 +255,8 @@ test('install.sh mints its own token and keeps an existing config\'s', () => {
   assert.match(sh, /if \[ -f "\$CRUCIBLE_HOME\/config\.toml" \]; then/);
   assert.match(sh, /its token is kept/);
   assert.match(sh, /TOKEN="\$\(head -c 32 \/dev\/urandom \| base64 \| tr '\+\/' '-_' \| tr -d '='\)"/);
-  assert.match(sh, /init' '--token' "\$TOKEN"/);
+  assert.match(sh, /CRUCIBLE_INIT_TOKEN="\$TOKEN" "\$CRUCIBLE" 'init' '--token-env'/);
+  assert.equal(/'init' '--token'( |$)/m.test(sh), false, 'the token is never on init\'s command line, where `ps aux` reads it');
 });
 
 test('install.sh\'s linger step tries itself, then sudo -n, then prints the ONE hand-over line', () => {
