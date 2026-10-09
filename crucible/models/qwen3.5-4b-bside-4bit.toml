@@ -1,0 +1,46 @@
+[model]
+id = "qwen3.5-4b-bside-4bit"
+# Its own family, so no capability class (decide, routing, cleanup, ...) ever offers it:
+# it answers one client's prompt and is asked for by name, never chosen.
+family = "bside"
+params_b = 4
+context_default = 8192
+
+trained_context = 262144
+modalities = ["text"]
+display = "Qwen 3.5 · 4B · B-Side (4-bit)"
+description = "qwen3.5-4b-bside quantized to 4-bit for a card that cannot hold it whole (an 8 GiB laptop): the same B-Side describe answers, tags and lyrics as JSON, from 3.1 GiB of weights. One request at a time. Text only; serve with thinking off."
+
+[defaults]
+thinking = false
+
+# owenmorgan/qwen3.5-4b-bside @ e9a563d2 with the language model's linear layers at 4 bits
+# (W4A16, compressed-tensors pack-quantized, symmetric, one scale per 128 inputs,
+# round-to-nearest); the tied embeddings, the linear-attention gates and the vision
+# tower stay bfloat16. Owen, 2026-10-09: "ya we can quantize to 4 bit, that would be
+# fine. this is a very simple task. filling out tags" and "we shouldnt need batching for
+# this specific thing since its one call". vLLM runs it with Marlin kernels on Ampere.
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "owenmorgan/qwen3.5-4b-bside-w4a16"
+revision = "8869af2a0add5fbd96c7f400a2376be48c805f36"
+serves = ["text"]
+memory_bytes_estimate = 5_300_000_000
+engine_args = [
+    "--dtype", "bfloat16",
+    "--max-num-seqs", "1",
+    "--language-model-only",
+    "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+]
+max_context = 16384
+
+# Measured 2026-10-09 on the RTX 3090 Ti, capped at 0.29 (6.96 GiB, an 8 GiB card less its
+# 1 GiB desktop allowance), vLLM 0.29: "Model loading took 3.11 GiB"; of the rest, 2.34 GiB
+# went to the KV pool and 0.06 GiB to CUDA graphs, leaving about 1.6 GB of overhead.
+# B-Side's describe() answered valid tags and well-formed lyrics in 1.5 to 7 s.
+[backends.cuda-linux.memory]
+weights_bytes = 3_339_000_000
+overhead_bytes = 1_600_000_000
+kv_bytes_per_token = 40_337
+basis = "measured"
+measured_at_context = 8192
