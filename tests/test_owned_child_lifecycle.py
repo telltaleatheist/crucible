@@ -46,7 +46,10 @@ app = FastAPI(lifespan=lifespan)
 from crucible.events import EventHub
 app.state.events = EventHub()
 from types import SimpleNamespace
-cli.common.load_config = lambda: SimpleNamespace(backend_kind='fixture', host='127.0.0.1', port=0, name='fixture')
+cli.common.load_config = lambda: SimpleNamespace(
+    backend_kind='fixture', host='127.0.0.1', port=0, name='fixture', path=root / 'config.toml',
+    advertise=(), tailscale_advertise=(), lan_advertise=(),
+)
 cli.common.detect_backend = lambda: SimpleNamespace(kind='fixture', gpu=SimpleNamespace(name='CPU fixture'))
 cli.token._sync_pairing_file = lambda config: None
 import crucible.api
