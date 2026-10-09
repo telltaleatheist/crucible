@@ -16,15 +16,29 @@ ORDINARY_POWERSHELL = (
 )
 
 
-def refusal_sentence(package: str, what: str) -> str:
+WRITES_CONSEQUENCE = (
+    "Windows quietly redirects what such a process writes under AppData into "
+    "that app's own private folder, so Crucible would land where only that app "
+    "can see it, and would not start when you sign in. Nothing has been "
+    "written. "
+)
+
+REMOVES_CONSEQUENCE = (
+    "Windows shows such a process that app's own private folder laid over the "
+    "real AppData, so what it removes there is not reliably what is on the disk: "
+    "an uninstall from inside it could take away part of Crucible and leave the "
+    "rest, a split install neither half of which can be started or finished. "
+    "Nothing has been removed. "
+)
+
+
+def refusal_sentence(package: str, what: str, *, removes: bool = False) -> str:
     return (
         f"{REFUSAL_CODE}: {what} is running inside the Windows app package "
         f"{package} (an app installed from the Store or as an MSIX, such as "
         "the Claude desktop app, and anything started from a terminal inside it). "
-        "Windows quietly redirects what such a process writes under AppData into "
-        "that app's own private folder, so Crucible would land where only that app "
-        "can see it, and would not start when you sign in. Nothing has been "
-        "written. " + ORDINARY_POWERSHELL
+        + (REMOVES_CONSEQUENCE if removes else WRITES_CONSEQUENCE)
+        + ORDINARY_POWERSHELL
     )
 
 
@@ -68,9 +82,10 @@ def package_name(
 def refuse_packaged(
     what: str,
     *,
+    removes: bool = False,
     platform: str | None = None,
     probe: Callable[[], str | None] | None = None,
 ) -> None:
     package = package_name(platform, probe)
     if package is not None:
-        raise LocalError(refusal_sentence(package, what))
+        raise LocalError(refusal_sentence(package, what, removes=removes))

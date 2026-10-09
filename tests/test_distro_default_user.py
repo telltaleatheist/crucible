@@ -13,6 +13,16 @@ from crucible.platform.wsl_table import CRUCIBLE_DISTRO, WSL_CONF_TEXT
 
 WHOAMI = " ".join(wsl.whoami_argv(CRUCIBLE_DISTRO))
 TERMINATE = " ".join(wsl.terminate_argv(CRUCIBLE_DISTRO))
+HELP = " ".join(wsl.help_argv())
+SET_USER = " ".join(wsl.set_default_user_argv(CRUCIBLE_DISTRO, wsl.GUEST_USER))
+
+# `wsl --help` as WSL 2.5.7 prints it (captured on Owen's PC, NULs stripped), and
+# the same text with the --set-default-user option taken out, as an older WSL's.
+WSL_HELP = (Path(__file__).parent / "data" / "wsl-help-2.5.7.txt").read_text(encoding="utf-8")
+OLD_WSL_HELP = "\n".join(
+    line for line in WSL_HELP.splitlines()
+    if "--set-default-user" not in line and "Set the default user of the distribution" not in line
+)
 
 
 def _ok(stdout: str = "") -> RunResult:
@@ -23,8 +33,14 @@ class Distro:
     """A `crucible` distro that reads /etc/wsl.conf only when it starts, as WSL does."""
 
     def __init__(self, *, booted_with_conf: bool, conf_names_user: bool = True, present: bool = True,
-                 terminate: RunResult | None = None, whoami: RunResult | None = None) -> None:
+                 terminate: RunResult | None = None, whoami: RunResult | None = None,
+                 help_text: str = WSL_HELP, set_user: RunResult | None = None,
+                 registry_names_user: bool = True) -> None:
         self.present = present
+        self.help_text = help_text
+        self.set_user = set_user or _ok()
+        self.registry_names_user = registry_names_user
+        self.registered = False
         self.booted_with_conf = booted_with_conf
         self.conf_names_user = conf_names_user
         self.terminate = terminate or _ok()
@@ -38,10 +54,16 @@ class Distro:
             if self.terminate.ok:
                 self.booted_with_conf = True
             return self.terminate
+        if line == HELP:
+            return _ok(self.help_text)
+        if line == SET_USER:
+            if self.set_user.ok and self.registry_names_user:
+                self.registered = True
+            return self.set_user
         if line == WHOAMI:
             if self.whoami is not None:
                 return self.whoami
-            named = self.booted_with_conf and self.conf_names_user
+            named = self.registered or (self.booted_with_conf and self.conf_names_user)
             return _ok(("crucible" if named else "root") + "\n")
         if line.endswith("-l -v"):
             return _ok(f"  {CRUCIBLE_DISTRO}  Running  2\n" if self.present else "  Ubuntu  Running  2\n")
@@ -66,6 +88,9 @@ def test_the_import_restarts_the_distro_so_its_wsl_conf_is_the_one_running(tmp_p
     assert not any("cat /etc/wsl.conf" in call for call in runner.calls), "took the import path, not the keep path"
     assert runner.calls.count(TERMINATE) == 1
     assert runner.calls.index(WHOAMI) < runner.calls.index(TERMINATE)
+    assert runner.calls.index(TERMINATE) < runner.calls.index(SET_USER), (
+        "the boot is read from who it enters as BEFORE the registry is told, which would answer it"
+    )
     assert runner.calls[-1] == WHOAMI, "the restart is verified, not assumed"
     assert runner.booted_with_conf
 
@@ -84,17 +109,84 @@ def test_a_distro_that_already_enters_as_crucible_is_left_running(tmp_path: Path
     _walk(tmp_path, runner, [])._import_distro()
     assert TERMINATE not in runner.calls
     assert WHOAMI in runner.calls
+    assert SET_USER in runner.calls, "the registry is told even when wsl.conf already holds"
 
 
-def test_a_distro_that_enters_as_root_after_a_restart_is_refused_by_name(tmp_path: Path) -> None:
+def test_the_registry_names_the_user_where_wsl_conf_did_not_take(tmp_path: Path) -> None:
+    # The laptop's case: the conf said crucible and the distro still entered as root.
+    events: list = []
     runner = Distro(booted_with_conf=False, conf_names_user=False)
+    _walk(tmp_path, runner, events)._import_distro()
+    assert runner.calls.count(TERMINATE) == 1
+    assert runner.calls.count(SET_USER) == 1
+    assert runner.calls[-1] == WHOAMI, "and it is verified, not assumed"
+    lines = [e.data["text"] for e in events if e.event == "line"]
+    assert any(SET_USER in line for line in lines), lines
+
+
+def test_an_older_wsl_without_the_option_keeps_wsl_conf_and_says_so(tmp_path: Path) -> None:
+    events: list = []
+    runner = Distro(booted_with_conf=False, help_text=OLD_WSL_HELP)
+    _walk(tmp_path, runner, events)._import_distro()
+    assert HELP in runner.calls
+    assert SET_USER not in runner.calls, "asked of wsl.exe, never tried blind"
+    lines = [e.data["text"] for e in events if e.event == "line"]
+    assert any(
+        "has no `wsl --manage <distro> --set-default-user`" in line and "wsl --update" in line
+        for line in lines
+    ), lines
+
+
+def test_an_older_wsl_whose_conf_did_not_take_is_refused_with_the_update_named(tmp_path: Path) -> None:
+    runner = Distro(booted_with_conf=False, conf_names_user=False, help_text=OLD_WSL_HELP)
     with pytest.raises(HostError) as caught:
         _walk(tmp_path, runner, [])._import_distro()
     assert caught.value.code == "distro_default_user"
     assert '"root"' in caught.value.message
+    assert "wsl --update" in caught.value.message
     assert f"wsl -d {CRUCIBLE_DISTRO} -u root --exec cat /etc/wsl.conf" in caught.value.message
     assert installer.TRY_AGAIN_HINT in caught.value.message
     assert runner.calls.count(TERMINATE) == 1, "one restart, then a refusal, not a loop"
+
+
+def test_a_distro_that_enters_as_root_even_after_the_registry_is_refused_by_name(tmp_path: Path) -> None:
+    runner = Distro(booted_with_conf=False, conf_names_user=False, registry_names_user=False)
+    with pytest.raises(HostError) as caught:
+        _walk(tmp_path, runner, [])._import_distro()
+    assert caught.value.code == "distro_default_user"
+    assert '"root"' in caught.value.message
+    assert f"wsl --manage {CRUCIBLE_DISTRO} --set-default-user crucible" in caught.value.message
+    assert runner.calls.count(TERMINATE) == 1
+    assert runner.calls.count(SET_USER) == 1, "one of each, then a refusal, not a loop"
+
+
+def test_a_set_default_user_that_fails_is_refused_with_what_wsl_said(tmp_path: Path) -> None:
+    runner = Distro(
+        booted_with_conf=True,
+        set_user=RunResult(code=1, stdout="", stderr="The user was not found.", failure=None),
+    )
+    with pytest.raises(HostError) as caught:
+        _walk(tmp_path, runner, [])._import_distro()
+    assert caught.value.code == "distro_default_user"
+    assert "The user was not found." in caught.value.message
+    assert installer.TRY_AGAIN_HINT in caught.value.message
+
+
+def test_a_help_that_is_not_usage_text_is_not_read_as_no(tmp_path: Path) -> None:
+    runner = Distro(booted_with_conf=True, help_text="")
+    with pytest.raises(HostError) as caught:
+        _walk(tmp_path, runner, [])._import_distro()
+    assert caught.value.code == "wsl_read_failed"
+    assert SET_USER not in runner.calls
+
+
+def test_the_option_is_read_from_usage_text_as_wsl_exe_writes_it() -> None:
+    from crucible.host import wslstate
+
+    utf16_read_as_text = chr(0).join(WSL_HELP)
+    assert wslstate.sets_default_user(_ok(utf16_read_as_text)) is True
+    assert wslstate.sets_default_user(_ok(OLD_WSL_HELP)) is False
+    assert wslstate.sets_default_user(RunResult(code=None, stdout="", stderr="", failure="not found")) is None
 
 
 def test_a_restart_that_fails_is_refused_with_what_wsl_said(tmp_path: Path) -> None:

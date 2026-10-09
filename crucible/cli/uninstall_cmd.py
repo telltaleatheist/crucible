@@ -8,10 +8,19 @@ import sys
 from .. import service, uninstall
 from ..config import crucible_home
 from ..errors import CrucibleError
+from ..platform.errors import LocalError
+from ..platform.packaged import refuse_packaged
 from .common import EXIT_OK, EXIT_REFUSED, _fail
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
+    # Before the plan, which reads the home, and so before a dry run too: from
+    # inside an app package even the reading is of that app's overlay, not the
+    # disk. install.ps1 -Uninstall asks the same question at the same point.
+    try:
+        refuse_packaged("`crucible uninstall`", removes=True)
+    except LocalError as exc:
+        return _fail(str(exc))
     try:
         home = crucible_home()
         built = uninstall.plan(

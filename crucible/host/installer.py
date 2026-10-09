@@ -144,6 +144,12 @@ def _feature_report(before: wslstate.LiveWsl, after: wslstate.LiveWsl) -> str:
 
 GUEST_RESTART_BUDGET_SECONDS = 180.0
 
+# `crucible capability --write` then `crucible service restart`, which waits up to
+# its own RESTART_ANSWER_SECONDS (120) for the server to answer before it says
+# restart_not_answering. This is the outer bound on both, so it must never be the
+# one that ends the wait first (tests/test_guest_restart.py holds that).
+GUEST_RESTART_TIMEOUT_SECONDS = QUICK_TIMEOUT_SECONDS
+
 
 @dataclass
 class Event:
@@ -540,30 +546,78 @@ class EngineInstall:
         return asked.stdout.strip()
 
     def _settle_wsl_conf(self) -> None:
-        if self._default_user() == wsl.GUEST_USER:
-            return
-        self._line(
-            f'Restarting "{self._distro}" so its /etc/wsl.conf takes effect: WSL reads '
-            f"it only when a distro starts, and it is what turns on systemd and makes "
-            f"{wsl.GUEST_USER} the user a plain `wsl -d {self._distro}` enters as"
-        )
-        stopped = self._runner.run(wsl.terminate_argv(self._distro), timeout_s=QUICK_TIMEOUT_SECONDS)
-        if not stopped.ok:
-            raise self._fail(
-                "distro_restart_failed",
-                f'"{self._distro}" would not stop to restart with its /etc/wsl.conf: '
-                f"{stopped.output_tail()}",
+        # First the boot: WSL reads /etc/wsl.conf (systemd=true, and the default
+        # user) only when a distro starts, and the finishing script booted it before
+        # the file existed. Who it enters as is how that is read, so it is asked
+        # BEFORE the registry is told the default user, which would answer it.
+        if self._default_user() != wsl.GUEST_USER:
+            self._line(
+                f'Restarting "{self._distro}" so its /etc/wsl.conf takes effect: WSL reads '
+                f"it only when a distro starts, and it is what turns on systemd and makes "
+                f"{wsl.GUEST_USER} the user a plain `wsl -d {self._distro}` enters as"
             )
+            stopped = self._runner.run(wsl.terminate_argv(self._distro), timeout_s=QUICK_TIMEOUT_SECONDS)
+            if not stopped.ok:
+                raise self._fail(
+                    "distro_restart_failed",
+                    f'"{self._distro}" would not stop to restart with its /etc/wsl.conf: '
+                    f"{stopped.output_tail()}",
+                )
+        registered = self._register_default_user()
         user = self._default_user()
         if user != wsl.GUEST_USER:
+            lever = (
+                f"`wsl --manage {self._distro} --set-default-user {wsl.GUEST_USER}` ran and "
+                "did not change it either"
+                if registered
+                else "this WSL cannot set a distro's default user itself (it has no "
+                "`wsl --manage --set-default-user`; `wsl --update` brings a WSL that does)"
+            )
             raise self._fail(
                 "distro_default_user",
                 f'"{self._distro}" enters as "{user}" after a restart, though its '
-                f"/etc/wsl.conf says [user] default={wsl.GUEST_USER}. The engine lives in "
-                f"/home/{wsl.GUEST_USER}, so a hand command typed at that distro would "
+                f"/etc/wsl.conf says [user] default={wsl.GUEST_USER}, and {lever}. The engine "
+                f"lives in /home/{wsl.GUEST_USER}, so a hand command typed at that distro would "
                 f"look for it in the wrong home. Read the file with: wsl -d {self._distro} "
                 f"-u root --exec cat /etc/wsl.conf  then {TRY_AGAIN_HINT}.",
             )
+
+    def _register_default_user(self) -> bool:
+        """Name the default user in WSL's own registration of the distro, where WSL can.
+
+        `wsl --manage <distro> --set-default-user` writes the distro's DefaultUid, which
+        is what WSL itself reads for a session that names no user; /etc/wsl.conf is read
+        only inside a booting distro. On a WSL without the option, wsl.conf is the only
+        thing naming the user, and the verification after this is what stands behind it.
+        Whether the option exists is asked of wsl.exe's own usage text, never inferred."""
+        helped = self._runner.run(wsl.help_argv(), timeout_s=QUICK_TIMEOUT_SECONDS)
+        supported = wslstate.sets_default_user(helped)
+        if supported is None:
+            raise self._fail(
+                "wsl_read_failed",
+                f"`wsl --help` gave no usage text this build can read, so it is not known "
+                f'whether this WSL can set the default user of "{self._distro}": '
+                f"{helped.output_tail()}",
+            )
+        if not supported:
+            self._line(
+                f"This WSL has no `wsl --manage <distro> --set-default-user` (older WSL "
+                f"releases do not; `wsl --update` brings it), so /etc/wsl.conf's [user] "
+                f"default={wsl.GUEST_USER} is the only thing naming the user "
+                f'"{self._distro}" enters as'
+            )
+            return False
+        argv = wsl.set_default_user_argv(self._distro, wsl.GUEST_USER)
+        set_user = self._runner.run(argv, timeout_s=QUICK_TIMEOUT_SECONDS)
+        if not set_user.ok:
+            raise self._fail(
+                "distro_default_user",
+                f"`{' '.join(argv)}` failed: {set_user.output_tail()}. Without it a plain "
+                f'`wsl -d {self._distro}` may enter as someone other than {wsl.GUEST_USER}, '
+                f"whose home the engine is in. Repair what wsl.exe said, then {TRY_AGAIN_HINT}.",
+            )
+        self._line(f'"{self._distro}" enters as {wsl.GUEST_USER}: `{" ".join(argv)}`')
+        return True
 
     def _keep_the_imported_distro(self) -> None:
         marked = self._runner.run(
@@ -795,15 +849,23 @@ class EngineInstall:
             )
 
     def _restart_guest_engine(self) -> None:
+        # `service restart`, never stop then start: between those two the tray's
+        # watch sees a stopped unit and starts it itself. And restart is done when
+        # the server ANSWERS (it waits up to RESTART_ANSWER_SECONDS, saying so),
+        # not when systemctl returns, so a server that never comes back fails this
+        # step by name (restart_not_answering, in the tail) instead of the next.
         restarted = self._stream_guest([
             "bash", "-c", 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"; '
             'export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"; '
             f'"{GUEST_CRUCIBLE}" capability --write && '
-            f'"{GUEST_CRUCIBLE}" service stop && '
-            f'"{GUEST_CRUCIBLE}" service start',
-        ], QUICK_TIMEOUT_SECONDS)
+            f'"{GUEST_CRUCIBLE}" service restart',
+        ], GUEST_RESTART_TIMEOUT_SECONDS)
         if not restarted.ok:
-            raise self._fail("guest_restart_failed", restarted.output_tail())
+            raise self._fail(
+                "guest_restart_failed",
+                f"`crucible capability --write && crucible service restart` failed "
+                f"inside \"{self._distro}\": {restarted.output_tail()}",
+            )
 
     def _wait_for_guest_catalog(self, guest: CatalogPort) -> None:
         deadline = self._monotonic() + GUEST_RESTART_BUDGET_SECONDS

@@ -201,6 +201,12 @@ def test_guided_import_downloads_verifies_and_imports_only_owned_distro(tmp_path
                 output = f"{chr(98) * 64} *other.tar.gz\n{chr(97) * 64} *{UBUNTU_WSL_ROOTFS}\n"
             elif argv[-1] == "/etc/wsl.conf":
                 output = "# crucible-rootfs\n[boot]\nsystemd=true\n"
+            elif argv[-2:] == ["id", "-un"]:
+                # The imported distro enters as crucible: the import settles that
+                # (installer._settle_wsl_conf) and refuses distro_default_user otherwise.
+                output = "crucible\n"
+            elif argv == ["wsl.exe", "--help"]:
+                output = (Path(__file__).parent / "data" / "wsl-help-2.5.7.txt").read_text(encoding="utf-8")
             else:
                 output = ""
             return RunResult(0, output, "", None)

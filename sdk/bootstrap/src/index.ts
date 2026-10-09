@@ -46,18 +46,12 @@ export type { GuestFacts, InstalledRuntime, RuntimeInstallOptions, RuntimeInstal
 export {
   CRUCIBLE_DISTRO,
   crucibleAppData,
-  ensureDistro,
-  importArgv,
   listDistros,
-  readWslConf,
   resolveDistro,
-  terminateArgv,
-  unregisterArgv,
-  writeWslConf,
   WSL_CONF_MARKER,
   WSL_CONF_TEXT,
 } from './distro.js';
-export type { DistroChoiceOptions, DistroOutcome, EnsureDistroOptions } from './distro.js';
+export type { DistroChoiceOptions } from './distro.js';
 
 export {
   DECISION_POLL_MS,

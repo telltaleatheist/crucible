@@ -465,6 +465,10 @@ def test_every_installer_hands_init_its_token_through_the_one_variable() -> None
     assert f"export const INIT_TOKEN_ENV = '{INIT_TOKEN_ENV}';" in steps
     assert f"{INIT_TOKEN_ENV}=\"$TOKEN\" \"$CRUCIBLE\" 'init' '--token-env'" in install_sh
     assert "'init' '--token' " not in install_sh
+    # And install.sh's own --token-env reads the SAME variable, so the
+    # one-liner's `CRUCIBLE_INIT_TOKEN=... sh -s -- --token-env` names one thing.
+    assert f'TOKEN="${{{INIT_TOKEN_ENV}:-}}"' in install_sh
+    assert f"unset {INIT_TOKEN_ENV}" in install_sh
 
 
 def test_every_installable_name_has_a_smoke_import() -> None:

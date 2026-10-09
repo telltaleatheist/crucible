@@ -88,3 +88,40 @@ def test_install_ps1_asks_before_anything_is_written_or_removed() -> None:
     assert "if ($PackageCode -eq 0) { Die " in script
     assert "if ($PackageCode -ne 15700) { Die \"package_check_failed:" in script
 
+
+
+def test_a_removal_is_refused_with_its_own_consequence() -> None:
+    with pytest.raises(LocalError) as caught:
+        packaged.refuse_packaged(
+            "`crucible uninstall`", removes=True, platform="win32", probe=lambda: PACKAGE
+        )
+    text = str(caught.value)
+    assert text.startswith("packaged_shell: `crucible uninstall` is running inside")
+    assert "Nothing has been removed." in text
+    assert "Nothing has been written." not in text
+    assert text.endswith(packaged.ORDINARY_POWERSHELL)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_crucible_uninstall_refuses_before_it_plans_or_removes(monkeypatch, capsys, dry_run) -> None:
+    # A dry run too: from inside a package even the reading is of the app's
+    # overlay, so the plan would describe a disk that is not there.
+    from crucible.cli import uninstall_cmd
+
+    _inside_a_package(monkeypatch)
+    monkeypatch.setattr(uninstall_cmd.uninstall, "plan", lambda **_: pytest.fail("planned"))
+    monkeypatch.setattr(uninstall_cmd.uninstall, "run", lambda *_: pytest.fail("removed"))
+    args = argparse.Namespace(purge_weights=False, wsl_too=True, dry_run=dry_run, json=False)
+    assert uninstall_cmd.cmd_uninstall(args) != 0
+    err = capsys.readouterr().err
+    assert "packaged_shell: `crucible uninstall`" in err
+    assert "Nothing has been removed." in err
+
+
+def test_install_ps1_uninstall_says_the_same_removal_sentence_as_the_host() -> None:
+    script = _install_ps1()
+    sentence = packaged.refusal_sentence("$PackageName", "this uninstall", removes=True)
+    assert f'if ($PackageCode -eq 0 -and $Uninstall) {{ Die "{sentence}" }}' in script
+    assert script.index("-and $Uninstall) { Die") < script.index(
+        'if ($PackageCode -eq 0) { Die '
+    ), "the uninstall's own sentence is asked first"

@@ -91,6 +91,18 @@ def read_wsl_answer(result: RunResult) -> WslAnswer:
     return WslAnswer("unreadable", first=first[:160])
 
 
+def sets_default_user(result: RunResult) -> bool | None:
+    """Whether this wsl.exe has `--manage <distro> --set-default-user`, from its own usage text.
+
+    None when the answer is not usage text at all: that is not a "no", and the caller
+    must not treat it as one. The option names are not translated, so the text is read
+    the same on every Windows display language."""
+    text = f"{result.stdout}\n{result.stderr}".replace("\x00", "")
+    if sum(1 for option in _USAGE_OPTIONS if option in text) < 3:
+        return None
+    return wsl.SET_DEFAULT_USER_FLAG in text
+
+
 LXSS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
 
 

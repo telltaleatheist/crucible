@@ -64,6 +64,20 @@ maintained; this file is the short list of things that must stay true.
   systemd) could live on under the controller's `sleep infinity` hold, and a hand
   `wsl -d crucible --exec bash -lc '~/.crucible/...'` looked in `/root` (the friend's
   laptop, 2026-10-08). Nothing needs root as the default: every root act names `-u root`.
+
+  Between the restart and the final question, the default user is also written where WSL
+  itself keeps it: `wsl --manage crucible --set-default-user crucible`, which sets the
+  distro's `DefaultUid` in its registration (`installer._register_default_user`). wsl.conf
+  is read only inside a booting distro; the registration is what wsl.exe reads for a
+  session that names no user, so it holds whatever the boot did. Whether this WSL has the
+  option is asked of `wsl --help` (option names are not translated), never guessed from a
+  version: present (it is in WSL 2.5.7) means it runs, and a failure is
+  `distro_default_user` with what wsl.exe said; absent means wsl.conf is the only thing
+  naming the user, the install says so in a line, and goes on to the same check. If that
+  check then finds root, the refusal names `wsl --update` as what brings the option. A
+  `wsl --help` that is not usage text at all is `wsl_read_failed`, not a "no". The order
+  matters: who it enters as is read BEFORE the registry is told, because after that the
+  answer no longer says whether the distro booted with its conf (and so with systemd).
 - **A distro terminates seconds after its last wsl.exe session ends**, even with systemd units
   running and linger on. Only a Windows-side process can keep the VM up, so the orchestrator
   holds `wsl -d <distro> --exec sleep infinity` for as long as a WSL engine is meant to run
@@ -102,6 +116,13 @@ maintained; this file is the short list of things that must stay true.
   setup exe, which runs that script, is covered too), and the host refuses the same way in
   `crucible local register|install-cli|install-desktop|tray|start`, `crucible orchestrator`
   and every controller spawn. Reading verbs (`status`) are not refused.
+- **Removing is refused the same way.** `crucible uninstall` (dry run included) and
+  `install.ps1 -Uninstall` refuse `packaged_shell` with the removal's own sentence ("Nothing
+  has been removed"): inside a package the process sees that app's private folder laid over
+  the real AppData, so what it deletes is not reliably what is on the disk, and a half-done
+  removal of a split install (the guest's half, then a host half that only partly went) is
+  worse than none. A dry run is refused too because its reading is of the same overlay. The
+  guest's own `crucible uninstall` runs on Linux and is never asked.
 
 ## Reading wsl.exe
 
@@ -313,6 +334,12 @@ seconds later by `recovery system-unit-start: ok`, so stop-then-start fought the
 `Restart=always`, a server that exits of its own accord is `activating` again, never
 inactive-with-success, so that state means someone stopped it. `crucible service restart`
 is the one-step verb for a restart from inside the guest.
+The move's own restart uses it too: `migrate-config` carries the Windows token into the
+guest and then runs `crucible capability --write && crucible service restart`
+(`installer._restart_guest_engine`), so the step ends when the guest server answers, and a
+server that does not answer inside the restart's 120 s fails the step
+`guest_restart_failed` with `restart_not_answering` in its tail, rather than the catalog wait
+after it timing out with less to say.
 
 ### The door (127.0.0.1:7101, `controller_door.py`)
 
@@ -399,6 +426,18 @@ Try again appears only for outcome `cannot` or `failed`; a disabled restart line
   --force --config-from <file>` carrying `auth.token`, `[routes]`, `[upstreams]` and
   `[accelerator]` (extracted textually, never round-tripped through a TOML writer). Host,
   port, name, backend and job flags belong to the guest.
+- **A Windows `config.toml` exists only if the Windows engine ever ran.** The tray writes it
+  (`crucible init`, `Host._host_mode_unready`) the first time it starts the native engine,
+  which `Host.start` does only when there is no `crucible` distro yet and nothing answers.
+  On a first install that is the normal path, so the home has a `config.toml` and
+  `migrate-config` carries its token into the guest; nothing removes the Windows file
+  afterwards. When the distro is already there at the tray's first start (a re-install
+  over a kept distro), the tray boots the guest and never starts the Windows engine, so no
+  `config.toml` is written, and `migrate-config` logs "no Windows config to carry over":
+  the guest keeps the token `install.sh` minted. Both are correct. With a guest, the token
+  that counts is the guest's (`~crucible/.crucible/config.toml`); the Windows side reads it
+  through `%LOCALAPPDATA%\Crucible\pairing`, and an absent Windows `config.toml` reads as
+  neither `[orchestrator]` key set (`hostconfig.declined_wsl`, `consented_distro`).
 - **Model retirement follows verified activation.** Pull each subject into the guest and wait
   until the guest's catalog says installed; stop the Windows server; verify guest ownership and
   pairing; only then retire native files through the catalog owner functions

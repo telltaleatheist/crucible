@@ -3069,6 +3069,9 @@ def test_the_root_door_is_probed_before_the_guest_install_needs_it(
         "cat /etc/wsl.conf": ok("# crucible-rootfs\n[boot]\nsystemd=true\n"),
         "--exec id -un": ok("crucible\n"),
         "--exec id -u": ok("0\n"),
+        "wsl.exe --help": ok(
+            (Path(__file__).parent / "data" / "wsl-help-2.5.7.txt").read_text(encoding="utf-8")
+        ),
     })
     walk = installer.EngineInstall(
         runner,
