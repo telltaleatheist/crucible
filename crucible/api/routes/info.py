@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ... import VERSION, features, pairing, reach, weights
@@ -45,6 +46,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def info() -> dict[str, Any]:
         """Who this server is, what it runs on, what it serves, and the few fixed
         tables (terminal states, voice sources, service commands) a console shows."""
+        # Off the event loop: a model or voice row reads its env, which is a `pip list`
+        # the first time and after every change to it.
+        return await asyncio.to_thread(_info)
+
+    def _info() -> dict[str, Any]:
         store = ctx.store
         rows_for: dict[str, list[dict[str, Any]]] = {}
         for name, plugin in sorted(store.registry.items()):
@@ -86,6 +92,17 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "voice_sources": VOICE_SOURCES,
             "service_commands": SERVICE_COMMANDS,
         }
+
+    def _reach(host: str, port: int) -> tuple[list[str], Any]:
+        """The addresses this server answers on, off the event loop: on Windows they are
+        read by spawning PowerShell (crucible/interfaces.py)."""
+        urls = pairing.reachable_urls(
+            host, port, config.advertise + config.tailscale_advertise + config.lan_advertise
+        )
+        network = reach.for_server(
+            config, place=reach.place_of(backend.kind), host=host, port=port
+        )
+        return urls, network
 
     def _pages_engine() -> dict[str, Any]:
         try:
@@ -155,12 +172,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """
         host, port = ctx.bind_host, ctx.bind_port
         try:
-            urls = pairing.reachable_urls(
-                host, port, config.advertise + config.tailscale_advertise + config.lan_advertise
-            )
-            network = reach.for_server(
-                config, place=reach.place_of(backend.kind), host=host, port=port
-            )
+            urls, network = await asyncio.to_thread(_reach, host, port)
         except InterfaceError as exc:
             raise ApiError(
                 503,
