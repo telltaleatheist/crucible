@@ -29,7 +29,7 @@ thinking = false
 [backends.cuda-linux]
 engine = "llama-server"
 hf_repo = "owenmorgan/qwen3.5-4b-bside-gguf"
-revision = "0000000000000000000000000000000000000000"
+revision = "15d71d2f3127407c8a2138b601de80fb10e77070"
 bits = 8
 file = "qwen3.5-4b-bside-Q8_0.gguf"
 serves = ["text"]
