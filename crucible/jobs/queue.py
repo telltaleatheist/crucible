@@ -1084,14 +1084,15 @@ class JobStore:
             )
             print(f"crucible: {line}", file=sys.stderr)
             self.append_event(job, "note", {"message": line})
-            return
-        if settled is not None:
-            self.append_event(job, "note", settled.to_dict())
-            if RESIDENT_KEY in job.done_extra:
-                # A job that reports what is resident read it when it finished; the
-                # settlement has just taken that off the card, and the done event
-                # written next must say what is there now.
-                job.done_extra[RESIDENT_KEY] = self._settlement.resident_id
+        else:
+            if settled is not None:
+                self.append_event(job, "note", settled.to_dict())
+        if RESIDENT_KEY in job.done_extra:
+            # A job that reports what is resident read it when it finished; the
+            # settlement runs after that and may have taken it off the card (a note
+            # says so), even when it then failed stopping the process. The done event
+            # written next says what the residency holds now, whatever the outcome.
+            job.done_extra[RESIDENT_KEY] = self._settlement.resident_id
 
     def _fail_out_of_band(self, job: Job, exc: BaseException) -> None:
         job.status = FAILED

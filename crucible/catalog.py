@@ -451,23 +451,65 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
     return sorted(BACKEND_ENGINES)
 
 
-def stranded_weights(config: Config) -> list[dict[str, Any]]:
+def _stranded(config: Config) -> list[weights.StrandedWeights]:
     aliases = {
         manifest.id
         for manifest in (*load_all_manifests().values(), *load_all_asr_manifests().values())
         if getattr(manifest, "weights_of", None) is not None
     }
-    return [
-        entry.to_dict()
-        for entry in weights.stranded(
-            config,
-            ModelManifest.weights_family,
-            tuple(BACKEND_ENGINES),
-            lambda subject_id: (
-                () if subject_id in aliases else backends_declaring("model", subject_id)
-            ),
+    return weights.stranded(
+        config,
+        ModelManifest.weights_family,
+        tuple(BACKEND_ENGINES),
+        lambda subject_id: (
+            () if subject_id in aliases else backends_declaring("model", subject_id)
+        ),
+    )
+
+
+def stranded_weights(config: Config) -> list[dict[str, Any]]:
+    return [entry.to_dict() for entry in _stranded(config)]
+
+
+def _stranded_subject(
+    config: Config, backend: Backend, subject_id: str
+) -> Subject | None:
+    # Weights this build declares nothing for on this backend: a model retired from
+    # the catalog (qwen3.5-4b-bside-4bit, 1.0.124) leaves its folder in the store,
+    # and the store, not the catalog, is what says it is there. It is removable and
+    # nothing else: there is no manifest to pull it again or to load it from.
+    for entry in _stranded(config):
+        if entry.subject_id == subject_id and entry.backend == backend.kind:
+            return _stranded_model(config, entry)
+    return None
+
+
+def _stranded_model(config: Config, entry: weights.StrandedWeights) -> Subject:
+    def no_pull(**_kwargs: Any) -> weights.InstalledWeights:
+        raise weights.WeightsError(
+            f"model {entry.subject_id!r} is not in this build's catalog; its "
+            f"weights at {entry.path} can only be removed"
         )
-    ]
+
+    return Subject(
+        kind="model",
+        id=entry.subject_id,
+        name=None,
+        job_type="stranded",
+        expected_bytes=None,
+        source=f"stranded:{entry.path}",
+        pull_command="",
+        installed=lambda: weights.InstalledWeights(
+            path=entry.path,
+            hf_repo=None,
+            revision=None,
+            bytes=entry.bytes,
+            pulled=None,
+            source="stranded",
+        ),
+        pull=no_pull,
+        remove=lambda: weights.remove_stranded(config, entry),
+    )
 
 
 def find(
@@ -523,12 +565,15 @@ def locate_installed(
             named,
         )
     subject = find(config, backend, kind, subject_id)
+    if subject is None and kind == "model":
+        subject = _stranded_subject(config, backend, subject_id)
     if subject is None:
         raise RemoveRefused(
             404,
             "subject_unknown",
             f"this server has no {kind} called {subject_id!r} for "
-            f"{backend.kind}. {LISTING} lists every subject it can hold",
+            f"{backend.kind}, and no weights under that id are left in its store. "
+            f"{LISTING} lists every subject it can hold",
             named,
         )
     found = subject.installed()

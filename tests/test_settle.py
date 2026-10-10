@@ -526,3 +526,27 @@ def test_the_done_event_keeps_the_resident_when_a_session_holds_the_card(
     assert done["resident"] == MODEL
     assert not [row for row in events if row["event"] == "note"]
     close(resident, auth, session_id)
+
+
+def test_the_done_event_follows_the_card_when_the_settlement_fails_after_the_unload(
+    resident: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The settlement took the model off the residency, then stopping its process
+    # raised: the note says the clearing failed, and the done event must still say
+    # what the residency holds rather than what the job read before the settlement.
+    _echo_that_reports_the_card(monkeypatch, resident)
+    residency = resident.app.state.residency
+
+    stop = residency._stop_the_dying
+
+    def stop_fails() -> None:
+        raise RuntimeError("the engine would not stop")
+
+    monkeypatch.setattr(residency, "_stop_the_dying", stop_fails)
+    events = echoed(resident, auth)
+    monkeypatch.setattr(residency, "_stop_the_dying", stop)
+    note = next(row["data"] for row in events if row["event"] == "note")
+    done = next(row["data"] for row in events if row["event"] == "done")
+    assert "could not clear the card" in note["message"]
+    assert residency.resident_id is None
+    assert done["resident"] is None

@@ -7,6 +7,11 @@ notes.
 
 ## Unreleased
 
+- Fix: weights left in the store by a model that is no longer in the catalog (`qwen3.5-4b-bside-4bit`, 3.6 GB on an 8 GiB laptop after 1.0.124) can be removed: `crucible remove model <id>` and `DELETE /v1/catalog/model/{id}` find them in the weights store when the catalog has no such model, instead of refusing `subject_unknown`. Nothing is deleted on an update by itself; `crucible doctor` lists such weights and now names that command for this machine's own.
+- Fix: a job's done event says what is on the card even when the settlement after it took the model off and then failed stopping its process; before, `resident` kept the id the job read before the settlement.
+- `crucible install llm` on a PC says the llama-server download (107 MB, xz) and the binary it unpacks (140 MB) apart, so the two figures no longer look like a mismatch.
+- Docs: the README says a Windows install moves to the WSL2 engine by itself (nothing to click), and how another device reaches a server that only its own machine can after an install: `crucible lan enable` on Windows, Private networks only, a Public network kept shut until it is marked Private.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.
