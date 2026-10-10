@@ -50,6 +50,29 @@ ENVIRONMENT: dict[str, str] = {
 }
 
 
+# What vLLM 0.29.0 does next after each line it logs while it starts, in its start order
+# (read in an engine log on owens-pc, 2026-10-09, and vllm/model_executor/warmup/
+# kernel_warmup.py): the latest of these lines in the log names the step under way. The
+# compile steps are minutes on a first load and seconds after it: torch.compile keeps
+# ~/.cache/vllm/torch_compile_cache and Triton ~/.triton/cache.
+COLD_CACHE = "slow only when its cache is cold, as on the first load after an install"
+STARTING_PHASES: tuple[tuple[str, str], ...] = (
+    ("Loading safetensors checkpoint shards", "reading its weights"),
+    ("Model loading took", f"compiling the model with torch.compile ({COLD_CACHE})"),
+    ("Dynamo bytecode transform time", f"compiling the model's kernels ({COLD_CACHE})"),
+    ("torch.compile took", "measuring memory and sizing the KV cache"),
+    ("JIT kernel warmup starting", "warming up its kernels"),
+    (
+        "Warming up Qwen Triton kernels",
+        f"compiling Qwen's linear-attention Triton kernels ({COLD_CACHE})",
+    ),
+    ("Capturing CUDA graphs", "capturing CUDA graphs"),
+    ("Graph capturing finished", "finishing start-up"),
+    ("Starting vLLM server on", "starting its HTTP server"),
+)
+PHASE_SCAN_LINES = 200
+
+
 class VllmEngine(SubprocessEngine):
     name = VLLM_ENGINE
 
@@ -130,3 +153,10 @@ class VllmEngine(SubprocessEngine):
 
     def environment(self) -> dict[str, str]:
         return dict(ENVIRONMENT)
+
+    def starting_phase(self) -> str | None:
+        for line in reversed(self.log_tail(PHASE_SCAN_LINES).splitlines()):
+            for marker, doing in STARTING_PHASES:
+                if marker in line:
+                    return doing
+        return None

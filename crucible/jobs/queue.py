@@ -44,6 +44,13 @@ SECONDS_PER_DAY = 86_400.0
 # (audio, image, segment, video, align, denoise, the load and unload types).
 RESIDENT_KEY = "resident"
 
+# The events whose message becomes the job's `message` and its `job.progress`. A load
+# says what it is doing with `warming` (the accelerator check, then the engine starting,
+# every 2 s), and that is the job's whole progress until it is resident: when only its
+# own stream carried it, a client reading the job saw "loading <model>" for the minutes
+# a first load spends compiling, and took it for hung (Victoria's laptop, 2026-10-09).
+SAYS_WHAT_IT_IS_DOING = frozenset({"progress", "warming"})
+
 
 def _params_for_artifact(params: dict[str, Any], index: int | None) -> dict[str, Any]:
     if index is None:
@@ -693,8 +700,9 @@ class JobStore:
     def append_event(self, job: Job, kind: str, data: dict[str, Any]) -> None:
         event = {"id": len(job.events) + 1, "event": kind, "data": data}
         job.events.append(event)
-        if kind == "progress":
-            job.progress = float(data["fraction"])
+        if kind in SAYS_WHAT_IT_IS_DOING:
+            if kind == "progress":
+                job.progress = float(data["fraction"])
             message = data.get("message")
             if isinstance(message, str) and message:
                 job.message = message
@@ -711,7 +719,7 @@ class JobStore:
             if job.status in TERMINAL_STATES:
                 self.events.forget(key)
             self.events.publish(JOB, f"job.{job.status}", _job_change(job, kind, data))
-        elif kind == "progress" and job.status == RUNNING:
+        elif kind in SAYS_WHAT_IT_IS_DOING and job.status == RUNNING:
             self.events.publish_throttled(JOB, "job.progress", key, {
                 "job_id": job.id, "fraction": job.progress, "message": job.message,
             })

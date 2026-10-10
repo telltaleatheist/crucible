@@ -15,6 +15,8 @@ notes.
 
 - A failed load (or any engine or worker that stops) now leads its refusal with the first error its log reports, then the last 40 lines as before. A vLLM start that died on its KV cache showed only the API server's "Engine core initialization failed. See root cause above" traceback, with the engine core's `ValueError: ... KV cache ...` cut off above the tail; it now reads `First error in its log: ValueError: ...`. A traceback logged as a warning (vLLM's deep_gemm import) is not taken for the cause.
 
+- A vLLM load now says what it is doing while its engine starts, and for how long: reading its weights, compiling the model with torch.compile, compiling Qwen's linear-attention Triton kernels (slow only when its cache is cold, as on the first load after an install), capturing CUDA graphs, starting its HTTP server, read from the phase vLLM last logged. A job's `warming` messages are now its `message` and its `job.progress` (with the fraction unchanged), and `GET /v1/jobs/{id}` carries `message`, so a client reading the job sees the load move instead of "loading <model>" for the two minutes a first load spends compiling.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.

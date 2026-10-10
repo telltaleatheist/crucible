@@ -124,6 +124,7 @@ class SubprocessEngine:
         self._log_handle: Any = None
         self._port: int | None = None
         self._served_name: str | None = None
+        self._phase_seen: tuple[str, float] | None = None
 
     @classmethod
     def load_args(
@@ -357,12 +358,32 @@ class SubprocessEngine:
 
     def warming_message(self, attempt: int, deadline: float) -> str:
         remaining = max(0.0, deadline - time.monotonic())
-        last = self.log_tail(1).strip()
         base = (
             f"{self.name} loading; {attempt * READY_POLL_SECONDS:.0f}s elapsed, "
             f"{remaining:.0f}s before give-up"
         )
+        phase = self.starting_phase()
+        if phase is not None:
+            return f"{base} — {phase}, {self._seconds_in(phase):.0f}s so far"
+        last = self.log_tail(1).strip()
         return f"{base} — {last}" if last else base
+
+    def starting_phase(self) -> str | None:
+        """What the engine is doing while it starts, in words a client can show, when
+        the engine's own log says it; None when it does not (the warming message then
+        quotes the log's last line). Said to the client while it waits, never decided
+        on (docs/ARCHITECTURE.md R4)."""
+        return None
+
+    def _seconds_in(self, phase: str) -> float:
+        """How long Crucible has seen ``phase`` as the latest: from the first poll that
+        read it, not from the engine's own clock."""
+        now = time.monotonic()
+        seen = self._phase_seen
+        if seen is None or seen[0] != phase:
+            self._phase_seen = (phase, now)
+            return 0.0
+        return now - seen[1]
 
     def _probe_models(self, url: str) -> list[str] | None:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})

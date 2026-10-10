@@ -436,6 +436,7 @@ One job's state: `status`, `progress`, `message`, its artifacts and, when it end
 | `model` | string or null | yes | — |  |
 | `status` | string | yes | — |  |
 | `progress` | integer or number | yes | — |  |
+| `message` | string or null | yes | — | What the job last said it is doing: its latest progress or warming message (a load's engine start, phase by phase). |
 | `position` | integer or null | yes | — |  |
 | `error` | JobFailure or null | yes | — |  |
 | `artifacts` | array of string | yes | — |  |
@@ -2584,6 +2585,7 @@ Why a job left the queue without running: `removed` is not `failed`.
 | `model` | string or null | yes | — |  |
 | `status` | string | yes | — |  |
 | `progress` | integer or number | yes | — |  |
+| `message` | string or null | yes | — | What the job last said it is doing: its latest progress or warming message (a load's engine start, phase by phase). |
 | `position` | integer or null | yes | — |  |
 | `error` | JobFailure or null | yes | — |  |
 | `artifacts` | array of string | yes | — |  |
