@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import hosttools, procgroup
+from . import hosttools, procgroup, workerexit
 from .backend import CUDA_LINUX
 from .errors import CrucibleError, JobCancelled
 from .logtail import led_by_first_error, tail_of_last_run
@@ -250,6 +250,12 @@ class _Conversation:
         self.script = script
         self.log_path = log_path
         self.reader = _Reader(process.stdout)
+        # Taken as the worker starts, so its ending can say whether the out-of-memory
+        # killer was what ended it (crucible/workerexit.py).
+        self.oom_at_start = workerexit.read_oom_count()
+
+    def ending(self, code: int | None) -> workerexit.Ending:
+        return workerexit.how_it_ended(code, self.oom_at_start, workerexit.read_oom_count())
 
     def stop(self) -> None:
         _terminate(self.process, self.script, self.log_path)
@@ -271,9 +277,10 @@ class _Conversation:
                 except subprocess.TimeoutExpired:
                     code = None
             if code is not None:
+                ending = self.ending(code)
                 raise WorkerError(
-                    f"{script.name} exited {code} before it read its request. "
-                    f"{_log_tail(log_path)}"
+                    f"{script.name} {ending.phrase} before it read its request."
+                    f"{ending.sentence()} {_log_tail(log_path)}"
                 ) from None
             _terminate(process, script, log_path)
             raise WorkerError(
@@ -377,12 +384,15 @@ class _Conversation:
         if not keep_open:
             code = process.wait()
             if code != 0:
-                raise WorkerError(f"{script.name} exited {code}. {_log_tail(log_path)}")
+                ending = self.ending(code)
+                raise WorkerError(
+                    f"{script.name} {ending.phrase}.{ending.sentence()} {_log_tail(log_path)}"
+                )
         elif ended:
-            code = process.wait()
+            ending = self.ending(process.wait())
             raise WorkerError(
-                f"{script.name} exited {code} in the middle of a request, after "
-                f"{len(results)} result(s). {_log_tail(log_path)}"
+                f"{script.name} {ending.phrase} in the middle of a request, after "
+                f"{len(results)} result(s).{ending.sentence()} {_log_tail(log_path)}"
             )
         if ready is None:
             raise WorkerError(
@@ -492,10 +502,11 @@ class WorkerSession:
                 "request only after `start`"
             )
         if not self.alive:
-            code = self._conversation.process.poll()
+            ending = self._conversation.ending(self._conversation.process.poll())
             raise WorkerError(
-                f"{self._script.name} is no longer running (it exited {code}); "
-                f"the resident worker must be reloaded. {_log_tail(self._log_path)}"
+                f"{self._script.name} is no longer running: it {ending.phrase}."
+                f"{ending.sentence()} The resident worker must be reloaded. "
+                f"{_log_tail(self._log_path)}"
             )
         try:
             return self._exchange(

@@ -86,6 +86,7 @@ Environment="CRUCIBLE_HOME=/home/telltale/.crucible"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 Restart=always
 RestartSec=2
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
@@ -116,6 +117,12 @@ def test_the_unit_restarts_always_and_the_reason_is_the_windows_host() -> None:
     assert "Restart=on-failure" not in EXPECTED_UNIT
     assert f"RestartSec={service.RESTART_SECONDS}\n" in EXPECTED_UNIT
     assert service.RESTART_SECONDS == 2
+
+
+def test_a_worker_the_oom_killer_ends_does_not_stop_the_server() -> None:
+    """systemd's default OOMPolicy=stop stops the whole unit when any process in it is
+    OOM-killed, and the workers are in it: the job fails, the server stays."""
+    assert "OOMPolicy=continue\n" in EXPECTED_UNIT
 
 
 def test_the_launchd_agent_is_deliberately_not_changed_with_it() -> None:
@@ -261,6 +268,41 @@ def test_install_writes_the_unit_reloads_and_enables(user_home: Path) -> None:
         "systemctl", "--user", "enable", "--now", "crucible.service",
     )
     assert any("linger: on" in line for line in lines)
+
+
+def test_an_upgrade_rewrites_a_unit_an_older_release_wrote_and_restarts_onto_it(
+    user_home: Path,
+) -> None:
+    """Every update - scripts/deploy.sh, the Windows tray carrying its WSL guest, a
+    re-run of the one-liner - runs install.sh, and install.sh runs `crucible service
+    install` every time. So a unit an older release wrote (here: without OOMPolicy) is
+    compared with this release's, rewritten, reloaded and restarted onto, with no one
+    re-running anything by hand."""
+    unit = service.unit_path(user_home)
+    install_systemd(user_home, Runner(LINGER_ON))
+    current = unit.read_text(encoding="utf-8")
+    unit.write_text(current.replace("OOMPolicy=continue\n", ""), encoding="utf-8")
+
+    runner = Runner(LINGER_ON)
+    lines = install_systemd(user_home, runner)
+    assert unit.read_text(encoding="utf-8") == current
+    assert runner.calls[0] == ("systemctl", "--user", "daemon-reload")
+    assert ("systemctl", "--user", "restart", "crucible.service") in runner.calls
+    assert "restarted crucible.service onto its new definition" in lines
+
+    unchanged = Runner(LINGER_ON)
+    install_systemd(user_home, unchanged)
+    assert ("systemctl", "--user", "restart", "crucible.service") not in unchanged.calls
+
+
+def test_the_installer_runs_service_install_on_every_upgrade() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "sdk" / "bootstrap" / "scripts" / "install.sh"
+    ).read_text(encoding="utf-8")
+    assert "\n\"$CRUCIBLE\" 'service' 'install' || die" in script, (
+        "install.sh must run `crucible service install` unconditionally, at the top "
+        "level, so an upgrade carries a changed unit"
+    )
 
 
 def test_install_records_the_installing_shells_path(
