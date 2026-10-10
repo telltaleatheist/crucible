@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.131 — 2026-10-10
+
 - `POST /v1/decide` answers carry `timing_ms.queued`: the ms a decision waited in the server's line before it ran. `timing_ms.total` was always the run alone, so a client that sent several decisions at once (Briefcase: three chapter calls) read the later ones' waits as a slowdown.
 
 - Chat: `"json_whitespace": "compact"` beside a JSON schema or json_object makes the answer compact JSON (no whitespace between tokens, whitespace only inside strings), for clients whose models are trained on compact JSON (B-Sides); `"flexible"`, the default, is unchanged. vLLM and mlx-lm keep it: the door writes llguidance's own `"x-guidance": {"whitespace_flexible": false}` into the schema, which llguidance takes over the engine's flexible default (a json_object goes as the schema `{"type": "object"}`); the mlx-lm patch is unchanged. llama-server (b10970's schema converter has a fixed whitespace rule and no option for it) and mlx-vlm are refused `json_whitespace_not_served` before the chat waits or loads anything, so on the PC `qwen3.5-4b-bside` (llama-server) is refused it; an upstream model is refused it too. Without a JSON constraint it is `json_whitespace_without_json`; a schema that states `x-guidance` whitespace itself is `json_whitespace_conflict`. `structured_outputs.disable_any_whitespace`, `disable_additional_properties` and `whitespace_pattern`, which vLLM 0.29.0 reads only from its server config and dropped from a request without a word, are now refused `structured_output_not_served`. The SDK's `ChatOptions` takes `jsonWhitespace` (docs/internals/engines-and-capability.md "Structured output").
