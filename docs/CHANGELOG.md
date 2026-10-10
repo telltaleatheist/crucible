@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.120 — 2026-10-09
+
 - New model `qwen3.5-4b-8bit` (cuda-linux): the 4B at 8 bits, text only (`owenmorgan/qwen3.5-4b-w8a16`). On an 8 GiB card every text verb now picks it instead of `qwen3.5-0.8b`; larger cards are unchanged.
 
 ## 1.0.119 — 2026-10-09
