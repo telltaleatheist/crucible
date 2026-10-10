@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Chat: `response_format` is now enforced on the Mac. Stock mlx-lm read none and answered every `json_schema` unconstrained; Crucible's `mlx-lm-structured-output` patch (applied by the engine at its next start) compiles `response_format` `json_schema` / `json_object` and `structured_outputs` with llguidance as vLLM does, one matcher per sequence, so the answer is the schema and stops at its closing brace (qwen3.5-4b-bside under B-Sides' describe schema: every answer valid, about 4% slower per sequence). It also fixes two mlx-lm batch defects that killed the generation thread, or dropped a constrained chat's grammar, when it shared a batch with a plain one. Every engine now states which constraints it enforces, and the chat door refuses the rest `400 structured_output_not_served` instead of sending them to be ignored: mlx-vlm enforces none, vLLM no `guided_*` or `grammar`, llama-server no `structured_outputs`. A constrained chat is answered from its first token, as on vLLM, whether thinking is on or off.
+
 ## 1.0.127 — 2026-10-10
 
 - Chat: a request may carry `"prefill": "<text>"` to start the model's answer with that text; the model writes on from it and the reply's content is what it wrote after it. Served on vLLM and llama-server, with thinking off and no `response_format`; refused by name elsewhere (`prefill_not_served` on mlx-lm, mlx-vlm and upstream models, `prefill_with_thinking`, `prefill_with_grammar`, `prefill_conflict`). The SDK's `chat()` takes `prefill`, and its `ChatUsage` now carries `cachedTokens`, the prompt tokens the engine read from its prefix cache.

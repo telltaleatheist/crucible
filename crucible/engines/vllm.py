@@ -102,6 +102,20 @@ class VllmEngine(SubprocessEngine):
         "an empty think block before it, so the model writes on from the prefill "
         "with its thinking off (rendered with the 9B's tokenizer, 2026-10-10)"
     )
+
+    structured_output_formats = frozenset({"json_object", "json_schema", "structural_tag"})
+    structured_output_fields = frozenset({"structured_outputs"})
+    structured_output_basis = (
+        "vLLM 0.29.0's ChatCompletionRequest reads response_format and "
+        "structured_outputs (vllm/entrypoints/openai/chat_completion/protocol.py L229, "
+        "L375, extract_structured_outputs L654-658) and turns a json_object, "
+        "json_schema or structural_tag format into structured_outputs "
+        "(vllm/entrypoints/generate/base/protocol.py L114-144), compiled by llguidance "
+        "(--structured-outputs-config guidance; v1/structured_output/"
+        "backend_guidance.py serialize_guidance_grammar L228). It has no guided_* "
+        "field and logs any field it does not know as ignored "
+        "(vllm/entrypoints/serve/engine/protocol.py); read 2026-10-10"
+    )
     decide_likelihood_route = "prompt-logprobs"
     decide_likelihood_basis = (
         "vLLM 0.29.0's /v1/chat/completions takes prompt_logprobs, "

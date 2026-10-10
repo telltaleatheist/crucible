@@ -11,7 +11,11 @@ from starlette.background import BackgroundTask
 
 from ... import upstreamrecord
 from ...callqueue import take_a_turn
-from ...engines import chat_admission, chat_prefill_reading
+from ...engines import (
+    chat_admission,
+    chat_prefill_reading,
+    structured_output_reading,
+)
 from ...errors import ApiError
 from ...inflight import read_act
 from ...manifests import ManifestError, load_manifest
@@ -23,6 +27,7 @@ from ...prefill import (
 )
 from ...queuerequest import queue_of
 from ...sampling import SAMPLING_HEADER, apply_defaults
+from ...structured import constrained_fields, refuse_unenforced_constraint
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..proxy import (
@@ -44,16 +49,23 @@ from ..proxy import (
 from ..upstream import forward_to_upstream, routed_upstream_rows
 
 
-def _refuse_a_prefill_before_waiting(
-    body: dict[str, Any], model: str, backend_kind: str
+def _refuse_before_waiting(
+    body: dict[str, Any], model: str, backend_kind: str, prefill: str | None
 ) -> None:
-    """What a queued chat's prefill would be refused for once its model is resident
-    is refused now, before it waits or a model is loaded for it. A model with no
-    manifest, or no block here, is left to the door's own refusal."""
+    """What a chat would be refused for once its model is resident is refused now,
+    before it waits or a model is loaded for it: a prefill the engine cannot keep, a
+    constraint it does not enforce. A model with no manifest, or no block here, is
+    left to the door's own refusal."""
+    if prefill is None and not constrained_fields(body):
+        return
     try:
         manifest = load_manifest(model)
         spec = manifest.spec(backend_kind)
     except ManifestError:
+        return
+    resolved = apply_defaults(body, manifest.defaults).body
+    refuse_an_unenforced_constraint(spec.engine, model, resolved)
+    if prefill is None:
         return
     reading = chat_prefill_reading(spec.engine)
     refuse_unkeepable_prefill(
@@ -61,7 +73,21 @@ def _refuse_a_prefill_before_waiting(
         model_id=model,
         served=reading.served,
         basis=reading.basis,
-        resolved_body=apply_defaults(body, manifest.defaults).body,
+        resolved_body=resolved,
+    )
+
+
+def refuse_an_unenforced_constraint(
+    engine: str, model_id: str, resolved_body: dict[str, Any]
+) -> None:
+    reading = structured_output_reading(engine)
+    refuse_unenforced_constraint(
+        engine=engine,
+        model_id=model_id,
+        formats=reading.formats,
+        fields=reading.fields,
+        basis=reading.basis,
+        body=resolved_body,
     )
 
 
@@ -111,7 +137,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         writes on from it; the reply's content is what it wrote after the prefill
         (vLLM and llama-server; thinking stated off; no response_format or other
         grammar; refused by name otherwise: docs/internals/engines-and-capability.md,
-        "Prefill").
+        "Prefill"). A `response_format` or other grammar is enforced by the engine or
+        refused `structured_output_not_served` before anything is sent: vLLM,
+        llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured
+        output").
         """
         raw = await request.body()
         body = chat_body(raw)
@@ -134,8 +163,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
-        if prefill is not None:
-            _refuse_a_prefill_before_waiting(body, requested, ctx.backend.kind)
+        _refuse_before_waiting(body, requested, ctx.backend.kind, prefill)
         inflight = ctx.inflight
         act = read_act(request.headers)
         chat_over = settle_after_chat(ctx.settlement)
@@ -162,6 +190,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 refuse_an_exited_engine(residency, resident)
 
                 applied = apply_defaults(body, resident.defaults)
+                refuse_an_unenforced_constraint(
+                    resident.engine, resident.model_id, applied.body
+                )
                 if prefill is not None:
                     reading = chat_prefill_reading(resident.engine)
                     refuse_unkeepable_prefill(

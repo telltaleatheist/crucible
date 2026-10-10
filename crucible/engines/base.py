@@ -110,6 +110,16 @@ class SubprocessEngine:
 
     chat_prefill_basis: str | None = None
 
+    structured_output_formats: frozenset[str] = frozenset()
+    """The `response_format` types beyond `text` the engine enforces."""
+
+    structured_output_fields: frozenset[str] = frozenset()
+    """The other body fields (structured.GRAMMAR_FIELDS) the engine enforces."""
+
+    structured_output_basis: str | None = None
+    """Where both were read. The chat door refuses `structured_output_not_served` for a
+    constraint the engine does not state, so it is never sent to be ignored."""
+
     decide_likelihood_route: str | None = None
     """How the engine scores a likelihood question's candidates: `items` (the
     batched items route, every candidate a row) or `prompt-logprobs` (one

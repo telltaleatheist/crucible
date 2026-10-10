@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from ..errors import EngineError
 from ..narratorengines import NARRATOR_ENGINES, VoicesDocumentView
+from ..structured import GRAMMAR_FIELDS
 from .base import STOP_TIMEOUT_SECONDS, SubprocessEngine, find_free_port, int_flag, logs_dir
 from .llama_server import LlamaServerEngine
 from .mlx_lm import MlxLmEngine
@@ -101,6 +102,43 @@ def chat_prefill_reading(engine_name: str) -> ChatPrefillReading:
             "where"
         )
     return ChatPrefillReading(served=cls.chat_prefill, basis=basis)
+
+
+@dataclass(frozen=True)
+class StructuredOutputReading:
+    formats: frozenset[str]
+    fields: frozenset[str]
+    basis: str
+
+    @property
+    def served(self) -> bool:
+        return bool(self.formats or self.fields)
+
+
+def structured_output_reading(engine_name: str) -> StructuredOutputReading:
+    cls = engine_class(engine_name)
+    basis = cls.structured_output_basis
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no structured_output_basis. Which constraints an "
+            "engine enforces is read from its source, and the reading says where; one "
+            "it does not read it drops without a word"
+        )
+    unknown = sorted(cls.structured_output_fields - frozenset(GRAMMAR_FIELDS))
+    if unknown:
+        raise EngineError(
+            f"{engine_name} states structured_output_fields {unknown}, which the chat "
+            f"door does not know as constraints (structured.GRAMMAR_FIELDS)"
+        )
+    if "text" in cls.structured_output_formats:
+        raise EngineError(
+            f"{engine_name} lists response_format text as a constraint; text is none"
+        )
+    return StructuredOutputReading(
+        formats=cls.structured_output_formats,
+        fields=cls.structured_output_fields,
+        basis=basis,
+    )
 
 
 @dataclass(frozen=True)
@@ -357,8 +395,10 @@ def engine_load_args(
 __all__ = [
     "ChatAdmission",
     "ChatPrefillReading",
+    "StructuredOutputReading",
     "chat_admission",
     "chat_prefill_reading",
+    "structured_output_reading",
     "concurrency_flag",
     "stated_concurrency",
     "with_concurrency",

@@ -14,7 +14,8 @@ from crucible.engines.mlx_lm import REQUIRED_FLAGS, MlxLmEngine
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_server_validate.py.txt"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_server.py.txt"
+SERVER_SHA256 = "cdfcb4ac848636f9927851a0ec7a951584526530cb7832ba58049e4a9144db8b"
 SCRIPT = envpatches.LLM_SCRIPTS_DIR / envpatches.MLX_LM_TOP_LOGPROBS.script
 PATCH = envpatches.MLX_LM_TOP_LOGPROBS
 GEN_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_generate.py.txt"
@@ -34,27 +35,6 @@ ALL_SCRIPTS = tuple(
     envpatches.LLM_SCRIPTS_DIR / patch.script for patch in envpatches.LLM_PATCHES
 )
 ALL_IDS = [patch.id for patch in envpatches.LLM_PATCHES]
-STOCK_GENERATION_THREAD = (
-    "\n\nclass ResponseGenerator:\n"
-    "    def __init__(self, model_provider, prompt_cache):\n"
-    "        self.model_provider = model_provider\n"
-    "        self._generation_thread = Thread(target=self._generate)\n"
-    "        self._generation_thread.start()\n"
-)
-
-STOCK_ITEMS_ANCHORS = (
-    "\n    def _generate(self):\n"
-    "        while not self._stop:\n"
-    "            request = None\n"
-    "            # We got a request\n"
-    "            if request is not None:\n"
-    "                rqueue, request, args = request\n"
-    "\n\nclass APIHandler(BaseHTTPRequestHandler):\n"
-    "    def do_POST(self):\n"
-    "        request_factories = {\n"
-    '            "/v1/completions": self.handle_text_completions,\n'
-    "        }\n"
-)
 ITEMS = envpatches.MLX_LM_DECIDE_ITEMS
 ITEMS_HELPER = envpatches.MLX_LM_DECIDE_ITEMS_HELPER
 ITEMS_SCRIPT = envpatches.LLM_SCRIPTS_DIR / ITEMS.script
@@ -62,8 +42,8 @@ ITEMS_HELPER_SCRIPT = envpatches.LLM_SCRIPTS_DIR / ITEMS_HELPER.script
 
 
 def pristine() -> str:
-    validator = FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
-    return validator + STOCK_GENERATION_THREAD + STOCK_ITEMS_ANCHORS
+    """Stock mlx-lm 0.31.3's mlx_lm/server.py, whole, as pip installs it."""
+    return FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
 def pristine_generate() -> str:
@@ -140,6 +120,8 @@ def _script_namespace(script: Path = SCRIPT) -> dict:
 
 
 def test_the_fixture_is_the_stock_validator() -> None:
+    raw = FIXTURE.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == SERVER_SHA256
     text = pristine()
     assert text.count(PATCH.absent_marker) == 1
     assert PATCH.marker not in text
@@ -627,6 +609,8 @@ def test_the_engine_applies_the_items_patches_itself_at_start(
     assert "no model directory" in str(caught.value)
     assert [Path(argv[1]).name for argv in ran] == [
         ITEMS.script, ITEMS_HELPER.script, DETOK.script,
+        envpatches.MLX_LM_STRUCTURED_OUTPUT_HELPER.script,
+        envpatches.MLX_LM_STRUCTURED_OUTPUT.script,
     ]
     assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
     assert helper_of(env).is_file()
