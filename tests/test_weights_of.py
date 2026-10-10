@@ -399,7 +399,7 @@ def test_the_small_tiers_are_untouched() -> None:
         assert manifest.weights_of is None
         assert aliases_of(manifest) == ()
         assert classes_for_model(model_id) == (
-            "clean", "translate", "simplify", "analysis", "generate", "decide",
+            "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank",
         )
 
 

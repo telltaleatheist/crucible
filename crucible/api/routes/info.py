@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from ... import VERSION, features, pairing, reach, weights
+from ... import VERSION, features, pairing, reach, verbfacts, weights
 from ... import pages as pages_module
 from ... import peer as peer_module
 from ...errors import ApiError
@@ -87,6 +87,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "features": features.names(),
             "job_types": sorted(store.registry),
             "capabilities": capabilities,
+            "verbs": verbfacts.info(config, backend.kind),
             "pages_engine": _pages_engine(),
             "terminal_states": TERMINAL,
             "voice_sources": VOICE_SOURCES,

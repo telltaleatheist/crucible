@@ -12,7 +12,7 @@ from .audiomodels import (
     load_sfx_manifests,
     load_song_manifests,
 )
-from .classnames import CLASS_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
+from .classnames import CLASS_NAMES, RETRIEVAL_PACKAGE, ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .denoisemodels import denoise_manifests_dir, load_all_denoise_manifests
 from .enginespec import UNSTATED_ENGINE_CONCURRENCY
 from .fit import Candidate, CatalogCandidates, WorkingContext, cached_catalog
@@ -91,6 +91,14 @@ class CapabilityClass:
     # A request of this class may carry images, so its record names the model that serves
     # those too (docs/VERB-SIZING.md section 8): `decide`.
     takes_images: bool = False
+    # Families whose models the pick ranks before every other candidate, whatever their
+    # size (docs/VERB-SIZING.md section 9): `rerank` takes its dedicated rerankers before
+    # the general text models that can also judge relevance. Empty: one ranking for all.
+    first_families: tuple[str, ...] = ()
+    # The optional package (classnames.PACKAGE_NAMES) whose models this class picks from:
+    # where it is not installed, the class picks nothing of it and says so by name; a
+    # model outside it chosen in Settings is still served (`rerank` on a decide model).
+    package: str | None = None
 
     def advises_api_key(self, picked: Candidate) -> bool:
         """The automatic pick is small enough to recommend an API key instead: a routable
@@ -108,7 +116,8 @@ class CapabilityClass:
         rule 3): at or below the goal, the most parameters, then the highest precision,
         then a model's own form before a `weights_of` alias of it (the alias is the same
         weights with more to hold). The catalog's order, largest need first, settles the
-        rest. A class with no goal keeps the catalog's order whole."""
+        rest. A class with no goal keeps the catalog's order whole. A class with
+        `first_families` ranks those families' models ahead of the rest (section 9)."""
         if self.goal is None:
             return found
         for candidate in found:
@@ -122,7 +131,12 @@ class CapabilityClass:
         return tuple(
             sorted(
                 (c for c in found if c.params_b <= self.goal.params_b),
-                key=lambda c: (-c.params_b, -c.bits, c.alias),
+                key=lambda c: (
+                    bool(self.first_families) and c.family not in self.first_families,
+                    -c.params_b,
+                    -c.bits,
+                    c.alias,
+                ),
             )
         )
 
@@ -165,6 +179,30 @@ DECIDE_GOAL = Goal(
         "- 9b 16 bit for decide, for example\" (docs/VERB-SIZING.md rule 2)"
     ),
 )
+
+EMBED_GOAL = Goal(
+    params_b=8,
+    source=(
+        "Owen 2026-10-10: embed's goal is Qwen3-Embedding-8B; for now the catalog ships "
+        "the 8B alone at bf16, and a smaller one is a manifest added when it is needed "
+        "(docs/VERB-SIZING.md section 9)"
+    ),
+)
+
+RERANK_GOAL = Goal(
+    params_b=8,
+    source=(
+        "Owen 2026-10-10: rerank's goal is Qwen3-Reranker-8B; for now the catalog ships "
+        "the 8B alone at bf16, and a smaller one is a manifest added when it is needed "
+        "(docs/VERB-SIZING.md section 9)"
+    ),
+)
+
+EMBED_FAMILY = "qwen3-embedding"
+
+RERANK_FAMILY = "qwen3-reranker"
+
+VERB_WORK_TOKENS = 8192
 
 CLEAN_GOAL = Goal(
     params_b=9,
@@ -280,6 +318,49 @@ CLASSES: tuple[CapabilityClass, ...] = (
         candidates=_from_catalog(load_all_manifests, *TEXT_FAMILIES, aliases=True),
         goal=DECIDE_GOAL,
         takes_images=True,
+    ),
+    CapabilityClass(
+        name="embed",
+        job_type="llm",
+        routable=False,
+        work=WorkingContext(
+            tokens=VERB_WORK_TOKENS,
+            concurrency=1,
+            source=(
+                f"one input of up to {VERB_WORK_TOKENS} tokens at a time: llama-server "
+                "embeds a request's inputs in turn on its one slot, and the Mac's items "
+                "route reads them as rows of the same forward, bounded the same way; "
+                "Qwen3-Embedding's model card embeds at max_length 8192"
+            ),
+        ),
+        purpose="text to vectors (the embed door)",
+        plainly="embed text",
+        noun="embedding models",
+        candidates=_from_catalog(load_all_manifests, EMBED_FAMILY),
+        goal=EMBED_GOAL,
+        package=RETRIEVAL_PACKAGE,
+    ),
+    CapabilityClass(
+        name="rerank",
+        job_type="llm",
+        routable=False,
+        work=WorkingContext(
+            tokens=VERB_WORK_TOKENS,
+            concurrency=1,
+            source=(
+                f"one query and one document at a time, up to {VERB_WORK_TOKENS} tokens "
+                "together: llama-server scores each document's reply in turn on its one "
+                "slot over the query it holds in its cache; Qwen3-Reranker's model card "
+                "scores at max_length 8192"
+            ),
+        ),
+        purpose="relevance scores for documents against a query (the rerank door)",
+        plainly="rerank documents",
+        noun="rerankers and text models",
+        candidates=_from_catalog(load_all_manifests, RERANK_FAMILY, *TEXT_FAMILIES),
+        goal=RERANK_GOAL,
+        first_families=(RERANK_FAMILY,),
+        package=RETRIEVAL_PACKAGE,
     ),
     CapabilityClass(
         name="pages",
@@ -461,6 +542,10 @@ __all__ = [
     "CLEAN_GOAL",
     "CapabilityClass",
     "DECIDE_GOAL",
+    "EMBED_FAMILY",
+    "EMBED_GOAL",
+    "RERANK_FAMILY",
+    "RERANK_GOAL",
     "DECIDE_STATE_TOKENS",
     "GENERATE_DEFAULT_TOKENS",
     "Goal",

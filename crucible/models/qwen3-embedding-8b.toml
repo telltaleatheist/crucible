@@ -1,0 +1,87 @@
+[model]
+id = "qwen3-embedding-8b"
+# Its own family, so no text verb (decide, chat, cleanup) ever offers it: it writes vectors.
+family = "qwen3-embedding"
+params_b = 8
+context_default = 8192
+
+trained_context = 32768
+modalities = ["text"]
+display = "Qwen3 Embedding · 8B"
+description = "The embed verb's model: text to a 4096-float vector, comparable only with vectors from the same fingerprint. Queries take an instruction, documents none; any size from 32 to 4096 (Matryoshka). In the optional retrieval package."
+
+# The model's input format and how its vector is read (crucible/verbspec.py). Every vector
+# Crucible returns is this pooling, normalised to unit length after any truncation to
+# `dimensions`.
+[embed]
+dimensions = 4096
+min_dimensions = 32
+pooling = "last"
+query = "Instruct: {instruction}\nQuery:{text}<|endoftext|>"
+document = "{text}<|endoftext|>"
+default_instruction = "Given a web search query, retrieve relevant passages that answer the query"
+source = "Qwen/Qwen3-Embedding-8B @ 1d8ad4ca9b3dd8059ad90a75d4983776a23d44af: config_sentence_transformers.json prompts.query 'Instruct: <task>\nQuery:' (no space after the colon, as the model card's get_detailed_instruct writes it) and prompts.document '' (no instruction on a document); 1_Pooling/config.json pooling_mode_lasttoken, then 2_Normalize; tokenizer.json's TemplateProcessing appends <|endoftext|> (151643) to every input, so the template writes it and nothing is added on top; README: output dimensions 32 to 4096 (MRL), context 32k"
+
+# Owen, 2026-10-10: the 8B only, at full precision (bf16), on the PC and the Mac; smaller
+# ones are pulled if they are ever needed.
+#
+# A bf16 GGUF of Qwen's own weights, served by llama-server with --embedding --pooling last
+# (engines/llama_server.py derives both from [embed]). Qwen publishes this model's GGUF in
+# f16 and quantised forms only; this is CompendiumLabs' bf16 conversion of the same
+# safetensors (general.base_model Qwen3 8B Base, qwen3.pooling_type 3, add_eos_token true in
+# its metadata, read 2026-10-10). Crucible sends token ids it rendered itself, so neither
+# the pooling type nor add_eos decides anything.
+#   qwen3-embedding-8b-bf16.gguf  15,141,156,384 B
+#     sha256 d023c9058a9774176eaf25ca2da0ea268698209beaff5c6392717ad46881dfdb
+[backends.cuda-linux]
+engine = "llama-server"
+hf_repo = "CompendiumLabs/qwen3-embedding-8b-gguf"
+revision = "ac37281f64377cd7546c556999bc7dbc6791f8da"
+bits = 16
+file = "qwen3-embedding-8b-bf16.gguf"
+serves = ["text"]
+memory_bytes_estimate = 17_099_115_936
+engine_args = ["--parallel", "1", "--n-gpu-layers", "all"]
+max_context = 32768
+
+# Computed, not measured on a card. Weights: the GGUF's bytes. KV: llama.cpp's f16 cache,
+# 36 layers x 8 KV heads x 128 dims x K and V x 2 bytes = 147,456 B/token, at the 8192
+# tokens one input may be. Overhead: the allowance qwen3.5-4b-bside's forms carry for the
+# CUDA context, cuBLAS and llama.cpp's compute buffer (750 MB); no recurrent state here.
+[backends.cuda-linux.memory]
+weights_bytes = 15_141_156_384
+overhead_bytes = 750_000_000
+kv_bytes_per_token = 147_456
+basis = "computed"
+measured_at_context = 8192
+
+# Qwen's own repo at bf16. It holds the bare transformer, saved from transformers'
+# AutoModel: keys without the `model.` prefix and no lm_head, which stock mlx-lm 0.31.3's
+# qwen3 loader refuses; Crucible's mlx-lm-qwen3-bare-checkpoint patch (applied by the
+# engine at start) reads that layout. The vector is read by Crucible's items route
+# (engines/items_forward.py, mlx_lm_embed): the inner model's last hidden state at the
+# input's last token.
+#   model-00001-of-00004.safetensors  4,900,037,024 B  sha256 99b343597fe840706146144699a8b9188dd3387e43eb61faf0231b70b249d451
+#   model-00002-of-00004.safetensors  4,915,959,512 B  sha256 dff635b0f6dbbaad2a2d633ef037ec0a39bc165cc1806c712fbd6fcbcb4526c0
+#   model-00003-of-00004.safetensors  4,983,067,656 B  sha256 30b1d4c53d84eb018f642cad7b373f0aabf79699872d8702c1f38577c0a59a2f
+#   model-00004-of-00004.safetensors    335,570,376 B  sha256 36cbc9c60375693629f25743c1e77ebb1724af58e671b2376463193c7fd21ef6
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "Qwen/Qwen3-Embedding-8B"
+revision = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+bits = 16
+serves = ["text"]
+memory_bytes_estimate = 18_411_639_214
+engine_args = [
+    "--decode-concurrency", "1",
+    "--prompt-concurrency", "1",
+    "--prompt-cache-size", "1",
+]
+max_context = 32768
+
+[backends.mlx-darwin.memory]
+weights_bytes = 15_134_634_568
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 147_456
+basis = "computed"
+measured_at_context = 8192

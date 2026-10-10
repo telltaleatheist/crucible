@@ -467,6 +467,14 @@ class Info(_Open):
     )
     job_types: list[str]
     capabilities: list[dict[str, Any]]
+    verbs: dict[str, Any] = Field(
+        description="The embed and rerank verbs (crucible/verbfacts.py): per verb its "
+        "route, whether this server serves it now (`available`) and with which model "
+        "(`registered`, and `reason`), its optional `package` and whether it is "
+        "installed here, the `models` a request may name on this backend, and the "
+        "per-call `limits`. Each model's own facts (dimensions, templates, token "
+        "limits) are its `GET /v1/models` row's `embed` and `rerank`."
+    )
     pages_engine: dict[str, Any]
     terminal_states: TerminalStates
     voice_sources: dict[str, VoiceSourceLabel]

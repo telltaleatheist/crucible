@@ -18,7 +18,8 @@ from .conftest import FAKE_BACKEND
 GIB = 1024 ** 3
 
 TEXT_CLASSES = ("clean", "translate", "simplify", "analysis")
-TEXT_VERBS = ("clean", "translate", "simplify", "analysis", "generate", "decide")
+# rerank reads any decide model too, with Crucible's general template (VERB-SIZING section 9).
+TEXT_VERBS = ("clean", "translate", "simplify", "analysis", "generate", "decide", "rerank")
 SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
 # CUDA also carries the 8-bit 4B, for an 8 GiB card (Victoria's 3070).
 # The catalog lists by size, so the 16-bit 2B comes before it; the pick still takes the
@@ -62,7 +63,7 @@ def test_every_text_verb_has_its_goal_and_no_floor() -> None:
     goals = {name: BY_NAME[name].goal for name in TEXT_VERBS}
     assert {name: goal.params_b for name, goal in goals.items()} == {
         "clean": 9, "translate": 27, "simplify": 27, "analysis": 27, "generate": 27,
-        "decide": 9,
+        "decide": 9, "rerank": 8,
     }
     for name in ("translate", "simplify", "analysis", "generate"):
         assert goals[name] is CHAT_GOAL, name

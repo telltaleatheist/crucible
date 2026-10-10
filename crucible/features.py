@@ -46,6 +46,19 @@ FEATURES: dict[str, str] = {
     "resident model's next-token logprobs.",
     "decide.items": "POST /v1/decide with `items`: one choice answer per item, in one "
     "request.",
+    "embed": "POST /v1/embed: unit-length vectors for a list of texts (queries or "
+    "documents), every answer naming the model, weights file, engine build and scheme "
+    "that wrote them (`model.fingerprint`); `fingerprint` on a later call serves exactly "
+    "that or is refused. Its models are the optional retrieval package.",
+    "embed.openai": "POST /v1/openai/embeddings and /openai/v1/embeddings: the same, "
+    "OpenAI-shaped.",
+    "rerank": "POST /v1/rerank: a relevance probability per document for one query, "
+    "P(yes) against P(no), from a dedicated reranker (the retrieval package) or any "
+    "decide model.",
+    "rerank.compat": "POST /v1/openai/rerank and /openai/v1/rerank: the same, "
+    "Cohere/Jina-shaped (`results` with `index` and `relevance_score`, `top_n`).",
+    "packages": "Optional packages (`crucible install retrieval`): GET /v1/models rows "
+    "carry `package` and `package_installed`, GET /v1/info `verbs`.",
     "models.forms": "A model may come in more than one form (precision) of the same "
     "weights; each server serves the best form its card holds, GET /v1/models lists "
     "them, and `form` on a chat, a decision or `load-model` names one "

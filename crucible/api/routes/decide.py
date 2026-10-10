@@ -16,6 +16,7 @@ from ...callqueue import take_a_turn
 from ...capabilityclasses import BY_NAME
 from ...config import Config
 from ...decide import DecideItemsResponse, DecideRequest, DecideResponse
+from ...embed import refuse_vectors_only
 from ...engines import (
     chat_admission,
     decide_items_reading,
@@ -97,7 +98,7 @@ def _refused(resident: Any, path: str, response: httpx.Response) -> ApiError:
     return named if named is not None else _decide_engine_refused(resident, response)
 
 
-def _engine_call(client: httpx.AsyncClient, resident: Any) -> decide_items.EngineCall:
+def engine_call(client: httpx.AsyncClient, resident: Any) -> decide_items.EngineCall:
     async def call(path: str, body: dict[str, Any]) -> Any:
         url = f"{resident.base_url}{path}"
         payload = json.dumps(body).encode("utf-8")
@@ -125,7 +126,7 @@ def _engine_call(client: httpx.AsyncClient, resident: Any) -> decide_items.Engin
 
 
 def _engine_post(client: httpx.AsyncClient, resident: Any) -> decide_core.EnginePost:
-    call = _engine_call(client, resident)
+    call = engine_call(client, resident)
 
     async def post(body: dict[str, Any]) -> Any:
         return await call("/v1/chat/completions", body)
@@ -249,7 +250,7 @@ def _with_likelihood(
     """A questions-form decision with likelihood questions in it: the label
     questions by the path they always take, the likelihood questions by the
     engine's route, merged in the request's order."""
-    call = _engine_call(client, resident)
+    call = engine_call(client, resident)
     labels = decide_core.label_plans(plans)
     scored = decide_core.likelihood_plans(plans)
 
@@ -322,6 +323,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         )
         _refuse_an_upstream(model)
         refuse_unknown_form(model, body.form, backend.kind)
+        refuse_vectors_only(model, "decide")
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)
         session = queue_session(request, ctx.sessions)
@@ -389,7 +391,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 items_reading = decide_items_reading(resident.engine)
                 if body.items is not None:
                     work = decide_items.decide_items_on_engine(
-                        _engine_call(ctx.http, resident),
+                        engine_call(ctx.http, resident),
                         _engine_post(ctx.http, resident),
                         resident, body, plans,
                         batched=items_reading.batched,
@@ -403,7 +405,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     )
                 elif items_reading.questions:
                     work = decide_items.decide_questions_on_items(
-                        _engine_call(ctx.http, resident), resident, body, plans,
+                        engine_call(ctx.http, resident), resident, body, plans,
                         max_logprobs=reading.max_logprobs,
                     )
                 else:

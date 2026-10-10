@@ -56,11 +56,13 @@ from .routes import (
     activity,
     capability,
     decide,
+    embed,
     info,
     jobs,
     openai,
     pairing,
     peer,
+    rerank,
     resumable,
     settings,
     tasks,
@@ -98,6 +100,8 @@ ROUTE_MODULES = (
     docs_routes,
     openai,
     decide,
+    embed,
+    rerank,
 )
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"

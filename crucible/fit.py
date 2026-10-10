@@ -53,6 +53,12 @@ class Candidate:
     # This backend's block serves images (`serves` names "image"): what a request that
     # carries images needs.
     serves_images: bool = False
+    # The manifest's `[model] family`: a class may rank its own family's models first
+    # (CapabilityClass.first_families).
+    family: str | None = None
+    # The optional package the model is in (ModelManifest.package), held only where it
+    # is installed.
+    package: str | None = None
 
     @classmethod
     def of(cls, manifest: Any, backend_kind: str, form: str | None = None) -> "Candidate":
@@ -84,6 +90,8 @@ class Candidate:
             params_b=getattr(manifest, "params_b", None),
             weights_of=getattr(manifest, "weights_of", None),
             serves_images="image" in getattr(spec, "serves", ()),
+            family=getattr(manifest, "family", None),
+            package=getattr(manifest, "package", None),
         )
 
     @property
@@ -203,6 +211,8 @@ class Candidate:
             "alias": self.alias,
             "weights_of": self.weights_of,
             "serves_images": self.serves_images,
+            "family": self.family,
+            "package": self.package,
         }
 
 

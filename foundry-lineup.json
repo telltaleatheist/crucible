@@ -1,5 +1,5 @@
 {
-  "generated_from": "f9babce928dddf471e4324fc071a725ed5bcb9f4",
+  "generated_from": "386307b6e3ff747247c76db98bf2fc67261ec852",
   "schema": 3,
   "models": [
     {
@@ -30,7 +30,8 @@
         "simplify",
         "analysis",
         "generate",
-        "decide"
+        "decide",
+        "rerank"
       ],
       "label": "Qwen 3.5 · 0.8B",
       "description": "The smallest text model: fast, and able to read an image on a PC or Windows card. Every text verb reaches down to it, so a card too small for anything larger still decides, cleans, translates and generates, at the quality a 0.8B gives.",
@@ -52,7 +53,8 @@
         "simplify",
         "analysis",
         "generate",
-        "decide"
+        "decide",
+        "rerank"
       ],
       "label": "Qwen 3.5 · 2B",
       "description": "A small text model between the 4B and the 0.8B, reading images as well as text on a PC or Windows card. Every text verb runs on it where nothing larger fits.",
@@ -74,7 +76,8 @@
         "simplify",
         "analysis",
         "generate",
-        "decide"
+        "decide",
+        "rerank"
       ],
       "label": "Qwen 3.5 · 4B",
       "description": "A small text model, reading images as well as text on a PC or Windows card. Every text verb runs on it where nothing larger fits.",
@@ -96,7 +99,8 @@
         "simplify",
         "analysis",
         "generate",
-        "decide"
+        "decide",
+        "rerank"
       ],
       "label": "Qwen 3.5 · 9B",
       "description": "The cleanup model, in bf16. Cleanup and the other 9B-class text work; wants a 24 GB card at this precision.",
@@ -117,7 +121,8 @@
         "simplify",
         "analysis",
         "generate",
-        "decide"
+        "decide",
+        "rerank"
       ],
       "label": "Qwen 3.8 · 27B (4-bit)",
       "description": "The 27B, quantized to fit a 24 GB card: the goal for translation, simplification, analysis and generation.",

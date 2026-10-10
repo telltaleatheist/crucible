@@ -134,6 +134,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             concurrency=query.get(capabilityquery.CONCURRENCY_PARAM),
             audio_low_vram=config.audio_low_vram,
             card=card_for(config.home, backend.gpu),
+            packages=config.packages,
         )
         for row in document["classes"]:
             row["route"] = (

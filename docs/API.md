@@ -24,7 +24,9 @@ Every route this server answers and every job type it runs, one line each. The s
 | route | what it does |
 | --- | --- |
 | `POST /openai/v1/chat/completions` | An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. |
+| `POST /openai/v1/embeddings` | OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). |
 | `GET /openai/v1/models` | The resident model in OpenAI's list shape, plus every upstream model a route names. |
+| `POST /openai/v1/rerank` | Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`. |
 | `GET /v1/accelerator` | What is on the card right now and which holders are Crucible's own processes. |
 | `GET /v1/activity` | What this server is doing and how far along, in one read with no job id. |
 | `GET /v1/capability` | What this server can hold, per capability class, and why not; `enabled: false` is an answer, not an error. |
@@ -35,6 +37,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `POST /v1/decide` | One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. |
 | `GET /v1/docs` | Every command this server answers, as data: each route with its door and one line, and each job type with its model, params schema, inputs, returns, notes, an example body and whether it is enabled here. |
 | `GET /v1/docs.md` | The whole API reference as markdown: every route, every job type, every model. |
+| `POST /v1/embed` | Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). |
 | `GET /v1/events` | Every change on this server as one SSE stream, so an app need not poll: a `snapshot` first, then one event per change (jobs, the queue, queue sessions, the card, chats in flight, tasks, settings, the server stopping). |
 | `GET /v1/health` | Is this process alive, in one cheap read: `status` (`ok`, `busy` running a job, `warming` loading a model), the queue depth and what is resident. |
 | `GET /v1/info` | Who this server is, what it runs on, what it serves, and the few fixed tables (terminal states, voice sources, service commands) a console shows. |
@@ -47,7 +50,9 @@ Every route this server answers and every job type it runs, one line each. The s
 | `DELETE /v1/jobs/{job_id}/hold` | The chain is complete: release the hold and remove the job now. |
 | `GET /v1/models` | Every model this build has a manifest for, and where it stands here. |
 | `POST /v1/openai/chat/completions` | An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. |
+| `POST /v1/openai/embeddings` | OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). |
 | `GET /v1/openai/models` | The resident model in OpenAI's list shape, plus every upstream model a route names. |
+| `POST /v1/openai/rerank` | Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`. |
 | `POST /v1/pairing/decision` | Approve (`allow: true`) or deny a pairing request, naming its `id` and the `user_code` the asking client shows. |
 | `POST /v1/pairing/poll` | How a pairing request stands: `pending`, `approved` (the answer then carries the server's `name` and its `token`), `denied` or `expired`. |
 | `GET /v1/pairing/requests` | The pairing requests waiting for an answer: who asked, from where, and the `user_code` to compare. |
@@ -69,6 +74,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `POST /v1/queue/sessions/{session_id}/touch` | "Still here", for a long gap on the client's side with nothing in flight. |
 | `DELETE /v1/queue/{job_id}` | Take a waiting job, call or queue session out of the queue (reason `operator`), or end the open queue session; a job that has started is cancelled with DELETE /v1/jobs/{id}. |
 | `POST /v1/queue/{job_id}/heartbeat` | Say the client that queued this job is still there. |
+| `POST /v1/rerank` | A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt, so the same model's scores compare across calls and a fixed cutoff means the same thing every time. |
 | `GET /v1/resumable` | Every resume journal this server keeps, newest first, with progress, inputs and expiry. |
 | `GET /v1/resumable/{resume_id}` | One journal, as `GET /v1/resumable` lists it. |
 | `DELETE /v1/resumable/{resume_id}` | Discard a journal now; refused `resume_in_use` while a job writes it. |
@@ -254,6 +260,7 @@ Who this server is, what it runs on, what it serves, and the few fixed tables (t
 | `features` | array of string | yes | — | What this server's API offers, by name (crucible/features.py; the list is in docs/API.md under Features). Check for a name rather than comparing versions. It says the routes exist in this build, not that a job type is enabled here: `job_types` says that. |
 | `job_types` | array of string | yes | — |  |
 | `capabilities` | array of object | yes | — |  |
+| `verbs` | object | yes | — | The embed and rerank verbs (crucible/verbfacts.py): per verb its route, whether this server serves it now (`available`) and with which model (`registered`, and `reason`), its optional `package` and whether it is installed here, the `models` a request may name on this backend, and the per-call `limits`. Each model's own facts (dimensions, templates, token limits) are its `GET /v1/models` row's `embed` and `rerank`. |
 | `pages_engine` | object | yes | — |  |
 | `terminal_states` | TerminalStates | yes | — | The states after which a job or a task never changes again. |
 | `voice_sources` | object of VoiceSourceLabel | yes | — |  |
@@ -1147,6 +1154,30 @@ An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/
 
 *Answers:* `200`
 
+### `POST /openai/v1/embeddings`
+
+OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). `input_type` defaults to `document`; a search query is sent with `"input_type": "query"`, which OpenAI's API does not have.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `input` | string or array of string | yes | — | One text or a list of texts. Token arrays are refused (`400 invalid_request`): the model's format is written around text, by Crucible. |
+| `model` | string or null | no | — | A Crucible model id; absent, the model this server registered for embed. An OpenAI model name (`text-embedding-3-small`) is refused `model_not_for_verb`. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float` or `base64` (float32 little-endian), as OpenAI's; `base64_float16` is Crucible's. |
+| `dimensions` | integer or null | no | — | As on `POST /v1/embed`. |
+| `user` | string or null | no | — | OpenAI's end-user tag. Read and not used. |
+| `input_type` | `'query'` or `'document'` | no | `'document'` | Crucible's: `query` writes the model's instruction prefix. Absent: `document`, the text as it is, which is what an OpenAI client means. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `fingerprint` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
+*Answers:* `200`, `422` HTTPValidationError
+
 ### `GET /openai/v1/models`
 
 The resident model in OpenAI's list shape, plus every upstream model a route names.
@@ -1154,6 +1185,28 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 *Door:* token + `X-Crucible-Api: 1`
 
 *Answers:* `200`
+
+### `POST /openai/v1/rerank`
+
+Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | What the documents are judged against. |
+| `documents` | array of string or TextDocument | yes | — | Strings, or `{"text": ...}` objects (Cohere's and Jina's). |
+| `model` | string or null | no | — | A Crucible model id: a reranker or any decide model; absent, the model this server registered for rerank. |
+| `top_n` | integer or null | no | — | How many results, most relevant first. Absent: every document. |
+| `return_documents` | boolean | no | `False` | Each result carries its document's text under `document.text`. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/rerank`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/openai/chat/completions`
 
@@ -1163,6 +1216,30 @@ An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/
 
 *Answers:* `200`
 
+### `POST /v1/openai/embeddings`
+
+OpenAI's embeddings: `{object: "list", data: [{embedding, index}], model, usage}`, unit-length vectors, with what wrote them under `crucible` (its `model.fingerprint` is what to store beside them; docs/internals/api.md "Embed"). `input_type` defaults to `document`; a search query is sent with `"input_type": "query"`, which OpenAI's API does not have.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `input` | string or array of string | yes | — | One text or a list of texts. Token arrays are refused (`400 invalid_request`): the model's format is written around text, by Crucible. |
+| `model` | string or null | no | — | A Crucible model id; absent, the model this server registered for embed. An OpenAI model name (`text-embedding-3-small`) is refused `model_not_for_verb`. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float` or `base64` (float32 little-endian), as OpenAI's; `base64_float16` is Crucible's. |
+| `dimensions` | integer or null | no | — | As on `POST /v1/embed`. |
+| `user` | string or null | no | — | OpenAI's end-user tag. Read and not used. |
+| `input_type` | `'query'` or `'document'` | no | `'document'` | Crucible's: `query` writes the model's instruction prefix. Absent: `document`, the text as it is, which is what an OpenAI client means. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `fingerprint` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
+*Answers:* `200`, `422` HTTPValidationError
+
 ### `GET /v1/openai/models`
 
 The resident model in OpenAI's list shape, plus every upstream model a route names.
@@ -1170,6 +1247,28 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 *Door:* token + `X-Crucible-Api: 1`
 
 *Answers:* `200`
+
+### `POST /v1/openai/rerank`
+
+Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], model, usage}`, most relevant first, `top_n` of them, with what judged them and every score in document order under `crucible`.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | What the documents are judged against. |
+| `documents` | array of string or TextDocument | yes | — | Strings, or `{"text": ...}` objects (Cohere's and Jina's). |
+| `model` | string or null | no | — | A Crucible model id: a reranker or any decide model; absent, the model this server registered for rerank. |
+| `top_n` | integer or null | no | — | How many results, most relevant first. Absent: every document. |
+| `return_documents` | boolean | no | `False` | Each result carries its document's text under `document.text`. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/rerank`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ## Peers
 
@@ -1239,6 +1338,75 @@ The whole API reference as markdown: every route, every job type, every model.
 *Door:* open
 
 *Answers:* `200`
+
+### `POST /v1/embed`
+
+Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else the biggest under `max_params_b` that fits, else what this server registered for embed; its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `inputs` | array of string | yes | — | The texts, in order; at most 256 a request. Each may be at most the served context in tokens (`GET /v1/models`, the row's `embed.max_input_tokens`), once the model's format is around it; a longer one is refused `embed_input_too_long` naming it, before anything is embedded. |
+| `input_type` | `'query'` or `'document'` | yes | — | `query`: written with the model's instruction prefix (Qwen3-Embedding: "Instruct: <instruction>\nQuery:<text>"). `document`: written as it is. Retrieval embeds the corpus as documents and the searches as queries; the two are meant to be compared. |
+| `instruction` | string or null | no | — | What the query is for, in one sentence ("Given a podcast transcript passage, find the passages that discuss the same topic"). Absent: the model's default instruction (the reply says which was used). Refused `instruction_not_taken` on a `document`, or by a model whose queries take none. |
+| `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
+| `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
+| `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
+
+*Answers:* `200` EmbedResponse, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `object` | `'crucible.embeddings'` | no | `'crucible.embeddings'` |  |
+| `model` | EmbedModel | yes | — | What wrote the vectors: everything that changes a float. |
+| `dimensions` | integer | yes | — | Each vector's length. |
+| `input_type` | `'query'` or `'document'` | yes | — |  |
+| `instruction` | string or null | yes | — | The instruction the queries were written with; null for documents. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | yes | — |  |
+| `embeddings` | array of array of number or array of string | yes | — | Unit-length vectors (float arrays, or base64 strings by `encoding_format`). |
+| `tokens` | EmbedTokens | yes | — |  |
+| `timing_ms` | EmbedTiming | yes | — |  |
+
+### `POST /v1/rerank`
+
+A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt, so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else the biggest under `max_params_b` that fits, else what this server registered for rerank; the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | What the documents are judged against. |
+| `documents` | array of string | yes | — | The documents, in order; at most 256. A document and the query together may be at most the served context in tokens; a longer one is refused `item_prompt_too_long` naming it. |
+| `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
+| `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
+| `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
+
+*Answers:* `200` RerankResponse, `422` HTTPValidationError
+
+**Answer `200`** (`application/json`), the body:
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `object` | `'crucible.rerank'` | no | `'crucible.rerank'` |  |
+| `model` | RerankModel | yes | — | What judged the documents. |
+| `instruction` | string | yes | — | The instruction the documents were judged under. |
+| `scores` | array of number | yes | — | Each document's relevance, in the request's order. |
+| `results` | array of RerankResult | yes | — | Every document, most relevant first (a tie keeps the request's order). |
+| `tokens` | RerankTokens | yes | — |  |
+| `timing_ms` | RerankTiming | yes | — |  |
 
 ### `POST /v1/server/restart`
 
@@ -2145,6 +2313,8 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `decide` | POST /v1/decide with `questions`: answer distributions read off the resident model's next-token logprobs. |
 | `decide.items` | POST /v1/decide with `items`: one choice answer per item, in one request. |
 | `denoise` | The `denoise` job: speech separated from what is behind it. |
+| `embed` | POST /v1/embed: unit-length vectors for a list of texts (queries or documents), every answer naming the model, weights file, engine build and scheme that wrote them (`model.fingerprint`); `fingerprint` on a later call serves exactly that or is refused. Its models are the optional retrieval package. |
+| `embed.openai` | POST /v1/openai/embeddings and /openai/v1/embeddings: the same, OpenAI-shaped. |
 | `events` | GET /v1/events: one SSE stream of every change on the server, opening with a snapshot and resumable with Last-Event-ID (docs/EVENTS.md). |
 | `events.topics` | GET /v1/events?topics=job,queue,...: only the named topics. |
 | `image` | The `image` job: pictures from words (docs/IMAGE.md). |
@@ -2153,12 +2323,15 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `jobs.hold` | `hold` on a submit and /v1/jobs/{id}/hold: a job's artifacts are kept until the client lets go of them. |
 | `jobs.resume` | `params.resume` and /v1/resumable: a resumable job continues the journal an earlier run left (docs/RESUMABLE-JOBS.md). |
 | `models.forms` | A model may come in more than one form (precision) of the same weights; each server serves the best form its card holds, GET /v1/models lists them, and `form` on a chat, a decision or `load-model` names one (docs/FITS-AND-THE-CARD.md section 8). |
+| `packages` | Optional packages (`crucible install retrieval`): GET /v1/models rows carry `package` and `package_installed`, GET /v1/info `verbs`. |
 | `playground` | GET /v1/playground: the pages the operator page's playground draws. |
 | `queue.calls` | A chat or a decision is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
 | `queue.default` | Every request that can wait (a job, a chat, a decision, a TTS stream) waits in the line by default; `"queue": false` refuses at once instead, and `{"max_wait_s": N}` sets the wait. `"queue": {}` is refused (docs/QUEUE.md). |
 | `queue.events` | GET /v1/queue/events: the waiting line's own SSE stream. |
 | `queue.jobs` | POST /v1/jobs: a busy server queues the job instead of refusing it; GET/DELETE /v1/queue and its heartbeat (docs/QUEUE.md). |
 | `queue.sessions` | /v1/queue/sessions: an app's session holds the machine for a run of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md). |
+| `rerank` | POST /v1/rerank: a relevance probability per document for one query, P(yes) against P(no), from a dedicated reranker (the retrieval package) or any decide model. |
+| `rerank.compat` | POST /v1/openai/rerank and /openai/v1/rerank: the same, Cohere/Jina-shaped (`results` with `index` and `relevance_score`, `top_n`). |
 | `rvc` | The `rvc` job: voice conversion. |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
 | `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
@@ -2377,6 +2550,22 @@ Pick one of named options. Labelled A, B, C… in the order given.
 | `instructions` | string | yes | — | The question, as a person would ask it: "Which team should handle this?". |
 | `options` | object of string | yes | — | Option name to a one-line description, in the order the letters are assigned: the first option is `A`. At least 2; more than 26 is refused as `too_many_options`, because past `Z` there is no one-token label to read. |
 
+### `CompatRerankRequest`
+
+`POST /v1/openai/rerank` (and `/openai/v1/rerank`): the Cohere and Jina rerank request, so their clients work unchanged, with Crucible's members beside it.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | What the documents are judged against. |
+| `documents` | array of string or TextDocument | yes | — | Strings, or `{"text": ...}` objects (Cohere's and Jina's). |
+| `model` | string or null | no | — | A Crucible model id: a reranker or any decide model; absent, the model this server registered for rerank. |
+| `top_n` | integer or null | no | — | How many results, most relevant first. Absent: every document. |
+| `return_documents` | boolean | no | `False` | Each result carries its document's text under `document.text`. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/rerank`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
 ### `DecideItem`
 
 One item of the items form: its text, and optionally its own options.
@@ -2455,6 +2644,70 @@ How big the prompts were.
 | `per_question` | object of integer | yes | — | `usage.prompt_tokens` for each question's prompt. |
 | `images` | integer | yes | — | How many images every prompt of this decision carried. |
 
+### `EmbedModel`
+
+What wrote the vectors: everything that changes a float.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — | The Crucible model id. |
+| `revision` | string | yes | — | The weights' revision (the repo commit pinned in the manifest). |
+| `file` | string or null | yes | — | The weights file read, for a block that is one file (a GGUF); null for a repo. |
+| `form` | string or null | yes | — | The form served, for a model whose block states several; null otherwise. |
+| `bits` | integer or null | yes | — | The weights' precision. |
+| `engine` | string | yes | — | `llama-server` or `mlx-lm`. |
+| `engine_build` | string | yes | — | The engine's build: `llama-server-b10970-llg1.7.6-cuda13.0`, `mlx-lm-0.31.3+mlx-0.32.2`. |
+| `scheme` | integer | yes | — | Crucible's own reading of a vector (rendering, pooling, truncation, normalisation). |
+| `fingerprint` | string | yes | — | All of the above in one string. Vectors are comparable only with vectors of the same fingerprint: store it beside them, send it on later calls. |
+| `dimensions` | integer | yes | — | The model's own vector length (the answer's `dimensions` may be a prefix of it). |
+
+### `EmbedRequest`
+
+`POST /v1/embed`: texts to unit-length vectors, each named by the model that wrote it.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `inputs` | array of string | yes | — | The texts, in order; at most 256 a request. Each may be at most the served context in tokens (`GET /v1/models`, the row's `embed.max_input_tokens`), once the model's format is around it; a longer one is refused `embed_input_too_long` naming it, before anything is embedded. |
+| `input_type` | `'query'` or `'document'` | yes | — | `query`: written with the model's instruction prefix (Qwen3-Embedding: "Instruct: <instruction>\nQuery:<text>"). `document`: written as it is. Retrieval embeds the corpus as documents and the searches as queries; the two are meant to be compared. |
+| `instruction` | string or null | no | — | What the query is for, in one sentence ("Given a podcast transcript passage, find the passages that discuss the same topic"). Absent: the model's default instruction (the reply says which was used). Refused `instruction_not_taken` on a `document`, or by a model whose queries take none. |
+| `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
+| `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
+| `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
+
+### `EmbedResponse`
+
+Vectors, in input order, and what wrote them.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `object` | `'crucible.embeddings'` | no | `'crucible.embeddings'` |  |
+| `model` | EmbedModel | yes | — | What wrote the vectors: everything that changes a float. |
+| `dimensions` | integer | yes | — | Each vector's length. |
+| `input_type` | `'query'` or `'document'` | yes | — |  |
+| `instruction` | string or null | yes | — | The instruction the queries were written with; null for documents. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | yes | — |  |
+| `embeddings` | array of array of number or array of string | yes | — | Unit-length vectors (float arrays, or base64 strings by `encoding_format`). |
+| `tokens` | EmbedTokens | yes | — |  |
+| `timing_ms` | EmbedTiming | yes | — |  |
+
+### `EmbedTiming`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `total` | number | yes | — | The run, ms, from leaving the server's line to the answer. |
+| `queued` | number or null | no | — | Ms the request waited in the server's line (a model loading, the engine busy). |
+
+### `EmbedTokens`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `per_input` | array of integer | yes | — | Tokens each input was, the model's format around it included. |
+| `total` | integer | yes | — |  |
+
 ### `ErrorBody`
 
 What every refusal carries: branch on `code`, show a person `message`.
@@ -2511,6 +2764,7 @@ One request to the engine, timed by Crucible.
 | `features` | array of string | yes | — | What this server's API offers, by name (crucible/features.py; the list is in docs/API.md under Features). Check for a name rather than comparing versions. It says the routes exist in this build, not that a job type is enabled here: `job_types` says that. |
 | `job_types` | array of string | yes | — |  |
 | `capabilities` | array of object | yes | — |  |
+| `verbs` | object | yes | — | The embed and rerank verbs (crucible/verbfacts.py): per verb its route, whether this server serves it now (`available`) and with which model (`registered`, and `reason`), its optional `package` and whether it is installed here, the `models` a request may name on this backend, and the per-call `limits`. Each model's own facts (dimensions, templates, token limits) are its `GET /v1/models` row's `embed` and `rerank`. |
 | `pages_engine` | object | yes | — |  |
 | `terminal_states` | TerminalStates | yes | — | The states after which a job or a task never changes again. |
 | `voice_sources` | object of VoiceSourceLabel | yes | — |  |
@@ -2661,6 +2915,24 @@ The weights that made the decision, as an artifact sidecar names them.
 | `revision` | string | yes | — | The revision the resident engine was started on. |
 | `fingerprint` | string | yes | — | `<id>@<revision>`. |
 
+### `OpenAIEmbeddingRequest`
+
+`POST /v1/openai/embeddings` (and `/openai/v1/embeddings`): OpenAI's embeddings request, so an OpenAI client works unchanged, with Crucible's members beside it.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `input` | string or array of string | yes | — | One text or a list of texts. Token arrays are refused (`400 invalid_request`): the model's format is written around text, by Crucible. |
+| `model` | string or null | no | — | A Crucible model id; absent, the model this server registered for embed. An OpenAI model name (`text-embedding-3-small`) is refused `model_not_for_verb`. |
+| `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float` or `base64` (float32 little-endian), as OpenAI's; `base64_float16` is Crucible's. |
+| `dimensions` | integer or null | no | — | As on `POST /v1/embed`. |
+| `user` | string or null | no | — | OpenAI's end-user tag. Read and not used. |
+| `input_type` | `'query'` or `'document'` | no | `'document'` | Crucible's: `query` writes the model's instruction prefix. Absent: `document`, the text as it is, which is what an OpenAI client means. |
+| `instruction` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `fingerprint` | string or null | no | — | Crucible's: as on `POST /v1/embed`. |
+| `form` | string or null | no | — | Crucible's: which form of `model`, for a model whose block states several. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling in billions of parameters, when no model is named. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, the request waits in the server's line; `false` refuses at once. |
+
 ### `Ping`
 
 `GET /v1/ping`: enough for a client to tell a Crucible from anything else.
@@ -2738,6 +3010,71 @@ Why an item waits beyond its turn. `accelerator_busy`: it is at the front and th
 | `details` | object or null | yes | — |  |
 | `since` | string | yes | — |  |
 | `next_check_at` | string or null | yes | — |  |
+
+### `RerankModel`
+
+What judged the documents.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `id` | string | yes | — |  |
+| `revision` | string | yes | — |  |
+| `file` | string or null | yes | — |  |
+| `form` | string or null | yes | — |  |
+| `engine` | string | yes | — |  |
+| `engine_build` | string | yes | — |  |
+| `template` | string | yes | — | `model`: the reranker's own prompt. `crucible-general-1`: Crucible's general template, for a decide model. |
+| `fingerprint` | string | yes | — | Scores are comparable across calls with the same fingerprint. |
+
+### `RerankRequest`
+
+`POST /v1/rerank`: how relevant each document is to one query.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `query` | string | yes | — | What the documents are judged against. |
+| `documents` | array of string | yes | — | The documents, in order; at most 256. A document and the query together may be at most the served context in tokens; a longer one is refused `item_prompt_too_long` naming it. |
+| `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
+| `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
+| `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
+
+### `RerankResponse`
+
+A relevance probability per document, in document order, and the same sorted.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `object` | `'crucible.rerank'` | no | `'crucible.rerank'` |  |
+| `model` | RerankModel | yes | — | What judged the documents. |
+| `instruction` | string | yes | — | The instruction the documents were judged under. |
+| `scores` | array of number | yes | — | Each document's relevance, in the request's order. |
+| `results` | array of RerankResult | yes | — | Every document, most relevant first (a tie keeps the request's order). |
+| `tokens` | RerankTokens | yes | — |  |
+| `timing_ms` | RerankTiming | yes | — |  |
+
+### `RerankResult`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `index` | integer | yes | — | The document's position in the request. |
+| `relevance_score` | number | yes | — | P(yes) / (P(yes) + P(no)), from 0 to 1. |
+
+### `RerankTiming`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `total` | number | yes | — | The run, ms, from leaving the server's line to the answer. |
+| `queued` | number or null | no | — | Ms the request waited in the server's line. |
+
+### `RerankTokens`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `per_document` | array of integer | yes | — | Each document's context: the prompt up to where the reply opens. |
+| `total` | integer | yes | — | Prompt tokens the engine was sent for the request, cached ones included. |
+| `cached` | integer or null | yes | — | Of those, read from the engine's cache (null when it did not say). |
 
 ### `ScoreAnswer`
 
@@ -2904,6 +3241,12 @@ The states after which a job or a task never changes again.
 | --- | --- | --- | --- | --- |
 | `jobs` | array of string | yes | — |  |
 | `tasks` | array of string | yes | — |  |
+
+### `TextDocument`
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `text` | string | yes | — |  |
 
 ### `ValidationError`
 

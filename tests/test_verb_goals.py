@@ -135,6 +135,10 @@ def test_every_goal_class_candidate_states_params_and_bits_on_every_backend() ->
         for kind in (CUDA_LINUX, MLX_DARWIN, LLAMA_WINDOWS):
             for c in entry.candidates(kind):
                 assert c.params_b is not None and c.bits is not None, (entry.name, kind, c.id)
+            if entry.package is not None and not entry.candidates(kind):
+                # An optional package's verb reaches the backends its models ship for:
+                # embed is the PC's and the Mac's (Owen, 2026-10-10), never Windows'.
+                continue
             assert entry.pick_order(entry.candidates(kind)), (entry.name, kind)
 
 
@@ -225,7 +229,7 @@ def test_the_store_passes_the_settings_choice_over_the_pick() -> None:
     kind, total, allowance, vendor = PC
     decisions = capabilitystore.decide_on(
         kind, total_bytes=total, desktop_allowance_bytes=allowance, gpu_vendor=vendor,
-        card=None, chosen={"decide": "qwen3.8-27b-4bit"}, audio_low_vram=False,
+        card=None, chosen={"decide": "qwen3.8-27b-4bit"}, packages=frozenset(), audio_low_vram=False,
     )
     by_name = {d.capability: d for d in decisions}
     assert by_name["decide"].selected == "qwen3.8-27b-4bit"
@@ -239,7 +243,7 @@ def test_the_install_plan_names_the_goal_and_its_best_within_it() -> None:
     kind, total, allowance, vendor = EIGHT_UNMEASURED
     decisions = capabilitystore.decide_on(
         kind, total_bytes=total, desktop_allowance_bytes=allowance, gpu_vendor=vendor,
-        card=None, chosen={}, audio_low_vram=False,
+        card=None, chosen={}, packages=frozenset(), audio_low_vram=False,
     )
     plan = installplan.install_plan(
         "llm", decisions, card=None, total_bytes=total, pool="card",
@@ -265,7 +269,7 @@ def test_doctor_says_a_record_from_before_the_goal_is_stale(home: Path) -> None:
     configure_box(home, enable_llm=True, backend=pc)  # the voices this host serves read it
     decisions = capabilitystore.decide_on(
         CUDA_LINUX, total_bytes=24 * GIB, desktop_allowance_bytes=3 * GIB,
-        gpu_vendor="nvidia", card=None, chosen={}, audio_low_vram=False,
+        gpu_vendor="nvidia", card=None, chosen={}, packages=frozenset(), audio_low_vram=False,
     )
     record = capabilitystore.record_of(
         CUDA_LINUX, total_bytes=24 * GIB, desktop_allowance_bytes=3 * GIB,

@@ -458,6 +458,35 @@ def _decide_chosen(w: _Weighing, chosen: str) -> Decision:
     return _chosen_granted(w, picked)
 
 
+def _package_not_installed(w: _Weighing) -> Decision:
+    """A class whose models are an optional package this server has not installed: it
+    picks nothing, and says how to install it (classnames.PACKAGE_NAMES). A model of
+    another family chosen for it in Settings is decided as any choice is."""
+    entry = w.entry
+    package = entry.package
+    assert package is not None
+    models = sorted({c.id for c in w.found if c.package == package})
+    # In the order the pick ranks them, then those above the goal.
+    others = [c.id for c in (*w.ranked, *w.found) if c.package is None]
+    others = list(dict.fromkeys(others))
+    named = (
+        f" A request may still name one of the other models it reads ({', '.join(others[:4])}"
+        f"{', ...' if len(others) > 4 else ''}), or Settings may choose one"
+        if others
+        else ""
+    )
+    return _refuse(
+        entry,
+        w.budget,
+        w.found,
+        w.fitting,
+        f"disabled: {entry.name}'s models are the optional {package} package, which this "
+        f"server has not installed. `crucible install {package}` pulls "
+        f"{', '.join(models)} and turns it on.{named}",
+        f"cannot {entry.plainly} — the {package} package is not installed on this server",
+    )
+
+
 def _best_fit(w: _Weighing) -> Decision:
     best = w.picks[0]
     why = (
@@ -607,9 +636,12 @@ def decide_capabilities(
     audio_low_vram: bool,
     work: "WorkingContext | None" = None,
     card: "CardFacts | None" = None,
+    packages: frozenset[str] = frozenset(),
 ) -> Decision:
     """`audio_low_vram` is this host's `[audio] low_vram`: an audio candidate is weighed at
-    the need the audio job would admit it against (audiomodels.held_need)."""
+    the need the audio job would admit it against (audiomodels.held_need). `packages` are
+    the optional packages installed here (config `[packages]`): a class whose models are
+    one that is not installed picks nothing of it."""
     work = _work_for(entry, work)
     budget = available_bytes(total_bytes, desktop_allowance_bytes)
     if backend_kind == LLAMA_WINDOWS and entry.job_type in WSL_ONLY_JOB_TYPES:
@@ -631,6 +663,10 @@ def decide_capabilities(
         work=work,
         card=card,
     )
+    if entry.package is not None and entry.package not in packages:
+        picked = None if chosen is None else next((c for c in found if c.id == chosen), None)
+        if picked is None or picked.package is not None:
+            return _package_not_installed(weighing)
     if chosen is not None:
         return _decide_chosen(weighing, chosen)
     if weighing.picks:
@@ -652,6 +688,7 @@ def decide_all(
     chosen: Mapping[str, str],
     audio_low_vram: bool,
     card: "CardFacts | None" = None,
+    packages: frozenset[str] = frozenset(),
 ) -> tuple[Decision, ...]:
     return tuple(
         decide_capabilities(
@@ -663,6 +700,7 @@ def decide_all(
             chosen=chosen.get(entry.name),
             audio_low_vram=audio_low_vram,
             card=card,
+            packages=packages,
         )
         for entry in CLASSES
     )

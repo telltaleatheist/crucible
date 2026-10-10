@@ -153,6 +153,20 @@ class SubprocessEngine:
 
     decide_likelihood_basis: str | None = None
 
+    decide_likelihood_prompt: bool = False
+    """The likelihood route also scores the prompt form: text Crucible rendered itself
+    from a model's manifest (a reranker's own prompt), tokenized as it is with no chat
+    template and no special tokens added. False: chat messages only."""
+
+    decide_likelihood_prompt_basis: str | None = None
+
+    embed_route: str | None = None
+    """How the engine turns text into vectors: `openai-embeddings` (token ids to
+    /v1/embeddings, the engine started for it) or `items` (Crucible's items route). None:
+    it does not, and `embed_basis` says why."""
+
+    embed_basis: str | None = None
+
     sigterm_wait_seconds: float = STOP_TIMEOUT_SECONDS
 
     env_job_type = "llm"

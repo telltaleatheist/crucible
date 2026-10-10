@@ -821,6 +821,13 @@ def parse_items_job(body: dict[str, Any], served: str) -> ItemsJob:
         ask = ITEMS.parse_request(body, (served,))
     except ITEMS.ItemsRefusal as refusal:
         raise Refusal(refusal.status, refusal.code, str(refusal)) from None
+    if isinstance(ask, ITEMS.EmbedAsk) or getattr(ask, "messages", None) is None:
+        raise Refusal(
+            400,
+            "not_served_by_mlx_vlm",
+            "this reader scores chat-form questions and candidates only; vectors and "
+            "the prompt form are mlx-lm's (engines/mlx_vlm.py states what it serves)",
+        )
     urls = _image_urls(ask.messages)
     return ItemsJob(
         ask=ask,

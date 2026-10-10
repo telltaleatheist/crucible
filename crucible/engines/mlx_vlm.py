@@ -61,6 +61,18 @@ class MlxVlmEngine(SubprocessEngine):
         "candidate is scored at every token from a copy of its cache"
     )
 
+    decide_likelihood_prompt_basis = (
+        "Crucible's Mac reader (engines/mlx_vlm_serve.py parse_items_job) refuses the "
+        "prompt form: it renders every context through mlx-vlm's chat template to place "
+        "the images, and no reranker manifest names an mlx-vlm block"
+    )
+
+    embed_basis = (
+        "Crucible's Mac reader (engines/mlx_vlm_serve.py parse_items_job) refuses an "
+        "embed request: it serves the vision forms, and no embedding manifest names an "
+        "mlx-vlm block"
+    )
+
     @classmethod
     def served_name(cls, weights_dir: Path, model_id: str) -> str:
         return str(weights_dir)

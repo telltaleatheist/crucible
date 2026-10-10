@@ -283,7 +283,7 @@ def test_the_catalog_and_the_settings_choices_name_the_held_need(home: Path) -> 
 def _with_record(home: Path, low_vram_decided: bool, low_vram_now: bool) -> Config:
     decisions = capabilitystore.decide_on(
         "cuda-linux", total_bytes=8 * GIB, desktop_allowance_bytes=GIB, gpu_vendor="nvidia",
-        card=None, chosen={}, audio_low_vram=low_vram_decided,
+        card=None, chosen={}, packages=frozenset(), audio_low_vram=low_vram_decided,
     )
     record = capabilitystore.record_of(
         "cuda-linux", total_bytes=8 * GIB, desktop_allowance_bytes=GIB,
@@ -353,7 +353,7 @@ def _decided_box(home: Path, backend: Backend, low_vram: bool | None) -> Config:
     said), and `[audio] low_vram` as a person left it (None: never touched)."""
     decisions = capabilitystore.decide_on(
         "cuda-linux", total_bytes=backend.gpu.vram_bytes, desktop_allowance_bytes=GIB,
-        gpu_vendor="nvidia", card=None, chosen={}, audio_low_vram=bool(low_vram),
+        gpu_vendor="nvidia", card=None, chosen={}, packages=frozenset(), audio_low_vram=bool(low_vram),
     )
     record = capabilitystore.record_of(
         "cuda-linux", total_bytes=backend.gpu.vram_bytes, desktop_allowance_bytes=GIB,
@@ -581,7 +581,7 @@ def test_settings_offer_nothing_where_no_model_can_be_split(home: Path) -> None:
     total = FAKE_MAC_BACKEND.gpu.vram_bytes
     decisions = capabilitystore.decide_on(
         "mlx-darwin", total_bytes=total, desktop_allowance_bytes=GIB,
-        gpu_vendor="apple", card=None, chosen={}, audio_low_vram=False,
+        gpu_vendor="apple", card=None, chosen={}, packages=frozenset(), audio_low_vram=False,
     )
     record = capabilitystore.record_of(
         "mlx-darwin", total_bytes=total, desktop_allowance_bytes=GIB,

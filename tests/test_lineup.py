@@ -23,19 +23,20 @@ WITH_LOCAL = [
     "qwen3.8-27b-4bit",
 ]
 WITHOUT_LOCAL = [
-    "qwen3.5-4b-8bit", "qwen3.5-4b-bside", "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit",
+    "qwen3-embedding-8b", "qwen3-reranker-8b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside", "qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl", "qwen3.8-27b-8bit",
 ]
 
 CLASSES = {
     "dots-ocr": ["pages"],
     # every text verb runs down to the small tiers (docs/VERB-SIZING.md rule 1)
-    "qwen3.5-0.8b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
-    "qwen3.5-2b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
-    "qwen3.5-4b": ["clean", "translate", "simplify", "analysis", "generate", "decide"],
+    # and rerank reads any decide model (docs/VERB-SIZING.md section 9)
+    "qwen3.5-0.8b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
+    "qwen3.5-2b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
+    "qwen3.5-4b": ["clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"],
     "qwen3.5-9b": [
-        "clean", "translate", "simplify", "analysis", "generate", "decide"
+        "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"
     ],
-    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "generate", "decide"],
+    "qwen3.8-27b-4bit": ["translate", "simplify", "analysis", "generate", "decide", "rerank"],
 }
 
 ROW_KEYS = ["id", "classes", "label", "description", "local"]
@@ -216,7 +217,7 @@ def test_classes_come_from_the_capability_table(model_id: str) -> None:
 
 def test_a_model_with_no_local_form_still_has_classes() -> None:
     assert classes_for_model("qwen3.8-27b-8bit") == (
-        "translate", "simplify", "analysis", "generate", "decide",
+        "translate", "simplify", "analysis", "generate", "decide", "rerank",
     )
 
 
@@ -280,7 +281,7 @@ def test_a_fixture_catalog_builds_the_same_shape(
         {
             "id": "demo-1b",
             "classes": [
-                "clean", "translate", "simplify", "analysis", "generate", "decide"
+                "clean", "translate", "simplify", "analysis", "generate", "decide", "rerank"
             ],
             "label": "Demo",
             "description": "A fixture.",

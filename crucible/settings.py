@@ -893,6 +893,7 @@ def recomputed_capability(
         card=card,
         chosen=resolved.local_models,
         audio_low_vram=resolved.audio_low_vram,
+        packages=config.packages,
     )
     return record_of(
         record.backend_kind,

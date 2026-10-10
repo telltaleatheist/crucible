@@ -148,6 +148,7 @@ def _redecided_row(
     routes: Mapping[str, str],
     audio_low_vram: bool,
     card: "CardFacts | None",
+    packages: frozenset[str],
 ) -> dict[str, Any]:
     decision = decide_capabilities(
         entry,
@@ -159,6 +160,7 @@ def _redecided_row(
         work=requested,
         audio_low_vram=audio_low_vram,
         card=card,
+        packages=packages,
     )
     fresh = decision.row()
     model = routes.get(entry.name)
@@ -176,6 +178,7 @@ def served_rows(
     concurrency: str | None,
     audio_low_vram: bool,
     card: "CardFacts | None" = None,
+    packages: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     entry = _named_class(
         capability_class, context_tokens is not None or concurrency is not None
@@ -220,6 +223,7 @@ def served_rows(
                 routes=routes,
                 audio_low_vram=audio_low_vram,
                 card=card,
+                packages=packages,
             )
         row["work"] = None if work is None else {**work.to_dict(), "from": basis}
         row["goal"] = None if found.goal is None else found.goal.to_dict()
