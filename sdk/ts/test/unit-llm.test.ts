@@ -582,8 +582,24 @@ test('chat posts the OpenAI body and reads the completion down to what it promis
     model: 'qwen3.5-9b',
     content: 'The forge is lit.',
     finishReason: 'stop',
-    usage: { promptTokens: 17, completionTokens: 5, totalTokens: 22 },
+    usage: { promptTokens: 17, completionTokens: 5, totalTokens: 22, cachedTokens: null },
   });
+});
+
+test('prefill is sent as the prefill member, and the cached prompt tokens are read', async () => {
+  handle = (_request, response) =>
+    json(response, 200, {
+      ...COMPLETION,
+      usage: { ...COMPLETION.usage, prompt_tokens_details: { cached_tokens: 16 } },
+    });
+  const answer = await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    thinking: false,
+    prefill: '{"edits": [',
+  });
+  assert.equal(JSON.parse(lastBody)['prefill'], '{"edits": [');
+  assert.equal(answer.usage?.cachedTokens, 16);
 });
 
 test('the optional sampling knobs are omitted entirely when not given', async () => {

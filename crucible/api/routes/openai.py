@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -10,9 +11,16 @@ from starlette.background import BackgroundTask
 
 from ... import upstreamrecord
 from ...callqueue import take_a_turn
-from ...engines import chat_admission
+from ...engines import chat_admission, chat_prefill_reading
 from ...errors import ApiError
 from ...inflight import read_act
+from ...manifests import ManifestError, load_manifest
+from ...prefill import (
+    refuse_unkeepable_prefill,
+    refuse_upstream_prefill,
+    take_prefill,
+    with_prefill,
+)
 from ...queuerequest import queue_of
 from ...sampling import SAMPLING_HEADER, apply_defaults
 from ..caller import client_agent, queue_session
@@ -34,6 +42,27 @@ from ..proxy import (
     settle_after_chat,
 )
 from ..upstream import forward_to_upstream, routed_upstream_rows
+
+
+def _refuse_a_prefill_before_waiting(
+    body: dict[str, Any], model: str, backend_kind: str
+) -> None:
+    """What a queued chat's prefill would be refused for once its model is resident
+    is refused now, before it waits or a model is loaded for it. A model with no
+    manifest, or no block here, is left to the door's own refusal."""
+    try:
+        manifest = load_manifest(model)
+        spec = manifest.spec(backend_kind)
+    except ManifestError:
+        return
+    reading = chat_prefill_reading(spec.engine)
+    refuse_unkeepable_prefill(
+        engine=spec.engine,
+        model_id=model,
+        served=reading.served,
+        basis=reading.basis,
+        resolved_body=apply_defaults(body, manifest.defaults).body,
+    )
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -78,6 +107,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         resident, or whose engine has every slot taken, waits in the server's line
         (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with
         `"queue": false` it is refused at once instead. An upstream chat never waits.
+        A `"prefill": "<text>"` member starts the answer with that text and the model
+        writes on from it; the reply's content is what it wrote after the prefill
+        (vLLM and llama-server; thinking stated off; no response_format or other
+        grammar; refused by name otherwise: docs/internals/engines-and-capability.md,
+        "Prefill").
         """
         raw = await request.body()
         body = chat_body(raw)
@@ -91,12 +125,17 @@ def register(routers: Routers, ctx: AppContext) -> None:
             )
         sent_queue = "queue" in body
         queued = queue_of(body)
-        if sent_queue:
+        prefill = take_prefill(body)
+        if sent_queue or prefill is not None:
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
+            if prefill is not None:
+                refuse_upstream_prefill(requested)
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
+        if prefill is not None:
+            _refuse_a_prefill_before_waiting(body, requested, ctx.backend.kind)
         inflight = ctx.inflight
         act = read_act(request.headers)
         chat_over = settle_after_chat(ctx.settlement)
@@ -123,6 +162,18 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 refuse_an_exited_engine(residency, resident)
 
                 applied = apply_defaults(body, resident.defaults)
+                if prefill is not None:
+                    reading = chat_prefill_reading(resident.engine)
+                    refuse_unkeepable_prefill(
+                        engine=resident.engine,
+                        model_id=resident.model_id,
+                        served=reading.served,
+                        basis=reading.basis,
+                        resolved_body=applied.body,
+                    )
+                    applied = replace(
+                        applied, body=with_prefill(applied.body, prefill), changed=True
+                    )
                 sampling_headers = {SAMPLING_HEADER: applied.header()}
                 forwarded = forward_body(raw, applied, resident)
                 url = f"{resident.base_url}/v1/chat/completions"

@@ -1140,7 +1140,7 @@ A chat surface shaped like OpenAI's, for clients that already speak it.
 
 ### `POST /openai/v1/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill").
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1156,7 +1156,7 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 
 ### `POST /v1/openai/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill").
 
 *Door:* token + `X-Crucible-Api: 1`
 

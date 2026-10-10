@@ -110,7 +110,10 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
 - `X-Crucible-Act` is a header, not a body field, because the chat body is
   proxied to the engine verbatim. It is sent only when the caller names an act.
 - `thinking` sends `chat_template_kwargs: {enable_thinking}`, read per request by
-  mlx-lm and vLLM. `contextTokens` reaches Ollama as `options.num_ctx`; omitted,
+  mlx-lm and vLLM. `prefill` is sent as the body's `prefill` member, which the
+  server turns into an open assistant message (engines-and-capability.md,
+  "Prefill"). `ChatUsage.cachedTokens` is `usage.prompt_tokens_details.
+  cached_tokens`, null when the engine did not say. `contextTokens` reaches Ollama as `options.num_ctx`; omitted,
   the server sends the tag's own context. A reasoning model that runs out of
   budget answers with `reasoning` and no `content`; that is a protocol error whose
   message names the remedy (raise `maxTokens` or send `thinking: false`).

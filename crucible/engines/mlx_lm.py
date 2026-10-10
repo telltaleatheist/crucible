@@ -35,6 +35,14 @@ class MlxLmEngine(SubprocessEngine):
         "the Mac Studio 2026-09-24)"
     )
 
+    chat_prefill = False
+    chat_prefill_basis = (
+        "mlx-lm 0.31.3's server renders every chat with add_generation_prompt=True "
+        "and reads no continue_final_message (mlx_lm/server.py _tokenize L573-586, "
+        "read on the Mac Studio 2026-10-10): a final assistant message is closed "
+        "and a new answer opened after it, so a prefill would not be continued"
+    )
+
     decide_logprobs = True
     max_logprobs = 40
     decide_basis = (

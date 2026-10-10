@@ -924,6 +924,14 @@ export interface ChatOptions {
   readonly responseFormat?: ResponseFormat;
   /** Whether a reasoning model thinks before it answers. */
   readonly thinking?: boolean;
+  /**
+   * The start of the answer: the model writes on from this text, and the reply's `content` is what
+   * it wrote AFTER it (join the two yourself). Sent as `prefill`. Served on vLLM and llama-server;
+   * needs thinking off (`thinking: false`, or the model's manifest) and no `responseFormat`, and
+   * must not begin or end with whitespace. Refused by name otherwise (`prefill_not_served`,
+   * `prefill_with_thinking`, `prefill_with_grammar`, `prefill_conflict`, `invalid_request`).
+   */
+  readonly prefill?: string;
   /** The context window an `ollama/<tag>` chat runs at, sent as `context_tokens`. */
   readonly contextTokens?: number;
   /**
@@ -947,6 +955,11 @@ export interface ChatUsage {
   readonly promptTokens: number | null;
   readonly completionTokens: number | null;
   readonly totalTokens: number | null;
+  /**
+   * Prompt tokens the engine read from its prefix cache instead of computing
+   * (`usage.prompt_tokens_details.cached_tokens`); `null` when the engine did not say.
+   */
+  readonly cachedTokens: number | null;
 }
 
 /**

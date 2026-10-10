@@ -92,6 +92,17 @@ class VllmEngine(SubprocessEngine):
         "request each after the state is sent alone"
     )
 
+    chat_prefill = True
+    chat_prefill_basis = (
+        "vLLM 0.29.0's ChatCompletionRequest takes continue_final_message with "
+        "add_generation_prompt false (vllm/entrypoints/openai/chat_completion/"
+        "protocol.py L318-327, L990-995) and hands both to the tokenizer's "
+        "apply_chat_template, which renders the final assistant message open "
+        "(transformers chat_template_utils.py L539-600); Qwen3.5's template closes "
+        "an empty think block before it, so the model writes on from the prefill "
+        "with its thinking off (rendered with the 9B's tokenizer, 2026-10-10)"
+    )
+
     chat_concurrency_flag = "--max-num-seqs"
     chat_concurrency_basis = (
         "vLLM 0.29.0 schedules at most --max-num-seqs sequences per step "
