@@ -7,6 +7,9 @@ notes.
 
 ## Unreleased
 
+- Chat on llama-server on cuda-linux (`qwen3.5-4b-bside`): every JSON schema is now enforced by llguidance, the compiler vLLM and the Mac's mlx-lm use, so a schema means the same grammar on every engine, and `"json_whitespace": "compact"` is kept there (it was refused). Crucible's llama-server build is now `b10970-llg1.7.6-cuda13.0` (a new asset on the `tools` release; a host replaces its binary at its next `crucible install llm` or GGUF load): `LLAMA_LLGUIDANCE=ON` with llguidance 1.7.6 (the llm env's) in place of b10970's 1.0.1, and patched so a grammar llguidance will not compile is llama-server's own 400 instead of an answer sampled without it (`scripts/llama-server-linux.patch`). The door sends `response_format` (json_schema, json_object) and llama-server's `json_schema` field as the grammar `%llguidance {}
+start: %json <schema>`, held from the first generated token as on the other engines; such a chat must state thinking off (`400 structured_output_with_thinking`; B-Sides' manifest does). A schema stated twice or beside a `grammar` is `invalid_request`. A `%llguidance` grammar sent to llama-server on llama-windows (ggml-org's build, no llguidance, which aborts on one) is refused `structured_output_not_served`; compact stays refused there (docs/internals/engines-and-capability.md "Structured output").
+
 ## 1.0.131 — 2026-10-10
 
 - `POST /v1/decide` answers carry `timing_ms.queued`: the ms a decision waited in the server's line before it ran. `timing_ms.total` was always the run alone, so a client that sent several decisions at once (Briefcase: three chapter calls) read the later ones' waits as a slowdown.

@@ -96,24 +96,36 @@ class LlamaServerEngine(SubprocessEngine):
         "llama-server b10970 reads json_schema and grammar from the body and "
         "response_format json_object and json_schema into the same schema, and answers "
         "any other response_format type with an error "
-        "(tools/server/server-common.cpp L1179-1204); the schema becomes its GBNF "
-        "grammar (common/json-schema-to-grammar.cpp). It reads no structured_outputs "
-        "and no guided_* field; read at the b10970 tag 2026-10-10"
+        "(tools/server/server-common.cpp L1179-1204). It reads no structured_outputs "
+        "and no guided_* field; read at the b10970 tag 2026-10-10. On cuda-linux the "
+        "door sends every JSON schema to it as an llguidance grammar "
+        "(structured.with_llguidance_grammar); on llama-windows the schema goes as sent "
+        "and becomes its GBNF grammar (common/json-schema-to-grammar.cpp)"
     )
-    json_whitespace_compact = False
+    json_whitespace_compact = True
     json_whitespace_basis = (
-        "llama-server b10970 compiles a JSON schema with a fixed whitespace rule, "
-        "space ::= | \" \" | \"\\n\"{1,2} [ \\t]{0,20} (common/json-schema-to-grammar.cpp "
-        "L229, set by every converter at L816), and reads no option that changes it "
-        "(tools/server/server-common.cpp L1179-1204). A grammar Crucible built itself "
-        "would not be the same constraint: the jinja chat path wraps the schema in its "
-        "PEG parser, after the reasoning block and with an optional ```json fence "
-        "(common/chat-auto-parser-generator.cpp L117-125), which a raw grammar "
-        "replaces, and the converter's Python port is gone at b10970, so Crucible would "
-        "own a port of its 1,027 lines of C++. Its llguidance grammars need "
-        "LLAMA_LLGUIDANCE, which defaults off (CMakeLists.txt L146) and is off in "
-        "Crucible's cuda-linux build (common/sampling.cpp L213-217 aborts the server "
-        "on one); read at the b10970 tag 2026-10-10"
+        "Crucible's cuda-linux build of llama-server b10970 has llguidance 1.7.6, the "
+        "one the PC's vLLM runs (scripts/build-llama-server-linux.sh, "
+        "LLAMA_LLGUIDANCE=ON). The door sends the schema as the grammar "
+        "'%llguidance {}\\nstart: %json <schema>', the form llama.cpp writes itself "
+        "(common/json-schema-to-grammar.cpp L993-996), which llama-server hands to "
+        "llguidance (common/sampling.cpp L213-215): its JSON compiler takes the schema's "
+        "x-guidance whitespace_flexible false over its default of true, as vLLM's does. "
+        "A grammar the request names is the user's (server-common.cpp L1414-1420, "
+        "server-schema.cpp L280), so the generation prompt is not fed through it "
+        "(common/common.h L218, sampling.cpp L297) and it holds from the first "
+        "generated token, as on vLLM and mlx-lm; read at the b10970 tag 2026-10-10"
+    )
+    llguidance_grammar_backends = frozenset({"cuda-linux"})
+    llguidance_unbuilt_basis = (
+        "llama-windows runs ggml-org's own b10970 build, which has no llguidance "
+        "(LLAMA_LLGUIDANCE defaults off, CMakeLists.txt L146, and only the 3rd-party "
+        "Ubuntu CI job turns it on), so it compiles a JSON schema with its GBNF "
+        "converter, whose whitespace rule is fixed: space ::= | \" \" | \"\\n\"{1,2} "
+        "[ \\t]{0,20} (common/json-schema-to-grammar.cpp L229, set by every converter at "
+        "L816), and no request field changes it (tools/server/server-common.cpp "
+        "L1179-1204). A grammar in llguidance's syntax ABORTS that build "
+        "(common/sampling.cpp L213-217); read at the b10970 tag 2026-10-10"
     )
 
     decide_logprobs = True

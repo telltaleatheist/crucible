@@ -32,11 +32,14 @@ from ...sampling import SAMPLING_HEADER, apply_defaults
 from ...structured import (
     COMPACT,
     constrained_fields,
+    refuse_llguidance_grammar_with_thinking,
+    refuse_unbuilt_llguidance_grammar,
     refuse_unenforced_constraint,
     refuse_unkept_json_whitespace,
     refuse_upstream_json_whitespace,
     take_json_whitespace,
     with_compact_json,
+    with_llguidance_grammar,
 )
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
@@ -78,7 +81,9 @@ def _refuse_before_waiting(
     except ManifestError:
         return
     resolved = apply_defaults(body, manifest.defaults).body
-    refuse_an_unenforced_constraint(spec.engine, model, resolved, json_whitespace)
+    refuse_an_unenforced_constraint(
+        spec.engine, backend_kind, model, resolved, json_whitespace
+    )
     if prefill is None:
         return
     reading = chat_prefill_reading(spec.engine)
@@ -93,11 +98,14 @@ def _refuse_before_waiting(
 
 def refuse_an_unenforced_constraint(
     engine: str,
+    backend_kind: str,
     model_id: str,
     resolved_body: dict[str, Any],
     json_whitespace: str | None,
-) -> None:
-    reading = structured_output_reading(engine)
+) -> bool:
+    """Refuse what the engine, as built for this backend, would not keep. True when the
+    chat's JSON constraint goes to it as an llguidance grammar (see `as_sent`)."""
+    reading = structured_output_reading(engine, backend_kind)
     refuse_unenforced_constraint(
         engine=engine,
         model_id=model_id,
@@ -113,6 +121,29 @@ def refuse_an_unenforced_constraint(
         basis=reading.compact_json_basis,
         mode=json_whitespace,
     )
+    refuse_unbuilt_llguidance_grammar(
+        engine=engine, model_id=model_id, built=reading.llguidance_grammar, body=resolved_body
+    )
+    if reading.llguidance_grammar:
+        refuse_llguidance_grammar_with_thinking(
+            engine=engine, model_id=model_id, resolved_body=resolved_body
+        )
+        # What it would be sent, built now so a body it cannot be written from (a
+        # schema stated twice, a grammar beside it) is refused before anything waits.
+        with_llguidance_grammar(resolved_body)
+    return reading.llguidance_grammar
+
+
+def as_sent(
+    body: dict[str, Any], json_whitespace: str | None, llguidance_grammar: bool
+) -> dict[str, Any]:
+    """The constraint as the engine is sent it: compact JSON written into the schema,
+    then, on a build that takes llguidance grammars, the schema as one."""
+    if json_whitespace == COMPACT:
+        body = with_compact_json(body)
+    if llguidance_grammar:
+        body = with_llguidance_grammar(body)
+    return body
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -167,8 +198,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured
         output"). A `"json_whitespace": "compact"` member, beside a JSON schema or
         json_object, keeps the answer's JSON free of whitespace between tokens (inside
-        strings only); `"flexible"` is the default. vLLM and mlx-lm keep it; llama-server
-        and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON
+        strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on
+        cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON
+        constraint needs thinking stated off: `structured_output_with_thinking`);
+        llama-server on llama-windows and mlx-vlm are refused
+        `json_whitespace_not_served`, and without a JSON
         constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member
         names which form of a model that comes in more than one serves the chat (GET
         /v1/models, the row's `forms`); without it the resident form answers, and a load
@@ -231,13 +265,16 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 refuse_an_exited_engine(residency, resident)
 
                 applied = apply_defaults(body, resident.defaults)
-                refuse_an_unenforced_constraint(
-                    resident.engine, resident.model_id, applied.body, json_whitespace
+                llguidance_grammar = refuse_an_unenforced_constraint(
+                    resident.engine,
+                    ctx.backend.kind,
+                    resident.model_id,
+                    applied.body,
+                    json_whitespace,
                 )
-                if json_whitespace == COMPACT:
-                    applied = replace(
-                        applied, body=with_compact_json(applied.body), changed=True
-                    )
+                sent = as_sent(applied.body, json_whitespace, llguidance_grammar)
+                if sent is not applied.body:
+                    applied = replace(applied, body=sent, changed=True)
                 if prefill is not None:
                     reading = chat_prefill_reading(resident.engine)
                     refuse_unkeepable_prefill(

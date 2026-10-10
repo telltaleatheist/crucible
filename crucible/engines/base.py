@@ -128,6 +128,19 @@ class SubprocessEngine:
     """Where that was read. Required of an engine that enforces any structured output;
     the chat door refuses `json_whitespace_not_served` with it."""
 
+    llguidance_grammar_backends: frozenset[str] = frozenset()
+    """The backends on which this engine's build compiles a grammar in llguidance's own
+    syntax, so the chat door sends it every JSON constraint as one
+    (structured.with_llguidance_grammar) instead of the response_format it would compile
+    with a compiler of its own. Empty for an engine that compiles response_format with
+    llguidance itself (vLLM, mlx-lm). When it is not empty, `json_whitespace_compact`
+    holds on these backends only, and `llguidance_unbuilt_basis` says why not on the
+    others."""
+
+    llguidance_unbuilt_basis: str | None = None
+    """Why this engine's build on a backend outside `llguidance_grammar_backends` has no
+    llguidance; the chat door refuses compact JSON and a `%llguidance` grammar with it."""
+
     decide_likelihood_route: str | None = None
     """How the engine scores a likelihood question's candidates: `items` (the
     batched items route, every candidate a row) or `prompt-logprobs` (one

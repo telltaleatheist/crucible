@@ -66,7 +66,7 @@ def refused(call: Callable[[], Any]) -> ApiError:
 
 
 def door(engine: str, body: dict[str, Any]) -> None:
-    reading = structured_output_reading(engine)
+    reading = structured_output_reading(engine, "cuda-linux")
     refuse_unenforced_constraint(
         engine=engine,
         model_id=MODEL,
@@ -82,19 +82,19 @@ def door(engine: str, body: dict[str, Any]) -> None:
 
 def test_every_engine_states_what_it_enforces_and_where_it_read_it() -> None:
     for name in ENGINES:
-        reading = structured_output_reading(name)
+        reading = structured_output_reading(name, "cuda-linux")
         assert reading.basis.strip(), name
 
 
 def test_the_text_engines_enforce_a_json_schema_and_the_page_reader_none() -> None:
     for name in ("vllm", "llama-server", "mlx-lm"):
-        reading = structured_output_reading(name)
+        reading = structured_output_reading(name, "cuda-linux")
         assert {"json_object", "json_schema"} <= reading.formats, name
-    assert not structured_output_reading("mlx-vlm").served
+    assert not structured_output_reading("mlx-vlm", "mlx-darwin").served
 
 
 def test_mlx_lm_states_what_its_patch_reads() -> None:
-    reading = structured_output_reading("mlx-lm")
+    reading = structured_output_reading("mlx-lm", "mlx-darwin")
     assert reading.formats == frozenset(structured_mlx.RESPONSE_FORMATS)
     assert reading.fields == frozenset({"structured_outputs"})
     assert set(structured_mlx.UNSERVED_FIELDS) == set(GRAMMAR_FIELDS) - reading.fields

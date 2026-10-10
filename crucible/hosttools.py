@@ -687,23 +687,31 @@ LLAMA_SERVER_PROGRAM = "llama-server"
 
 LLAMA_SERVER_STAMP_NAME = "llama-server.json"
 
+# A new pin is a NEW asset name on the release (the old one stays for hosts not yet
+# updated): a host whose stamp names another sha256 is not placed (llama_server_placed), so
+# its next `crucible install llm`, or install-on-submit for a GGUF load, replaces the binary.
 LLAMA_SERVER_BUILDS: dict[str, ToolBuild] = {
     "linux-x86_64": ToolBuild(
-        version="b10970-cuda13.0",
+        version="b10970-llg1.7.6-cuda13.0",
         url=(
             "https://github.com/telltaleatheist/crucible/releases/download/"
-            "tools/llama-server-b10970-cuda13.0-linux-x86_64.tar.xz"
+            "tools/llama-server-b10970-llg1.7.6-cuda13.0-linux-x86_64.tar.xz"
         ),
-        sha256="059b6d35b6e0b597e476c162d31a33b432d1c9386266c34169881290c1b3b73f",
-        bytes=106_932_584,
-        root="llama-server-b10970-cuda13.0-linux-x86_64",
+        sha256="54b277feec6c980f08def703eace61b06c808502f5b5fd60094883403176dd66",
+        bytes=108_209_692,
+        root="llama-server-b10970-llg1.7.6-cuda13.0-linux-x86_64",
         provenance=(
-            "built on owens-pc (WSL2 Ubuntu 24.04, gcc 13.3) 2026-10-09 by "
+            "built on owens-pc (WSL2 Ubuntu 24.04, gcc 13.3) 2026-10-10 by "
             "scripts/build-llama-server-linux.sh from ggml-org/llama.cpp b10970 "
-            "(bfdc32183d57f1e35bacf35c47d6311e2028bbbc); CUDA 13.0 from PyPI nvidia "
-            "wheels (nvcc 13.0.88, cudart 13.0.96, cuBLAS 13.1.1.3), sm_75/80/86/89/90/120, "
-            "static llama/ggml and libstdc++, links libcudart.so.13 and libcublas.so.13 "
-            "(the llm env's) and libcuda.so.1 (the driver's), glibc 2.38+; MIT"
+            "(bfdc32183d57f1e35bacf35c47d6311e2028bbbc) with LLAMA_LLGUIDANCE=ON and "
+            "scripts/llama-server-linux.patch: llguidance 1.7.6 "
+            "(0384f3f6aab6cebe8abf9b74db0079b96f5837ef, rustc 1.95.0) in place of b10970's "
+            "1.0.1, and a grammar llguidance will not compile refused instead of sampled "
+            "without it; CUDA 13.0 from PyPI nvidia wheels (nvcc 13.0.88, cudart 13.0.96, "
+            "cuBLAS 13.1.1.3), sm_75/80/86/89/90/120, static llama/ggml, llguidance and "
+            "libstdc++, links libcudart.so.13 and libcublas.so.13 (the llm env's) and "
+            "libcuda.so.1 (the driver's), glibc 2.38+ (the 2.39 symbols are Rust's weak "
+            "pidfd ones); MIT"
         ),
     ),
 }
@@ -806,7 +814,7 @@ def ensure_llama_server(
         encoding="utf-8",
     )
     # The archive is xz: the binary it unpacks is a third larger than the download
-    # (b10970: 106,932,584 B fetched, 139,514,616 B placed), so both are said.
+    # (b10970-llg1.7.6: 108,209,692 B fetched, 143,975,336 B placed), so both are said.
     return (
         f"llama-server: {build.version} placed at {target} "
         f"({target.stat().st_size / 1e6:.1f} MB unpacked from a "

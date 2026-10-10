@@ -108,6 +108,29 @@ def test_the_build_script_builds_the_pinned_tag_against_the_env_s_cuda() -> None
     assert "86-real" in script, "the 3070 and the 3090 Ti are sm_86"
 
 
+def test_the_build_has_the_llguidance_vllm_runs() -> None:
+    """The door sends a JSON schema to this build as an llguidance grammar
+    (structured.with_llguidance_grammar), so it is built with llguidance, at the version
+    the llm env's vLLM compiles schemas with, and its name says so."""
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "scripts" / "build-llama-server-linux.sh").read_text(encoding="utf-8")
+    recipe = (root / "crucible" / "envs" / "llm" / "cuda-linux.txt").read_text(encoding="utf-8")
+    patch = (root / "scripts" / "llama-server-linux.patch").read_text(encoding="utf-8")
+    pinned = re.search(r"^llguidance==(\S+)$", recipe, re.M)
+    assert pinned is not None, "the llm env no longer pins llguidance"
+    assert "-DLLAMA_LLGUIDANCE=ON" in script
+    assert f"LLGUIDANCE=v{pinned.group(1)}" in script
+    commit = re.search(r"^LLGUIDANCE_COMMIT=([0-9a-f]{40})$", script, re.M)
+    assert commit is not None
+    assert f"+        GIT_TAG {commit.group(1)}" in patch
+    assert "throw std::invalid_argument(error);" in patch, (
+        "a grammar llguidance will not compile is refused, never sampled without it"
+    )
+    build = hosttools.LLAMA_SERVER_BUILDS["linux-x86_64"]
+    assert f"llg{pinned.group(1)}" in build.root
+    assert f"llguidance {pinned.group(1)}" in build.provenance
+
+
 def _archive(root: str, body: bytes = b"\x7fELF the server") -> bytes:
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:xz") as bundle:
@@ -150,6 +173,24 @@ def test_the_pinned_archive_is_placed_and_stamped(tmp_path: Path, monkeypatch: p
     assert stamp["sha256"] == build.sha256
     assert hosttools.llama_server_placed(tmp_path, build)
     assert "already at" in hosttools.ensure_llama_server(tmp_path, fetch=_fetch_from(archive))
+
+
+def test_a_new_pin_replaces_the_binary_an_older_pin_placed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host that placed the last pin's binary is not whole under the new one (the stamp
+    names the old sha256), so its next llm install or install-on-submit replaces it."""
+    old = _archive("llama-server-b10970-cuda13.0-test", b"the old server")
+    old_build = _pinned(monkeypatch, old)
+    hosttools.ensure_llama_server(tmp_path, fetch=_fetch_from(old))
+    new = _archive("llama-server-b10970-cuda13.0-test", b"the new server")
+    new_build = _pinned(monkeypatch, new)
+    assert not hosttools.llama_server_placed(tmp_path, new_build)
+    said = hosttools.ensure_llama_server(tmp_path, fetch=_fetch_from(new))
+    assert "placed at" in said
+    assert hosttools.llama_server_path(tmp_path).read_bytes() == b"the new server"
+    assert hosttools.llama_server_placed(tmp_path, new_build)
+    assert not hosttools.llama_server_placed(tmp_path, old_build)
 
 
 def test_the_install_says_the_download_and_the_unpacked_size_apart(

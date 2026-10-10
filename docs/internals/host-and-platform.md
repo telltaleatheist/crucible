@@ -946,10 +946,17 @@ names the directories and PATH searched (`searched_note`).
 
 `LLAMA_SERVER_BUILDS` pins llama.cpp's `llama-server` for linux-x86_64 on the same release:
 our own build of the tag Windows pins (`scripts/build-llama-server-linux.sh`), CUDA 13.0,
-sm_75/80/86/89/90/120, static llama/ggml with libstdc++ folded in, no OpenMP and no rpath.
-The archive holds the binary, llama.cpp's LICENSE and a BUILD.txt; for b10970 the `.tar.xz` is
-106,932,584 B to download and the binary it unpacks is 139,514,616 B, and the install's lines
-say both (the pin's `bytes` is the archive's). cudart and cuBLAS are not
+sm_75/80/86/89/90/120, static llama/ggml with libstdc++ folded in, no OpenMP and no rpath,
+and llguidance 1.7.6 compiled in (`LLAMA_LLGUIDANCE=ON`; `scripts/llama-server-linux.patch`
+moves b10970's llguidance 1.0.1 to the llm env's 1.7.6 and refuses a grammar llguidance will
+not compile instead of sampling without it; the door sends JSON schemas to it as llguidance
+grammars, engines-and-capability.md "Structured output"). Building it needs rustup; running
+it needs nothing of Rust. The archive holds the binary, llama.cpp's and llguidance's LICENSEs
+and a BUILD.txt; for b10970-llg1.7.6 the `.tar.xz` is 108,209,692 B to download and the binary
+it unpacks is 143,975,336 B, and the install's lines say both (the pin's `bytes` is the
+archive's). A new pin is a new asset name, the old one kept on the release; a host whose
+stamp names another sha256 is not placed, so its next `crucible install llm` (or
+install-on-submit for a GGUF load) replaces the binary. cudart and cuBLAS are not
 in it and come from the llm env (`llamacpp.cuda_linux_engine`). `ensure_llama_server` is
 called by `crucible install llm` on cuda-linux only, checks the digest before placing, and
 refuses a platform with no pin (`tool_unpinned`) rather than skipping it.
