@@ -413,6 +413,8 @@ def engine_load_args(
             card_flags=card_args,
             source=manifest.path.name,
         ),
+        weights_dir,
+        context,
     )
     if concurrency is None:
         return args

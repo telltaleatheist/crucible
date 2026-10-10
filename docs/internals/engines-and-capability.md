@@ -512,7 +512,9 @@ started exactly as `load-model` would).
   `--prompt-cache-size` (`REQUIRED_FLAGS`). mlx-lm 0.31.3 batches continuously
   up to `--decode-concurrency`, and the door admits that + 1.
 - `--prefill-step-size` is NOT stated by a block: `MlxLmEngine.model_args`
-  derives it from the manifest's `params_b` (`prefill_step`; a block that states
+  derives it from the manifest's `params_b`, the weights' `config.json` (full-attention
+  layers x heads x head_dim) and the context the model is loaded at (`prefill_step`;
+  unreadable config: `model_config_unreadable`; a block that states
   it is refused `prefill_step_stated`, and `start` refuses an argv without it,
   `mlx_lm_prefill_step_unset`). See "Prefill steps hold the GPU" below.
 
@@ -536,6 +538,8 @@ own thread answers):
 | 27B-8bit, chat prompts, live engine (2048 steps) | 12-13 s | 8 stalls > 1 s, max 13.2 s | 2 stalls > 1 s, max 12.6 s; its CPU fell from ~30% to 0 |
 | 9B bf16, same load, live engine | ~3.7 s | 12 stalls > 1 s, max 3.2 s | none > 28 ms |
 | 27B-8bit, standalone mlx-lm server, 256-token steps | 1.6 s | max 12 ms | max 46 ms |
+| 27B-8bit at context 24576, one 24k-token prompt, live engine (2048 steps) | 12.2 -> 13.7 s along the prompt | max 41 ms (a session that interleaved) | max 42 ms |
+| the same prompt, standalone server, 217-token steps (the derived step at 24576) | 1.40 -> 1.72 s | max 27 ms, p50 1.8 ms | max 76 ms |
 
 - The stall is intermittent: in some sessions the render client interleaves with
   MLX at ~10 ms (p50 8-16 ms at 2048-token steps), in others it waits for the
@@ -547,10 +551,22 @@ own thread answers):
   evaluation, so the evaluation's length is the lever. (The 256-step row above is
   from a session that interleaved; in a stalling one the bound is the 1.6 s step.)
 - `EVAL_BUDGET_FLOPS` = 2 x 27e9 x 256: the 27B at 256 tokens, 1.59 s per step at
-  the same throughput as 2048 (27B prefill: 2048 162-170 tok/s, 512 168, 256 164,
-  128 152, 64 135). `prefill_step(params_b)` = that budget over 2 x params, at most
-  mlx-lm's 2048: 27B 256, 9B 768, 4B 1728, 2B and 0.8B 2048. Each step is then
-  about the same stretch of GPU on every model; the 9B's 768 is ~1.2 s.
+  the same throughput as 2048 near the start of a prompt (27B prefill: 2048 162-170
+  tok/s, 512 168, 256 164, 128 152, 64 135). A step's cost grows with the tokens
+  already cached (attention): 2048-token steps of a 24k prompt went 12.2 -> 13.7 s.
+  So `prefill_step` sizes the step for the DEEPEST position the loaded context
+  allows: budget / (2 x params + 4 x full-attention layers x heads x head_dim x
+  context), at most mlx-lm's 2048. 27B: 234 at its 12288 default, 217 at 24576, 130
+  at 131072; 9B 686 at 16384; 4B 1523 at 8192; 2B and 0.8B 2048. Each step is then at
+  most about the same stretch of GPU on every model and context.
+- The cost, measured: none near the start of a prompt (above), about 10% on a
+  24k-token prompt (the 27B read it in ~168 s at 217-token steps vs ~153 s at 2048).
+- Not built yet: a step that corrects itself (time each prefill evaluation, halve
+  the step for the rest of the engine's life when one runs past the budget, and log
+  it). mlx-lm 0.31.3 times each step itself in `BatchGenerator.next`
+  (generate.py ~L1883, `tic`/`toc` around `self._prompt_batch.prompt`), so it is a
+  few lines there plus the same in `generate_step` (~L445) for the unbatched path:
+  a new self-applied env patch to `mlx_lm/generate.py` with its marker and tests.
 - The items route uses the same step (`provider.cli_args.prefill_step_size`), so a
   decision holds the GPU no longer per evaluation than a chat prompt does
   (`items_forward.MlxLmShared`, ITEMS_VERSION 5; "The decision door" below).

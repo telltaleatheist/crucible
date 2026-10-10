@@ -43,12 +43,47 @@ step is about the same stretch of GPU time (docs/internals/engines-and-capabilit
 "Prefill steps hold the GPU")."""
 
 
-def prefill_step(params_b: float) -> int:
-    """Tokens per prefill step for a dense model of `params_b` billion parameters:
-    EVAL_BUDGET_FLOPS of work, never more than mlx-lm's own step."""
-    if params_b <= 0:
-        raise EngineError(f"prefill_step: params_b must be positive, got {params_b}")
-    return max(1, min(MLX_LM_PREFILL_STEP, int(EVAL_BUDGET_FLOPS / (2 * params_b * 1e9))))
+def attention_flops_per_position(weights_dir: Path) -> float:
+    """FLOPs one new token spends per token already in the cache: QK^T and the
+    weighted sum over V, 4 x heads x head_dim per full-attention layer (a linear-
+    attention layer's cost does not grow with the cache). Read from the weights'
+    config.json, the only place the architecture is stated."""
+    path = Path(weights_dir) / "config.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise EngineError(
+            f"model_config_unreadable: {path} cannot be read ({exc}); the prefill step "
+            "is sized from the model's attention layers"
+        ) from None
+    text = config.get("text_config", config)
+    try:
+        layers = int(text["num_hidden_layers"])
+        heads = int(text["num_attention_heads"])
+        head_dim = int(text.get("head_dim") or int(text["hidden_size"]) // heads)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EngineError(
+            f"model_config_unreadable: {path} states no {exc} for its attention layers"
+        ) from None
+    types = text.get("layer_types")
+    if isinstance(types, list):
+        full = sum(1 for kind in types if kind == "full_attention")
+    else:
+        full = layers // int(text.get("full_attention_interval") or 1)
+    return 4.0 * full * heads * head_dim
+
+
+def prefill_step(params_b: float, attention_per_position: float, context: int) -> int:
+    """Tokens per prefill step: EVAL_BUDGET_FLOPS of work for a step at the deepest
+    position the context allows (2 x params per token, plus attention over every
+    token already cached), never more than mlx-lm's own step. Measured on the 27B
+    at a 24k-token prompt: 2048-token steps grew 12.2 -> 13.7 s along it."""
+    if params_b <= 0 or context <= 0:
+        raise EngineError(
+            f"prefill_step: params_b and context must be positive, got {params_b}, {context}"
+        )
+    per_token = 2 * params_b * 1e9 + attention_per_position * context
+    return max(1, min(MLX_LM_PREFILL_STEP, int(EVAL_BUDGET_FLOPS / per_token)))
 
 
 class MlxLmEngine(SubprocessEngine):
@@ -135,9 +170,12 @@ class MlxLmEngine(SubprocessEngine):
     )
 
     @classmethod
-    def model_args(cls, manifest: Any, args: list[str]) -> list[str]:
-        """The prefill step, derived from the model's size (`prefill_step`). One
-        owner: a manifest that states the flag itself is refused."""
+    def model_args(
+        cls, manifest: Any, args: list[str], weights_dir: Path, context: int
+    ) -> list[str]:
+        """The prefill step, derived from the model's size and attention at the
+        context it is loaded with (`prefill_step`). One owner: a manifest that
+        states the flag itself is refused."""
         if int_flag(args, PREFILL_STEP_FLAG) is not None:
             raise EngineError(
                 f"prefill_step_stated: {manifest.path.name} states {PREFILL_STEP_FLAG} "
@@ -145,7 +183,10 @@ class MlxLmEngine(SubprocessEngine):
                 "holds the GPU about as long (engines/mlx_lm.py, EVAL_BUDGET_FLOPS). "
                 "Remove it from the manifest"
             )
-        return [*args, PREFILL_STEP_FLAG, str(prefill_step(manifest.params_b))]
+        step = prefill_step(
+            manifest.params_b, attention_flops_per_position(weights_dir), context
+        )
+        return [*args, PREFILL_STEP_FLAG, str(step)]
 
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
