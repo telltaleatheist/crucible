@@ -17,7 +17,8 @@ def settings_client(make_client: Callable[..., TestClient]):
 
 # translate's lineup on cuda-linux, down to the 0.8B since the floor went (docs/VERB-SIZING.md)
 PC_TEXT_LINEUP = (
-    "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b",
+    "qwen3.8-27b-4bit", "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-4b-8bit",
+    "qwen3.5-0.8b",
 )
 
 
