@@ -34,11 +34,19 @@ STRUCTURED_OUTPUTS_ARGS: tuple[str, ...] = (
 )
 
 
+# VLLM_USE_DEEP_GEMM=0: DeepGEMM runs only on Hopper and Blackwell (platforms/cuda.py
+# support_deep_gemm) and JIT-compiles with nvcc from a CUDA toolkit, which Crucible never
+# places. Left on, vLLM 0.29.0's kernel_warmup asks is_deep_gemm_supported(), whose
+# has_deep_gemm() trial-imports vllm.third_party.deep_gemm; that asserts a CUDA home and
+# vLLM logs the AssertionError's whole traceback as a WARNING on every start (read in
+# vllm/utils/deep_gemm.py and import_utils.py _has_module, 2026-10-10). Off, the check
+# stops at the switch, before the import.
 ENVIRONMENT: dict[str, str] = {
     "VLLM_NO_USAGE_STATS": "1",
     "DO_NOT_TRACK": "1",
     "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
     "VLLM_USE_FLASHINFER_SAMPLER": "0",
+    "VLLM_USE_DEEP_GEMM": "0",
 }
 
 

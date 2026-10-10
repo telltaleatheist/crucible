@@ -11,6 +11,8 @@ notes.
 
 - The engine log no longer shows `'_POSIX_C_SOURCE' macro redefined` on every Triton compile (zig's glibc headers say POSIX.1-2024, Python's pyconfig.h says 2008). Crucible's `cc` passes `-Wno-macro-redefined`, and only that; a host's existing `cc` is rewritten the next time an engine or worker starts.
 
+- A vLLM engine (and the vLLM ASR worker) no longer logs a `deep_gemm` `AssertionError` traceback as a WARNING on every start: Crucible runs vLLM with `VLLM_USE_DEEP_GEMM=0`. DeepGEMM needs a Hopper or Blackwell card and a CUDA toolkit, which Crucible never places, so it could never run here; with the switch off vLLM stops before trial-importing it.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.
