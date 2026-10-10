@@ -106,6 +106,10 @@ class SubprocessEngine:
 
     decide_questions_basis: str | None = None
 
+    chat_prefill: bool = False
+
+    chat_prefill_basis: str | None = None
+
     sigterm_wait_seconds: float = STOP_TIMEOUT_SECONDS
 
     env_job_type = "llm"

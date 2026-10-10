@@ -86,6 +86,24 @@ def chat_admission(
 
 
 @dataclass(frozen=True)
+class ChatPrefillReading:
+    served: bool
+    basis: str
+
+
+def chat_prefill_reading(engine_name: str) -> ChatPrefillReading:
+    cls = engine_class(engine_name)
+    basis = cls.chat_prefill_basis
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no chat_prefill_basis. Whether an engine continues "
+            "a final assistant message is read from its source, and the reading says "
+            "where"
+        )
+    return ChatPrefillReading(served=cls.chat_prefill, basis=basis)
+
+
+@dataclass(frozen=True)
 class DecideReading:
     served: bool
     max_logprobs: int | None
@@ -300,7 +318,9 @@ def engine_load_args(
 
 __all__ = [
     "ChatAdmission",
+    "ChatPrefillReading",
     "chat_admission",
+    "chat_prefill_reading",
     "concurrency_flag",
     "stated_concurrency",
     "with_concurrency",

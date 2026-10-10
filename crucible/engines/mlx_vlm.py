@@ -14,6 +14,13 @@ WIDTH_FLAG = "--width"
 class MlxVlmEngine(SubprocessEngine):
     name = "mlx-vlm"
 
+    chat_prefill = False
+    chat_prefill_basis = (
+        "Crucible's Mac server (engines/mlx_vlm_serve.py) answers a page or a "
+        "decision, and refuses a body field it does not know (KNOWN_FIELDS): it "
+        "has no way to be told to continue a message"
+    )
+
     decide_logprobs = True
     max_logprobs = MAX_TOP_LOGPROBS
     decide_basis = (

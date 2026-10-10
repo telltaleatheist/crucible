@@ -669,12 +669,14 @@ started exactly as `load-model` would).
   `qwen3.5-9b-vl` for `decide` (candidates sort by memory, and the vision form
   is larger), as the PC and Windows lineups already do. The Mac Studio's
   64 GB still selects `qwen3.8-27b-8bit`.
-- On vLLM the prefix cache of a hybrid (attention plus mamba) model works in 544-token
-  blocks (the engine sets the attention block to 544 so its page is at least
-  the mamba page; measured 2026-09-23: a 121-token prompt sent three times
-  cached nothing, a 1,345-token one cached 1,088 from the second send). The
-  prime buys reuse only in whole blocks, which is also how `decide`'s working
-  context is sized in `capabilityclasses`.
+- On vLLM the prefix cache of a hybrid (attention plus mamba) model works in whole
+  attention blocks, and vLLM sizes the block per model so its page is at least
+  the mamba page: 544 tokens on the 0.8B (measured 2026-09-23: a 121-token prompt
+  sent three times cached nothing, a 1,345-token one cached 1,088 from the second
+  send), 528 on the 9B and 784 on the 27B 4-bit (each engine log's "Setting
+  attention block size to N tokens", owens-pc, 2026-10-09). The prime buys reuse
+  only in whole blocks, which is also how `decide`'s working context is sized in
+  `capabilityclasses`. A state shorter than one block caches nothing at all.
 - Refuse mode carries no `missing_labels` key. Report mode nulls a missing
   label and never invents a number.
 - The items form (api.md "The items form") reads a list of items about one
@@ -765,6 +767,70 @@ stated even when it is `null`. Every response carries `X-Crucible-Sampling`
 naming the source of each key. It is a header because the proxy passes bodies
 through verbatim. `thinking` travels in `chat_template_kwargs`, and Crucible
 owns only that one key there.
+
+## Prefix reuse on the chat door
+
+Every engine reuses a chat's prompt prefix with nothing asked of the client, and
+every one reports it the same way, which the proxy passes through untouched:
+`usage.prompt_tokens_details.cached_tokens` (the SDK's `ChatUsage.cachedTokens`).
+
+- **vLLM**: prefix caching is on for every block (vLLM 0.29.0's default; no
+  manifest turns it off, and Qwen3.5 then runs mamba cache mode `align`).
+  Crucible starts it with `--enable-prompt-tokens-details`, so the count is in
+  every reply. Reuse is in whole blocks of 528 tokens (9B) or 784 (27B 4-bit):
+  a prompt shares nothing until its common prefix passes a block boundary.
+  vLLM logs a rolling `Prefix cache hit rate` every 10 s in the engine log.
+- **mlx-lm**: its `LRUPromptCache` (`--prompt-cache-size` sequences) keeps a
+  hybrid model's cache only at a segment end: the end of the system messages,
+  the end of the user turn, the thinking tail. So a chat reuses exactly its
+  system messages, whole, and nothing inside them. Eviction takes assistant
+  and user entries before the system one. It logs `Prompt Cache: N sequences`
+  per type. (`patch_mlx_lm_cache_counters` is not a counter of hits: it forces
+  the caches' bookkeeping arrays to evaluate so a long decode does not exhaust
+  Metal's buffer count.)
+- **llama-server**: one slot (`--parallel 1`), `cache_prompt` on by default; it
+  checkpoints the recurrent state at the start of the last user message, so a
+  chat reuses everything before its last user turn.
+
+What a client does to be reused: everything that is the same across requests
+first and byte-identical (system prompt, rules, examples), the part that changes
+last, in the last user message. On vLLM, make the shared part longer than a
+block or it buys nothing.
+
+## Prefill (`prefill`)
+
+A chat body may carry `"prefill": "<text>"`: the answer begins with that text
+and the model writes on from it. The reply's `content` is what it wrote after
+the prefill; the client joins the two. Crucible takes the member out and sends
+the engine the messages plus `{"role": "assistant", "content": <prefill>}` with
+`continue_final_message: true` and `add_generation_prompt: false`
+(`crucible/prefill.py`). It is a field of its own because the engines read a
+bare trailing assistant message three ways: llama-server b10970 continues it,
+vLLM 0.29.0 closes it and answers after it unless told, and mlx-lm 0.31.3
+always closes it. Whether an engine can is `chat_prefill` with its
+`chat_prefill_basis`, read by `engines.chat_prefill_reading`. Refused by name:
+
+- `prefill_not_served` (400): mlx-lm and mlx-vlm (no way to continue a message),
+  and every upstream model. A queued chat is refused from its manifest before
+  it waits or loads anything, and again from the resident engine.
+- `prefill_with_thinking` (400): thinking not resolved off (request or manifest
+  `[defaults]`). Qwen3.5's template closes an empty `<think></think>` before a
+  continued message whether thinking is on or off, so a prefilled answer never
+  thinks; the request has to say that is what it wants.
+- `prefill_with_grammar` (400): `response_format` (any type but `text`),
+  `structured_outputs`, `guided_*`, `grammar` or `json_schema`. The grammar
+  constrains the answer from its first generated token, not from the end of
+  the prefill, so the engine would write a whole new document after it.
+- `prefill_conflict` (400): the body also ends in an assistant message, or
+  states `continue_final_message` / `add_generation_prompt` itself.
+- `invalid_request` (400): not a non-empty string, or it begins or ends with
+  whitespace: Qwen3.5's template trims an assistant message, so `{"answer": `
+  is continued as `{"answer":` (rendered with the 9B's tokenizer, 2026-10-10).
+
+Prefill and prefix reuse agree: the prefill comes after everything else, so a
+prompt's shared prefix is the same with or without it. On mlx-lm (were it
+served) a final assistant message also turns off its segment split, which is
+part of why it is refused there rather than patched in.
 
 ## Page requests (`pages`)
 

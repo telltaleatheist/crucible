@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Chat: a request may carry `"prefill": "<text>"` to start the model's answer with that text; the model writes on from it and the reply's content is what it wrote after it. Served on vLLM and llama-server, with thinking off and no `response_format`; refused by name elsewhere (`prefill_not_served` on mlx-lm, mlx-vlm and upstream models, `prefill_with_thinking`, `prefill_with_grammar`, `prefill_conflict`). The SDK's `chat()` takes `prefill`, and its `ChatUsage` now carries `cachedTokens`, the prompt tokens the engine read from its prefix cache.
+
 ## 1.0.126 — 2026-10-10
 
 - `qwen3.5-4b-bside` is v2: one model for every B-Sides text call (describe, album, tracks, lyrics, album title, artist, track titles, cover), the task named by the first line of the user message. Same id; the Mac pins `owenmorgan/qwen3.5-4b-bside` @ 3e499e62, a PC the Q8_0 GGUF @ 5e326c86. On a Mac, mlx-lm does not yet enforce `json_schema`, so the strict schema each call sends applies on a PC only.

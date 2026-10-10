@@ -81,6 +81,15 @@ class LlamaServerEngine(SubprocessEngine):
         "the rest queue inside the server"
     )
 
+    chat_prefill = True
+    chat_prefill_basis = (
+        "llama-server b10970 takes continue_final_message with add_generation_prompt "
+        "false (tools/server/server-common.cpp L1296-1310) and renders the messages "
+        "before the final one with the template, then the generation prompt up to "
+        "the reasoning start, an empty reasoning block and the final message's "
+        "content (common/chat-auto-parser-generator.cpp L45-61)"
+    )
+
     decide_logprobs = True
     max_logprobs = None
     decide_items_basis = (

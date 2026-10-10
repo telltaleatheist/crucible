@@ -1390,6 +1390,7 @@ export class CrucibleClient {
       }
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
     }
+    if (given.prefill !== undefined) payload['prefill'] = requireText(given.prefill, 'prefill');
     const queue = this.#callQueue(given.queue);
     if (queue !== null) payload['queue'] = queue;
     if (given.contextTokens !== undefined) {
@@ -4081,6 +4082,12 @@ function readChatMessages(messages: unknown): Array<{ role: string; content: str
   });
 }
 
+/** `usage.prompt_tokens_details.cached_tokens`, or null when the engine did not say. */
+function cachedTokensOf(usage: Json): number | null {
+  const details = optObject(usage, 'prompt_tokens_details', 'chat.usage');
+  return details === null ? null : optNum(details, 'cached_tokens', 'chat.usage.prompt_tokens_details');
+}
+
 function readChatResponse(body: Json): ChatResponse {
   const where = 'chat';
   const choices = asArray(field(body, 'choices', where), 'chat.choices');
@@ -4105,6 +4112,7 @@ function readChatResponse(body: Json): ChatResponse {
             promptTokens: optNum(usage, 'prompt_tokens', 'chat.usage'),
             completionTokens: optNum(usage, 'completion_tokens', 'chat.usage'),
             totalTokens: optNum(usage, 'total_tokens', 'chat.usage'),
+            cachedTokens: cachedTokensOf(usage),
           },
   };
 }
