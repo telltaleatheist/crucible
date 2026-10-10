@@ -92,13 +92,39 @@ def test_an_instrumental_moves_the_vocal_melody_and_renders_that_score_unsung(
     assert engine.notes["planned_score"] == SCORE
 
 
-def test_an_empty_or_truncated_plan_is_refused_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+class FailedPlan(SimpleNamespace):
+    """A SymbolicPlan that came back unusable; `save` is SymbolicPlan.save's door."""
+
+    def save(self, directory) -> None:
+        Path(directory).mkdir(parents=True)
+        (Path(directory) / "plan.json").write_text("{}", encoding="utf-8")
+        self.saved_to = Path(directory)
+
+
+@pytest.mark.parametrize(
+    ("plan", "said"),
+    [
+        (dict(abc=SCORE, truncated=True, timing={"output_tokens": 4096}),
+         "truncated: it ran to its 4096-token cap without ending"),
+        (dict(abc="", truncated=False, timing={"output_tokens": 1}),
+         "empty: the model ended it after 1 tokens"),
+    ],
+)
+def test_an_empty_or_truncated_plan_is_refused_by_name_and_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, plan: dict, said: str
+) -> None:
     module = _load_worker(monkeypatch)
     engine = module.YuE2Engine.__new__(module.YuE2Engine)
     engine._pipe = FakePipe()
-    job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True)
-    with pytest.raises(RuntimeError, match="another seed"):
-        engine._instrumental_plan(job, SimpleNamespace(abc=SCORE, truncated=True))
+    engine._pipe.generation_config = SimpleNamespace(abc=SimpleNamespace(max_tokens=4096))
+    job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True,
+                          output_path=str(tmp_path / "audio.flac"))
+    failed = FailedPlan(**plan)
+    with pytest.raises(RuntimeError, match="another seed") as raised:
+        engine._instrumental_plan(job, failed)
+    assert said in str(raised.value)
+    assert failed.saved_to == tmp_path / module.FAILED_PLAN_DIR
+    assert (failed.saved_to / "plan.json").is_file()
 
 
 def test_an_instrumental_with_words_in_its_lyrics_is_refused_not_silently_unsung() -> None:

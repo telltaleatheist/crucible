@@ -19,6 +19,10 @@ LABEL = "yue2"
 # skill's own default (skills/yue2-music/instrumental/scripts/instrumental.py).
 INSTRUMENTAL_SECTIONS = "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Outro]\n"
 
+# Where an instrumental whose score came back empty or truncated keeps the plan YuE2 wrote
+# (SymbolicPlan.save: its tokens, timing and how it ended), in the job's own directory.
+FAILED_PLAN_DIR = "failed-plan"
+
 GIB = 1024**3
 
 YUE2_RESERVE_GIB = 2
@@ -422,9 +426,22 @@ class YuE2Engine:
         from instrumentalize import convert_score
 
         if planned.truncated or not planned.abc:
+            # What the model actually wrote is the evidence: the whole plan (its tokens,
+            # timing and how it ended) is saved beside the job's kept request, and the
+            # error says which of the two failures it was. Victoria's two-album run had 2
+            # of ~11 instrumentals end here (2026-10-10) and nothing said why.
+            kept = os.path.join(os.path.dirname(job.output_path), FAILED_PLAN_DIR)
+            planned.save(kept)
+            tokens = planned.timing["output_tokens"]
+            if planned.truncated:
+                how = (f"truncated: it ran to its {self._pipe.generation_config.abc.max_tokens}"
+                       "-token cap without ending")
+            else:
+                how = f"empty: the model ended it after {tokens} tokens with no score in them"
             raise RuntimeError(
-                "YuE2's score for this instrumental came back empty or truncated, so there "
-                "is no melody to move to the instrument; send it again with another seed"
+                f"YuE2's score for this instrumental came back {how}, so there is no "
+                "melody to move to the instrument; send it again with another seed. The "
+                f"plan it wrote is kept in the job's {FAILED_PLAN_DIR}/"
             )
         converted, transfer = convert_score(planned.abc)
         validate_score(converted)
