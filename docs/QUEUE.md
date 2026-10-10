@@ -61,7 +61,7 @@ that may wait (every job not sent with `"queue": false`):
 | event | data | means |
 |---|---|---|
 | `queued` | `{position, of}` | where it stands; sent when it joins and again whenever it moves |
-| `waiting` | `{code, message, details, since}` | it is at the front and the lane is free, but the card is held by a process Crucible does not own (below); sent when that starts and whenever who holds it changes |
+| `waiting` | `{code, message, details, since}` | it waits beyond its turn: `accelerator_busy`, it is at the front and the lane is free but the card is held by a process Crucible does not own (below); or `keeping_calls_together`, the resident model's queued calls run before it ("A model that keeps its calls together"). Sent when that starts, whenever it changes, and every 60 s while it does not |
 | `started` | `{waited_s}` | it reached the lane; `progress`, `done` and `failed` follow as usual |
 | `removed` | `{reason, message, waited_s, at}` | it left the queue without running; **terminal** |
 
@@ -172,20 +172,66 @@ The client is who the job was submitted as (`X-Crucible-Client`, else `User-Agen
 ## The open session goes first
 
 While a queue session is open (below), its items go ahead of everything waiting and
-nothing from anyone else runs. Everyone else is first come, first served.
+nothing from anyone else runs. Everyone else is first come, first served, except for a
+model that keeps its calls together (next).
+
+## A model that keeps its calls together
+
+Some models take minutes to load. Their manifest says `keep_calls_together = true`
+(today `yue2-3b`). While one is resident, the queued work that runs on it goes ahead of
+the first queued item that would take it off the card, so a batch is not split by an
+unload and a reload. Owen, 2026-10-10, after a CLI `load-model` sent in the middle of
+B-Sides' YuE2 songs queued between two of them: *"keep yue's calls together"*.
+
+- **What runs on it:** a job that runs on that model (`audio` with `"model": "yue2-3b"`,
+  or its `load-audio`), and, for a text model, a chat or decision for it.
+- **What would take it off:** a load or a job of anything else (a `load-model`, another
+  audio model, `asr`, `image`, …), a chat, decision or queue session for another model, and
+  an unload of its kind. `echo` and an unload of another kind take nothing off the card
+  and keep their place, as does a queue session that names no model.
+- **The settlement keeps it** while the next thing to run on the card is one of its calls,
+  so it is not unloaded between two songs either.
+- **The bound.** The item that would take it off waits only for the calls on the model
+  that are waiting at its **turn**: the first time the lane is free when it would be next
+  (nothing that arrived before it still waits). Those, and only those, go ahead of it; a
+  call for the model sent after its turn waits behind it, and runs once the model is
+  loaded again. Until its turn every call for the model goes ahead of it (they would all
+  have run while it waited anyway). So it never waits for a stream of new songs: at most
+  for the ones queued when it would have run, each once. Its own `max_wait_s` still
+  bounds it; a waiting `load-model` sent with the default hour behind a long batch can
+  expire, and its `expired` message says it was waiting behind the model's calls.
+- **Only while the model is resident.** If it leaves the card some other way, nothing is
+  kept and the line is first come, first served again. Removing or cancelling a call that
+  goes ahead of it shortens the wait at once.
+- **It says why.** The item kept waiting carries `waiting_for` (on its row in
+  `GET /v1/queue` and in `GET /v1/activity`'s `queued`) and a `waiting` event on its own
+  stream (a session's on the session's stream), with `code: "keeping_calls_together"`, a
+  `message` such as *"waiting: yue2-3b has 3 queued call(s) ahead, run first because
+  yue2-3b keeps its calls together (it is slow to load, and this load-model would take it
+  off the card between them); calls for yue2-3b sent from now on wait behind this
+  load-model"*, `details: {model, ahead, ahead_ids, turn_taken}` and `next_check_at: null`.
+  The queue streams say `waiting` with the same code. It is said when the wait begins,
+  whenever which calls go ahead of it changes, and every 60 s while nothing does. Its
+  `position` is honest: the calls ahead of it are counted ahead of it.
+
+The open session's own items are not reordered: the session already runs them back to
+back with nothing from anyone else in between. A client that wants a model held across a
+gap in its own work (songs sent one at a time, each after the last has finished) opens a
+queue session; keeping calls together only reorders what is already waiting.
 
 ## The whole queue
 
 - `GET /v1/queue`: `{items: [{position, job_id, type, model, client, client_ref, submitted,
   waited_s, max_wait_s, expires_at, session, kind, waiting_for}], depth, limits}`.
-  `waiting_for` says the front item waits for a held card (above), else null. `kind` is `"job"`,
+  `waiting_for` says the front item waits for a held card (above), or that it waits behind
+  the queued calls of a model that keeps its calls together, else null. `kind` is `"job"`,
   `"call"` (a queued chat or decision) or `"session"` (a queue session waiting to open,
   `job_id` `ses-…`). `session` names the queue session an item belongs to, or is null.
 - `DELETE /v1/queue/{job_id}`: remove one (reason `operator`). Given the open session's
   id, it ends that session (reason `operator`).
 - `GET /v1/queue/events`: server-wide SSE for dashboards. A `snapshot {items, depth}`
   first, then `added`, `moved {position}`, `waiting {code, message}` (the front waits for
-  a held card), `started {waited_s}` and `removed {reason}` with `job_id` and `depth` on
+  a held card, or an item waits behind a model's kept calls), `started {waited_s}` and `removed {reason}` with `job_id` and `depth` on
   every event. A job refused at the front shows here as `removed`
   with `reason: "refused"` and its `error`; on its own stream it is `failed`.
 - `GET /v1/activity`: `queued` lists the waiting jobs in order (with `waited_s`,

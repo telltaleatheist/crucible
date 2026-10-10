@@ -21,7 +21,9 @@ it up so we can use them."*
 - One manifest per model in `crucible/audio/`, loaded by `audiomodels.py`. `[model].kind` is
   `sfx`, `music` or `song` and decides two things: which capability class lists the model,
   and which text param it reads (`prompt`, or `tags` plus `lyrics`).
-  `catalog_is_complete`: an undeclared id is refused.
+  `catalog_is_complete`: an undeclared id is refused. `[model].keep_calls_together`
+  (optional bool, `yue2-3b` sets it) runs the model's queued calls back to back ahead of
+  what would take it off the card (docs/QUEUE.md, "A model that keeps its calls together").
 - Each `[backends.<kind>]` arm declares the engine, the pinned repo and revision, `gated`, dtype,
   memory estimate with basis and note, the files to pull, sample rate, channels,
   `max_duration_s`, `takes` (the optional params it reads, from `duration_s`, `steps`, `cfg`,

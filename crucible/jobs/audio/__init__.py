@@ -226,6 +226,7 @@ def occupy_audio(
             memory_bytes_estimate=needs.need_bytes,
             log_path=log_path,
             loaded_at=utcnow(),
+            keeps_calls_together=manifest.keep_calls_together,
         )
         return Occupant(resident, session=session)
 

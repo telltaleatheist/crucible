@@ -6,6 +6,10 @@ kind = "song"
 licence = "CC BY-NC 4.0 (weights, with the 2026-09-16 creator addendum); Apache-2.0 (the yue2-infer code)"
 licence_url = "https://huggingface.co/m-a-p/YuE2-3B/blob/main/LICENSE"
 commercial_use = "non-commercial, except that individual creators and musicians acting for themselves may publish and monetise the songs they make (addendum of 2026-09-16); a company needs a commercial licence from the authors"
+# Slow to load: while it is resident, its queued songs run back to back before anything
+# that would take it off the card (Owen, 2026-10-10: "keep yue's calls together";
+# docs/QUEUE.md, "A model that keeps its calls together").
+keep_calls_together = true
 
 [backends.cuda-linux]
 engine = "yue2"

@@ -20,10 +20,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
-from .. import clock
+from .. import clock, keeptogether
 from ..accelerator import WAITS_FOR_THE_CARD
 from ..errors import ApiError
 from ..events import QUEUE
+from ..keeptogether import KEEPING_CALLS_TOGETHER, Hold, Kept
 from ..queuesessions import LOAD_FAILED, QueueSession, QueueSessions, is_session_id
 from .base import TERMINAL_STATES, Job, JobFailure
 
@@ -59,7 +60,8 @@ a full admission (nvidia-smi and the process table), so it is paced, never per t
 CARD_WAIT_REPEAT_S = 60.0
 """How often a card wait whose holder has not changed is said again on the job's, the
 session's and the queue's streams, so a client watching for silence sees the wait is
-still alive. A changed holder is said at once."""
+still alive. A changed holder is said at once. A wait behind a model's queued calls
+(``KeepWait``) is repeated on the same pace."""
 
 
 def limits() -> dict[str, Any]:
@@ -115,6 +117,34 @@ class CardWait:
         }
 
 
+@dataclass(frozen=True)
+class KeepWait:
+    """Why an item waits behind calls that arrived after it: the resident model keeps
+    its queued calls together, and ``ahead`` of them run on it first
+    (crucible/keeptogether.py)."""
+
+    model: str
+    ahead: tuple[str, ...]
+    turn_taken: bool
+    message: str
+    since: datetime
+    said_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": KEEPING_CALLS_TOGETHER,
+            "message": self.message,
+            "details": {
+                "model": self.model,
+                "ahead": len(self.ahead),
+                "ahead_ids": list(self.ahead),
+                "turn_taken": self.turn_taken,
+            },
+            "since": self.since.isoformat(),
+            "next_check_at": None,
+        }
+
+
 @dataclass
 class Waiting:
     is_call: ClassVar[bool] = False
@@ -129,6 +159,8 @@ class Waiting:
     position: int | None = None
     gone: bool = False
     card_wait: CardWait | None = None
+    kept: Kept | None = None
+    keep_wait: KeepWait | None = None
 
     @property
     def expires_at(self) -> datetime:
@@ -161,8 +193,16 @@ class Waiting:
             "expires_at": self.expires_at.isoformat(),
             "session": self.session,
             "kind": self.kind,
-            "waiting_for": None if self.card_wait is None else self.card_wait.to_dict(),
+            "waiting_for": self.waiting_for(),
         }
+
+    def waiting_for(self) -> dict[str, Any] | None:
+        """What it waits for beyond its turn: a held card, or a model's queued calls."""
+        if self.card_wait is not None:
+            return self.card_wait.to_dict()
+        if self.keep_wait is not None:
+            return self.keep_wait.to_dict()
+        return None
 
     def card_due(self, now: datetime) -> bool:
         """Whether this item may meet admission now: always, unless it is waiting for
@@ -200,11 +240,19 @@ class WaitingSession(Waiting):
 
 
 class WaitingLine:
-    """FIFO, except that the items of the open queue session go ahead of the line."""
+    """FIFO, except that the items of the open queue session go ahead of the line, and
+    the queued calls on a resident model that keeps its calls together go ahead of what
+    would take it off the card (crucible/keeptogether.py)."""
 
-    def __init__(self, store: "JobStore", sessions: QueueSessions) -> None:
+    def __init__(
+        self,
+        store: "JobStore",
+        sessions: QueueSessions,
+        resident: Callable[[], Any] = lambda: None,
+    ) -> None:
         self._store = store
         self._sessions = sessions
+        self._resident = resident
         self._items: list[Waiting] = []
         self._client_seen: dict[str | None, datetime] = {}
         self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_MEMORY)
@@ -228,11 +276,31 @@ class WaitingLine:
         return None if session is None else session.id
 
     def ordered(self) -> list[Waiting]:
+        return self._ordering()[0]
+
+    def _ordering(self) -> tuple[list[Waiting], Hold | None]:
+        items = list(self._items)
         first_id = self.open_session()
-        if first_id is None:
-            return list(self._items)
-        first = [item for item in self._items if item.session == first_id]
-        return first + [item for item in self._items if item.session != first_id]
+        first = [] if first_id is None else [i for i in items if i.session == first_id]
+        rest = items if first_id is None else [i for i in items if i.session != first_id]
+        kept, hold = keeptogether.order(rest, self._resident())
+        return first + kept, hold
+
+    def take_kept_turn(self) -> bool:
+        """The lane is free: an item that would take a resident that keeps its calls
+        together off the card, and is the first still waiting to have arrived, takes its
+        turn now (keeptogether.take_turn). Not while a session is open: nothing else
+        runs then."""
+        if self.open_session() is not None:
+            return False
+        return keeptogether.take_turn(list(self._items), self._resident())
+
+    def kept_on_card(self) -> tuple[str, int] | None:
+        """The resident and how many queued calls run on it next, when it keeps its
+        calls together and some do: the settlement does not unload it between them."""
+        resident = self._resident()
+        count = keeptogether.runs_next_on(self.ordered(), resident)
+        return None if count == 0 else (resident.id, count)
 
     def items_of(self, session_id: str) -> list[Waiting]:
         return [item for item in self._items if item.session == session_id]
@@ -369,7 +437,8 @@ class WaitingLine:
 
     def reorder(self, announce_new: Waiting | None = None) -> None:
         depth = len(self._items)
-        for index, item in enumerate(self.ordered(), start=1):
+        ordered, hold = self._ordering()
+        for index, item in enumerate(ordered, start=1):
             if item.position == index and item is not announce_new:
                 continue
             was, item.position = item.position, index
@@ -388,6 +457,54 @@ class WaitingLine:
                 self._announce("added", item, **self._added(item))
             elif was is not None:
                 self._announce("moved", item, position=index)
+        self._say_kept(ordered, hold)
+
+    def _say_kept(self, ordered: list[Waiting], hold: Hold | None) -> None:
+        """Say why the item held behind a model's queued calls waits: when the hold
+        begins, whenever which calls go ahead of it changes, and every
+        ``CARD_WAIT_REPEAT_S`` while nothing does."""
+        for item in ordered:
+            if item.keep_wait is not None and (hold is None or item is not hold.item):
+                item.keep_wait = None
+        if hold is None:
+            return
+        item = hold.item
+        now = clock.now()
+        ahead = tuple(other.job.id for other in hold.ahead)
+        was = item.keep_wait
+        if (
+            was is not None
+            and was.ahead == ahead
+            and was.turn_taken == hold.turn_taken
+            and now - was.said_at < timedelta(seconds=CARD_WAIT_REPEAT_S)
+        ):
+            return
+        what = "session" if item.is_session else item.job.type
+        later = (
+            f"calls for {hold.model} sent from now on wait behind this {what}"
+            if hold.turn_taken
+            else f"when this {what} would be next, the calls for {hold.model} waiting "
+            "then go first too, and any sent after that wait behind it"
+        )
+        message = (
+            f"waiting: {hold.model} has {len(ahead)} queued call(s) ahead, run first "
+            f"because {hold.model} keeps its calls together (it is slow to load, and "
+            f"this {what} would take it off the card between them); {later}"
+        )
+        item.keep_wait = KeepWait(
+            model=hold.model,
+            ahead=ahead,
+            turn_taken=hold.turn_taken,
+            message=message,
+            since=now if was is None else was.since,
+            said_at=now,
+        )
+        said = item.keep_wait.to_dict()
+        if item.is_session:
+            self._sessions.waiting(item.job, said)  # type: ignore[arg-type]
+        elif not item.is_call:
+            self._store.append_event(item.job, "waiting", said)
+        self._announce("waiting", item, code=KEEPING_CALLS_TOGETHER, message=message)
 
     @staticmethod
     def _added(item: Waiting) -> dict[str, Any]:
@@ -542,6 +659,13 @@ class WaitingLine:
                     "reaching the lane; since "
                     f"{item.card_wait.since.isoformat()} it was waiting for the "
                     f"accelerator, and it was still held: {item.card_wait.message}"
+                )
+            if item.keep_wait is not None:
+                return (
+                    f"it waited its whole max_wait_s ({item.max_wait_s} s) without "
+                    "reaching the lane; since "
+                    f"{item.keep_wait.since.isoformat()} it was waiting behind the "
+                    f"queued calls for {item.keep_wait.model}: {item.keep_wait.message}"
                 )
             return (
                 f"it waited its whole max_wait_s ({item.max_wait_s} s) without "

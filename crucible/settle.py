@@ -71,9 +71,11 @@ class Settlement:
         sessions: "QueueSessions",
         inflight: "InFlight",
         waiting_calls: Callable[[], dict[str, int]] = dict,
+        kept_together: Callable[[], tuple[str, int] | None] = lambda: None,
         log: Callable[[str], None] = _to_stderr,
     ) -> None:
         self._waiting_calls = waiting_calls
+        self._kept_together = kept_together
         self._residency = residency
         self._store = store
         self._sessions = sessions
@@ -109,6 +111,15 @@ class Settlement:
                 f"{waiting} chat(s), decision(s) or session(s) waiting for it in the "
                 "queue",
                 {"waiting": waiting},
+            )
+        kept = self._kept_together()
+        if kept is not None:
+            model, next_on_it = kept
+            return Held(
+                "a queued call",
+                f"{next_on_it} queued call(s) run on {model} next, and it keeps its "
+                "calls together (crucible/keeptogether.py)",
+                {"waiting": next_on_it, "model": model, "kept_together": True},
             )
         return None
 

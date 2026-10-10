@@ -229,7 +229,7 @@ def _services(
     events = EventHub()
     store = JobStore(config, backend, keeper.registry)
     sessions = QueueSessions(lambda: config.max_session_hold_s)
-    line = WaitingLine(store, sessions)
+    line = WaitingLine(store, sessions, lambda: residency.resident)
     sessions.when_said(
         lambda event, data: events.publish(SESSION, f"session.{event}", data)
     )
@@ -243,6 +243,7 @@ def _services(
     settlement = Settlement(
         residency=residency, store=store, sessions=sessions, inflight=inflight,
         waiting_calls=line.calls_waiting,
+        kept_together=line.kept_on_card,
     )
     store.attach_settlement(settlement)
     task_store = TaskStore(
