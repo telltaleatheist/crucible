@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.127 — 2026-10-10
+
 - Chat: a request may carry `"prefill": "<text>"` to start the model's answer with that text; the model writes on from it and the reply's content is what it wrote after it. Served on vLLM and llama-server, with thinking off and no `response_format`; refused by name elsewhere (`prefill_not_served` on mlx-lm, mlx-vlm and upstream models, `prefill_with_thinking`, `prefill_with_grammar`, `prefill_conflict`). The SDK's `chat()` takes `prefill`, and its `ChatUsage` now carries `cachedTokens`, the prompt tokens the engine read from its prefix cache.
 
 ## 1.0.126 — 2026-10-10
