@@ -1,7 +1,9 @@
 # Local lifecycle and desktop installation
 
 The normal Windows installation runs the native `llama-windows` engine immediately.
-WSL is an optional guided upgrade owned by the Windows controller. Applications
+The Windows controller then moves the machine to the WSL engine by itself (PHASE19), unless
+it cannot host WSL2 or `[orchestrator] wsl = "never"` declines it; the move is the
+controller's alone. Applications
 never select a WSL distribution or spawn an engine to start their local service.
 
 `installation.json` under the resolved Crucible home is versioned installation

@@ -16,7 +16,7 @@ never knows what an audiobook or a cleanup pass is.
 types on a backend (`cuda-linux`, `mlx-darwin`, `llama-windows`) — or an **orchestrator**:
 a hollow thing that keeps time and plays nothing, managing exactly one engine and carrying
 no model data itself. On Windows the controller (`crucible orchestrator`, formerly
-`crucible host`) manages the native engine or the optional WSL2 guest; the tray is its
+`crucible host`) manages the native engine or the WSL2 guest it sets up; the tray is its
 independent desktop control. A Mac or a rented box is an engine with
 no orchestrator. Apps always hold ONE address per machine and it is the engine's. See
 `docs/internals/host-and-platform.md`.
@@ -48,8 +48,11 @@ all of it.
 | `mlx-darwin` | Apple Silicon macOS | `arm64` + `import mlx.core` |
 | `llama-windows` | Native Windows | NVIDIA when available; otherwise the CPU build of llama.cpp |
 
-Windows installation starts a native engine immediately. WSL2 is an optional guided
-upgrade for Linux engines such as SGLang; it is not required for local Windows use.
+Windows installation starts a native engine immediately, and then the tray moves the
+machine to a Linux engine inside WSL2 BY ITSELF (docs/history/PHASE19-AUTOMATIC-WSL.md):
+nothing to click, beyond the administrator prompt and the restart Windows may ask for. A
+machine that cannot host WSL2 stays on the native engine and the tray's menu says why; one
+set to `[orchestrator] wsl = "never"` in its `config.toml` keeps the native engine by choice.
 Linux without a working `nvidia-smi`, Intel Macs, and unsupported platforms are
 refused by name. Native Windows explicitly supports its CPU backend.
 
@@ -72,13 +75,34 @@ curl -fsSL https://github.com/telltaleatheist/crucible/releases/latest/download/
 ```
 
 ```powershell
-# Windows: native engine, desktop controls, and optional guided WSL upgrade
+# Windows: native engine and desktop controls, then the tray moves it to WSL2 by itself
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 | iex
 
 # and off again, the Windows half and the guest with it
 irm https://github.com/telltaleatheist/crucible/releases/latest/download/install.ps1 -OutFile install.ps1
 .\install.ps1 -Uninstall -WslToo
 ```
+
+**From another device.** After an install only the machine itself can reach Crucible: the
+Linux engine listens on `127.0.0.1` inside WSL2. On a Windows PC, opening it to the network
+is the owner's choice and one action, in PowerShell on Windows (not inside WSL):
+
+```powershell
+crucible lan enable     # one administrator prompt, on this PC's screen
+crucible lan status     # what still stands in the way, if anything does
+crucible lan disable    # removes exactly what enable added
+```
+
+It adds a port forward on 7100 into the guest and a firewall rule for TCP 7100 on **Private
+networks only**. A network Windows has marked **Public** stays shut: `lan enable` says so by
+name and offers to mark it Private (`--make-private` says yes without asking); answer no on a
+cafe, hotel or other shared network. Left Public, sharing is on and still nothing gets in,
+and `lan enable` and `lan status` end `degraded` and say so. Nothing on this PC can see a router
+that keeps its devices apart (guest Wi-Fi often does); the final test is the other device
+connecting (`crucible pair <this PC's address>` on it). The Crucible window's Settings →
+"Share on your network" runs the same code. On Linux or a Mac there is no forward: install
+with `--host 0.0.0.0` (or set `[server] host`) and open the port in that machine's firewall.
+`docs/INSTALL-UNINSTALL.md` §4.1 has the whole of it.
 
 The `latest` URLs select the promoted stable release. To validate a prerelease, use
 its explicit `releases/download/v<version>/install.sh` or `install.ps1` URL. A
