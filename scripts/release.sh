@@ -141,6 +141,13 @@ if [ "$dry_run" = "1" ]; then
 fi
 
 NOTES_HEADER="Server \`crucible\` $VERSION, TypeScript client \`@crucible/client\` $VERSION, and app-side bootstrapper \`@crucible/bootstrap\` $VERSION."
+CHANGES="$(python scripts/changelog.py notes "$VERSION")" \
+  || fail "docs/CHANGELOG.md has no section for $VERSION; ship.sh writes it when it cuts (python scripts/changelog.py cut $VERSION)"
+NOTES_HEADER="$NOTES_HEADER
+
+## What changed
+
+$CHANGES"
 if [ -n "$branch_override" ]; then
   NOTES_HEADER="$NOTES_HEADER
 

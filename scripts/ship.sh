@@ -102,11 +102,19 @@ if [ "$no_bump" = "1" ]; then
   version="$(python scripts/bump.py --check)" \
     || fail "the version places are not one version (bump.py said why, above); run 'python scripts/bump.py --align', commit, and ship again"
   step "the version bump: none, $version unchanged (--no-bump)"
+  # A cut that already wrote this version's changelog section carries on from it.
+  if ! python scripts/changelog.py notes "$version" >/dev/null 2>&1; then
+    python scripts/changelog.py check || fail "docs/CHANGELOG.md says nothing about this release (above)"
+    python scripts/changelog.py cut "$version"
+  fi
 else
+  step "the changelog"
+  python scripts/changelog.py check || fail "docs/CHANGELOG.md says nothing about this release (above)"
   step "the version bump"
   python scripts/bump.py "$level"
   version="$(python scripts/bump.py --check)" \
     || fail "the bump left the version places disagreeing (bump.py said why, above); 'git checkout .' undoes it"
+  python scripts/changelog.py cut "$version"
 fi
 
 if [ "$dry_run" = "1" ]; then
