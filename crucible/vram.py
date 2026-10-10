@@ -18,6 +18,15 @@ MAX_NUM_SEQS_FLAG = "--max-num-seqs"
 # smaller term, which is why it never showed.
 VLLM_CUDA_CONTEXT_BYTES = 960 * 1024**2
 
+# What vLLM needs per in-flight request beyond context x bytes-per-token, in tokens of
+# KV. On Qwen3.5 (hybrid attention) vLLM 0.29 pads attention to 528-token blocks to
+# match the mamba page, and holds each request's linear-attention state inside the KV
+# pool. Victoria's RTX 3070, 2026-10-09, qwen3.5-4b-bside-4bit at 8192 tokens x 1 with a
+# pool of exactly 8192 x 40,337 B: "0.35 GiB KV cache is needed, which is larger than the
+# available KV cache memory (0.29 GiB)". One block of padding (528) and the state
+# (0.019 GiB, about 430 tokens at 46,581 B/token) fit in 1024.
+VLLM_SEQUENCE_SLACK_TOKENS = 1024
+
 
 def _gib(value: int) -> str:
     return gib_text(value, 2)
@@ -55,11 +64,13 @@ class KvPlan:
 
     @property
     def fits(self) -> bool:
-        return self.pool_bytes >= self.kv_bytes_per_token * self.context
+        return self.pool_bytes >= self.kv_bytes_per_token * (
+            self.context + VLLM_SEQUENCE_SLACK_TOKENS
+        )
 
     @property
     def affordable_context(self) -> int:
-        return self.pool_bytes // self.kv_bytes_per_token
+        return max(0, self.pool_bytes // self.kv_bytes_per_token - VLLM_SEQUENCE_SLACK_TOKENS)
 
     def sentence(self) -> str:
         return (
@@ -118,7 +129,12 @@ def plan_vllm_memory(
     room = max(0, budget - terms.fixed_bytes)
     concurrency = max_num_seqs(spec, model_id)
     if concurrency is not None:
-        room = min(room, terms.kv_bytes_per_token * context * concurrency)
+        room = min(
+            room,
+            terms.kv_bytes_per_token
+            * (context + VLLM_SEQUENCE_SLACK_TOKENS)
+            * concurrency,
+        )
 
     return KvPlan(
         model_id=model_id,

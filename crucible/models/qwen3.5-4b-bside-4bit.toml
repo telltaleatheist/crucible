@@ -42,6 +42,8 @@ max_context = 16384
 [backends.cuda-linux.memory]
 weights_bytes = 3_339_000_000
 overhead_bytes = 1_600_000_000
-kv_bytes_per_token = 40_337
+# 46,581 B/token: measured for this architecture on vLLM 0.29 (qwen3.5-4b-8bit on an
+# RTX 3070, 2026-10-09: 14,522 tokens in 0.63 GiB, the mamba page padding included).
+kv_bytes_per_token = 46_581
 basis = "measured"
 measured_at_context = 8192

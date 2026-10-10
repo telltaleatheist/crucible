@@ -129,7 +129,35 @@ def test_the_pool_never_exceeds_what_the_engine_could_reach():
         reclaimable_bytes=0,
     )
     assert plan is not None
-    assert plan.pool_bytes == NINE_B.kv_bytes_per_token * 4096 * 16
+    from crucible.vram import VLLM_SEQUENCE_SLACK_TOKENS
+
+    # Each in-flight request's context, and the block padding and recurrent state vLLM
+    # keeps for it inside the pool.
+    assert plan.pool_bytes == (
+        NINE_B.kv_bytes_per_token * (4096 + VLLM_SEQUENCE_SLACK_TOKENS) * 16
+    )
+
+
+def test_one_request_at_its_full_context_gets_the_room_vllm_asks_for():
+    """Victoria's RTX 3070, 2026-10-09: qwen3.5-4b-bside-4bit, 8192 tokens x 1, was given
+    exactly 8192 x 40,337 B (0.31 GiB) and vLLM refused: 0.35 GiB needed, 0.29 usable."""
+    plan = plan_vllm_memory(
+        model_id="qwen3.5-4b-bside-4bit",
+        spec=spec(memory=MemoryTerms(
+            weights_bytes=3_339_000_000, overhead_bytes=1_600_000_000,
+            kv_bytes_per_token=46_581, basis="measured", measured_at_context=8192,
+        ), args=("--max-num-seqs", "1")),
+        context=8192,
+        card=AcceleratorState(
+            backend="cuda-linux", total_bytes=8 * GIB, free_bytes=int(7.83 * GIB),
+            compute_apps=(), detail="fixture",
+        ),
+        desktop_allowance_bytes=GIB,
+        reclaimable_bytes=0,
+    )
+    assert plan is not None and plan.fits
+    needed, state = int(0.35 * GIB), int(0.019 * GIB)
+    assert plan.pool_bytes >= needed + state
 
 
 def test_a_block_that_states_no_concurrency_may_have_the_whole_budget():

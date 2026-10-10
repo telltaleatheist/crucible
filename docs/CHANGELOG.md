@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Fix: a vLLM model run one request at a time at its full context (B-Sides' `qwen3.5-4b-bside-4bit` on an 8 GiB card) was refused at startup: "0.35 GiB KV cache is needed, which is larger than the available KV cache memory (0.29 GiB)". The memory plan now gives each in-flight request 1024 tokens beyond its context for vLLM's block padding and the linear-attention state it keeps in the pool, and the Qwen3.5 4B family uses the measured 46,581 B/token.
+
 ## 1.0.122 — 2026-10-09
 
 - Fix: on a cuda-linux host with no C compiler (a fresh WSL distro), a model loaded its weights and then died with `RuntimeError: Failed to find C compiler`, because Triton compiles a C launcher on its first kernel. `crucible install` now places a pinned Zig 0.17.0 as `~/.crucible/tools/bin/cc` and Crucible's engines and workers run with `CC` set to it; a host updated by a deploy places it the first time an engine or worker needs it (57 MB, once); only a placement that fails is refused by name (`c_compiler_missing`), and `crucible doctor` names the fix.
