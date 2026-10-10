@@ -37,6 +37,11 @@
     voiceEdit: null,
     voiceAdd: { id: '', repo: '', revision: '' },
     allowanceDraft: null,
+    configDraft: {},
+    restart: null,
+    remeasured: null,
+    rotated: null,
+    rotateAsked: false,
     upstreamModels: {},
     queue: null,
     events: null,
@@ -1487,6 +1492,7 @@
             'decided nothing about its card cannot say what it could hold.'
         })
       );
+      body.appendChild(remeasureBox());
       return;
     }
     var infoRefusal = refusalBox(state.refusals.info);
@@ -1517,6 +1523,8 @@
           'turned it off.'
       ])
     );
+
+    body.appendChild(remeasureBox());
 
     var rows = el('div', { class: 'rows' });
     for (var slot = 0; slot < state.capability.job_types.length; slot += 1) {
@@ -1717,6 +1725,18 @@
     if (concurrency !== null) {
       body.appendChild(concurrency);
     }
+    body.appendChild(renderServerKeys());
+    body.appendChild(renderAccessKeys());
+    body.appendChild(renderJobTypeFlags());
+    body.appendChild(renderJobKeys());
+    body.appendChild(renderHfToken());
+    for (var engine = 0; engine < state.settings.tts_engines.length; engine += 1) {
+      body.appendChild(engineBlock(state.settings.tts_engines[engine]));
+    }
+    if (state.settings.video_desktop !== null) {
+      body.appendChild(videoDesktopBlock(state.settings.video_desktop));
+    }
+    body.appendChild(renderFixedKeys());
   }
 
   async function putConcurrency(model, width) {
@@ -1900,6 +1920,894 @@
       block.appendChild(refusal);
     }
     return block;
+  }
+
+  // ---- Every other key in config.toml (Owen, 2026-10-09: "we should be able to change
+  // everything in the config file from the crucible ui"). Live keys are written at once;
+  // host and port wait for a restart, which is asked for here, never in a dialog.
+
+  var WILDCARD_HOSTS = ['0.0.0.0', '::'];
+  var LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
+  var RESTART_STOP_MS = 60000;
+  var RESTART_START_MS = 180000;
+  var RESTART_POLL_MS = 1000;
+
+  function draftOf(key, current) {
+    return Object.prototype.hasOwnProperty.call(state.configDraft, key)
+      ? state.configDraft[key]
+      : current;
+  }
+
+  function settingInput(key, current, label, attrs) {
+    var input = el('input', Object.assign({
+      id: 'config-' + key,
+      type: 'text',
+      spellcheck: 'false',
+      autocomplete: 'off',
+      'aria-label': label,
+      oninput: function (event) {
+        state.configDraft[key] = event.target.value;
+      }
+    }, attrs || {}));
+    input.value = draftOf(key, current);
+    return input;
+  }
+
+  // One key of PUT /v1/settings: the field, a Save that sends it, and the refusal.
+  function configRow(spec) {
+    var where = 'config-' + spec.key;
+    var input = settingInput(spec.key, spec.shown, spec.label, spec.attrs);
+    var save = el('button', {
+      id: 'config-save-' + spec.key,
+      class: 'button quiet',
+      type: 'button',
+      onclick: function () {
+        var typed = String(draftOf(spec.key, spec.shown)).trim();
+        var parsed = spec.parse(typed);
+        if (parsed instanceof Refusal) {
+          setRefusal(where, parsed);
+          renderSettings();
+          return;
+        }
+        var patch = {};
+        patch[spec.key] = parsed;
+        putSettings(patch, where).then(function (took) {
+          if (took) {
+            delete state.configDraft[spec.key];
+            render();
+          }
+        });
+      }
+    }, ['Save']);
+    var head = [el('span', { class: 'setting-name', text: spec.label })];
+    if (spec.chips) {
+      head = head.concat(spec.chips);
+    }
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, head),
+      el('div', { class: 'setting-actions' }, [input, save])
+    ]);
+    if (spec.note) {
+      card.appendChild(el('p', { class: 'note', text: spec.note }));
+    }
+    var warning = spec.warn ? spec.warn(String(draftOf(spec.key, spec.shown)).trim()) : null;
+    if (warning) {
+      card.appendChild(el('p', { class: 'note' }, [chip('careful', 'warn'), ' ', warning]));
+    }
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      card.appendChild(refusal);
+    }
+    return card;
+  }
+
+  function notSent(code, message) {
+    return new Refusal(0, code, message + ' Nothing was sent.', null);
+  }
+
+  function wholeNumber(least, words) {
+    return function (typed) {
+      if (!/^[0-9]+$/.test(typed) || Number(typed) < least) {
+        return notSent('invalid_number', words + ', and ' + JSON.stringify(typed) + ' is not.');
+      }
+      return Number(typed);
+    };
+  }
+
+  function someText(typed) {
+    return typed === '' ? notSent('invalid_text', 'This needs some text.') : typed;
+  }
+
+  function listOf(typed) {
+    return typed === '' ? [] : typed.split(/[\s,]+/).filter(function (entry) {
+      return entry !== '';
+    });
+  }
+
+  function bindWarning(typed) {
+    if (WILDCARD_HOSTS.indexOf(typed) !== -1) {
+      return typed + ' lets every network this computer is on reach Crucible. The token ' +
+        'is then the only lock.';
+    }
+    return null;
+  }
+
+  function toggleRow(key, label, current, choices, note) {
+    var where = 'config-' + key;
+    var actions = el('div', { class: 'setting-actions' });
+    for (var index = 0; index < choices.length; index += 1) {
+      var choice = choices[index];
+      var on = current === choice[0];
+      actions.appendChild(el('button', {
+        id: 'config-' + key + '-' + String(choice[0]),
+        class: on ? 'button primary' : 'button quiet',
+        type: 'button',
+        disabled: on,
+        'aria-pressed': on ? 'true' : 'false',
+        onclick: (function (value) {
+          return function () {
+            var patch = {};
+            patch[key] = value;
+            putSettings(patch, where);
+          };
+        })(choice[0])
+      }, [choice[1]]));
+    }
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, [el('span', { class: 'setting-name', text: label })]),
+      actions
+    ]);
+    if (note) {
+      card.appendChild(el('p', { class: 'note', text: note }));
+    }
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      card.appendChild(refusal);
+    }
+    return card;
+  }
+
+  function renderServerKeys() {
+    var doc = state.settings;
+    var block = el('div', { class: 'block', id: 'server-keys' }, [
+      el('p', { class: 'subhead', text: 'This server' }),
+      configRow({
+        key: 'name', label: 'Name', shown: doc.name, parse: someText,
+        note: 'What apps list this server as.'
+      }),
+      configRow({
+        key: 'host', label: 'Listens on', shown: doc.host, parse: someText,
+        chips: [chip('takes effect at restart', 'accent')],
+        note: '127.0.0.1 is this computer only; 0.0.0.0 is every network it is on.',
+        warn: bindWarning
+      }),
+      configRow({
+        key: 'port', label: 'Port', shown: String(doc.port),
+        parse: wholeNumber(1, 'A port is a whole number from 1 to 65535'),
+        attrs: { inputmode: 'numeric' },
+        chips: [chip('takes effect at restart', 'accent')],
+        note: 'Apps paired on the old port have to be told the new one.'
+      }),
+      configRow({
+        key: 'advertise', label: 'Also reachable at', shown: doc.advertise.join(', '),
+        parse: listOf,
+        note: 'Addresses something forwards to this server on (host or host:port), ' +
+          'comma-separated. They go into the pairing lines.'
+      }),
+      configRow({
+        key: 'tailscale_advertise', label: 'Tailscale addresses',
+        shown: doc.tailscale_advertise.join(', '), parse: listOf
+      }),
+      configRow({
+        key: 'lan_advertise', label: 'LAN addresses', shown: doc.lan_advertise.join(', '),
+        parse: listOf
+      }),
+      configRow({
+        key: 'cors_origins', label: 'Web pages allowed to call it',
+        shown: doc.cors_origins.join(', '), parse: listOf,
+        note: 'Exact origins, like capacitor://localhost. Never *.'
+      })
+    ]);
+    var restart = renderRestartPrompt();
+    if (restart !== null) {
+      block.appendChild(restart);
+    }
+    return block;
+  }
+
+  // ---- restarting the server ------------------------------------------------------
+
+  function hostsOf(doc) {
+    return { host: doc.host, port: doc.port };
+  }
+
+  // Where the page finds the server after it comes back, or a sentence saying why it
+  // cannot follow it there.
+  function addressAfterRestart(doc) {
+    var wanted = hostsOf(doc);
+    var here = window.location.hostname;
+    var wantsLoopback = LOOPBACK_HOSTS.indexOf(wanted.host) !== -1;
+    var hereLoopback = LOOPBACK_HOSTS.indexOf(here) !== -1 || here === '[::1]';
+    var host;
+    if (WILDCARD_HOSTS.indexOf(wanted.host) !== -1 || (wantsLoopback && hereLoopback)) {
+      // The page already reaches this computer by this name.
+      host = here;
+    } else if (wantsLoopback) {
+      return {
+        origin: null,
+        why: 'It will listen on ' + wanted.host + ', which is the server’s own computer ' +
+          'only, so this page cannot follow it. Open it on the server, at 127.0.0.1 port ' +
+          wanted.port + '.'
+      };
+    } else {
+      host = wanted.host.indexOf(':') !== -1 ? '[' + wanted.host + ']' : wanted.host;
+    }
+    return { origin: window.location.protocol + '//' + host + ':' + wanted.port, why: null };
+  }
+
+  function renderRestartPrompt() {
+    var doc = state.settings;
+    var going = state.restart;
+    if (going !== null) {
+      var lines = [el('p', { class: 'note' }, [chip('restarting', 'warn'), ' ', going.said])];
+      if (going.link) {
+        lines.push(el('p', { class: 'note' }, [
+          el('a', { id: 'restart-link', href: going.link, text: going.link.split('#')[0] })
+        ]));
+      }
+      if (going.refusal) {
+        lines.push(refusalBox(going.refusal));
+      }
+      return el('div', { class: 'setting', id: 'restart' }, lines);
+    }
+    if (!doc.restart_pending || doc.restart_pending.length === 0) {
+      return null;
+    }
+    var after = addressAfterRestart(doc);
+    var parts = [
+      el('p', { class: 'note' }, [
+        chip('waiting for a restart', 'warn'),
+        ' It listens on ' + doc.bound.host + ':' + doc.bound.port + ' until then. This ' +
+          'takes effect when Crucible restarts. Restart now? ',
+        el('button', {
+          id: 'restart-now',
+          class: 'button primary',
+          type: 'button',
+          onclick: function () {
+            restartServer();
+          }
+        }, ['Restart now'])
+      ])
+    ];
+    if (after.origin !== null && after.origin !== window.location.origin) {
+      parts.push(el('p', { class: 'note', text:
+        'Afterwards it is at ' + after.origin + '/; this page links you there.' }));
+    } else if (after.why) {
+      parts.push(el('p', { class: 'note' }, [chip('careful', 'warn'), ' ', after.why]));
+    }
+    var refusal = state.refusals.restart;
+    if (refusal) {
+      parts.push(refusalBox(refusal));
+      if (refusal.details && refusal.details.command) {
+        parts.push(lineItem(refusal.details.command, 'Copy command', 'copy-restart-command'));
+      }
+    }
+    return el('div', { class: 'setting', id: 'restart' }, parts);
+  }
+
+  function restartSaid(text) {
+    state.restart.said = text;
+    renderSettings();
+  }
+
+  // Whether this page's own server answers. The page talks to its own server and to
+  // nothing else, so a server that comes back on another address is shown as a link.
+  async function answers() {
+    try {
+      await call('/v1/ping');
+      return true;
+    } catch (unreachable) {
+      return false;
+    }
+  }
+
+  function pause(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  async function waitFor(up, budget, words) {
+    var started = Date.now();
+    while (Date.now() - started < budget) {
+      if ((await answers()) === up) {
+        return true;
+      }
+      restartSaid(words + ' ' + Math.round((Date.now() - started) / 1000) + ' s');
+      await pause(RESTART_POLL_MS);
+    }
+    return false;
+  }
+
+  async function restartServer() {
+    setRefusal('restart', null);
+    var after = addressAfterRestart(state.settings);
+    var answer;
+    try {
+      answer = await call('/v1/server/restart', { method: 'POST' });
+    } catch (refusal) {
+      setRefusal('restart', refusal);
+      renderSettings();
+      return;
+    }
+    state.restart = { said: 'asked; ' + answer.by + ' starts it again.', refusal: null, link: null };
+    stopEvents();
+    renderSettings();
+    if (!(await waitFor(false, RESTART_STOP_MS, 'Waiting for it to stop,'))) {
+      state.restart.refusal = notSent('restart_not_seen',
+        'It was still answering after ' + RESTART_STOP_MS / 1000 + ' s. Refresh the page to ' +
+        'see where it is.');
+      renderSettings();
+      return;
+    }
+    if (after.origin === null) {
+      restartSaid('It stopped and is starting again. ' + after.why);
+      return;
+    }
+    if (after.origin !== window.location.origin) {
+      state.restart.link = after.origin + '/ui/#token=' + encodeURIComponent(state.token);
+      restartSaid('It stopped and is starting again at ' + after.origin + '/. Open it there ' +
+        'in a few seconds:');
+      return;
+    }
+    if (!(await waitFor(true, RESTART_START_MS, 'Waiting for it to come back,'))) {
+      state.restart.refusal = new Refusal(0, 'restart_not_answering',
+        'Nothing answered within ' + RESTART_START_MS / 1000 + ' s. `crucible service ' +
+        'status` on the server says whether it is running.', null);
+      renderSettings();
+      return;
+    }
+    restartSaid('Back. Reloading the page.');
+    window.location.reload();
+  }
+
+  // ---- pairing, jobs, queue, Hugging Face -----------------------------------------
+
+  function renderAccessKeys() {
+    var doc = state.settings;
+    return el('div', { class: 'block', id: 'access-keys' }, [
+      el('p', { class: 'subhead', text: 'Apps asking to connect' }),
+      toggleRow('open_pairing', 'A new app', doc.open_pairing, [
+        [false, 'Ask me first'],
+        [true, 'Let it connect']
+      ], doc.open_pairing
+        ? 'An app that asks is let in at once.'
+        : 'An app that asks waits until you approve its code under Connect an app.')
+    ]);
+  }
+
+  function renderJobKeys() {
+    var doc = state.settings;
+    return el('div', { class: 'block', id: 'job-keys' }, [
+      el('p', { class: 'subhead', text: 'Jobs' }),
+      toggleRow('install_on_submit', 'A job whose model is not installed', doc.install_on_submit, [
+        [true, 'Install it and run'],
+        [false, 'Refuse it']
+      ], null),
+      configRow({
+        key: 'retention_days', label: 'Keep finished jobs for (days)',
+        shown: String(doc.retention_days),
+        parse: wholeNumber(1, 'Days to keep a finished job is a whole number of 1 or more'),
+        attrs: { inputmode: 'numeric' }
+      }),
+      configRow({
+        key: 'max_session_hold_s', label: 'Longest one app may hold the server (s)',
+        shown: String(doc.max_session_hold_s),
+        parse: wholeNumber(0, 'Seconds is a whole number, 0 for no limit'),
+        attrs: { inputmode: 'numeric' },
+        note: '0 is no limit: a session stays open while its app keeps using it.'
+      })
+    ]);
+  }
+
+  function jobTypePath(jobType) {
+    var safe = encodeURIComponent(jobType);
+    return `/v1/settings/jobs/${safe}`;
+  }
+
+  function enginePath(engine) {
+    var safe = encodeURIComponent(engine);
+    return `/v1/settings/tts/${safe}`;
+  }
+
+  async function putJobType(jobType, on) {
+    var where = 'job-type-' + jobType;
+    try {
+      state.settings = await call(jobTypePath(jobType), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: on })
+      });
+      setRefusal(where, null);
+    } catch (refusal) {
+      setRefusal(where, refusal);
+    } finally {
+      await loadInfo();
+      render();
+    }
+  }
+
+  var FITS_CHIP = {
+    true: ['fits', 'ok'],
+    false: ['does not fit', 'bad'],
+    null: ['not measured', 'warn']
+  };
+
+  function renderJobTypeFlags() {
+    var rows = state.settings.job_types;
+    var block = el('div', { class: 'block', id: 'job-type-flags' }, [
+      el('p', { class: 'subhead', text: 'Job types this server offers' }),
+      el('p', { class: 'note', text:
+        'Turning one on is refused when the card cannot hold it or its software is not ' +
+        'installed; Install under Job types does both.' })
+    ]);
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      var fits = FITS_CHIP[String(row.fits)];
+      var head = [
+        el('span', { class: 'setting-name', text: row.job_type }),
+        chip(row.enabled ? 'on' : 'off', row.enabled ? 'accent' : ''),
+        chip(fits[0], fits[1])
+      ];
+      if (row.env_built === false) {
+        head.push(chip('not installed', 'warn'));
+      }
+      var card = el('div', { class: 'setting' }, [
+        el('div', { class: 'setting-head' }, head),
+        el('div', { class: 'setting-actions' }, [
+          el('button', {
+            id: 'job-type-' + row.job_type,
+            class: row.enabled ? 'button quiet' : 'button primary',
+            type: 'button',
+            onclick: (function (jobType, on) {
+              return function () {
+                putJobType(jobType, on);
+              };
+            })(row.job_type, !row.enabled)
+          }, [row.enabled ? 'Turn off' : 'Turn on'])
+        ])
+      ]);
+      var refusal = refusalBox(state.refusals['job-type-' + row.job_type]);
+      if (refusal) {
+        card.appendChild(refusal);
+      }
+      block.appendChild(card);
+    }
+    return block;
+  }
+
+  function renderHfToken() {
+    var hf = state.settings.hf;
+    var where = 'config-hf_token';
+    var input = el('input', {
+      id: 'config-hf_token',
+      type: 'password',
+      spellcheck: 'false',
+      autocomplete: 'off',
+      placeholder: 'paste an hf_... token',
+      'aria-label': 'Hugging Face token',
+      oninput: function (event) {
+        state.configDraft.hf_token = event.target.value;
+      }
+    });
+    input.value = draftOf('hf_token', '');
+    var actions = [
+      input,
+      el('button', {
+        class: 'button primary',
+        type: 'button',
+        onclick: function () {
+          var typed = String(draftOf('hf_token', '')).trim();
+          if (typed === '') {
+            return;
+          }
+          putSettings({ hf_token: typed }, where).then(function (took) {
+            if (took) {
+              delete state.configDraft.hf_token;
+              render();
+            }
+          });
+        }
+      }, ['Save'])
+    ];
+    if (hf.configured) {
+      actions.push(el('button', {
+        class: 'button quiet',
+        type: 'button',
+        onclick: function () {
+          putSettings({ hf_token: null }, where);
+        }
+      }, ['Remove']));
+    }
+    var head = [el('span', { class: 'setting-name', text: 'Hugging Face' })];
+    if (hf.configured) {
+      head.push(chip('configured', 'ok'));
+      head.push(mono(hf.token_hint));
+    } else {
+      head.push(chip('not configured'));
+    }
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, head),
+      el('div', { class: 'setting-actions' }, actions),
+      el('p', { class: 'note', text:
+        'Used to download models that need an account. Write-only: it is never shown again.' })
+    ]);
+    if (hf.from_environment) {
+      card.appendChild(el('p', { class: 'note' }, [chip('careful', 'warn'),
+        ' $HF_TOKEN is set where this server runs, and it is used instead of this one.']));
+    }
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      card.appendChild(refusal);
+    }
+    return el('div', { class: 'block', id: 'hf-token' }, [
+      el('p', { class: 'subhead', text: 'Downloads' }),
+      card
+    ]);
+  }
+
+  // ---- [tts.<engine>] ---------------------------------------------------------------
+
+  var ENGINE_LEVERS = [
+    ['memory_bytes_estimate', 'Memory it takes (bytes)', 'estimate_note', true],
+    ['max_num_seqs', 'Lines at once', 'max_num_seqs_note', true],
+    ['mem_fraction', 'Share of the card it reserves', 'mem_fraction_note', false],
+    ['context_length', 'Context length', 'context_length_note', false]
+  ];
+
+  async function putEngine(engine, patch, where) {
+    try {
+      state.settings = await call(enginePath(engine), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      setRefusal(where, null);
+      return true;
+    } catch (refusal) {
+      setRefusal(where, refusal);
+      return false;
+    } finally {
+      render();
+    }
+  }
+
+  async function reloadVoice(voice, where) {
+    try {
+      await call('/v1/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'unload-voice', model: voice, params: {} })
+      });
+      setRefusal(where, null);
+    } catch (refusal) {
+      setRefusal(where, refusal);
+    } finally {
+      await loadSettings();
+      render();
+    }
+  }
+
+  function leverRow(row, lever) {
+    var key = lever[0];
+    var noteKey = lever[2];
+    var draftKey = 'tts-' + row.engine + '-' + key;
+    var noteDraftKey = draftKey + '-note';
+    var where = 'tts-' + row.engine + '-' + key;
+    var value = row[key] === undefined || row[key] === null ? '' : String(row[key]);
+    var note = row[noteKey] === undefined || row[noteKey] === null ? '' : row[noteKey];
+    var number = settingInput(draftKey, value, lever[1], { inputmode: 'decimal' });
+    var why = settingInput(noteDraftKey, note, 'where ' + lever[1] + ' came from', {
+      placeholder: 'where the number came from'
+    });
+    var actions = [number, why, el('button', {
+      class: 'button quiet',
+      type: 'button',
+      onclick: function () {
+        var typed = String(draftOf(draftKey, value)).trim();
+        var said = String(draftOf(noteDraftKey, note)).trim();
+        var patch = {};
+        if (typed === '') {
+          patch[key] = null;
+          patch[noteKey] = null;
+        } else if (!/^[0-9]*\.?[0-9]+$/.test(typed)) {
+          setRefusal(where, notSent('invalid_number', JSON.stringify(typed) + ' is not a number.'));
+          renderSettings();
+          return;
+        } else {
+          patch[key] = key === 'mem_fraction' ? Number(typed) : parseInt(typed, 10);
+          patch[noteKey] = said === '' ? null : said;
+        }
+        putEngine(row.engine, patch, where).then(function (took) {
+          if (took) {
+            delete state.configDraft[draftKey];
+            delete state.configDraft[noteDraftKey];
+            render();
+          }
+        });
+      }
+    }, ['Save'])];
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, [
+        el('span', { class: 'setting-name', text: lever[1] }),
+        lever[3] ? null : chip(value === '' ? 'narrator’s own' : 'set manually')
+      ]),
+      el('div', { class: 'setting-actions' }, actions)
+    ]);
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      card.appendChild(refusal);
+    }
+    return card;
+  }
+
+  function engineBlock(row) {
+    var where = 'tts-' + row.engine + '-reload';
+    var parts = [el('p', { class: 'subhead', text: 'Narration engine: ' + row.engine })];
+    var basis = row.estimate_basis;
+    parts.push(el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, [
+        el('span', { class: 'setting-name', text: 'Memory figure is' }),
+        chip(basis, basis === 'measured' ? 'ok' : 'warn')
+      ]),
+      el('div', { class: 'setting-actions' }, [
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          disabled: basis === 'measured',
+          onclick: function () {
+            putEngine(row.engine, { estimate_basis: 'measured', estimate_note: null },
+              'tts-' + row.engine + '-memory_bytes_estimate');
+          }
+        }, ['Measured here']),
+        el('button', {
+          class: 'button quiet',
+          type: 'button',
+          disabled: basis === 'declared',
+          title: 'needs a note saying where the number came from',
+          onclick: function () {
+            var said = String(draftOf('tts-' + row.engine + '-memory_bytes_estimate-note', '')).trim();
+            putEngine(row.engine, { estimate_basis: 'declared', estimate_note: said || null },
+              'tts-' + row.engine + '-memory_bytes_estimate');
+          }
+        }, ['Declared'])
+      ])
+    ]));
+    for (var index = 0; index < ENGINE_LEVERS.length; index += 1) {
+      parts.push(leverRow(row, ENGINE_LEVERS[index]));
+    }
+    var resident = row.resident;
+    if (resident && resident.reload_needed) {
+      parts.push(el('p', { class: 'note' }, [
+        resident.voice + ' is on the card with the old numbers; the new ones take effect ' +
+          'when it loads again. Reload it now? ',
+        el('button', {
+          id: 'tts-reload-' + row.engine,
+          class: 'button primary',
+          type: 'button',
+          onclick: function () {
+            reloadVoice(resident.voice, where);
+          }
+        }, ['Reload now'])
+      ]));
+    }
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      parts.push(refusal);
+    }
+    parts.push(el('p', { class: 'note', text:
+      'A voice reads these when it loads. Each number keeps a note saying where it came from.' }));
+    return el('div', { class: 'block', id: 'tts-' + row.engine }, parts);
+  }
+
+  // ---- [video_desktop] (the Mac) ------------------------------------------------------
+
+  function videoDesktopBlock(entry) {
+    var block = el('div', { class: 'block', id: 'video-desktop' }, [
+      el('p', { class: 'subhead', text: 'Video renders and the desktop' }),
+      el('p', { class: 'note', text:
+        'How a video render shares this Mac with whoever is using it. Empty is the default.' })
+    ]);
+    for (var index = 0; index < entry.rows.length; index += 1) {
+      block.appendChild(videoDesktopRow(entry.rows[index]));
+    }
+    return block;
+  }
+
+  function videoDesktopRow(row) {
+    var key = 'video_desktop.' + row.key;
+    var where = 'config-' + key;
+    var shown = row.set === null ? '' : String(row.set);
+    var input = settingInput(key, shown, row.key, { placeholder: String(row.default) });
+    var save = el('button', {
+      class: 'button quiet',
+      type: 'button',
+      onclick: function () {
+        var typed = String(draftOf(key, shown)).trim();
+        var value;
+        if (typed === '') {
+          value = null;
+        } else if (typed === 'true' || typed === 'false') {
+          value = typed === 'true';
+        } else if (/^-?[0-9]*\.?[0-9]+$/.test(typed)) {
+          value = Number(typed);
+        } else {
+          setRefusal(where, notSent('invalid_value', row.key + ' is ' + row.range + '.'));
+          renderSettings();
+          return;
+        }
+        var patch = { video_desktop: {} };
+        patch.video_desktop[row.key] = value;
+        putSettings(patch, where).then(function (took) {
+          if (took) {
+            delete state.configDraft[key];
+            render();
+          }
+        });
+      }
+    }, ['Save']);
+    var card = el('div', { class: 'setting' }, [
+      el('div', { class: 'setting-head' }, [
+        el('span', { class: 'setting-name', text: row.key }),
+        row.set === null ? chip('default ' + String(row.default)) : chip('set manually', 'accent')
+      ]),
+      el('div', { class: 'setting-actions' }, [input, save]),
+      el('p', { class: 'note', text: row.meaning + ' — ' + row.range + '.' })
+    ]);
+    if (row.problem) {
+      card.appendChild(el('p', { class: 'note' }, [chip('not used', 'bad'), ' ', row.problem]));
+    }
+    var refusal = refusalBox(state.refusals[where]);
+    if (refusal) {
+      card.appendChild(refusal);
+    }
+    return card;
+  }
+
+  // ---- shown, not set ------------------------------------------------------------------
+
+  function renderFixedKeys() {
+    var doc = state.settings;
+    var pairs = [['Backend', mono(doc.backend_kind)]];
+    var tables = doc.read_only_tables || {};
+    for (var name in tables) {
+      if (!Object.prototype.hasOwnProperty.call(tables, name)) {
+        continue;
+      }
+      var values = tables[name];
+      for (var key in values) {
+        if (Object.prototype.hasOwnProperty.call(values, key)) {
+          pairs.push(['[' + name + '] ' + key, mono(JSON.stringify(values[key]))]);
+        }
+      }
+    }
+    return el('div', { class: 'block', id: 'fixed-keys' }, [
+      el('p', { class: 'subhead', text: 'Set when it was installed' }),
+      facts(pairs),
+      el('p', { class: 'note', text:
+        'The backend is chosen by the install. [video_trial] is set by hand for a ' +
+        'measurement and is shown here only.' })
+    ]);
+  }
+
+  // ---- the card's record and the token ---------------------------------------------
+
+  async function remeasureCard() {
+    state.remeasured = null;
+    try {
+      state.remeasured = await call('/v1/capability/record', { method: 'POST' });
+      setRefusal('remeasure', null);
+    } catch (refusal) {
+      setRefusal('remeasure', refusal);
+    } finally {
+      await Promise.all([loadCapability(), loadSettings(), loadInfo()]);
+      render();
+    }
+  }
+
+  function remeasureBox() {
+    var parts = [el('div', { class: 'controls' }, [
+      el('button', {
+        id: 'remeasure',
+        class: 'button quiet',
+        type: 'button',
+        onclick: function () {
+          remeasureCard();
+        }
+      }, ['Re-measure this card'])
+    ])];
+    var done = state.remeasured;
+    if (done) {
+      var said = 'Recorded again.';
+      if (done.turned_off.length) {
+        said += ' Turned off, because the card cannot hold them: ' + done.turned_off.join(', ') + '.';
+      }
+      if (done.low_vram_change) {
+        said += ' ' + done.low_vram_change;
+      }
+      parts.push(el('p', { class: 'note', text: said }));
+    }
+    var refusal = refusalBox(state.refusals.remeasure);
+    if (refusal) {
+      parts.push(refusal);
+    }
+    return el('div', { class: 'block', id: 'remeasure-box' }, parts);
+  }
+
+  async function rotateToken() {
+    try {
+      var answer = await call('/v1/settings/token/rotate', { method: 'POST' });
+      state.token = answer.token;
+      storeToken(answer.token);
+      state.rotated = answer;
+      state.rotateAsked = false;
+      setRefusal('rotate', null);
+    } catch (refusal) {
+      setRefusal('rotate', refusal);
+    }
+    await Promise.all([loadSetup(), loadSettings()]);
+    render();
+  }
+
+  function rotateBox() {
+    var parts = [el('p', { class: 'subhead', text: 'Replace the token' })];
+    if (state.rotated) {
+      parts.push(el('p', { class: 'note' }, [chip('new token', 'warn'),
+        ' Every app paired with the old token is now locked out. Pair them again with a ' +
+        'line above. This page already uses the new one; it is shown here once.']));
+      parts.push(lineItem(state.rotated.token, 'Copy token', 'copy-rotated-token'));
+      if (state.rotated.pairing_file_error) {
+        parts.push(el('p', { class: 'note' }, [chip('careful', 'bad'), ' The pairing file ' +
+          'on the server was not rewritten: ' + state.rotated.pairing_file_error]));
+      }
+    } else if (state.rotateAsked) {
+      parts.push(el('p', { class: 'note' }, [
+        'Every paired app stops working until it is paired again. Replace it? ',
+        el('button', {
+          id: 'rotate-yes',
+          class: 'button danger',
+          type: 'button',
+          onclick: function () {
+            rotateToken();
+          }
+        }, ['Replace the token']),
+        ' ',
+        el('button', {
+          id: 'rotate-no',
+          class: 'button quiet',
+          type: 'button',
+          onclick: function () {
+            state.rotateAsked = false;
+            renderConnect();
+          }
+        }, ['Keep it'])
+      ]));
+    } else {
+      parts.push(el('div', { class: 'controls' }, [el('button', {
+        id: 'rotate-token',
+        class: 'button quiet',
+        type: 'button',
+        onclick: function () {
+          state.rotateAsked = true;
+          renderConnect();
+        }
+      }, ['Replace the token…'])]));
+    }
+    var refusal = refusalBox(state.refusals.rotate);
+    if (refusal) {
+      parts.push(refusal);
+    }
+    return el('div', { class: 'block', id: 'rotate-box' }, parts);
   }
 
   function routedModels() {
@@ -2973,6 +3881,7 @@
       ])
     ]);
     body.appendChild(detail);
+    body.appendChild(rotateBox());
 
     body.appendChild(renderModuleBox());
   }
