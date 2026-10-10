@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.123 — 2026-10-09
+
 - Fix: a vLLM model run one request at a time at its full context (B-Sides' `qwen3.5-4b-bside-4bit` on an 8 GiB card) was refused at startup: "0.35 GiB KV cache is needed, which is larger than the available KV cache memory (0.29 GiB)". The memory plan now gives each in-flight request 1024 tokens beyond its context for vLLM's block padding and the linear-attention state it keeps in the pool, and the Qwen3.5 4B family uses the measured 46,581 B/token.
 
 ## 1.0.122 — 2026-10-09
