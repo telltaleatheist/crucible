@@ -38,23 +38,12 @@ from typing import Any
 
 from .errors import ApiError
 from .sampling import TEMPLATE_KWARGS, THINKING_KEY
+from .structured import GRAMMAR_FIELDS, constrained_fields
 
 PREFILL_KEY = "prefill"
 
 CONTINUATION_FIELDS: tuple[str, ...] = ("continue_final_message", "add_generation_prompt")
 
-# Every way a chat body can constrain its answer with a grammar on the engines Crucible
-# runs: vLLM's structured_outputs and its older guided_* fields, llama-server's
-# grammar and json_schema, and OpenAI's response_format (any type but "text").
-GRAMMAR_FIELDS: tuple[str, ...] = (
-    "structured_outputs",
-    "guided_json",
-    "guided_regex",
-    "guided_choice",
-    "guided_grammar",
-    "grammar",
-    "json_schema",
-)
 
 
 def take_prefill(body: dict[str, Any]) -> str | None:
@@ -112,13 +101,7 @@ def take_prefill(body: dict[str, Any]) -> str | None:
             "true, add_generation_prompt false); drop them",
             {"fields": stated},
         )
-    grammar = [key for key in GRAMMAR_FIELDS if body.get(key) is not None]
-    response_format = body.get("response_format")
-    if isinstance(response_format, dict) and response_format.get("type") not in (
-        None,
-        "text",
-    ):
-        grammar.append("response_format")
+    grammar = constrained_fields(body)
     if grammar:
         raise ApiError(
             400,

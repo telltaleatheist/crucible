@@ -594,6 +594,14 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
    the 27B with ContentStudio's real requests. The patch adds the counters to the
    decode step's existing `mx.async_eval`.
 
+`MlxLmEngine` also applies its own patches at start (`SELF_APPLIED_LLM_PATCHES`,
+`envpatches.ensure_applied`), so they reach a Mac on the next load with no
+reinstall: the decide door's items route and its helper, the detokenizer table,
+and structured output (`mlx-lm-structured-output` on `server.py`,
+`mlx-lm-structured-output-batch` on `generate.py`, and the helper
+`mlx_lm/_crucible_grammar.py`), which enforces `response_format` with llguidance
+(engines-and-capability.md, "Structured output").
+
 ## Weights store (`weights.py`)
 
 - The layout is `~/.crucible/<family>/<id>/<backend>/`. The families (`models`,

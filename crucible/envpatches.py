@@ -310,10 +310,70 @@ MLX_LM_DETOKENIZER_TOKENMAP = EnvPatch(
     ),
 )
 
+STRUCTURED_OUTPUT_SCRIPT = "patch_mlx_lm_structured_output.py"
+
+STRUCTURED_OUTPUT_WHY = (
+    "stock mlx-lm 0.31.3 reads no response_format at all, so a chat that asked for "
+    "a JSON schema (B-Sides on every call, BookForge's pronunciation guide) was "
+    "answered unconstrained on the Mac while vLLM and llama-server enforced it on "
+    "the PC. Patched, the server compiles response_format / structured_outputs with "
+    "llguidance as vLLM does, gives each constrained sequence its own matcher, and "
+    "refuses by name what it cannot enforce. MlxLmEngine applies it itself at start"
+)
+
+MLX_LM_STRUCTURED_OUTPUT = EnvPatch(
+    id="mlx-lm-structured-output",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/server.py",
+    marker="_crucible_grammar.constraint_of_body(self.body)",
+    absent_marker="def _make_logits_processors(args):",
+    stale_marker=None,
+    script=STRUCTURED_OUTPUT_SCRIPT,
+    why=STRUCTURED_OUTPUT_WHY,
+)
+
+MLX_LM_STRUCTURED_OUTPUT_BATCH = EnvPatch(
+    id="mlx-lm-structured-output-batch",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/generate.py",
+    marker="if self.logits_processors:  # crucible: in step with uids",
+    absent_marker="for processor in self.logits_processors[e]:",
+    stale_marker=None,
+    script=STRUCTURED_OUTPUT_SCRIPT,
+    why=(
+        "stock mlx-lm 0.31.3 loses a sequence's logits processors in a mixed batch: "
+        "PromptProcessingBatch.extend turns empty lists into None, which kills the "
+        "generation thread in GenerationBatch._step, and GenerationBatch.filter leaves "
+        "a list of empty entries longer than the batch, so a constrained chat that "
+        "joins after a plain one finished runs with no grammar at all (reproduced on "
+        "CPU, 2026-10-10). MlxLmEngine applies it itself at start, with "
+        "mlx-lm-structured-output"
+    ),
+)
+
+MLX_LM_STRUCTURED_OUTPUT_HELPER = EnvPatch(
+    id="mlx-lm-structured-output-helper",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/_crucible_grammar.py",
+    marker="GRAMMAR_VERSION = 1",
+    absent_marker=None,
+    stale_marker=None,
+    script="patch_mlx_lm_structured_output_helper.py",
+    why=(
+        "the structured-output patch runs Crucible's engines/structured_mlx.py, "
+        "copied into the env as mlx_lm/_crucible_grammar.py. MlxLmEngine applies it "
+        "itself at start"
+    ),
+    creates=True,
+)
+
 SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_DECIDE_ITEMS,
     MLX_LM_DECIDE_ITEMS_HELPER,
     MLX_LM_DETOKENIZER_TOKENMAP,
+    MLX_LM_STRUCTURED_OUTPUT_HELPER,
+    MLX_LM_STRUCTURED_OUTPUT,
+    MLX_LM_STRUCTURED_OUTPUT_BATCH,
 )
 
 LLM_PATCHES: tuple[EnvPatch, ...] = (
@@ -577,6 +637,9 @@ __all__ = [
     "MLX_LM_DETOKENIZER_TOKENMAP",
     "MLX_LM_FATAL_GENERATION_THREAD",
     "MLX_LM_FP32_LOGPROBS",
+    "MLX_LM_STRUCTURED_OUTPUT",
+    "MLX_LM_STRUCTURED_OUTPUT_BATCH",
+    "MLX_LM_STRUCTURED_OUTPUT_HELPER",
     "MLX_LM_TOP_LOGPROBS",
     "MISSING",
     "NOT_APPLICABLE",

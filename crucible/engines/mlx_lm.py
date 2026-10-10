@@ -43,6 +43,20 @@ class MlxLmEngine(SubprocessEngine):
         "and a new answer opened after it, so a prefill would not be continued"
     )
 
+    structured_output_formats = frozenset({"json_object", "json_schema"})
+    structured_output_fields = frozenset({"structured_outputs"})
+    structured_output_basis = (
+        "stock mlx-lm 0.31.3 reads no response_format (mlx_lm/server.py builds its "
+        "logits processors from logit_bias and the penalties only, "
+        "_make_logits_processors L414-423); Crucible's mlx-lm-structured-output patch "
+        "(applied by this engine at start) reads response_format json_object and "
+        "json_schema and structured_outputs json, json_object, regex, choice and "
+        "grammar, compiles them with llguidance as vLLM 0.29.0's guidance backend "
+        "does, gives each constrained sequence its own matcher as a logits processor, "
+        "and refuses by name anything else, guided_* and grammar included "
+        "(engines/structured_mlx.py)"
+    )
+
     decide_logprobs = True
     max_logprobs = 40
     decide_basis = (
@@ -114,7 +128,8 @@ class MlxLmEngine(SubprocessEngine):
             raise EngineError(
                 f"llm_env_unpatched: {exc}. This engine states what it "
                 f"serves (max_logprobs {self.max_logprobs}, logprobs "
-                "computed in float32, the decide door's items route) because "
+                "computed in float32, the decide door's items route, "
+                "response_format enforced with llguidance) because "
                 "of the llm env's patches and will not start without every "
                 "one; run `crucible env patch llm` (or `crucible install llm "
                 "--force`) and load again"

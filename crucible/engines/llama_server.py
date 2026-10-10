@@ -90,6 +90,17 @@ class LlamaServerEngine(SubprocessEngine):
         "content (common/chat-auto-parser-generator.cpp L45-61)"
     )
 
+    structured_output_formats = frozenset({"json_object", "json_schema"})
+    structured_output_fields = frozenset({"json_schema", "grammar"})
+    structured_output_basis = (
+        "llama-server b10970 reads json_schema and grammar from the body and "
+        "response_format json_object and json_schema into the same schema, and answers "
+        "any other response_format type with an error "
+        "(tools/server/server-common.cpp L1179-1204); the schema becomes its GBNF "
+        "grammar (common/json-schema-to-grammar.cpp). It reads no structured_outputs "
+        "and no guided_* field; read at the b10970 tag 2026-10-10"
+    )
+
     decide_logprobs = True
     max_logprobs = None
     decide_items_basis = (

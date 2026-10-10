@@ -20,6 +20,10 @@ httpx==0.28.1
 huggingface_hub==1.31.0
 idna==3.19
 Jinja2==3.1.6
+# llguidance: mlx-vlm 0.7.1 requires it, and mlx-lm's server enforces response_format with
+# it (engines/structured_mlx.py). cuda-linux's vLLM 0.29.0 pins 1.7.6; on Qwen3.5's tokenizer
+# both compile B-Sides' describe schema to the same grammar and the same mask at every token
+# of an answer with escapes in its capped lyrics (2026-10-10), so the pin stays.
 llguidance==1.8.0
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3

@@ -21,6 +21,14 @@ class MlxVlmEngine(SubprocessEngine):
         "has no way to be told to continue a message"
     )
 
+    structured_output_basis = (
+        "Crucible's Mac server (engines/mlx_vlm_serve.py) reads a page or a decision "
+        "and refuses any body field it does not know (KNOWN_FIELDS, QUESTION_FIELDS), "
+        "response_format among them: it enforces no structured output. mlx-vlm 0.7.1 "
+        "ships an llguidance processor (mlx_vlm/structured.py), which this server does "
+        "not use"
+    )
+
     decide_logprobs = True
     max_logprobs = MAX_TOP_LOGPROBS
     decide_basis = (

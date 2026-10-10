@@ -5,7 +5,8 @@ engine is started and stopped. Modules: `backend`, the capability modules
 listed under "Where each part lives", `memorybudget`,
 `precision`, `servingplan`, `ttsplan`, `asrplan`, `accelerator`, `vram`,
 `ladder`, `residency`, `engines/*`, `decide`,
-`sampling`, `pages`, `llamacpp`, `ollamastore`, `interpreter`, `lineup`.
+`sampling`, `prefill`, `structured`, `pages`, `llamacpp`, `ollamastore`,
+`interpreter`, `lineup`.
 
 ## Backends
 
@@ -516,6 +517,9 @@ started exactly as `load-model` would).
   that to 40, and `start` refuses an unpatched env (`llm_env_unpatched`).
   Logprobs are computed after logits processors, so a decision sends its own
   sampling and applies no manifest defaults.
+- `response_format` is enforced by Crucible's `mlx-lm-structured-output` patch
+  (stock 0.31.3 reads none and answered a schema unconstrained): see
+  "Structured output" below.
 
 ### mlx-vlm server (`mlx_vlm.py`, `mlx_vlm_serve.py`)
 
@@ -880,6 +884,98 @@ Prefill and prefix reuse agree: the prefill comes after everything else, so a
 prompt's shared prefix is the same with or without it. On mlx-lm (were it
 served) a final assistant message also turns off its segment split, which is
 part of why it is refused there rather than patched in.
+
+## Structured output (`structured`)
+
+A chat constrains its answer with `response_format` (`json_schema`,
+`json_object`) or with an engine's own field (`structured_outputs`, `guided_*`,
+`grammar`, `json_schema`; `structured.GRAMMAR_FIELDS`, which the prefill door
+reads too). An engine that does not read a field drops it without a word, so
+every engine states what it enforces, with where that was read:
+`structured_output_formats` (the `response_format` types beyond `text`),
+`structured_output_fields` and `structured_output_basis`, read by
+`engines.structured_output_reading`.
+
+| engine | `response_format` | other fields |
+|---|---|---|
+| vLLM 0.29.0 | `json_schema`, `json_object`, `structural_tag` | `structured_outputs` |
+| llama-server b10970 | `json_schema`, `json_object` | `json_schema`, `grammar` |
+| mlx-lm 0.31.3 + patch | `json_schema`, `json_object` | `structured_outputs` (`json`, `json_object`, `regex`, `choice`, `grammar`) |
+| mlx-vlm (Crucible's server) | none | none |
+
+`structured_output_not_served` (400) names what the resident engine does not
+enforce and what it does; nothing is sent. A queued chat is refused from its
+manifest's engine before it waits or loads anything, and again from the resident
+engine. vLLM 0.29.0 has no `guided_*` field any more (it logs one as ignored), so a
+`guided_json` is refused there too. Whether the constraint itself compiles is the
+engine's to say: its own 400 is relayed.
+
+**mlx-lm.** `patch_mlx_lm_structured_output.py`, self-applied at engine start
+with `mlx_lm/_crucible_grammar.py` (a verbatim copy of `engines/structured_mlx.py`,
+`GRAMMAR_VERSION = 1`):
+
+- The HTTP thread reads the constraint and compiles it with llguidance exactly as
+  vLLM 0.29.0's guidance backend does (`grammar_from_json_schema(schema,
+  defaults={"whitespace_flexible": True})`; `json_object` is the schema
+  `{"type": "object"}`; regex, choice and grammar through `grammar_from`), so a
+  schema means the same thing on both. What it cannot keep is refused by name
+  before generation: `structured_output_not_served` (`guided_*`, `grammar`,
+  `json_schema`, a `structural_tag`, a `structured_outputs` option it does not
+  act on), `invalid_response_format`, `invalid_structured_outputs`,
+  `invalid_grammar` (llguidance's own message) and `invalid_request` (both
+  `response_format` and `structured_outputs`).
+- Each constrained sequence gets its own `GrammarProcessor` (its own
+  `LLMatcher`), appended last to its logits processors, so no bias or penalty can
+  lift a token the grammar forbids. The first call (with the prompt's last token)
+  starts the matcher; every later call consumes the token sampled after the one
+  before. The bitmask is applied with plain mlx ops rather than a Metal kernel, so
+  the same code runs on mlx's CPU backend in the tests. The llguidance tokenizer is
+  built once per model (1.8 s for Qwen3.5's 248k vocabulary on the Mac Studio),
+  sized `max(logits width, len(tokenizer))` as vLLM sizes it, with every id in
+  mlx-lm's `eos_token_ids` as EOS.
+- EOS is in the mask only while the grammar accepts; once the grammar is complete
+  it is the only token left, so a JSON answer stops at its closing brace. Inside
+  the object `whitespace_flexible` allows whitespace between tokens, as on vLLM.
+- **Thinking.** vLLM binds the grammar from the first generated token: Crucible
+  starts it with no reasoning parser, so `structured_outputs_config.reasoning_parser`
+  is empty and nothing delays the grammar. mlx-lm matches it: a constrained chat
+  starts in the `normal` state, so a thinking-on request answers JSON at once and
+  it lands in `content`, not `reasoning`. Thinking is not refused; under a grammar
+  it does not happen, on either backend.
+- **A failed matcher** (a resource limit inside llguidance; never a token it
+  allowed) stops the sequence at once, and the request is answered
+  `structured_output_failed` (500, or an error event before `[DONE]` on a stream),
+  never with the partial text.
+- **Two batch defects in stock 0.31.3** made a constrained chat beside a plain one
+  either kill the generation thread or run with no grammar at all. The patch fixes
+  both in `mlx_lm/generate.py` (`mlx-lm-structured-output-batch`).
+  `PromptProcessingBatch.extend` turns a batch of empty processor lists into
+  `None` entries, and `_step` iterated them (`for processor in None`).
+  `GenerationBatch.filter` filtered the list only `if any(...)`, so once a plain
+  sequence finished the list stayed longer than the batch and the next constrained
+  sequence ran the wrong row's (empty) list. Both reproduce on CPU against stock
+  0.31.3 (tests/test_structured_mlx.py).
+- llguidance is the llm env's own pin (1.8.0, which mlx-vlm 0.7.1 needs too). The
+  PC's vLLM pins 1.7.6; on Qwen3.5's tokenizer both give the same grammar and the
+  same mask at every token of a B-Sides describe answer (escapes in a capped
+  string included).
+- Measured on the Mac Studio, `qwen3.5-4b-bside` bf16 under B-Sides' describe
+  schema (2026-10-10): every constrained answer parsed and ended at its brace (the
+  same prompt unconstrained wrote prose). One sequence: 51.2 tok/s plain, 49.0
+  constrained (about 4%). Four concurrent chats through the patched server: 46
+  tok/s aggregate plain, 47 constrained.
+
+**mlx-vlm** enforces none: Crucible's page/decision server refuses any field it
+does not know, and the door refuses a constraint before sending it. mlx-vlm 0.7.1
+ships an llguidance processor (`mlx_vlm/structured.py`) that the server could
+adopt if a vision chat ever needs a schema.
+
+Tests: `tests/test_structured_output.py` runs in Crucible's env (the readings,
+the door, the request parsing, the patch scripts against stock 0.31.3).
+`tests/test_structured_mlx.py` needs llguidance, mlx and mlx-lm, so it skips in
+Crucible's env; its docstring says how to run it in a throwaway venv. It covers
+the processor, both batch defects against stock and patched copies, and the
+patched server end to end on a tiny random llama.
 
 ## Page requests (`pages`)
 
