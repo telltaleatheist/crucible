@@ -7,6 +7,7 @@ notes.
 
 ## Unreleased
 
+- `qwen3.5-4b-bside` is v2: one model for every B-Sides text call (describe, album, tracks, lyrics, album title, artist, track titles, cover), the task named by the first line of the user message. Same id; the Mac pins `owenmorgan/qwen3.5-4b-bside` @ 3e499e62, a PC the Q8_0 GGUF @ 5e326c86. On a Mac, mlx-lm does not yet enforce `json_schema`, so the strict schema each call sends applies on a PC only.
 ## 1.0.125 — 2026-10-10
 
 - Fix: weights left in the store by a model that is no longer in the catalog (`qwen3.5-4b-bside-4bit`, 3.6 GB on an 8 GiB laptop after 1.0.124) can be removed: `crucible remove model <id>` and `DELETE /v1/catalog/model/{id}` find them in the weights store when the catalog has no such model, instead of refusing `subject_unknown`. Nothing is deleted on an update by itself; `crucible doctor` lists such weights and now names that command for this machine's own.

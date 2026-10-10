@@ -9,31 +9,33 @@ context_default = 16384
 trained_context = 262144
 modalities = ["text"]
 display = "Qwen 3.5 · 4B · B-Side"
-description = "Qwen3.5-4B fine-tuned to answer B-Side's describe prompt: a song page's tag menu as the system prompt and a free-text description in, the tags and lyrics as JSON out. Text only; serve with thinking off."
+description = "Qwen3.5-4B fine-tuned for every B-Sides text call (describe, album, tracks, lyrics, album title, artist, track titles, cover), each named by the first line of the user message and answered as JSON under a strict schema. Text only; serve with thinking off."
 
 [defaults]
 thinking = false
 
-# Owen's own weights: the LoRA trained on B-Side's 2,162 describe answers (lyrics_v1, step
-# 256), merged into the base snapshot's full layout. A retrain is a new revision of the same
-# private repo, repinned here, and a new GGUF of it below.
+# Owen's own weights, merged into the base snapshot's full layout. v1 (e9a563d2) was the LoRA
+# trained on B-Side's 2,162 describe answers; v2 (3e499e62, 2026-10-10) is one model for every
+# B-Sides text call, the task named by the first line of the user message ([describe],
+# [album], [tracks], [lyrics], [album title], [artist], [track titles], [cover]). A retrain is
+# a new revision of the same private repo, repinned here, and a new GGUF of it below.
 #
 # On a PC it runs on llama.cpp, not vLLM. Owen, 2026-10-09: B-Sides only ever makes single
 # requests, so this model gains nothing from vLLM's batching, and on Victoria's RTX 3070 the
 # first vLLM load took 3 min 22 s (Triton JIT, torch.compile, CUDA graphs) and every later
 # one about a minute, on an album that swaps it with the writer. The GGUF is the merged
-# repo above at e9a563d2, converted text only (no vision tower) by llama.cpp b10970's
+# repo above at 3e499e62, converted text only (no vision tower) by llama.cpp b10970's
 # convert_hf_to_gguf.py --outtype q8_0: 8 bits is effectively lossless on a 4B for tags and
 # lyrics, and at 4.6 GB it fits an 8 GiB card whole, so one block serves every card and the
 # 4-bit vLLM form is gone. One request at a time (--parallel 1), every layer on the card.
 [backends.cuda-linux]
 engine = "llama-server"
 hf_repo = "owenmorgan/qwen3.5-4b-bside-gguf"
-revision = "15d71d2f3127407c8a2138b601de80fb10e77070"
+revision = "5e326c86dc5bf31e82b23c37e3b611f347547a0b"
 bits = 8
 file = "qwen3.5-4b-bside-Q8_0.gguf"
 serves = ["text"]
-memory_bytes_estimate = 5_897_450_976
+memory_bytes_estimate = 5_897_450_784
 engine_args = ["--parallel", "1", "--n-gpu-layers", "all"]
 max_context = 131072
 
@@ -45,7 +47,7 @@ max_context = 131072
 # an allowance of 300 MB for the CUDA compute buffer (85 MiB on the CPU backend) and 400 MB
 # for the CUDA context, cuBLAS and the kernels of one architecture.
 [backends.cuda-linux.memory]
-weights_bytes = 4_610_580_064
+weights_bytes = 4_610_579_872
 overhead_bytes = 750_000_000
 kv_bytes_per_token = 32_768
 basis = "computed"
@@ -56,7 +58,7 @@ measured_at_context = 16384
 [backends.mlx-darwin]
 engine = "mlx-lm"
 hf_repo = "owenmorgan/qwen3.5-4b-bside"
-revision = "e9a563d216895b6c472e1ebd5d3a48541835d731"
+revision = "3e499e62b787565373b71aa6bee94ab5dfdaee6e"
 bits = 16
 serves = ["text"]
 memory_bytes_estimate = 11_017_420_134
