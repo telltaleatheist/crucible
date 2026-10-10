@@ -23,10 +23,6 @@ GIB = 1024**3
 
 YUE2_RESERVE_GIB = 2
 
-SCORE_TOKENS = 4096
-
-SONG_TOKENS = 9000
-
 TOKENS_PER_REPORT = 64
 
 SAMPLE_RATE = 48000
@@ -175,6 +171,30 @@ def hold_halves(pipe, torch) -> None:
     nar_module._offload_ar = swap
 
 
+def decode_facts(timing: dict, truncated: bool, cap: int, low_vram: bool) -> dict:
+    """What one autoregressive stage did, from yue2-infer's own account of it
+    (`yue2.sampling.generate_tokens`' timing and its `truncated`), so a finished job says
+    how each stage ended without anyone re-running the seed. A stage is one pass over one
+    prefix: YuE2 decodes neither the score nor the song tokens in segments.
+
+    `ended` is "eos" when the model wrote its end token and "cap" when the stage ran to
+    `cap` tokens without one - a runaway, the 6-minute song on Victoria's 3070
+    (2026-10-09). `tokens` counts every token the model wrote, the end token included."""
+    return {
+        "tokens": timing["output_tokens"],
+        "cap": cap,
+        "ended": "cap" if truncated else "eos",
+        "execution": timing["execution"],
+        "attention": timing["attention"],
+        "low_vram": low_vram,
+        "prefix_tokens": timing["prefix_tokens"],
+        "cfg_branches": timing["cfg_branches"],
+        "seconds": round(timing["seconds"], 2),
+        "prefill_seconds": round(timing["prefill_seconds"], 2),
+        "tokens_per_second": round(timing["output_tps"], 1),
+    }
+
+
 def _version_of(distribution: str):
     from importlib import metadata
 
@@ -188,6 +208,7 @@ class YuE2Engine:
     name = "yue2"
     spans = SPANS
     notes = None
+    decode_stages = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -288,8 +309,11 @@ class YuE2Engine:
 
     def _stages(self, job, progress, peaks):
         pipe = self._pipe
+        caps = pipe.generation_config
         stop = lambda: progress.asked_to_stop
-        progress.enter("scoring", SCORE_TOKENS)
+        self.notes = None
+        self.decode_stages = {}
+        progress.enter("scoring", caps.abc.max_tokens)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
         plan = pipe.plan(
             job.tags,
@@ -299,13 +323,20 @@ class YuE2Engine:
             cancelled=stop,
             on_token=lambda *_: ticks.tick(),
         )
-        self.notes = None
+        # The score YuE2 decoded. An instrumental then re-plans from a fixed score, which
+        # decodes nothing, so this is the scoring stage's one decode either way.
+        self.decode_stages["scoring"] = decode_facts(
+            plan.timing, plan.truncated, caps.abc.max_tokens, self.low_vram
+        )
         if job.instrumental:
             plan = self._instrumental_plan(job, plan)
         self._close_stage(peaks, "scoring")
-        progress.enter("composing", SONG_TOKENS)
+        progress.enter("composing", caps.semantic.max_tokens)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
         semantic = pipe.generate_semantic(plan, cancelled=stop, on_token=lambda *_: ticks.tick())
+        self.decode_stages["composing"] = decode_facts(
+            semantic.timing, semantic.truncated, caps.semantic.max_tokens, self.low_vram
+        )
         self._close_stage(peaks, "composing")
         progress.enter("synthesizing")
         latents = pipe.synthesize(semantic, cancelled=stop)

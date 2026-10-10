@@ -441,7 +441,7 @@ class AudioJobType(ResidentWorker):
         wrote_score = bool(result.get("score_path")) and score.is_file()
         if wrote_score:
             ctx.artifact(SCORE_ARTIFACT, score)
-        ctx.progress(1.0, f"{result.get('audio_seconds')} s of audio made", stage="done")
+        ctx.progress(1.0, made_words(result.get("audio_seconds"), result["decode_stages"]), stage="done")
         ctx.done_extra(
             audio=effective_params(params, needs, settled, result, output.name, wrote_score),
             resident=self._residency.resident_id,
@@ -450,6 +450,27 @@ class AudioJobType(ResidentWorker):
 
 def _require_block(manifest: AudioManifest, model_id: str, backend_kind: str) -> AudioBackendSpec:
     return worker_type.require_block(manifest, model_id, backend_kind, "audio model")
+
+
+def stages_at_cap(decode_stages: dict[str, Any] | None) -> list[str] | None:
+    """The stages that ran to their token cap without the model ending them, in order; []
+    when every stage ended itself, None for an engine that decodes no tokens. The job
+    still succeeds - the audio is real, only longer than the model meant (Victoria's
+    6-minute song, 2026-10-09) - and nothing re-runs it: this is how a client sees it."""
+    if decode_stages is None:
+        return None
+    return [stage for stage, facts in decode_stages.items() if facts["ended"] == "cap"]
+
+
+def made_words(audio_seconds: Any, decode_stages: dict[str, Any] | None) -> str:
+    words = f"{audio_seconds} s of audio made"
+    if decode_stages is None:
+        return words
+    capped = [stage for stage in decode_stages if decode_stages[stage]["ended"] == "cap"]
+    if not capped:
+        return words
+    reached = ", ".join(f"{stage} at its {decode_stages[stage]['cap']}-token cap" for stage in capped)
+    return f"{words}; {reached} without ending (see audio.decode_stages)"
 
 
 def generate_request(
@@ -518,6 +539,8 @@ def effective_params(
         "low_vram": needs.low_vram,
         "versions": result.get("versions"),
         "notes": result.get("notes"),
+        "decode_stages": result["decode_stages"],
+        "stages_at_cap": stages_at_cap(result["decode_stages"]),
     }
 
 

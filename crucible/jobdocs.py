@@ -522,6 +522,12 @@ JOB_DOCS: dict[str, JobDoc] = {
             "on the card at a time; Crucible turns it on by itself on a card too small "
             "to hold YuE2 whole (an 8 GiB card), and `audio.low_vram` in the `done` "
             "event says which ran (docs/AUDIO.md).",
+            "A song's `done` event says how each token stage ended: `audio.decode_stages` "
+            "gives `scoring` and `composing` their tokens, `cap`, `ended` (`eos`, or `cap` "
+            "when the model never ended the stage), execution path, `low_vram` and "
+            "tokens per second, and `audio.stages_at_cap` names the stages that ran to "
+            "their cap (`[]` when none; null for Stable Audio). A stage at its cap still "
+            "finishes the job and is never re-run (docs/AUDIO.md).",
             "The Stable Audio repos are gated: until the licence is accepted on "
             "Hugging Face and the server has a token, `409 model_gated` says what to "
             "do (docs/AUDIO.md).",

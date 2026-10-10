@@ -105,6 +105,24 @@ class FakeEngine:
         self.device = request["device"]
         self.versions = {"fake": "1.0", "engine": request["engine"]}
         self.notes = None
+        self.decode_stages = None
+
+    def _decode_stages(self, job) -> dict | None:
+        """A song's two token stages as yue2_worker.decode_facts words them; a stage named
+        in $CRUCIBLE_FAKE_AUDIO_CAPPED runs to its cap without an end token."""
+        if job.kind != "song":
+            return None
+        capped = set(filter(None, (os.environ.get("CRUCIBLE_FAKE_AUDIO_CAPPED") or "").split(",")))
+        stages = {}
+        for stage, cap, written in (("scoring", 4096, 1180), ("composing", 9000, 4321)):
+            tokens = cap if stage in capped else written
+            stages[stage] = {
+                "tokens": tokens, "cap": cap, "ended": "cap" if stage in capped else "eos",
+                "execution": "cuda_graph", "attention": "sdpa", "low_vram": False,
+                "prefix_tokens": 212, "cfg_branches": 1, "seconds": 10.0,
+                "prefill_seconds": 0.1, "tokens_per_second": round(tokens / 10.0, 1),
+            }
+        return stages
 
     def generate(self, job, progress):
         _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "kind": job.kind})
@@ -119,6 +137,7 @@ class FakeEngine:
         seconds = job.duration_s or 1.0
         frames = min(int(seconds * job.sample_rate), job.sample_rate // 10)
         score = FAKE_SCORE if job.kind == "song" else None
+        self.decode_stages = self._decode_stages(job)
         return TinyAudio(frames, job.sample_rate, job.channels), score, {"denoising": 7, "decoding": 9}
 
 

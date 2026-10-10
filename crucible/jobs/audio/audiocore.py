@@ -218,6 +218,10 @@ class Worker:
             # What the engine did to this one render beyond its parameters (YuE2's
             # instrumental voice transfer); None when nothing.
             "notes": self.engine.notes,
+            # Each token-decoding stage's own account - tokens, cap, how it ended, the
+            # path it ran on, its speed (yue2_worker.decode_facts); None for an engine
+            # that decodes no tokens.
+            "decode_stages": self.engine.decode_stages,
         }
 
     def generate(self, request: dict) -> None:

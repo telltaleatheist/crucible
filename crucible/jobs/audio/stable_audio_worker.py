@@ -63,6 +63,8 @@ def _version_of(distribution: str):
 class StableAudio3Engine:
     name = "stable-audio-3"
     notes = None
+    # A diffusion model: no stage decodes tokens, so none can run to a cap.
+    decode_stages = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:
