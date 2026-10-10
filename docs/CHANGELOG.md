@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- YuE2 under `[audio] low_vram` no longer runs out of memory synthesizing a long song (Victoria's 8 GiB laptop: a song composed to 8,960 tokens failed 4 s into `synthesizing` at the 6.8 GiB cap). yue2-infer synthesizes a song of up to about 10,000 frames as one chunk whose prefill runs the AR half over the whole prefix and every codec token and keeps each layer's keys and values for the solve (112 KiB a token, 1.44 GiB for that song); it ran with the whole AR half, embeddings and lm_head on the card (4.03 GiB), so the keys grew on top of them. The synthesis prefill now brings the AR half to the card one layer at a time and the solve holds the NAR half alone beside the keys, so the stage's weights on the card no longer depend on the song and synthesizing stays below the composing stage at any length; the arithmetic is unchanged (docs/internals/audio.md "Synthesizing under low_vram").
+
 ## 1.0.132 — 2026-10-10
 
 - Chat on llama-server on cuda-linux (`qwen3.5-4b-bside`): every JSON schema is now enforced by llguidance, the compiler vLLM and the Mac's mlx-lm use, so a schema means the same grammar on every engine, and `"json_whitespace": "compact"` is kept there (it was refused). Crucible's llama-server build is now `b10970-llg1.7.6-cuda13.0` (a new asset on the `tools` release; a host replaces its binary at its next `crucible install llm` or GGUF load): `LLAMA_LLGUIDANCE=ON` with llguidance 1.7.6 (the llm env's) in place of b10970's 1.0.1, and patched so a grammar llguidance will not compile is llama-server's own 400 instead of an answer sampled without it (`scripts/llama-server-linux.patch`). The door sends `response_format` (json_schema, json_object) and llama-server's `json_schema` field as the grammar `%llguidance {}

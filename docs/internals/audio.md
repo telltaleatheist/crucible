@@ -177,6 +177,50 @@ jobs. The manifest declares `host_memory_bytes_estimate` for the cuda arm and `c
 (`audio_host_memory`, crucible/hostmemory.py) names the model and both figures when this
 machine's MemTotal is below it.
 
+### Synthesizing under low_vram
+
+Victoria's 3070 laptop, 2026-10-10 (Crucible 1.0.130, low_vram, torch capped at 6.8 GiB): a
+song composed to 8,960 of its 9,000 tokens ran out of memory 4 s into `synthesizing`, asking
+for 158 MiB with 6.34 GiB allocated. Songs of 5-6k tokens peaked at 6.1-6.5 GB there and
+finished, so the stage's peak grew with the song.
+
+What yue2-infer's synthesis does (`yue2/nar.py` at the pinned commit): it cuts the song into
+chunks of `(24576 - prefix - 3) // 2` frames (`protocol.chunk_ranges`), about 10,000 after a
+4,500-token prefix, so a song of up to 9,000 frames is one chunk. Each chunk's `CachedNAR`
+first runs the AR half over the prefix, every codec token and MUSIC_END (13,483 tokens for
+that song) and keeps every layer's keys and values for the solve: 28 layers x 8 KV heads x 128
+x 2 (K and V) x 2 bytes = 112 KiB a token, 1.44 GiB there. Then the 32-step midpoint solve
+runs the NAR half over the chunk's frames, attending to those keys. Attention never forms a
+square mask on CUDA (fused SDPA), so nothing grows with the square of the length.
+
+The prefill ran with the whole AR half, embeddings and lm_head on the card (4.03 GiB of
+bfloat16; lm_head is never used there), because the worker's `load(for_nar=True)` laid out the
+card as for composing and its swap moved AR out only around the solve. The keys grew on top
+of it, layer by layer, with the full-length MLP's activations (three [13,483 x 6,144] bfloat16
+tensors, 158 MiB each: the allocation that failed) on top of that. By the code, nothing of composing's is
+left: its GraphAR keys, values and graph are released in `generate_tokens`' `finally`.
+
+`own_residency` now lays the stage out by what it uses. `load(for_nar=True)` sends both halves
+home and keeps only the adapters and the final norm on the card; the synthesis prefill
+(`CachedNAR._prefill`, wrapped by `ar_one_layer_at_a_time`) brings the embeddings and then
+each AR layer to the card when its first module is called, sending the previous one home
+first, so one layer's 0.1 GB of AR weights sits beside the growing keys; the swap brings the
+NAR half (2.63 GiB) for the solve and sends it home after, leaving AR home (the next chunk's
+prefill streams it, every later stage places it through `load`). The arithmetic and its order
+are yue2-infer's own; only where the weights wait between uses changed. A prefill that does
+not walk embeddings then layers 0-27 once each is refused by name.
+
+What still grows with the song is the keys and values the solve attends to, 112 KiB a token,
+which the model's attention needs. The composing stage allocates the same keys for its whole
+budget (prefix + 9,000 tokens) before it writes one, with the 4.03 GiB AR half beside them, so
+synthesizing (2.63 GiB of NAR beside the keys of at most prefix + 9,001 tokens) stays below
+composing at every length a song can come out. `tests/test_yue2_synth_vram.py` pins the
+layout with stand-ins of the real part sizes and yue2-infer's loop.
+
+The workers already run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+(`workers.torch_allocator_environment`), so the 364 MB reserved-but-unallocated in the
+incident was not the cause.
+
 ## What the first runs through Crucible must measure
 
 After deployment, one job per arm through Crucible (never a bare script) settles:
