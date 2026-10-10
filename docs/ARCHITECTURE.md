@@ -306,6 +306,25 @@ inside a session with no priority of their own: a stream opened by a client with
 opens one for itself. App guidance: docs/QUEUE.md; how it is built:
 docs/internals/queue-sessions.md.
 
+**A model keeps its calls together, 2026-10-10.** Owen, after a CLI `load-model` sent in
+the middle of B-Sides' YuE2 songs on Victoria's laptop queued between two of them: *"keep
+yue's calls together"*. It is a manifest fact, not a YuE2 rule: `keep_calls_together =
+true` in a manifest's `[model]` (audio manifests parse it today, `yue2-3b` sets it), carried
+on the resident as `keeps_calls_together`. The owner is the line's order
+(`crucible/keeptogether.py`, applied in `WaitingLine.ordered`), so the pump, positions,
+`GET /v1/queue` and the settlement all read one answer: while such a model is resident,
+the queued calls that run on it go ahead of the first queued item that would take it off
+the card, and the settlement counts the ones that run next as holding it. The bound is a
+**turn**: the first time the lane is free when that item would be next, the calls on the
+model then waiting are fixed (`Waiting.kept`) and only they go ahead; later ones wait
+behind it. So it is never starved by a stream of new calls, and priority (the open
+session first), cancel, removal and `max_wait_s` are unchanged. The item kept waiting
+says why: `waiting_for` / a `waiting` event with code `keeping_calls_together`.
+Considered and not done: keeping calls together for every model (an LLM's or a voice's
+reload is seconds, and the card was deliberately cleared as soon as nothing holds it), and
+a time or count budget (the turn already bounds the wait by what was queued, and a budget
+would split a batch at an arbitrary song).
+
 ---
 
 ## 4. Where each thing lives

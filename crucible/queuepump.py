@@ -17,6 +17,10 @@ not resident is loaded for it when the lane is free. A queued job that would cha
 what is on the card waits while any chat is in flight, so the pump never takes a model
 out from under a completion it let in.
 
+While a resident model that keeps its calls together has queued calls, they go ahead of
+what would take it off the card; the item they go ahead of takes its turn, fixing which
+of them do, the first time the lane is free when it would be next (crucible/keeptogether.py).
+
 A queue session (crucible/queuesessions.py) at the front is opened (crucible/sessionqueue.py).
 While a session is open, only its own items are offered anything: nothing from anyone
 else runs until it closes.
@@ -146,6 +150,8 @@ class QueuePump:
         if len(line) == 0:
             return
         ctx = self._admission()
+        if ctx.store.lane_free and line.take_kept_turn():
+            line.reorder()
         held = line.sessions.current()
         for waiting in line.ordered():
             if held is not None and waiting.session != held.id:

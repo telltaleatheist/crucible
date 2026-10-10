@@ -67,6 +67,9 @@ _MODEL_REQUIRED: dict[str, type] = {
     "licence_url": str,
     "commercial_use": str,
 }
+_MODEL_OPTIONAL: dict[str, type] = {
+    "keep_calls_together": bool,
+}
 _BACKEND_REQUIRED: dict[str, Any] = {
     "engine": str,
     "hf_repo": str,
@@ -248,6 +251,9 @@ class AudioManifest:
     commercial_use: str
     backends: dict[str, AudioBackendSpec]
     path: Path
+    # A model slow enough to load that its queued calls run back to back before anything
+    # that would take it off the card (crucible/keeptogether.py, docs/QUEUE.md).
+    keep_calls_together: bool = False
 
     @property
     def pull_command(self) -> str:
@@ -323,7 +329,10 @@ def _check_document(document: dict[str, Any], path: Path) -> None:
 
 
 def _parse_model(model: dict[str, Any], path: Path, expected_id: str) -> str:
-    check_table(f"{path.name} [model]", model, _MODEL_REQUIRED, error=AudioManifestError)
+    check_table(
+        f"{path.name} [model]", model, _MODEL_REQUIRED, _MODEL_OPTIONAL,
+        error=AudioManifestError,
+    )
     model_id = model["id"]
     if not MODEL_ID_PATTERN.match(model_id):
         raise AudioManifestError(
@@ -543,6 +552,7 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AudioManif
         commercial_use=model["commercial_use"],
         backends=backends,
         path=path,
+        keep_calls_together=model.get("keep_calls_together", False),
     )
 
 

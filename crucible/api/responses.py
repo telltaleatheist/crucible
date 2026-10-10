@@ -133,17 +133,21 @@ class JobStatus(_Open):
 
 
 class QueueWaitingFor(_Open):
-    """Why an item at the front is not offered the lane yet although it is free: memory
-    on the accelerator is held by a process this Crucible does not own. `message` is the
-    guard's sentence naming the holder (pid, name and bytes, or the unattributed bytes);
-    the item is checked again at `next_check_at` and leaves the line `expired` when its
+    """Why an item waits beyond its turn. `accelerator_busy`: it is at the front and the
+    lane is free, but memory on the accelerator is held by a process this Crucible does
+    not own; `message` is the guard's sentence naming the holder (pid, name and bytes, or
+    the unattributed bytes), and the item is checked again at `next_check_at`.
+    `keeping_calls_together`: it would take a resident model that keeps its calls
+    together off the card, so that model's queued calls run first; `details` names the
+    `model`, how many go `ahead` (`ahead_ids`) and whether its `turn_taken` already fixed
+    them, and `next_check_at` is null. Either way it leaves the line `expired` when its
     `max_wait_s` runs out."""
 
-    code: Literal["accelerator_busy"]
+    code: Literal["accelerator_busy", "keeping_calls_together"]
     message: str
     details: dict[str, Any] | None
     since: str
-    next_check_at: str
+    next_check_at: str | None
 
 
 class QueueItem(_Open):

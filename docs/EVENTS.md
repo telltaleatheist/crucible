@@ -89,7 +89,7 @@ queued chat or decision) or `"session"` (an app's session waiting for its turn).
 | --- | --- |
 | `queue.added` | `position`, `type`, `model`, `client`, `submitted`, `max_wait_s`. |
 | `queue.moved` | `position`. |
-| `queue.waiting` | `code` (`accelerator_busy`) and `message`: the item is at the front, but the card is held by a process Crucible does not own, so it waits for the card (docs/QUEUE.md). Said when that starts, whenever who holds the card changes, and every 60 s while it does not; `waiting_for` on its row in the snapshot says the same. |
+| `queue.waiting` | `code` and `message`: `accelerator_busy`, the item is at the front, but the card is held by a process Crucible does not own, so it waits for the card; or `keeping_calls_together`, the item would take a resident model that keeps its calls together off the card, so that model's queued calls run first (docs/QUEUE.md). Said when that starts, whenever who holds the card (or which calls go ahead) changes, and every 60 s while it does not; `waiting_for` on its row in the snapshot says the same. |
 | `queue.started` | `waited_s`: it left the line for the lane or for a chat slot. |
 | `queue.removed` | `reason` and `message`; a job refused at the front has `reason: "refused"` and `error` instead of `message`. |
 

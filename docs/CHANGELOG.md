@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A model whose manifest says `keep_calls_together = true` (now `yue2-3b`) keeps its queued calls together: while it is resident, its queued songs run back to back ahead of a queued job that would take it off the card (a CLI `load-model` sent mid-batch on Victoria's laptop), and the card is not unloaded between them. The job kept waiting says why (`waiting_for` / a `waiting` event with code `keeping_calls_together`, "waiting: yue2-3b has N queued call(s) ahead …"), and waits only for the calls queued when it would have run, never for later ones (docs/QUEUE.md, "A model that keeps its calls together").
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.

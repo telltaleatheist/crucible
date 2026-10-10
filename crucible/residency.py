@@ -106,6 +106,7 @@ class ResidentModel:
     loaded_at: str
     engine_args: tuple[str, ...]
     defaults: ModelDefaults = NO_DEFAULTS
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -146,6 +147,7 @@ class ResidentVoice:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
     reference: dict[str, Any] | None = None
     # The config's [tts.<engine>] numbers this voice's engine was started with
     # (memory_bytes_estimate, max_num_seqs, mem_fraction, context_length): Settings
@@ -186,6 +188,7 @@ class ResidentAligner:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -220,6 +223,7 @@ class ResidentSeparator:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -255,6 +259,7 @@ class ResidentImage:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -291,6 +296,7 @@ class ResidentAudio:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -327,6 +333,7 @@ class ResidentSegmenter:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -364,6 +371,7 @@ class ResidentVideo:
     memory_bytes_estimate: int
     log_path: Path
     loaded_at: str
+    keeps_calls_together: bool = False
 
     @property
     def id(self) -> str:
@@ -385,6 +393,10 @@ class ResidentVideo:
         }
 
 
+# Every resident carries `keeps_calls_together`: what its manifest declared
+# (`keep_calls_together` in [model]; only audio manifests declare it so far). The queue
+# reads it to run the queued calls on it back to back before anything that would take it
+# off the card (crucible/keeptogether.py).
 Resident = (
     ResidentModel
     | ResidentVoice

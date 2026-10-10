@@ -328,7 +328,9 @@ class QueueSessions:
 
     def waiting(self, session: QueueSession, data: dict[str, Any]) -> None:
         """A queued session at the front waits for the accelerator (its model's load
-        met ``accelerator_busy``); said whenever who holds the card changes."""
+        met ``accelerator_busy``); said whenever who holds the card changes. Also a
+        queued session that would load its model over a resident that keeps its calls
+        together, waiting behind that model's queued calls (crucible/keeptogether.py)."""
         self._say(session, "waiting", data)
 
     def opened(self, session: QueueSession) -> None:
