@@ -475,7 +475,7 @@ def _stranded_subject(
     config: Config, backend: Backend, subject_id: str
 ) -> Subject | None:
     # Weights this build declares nothing for on this backend: a model retired from
-    # the catalog (qwen3.5-4b-bside-4bit, 1.0.123) leaves its folder in the store,
+    # the catalog (qwen3.5-4b-bside-4bit, 1.0.124) leaves its folder in the store,
     # and the store, not the catalog, is what says it is there. It is removable and
     # nothing else: there is no manifest to pull it again or to load it from.
     for entry in _stranded(config):
