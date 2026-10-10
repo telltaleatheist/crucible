@@ -206,10 +206,37 @@ def test_cc_is_set_only_for_an_env_with_triton_on_a_pinned_host(
     assert hosttools.compiler_environment(llm, tmp_path) == {}, "mlx-darwin / Windows"
 
 
+def _unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fetch(url: str, destination: Path) -> str:
+        raise hosttools.HostToolError("tool_fetch_failed", f"{url} could not be reached")
+
+    monkeypatch.setattr(hosttools, "_download", fetch)
+
+
+def test_a_host_updated_without_an_install_places_the_compiler_on_first_need(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deploy runs no `crucible install`: the first engine or worker that needs the
+    compiler places it, once."""
+    archive = _archive(ROOT)
+    build = _pinned(monkeypatch, archive)
+    calls: list[str] = []
+    monkeypatch.setattr(hosttools, "_download", _fetch_from(archive, calls))
+    llm = _env_with_triton(tmp_path, "llm")
+    assert hosttools.compiler_environment(llm, tmp_path) == {
+        "CC": str(tmp_path / "tools" / "bin" / "cc")
+    }
+    assert hosttools.zig_placed(tmp_path, build)
+    hosttools.compiler_environment(llm, tmp_path)
+    assert len(calls) == 1, "placed once, then found"
+
+
 def test_an_env_with_triton_and_no_compiler_is_refused_with_its_install_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Only a placement that fails is refused."""
     _pinned(monkeypatch, _archive(ROOT))
+    _unreachable(monkeypatch)
     llm = _env_with_triton(tmp_path, "llm")
     with pytest.raises(hosttools.HostToolError) as refused:
         hosttools.compiler_environment(llm, tmp_path)
@@ -232,6 +259,7 @@ def test_an_engine_is_refused_before_it_launches(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _pinned(monkeypatch, _archive(ROOT))
+    _unreachable(monkeypatch)
     env = _env_with_triton(home, "llm")
     weights = home / "weights"
     weights.mkdir()

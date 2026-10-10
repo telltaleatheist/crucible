@@ -564,12 +564,19 @@ def compiler_environment(env_dir: Path, home: Path | None = None) -> dict[str, s
 
         home = crucible_home()
     if not zig_placed(home, build):
-        raise HostToolError(
-            "c_compiler_missing",
-            f"{env_dir} runs Triton, which compiles a C launcher the first time a "
-            f"kernel runs, and Crucible's C compiler (zig {build.version} cc) is not "
-            f"at {c_compiler_path(home)}. {_install_sentence(home, env_dir)}",
-        )
+        # A host updated by a deploy runs no `crucible install`, so the first process
+        # that needs the compiler places it (57 MB, once), as install-on-submit places a
+        # missing model. Only a placement that fails is refused, by name.
+        try:
+            ensure_zig(home)
+        except HostToolError as exc:
+            raise HostToolError(
+                "c_compiler_missing",
+                f"{env_dir} runs Triton, which compiles a C launcher the first time a "
+                f"kernel runs, and Crucible's C compiler (zig {build.version} cc) could "
+                f"not be placed at {c_compiler_path(home)}: {exc.message}. "
+                f"{_install_sentence(home, env_dir)}",
+            ) from exc
     return {C_COMPILER_ENV: str(c_compiler_path(home))}
 
 
