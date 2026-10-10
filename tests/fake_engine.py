@@ -18,6 +18,28 @@ DELTAS = ["Crucible ", "is ", "a ", "server."]
 
 ProbsFor = Callable[[list[dict[str, Any]]], dict[str, float]]
 
+GENERATION_PROMPT = "<a>"
+
+
+def fake_prompt_ids(body: dict[str, Any]) -> list[int]:
+    """vLLM's chat template, faked: the turns rendered, then the opened reply
+    (`<a>`), then the open assistant message's text under
+    `continue_final_message`. One token per character."""
+    messages = list(body.get("messages") or [])
+    reply = ""
+    if body.get("continue_final_message"):
+        assert messages[-1]["role"] == "assistant"
+        reply = messages.pop()["content"]
+    else:
+        assert body.get("add_generation_prompt", True)
+    return [ord(ch) for ch in _rendered(messages) + GENERATION_PROMPT + reply]
+
+
+def fake_token_logprob(prefix: list[int], token: int) -> float:
+    """What the fake model says ln P(token | prefix) is: a number that moves
+    with every earlier token, so a read off by one position is caught."""
+    return -((sum(prefix) + 3 * token) % 50) / 10.0 - 0.01
+
 FAKE_MAX_LOGPROBS = 20
 
 FAKE_KV_BLOCK = 16
@@ -58,6 +80,8 @@ class _Handler(BaseHTTPRequestHandler):
     events: list[tuple[str, int]] | None = None
     in_flight: list[int] | None = None
     max_in_flight: list[int] | None = None
+    scores_prompts: bool = False
+    tokenized: list[dict[str, Any]] | None = None
 
     def log_message(self, *args: Any) -> None:
         return
@@ -92,6 +116,14 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self) -> None:
+        if self.path == "/tokenize" and type(self).scores_prompts:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            with type(self).lock:
+                type(self).tokenized.append(body)
+            ids = fake_prompt_ids(body)
+            self._json(200, {"count": len(ids), "max_model_len": 8192, "tokens": ids})
+            return
         if self.path != "/v1/chat/completions":
             self._json(404, {"error": "not found"})
             return
@@ -203,6 +235,10 @@ class _Handler(BaseHTTPRequestHandler):
         if delay > 0.0 and self._wait_out_the_answer(delay):
             return
 
+        if type(self).scores_prompts and "prompt_logprobs" in body:
+            self._json(200, self._prompt_logprobs_reply(body))
+            return
+
         if type(self).probs_for is not None:
             self._json(200, self._decision_reply(body, wants_logprobs))
             return
@@ -291,6 +327,27 @@ class _Handler(BaseHTTPRequestHandler):
                     {"cached_tokens": cached} if type(self).report_cached else None
                 ),
             },
+        }
+
+    def _prompt_logprobs_reply(self, body: dict[str, Any]) -> dict[str, Any]:
+        ids = fake_prompt_ids(body)
+        entries: list[Any] = [None]
+        for position in range(1, len(ids)):
+            token = ids[position]
+            entries.append({str(token): {
+                "logprob": fake_token_logprob(ids[:position], token),
+                "rank": 1, "decoded_token": chr(token),
+            }})
+        return {
+            "id": "chatcmpl-fake", "object": "chat.completion", "created": 0,
+            "model": type(self).served_name,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "x"},
+                         "finish_reason": "length"}],
+            "usage": {"prompt_tokens": len(ids), "completion_tokens": 1,
+                      "total_tokens": len(ids) + 1,
+                      "prompt_tokens_details": {"cached_tokens": 0}},
+            "prompt_logprobs": entries,
+            "prompt_token_ids": ids,
         }
 
     def _wait_out_the_answer(self, delay: float) -> bool:
@@ -391,6 +448,7 @@ class FakeEngine:
         max_logprobs: int = FAKE_MAX_LOGPROBS,
         report_cached: bool = True,
         prefix_cache: PrefixCache = "blocks",
+        scores_prompts: bool = False,
     ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
@@ -412,6 +470,7 @@ class FakeEngine:
         self._max_logprobs = max_logprobs
         self._report_cached = report_cached
         self._prefix_cache = prefix_cache
+        self._scores_prompts = scores_prompts
         self.warming_started = threading.Event()
         self.stopped = False
         self.exited_with: int | None = None
@@ -468,6 +527,8 @@ class FakeEngine:
                 "events": [],
                 "in_flight": [0],
                 "max_in_flight": [0],
+                "scores_prompts": self._scores_prompts,
+                "tokenized": [],
             },
         )
         self._handler = handler
@@ -548,6 +609,13 @@ class FakeEngine:
         if handler is None:
             raise RuntimeError("fake engine has not been started")
         return handler.aborts[0]
+
+    @property
+    def tokenized(self) -> list[dict[str, Any]]:
+        handler = getattr(self, "_handler", None)
+        if handler is None:
+            raise RuntimeError("fake engine has not been started")
+        return handler.tokenized
 
     @property
     def max_in_flight(self) -> int:

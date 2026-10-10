@@ -11,12 +11,17 @@ from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
 
 from ... import decide as decide_core
-from ... import decide_items, enginespec, upstreamrecord
+from ... import decide_items, decide_likelihood, enginespec, upstreamrecord
 from ...callqueue import take_a_turn
 from ...capabilityclasses import BY_NAME
 from ...config import Config
 from ...decide import DecideItemsResponse, DecideRequest, DecideResponse
-from ...engines import chat_admission, decide_items_reading, decide_reading
+from ...engines import (
+    chat_admission,
+    decide_items_reading,
+    decide_reading,
+    likelihood_reading,
+)
 from ...engines.items_forward import ITEMS_PATH
 from ...errors import ApiError
 from ...inflight import read_act
@@ -61,6 +66,20 @@ def _items_route_missing(resident: Any) -> ApiError:
     )
 
 
+def _items_route_older(resident: Any, payload: Any) -> ApiError | None:
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict) or error.get("code") != "unknown_field":
+        return None
+    load = json.dumps({"type": "load-model", "model": resident.model_id})
+    return decide_core.decide_not_served(
+        resident,
+        f"the engine process's {ITEMS_PATH} is older than this server's and refused a "
+        f"field it does not read ({error.get('message')}). Load the model again (POST "
+        f"/v1/jobs {load}); the load applies the current route",
+        {"form": "items"},
+    )
+
+
 def _refused(resident: Any, path: str, response: httpx.Response) -> ApiError:
     if path == ITEMS_PATH and response.status_code == 404:
         return _items_route_missing(resident)
@@ -68,6 +87,10 @@ def _refused(resident: Any, path: str, response: httpx.Response) -> ApiError:
         payload = response.json()
     except ValueError:
         payload = None
+    if path == ITEMS_PATH and response.status_code == 400:
+        older = _items_route_older(resident, payload)
+        if older is not None:
+            return older
     named = decide_items.engine_refusal(response.status_code, payload)
     return named if named is not None else _decide_engine_refused(resident, response)
 
@@ -197,8 +220,58 @@ def _refuse_a_malformed_decision(
     if body.items is not None:
         decide_items.check_item_count(body.items)
         decide_items.item_plans(body)
-    else:
-        decide_core.plan_all(body)
+        return
+    plans = decide_core.plan_all(body)
+    if not decide_core.likelihood_plans(plans):
+        return
+    try:
+        engine = load_manifest(model).spec(backend_kind).engine
+    except Exception:
+        return
+    decide_likelihood.refuse_unscorable(
+        model, engine, likelihood_reading(engine), n_images
+    )
+
+
+def _with_likelihood(
+    client: httpx.AsyncClient,
+    resident: Any,
+    body: DecideRequest,
+    plans: list[decide_core.Plan],
+    route: str | None,
+    *,
+    questions_on_items: bool,
+    max_logprobs: int | None,
+    concurrency: int,
+) -> Any:
+    """A questions-form decision with likelihood questions in it: the label
+    questions by the path they always take, the likelihood questions by the
+    engine's route, merged in the request's order."""
+    call = _engine_call(client, resident)
+    labels = decide_core.label_plans(plans)
+    scored = decide_core.likelihood_plans(plans)
+
+    def labelled() -> Any:
+        if questions_on_items:
+            return decide_items.decide_questions_on_items(
+                call, resident, body, labels, max_logprobs=max_logprobs,
+            )
+        return decide_core.decide_on_engine(
+            _engine_post(client, resident), resident, body, labels,
+            max_logprobs=max_logprobs, concurrency=concurrency,
+        )
+
+    def likely() -> Any:
+        if route == "items":
+            return decide_likelihood.score_on_items(call, resident, body, scored)
+        assert route == "prompt-logprobs", route
+        return decide_likelihood.score_on_prompt_logprobs(
+            call, resident, body, scored, concurrency=concurrency
+        )
+
+    return decide_likelihood.decide_with_likelihood(
+        plans, labelled if labels else None, likely, resident, len(body.images or [])
+    )
 
 
 def _log_timing(
@@ -287,6 +360,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     plans = decide_core.plan_all(body)
                 reading = decide_reading(resident.engine)
                 decide_core.refuse_unreadable_labels(resident, reading, plans)
+                scored_plans = (
+                    [] if body.items is not None else decide_core.likelihood_plans(plans)
+                )
+                if scored_plans:
+                    scoring = likelihood_reading(resident.engine)
+                    decide_likelihood.refuse_unscorable(
+                        resident.model_id, resident.engine, scoring, n_images
+                    )
 
                 limit, limit_basis = chat_admission(
                     resident.engine, resident.engine_args
@@ -307,6 +388,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
                         _engine_post(ctx.http, resident),
                         resident, body, plans,
                         batched=items_reading.batched,
+                        max_logprobs=reading.max_logprobs, concurrency=concurrency,
+                    )
+                elif scored_plans:
+                    work = _with_likelihood(
+                        ctx.http, resident, body, plans, scoring.route,
+                        questions_on_items=items_reading.questions,
                         max_logprobs=reading.max_logprobs, concurrency=concurrency,
                     )
                 elif items_reading.questions:

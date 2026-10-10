@@ -389,8 +389,11 @@ test('report mode reads missingLabels on every answer and null for exactly the m
     labelMass: 0.5,
     missingLabels: ['Very angry'],
   });
-  assert.deepEqual(result.answers['team']?.missingLabels, []);
-  assert.deepEqual(result.answers['urgent']?.missingLabels, []);
+  const team = result.answers['team'];
+  const urgent = result.answers['urgent'];
+  assert.ok(team?.type === 'choice' && urgent?.type === 'yesno');
+  assert.deepEqual(team.missingLabels, []);
+  assert.deepEqual(urgent.missingLabels, []);
 });
 
 test('refuse mode reads no missingLabels key at all', async () => {
@@ -465,4 +468,106 @@ test('a missing mode other than the two words is refused before any request', as
     (error: unknown) => error instanceof CrucibleConfigError && error.option === 'missing',
   );
   assert.equal(requests, before, 'nothing reached the server');
+});
+
+// --- likelihood questions ------------------------------------------------------------
+
+const LIKELY: DecideRequest = {
+  model: 'qwen3.5-9b',
+  state: 'First. They agreed to co-operate.',
+  questions: {
+    spelling: {
+      type: 'likelihood',
+      instructions: 'Write out the second sentence, spelled as it should be.',
+      candidates: { plain: 'They agreed to cooperate.', hyphen: 'They agreed to co-operate.' },
+    },
+    title: {
+      type: 'likelihood',
+      instructions: 'Name the chapter.',
+      candidates: { long: 'The Long Road', short: 'Road' },
+      rankBy: 'mean',
+    },
+  },
+};
+
+function likelyReply(): Record<string, any> {
+  const score = (logprob: number, tokens: number, probability: number) => ({
+    logprob, tokens, mean_logprob: logprob / tokens, probability,
+  });
+  return {
+    model: { id: 'qwen3.5-9b', revision: REVISION, fingerprint: `qwen3.5-9b@${REVISION}` },
+    engine: 'vllm',
+    answers: {
+      spelling: {
+        type: 'likelihood', winner: 'plain', rank_by: 'total',
+        candidates: { plain: score(-3.0, 6, 0.88), hyphen: score(-5.0, 8, 0.12) },
+        context_tokens: 61, boundary_tokens: 0,
+      },
+      title: {
+        type: 'likelihood', winner: 'long', rank_by: 'mean',
+        candidates: { long: score(-3.0, 3, 0.27), short: score(-2.0, 1, 0.73) },
+        context_tokens: 55, boundary_tokens: 1,
+      },
+    },
+    timing_ms: {
+      total: 40.0,
+      per_question: {
+        spelling: { wall_ms: 20.0, prompt_tokens: 135, cached_tokens: 0 },
+        title: { wall_ms: 18.0, prompt_tokens: 114, cached_tokens: 0 },
+      },
+      prime: null,
+    },
+    tokens: { per_question: { spelling: 135, title: 114 }, images: 0 },
+  };
+}
+
+test('a likelihood question travels with rank_by in the server\'s spelling, only when given', async () => {
+  handle = (_request, response) => json(response, 200, likelyReply());
+  await client().decide(LIKELY);
+  const body = JSON.parse(lastBody);
+  assert.deepEqual(body.questions.spelling, {
+    type: 'likelihood',
+    instructions: 'Write out the second sentence, spelled as it should be.',
+    candidates: { plain: 'They agreed to cooperate.', hyphen: 'They agreed to co-operate.' },
+  });
+  assert.equal(body.questions.title.rank_by, 'mean');
+  assert.equal('rankBy' in body.questions.title, false);
+});
+
+test('a likelihood answer reads every candidate, the winner and the boundary', async () => {
+  handle = (_request, response) => json(response, 200, likelyReply());
+  const result = await client().decide(LIKELY);
+  assert.deepEqual(result.answers['title'], {
+    type: 'likelihood',
+    winner: 'long',
+    rankBy: 'mean',
+    candidates: {
+      long: { logprob: -3.0, tokens: 3, meanLogprob: -1.0, probability: 0.27 },
+      short: { logprob: -2.0, tokens: 1, meanLogprob: -2.0, probability: 0.73 },
+    },
+    contextTokens: 55,
+    boundaryTokens: 1,
+  });
+});
+
+test('a likelihood answer naming a candidate nobody offered, or another ranking, is a protocol error', async () => {
+  const stranger = likelyReply();
+  stranger.answers.spelling.winner = 'colon';
+  handle = (_request, response) => json(response, 200, stranger);
+  await assert.rejects(client().decide(LIKELY), CrucibleProtocolError);
+  const ranked = likelyReply();
+  ranked.answers.title.rank_by = 'total';
+  handle = (_request, response) => json(response, 200, ranked);
+  await assert.rejects(client().decide(LIKELY), CrucibleProtocolError);
+});
+
+test('a likelihood question with a bad rankBy or one candidate is refused before any request', async () => {
+  const before = requests;
+  const bad = (question: unknown) => client().decide({ state: 's', questions: { q: question as any } });
+  await assert.rejects(
+    bad({ type: 'likelihood', instructions: 'x', candidates: { a: 'a', b: 'b' }, rankBy: 'median' }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(bad({ type: 'likelihood', instructions: 'x', candidates: { a: 'a' } }), CrucibleConfigError);
+  assert.equal(requests, before);
 });

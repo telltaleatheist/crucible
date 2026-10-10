@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 2
+ITEMS_VERSION = 3
 
 ITEMS_PATH = "/v1/crucible/items"
 
@@ -41,11 +41,38 @@ ITEMS_FIELDS = frozenset(
     }
 )
 
+LIKELIHOOD_FIELDS = frozenset(
+    {
+        "model",
+        "messages",
+        "candidates",
+        "chat_template_kwargs",
+        "max_prompt_tokens",
+        "max_item_tokens",
+        "max_candidate_tokens",
+    }
+)
+
+SCORE_CHUNK = 64
+"""Positions one head application reads when a candidate's tokens are scored:
+64 rows of float32 logits over a 248k vocabulary is ~63 MB."""
+
 TEMPLATE_KWARGS = frozenset({"enable_thinking"})
 
 ITEM_TOO_LONG = "item_too_long"
 
 PROMPT_TOO_LONG = "item_prompt_too_long"
+
+CANDIDATE_TOO_LONG = "candidate_too_long"
+
+CANDIDATE_NOT_A_REPLY = "candidate_not_a_reply"
+
+BOUNDARY_SLACK = 1
+"""Context tokens a candidate may re-tokenize. Its first characters can merge
+with the end of the open assistant turn into one token, and that end is one
+pre-token (the blank line after Qwen's empty think block), so at most its last token
+is read again with the candidate. More than that means the chat template did
+not render the candidate as the continuation of the reply it opens."""
 
 
 class ItemsRefusal(Exception):
@@ -159,6 +186,81 @@ def parse_items(body: Any, served: Sequence[str]) -> ItemsAsk:
     )
 
 
+@dataclass(frozen=True)
+class CandidateGroup:
+    question: str
+    texts: list[str]
+
+
+@dataclass(frozen=True)
+class LikelihoodAsk:
+    model: str
+    messages: list[dict[str, Any]]
+    groups: list[CandidateGroup]
+    template_kwargs: dict[str, Any]
+    max_prompt_tokens: int
+    max_item_tokens: int
+    max_candidate_tokens: int
+
+
+def _groups(body: dict[str, Any]) -> list[CandidateGroup]:
+    groups = body.get("candidates")
+    shape = (
+        "candidates must be a non-empty list of {question, texts}: a non-empty question "
+        "and at least one non-empty candidate text"
+    )
+    if not isinstance(groups, list) or not groups:
+        raise ItemsRefusal(400, "bad_candidates", shape)
+    read: list[CandidateGroup] = []
+    for group in groups:
+        if not isinstance(group, dict) or set(group) != {"question", "texts"}:
+            raise ItemsRefusal(400, "bad_candidates", shape)
+        question, texts = group["question"], group["texts"]
+        if (
+            not isinstance(question, str)
+            or not question
+            or not isinstance(texts, list)
+            or not texts
+            or not all(isinstance(text, str) and text for text in texts)
+        ):
+            raise ItemsRefusal(400, "bad_candidates", shape)
+        read.append(CandidateGroup(question=question, texts=list(texts)))
+    return read
+
+
+def parse_likelihood(body: dict[str, Any], served: Sequence[str]) -> LikelihoodAsk:
+    unknown = sorted(set(body) - LIKELIHOOD_FIELDS)
+    if unknown:
+        raise ItemsRefusal(
+            400,
+            "unknown_field",
+            f"a likelihood request does not carry {unknown}; it reads "
+            f"{sorted(LIKELIHOOD_FIELDS)}",
+        )
+    if body.get("model") not in served:
+        raise ItemsRefusal(
+            404, "model_not_found", f"{body.get('model')!r} is not loaded; {served[0]!r} is"
+        )
+    return LikelihoodAsk(
+        model=body["model"],
+        messages=_messages(body),
+        groups=_groups(body),
+        template_kwargs=_template_kwargs(body),
+        max_prompt_tokens=_positive_int(body, "max_prompt_tokens"),
+        max_item_tokens=_positive_int(body, "max_item_tokens"),
+        max_candidate_tokens=_positive_int(body, "max_candidate_tokens"),
+    )
+
+
+def parse_request(body: Any, served: Sequence[str]) -> ItemsAsk | LikelihoodAsk:
+    """The items route reads two asks: questions, whose answer is the top tokens
+    at each prompt's end, and candidates, whose answer is the log-probability of
+    every token of each candidate reply."""
+    if isinstance(body, dict) and "candidates" in body:
+        return parse_likelihood(body, served)
+    return parse_items(body, served)
+
+
 def item_messages(messages: list[dict[str, Any]], question: str) -> list[dict[str, Any]]:
     last = messages[-1]
     content = last["content"]
@@ -167,6 +269,237 @@ def item_messages(messages: list[dict[str, Any]], question: str) -> list[dict[st
     else:
         filled = question
     return [*messages[:-1], {**last, "content": filled}]
+
+
+def reply_messages(
+    messages: list[dict[str, Any]], question: str, reply: str
+) -> list[dict[str, Any]]:
+    """The question's turns with the candidate as the open assistant reply: the
+    chat template renders it with `continue_final_message`, so the prompt ends
+    on the candidate's last character."""
+    return [*item_messages(messages, question), {"role": "assistant", "content": reply}]
+
+
+@dataclass(frozen=True)
+class Scored:
+    group: int
+    start: int
+    """Where in the row's suffix the hidden state that predicts the first
+    scored token is: the token before the boundary."""
+    targets: list[int]
+    """The candidate's tokens, from the boundary to the end of its prompt."""
+
+
+@dataclass(frozen=True)
+class LikelihoodSplit:
+    shared: list[int]
+    suffixes: list[list[int]]
+    scored: list[Scored]
+    context_tokens: list[int]
+    boundaries: list[int]
+
+
+def likelihood_split(
+    contexts: Sequence[Sequence[int]],
+    candidates: Sequence[Sequence[Sequence[int]]],
+    max_prompt_tokens: int,
+    max_item_tokens: int,
+    max_candidate_tokens: int,
+) -> LikelihoodSplit:
+    """Where each group's context ends in its candidates' prompts, and the rows
+    one forward reads. A group's boundary is the token prefix its context (the
+    question with the reply opened) shares with every candidate's prompt, each
+    tokenized whole, so a candidate is scored as it tokenizes after the context:
+    a first token that merged across the boundary is scored, and it costs the
+    context at most BOUNDARY_SLACK tokens. Every candidate of a group is scored
+    from the same boundary, so their totals compare the same thing. The shared
+    part every row continues from stops before the earliest boundary: a row has
+    to read the hidden state that predicts its first scored token."""
+    boundaries: list[int] = []
+    for group, (context, prompts) in enumerate(zip(contexts, candidates)):
+        common = common_prefix([context, *prompts])
+        if common < max(1, len(context) - BOUNDARY_SLACK):
+            raise ItemsRefusal(
+                400,
+                CANDIDATE_NOT_A_REPLY,
+                f"group {group}'s candidates share {common} tokens with its context of "
+                f"{len(context)}; a candidate may re-read at most {BOUNDARY_SLACK} "
+                "context token, so the chat template did not render the candidates as "
+                "the reply the context opens",
+                {"group": group, "context_tokens": len(context), "common_tokens": common},
+            )
+        for index, prompt in enumerate(prompts):
+            scored = len(prompt) - common
+            if scored < 1:
+                raise ItemsRefusal(
+                    400,
+                    CANDIDATE_NOT_A_REPLY,
+                    f"group {group}'s candidate {index} adds no token to its context",
+                    {"group": group, "candidate": index, "tokens": scored},
+                )
+            if scored > max_candidate_tokens:
+                raise ItemsRefusal(
+                    400,
+                    CANDIDATE_TOO_LONG,
+                    f"group {group}'s candidate {index} is {scored} tokens; one candidate "
+                    f"may be at most {max_candidate_tokens}",
+                    {"group": group, "candidate": index, "tokens": scored,
+                     "max_tokens": max_candidate_tokens},
+                )
+            if len(prompt) > max_prompt_tokens:
+                raise ItemsRefusal(
+                    400,
+                    PROMPT_TOO_LONG,
+                    f"group {group}'s candidate {index}'s prompt is {len(prompt)} tokens; "
+                    f"one prompt may be at most {max_prompt_tokens}",
+                    {"group": group, "candidate": index, "tokens": len(prompt),
+                     "max_tokens": max_prompt_tokens},
+                )
+        boundaries.append(common)
+    rows = [(group, list(prompt)) for group, prompts in enumerate(candidates) for prompt in prompts]
+    shared = min(common_prefix([prompt for _, prompt in rows]), min(boundaries) - 1)
+    suffixes: list[list[int]] = []
+    scored_rows: list[Scored] = []
+    for index, (group, prompt) in enumerate(rows):
+        suffix = prompt[shared:]
+        if len(suffix) > max_item_tokens:
+            raise ItemsRefusal(
+                400,
+                ITEM_TOO_LONG,
+                f"row {index} (group {group}) is {len(suffix)} tokens past the shared "
+                f"state; one row may be at most {max_item_tokens}",
+                {"group": group, "item": index, "tokens": len(suffix),
+                 "max_tokens": max_item_tokens},
+            )
+        suffixes.append(suffix)
+        boundary = boundaries[group]
+        scored_rows.append(
+            Scored(group=group, start=boundary - 1 - shared, targets=prompt[boundary:])
+        )
+    return LikelihoodSplit(
+        shared=rows[0][1][:shared],
+        suffixes=suffixes,
+        scored=scored_rows,
+        context_tokens=[len(context) for context in contexts],
+        boundaries=boundaries,
+    )
+
+
+def likelihood_prompts(
+    ask: LikelihoodAsk,
+    tokenize_context: Callable[[list[dict[str, Any]]], Sequence[int]],
+    tokenize_reply: Callable[[list[dict[str, Any]]], Sequence[int]],
+) -> LikelihoodSplit:
+    contexts = [tokenize_context(item_messages(ask.messages, group.question)) for group in ask.groups]
+    candidates = [
+        [tokenize_reply(reply_messages(ask.messages, group.question, text)) for text in group.texts]
+        for group in ask.groups
+    ]
+    return likelihood_split(
+        contexts, candidates, ask.max_prompt_tokens, ask.max_item_tokens,
+        ask.max_candidate_tokens,
+    )
+
+
+def token_logprobs(head: Callable[[Any], Any], hidden: Any, targets: Sequence[int]) -> list[float]:
+    """ln P(target i | everything before it) for each position of `hidden`
+    (one row, [positions, width]), in float32, SCORE_CHUNK positions per head
+    application."""
+    import mlx.core as mx
+
+    read: list[float] = []
+    for start in range(0, len(targets), SCORE_CHUNK):
+        stop = min(len(targets), start + SCORE_CHUNK)
+        logits = head(hidden[start:stop]).astype(mx.float32)
+        picked = mx.take_along_axis(
+            logits, mx.array(list(targets[start:stop]))[:, None], axis=-1
+        )[:, 0]
+        values = picked - mx.logsumexp(logits, axis=-1)
+        mx.eval(values)
+        read.extend(float(value) for value in values.tolist())
+    return read
+
+
+ScoreFn = Callable[[Any, Sequence[int]], list[float]]
+
+
+def read_likelihood_rows(
+    split: LikelihoodSplit,
+    shared_pass: Callable[[], list[Any]],
+    rows_pass: Callable[[list[Any], list[list[int]]], Any],
+    score: ScoreFn,
+    per_row_bytes: Callable[[list[Any]], int],
+) -> list[list[float]]:
+    """Every candidate read as one row of a batched forward over the shared
+    cache, as `read_rows` reads items, and scored at every one of its tokens
+    instead of at its end."""
+    import mlx.core as mx
+
+    cache = shared_pass()
+    row_bytes = per_row_bytes(cache)
+    read: list[list[float] | None] = [None] * len(split.suffixes)
+    for group in row_groups(split.suffixes, lambda longest: rows_per_pass(row_bytes, longest)):
+        rows, _ = padded([split.suffixes[index] for index in group])
+        hidden = rows_pass(cache, rows)
+        for row, index in enumerate(group):
+            scored = split.scored[index]
+            stop = scored.start + len(scored.targets)
+            read[index] = score(hidden[row, scored.start:stop], scored.targets)
+    mx.clear_cache()
+    done = [row for row in read if row is not None]
+    assert len(done) == len(read)
+    return done
+
+
+def read_likelihood(
+    split: LikelihoodSplit,
+    shared_pass: Callable[[], list[Any]],
+    item_pass: Callable[[list[Any], list[int]], Any],
+    score: ScoreFn,
+) -> list[list[float]]:
+    """The candidates one forward each over a copy of the shared cache: the
+    mlx-vlm reader's way, whose item pass places image positions itself."""
+    import mlx.core as mx
+
+    cache = shared_pass()
+    read: list[list[float]] = []
+    for suffix, scored in zip(split.suffixes, split.scored):
+        hidden = item_pass(cache, suffix)
+        stop = scored.start + len(scored.targets)
+        read.append(score(hidden[0, scored.start:stop], scored.targets))
+    mx.clear_cache()
+    return read
+
+
+def likelihood_document(
+    split: LikelihoodSplit, logprobs: Sequence[Sequence[float]], cached_tokens: int | None = None
+) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = [
+        {"context_tokens": context, "boundary": boundary, "candidates": []}
+        for context, boundary in zip(split.context_tokens, split.boundaries)
+    ]
+    for index, (scored, row) in enumerate(zip(split.scored, logprobs)):
+        if len(row) != len(scored.targets):
+            raise ItemsRefusal(
+                500, "engine_error",
+                f"row {index} read {len(row)} log-probabilities for {len(scored.targets)} tokens",
+            )
+        if not all(math.isfinite(value) for value in row):
+            raise ItemsRefusal(
+                500, "engine_error",
+                f"row {index} (group {scored.group}) has a token whose log-probability is "
+                "not finite; the model gives it no probability at all",
+                {"group": scored.group},
+            )
+        groups[scored.group]["candidates"].append({"logprobs": [float(v) for v in row]})
+    document: dict[str, Any] = {
+        "object": "crucible.likelihood",
+        "shared_tokens": len(split.shared),
+        "groups": groups,
+    }
+    if cached_tokens is not None:
+        document["cached_tokens"] = cached_tokens
+    return document
 
 
 def split_shared(
@@ -414,34 +747,98 @@ def refusal_document(refusal: ItemsRefusal) -> dict[str, Any]:
 
 @dataclass
 class MlxLmItemsJob:
-    ask: ItemsAsk
+    ask: ItemsAsk | LikelihoodAsk
 
 
 def state_bytes(cache: list[Any]) -> int:
     return sum(array.nbytes for entry in cache for array in entry.state if array is not None)
 
 
+class MlxLmShared:
+    """The shared part of one items or likelihood pass on mlx-lm: the state
+    taken from a held cache where one opens it, read and kept where none does,
+    then whatever else every row shares."""
+
+    def __init__(self, model: Any, inner: Any, shared: list[int], state_end: int) -> None:
+        self.model = model
+        self.inner = inner
+        self.shared = shared
+        self.state_end = state_end
+        self.reused = 0
+
+    def _prefill(self, cache: list[Any], tokens: list[int]) -> None:
+        import mlx.core as mx
+
+        ids = mx.array(tokens)
+        for start in range(0, len(tokens), CHUNK_TOKENS):
+            self.inner(ids[None, start:start + CHUNK_TOKENS], cache=cache)
+            mx.eval([entry.state for entry in cache])
+
+    def shared_pass(self) -> list[Any]:
+        import mlx.core as mx
+        from mlx_lm.models.cache import make_prompt_cache
+
+        model, shared, state_end = self.model, self.shared, self.state_end
+        cache = make_prompt_cache(model)
+        held = STATES.nearest(model, shared[:state_end])
+        if held is not None:
+            copied(cache, held.cache)
+            self.reused = len(held.tokens)
+        if state_end > self.reused:
+            self._prefill(cache, shared[self.reused:state_end])
+            kept = copied(make_prompt_cache(model), cache)
+            mx.eval([entry.state for entry in kept])
+            STATES.keep(model, shared[:state_end], kept, state_bytes(kept))
+        if len(shared) > state_end:
+            self._prefill(cache, shared[state_end:])
+        return cache
+
+    def rows_hidden(self, cache: list[Any], rows: list[list[int]]) -> Any:
+        import mlx.core as mx
+        from mlx_lm.models.cache import make_prompt_cache
+
+        own = make_prompt_cache(self.model)
+        if self.shared:
+            for mine, theirs in zip(own, cache):
+                mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
+        return self.inner(mx.array(rows), cache=own)
+
+    def per_row_bytes(self, cache: list[Any]) -> int:
+        return state_bytes(cache) if self.shared else 0
+
+
 def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     import mlx.core as mx
-    from mlx_lm.models.cache import make_prompt_cache
 
     model, tokenizer = provider.load("default_model", None, "default_model")
     inner, head = text_parts(model)
+    ask = job.ask
 
-    def tokenize(messages: list[dict[str, Any]]) -> list[int]:
+    def tokenize(messages: list[dict[str, Any]], reply: bool = False) -> list[int]:
         return list(tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True, **job.ask.template_kwargs
+            messages, add_generation_prompt=not reply, tokenize=True,
+            **({"continue_final_message": True} if reply else {}), **ask.template_kwargs,
         ))
 
-    ask = job.ask
+    open_turn = tokenize(item_messages(ask.messages, ""))
+    if isinstance(ask, LikelihoodAsk):
+        likely = likelihood_prompts(ask, tokenize, lambda messages: tokenize(messages, True))
+        # The state is kept where it ends, as for items: what every row shares
+        # with the open turn left empty.
+        state_end = min(len(likely.shared), common_prefix([*likely_rows(likely), open_turn]))
+        held = MlxLmShared(model, inner, likely.shared, state_end)
+        logprobs = read_likelihood_rows(
+            likely, held.shared_pass, held.rows_hidden,
+            lambda hidden, targets: token_logprobs(head, hidden, targets), held.per_row_bytes,
+        )
+        return likelihood_document(likely, logprobs, held.reused)
+
     prompts = [tokenize(item_messages(ask.messages, question)) for question in ask.questions]
     split = split_shared(prompts, ask.max_prompt_tokens, ask.max_item_tokens)
     # Where the state ends: what every item shares with the open turn left
     # empty. The state's cache is kept at that point, so a later decision about
     # the same state, with other questions, continues from it.
-    state_end = min(
-        len(split.shared), common_prefix([*prompts, tokenize(item_messages(ask.messages, ""))])
-    )
+    state_end = min(len(split.shared), common_prefix([*prompts, open_turn]))
     if len(split.suffixes) == 1 and state_end < len(split.shared):
         # One item: what lies past the state is read in its row's forward. A
         # forward of its own would cost a whole forward (~115 ms on a 9B at any
@@ -450,45 +847,22 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
             shared=split.shared[:state_end],
             suffixes=[split.shared[state_end:] + split.suffixes[0]],
         )
-    reused = 0
-
-    def prefill(cache: list[Any], tokens: list[int]) -> None:
-        ids = mx.array(tokens)
-        for start in range(0, len(tokens), CHUNK_TOKENS):
-            inner(ids[None, start:start + CHUNK_TOKENS], cache=cache)
-            mx.eval([entry.state for entry in cache])
-
-    def shared_pass() -> list[Any]:
-        nonlocal reused
-        cache = make_prompt_cache(model)
-        held = STATES.nearest(model, split.shared[:state_end])
-        if held is not None:
-            copied(cache, held.cache)
-            reused = len(held.tokens)
-        if state_end > reused:
-            prefill(cache, split.shared[reused:state_end])
-            kept = copied(make_prompt_cache(model), cache)
-            mx.eval([entry.state for entry in kept])
-            STATES.keep(model, split.shared[:state_end], kept, state_bytes(kept))
-        if len(split.shared) > state_end:
-            prefill(cache, split.shared[state_end:])
-        return cache
+    held = MlxLmShared(model, inner, split.shared, state_end)
 
     def rows_pass(cache: list[Any], rows: list[list[int]], lasts: list[int]) -> Any:
-        own = make_prompt_cache(model)
-        if split.shared:
-            for mine, theirs in zip(own, cache):
-                mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
-        hidden = inner(mx.array(rows), cache=own)
+        hidden = held.rows_hidden(cache, rows)
         return hidden[mx.arange(len(rows)), mx.array(lasts)]
 
     tops = read_rows(
-        split, shared_pass, rows_pass, head, ask.top_logprobs,
-        lambda cache: state_bytes(cache) if split.shared else 0,
+        split, held.shared_pass, rows_pass, head, ask.top_logprobs, held.per_row_bytes
     )
     return items_document(
-        split, tops, lambda token: tokenizer.convert_ids_to_tokens([token])[0], reused
+        split, tops, lambda token: tokenizer.convert_ids_to_tokens([token])[0], held.reused
     )
+
+
+def likely_rows(split: LikelihoodSplit) -> list[list[int]]:
+    return [split.shared + suffix for suffix in split.suffixes]
 
 
 def mlx_lm_run_job(provider: Any, job: MlxLmItemsJob, rqueue: Any) -> None:
@@ -521,7 +895,7 @@ def mlx_lm_serve_http(handler: Any) -> None:
     served = mlx_lm_names(handler.response_generator.cli_args.model)
     try:
         length = int(handler.headers.get("Content-Length") or 0)
-        ask = parse_items(json.loads(handler.rfile.read(length).decode("utf-8")), served)
+        ask = parse_request(json.loads(handler.rfile.read(length).decode("utf-8")), served)
     except (ValueError, UnicodeDecodeError) as exc:
         refusal = ItemsRefusal(400, "bad_json", f"the body is not JSON: {exc}")
         _write(handler, 400, refusal_document(refusal))

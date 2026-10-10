@@ -397,6 +397,59 @@ pays for it in tokens: the state once, then each item's own question (about
 would cut that to about 50 (48.7 s for the 250) but changes the prompt, and the
 argmax then agrees with today's door on 81.6% of units, so it is not done.
 
+### Likelihood questions
+
+A question of `type: "likelihood"` in the questions form scores free-text candidates
+instead of reading a label: each candidate's log-likelihood as the start of the
+model's reply to `instructions`, nothing decoded.
+
+```json
+{"model": "qwen3.5-9b", "state": "The two nations met in Geneva. They agreed to co-operate on trade.",
+ "questions": {"spelling": {"type": "likelihood",
+   "instructions": "Write out the second sentence, spelled as it should be.",
+   "candidates": {"plain": "They agreed to cooperate on trade.",
+                  "hyphen": "They agreed to co-operate on trade."}}}}
+```
+
+The answer (the numbers show the shape; they were not measured):
+
+```json
+{"answers": {"spelling": {"type": "likelihood", "winner": "plain", "rank_by": "total",
+   "candidates": {"plain":  {"logprob": -1.92, "tokens": 8, "mean_logprob": -0.24, "probability": 0.81},
+                  "hyphen": {"logprob": -3.37, "tokens": 10, "mean_logprob": -0.337, "probability": 0.19}},
+   "context_tokens": 71, "boundary_tokens": 0}}, ...}
+```
+
+- The context is the state in the system turn under `LIKELIHOOD_SYSTEM_PROMPT` ("Reply
+  with exactly what the request asks for"), not the classifier prompt: a model told to
+  answer with a letter gives every sentence a depressed, distorted probability. The
+  label questions of the same request keep their prompt byte for byte, and run first
+  by the path they always take; the likelihood questions then run by the engine's
+  route (engines-and-capability.md), and the answers come back in question order.
+- `logprob` is the sum over the candidate's tokens, `mean_logprob` that over `tokens`,
+  `probability` a softmax over the totals (the model's probability of each reply
+  renormalised over the replies offered). `winner` is by `rank_by`: `total` (default)
+  for variants of one content, where the mean would reward a variant for being cut
+  into more, individually likely tokens (`co-operate`'s later pieces are nearly
+  certain); `mean` for candidates whose lengths differ by content. With `mean` the
+  winner need not hold the largest `probability`.
+- Limits: 26 candidates (`400 too_many_candidates`, like options), each unique and
+  without leading or trailing whitespace (schema), at most 256 scored tokens
+  (`400 candidate_too_long`, naming the question and the candidate), each whole prompt
+  at most `min(32768, max_model_len - 1)` (`400 item_prompt_too_long`). 256 is several
+  OCR lines or a long title; a candidate is the part the readings differ in plus enough
+  around it to judge, not a page.
+- `timing_ms.per_question` for a likelihood question is the request(s) that scored it:
+  the one items request on the Mac (`cached_tokens`: state tokens the engine reused),
+  the candidates' requests on vLLM summed (`prompt_tokens` summed; `cached_tokens` 0,
+  because a prompt-logprobs request never reads the cache). `tokens.per_question` is
+  the same `prompt_tokens`.
+- Refused by name before anything waits: a llama-server model
+  (`likelihood_unsupported_on_engine`) and images on an engine that scores text only
+  (`likelihood_images_unsupported_on_engine`). An engine process whose items route is
+  older than the server's answers `unknown_field`, reported as `503 decide_not_served`
+  naming the `load-model` job that applies the current route.
+
 ## The operator page
 
 `GET /` redirects 307 to `/ui/` because `index.html` loads its assets by

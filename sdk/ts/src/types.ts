@@ -1000,7 +1000,33 @@ export interface DecideYesNoQuestion {
   readonly instructions: string;
 }
 
-export type DecideQuestion = DecideChoiceQuestion | DecideScoreQuestion | DecideYesNoQuestion;
+/**
+ * Score 2–26 free-text candidate replies by how likely the model is to say each, instead of
+ * generating one: nothing is decoded, so nothing fails to parse or runs away. Each candidate is
+ * scored as the start of the model's reply to `instructions` (thinking off), at most 256 tokens.
+ * Served on vLLM, mlx-lm and mlx-vlm; a llama-server model is 400
+ * `likelihood_unsupported_on_engine`.
+ */
+export interface DecideLikelihoodQuestion {
+  readonly type: 'likelihood';
+  readonly instructions: string;
+  /** Candidate name → the reply text scored: unique, no leading or trailing whitespace. */
+  readonly candidates: Readonly<Record<string, string>>;
+  /** Which measure picks `winner`. Omitted: `total`. */
+  readonly rankBy?: DecideRankBy;
+}
+
+/**
+ * `total`: the summed log-probability, for variants of the same content (spellings, OCR readings
+ * of one line). `mean`: per token, for candidates whose lengths differ by content (titles).
+ */
+export type DecideRankBy = 'total' | 'mean';
+
+export type DecideQuestion =
+  | DecideChoiceQuestion
+  | DecideScoreQuestion
+  | DecideYesNoQuestion
+  | DecideLikelihoodQuestion;
 
 export interface DecideRequest {
   /**
@@ -1069,7 +1095,33 @@ export interface DecideYesNoAnswer extends DecideAnswerCommon {
   readonly logprob: number | null;
 }
 
-export type DecideAnswer = DecideChoiceAnswer | DecideScoreAnswer | DecideYesNoAnswer;
+/** One candidate's reading in a {@link DecideLikelihoodAnswer}. */
+export interface DecideCandidateScore {
+  /** ln P(this reply | the context), summed over its tokens. Not calibrated. */
+  readonly logprob: number;
+  /** The tokens scored. */
+  readonly tokens: number;
+  /** `logprob / tokens`. */
+  readonly meanLogprob: number;
+  /** A softmax over the candidates' totals, whatever `rankBy` says. */
+  readonly probability: number;
+}
+
+/** The answer to a `likelihood`: every candidate's log-likelihood, and the winner by `rankBy`. */
+export interface DecideLikelihoodAnswer {
+  readonly type: 'likelihood';
+  /** The best candidate by `rankBy`; on a tie the first asked. */
+  readonly winner: string;
+  readonly rankBy: DecideRankBy;
+  /** Candidate name → its reading, in the order asked. */
+  readonly candidates: Readonly<Record<string, DecideCandidateScore>>;
+  /** The context's tokens: the state, the request and the opened reply. */
+  readonly contextTokens: number;
+  /** Context tokens re-read because a candidate's first characters merged into the last (0 or 1). */
+  readonly boundaryTokens: number;
+}
+
+export type DecideAnswer = DecideChoiceAnswer | DecideScoreAnswer | DecideYesNoAnswer | DecideLikelihoodAnswer;
 
 /** One completion the door sent the engine, timed by Crucible's wall clock. */
 export interface DecideCallTiming {

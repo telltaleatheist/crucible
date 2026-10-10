@@ -61,6 +61,15 @@ class MlxLmEngine(SubprocessEngine):
         "copy of its cache"
     )
 
+    decide_likelihood_route = "items"
+    decide_likelihood_basis = (
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 3) reads a "
+        "candidates body: every candidate's prompt is the chat template's open "
+        "assistant reply (continue_final_message), the shared state runs once, and "
+        "each candidate is a batched row whose every token is scored off the head "
+        "in float32"
+    )
+
     decide_questions_batched = True
     decide_questions_basis = (
         "measured on the Mac Studio M1 Ultra, qwen3.5-9b bf16, 2026-10-01: MLX's "

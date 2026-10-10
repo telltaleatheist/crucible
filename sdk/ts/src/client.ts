@@ -103,8 +103,12 @@ import {
   type DecideAnswer,
   type DecideChoiceAnswer,
   type DecideChoiceQuestion,
+  type DecideCandidateScore,
   type DecideItemsRequest,
   type DecideItemsResponse,
+  type DecideLikelihoodAnswer,
+  type DecideLikelihoodQuestion,
+  type DecideRankBy,
   type DecideCallTiming,
   type DecideOptions,
   type DecideQuestion,
@@ -1435,7 +1439,7 @@ export class CrucibleClient {
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
-    payload['questions'] = questions;
+    payload['questions'] = decideQuestionsWire(questions);
     let report = false;
     if (given.missing !== undefined) {
       if (given.missing !== 'refuse' && given.missing !== 'report') {
@@ -4117,7 +4121,23 @@ function readChatResponse(body: Json): ChatResponse {
   };
 }
 
-const DECIDE_TYPES = ['choice', 'score', 'yesno'] as const;
+const DECIDE_TYPES = ['choice', 'score', 'yesno', 'likelihood'] as const;
+
+const RANK_BY = ['total', 'mean'] as const;
+
+/** The questions as the server reads them: a likelihood question's `rankBy` is `rank_by`. */
+function decideQuestionsWire(questions: Record<string, DecideQuestion>): Record<string, unknown> {
+  const wire: Record<string, unknown> = {};
+  for (const [name, question] of Object.entries(questions)) {
+    if (question.type !== 'likelihood') {
+      wire[name] = question;
+      continue;
+    }
+    const { rankBy, ...rest } = question;
+    wire[name] = rankBy === undefined ? rest : { ...rest, rank_by: rankBy };
+  }
+  return wire;
+}
 
 function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -4142,7 +4162,9 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
         ? ['type', 'instructions', 'options']
         : type === 'score'
           ? ['type', 'instructions', 'levels']
-          : ['type', 'instructions'];
+          : type === 'likelihood'
+            ? ['type', 'instructions', 'candidates', 'rankBy']
+            : ['type', 'instructions'];
     for (const key of Object.keys(question)) {
       if (!known.includes(key)) {
         throw new CrucibleConfigError(
@@ -4164,6 +4186,19 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
       out[name] = { type, instructions, options: read };
     } else if (type === 'score') {
       out[name] = { type, instructions, levels: requireStrings(question['levels'], `${where}.levels`) };
+    } else if (type === 'likelihood') {
+      const candidates = readOptionMap(question['candidates'], `${where}.candidates`);
+      const rankBy = question['rankBy'];
+      if (rankBy === undefined) {
+        out[name] = { type, instructions, candidates };
+      } else if (typeof rankBy === 'string' && (RANK_BY as readonly string[]).includes(rankBy)) {
+        out[name] = { type, instructions, candidates, rankBy: rankBy as DecideRankBy };
+      } else {
+        throw new CrucibleConfigError(
+          `${where}.rankBy`,
+          `must be ${RANK_BY.map((word) => `'${word}'`).join(' or ')}, got ${JSON.stringify(rankBy)}`,
+        );
+      }
     } else {
       out[name] = { type: 'yesno', instructions };
     }
@@ -4344,6 +4379,9 @@ function readDecideAnswer(
       `${where}.type is ${JSON.stringify(type)} but the question asked was a ${question.type}`,
     );
   }
+  if (question.type === 'likelihood') {
+    return readLikelihoodAnswer(entry, question, where);
+  }
   const labelMass = num(entry, 'label_mass', where);
   const labels =
     question.type === 'choice'
@@ -4376,6 +4414,42 @@ function readDecideAnswer(
   const level = str(entry, 'level', where);
   oneOf(level, labels, `${where}.level`);
   return { type: 'score', score: num(entry, 'score', where), level, probabilities, logprobs, confidence, ...common };
+}
+
+function readLikelihoodAnswer(
+  entry: Json,
+  question: DecideLikelihoodQuestion,
+  where: string,
+): DecideLikelihoodAnswer {
+  const names = Object.keys(question.candidates);
+  const winner = str(entry, 'winner', where);
+  oneOf(winner, names, `${where}.winner`);
+  const rankBy = oneOf(str(entry, 'rank_by', where), RANK_BY, `${where}.rank_by`);
+  const asked = question.rankBy === undefined ? 'total' : question.rankBy;
+  if (rankBy !== asked) {
+    throw new CrucibleProtocolError(`${where}.rank_by is ${JSON.stringify(rankBy)} but the question asked for ${asked}`);
+  }
+  const raw = objectField(entry, 'candidates', where);
+  sameKeys(Object.keys(raw), names, `${where}.candidates`, 'the candidates asked');
+  const candidates: Record<string, DecideCandidateScore> = {};
+  for (const name of names) {
+    const scoreWhere = `${where}.candidates.${name}`;
+    const score = objectField(raw, name, `${where}.candidates`);
+    candidates[name] = {
+      logprob: num(score, 'logprob', scoreWhere),
+      tokens: num(score, 'tokens', scoreWhere),
+      meanLogprob: num(score, 'mean_logprob', scoreWhere),
+      probability: num(score, 'probability', scoreWhere),
+    };
+  }
+  return {
+    type: 'likelihood',
+    winner,
+    rankBy,
+    candidates,
+    contextTokens: num(entry, 'context_tokens', where),
+    boundaryTokens: num(entry, 'boundary_tokens', where),
+  };
 }
 
 function readDistribution(

@@ -755,6 +755,55 @@ started exactly as `load-model` would).
   `503 decide_not_served` naming the `load-model` job that fixes it.
 - An items job holds mlx-lm's generation thread for its whole run (81.5 s for
   250 Briefcase items on the 9B); chat requests queue behind it.
+- **Likelihood questions** (api.md "Likelihood questions") read the log-probability of
+  every token of a free-text candidate instead of one label token. How an engine does
+  it is `decide_likelihood_route` (with `decide_likelihood_basis`, read by
+  `engines.likelihood_reading`): `items` (mlx-lm, mlx-vlm: the items route reads a
+  `candidates` body, ITEMS_VERSION 3), `prompt-logprobs` (vLLM) or None (llama-server,
+  refused `400 likelihood_unsupported_on_engine` before anything waits; b10970 returns
+  no prompt-token log-probability: `n_probs` covers generated tokens only and
+  `/v1/completions` refuses `echo`). `decide_likelihood_images` says whether images may
+  ride along (mlx-vlm only; elsewhere `400 likelihood_images_unsupported_on_engine`).
+- A candidate's prompt is the chat template's **open assistant reply**: the question's
+  turns plus `{"role": "assistant", "content": <candidate>}` rendered with
+  `continue_final_message` (thinking off), so it ends on the candidate's last
+  character. Its context is the same turns with the generation prompt. For Qwen3.5's
+  template the two agree byte for byte (the open reply renders `<think>\n\n</think>\n\n`
+  before the content, exactly as the generation prompt does), so the candidate is
+  scored as the first words of the reply. `continue_final_message` cuts the render at
+  the stripped content, which is why a candidate may not start or end with whitespace.
+- **The boundary** (`items_forward.likelihood_split`, the one owner, used by the Mac
+  engines and by the door for vLLM): every prompt is tokenized whole, and a question's
+  boundary is the token prefix its context shares with all its candidates. A candidate
+  whose first characters merge with the context's last token re-reads that token
+  (`boundary_tokens` 1, `BOUNDARY_SLACK`); more than one is `400
+  candidate_not_a_reply` (the template does not continue the reply it opened). All of
+  a question's candidates are scored from one boundary, so their totals compare the
+  same thing.
+- **Mac**: one items request for every likelihood question of a decision. The state
+  runs once (and is kept in `StateCache` as for items), each candidate is a row of a
+  batched forward (`read_likelihood_rows`; mlx-vlm one forward per candidate,
+  `read_likelihood`), and the head runs on the candidate's positions only, 64 at a
+  time (`SCORE_CHUNK`), float32 log-softmax, the target token gathered. The shared part
+  stops one token before the earliest boundary, because a row must read the hidden
+  state that predicts its first scored token.
+- **vLLM**: `/tokenize` renders the context (`add_generation_prompt`) and every
+  candidate (`continue_final_message`) first, on the CPU, so every refusal is made
+  before a forward pass; then one `/v1/chat/completions` per candidate with
+  `prompt_logprobs: 0`, `return_token_ids: true`, `max_tokens: 1` under the engine's
+  admission. The reply's `prompt_token_ids` must equal what `/tokenize` said
+  (`engine_error` otherwise), and each scored position's dict is read at the prompt's
+  own token id. vLLM 0.29.0 sets `skip_reading_prefix_cache` for any request with
+  `prompt_logprobs` (`sampling_params.py` L540-543): the cached positions would have no
+  logprobs. So each candidate prefills its whole prompt (state included); vLLM batches
+  them, but a long state costs N prefills. vLLM writes -inf as -9999.0
+  (`clamp_prompt_logprobs`); the door refuses that as `engine_error` rather than
+  reporting a number the model never gave.
+- **Raw-text continuation is not built.** Every use so far has a natural request
+  (spell this sentence, read this line, title this chapter, say this word), and an
+  instruct model scored off its template is a distribution nobody tuned. If one turns
+  up: a `mode: "text"` whose context is the state verbatim, `/v1/completions` with
+  `prompt_logprobs` on vLLM, `tokenizer.encode` on the Mac, the same boundary code.
 - `mlx_vlm_serve.py` compares realpaths when it drops its own directory from
   `sys.path`: run from `/tmp` on macOS (`/private/tmp`), the abspath test missed
   and `import mlx_vlm` found `engines/mlx_vlm.py`.

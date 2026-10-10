@@ -12,6 +12,7 @@ notes.
 ## 1.0.126 — 2026-10-10
 
 - `qwen3.5-4b-bside` is v2: one model for every B-Sides text call (describe, album, tracks, lyrics, album title, artist, track titles, cover), the task named by the first line of the user message. Same id; the Mac pins `owenmorgan/qwen3.5-4b-bside` @ 3e499e62, a PC the Q8_0 GGUF @ 5e326c86. On a Mac, mlx-lm does not yet enforce `json_schema`, so the strict schema each call sends applies on a PC only.
+- `POST /v1/decide` scores free-text candidates: a question of `type: "likelihood"` (`instructions`, `candidates` name → reply text, `rank_by` `total` or `mean`) answers each candidate's summed log-probability, token count and mean as the start of the model's reply, a softmax over the totals and the `winner`, with nothing generated (so no format failures and no runaways). It sits beside the label questions in the questions form. vLLM reads prompt log-probabilities (`/tokenize` first, so every refusal comes before a forward pass); mlx-lm and mlx-vlm score every candidate as a row of the items route over the state read once (`mlx-lm-decide-items-helper` is now `ITEMS_VERSION = 3` and applies itself at the next engine start); a llama-server model is refused `400 likelihood_unsupported_on_engine` (b10970 returns no prompt-token log-probability). The SDK's `decide()` takes `DecideLikelihoodQuestion` and reads `DecideLikelihoodAnswer`; a `DecideAnswer` must now be narrowed by `type` before reading `labelMass` (docs/internals/api.md "Likelihood questions").
 
 ## 1.0.125 — 2026-10-10
 

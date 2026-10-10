@@ -102,6 +102,18 @@ class VllmEngine(SubprocessEngine):
         "an empty think block before it, so the model writes on from the prefill "
         "with its thinking off (rendered with the 9B's tokenizer, 2026-10-10)"
     )
+    decide_likelihood_route = "prompt-logprobs"
+    decide_likelihood_basis = (
+        "vLLM 0.29.0's /v1/chat/completions takes prompt_logprobs, "
+        "continue_final_message and return_token_ids and answers the log-probability "
+        "of every prompt token with the prompt's token ids "
+        "(vllm/entrypoints/openai/chat_completion/protocol.py L137-138, L285, "
+        "L318, L414); /tokenize renders the context with the same template. A "
+        "request with prompt_logprobs never READS the prefix cache "
+        "(vllm/sampling_params.py L540-543), so every candidate prefills its whole "
+        "prompt; vLLM batches them. No images: the boundary is read through "
+        "/tokenize, whose handling of image placeholders is not checked"
+    )
 
     chat_concurrency_flag = "--max-num-seqs"
     chat_concurrency_basis = (
