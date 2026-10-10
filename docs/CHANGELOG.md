@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.124 — 2026-10-09
+
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.
 
 ## 1.0.123 — 2026-10-09
