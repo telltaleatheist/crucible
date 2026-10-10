@@ -65,18 +65,40 @@ def taken(body: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
 # --- what each engine states -----------------------------------------------------
 
 
+BACKENDS = ("cuda-linux", "mlx-darwin", "llama-windows")
+
+
 def test_every_engine_states_whether_it_keeps_compact_json_and_where_it_read_it() -> None:
     for name in ENGINES:
-        reading = structured_output_reading(name)
-        assert reading.compact_json_basis.strip(), name
+        for backend in BACKENDS:
+            reading = structured_output_reading(name, backend)
+            assert reading.compact_json_basis.strip(), (name, backend)
 
 
-def test_the_llguidance_engines_keep_it_and_the_others_do_not() -> None:
-    kept = {name for name in ENGINES if structured_output_reading(name).compact_json}
-    assert kept == {"vllm", "mlx-lm"}
-    llama = structured_output_reading("llama-server").compact_json_basis
-    assert "json-schema-to-grammar.cpp" in llama
-    assert "no structured output" in structured_output_reading("mlx-vlm").compact_json_basis
+def test_the_llguidance_builds_keep_it_and_the_others_do_not() -> None:
+    def kept(backend: str) -> set[str]:
+        return {
+            name for name in ENGINES if structured_output_reading(name, backend).compact_json
+        }
+
+    assert kept("cuda-linux") == {"vllm", "mlx-lm", "llama-server"}
+    assert kept("llama-windows") == {"vllm", "mlx-lm"}
+    linux = structured_output_reading("llama-server", "cuda-linux").compact_json_basis
+    assert "LLAMA_LLGUIDANCE=ON" in linux and "1.7.6" in linux
+    windows = structured_output_reading("llama-server", "llama-windows").compact_json_basis
+    assert "ggml-org" in windows and "json-schema-to-grammar.cpp" in windows
+    mlx_vlm = structured_output_reading("mlx-vlm", "mlx-darwin").compact_json_basis
+    assert "no structured output" in mlx_vlm
+
+
+def test_only_llama_server_on_cuda_linux_is_sent_an_llguidance_grammar() -> None:
+    sent = {
+        (name, backend)
+        for name in ENGINES
+        for backend in BACKENDS
+        if structured_output_reading(name, backend).llguidance_grammar
+    }
+    assert sent == {("llama-server", "cuda-linux")}
 
 
 # --- the body ----------------------------------------------------------------------
@@ -206,8 +228,8 @@ def test_structured_outputs_json_object_goes_as_the_object_schema() -> None:
 # --- the engine's refusal --------------------------------------------------------------
 
 
-def unkept(engine: str, mode: str | None) -> None:
-    reading = structured_output_reading(engine)
+def unkept(engine: str, mode: str | None, backend: str = "cuda-linux") -> None:
+    reading = structured_output_reading(engine, backend)
     refuse_unkept_json_whitespace(
         engine=engine,
         model_id=MODEL,
@@ -217,20 +239,26 @@ def unkept(engine: str, mode: str | None) -> None:
     )
 
 
-@pytest.mark.parametrize("engine", ["vllm", "mlx-lm"])
-def test_compact_passes_where_it_is_kept(engine: str) -> None:
-    unkept(engine, "compact")
+@pytest.mark.parametrize(
+    ("engine", "backend"),
+    [("vllm", "cuda-linux"), ("mlx-lm", "mlx-darwin"), ("llama-server", "cuda-linux")],
+)
+def test_compact_passes_where_it_is_kept(engine: str, backend: str) -> None:
+    unkept(engine, "compact", backend)
 
 
 @pytest.mark.parametrize("engine", list(ENGINES))
-def test_flexible_and_absent_pass_everywhere(engine: str) -> None:
-    unkept(engine, "flexible")
-    unkept(engine, None)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_flexible_and_absent_pass_everywhere(engine: str, backend: str) -> None:
+    unkept(engine, "flexible", backend)
+    unkept(engine, None, backend)
 
 
-@pytest.mark.parametrize("engine", ["llama-server", "mlx-vlm"])
-def test_compact_is_refused_by_name_where_it_is_not_kept(engine: str) -> None:
-    error = refused(lambda: unkept(engine, "compact"))
+@pytest.mark.parametrize(
+    ("engine", "backend"), [("llama-server", "llama-windows"), ("mlx-vlm", "mlx-darwin")]
+)
+def test_compact_is_refused_by_name_where_it_is_not_kept(engine: str, backend: str) -> None:
+    error = refused(lambda: unkept(engine, "compact", backend))
     assert error.status_code == 400 and error.code == "json_whitespace_not_served"
     assert error.details == {"model": MODEL, "engine": engine}
 
@@ -242,7 +270,7 @@ def test_compact_is_refused_by_name_where_it_is_not_kept(engine: str) -> None:
 def test_a_structured_outputs_option_vllm_does_not_read_per_request_is_refused(
     option: dict[str, Any],
 ) -> None:
-    reading = structured_output_reading("vllm")
+    reading = structured_output_reading("vllm", "cuda-linux")
     body = {"structured_outputs": {"json": SCHEMA, **option}}
     error = refused(
         lambda: refuse_unenforced_constraint(
@@ -321,11 +349,14 @@ def test_the_door_refuses_compact_without_json_and_sends_nothing(
     assert engines[0].last_request == before
 
 
-def test_compact_on_llama_server_is_refused_before_anything_loads(
+def test_compact_on_llama_server_on_cuda_linux_passes_the_door(
     llm_client: TestClient,  # noqa: F811
     auth: dict[str, str],
     engines: list[FakeEngine],  # noqa: F811
 ) -> None:
+    """Not refused for the engine: B-Sides' model takes thinking off from its manifest,
+    so the chat goes on to the door's next question, which with "queue": false and
+    nothing resident is the model's residency."""
     response = llm_client.post(
         "/v1/openai/chat/completions",
         headers=auth,
@@ -334,12 +365,16 @@ def test_compact_on_llama_server_is_refused_before_anything_loads(
             "messages": USER,
             "response_format": JSON_SCHEMA,
             JSON_WHITESPACE: "compact",
+            "queue": False,
         },
     )
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["code"] == "json_whitespace_not_served"
-    assert error["details"] == {"model": LLAMA_MODEL, "engine": "llama-server"}
+    assert response.status_code != 200
+    assert response.json()["error"]["code"] not in (
+        "json_whitespace_not_served",
+        "json_whitespace_without_json",
+        "structured_output_with_thinking",
+        "structured_output_not_served",
+    )
     assert engines == []
 
 

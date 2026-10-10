@@ -112,13 +112,20 @@ class StructuredOutputReading:
     compact_json: bool
     """Whether `"json_whitespace": "compact"` is kept (structured.with_compact_json)."""
     compact_json_basis: str
+    llguidance_grammar: bool
+    """Whether the door sends a JSON constraint as an llguidance grammar
+    (structured.with_llguidance_grammar), which is also whether this build takes a
+    `%llguidance` grammar at all."""
 
     @property
     def served(self) -> bool:
         return bool(self.formats or self.fields)
 
 
-def structured_output_reading(engine_name: str) -> StructuredOutputReading:
+def structured_output_reading(engine_name: str, backend_kind: str) -> StructuredOutputReading:
+    """What `engine_name` enforces as it is built for `backend_kind`: one engine can be
+    two builds (llama-server is Crucible's own, with llguidance, on cuda-linux, and
+    ggml-org's, without it, on llama-windows)."""
     cls = engine_class(engine_name)
     basis = cls.structured_output_basis
     if basis is None:
@@ -154,12 +161,31 @@ def structured_output_reading(engine_name: str) -> StructuredOutputReading:
             f"{engine_name} states json_whitespace_compact without enforcing "
             "response_format json_schema and json_object, which it is written into"
         )
+    compact = cls.json_whitespace_compact
+    llguidance_grammar = False
+    if cls.llguidance_grammar_backends:
+        if "grammar" not in cls.structured_output_fields:
+            raise EngineError(
+                f"{engine_name} is sent JSON as an llguidance grammar on "
+                f"{sorted(cls.llguidance_grammar_backends)} and does not state that it "
+                "enforces a grammar"
+            )
+        if cls.llguidance_unbuilt_basis is None:
+            raise EngineError(
+                f"{engine_name} has llguidance on {sorted(cls.llguidance_grammar_backends)} "
+                "only and states no llguidance_unbuilt_basis, which says why not elsewhere"
+            )
+        llguidance_grammar = backend_kind in cls.llguidance_grammar_backends
+        if not llguidance_grammar:
+            compact = False
+            compact_basis = cls.llguidance_unbuilt_basis
     return StructuredOutputReading(
         formats=cls.structured_output_formats,
         fields=cls.structured_output_fields,
         basis=basis,
-        compact_json=cls.json_whitespace_compact,
+        compact_json=compact,
         compact_json_basis=compact_basis,
+        llguidance_grammar=llguidance_grammar,
     )
 
 

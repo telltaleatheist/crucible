@@ -604,13 +604,16 @@ started exactly as `load-model` would).
   install-on-submit runs `crucible install llm`, which keeps the env and places
   the binary. Every block names `--n-gpu-layers all`, so a model that does not
   fit fails its load by name instead of spilling layers to the CPU.
-- Structured output: `response_format` `json_schema` reaches llama-server
-  unchanged and is compiled to its own GBNF grammar (b10970
-  `common/json-schema-to-grammar.cpp`), whose capped string repeats a character
-  rule that includes the escapes, so a `maxLength` string keeps its newlines
-  (the defect that moved vLLM to llguidance does not exist here). Its whitespace rule
-  is fixed, so `"json_whitespace": "compact"` is refused here
-  (`json_whitespace_not_served`; "Structured output").
+- Structured output: on `cuda-linux` the binary has llguidance (1.7.6, the one
+  vLLM runs) and the door sends every JSON schema to it as an llguidance grammar,
+  so a schema compiles to the same grammar as on vLLM and mlx-lm and
+  `"json_whitespace": "compact"` is kept; the request must state thinking off
+  (`structured_output_with_thinking`). On `llama-windows` (ggml-org's build, no
+  llguidance) `response_format` reaches llama-server unchanged and becomes its own
+  GBNF grammar (b10970 `common/json-schema-to-grammar.cpp`), whose capped string
+  repeats a character rule that includes the escapes, so a `maxLength` string keeps
+  its newlines; its whitespace rule is fixed, so compact is refused there
+  (`json_whitespace_not_served`). "Structured output" has both.
 - On `llama-windows` the binary is a pinned **engine subject** (`llamacpp`): `LLAMA_CPP_RELEASE`
   is never read from a listing. The CUDA build is two zips (the build plus
   `cudart`) unpacked into one directory. Every digest is checked before
@@ -975,7 +978,8 @@ every engine states what it enforces, with where that was read:
 | engine | `response_format` | other fields | `json_whitespace: compact` |
 |---|---|---|---|
 | vLLM 0.29.0 | `json_schema`, `json_object`, `structural_tag` | `structured_outputs` | kept |
-| llama-server b10970 | `json_schema`, `json_object` | `json_schema`, `grammar` | refused |
+| llama-server b10970, `cuda-linux` (Crucible's build, llguidance) | `json_schema`, `json_object` (sent as an llguidance `grammar`) | `json_schema`, `grammar` (GBNF or `%llguidance`) | kept |
+| llama-server b10970, `llama-windows` (ggml-org's build) | `json_schema`, `json_object` | `json_schema`, `grammar` (GBNF only) | refused |
 | mlx-lm 0.31.3 + patch | `json_schema`, `json_object` | `structured_outputs` (`json`, `json_object`, `regex`, `choice`, `grammar`) | kept |
 | mlx-vlm (Crucible's server) | none | none | refused |
 
@@ -1024,18 +1028,58 @@ before it is forwarded (`structured.take_json_whitespace`), like `prefill` and `
   own per-request `structured_outputs.disable_any_whitespace` is read by no backend
   (only the server-wide `--structured-outputs-config` is, `backend_guidance.py` L91-92),
   which is why the door does not use it.
-- **llama-server b10970** is refused. Its converter's whitespace rule is fixed,
-  `space ::= | " " | "
-"{1,2} [ 	]{0,20}` (`common/json-schema-to-grammar.cpp` L229,
-  set at L816), and no request field changes it (`server-common.cpp` L1179-1204). A
-  GBNF built by Crucible and sent as `grammar` would not be the same constraint: the
-  jinja chat path wraps a response_format schema in its PEG parser, after the reasoning
-  block and with an optional ```` ```json ```` fence
-  (`common/chat-auto-parser-generator.cpp` L117-125), and the converter's Python port
-  is gone at b10970, so Crucible would own a port of 1,027 lines of C++. llama.cpp's
-  llguidance grammars need `LLAMA_LLGUIDANCE`, off by default and off in Crucible's
-  cuda-linux build. `qwen3.5-4b-bside` is a llama-server block on cuda-linux, so B-Sides
-  gets compact on the Mac and is refused it on the PC.
+- **llama-server b10970 on `cuda-linux`** keeps it, through llguidance. Crucible's
+  build (`scripts/build-llama-server-linux.sh`) turns `LLAMA_LLGUIDANCE` on, with
+  llguidance 1.7.6 (the llm env's, which vLLM runs) in place of the 1.0.1 b10970 pins;
+  the C API llama.cpp calls is the same in both. The door does not send it the
+  `response_format`: llama-server's chat path never hands a response_format schema to
+  llguidance even when it is built in. It compiles the schema with its own GBNF
+  converter, whose whitespace rule is fixed (`space ::= | " " | "\n"{1,2} [ \t]{0,20}`,
+  `common/json-schema-to-grammar.cpp` L229, set at L816), inside the chat template's
+  PEG parser, which also admits a reasoning block and a ```` ```json ```` fence around
+  the JSON (`common/parsers/qwen3-coder.cpp` for Qwen3.5's template,
+  `common/chat-auto-parser-generator.cpp` L117-125 for the others), and files that
+  grammar as a tool-call grammar that the generation prompt is fed through
+  (`server-common.cpp` L1365-1366, `sampling.cpp` L297). Only a `grammar` that starts
+  with `%llguidance` reaches llguidance (`common/sampling.cpp` L213-215). So the door
+  (`structured.with_llguidance_grammar`) takes `response_format` (`json_schema`, or
+  `json_object` as `{"type": "object"}`, or llama-server's own json_object `schema`)
+  and llama-server's `json_schema` field off the body and sends the schema as
+  `grammar`: `%llguidance {}\nstart: %json <schema>`, the form llama.cpp writes itself
+  (`common/json-schema-to-grammar.cpp` L993-996). llguidance compiles that schema with
+  its JSON defaults (`whitespace_flexible` true) under the schema's own `x-guidance`,
+  which is what vLLM's `grammar_from_json_schema(schema, defaults={"whitespace_flexible":
+  true})` compiles; compact is `with_compact_json` first, as on the other engines.
+  - A grammar the request names is the user's: server-common.cpp copies it through
+    (L1414-1420) and server-schema.cpp files it `COMMON_GRAMMAR_TYPE_USER` (L280), so
+    the generation prompt is not fed through it (`common_grammar_needs_prefill`,
+    `common/common.h` L218) and it holds from the first generated token, as on vLLM and
+    mlx-lm. The chat must state thinking off, or it is refused
+    `structured_output_with_thinking` before it waits or loads anything: with thinking
+    on, the template opens a reasoning block, the grammar makes the first token JSON,
+    and llama-server's response parser, which reads the content after that block, would
+    not hand the JSON back as the content. `qwen3.5-4b-bside` states thinking off in its
+    manifest.
+  - A schema stated twice (`response_format` and `json_schema`) or beside a `grammar`
+    is `invalid_request`; a schema that is not a JSON object `invalid_response_format`.
+  - A grammar llguidance will not compile is llama-server's own 400 ("Failed to
+    initialize samplers: llguidance: ..."). At b10970 the llguidance sampler logged
+    the error and then sampled WITHOUT the constraint; Crucible's build patches
+    `common/llguidance.cpp` (`scripts/llama-server-linux.patch`) to throw instead, as
+    the GBNF path does for a grammar that will not parse. If llguidance fails to
+    compute a mask in the middle of an answer (its lexer or item limits), llama.cpp
+    still drops the constraint for the rest of that answer and logs `llg error`.
+  - `qwen3.5-4b-bside` is the llama-server block on cuda-linux, so B-Sides gets
+    compact on the PC and on the Mac.
+- **llama-server b10970 on `llama-windows`** is refused it. That binary is ggml-org's,
+  which has no llguidance (`LLAMA_LLGUIDANCE` defaults off, `CMakeLists.txt` L146; only a
+  third-party CI job builds it on), so the schema goes as sent and becomes its GBNF
+  grammar with the fixed whitespace above. A `grammar` that starts with `%llguidance`
+  ABORTS that build (`common/sampling.cpp` L213-217), taking the model down with the
+  request, so it is refused `structured_output_not_served` and never sent
+  (`structured.refuse_unbuilt_llguidance_grammar`). Which build an engine is, is
+  `llguidance_grammar_backends` on the engine class, read per backend by
+  `engines.structured_output_reading(engine, backend_kind)`.
 
 **mlx-lm.** `patch_mlx_lm_structured_output.py`, self-applied at engine start
 with `mlx_lm/_crucible_grammar.py` (a verbatim copy of `engines/structured_mlx.py`,

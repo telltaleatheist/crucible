@@ -16,6 +16,13 @@ What the door does not judge is the constraint itself (a schema the grammar engi
 will not compile, a regex that does not parse): the engine refuses that by name with
 its own 400, which the door relays.
 
+**llama-server.** Crucible's cuda-linux build has llguidance, and its chat path compiles
+a `response_format` schema with llama.cpp's own GBNF converter, never llguidance, so
+there the door sends every JSON schema as an llguidance `grammar`
+(`with_llguidance_grammar`): the same compiler, at the same version, as vLLM. ggml-org's
+llama-windows build has no llguidance and aborts on such a grammar, so one is refused
+there (`refuse_unbuilt_llguidance_grammar`).
+
 **Whitespace between JSON tokens.** Every engine compiles a JSON schema with flexible
 whitespace (a space, or newlines and indentation, wherever JSON allows it), as OpenAI
 and vLLM do, and that stays the default (Owen, 2026-10-10). A client whose model is
@@ -25,8 +32,9 @@ before the body is forwarded, and it is valid only beside a JSON constraint
 (`response_format` json_schema / json_object, `structured_outputs` json / json_object).
 Each engine states whether it keeps it (`json_whitespace_compact`,
 `json_whitespace_basis`); one that does not is refused `json_whitespace_not_served`
-before the chat waits or loads anything. On the engines that keep it (vLLM and mlx-lm,
-both of which compile JSON with llguidance) the door writes it into the schema as
+before the chat waits or loads anything. On the engines that keep it (vLLM, mlx-lm and
+llama-server on cuda-linux, all of which compile JSON with llguidance) the door writes
+it into the schema as
 llguidance's own option, `"x-guidance": {"whitespace_flexible": false}`, which
 llguidance takes over the `whitespace_flexible: true` default the engine passes; a
 json_object goes as the schema `{"type": "object"}`, which is what both engines compile
@@ -40,6 +48,7 @@ import json
 from typing import Any
 
 from .errors import ApiError
+from .sampling import TEMPLATE_KWARGS, THINKING_KEY
 
 RESPONSE_FORMAT = "response_format"
 
@@ -84,6 +93,10 @@ GUIDANCE_WHITESPACE_KEYS: tuple[str, ...] = ("whitespace_flexible", "whitespace_
 COMPACT_GUIDANCE: dict[str, Any] = {"whitespace_flexible": False}
 ANY_OBJECT: dict[str, Any] = {"type": "object"}
 JSON_OBJECT_SCHEMA_NAME = "json_object"
+
+# The first characters of a grammar in llguidance's own (lark) syntax, which llama.cpp
+# hands to llguidance instead of its GBNF parser (b10970 common/sampling.cpp L213).
+LLGUIDANCE_PREFIX = "%llguidance"
 
 
 def constraints_of(body: dict[str, Any]) -> list[tuple[str, str | None]]:
@@ -281,6 +294,145 @@ def refuse_unkept_json_whitespace(
     )
 
 
+def refuse_unbuilt_llguidance_grammar(
+    *, engine: str, model_id: str, built: bool, body: dict[str, Any]
+) -> None:
+    """Refuse a `grammar` in llguidance's own syntax on an engine whose build has no
+    llguidance: llama-server b10970 ABORTS on one (common/sampling.cpp L213-217), which
+    takes the model down with the request."""
+    grammar = body.get("grammar")
+    if built or not isinstance(grammar, str) or not grammar.startswith(LLGUIDANCE_PREFIX):
+        return
+    raise ApiError(
+        400,
+        "structured_output_not_served",
+        f"this chat's grammar starts with {LLGUIDANCE_PREFIX}, and the {engine} build "
+        f"serving {model_id!r} has no llguidance: it would abort on it (common/sampling.cpp "
+        "L213-217) and take the model down with the request. Send a GBNF grammar, or the "
+        "JSON schema as response_format. Nothing was sent to it",
+        {"model": model_id, "engine": engine, "fields": ["grammar"]},
+    )
+
+
+def refuse_llguidance_grammar_with_thinking(
+    *, engine: str, model_id: str, resolved_body: dict[str, Any]
+) -> None:
+    """Refuse a JSON constraint the door would send as an llguidance grammar unless the
+    chat states thinking off. The grammar holds from the first generated token, as it
+    does on vLLM and mlx-lm, so a model that was asked to think writes its JSON where the
+    template opened a reasoning block, and llama-server's response parser, which reads
+    the answer after that block, would not hand it back as the content."""
+    if not _llguidance_schema_sources(resolved_body):
+        return
+    kwargs = resolved_body.get(TEMPLATE_KWARGS)
+    thinking = kwargs.get(THINKING_KEY) if isinstance(kwargs, dict) else None
+    if thinking is False:
+        return
+    stated = "unstated" if thinking is None else repr(thinking)
+    raise ApiError(
+        400,
+        "structured_output_with_thinking",
+        f"this chat constrains its answer to JSON with thinking {stated} on {model_id!r}. "
+        f"The {engine} engine enforces the schema from the first token it writes, as "
+        "every engine here does, so the answer cannot think first, and it would write "
+        "its JSON inside the reasoning block the template opened, where the reply's "
+        f'content is not read from. State thinking off ("{TEMPLATE_KWARGS}": '
+        f'{{"{THINKING_KEY}": false}}). Nothing was sent to it',
+        {"model": model_id, "engine": engine, "thinking": thinking},
+    )
+
+
+def llguidance_grammar(schema: Any) -> str:
+    """A JSON schema as an llguidance grammar, in the form llama.cpp writes one itself
+    (b10970 common/json-schema-to-grammar.cpp L993-996): a lark grammar whose start is
+    the schema. llguidance compiles that schema with its JSON defaults
+    (whitespace_flexible true) under the schema's own `x-guidance` options, which is what
+    vLLM's `grammar_from_json_schema(schema, defaults={"whitespace_flexible": True})`
+    compiles too."""
+    return f"{LLGUIDANCE_PREFIX} {{}}\nstart: %json " + json.dumps(
+        schema, separators=(",", ":")
+    )
+
+
+def _llguidance_schema_sources(body: dict[str, Any]) -> list[str]:
+    """The fields of `body` that state a JSON constraint llama-server would compile
+    itself: response_format json_schema / json_object, and its own `json_schema`."""
+    found: list[str] = []
+    response_format = body.get(RESPONSE_FORMAT)
+    if isinstance(response_format, dict) and response_format.get("type") in (
+        "json_schema",
+        "json_object",
+    ):
+        found.append(RESPONSE_FORMAT)
+    if body.get("json_schema") is not None:
+        found.append("json_schema")
+    return found
+
+
+def with_llguidance_grammar(body: dict[str, Any]) -> dict[str, Any]:
+    """The body llama-server is sent for a JSON constraint when its build has
+    llguidance: the schema as an llguidance `grammar` (`llguidance_grammar`), with
+    `response_format` and `json_schema` taken off.
+
+    Sent as response_format, llama-server b10970 compiles the schema with its own GBNF
+    converter, whose whitespace rule is fixed (common/json-schema-to-grammar.cpp L229,
+    L816), inside the chat template's PEG parser, which also admits a reasoning block and
+    a ```json fence around it (common/parsers/qwen3-coder.cpp, the Qwen3.5 template's;
+    common/chat-auto-parser-generator.cpp L117-125 for the others). The chat path never
+    hands a response_format schema to llguidance even when it is built in: only a
+    `grammar` that starts with %llguidance reaches it (common/sampling.cpp L213-215). A
+    grammar the request names is the user's (server-common.cpp copies it through, and
+    server-schema.cpp files it COMMON_GRAMMAR_TYPE_USER), so the generation prompt is
+    not fed through it (common_grammar_needs_prefill) and it holds from the first
+    generated token, as the schema does on vLLM and mlx-lm. A body with no JSON
+    constraint is returned as it is."""
+    sources = _llguidance_schema_sources(body)
+    if not sources:
+        return body
+    if len(sources) > 1:
+        raise ApiError(
+            400,
+            "invalid_request",
+            "this chat states a JSON schema twice, as response_format and as json_schema; "
+            "state it once",
+            {"fields": sources},
+        )
+    if body.get("grammar") is not None:
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"this chat states a grammar and a JSON schema ({sources[0]}); the answer can "
+            "be held to one of them",
+            {"fields": ["grammar", sources[0]]},
+        )
+    sent = dict(body)
+    if sources[0] == "json_schema":
+        schema = sent.pop("json_schema")
+    else:
+        response_format = sent.pop(RESPONSE_FORMAT)
+        if response_format["type"] == "json_schema":
+            wrapper = response_format.get("json_schema")
+            schema = wrapper.get("schema") if isinstance(wrapper, dict) else None
+            if schema is None:
+                raise ApiError(
+                    400,
+                    "invalid_response_format",
+                    "response_format json_schema states no json_schema.schema",
+                )
+        else:
+            # llama-server's json_object takes a schema of its own, else any object
+            # (server-common.cpp L1189-1192, L1201-1203); vLLM's is any object.
+            schema = response_format.get("schema", ANY_OBJECT)
+    if not isinstance(schema, dict):
+        raise ApiError(
+            400,
+            "invalid_response_format",
+            f"a JSON schema is an object, and this chat's is {type(schema).__name__}",
+        )
+    sent["grammar"] = llguidance_grammar(schema)
+    return sent
+
+
 def refuse_upstream_json_whitespace(model: str) -> None:
     raise ApiError(
         400,
@@ -338,14 +490,19 @@ __all__ = [
     "GRAMMAR_FIELDS",
     "GUIDANCE_KEY",
     "JSON_WHITESPACE",
+    "LLGUIDANCE_PREFIX",
     "RESPONSE_FORMAT",
     "UNREAD_STRUCTURED_OPTIONS",
     "constrained_fields",
     "constraints_of",
+    "llguidance_grammar",
+    "refuse_llguidance_grammar_with_thinking",
+    "refuse_unbuilt_llguidance_grammar",
     "refuse_unenforced_constraint",
     "refuse_unkept_json_whitespace",
     "refuse_unread_structured_options",
     "refuse_upstream_json_whitespace",
     "take_json_whitespace",
     "with_compact_json",
+    "with_llguidance_grammar",
 ]

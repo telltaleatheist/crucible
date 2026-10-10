@@ -1,0 +1,70 @@
+diff --git a/common/CMakeLists.txt b/common/CMakeLists.txt
+index 2b307c5..3868403 100644
+--- a/common/CMakeLists.txt
++++ b/common/CMakeLists.txt
+@@ -159,8 +159,8 @@ if (LLAMA_LLGUIDANCE)
+ 
+     ExternalProject_Add(llguidance_ext
+         GIT_REPOSITORY https://github.com/guidance-ai/llguidance
+-        # v1.0.1:
+-        GIT_TAG d795912fedc7d393de740177ea9ea761e7905774
++        # v1.7.6 (Crucible: b10970 pins v1.0.1, d795912fedc7d393de740177ea9ea761e7905774):
++        GIT_TAG 0384f3f6aab6cebe8abf9b74db0079b96f5837ef
+         PREFIX ${CMAKE_BINARY_DIR}/llguidance
+         SOURCE_DIR ${LLGUIDANCE_SRC}
+         BUILD_IN_SOURCE TRUE
+diff --git a/common/llguidance.cpp b/common/llguidance.cpp
+index 500bb09..179e0a2 100644
+--- a/common/llguidance.cpp
++++ b/common/llguidance.cpp
+@@ -5,6 +5,8 @@
+ 
+ #    include "llguidance.h"
+ #    include <cmath>
++#    include <stdexcept>
++#    include <string>
+ 
+ struct llama_sampler_llg {
+     const llama_vocab * vocab;
+@@ -24,9 +26,12 @@ static LlgMatcher * llama_sampler_llg_new(LlgTokenizer * tokenizer, const char *
+     }
+     auto c = llg_new_matcher(&cinit, grammar_kind, grammar_data);
+     if (llg_matcher_get_error(c)) {
+-        LOG_ERR("llg error: %s\n", llg_matcher_get_error(c));
++        // Crucible: a grammar llguidance will not compile is refused with its message, as a
++        // GBNF that will not parse is, never sampled without its constraint.
++        std::string error = std::string("llguidance: ") + llg_matcher_get_error(c);
++        LOG_ERR("llg error: %s\n", error.c_str());
+         llg_free_matcher(c);
+-        return nullptr;
++        throw std::invalid_argument(error);
+     }
+ 
+     return c;
+@@ -224,12 +229,25 @@ llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab, const char * g
+ 
+     if (grammar_kind != nullptr && grammar_kind[0] != '\0') {
+         auto tokenizer = llama_sampler_llg_new_tokenizer(vocab);
++        if (tokenizer == nullptr) {
++            // Crucible: no tokenizer is no constraint; refused, never sampled without one.
++            delete ctx;
++            throw std::runtime_error("llguidance: no tokenizer for this vocabulary");
++        }
++        LlgMatcher * grammar = nullptr;
++        try {
++            grammar = llama_sampler_llg_new(tokenizer, grammar_kind, grammar_data);
++        } catch (...) {
++            llg_free_tokenizer(tokenizer);
++            delete ctx;
++            throw;
++        }
+         *ctx           = {
+             /* .vocab        = */ vocab,
+             /* .grammar_kind = */ grammar_kind,
+             /* .grammar_data = */ grammar_data,
+             /* .tokenizer    = */ tokenizer,
+-            /* .grammar      = */ llama_sampler_llg_new(tokenizer, grammar_kind, grammar_data),
++            /* .grammar      = */ grammar,
+         };
+         if (ctx->grammar) {
+             GGML_ASSERT(((size_t) llama_vocab_n_tokens(vocab) + 31) / 32 * 4 ==
