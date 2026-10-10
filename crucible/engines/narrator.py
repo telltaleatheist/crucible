@@ -13,7 +13,7 @@ from .. import envpatches, procgroup, stallguard
 from ..accelerator import proc_entries
 from ..errors import EngineError, JobCancelled
 from ..narratorengines import HIGGS_V3, VOICES_PULL_COMMAND, VoicesDocumentView
-from .base import LOG_TAIL_LINES, SubprocessEngine, find_free_port
+from .base import SubprocessEngine, find_free_port
 
 MODULE = "narrator.serve"
 
@@ -510,12 +510,10 @@ class NarratorEngine(SubprocessEngine):
                 if code is not None:
                     raise EngineError(
                         f"{self.name} exited {code} and could not be sent a "
-                        f"{message.get('action')!r}. Last {LOG_TAIL_LINES} lines "
-                        f"of {self.log_path}:\n" + self.log_tail()
+                        f"{message.get('action')!r}. " + self.log_report()
                     ) from None
                 raise EngineError(
-                    f"could not write to {self.name}: {exc}. Last "
-                    f"{LOG_TAIL_LINES} lines of {self.log_path}:\n" + self.log_tail()
+                    f"could not write to {self.name}: {exc}. " + self.log_report()
                 ) from None
 
     def converse(
@@ -553,9 +551,7 @@ class NarratorEngine(SubprocessEngine):
                     "reader sets a flag the moment a cancel lands, so an engine "
                     "still working after this long is one whose rendering arm "
                     "does not read that flag — this is the wire's contract "
-                    "being broken, not a slow render. Last "
-                    f"{LOG_TAIL_LINES} lines of {self.log_path}:\n"
-                    + self.log_tail()
+                    "being broken, not a slow render. " + self.log_report()
                 )
             try:
                 item = self._inbox.get(timeout=POLL_SECONDS)
@@ -564,14 +560,12 @@ class NarratorEngine(SubprocessEngine):
                 if code is not None:
                     raise EngineError(
                         f"{self.name} exited {code} in the middle of a request. "
-                        f"Last {LOG_TAIL_LINES} lines of {self.log_path}:\n"
-                        + self.log_tail()
+                        + self.log_report()
                     )
                 if time.monotonic() >= deadline:
                     raise EngineError(
                         f"{self.name} said nothing at all for "
-                        f"{silence_timeout:.0f}s. Last {LOG_TAIL_LINES} lines of "
-                        f"{self.log_path}:\n" + self.log_tail()
+                        f"{silence_timeout:.0f}s. " + self.log_report()
                     )
                 continue
 
@@ -580,8 +574,7 @@ class NarratorEngine(SubprocessEngine):
             if isinstance(item, _Ended):
                 raise EngineError(
                     f"{self.name} closed its stdout in the middle of a request "
-                    f"(exit {process.poll()}). Last {LOG_TAIL_LINES} lines of "
-                    f"{self.log_path}:\n" + self.log_tail()
+                    f"(exit {process.poll()}). " + self.log_report()
                 )
             if isinstance(item, _Garbled):
                 raise EngineError(

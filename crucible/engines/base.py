@@ -13,7 +13,7 @@ from typing import Any, Callable
 from .. import hosttools, procgroup
 from ..enginespec import flag_value
 from ..errors import EngineError, JobCancelled
-from ..logtail import tail_of_last_run
+from ..logtail import led_by_first_error, tail_of_last_run
 
 STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
 READY_POLL_SECONDS = 2.0
@@ -124,6 +124,7 @@ class SubprocessEngine:
         self._log_handle: Any = None
         self._port: int | None = None
         self._served_name: str | None = None
+        self._phase_seen: tuple[str, float] | None = None
 
     @classmethod
     def load_args(
@@ -333,8 +334,7 @@ class SubprocessEngine:
             self.refuse_a_taken_port()
             if code is not None:
                 raise EngineError(
-                    f"{self.name} exited {code} before it was ready. Last "
-                    f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
+                    f"{self.name} exited {code} before it was ready. " + self.log_report()
                 )
             announcement = self.announced_ready()
             if announcement is not None:
@@ -345,8 +345,7 @@ class SubprocessEngine:
             if time.monotonic() >= deadline:
                 raise EngineError(
                     f"{self.name} did not {self.readiness_description()} within "
-                    f"{timeout:.0f}s. Last "
-                    f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
+                    f"{timeout:.0f}s. " + self.log_report()
                 )
             attempt += 1
             if on_progress is not None:
@@ -359,12 +358,32 @@ class SubprocessEngine:
 
     def warming_message(self, attempt: int, deadline: float) -> str:
         remaining = max(0.0, deadline - time.monotonic())
-        last = self.log_tail(1).strip()
         base = (
             f"{self.name} loading; {attempt * READY_POLL_SECONDS:.0f}s elapsed, "
             f"{remaining:.0f}s before give-up"
         )
+        phase = self.starting_phase()
+        if phase is not None:
+            return f"{base} — {phase}, {self._seconds_in(phase):.0f}s so far"
+        last = self.log_tail(1).strip()
         return f"{base} — {last}" if last else base
+
+    def starting_phase(self) -> str | None:
+        """What the engine is doing while it starts, in words a client can show, when
+        the engine's own log says it; None when it does not (the warming message then
+        quotes the log's last line). Said to the client while it waits, never decided
+        on (docs/ARCHITECTURE.md R4)."""
+        return None
+
+    def _seconds_in(self, phase: str) -> float:
+        """How long Crucible has seen ``phase`` as the latest: from the first poll that
+        read it, not from the engine's own clock."""
+        now = time.monotonic()
+        seen = self._phase_seen
+        if seen is None or seen[0] != phase:
+            self._phase_seen = (phase, now)
+            return 0.0
+        return now - seen[1]
 
     def _probe_models(self, url: str) -> list[str] | None:
         request = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -400,6 +419,14 @@ class SubprocessEngine:
 
     def log_tail(self, lines: int = LOG_TAIL_LINES) -> str:
         return tail_of_last_run(self._log_path, lines)
+
+    def log_report(self) -> str:
+        """What a refusal quotes of this engine's log: the first error its last run
+        printed, which the tail may have cut off, then the tail."""
+        return led_by_first_error(
+            self._log_path,
+            f"Last {LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail(),
+        )
 
     def _close_log(self) -> None:
         if self._log_handle is not None:

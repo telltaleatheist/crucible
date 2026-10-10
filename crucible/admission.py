@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping
 
@@ -137,11 +138,17 @@ def _unloads_what_is_being_cleared(
     return same_intent
 
 
-def _preflight(
+async def _preflight(
     request: JobRequest, ctx: AdmissionContext, plugin: Any, model: str | None
 ) -> ApiError | None:
+    """A job type's preflight, run off the event loop. It reads the card (`nvidia-smi`,
+    over a second under WSL2) and the env (`pip list` on its first read), and every
+    route, SSE stream and chat proxy shares the loop (crucible/loopwatch.py). It runs
+    outside ``settled_for``: that holds the residency's claim lock on the loop's
+    thread, and a preflight that takes the same lock from another thread would wait on
+    it forever. The checks that decide a place on the lane are made again inside it."""
     try:
-        plugin.preflight(model, request.params)
+        await asyncio.to_thread(plugin.preflight, model, request.params)
     except ApiError as refusal:
         if not (ctx.config.install_on_submit and refusal.code in INSTALLABLE_REFUSALS):
             raise
@@ -212,11 +219,11 @@ def _refuse_if_busy(request: JobRequest, ctx: AdmissionContext, model: str | Non
         raise _JoinTheLine()
 
 
-def _preflight_or_wait(
+async def _preflight_or_wait(
     request: JobRequest, ctx: AdmissionContext, plugin: Any, model: str | None
 ) -> ApiError | None:
     try:
-        return _preflight(request, ctx, plugin, model)
+        return await _preflight(request, ctx, plugin, model)
     except ApiError as refusal:
         if not _waiting_instead(request, refusal):
             raise
@@ -229,13 +236,13 @@ async def _admit(request: JobRequest, ctx: AdmissionContext) -> Job:
         refuse_an_upstream_model(request.model)
     model = resolve_model(plugin, request.model)
     refuse_resume_without_a_journal(plugin, request.type, request.params)
+    same_intent = _unloads_what_is_being_cleared(request, ctx, model)
     try:
-        async with ctx.residency.settled_for(
-            f"a {request.type} job",
-            same_intent=_unloads_what_is_being_cleared(request, ctx, model),
-        ):
+        async with ctx.residency.settled_for(f"a {request.type} job", same_intent=same_intent):
             _refuse_if_busy(request, ctx, model)
-            not_installed = _preflight_or_wait(request, ctx, plugin, model)
+        not_installed = await _preflight_or_wait(request, ctx, plugin, model)
+        async with ctx.residency.settled_for(f"a {request.type} job", same_intent=same_intent):
+            _refuse_if_busy(request, ctx, model)
             if not_installed is None:
                 return _created(request, ctx, plugin, model)
     except _JoinTheLine as joining:
@@ -257,13 +264,15 @@ async def admit_waiting(waiting: Any, ctx: AdmissionContext) -> ApiError | None:
     try:
         plugin = _resolved_plugin(request, ctx)
         model = resolve_model(plugin, request.model)
-        async with ctx.residency.settled_for(
-            f"a queued {request.type} job",
-            same_intent=_unloads_what_is_being_cleared(request, ctx, model),
-        ):
-            ctx.sessions.refuse_if_held(request.session, f"a queued {request.type} job")
+        what = f"a queued {request.type} job"
+        same_intent = _unloads_what_is_being_cleared(request, ctx, model)
+        async with ctx.residency.settled_for(what, same_intent=same_intent):
+            ctx.sessions.refuse_if_held(request.session, what)
             ctx.store.refuse_if_busy()
-            not_installed = _preflight(request, ctx, plugin, model)
+        not_installed = await _preflight(request, ctx, plugin, model)
+        async with ctx.residency.settled_for(what, same_intent=same_intent):
+            ctx.sessions.refuse_if_held(request.session, what)
+            ctx.store.refuse_if_busy()
             if not_installed is None:
                 _onto_the_lane(waiting, ctx)
                 return None

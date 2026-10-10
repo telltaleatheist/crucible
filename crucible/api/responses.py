@@ -113,6 +113,10 @@ class JobStatus(_Open):
     model: str | None
     status: str
     progress: Number
+    message: str | None = Field(
+        description="What the job last said it is doing: its latest progress or "
+        "warming message (a load's engine start, phase by phase)."
+    )
     position: int | None
     error: JobFailure | None
     artifacts: list[str]

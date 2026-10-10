@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterator
 from . import hosttools, procgroup
 from .backend import CUDA_LINUX
 from .errors import CrucibleError, JobCancelled
-from .logtail import tail_of_last_run
+from .logtail import led_by_first_error, tail_of_last_run
 
 STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
 
@@ -574,7 +574,9 @@ def _log_tail(log_path: Path, lines: int = LOG_TAIL_LINES) -> str:
     tail = tail_of_last_run(Path(log_path), lines)
     if not tail:
         return f"Its log is {log_path} (empty or unreadable)."
-    return f"Last {lines} lines of the latest run in {log_path}:\n{tail}"
+    return led_by_first_error(
+        Path(log_path), f"Last {lines} lines of the latest run in {log_path}:\n{tail}"
+    )
 
 
 def cuda_library_path(env_dir: Path) -> str | None:

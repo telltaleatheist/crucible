@@ -388,6 +388,9 @@ def zig_cache_dir(home: Path) -> Path:
     return home / TOOLS_DIR_NAME / ZIG_DIR_NAME / "cache"
 
 
+QUIETED_WARNING = "-Wno-macro-redefined"
+
+
 def c_compiler_path(home: Path) -> Path:
     return home / TOOLS_DIR_NAME / "bin" / C_COMPILER_NAME
 
@@ -397,6 +400,13 @@ def c_compiler_wrapper(home: Path, build: CompilerBuild) -> str:
 
     Zig's caches are kept beside it under the Crucible home, so a service whose
     $HOME is unusable still compiles, and nothing is written outside the home.
+
+    ``-Wno-macro-redefined`` is the one warning it turns off. Zig's glibc headers
+    define ``_POSIX_C_SOURCE`` as POSIX.1-2024 (``202405L``) and Python's pyconfig.h
+    defines it again as ``200809L``, so every launcher Triton compiles (driver.c
+    includes <dlfcn.h> before <Python.h>) printed that warning into the engine log.
+    Clang cannot name one macro, so the class is turned off; every other warning
+    still prints.
     """
     zig = shlex.quote(str(zig_dir(home, build) / "zig"))
     cache = shlex.quote(str(zig_cache_dir(home)))
@@ -407,7 +417,7 @@ def c_compiler_wrapper(home: Path, build: CompilerBuild) -> str:
         f"ZIG_GLOBAL_CACHE_DIR={cache}\n"
         f"ZIG_LOCAL_CACHE_DIR={cache}\n"
         "export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n"
-        f'exec {zig} cc -target {build.target} "$@"\n'
+        f'exec {zig} cc -target {build.target} {QUIETED_WARNING} "$@"\n'
     )
 
 

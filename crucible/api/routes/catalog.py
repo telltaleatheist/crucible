@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Any
 
@@ -167,7 +168,7 @@ def _models_handler(ctx: AppContext):
         """Every model this build has a manifest for, and where it stands here."""
         if not ctx.config.enable_llm:
             raise disabled_error("load-model", ctx.config)
-        return model_rows(ctx.config, ctx.backend, ctx.residency)
+        return await asyncio.to_thread(model_rows, ctx.config, ctx.backend, ctx.residency)
 
     return models
 

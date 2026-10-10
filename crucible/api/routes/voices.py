@@ -81,7 +81,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
     )
     async def voices() -> list[dict[str, Any]]:
         """Every voice this build has a manifest for, and where it stands here."""
-        return rows()
+        return await asyncio.to_thread(rows)
 
     @private.post("/voices/updates", dependencies=tts_on)
     async def voice_updates() -> dict[str, Any]:

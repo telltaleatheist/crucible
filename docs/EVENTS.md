@@ -68,15 +68,15 @@ status it has just entered. Every one carries `job_id`, `type`, `model`, `client
 | --- | --- |
 | `job.queued` | `position`; `waiting`: `true` when it waits in the line (it found the lane busy and was not sent with `"queue": false`), `false` when it went straight to the lane. Moves in the line are `queue.moved`, not more `job.queued`. |
 | `job.running` | `started`. |
-| `job.progress` | Only `job_id`, `fraction` (0 to 1) and `message`. At most one a second per job, only when either changed, and the latest one always arrives unless the job ends first. |
+| `job.progress` | Only `job_id`, `fraction` (0 to 1) and `message`. At most one a second per job, only when either changed, and the latest one always arrives unless the job ends first. A job's `warming` messages (what a load is doing while its engine starts) are its `message` too, with `fraction` unchanged. |
 | `job.done` | `artifacts`: the names to fetch from `GET /v1/jobs/{id}/artifacts/{name}`. |
 | `job.failed` | `error`: `{code, message}`. |
 | `job.cancelled` | nothing more. |
 | `job.interrupted` | `interrupted_at`: the server stopped while it ran (docs/RESUMABLE-JOBS.md). |
 | `job.removed` | `removal`: `{reason, message, waited_s, at}`; `reason` is `operator`, `client`, `expired` or `server_restart` (docs/QUEUE.md). |
 
-Everything a job says on its own stream (`GET /v1/jobs/{id}/events`: notes, warming
-messages, cues, each artifact as it lands) stays there. Follow that stream when a single
+Everything else a job says on its own stream (`GET /v1/jobs/{id}/events`: notes, cues,
+each artifact as it lands) stays there. Follow that stream when a single
 job's detail matters.
 
 ### The queue
