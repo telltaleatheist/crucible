@@ -357,7 +357,9 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
     manifest = load_manifest(model_id)
     assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
-    for kind, spec in manifest.backends.items():
+    for kind in manifest.backends:
+        # A block with forms is read as one of them (crucible/manifests.py, spec).
+        spec = manifest.spec(kind)
         assert spec.engine == block_engine(kind, spec.serves, gguf=spec.file is not None)
         assert len(spec.revision) == 40
         expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])

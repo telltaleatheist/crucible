@@ -886,6 +886,34 @@ export interface ModelInfo {
   readonly contextDefault: number;
   /** The context in force right now; size requests against this. */
   readonly maxModelLen: number | null;
+  /**
+   * For a model that comes in more than one form (precision) of the same weights: the form this
+   * server's card takes (the best that fits), which is what a load that names no form loads and
+   * what `installed`, `revision` and `memoryBytesEstimate` describe. Null for a model with one.
+   */
+  readonly form: string | null;
+  /** Why this card takes `form`, with the numbers; null for a model with one form. */
+  readonly formReason: string | null;
+  /** Every form, best first; null for a model with one form. */
+  readonly forms: readonly ModelFormInfo[] | null;
+}
+
+/** One form of a model (`ModelInfo.forms`). */
+export interface ModelFormInfo {
+  /** What `form` on a chat, a decision or {@link LoadModelOptions.form} says, e.g. `bf16`. */
+  readonly name: string;
+  readonly bits: number;
+  readonly file: string;
+  readonly memoryBytesEstimate: number;
+  /** Whether it fits this server's card; null where the server knows no card. */
+  readonly fits: boolean | null;
+  readonly installed: boolean;
+  /** The form this card takes. */
+  readonly picked: boolean;
+  /** The form on the card right now. */
+  readonly resident: boolean;
+  /** The operator command that pulls this form here. */
+  readonly pullCommand: string;
 }
 
 /** OpenAI's structured-output request, passed through to the engine verbatim. */
@@ -934,6 +962,13 @@ export interface ChatOptions {
   readonly prefill?: string;
   /** The context window an `ollama/<tag>` chat runs at, sent as `context_tokens`. */
   readonly contextTokens?: number;
+  /**
+   * Which form of the model serves this, for a model that comes in more than one form (precision)
+   * of the same weights (`ModelInfo.forms`). Omitted: whichever form is resident, and the form the
+   * server's card takes when one is loaded — what almost every caller wants. Named: that form;
+   * another form on the card is a reload. A name the model does not have is 400 `unknown_form`.
+   */
+  readonly form?: string;
   /**
    * What this chat is, as a capability class sent in the `X-Crucible-Act` header; omitted, no
    * header is sent.
@@ -1043,6 +1078,13 @@ export interface DecideRequest {
   readonly questions: Readonly<Record<string, DecideQuestion>>;
   /** What to do when a label is not among the top tokens the engine returned. */
   readonly missing?: DecideMissing;
+  /**
+   * Which form of the model serves this, for a model that comes in more than one form (precision)
+   * of the same weights (`ModelInfo.forms`). Omitted: whichever form is resident, and the form the
+   * server's card takes when one is loaded — what almost every caller wants. Named: that form;
+   * another form on the card is a reload. A name the model does not have is 400 `unknown_form`.
+   */
+  readonly form?: string;
 }
 
 /** `DecideRequest.missing`: refuse a decision with a label outside the top-K, or report it. */
@@ -1179,6 +1221,13 @@ export interface DecideItemsRequest {
   readonly options?: Readonly<Record<string, string>>;
   readonly items: readonly DecideItem[];
   readonly missing?: DecideMissing;
+  /**
+   * Which form of the model serves this, for a model that comes in more than one form (precision)
+   * of the same weights (`ModelInfo.forms`). Omitted: whichever form is resident, and the form the
+   * server's card takes when one is loaded — what almost every caller wants. Named: that form;
+   * another form on the card is a reload. A name the model does not have is 400 `unknown_form`.
+   */
+  readonly form?: string;
 }
 
 /** The items form's reply: one choice answer per item, in item order. */
@@ -1338,6 +1387,11 @@ export interface LoadVoiceOptions {
 export interface LoadModelOptions {
   /** Tokens: the context to start the engine with (`params.context`). */
   readonly context?: number;
+  /**
+   * The form to load (`params.form`), for a model with more than one (`ModelInfo.forms`).
+   * Omitted: the form the server's card takes.
+   */
+  readonly form?: string;
 }
 
 /** `[voice.serving]` — what the server under narrator is sized by. */
@@ -2063,6 +2117,13 @@ export interface CatalogRow {
   readonly source: string;
   /** Is this the thing on the card right now? */
   readonly resident: boolean;
+  /**
+   * For a model that comes in more than one form: the form this card takes, which is what
+   * `installed`, the size and a pull are about. Null otherwise.
+   */
+  readonly form: string | null;
+  /** Why this card takes `form`; null for a row without forms. */
+  readonly formReason: string | null;
 }
 
 /** One `pull`: fetch a subject's weights. */

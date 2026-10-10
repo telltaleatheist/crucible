@@ -107,6 +107,9 @@ class ResidentModel:
     engine_args: tuple[str, ...]
     defaults: ModelDefaults = NO_DEFAULTS
     keeps_calls_together: bool = False
+    # Which form of the model's block is on the card (docs/FITS-AND-THE-CARD.md section 8);
+    # None for a block with one form.
+    form: str | None = None
 
     @property
     def id(self) -> str:
@@ -130,7 +133,19 @@ class ResidentModel:
             "memory_bytes_estimate": self.memory_bytes_estimate,
             "log_path": str(self.log_path),
             "loaded_at": self.loaded_at,
+            "form": self.form,
         }
+
+
+def serves_model(resident: Any, model: str, form: str | None = None) -> bool:
+    """Whether the resident model answers a call for `model`: the same id, and, where the
+    call names a form, that form. A call naming no form takes whichever form is on the
+    card; naming another form is a reload, as naming another model is."""
+    return (
+        resident is not None
+        and resident.model_id == model
+        and (form is None or resident.form == form)
+    )
 
 
 @dataclass(frozen=True)

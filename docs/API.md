@@ -1140,7 +1140,7 @@ A chat surface shaped like OpenAI's, for clients that already speak it.
 
 ### `POST /openai/v1/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill").
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1156,7 +1156,7 @@ The resident model in OpenAI's list shape, plus every upstream model a route nam
 
 ### `POST /v1/openai/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill").
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1211,6 +1211,7 @@ One answer distribution per question, read off the resident model's next-token l
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `model` | string or null | no | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. Absent: the model this server registered for `decide` (`GET /v1/capability`, the decide row's `selected`), or, when `images` are sent, the one it registered for a decision with images (that row's `with_images`: the vision form of the same weights when it fits, else the largest model that reads images and fits at or below decide's 9B goal). The answer's `model` names which one served it. |
+| `form` | string or null | no | — | Which form of the model serves the decision, for a model whose block here states more than one (`GET /v1/models`, the row's `forms`). Absent: whichever form is resident, and the form this server's card takes when one is loaded. Another form of the same model on the card is a reload; a name the model does not have is refused `400 unknown_form` before anything waits. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or LikelihoodQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
@@ -1315,6 +1316,7 @@ Starts an LLM engine for a model and leaves it resident, so the chat door (POST 
 | --- | --- | --- | --- | --- |
 | `timeout_s` | number | no | `900.0` | Seconds to wait for the engine to come up and answer before the load fails, 30 to 7200 (default 900). |
 | `context` | integer or null | no | `null` | The context length in tokens to start the engine at, at least 2048; null uses the model's own default. Above this host's ceiling it is refused `context_over_limit`; loading the resident model at a new context is a reload. |
+| `form` | string or null | no | `null` | Which form of the model to load, for a model whose block on this backend states more than one (GET /v1/models lists them under `forms`); null loads the one this host's card takes (the row's `form`). A name the model does not have is refused `unknown_form`. |
 
 *Inputs:* None.
 
@@ -1322,6 +1324,7 @@ Starts an LLM engine for a model and leaves it resident, so the chat door (POST 
 
 - There is no `llm` job type: chat and decide never load a model (`model_not_resident`), so load it here first.
 - `context` (at least 2048) is refused above this host's ceiling (`context_over_limit`; GET /v1/capability's `generate` row lists it per model); without it the model's own default is used. A plan that leaves too little KV cache is refused 409 `insufficient_kv_cache`.
+- `form` loads one form of a model that comes in more than one (GET /v1/models, the row's `forms`); without it, the form this card takes. An unknown name is 400 `unknown_form`; a form this card does not take and that is not pulled is 409 `form_not_installed`, with its pull command (docs/FITS-AND-THE-CARD.md section 8).
 - A load that ends `done` leaves the subject resident and held by nothing: the next job to end, a queue session closing or the last chat returning takes it off unless something holds it. Load inside a queue session to keep it for the session.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 - Refused 409 `engine_in_use` while something holds the card (a TTS stream session); the refusal names the holder.
@@ -2148,6 +2151,7 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `jobs.events` | GET /v1/jobs/{id}/events: one job's own SSE stream, resumable with Last-Event-ID. |
 | `jobs.hold` | `hold` on a submit and /v1/jobs/{id}/hold: a job's artifacts are kept until the client lets go of them. |
 | `jobs.resume` | `params.resume` and /v1/resumable: a resumable job continues the journal an earlier run left (docs/RESUMABLE-JOBS.md). |
+| `models.forms` | A model may come in more than one form (precision) of the same weights; each server serves the best form its card holds, GET /v1/models lists them, and `form` on a chat, a decision or `load-model` names one (docs/FITS-AND-THE-CARD.md section 8). |
 | `playground` | GET /v1/playground: the pages the operator page's playground draws. |
 | `queue.calls` | A chat or a decision is held open in the same line until the resident model has a slot (docs/QUEUE.md). |
 | `queue.default` | Every request that can wait (a job, a chat, a decision, a TTS stream) waits in the line by default; `"queue": false` refuses at once instead, and `{"max_wait_s": N}` sets the wait. `"queue": {}` is refused (docs/QUEUE.md). |
@@ -2408,6 +2412,7 @@ An items-form decision: one choice distribution per item, in item order.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `model` | string or null | no | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. Absent: the model this server registered for `decide` (`GET /v1/capability`, the decide row's `selected`), or, when `images` are sent, the one it registered for a decision with images (that row's `with_images`: the vision form of the same weights when it fits, else the largest model that reads images and fits at or below decide's 9B goal). The answer's `model` names which one served it. |
+| `form` | string or null | no | — | Which form of the model serves the decision, for a model whose block here states more than one (`GET /v1/models`, the row's `forms`). Absent: whichever form is resident, and the form this server's card takes when one is loaded. Another form of the same model on the card is a reload; a name the model does not have is refused `400 unknown_form` before anything waits. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
 | `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or LikelihoodQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |

@@ -24,7 +24,7 @@ from .clock import utcnow
 from .config import Config
 from .errors import ApiError, CrucibleError
 from .imagemodels import load_all_image_manifests
-from .manifests import BACKEND_ENGINES, ModelManifest, load_all_manifests
+from .manifests import BACKEND_ENGINES, ModelManifest, host_fit_of, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
 from .segmentmodels import load_all_segment_manifests
@@ -70,6 +70,10 @@ class Subject:
     shares_weights_of: str | None = None
     missing_files: Callable[[], list[str]] | None = None
     moves_to: Callable[[], str | None] | None = None
+    # For a model that comes in more than one form: the form this card takes (what the
+    # subject's pull fetches and its `installed` reads) and why.
+    form: str | None = None
+    form_reason: str | None = None
 
     def would_move(self) -> str | None:
         return None if self.moves_to is None else self.moves_to()
@@ -152,7 +156,13 @@ def _video_subject(config: Config, manifest: Any, spec: Any) -> Subject:
 def _model_subject(
     config: Config, backend: Backend, job_type: str, manifest: Any
 ) -> Subject:
-    spec = manifest.spec(backend.kind)
+    host = host_fit_of(config, backend)
+    pick = manifest.form_pick(backend.kind, host) if job_type == "llm" else None
+    spec = (
+        manifest.spec(backend.kind)
+        if pick is None
+        else manifest.spec(backend.kind, pick.form.name)
+    )
     base_id = getattr(manifest, "weights_of", None)
     return Subject(
         kind="model",
@@ -175,6 +185,8 @@ def _model_subject(
             if base_id is None
             else _missing_extras(config, manifest, backend.kind)
         ),
+        form=None if pick is None else pick.form.name,
+        form_reason=None if pick is None else pick.reason,
     )
 
 
@@ -645,6 +657,8 @@ def rows(config: Config, backend: Backend, residency: Residency) -> list[dict[st
                     "license": None,
                     "source": subject.source,
                     "resident": is_resident(subject),
+                    "form": subject.form,
+                    "form_reason": subject.form_reason,
                 }
             )
     except ApiError:

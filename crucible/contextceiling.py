@@ -121,8 +121,9 @@ def check_load_context(
     *,
     available_bytes: int,
     context: int,
+    form: str | None = None,
 ) -> ContextCeiling:
-    candidate = Candidate.of(manifest, backend_kind)
+    candidate = Candidate.of(manifest, backend_kind, form)
     ceiling = candidate.context_ceiling(available_bytes, 1)
     if ceiling is None:
         raise ValueError(f"{manifest.id} is not token-shaped")

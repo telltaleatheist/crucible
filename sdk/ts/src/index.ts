@@ -217,6 +217,7 @@ export type {
   EngineRestartTaskRequest,
   ManagedBy,
   ModelDescriptor,
+  ModelFormInfo,
   ModelInfo,
   ModuleTaskRequest,
   PageRequest,

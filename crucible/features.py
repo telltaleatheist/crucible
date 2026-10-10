@@ -46,6 +46,10 @@ FEATURES: dict[str, str] = {
     "resident model's next-token logprobs.",
     "decide.items": "POST /v1/decide with `items`: one choice answer per item, in one "
     "request.",
+    "models.forms": "A model may come in more than one form (precision) of the same "
+    "weights; each server serves the best form its card holds, GET /v1/models lists "
+    "them, and `form` on a chat, a decision or `load-model` names one "
+    "(docs/FITS-AND-THE-CARD.md section 8).",
     "tts": "The `tts` job: a render of text to audio with a narration voice.",
     "tts.stream": "/v1/tts/stream: a long-lived narration session, text in and audio "
     "back over SSE.",

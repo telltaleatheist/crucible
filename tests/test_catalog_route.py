@@ -70,6 +70,8 @@ def test_a_row_carries_exactly_the_contract_s_fields(
             "license",
             "source",
             "resident",
+            "form",
+            "form_reason",
         }
 
 

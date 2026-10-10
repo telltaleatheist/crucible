@@ -332,3 +332,72 @@ already declares it.
 recite a table. 5 needs no GPU and is worth doing early — it is the difference
 between Crucible's verdict and vLLM's. 6 waits on 4, because its maximum is 4's
 output.
+
+## 8. Forms: one model, the best precision this card holds
+
+**Owen, 2026-10-10:** `qwen3.5-4b-bside` is *full precision on the Mac and this PC, and
+8-bit on Victoria's laptop*. B-Sides asks for the model by name, and which card it runs
+on is Crucible's business, not the app's. So the answer is not a second model id the
+app chooses between: it is one id whose backend block lists **forms** of the same
+weights, best first, and each host serves the best form that fits its card.
+
+**The manifest.** The block keeps what its forms share (engine, repo, revision,
+`serves`, `engine_args`, context); each `[[backends.<kind>.forms]]` table states what
+differs: `name`, `bits`, `file`, `memory_bytes_estimate` and its `memory` terms. Today a
+form is one GGUF file of the block's repo at the block's revision, so forms live on
+`llama-server` blocks; a whole-repo (vLLM, mlx) block with forms is refused, because a
+second precision of a repo is a second repo. A block without `forms` is exactly what it
+was. Forms are best first, each narrower in `bits` and smaller in its estimate than the
+one before, at least two of them; a block with forms that also states `file`, `bits`,
+`memory_bytes_estimate` or `memory` is refused (one fact, two owners).
+
+**The pick** (`manifests.pick_form`) is the fit every verb's candidate meets with no
+working context (`fit.Candidate.holds`): the first form whose `memory_bytes_estimate` is
+within the host's available bytes, which are the card's total less the desktop
+allowance (`memorybudget.available_bytes`). It reads nothing live and nothing on disk,
+so a host's form changes only when its card or its allowance does. With nothing fitting,
+the smallest form is **tried**, as a model named by id is (docs/VERB-SIZING.md), and the
+reason carries the numbers. The two cards:
+
+| host | total | allowance | gives a model | bf16 (9.27 GiB) | q8_0 (5.49 GiB) | form |
+|---|---|---|---|---|---|---|
+| owens-pc-wsl, RTX 3090 Ti | 23.99 GiB | 3.00 GiB | 20.99 GiB | fits | fits | **bf16** |
+| Victoria's RTX 3070 Laptop | 8.00 GiB | 1.00 GiB | 7.00 GiB | no | fits | **q8_0** |
+
+(`tests/test_model_forms.py` holds these numbers.) The Mac's block has no forms: it is
+bf16 on mlx-lm.
+
+**Where the form is resolved.** `ModelManifest.spec(kind, form=None, host=None)` is the
+one door: a block with forms comes back as one form flattened into a spec (its file,
+bits and memory in the block's place, `spec.form` naming it). A path that knows its host
+passes it (`manifests.host_fit_of(config, backend)`: the load, `/v1/models`, the
+catalog, `crucible models`, doctor); everything else reads the host the process
+registered (`manifests.use_host`, called by `create_app`, the CLI's `common.here` and
+doctor's survey, reading the live config so a re-measured allowance moves the pick). A
+process with no host (the lineup generator, a test reading the catalog) reads the first
+form, and its reason says so. `ModelManifest.block(kind)` is the block as stated, for
+the shared facts.
+
+**What a host says about it.** `GET /v1/models` rows carry `form` (the pick),
+`form_reason` and `forms` (each with `bits`, `file`, `memory_bytes_estimate`, `fits`,
+`installed`, `picked`, `resident`, `pull_command`); `installed`, `revision` and the
+estimate are the pick's. `/v1/catalog` rows carry `form` and `form_reason`. `crucible
+models list` says which form, and when another form is installed than the one this card
+takes, that it needs a pull. `crucible doctor` reports `model_forms` and the problem
+`model_form_not_installed` with the command. A load never serves a smaller form because
+the better one is not downloaded: it is refused `model_not_installed`, naming the form,
+why, and the form that IS installed, and install-on-submit pulls the pick like any
+model. `crucible models pull <id>` pulls the pick; `--form <name>` pulls another. Every
+form of one block lives in one folder under one stamp, so pulling a second form keeps
+the first installed, and a failed or cancelled pull of it takes nothing away.
+
+**The granular control.** Owen, 2026-10-10: *"b-sides should handle calling the
+commands, crucible handles serving the model. with more granular controls available from
+the calling app if they want it."* A chat, a decision or a `load-model` may carry
+`form`. Omitted: the default above, and a call naming no form takes whichever form is
+resident. Named: that form; another form of the same id on the card is a reload, as
+another model is. An unknown name is `400 unknown_form` with the forms the model has,
+before anything waits. A named form that is not installed and is not the pick is `409
+form_not_installed` with its `--form` command (install-on-submit pulls only the pick); a
+named form that cannot fit is tried and refused with the numbers, as a named model is.
+`form` is Crucible's, never forwarded to the engine.

@@ -28,6 +28,7 @@ from crucible.manifests import (
     GGUF_ENGINE,
     ManifestError,
     block_engine,
+    host_fit_of,
     load_manifest,
     parse_manifest,
 )
@@ -377,12 +378,15 @@ def test_mlx_has_no_gguf_engine() -> None:
 
 def test_the_bside_model_is_gguf_on_llama_server_on_the_pc_and_mlx_on_the_mac() -> None:
     manifest = load_manifest(BSIDE)
-    spec = manifest.spec(CUDA_LINUX)
-    assert spec.engine == GGUF_ENGINE
-    assert spec.file is not None and spec.file.endswith("Q8_0.gguf")
-    assert spec.bits == 8
-    assert spec.memory is not None and spec.memory.basis == "computed"
+    assert manifest.block(CUDA_LINUX).form_names == ("bf16", "q8_0")
+    for form, suffix, bits in (("bf16", "BF16.gguf", 16), ("q8_0", "Q8_0.gguf", 8)):
+        spec = manifest.spec(CUDA_LINUX, form)
+        assert spec.engine == GGUF_ENGINE
+        assert spec.file is not None and spec.file.endswith(suffix)
+        assert spec.bits == bits and spec.form == form
+        assert spec.memory is not None and spec.memory.basis == "computed"
     assert manifest.spec("mlx-darwin").engine == "mlx-lm"
+    assert manifest.spec("mlx-darwin").bits == 16
     assert manifest.defaults.thinking is False
 
 
@@ -409,10 +413,13 @@ def test_the_four_bit_vllm_form_is_gone() -> None:
 
 
 def _pulled(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The form the 3070 takes (q8_0), pulled."""
     manifest = load_manifest(BSIDE)
     hub = FakeHub(chunks=1)
     monkeypatch.setattr("huggingface_hub.snapshot_download", hub.snapshot_download, raising=False)
-    weights.pull(config, manifest, manifest.spec(CUDA_LINUX))
+    weights.pull(
+        config, manifest, manifest.spec(CUDA_LINUX, host=host_fit_of(config, _backend()))
+    )
 
 
 def test_a_bside_load_starts_the_binary_with_the_env_s_libraries(
@@ -429,6 +436,7 @@ def test_a_bside_load_starts_the_binary_with_the_env_s_libraries(
     monkeypatch.setattr("crucible.accelerator.refuse_if_card_lacks", lambda **_: None)
     _, spec, (launch, _) = _require_loadable(config, backend, BSIDE)
     assert spec.engine == GGUF_ENGINE
+    assert spec.form == "q8_0", "an 8 GiB card takes the 8-bit form"
     assert launch.executable == hosttools.llama_server_path(config.home)
     assert launch.library_dirs == (lib,)
     assert job_type.check(backend).ready

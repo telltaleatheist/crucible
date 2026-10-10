@@ -678,6 +678,14 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   `--language-model-only` is refused when `image` is served, because the engine
   would answer pages it cannot see. On every `llama-server` block, `file` is required, `mmproj`
   is required when images are served, and `mmproj` is refused otherwise.
+- **Forms.** A `llama-server` block may list `[[backends.<kind>.forms]]` (`name`, `bits`,
+  `file`, `memory_bytes_estimate`, `memory`), best first, instead of stating those keys
+  itself; `_check_block_numbers`, `_parse_forms` and `_check_form_order` hold the rules.
+  Read the block through `ModelManifest.spec(kind, form, host=)`, which flattens the form
+  a host takes (`pick_form`) or the one named; `ModelManifest.block(kind)` is the shared
+  part. Every form of a block is one folder and one stamp: `weights.pull` adds a second
+  form's file beside the first (`same_pin_files`) and keeps the stamp, so the first stays
+  installed. Design and the picks: docs/FITS-AND-THE-CARD.md section 8.
 - **GGUF floor.** Owen 2026-09-26: *"we can quantize if we need to. no less than 4."*
   Q3, Q2 and IQ2 files are refused.
 - `[defaults]` may contain only keys the engines honour. A field stated in the

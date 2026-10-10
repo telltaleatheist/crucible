@@ -24,9 +24,11 @@ from ...engines import (
 )
 from ...engines.items_forward import ITEMS_PATH
 from ...errors import ApiError
+from ...formrequest import refuse_unknown_form
 from ...inflight import read_act
 from ...manifests import load_manifest
 from ...queuerequest import max_wait_of
+from ...residency import serves_model
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..proxy import (
@@ -317,6 +319,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             else _registered_model(ctx.config, decide_core.check_image_count(body.images))
         )
         _refuse_an_upstream(model)
+        refuse_unknown_form(model, body.form, backend.kind)
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)
         session = queue_session(request, ctx.sessions)
@@ -329,7 +332,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 request, line=ctx.line, residency=residency, inflight=inflight,
                 settle=chat_over, kind="decide", model=model, act=act,
                 client=client_agent(request), max_wait_s=max_wait_s,
-                session=session,
+                session=session, form=body.form,
             )
             if isinstance(turn, Response):
                 return turn
@@ -340,8 +343,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         try:
             async with residency.settled_for("a decision"):
                 resident = residency.resident_model
-                if resident is None or resident.model_id != model:
-                    raise model_not_resident(model, resident, "a decision")
+                if not serves_model(resident, model, body.form):
+                    raise model_not_resident(model, resident, "a decision", body.form)
                 refuse_an_exited_engine(residency, resident)
 
                 n_images = decide_core.check_image_count(body.images)

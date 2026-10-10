@@ -599,13 +599,24 @@ def pull(
     if force and target.exists():
         refuse_if_shared(config, manifest, spec.backend)
         shutil.rmtree(target)
-    stamp = _clear_stamp(target, STAMP_NAME)
+    kept = same_pin_files(target, spec)
+    stamp = target / STAMP_NAME if kept else _clear_stamp(target, STAMP_NAME)
+    if kept:
+        _say(
+            on_line,
+            f"{target} already holds {', '.join(kept)} at this pin (another form of "
+            "the same weights); it stays, and stays installed, while this one is fetched",
+        )
     linked = adopt_hub_cache(spec, target, on_line)
-    started = _fetch_snapshot(config, manifest, spec, target, on_line, on_progress)
+    started = _fetch_snapshot(
+        config, manifest, spec, target, on_line, on_progress, keep=bool(kept)
+    )
     elapsed = time.monotonic() - started
     _require_snapshot_complete(manifest, spec, target)
     size = directory_bytes(target)
-    _write_record(stamp, {**_snapshot_record(manifest, spec, size, elapsed), "linked_bytes": linked})
+    record = _snapshot_record(manifest, spec, size, elapsed)
+    record["files"] = sorted({*kept, *record["files"]})
+    _write_record(stamp, {**record, "linked_bytes": linked})
     _say(
         on_line,
         f"pulled {size / 1e9:.2f} GB in {elapsed:.0f}s "
@@ -675,6 +686,25 @@ def adopt_hub_cache(
     return linked
 
 
+def same_pin_files(target: Path, spec: WeightsSource) -> tuple[str, ...]:
+    """The files a directory already holds at `spec`'s pin under its stamp: another form
+    of the same weights (docs/FITS-AND-THE-CARD.md section 8), pulled before. A pull of
+    a second form adds its file beside them and keeps the stamp, so a failed or cancelled
+    pull never takes the installed form away. Empty when the stamp is missing, names
+    another pin, or the pull fetches a whole repo (no files to add)."""
+    if not spec.files:
+        return ()
+    stamp = target / STAMP_NAME
+    if not stamp.is_file():
+        return ()
+    record = json.loads(stamp.read_text(encoding="utf-8"))
+    if record["revision"] != spec.revision or record["hf_repo"] != spec.hf_repo:
+        return ()
+    return tuple(
+        name for name in record.get("files", ()) if (target / name).is_file()
+    )
+
+
 def _fetch_snapshot(
     config: Config,
     manifest: WeightsSubject,
@@ -682,6 +712,8 @@ def _fetch_snapshot(
     target: Path,
     on_line: Callable[[str], None] | None,
     on_progress: ProgressHook | None,
+    *,
+    keep: bool = False,
 ) -> float:
     token = hf_token(config)
     _say(
@@ -699,7 +731,13 @@ def _fetch_snapshot(
             retry=manifest.pull_command,
         )
     except PullCancelled:
-        shutil.rmtree(target, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(target, ignore_errors=True)
+            raise
+        # Another form is installed here: take away only what this pull brought.
+        for name in spec.files:
+            (target / name).unlink(missing_ok=True)
+        shutil.rmtree(target / ".cache", ignore_errors=True)
         raise
     return started
 

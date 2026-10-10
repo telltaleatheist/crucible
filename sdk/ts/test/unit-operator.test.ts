@@ -174,6 +174,8 @@ const ROW = {
   license: null,
   source: 'hf:Qwen/Qwen3.5-9B',
   resident: false,
+  form: null,
+  form_reason: null,
 };
 
 test('catalog reads its rows and camelCases nothing else', async () => {
@@ -194,6 +196,8 @@ test('catalog reads its rows and camelCases nothing else', async () => {
     license: null,
     source: 'hf:Qwen/Qwen3.5-9B',
     resident: false,
+    form: null,
+    formReason: null,
   });
   assert.equal(rows[1]!.kind, 'rvc-base');
   assert.equal(rows[1]!.name, null);
