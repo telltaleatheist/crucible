@@ -75,6 +75,20 @@ const DONE_SONG = {
   stage_peak_bytes: { scoring: 9_000_000_000, composing: 12_000_000_000 },
   memory_bytes_estimate: 16_000_000_000,
   memory_basis: 'declared',
+  low_vram: false,
+  decode_stages: {
+    scoring: {
+      tokens: 1180, cap: 4096, ended: 'eos', execution: 'cuda_graph', attention: 'sdpa',
+      low_vram: false, prefix_tokens: 212, cfg_branches: 1, seconds: 9.0,
+      prefill_seconds: 0.1, tokens_per_second: 131.1,
+    },
+    composing: {
+      tokens: 9000, cap: 9000, ended: 'cap', execution: 'cuda_graph', attention: 'sdpa',
+      low_vram: false, prefix_tokens: 1395, cfg_branches: 1, seconds: 50.0,
+      prefill_seconds: 0.2, tokens_per_second: 180.0,
+    },
+  },
+  stages_at_cap: ['composing'],
 };
 
 test('audio() posts one audio job with snake_case params and only what the caller set', async () => {
@@ -135,6 +149,31 @@ test('readAudioResult reads what a song can be made again from, score included',
   assert.deepEqual([result.sampleRate, result.channels, result.score], [48000, 2, 'score.abc']);
   assert.equal(result.stageSeconds.composing, 50.2);
   assert.deepEqual(result.artifacts, ['audio.flac', 'score.abc']);
+});
+
+test('readAudioResult reads how each token stage ended, and which ran to its cap', () => {
+  const result = readAudioResult({ artifacts: ['audio.flac'], extra: { audio: DONE_SONG } });
+  assert.deepEqual(result.stagesAtCap, ['composing']);
+  assert.equal(result.lowVram, false);
+  const composing = result.decodeStages?.['composing'];
+  assert.deepEqual(
+    [composing?.tokens, composing?.cap, composing?.ended, composing?.execution, composing?.tokensPerSecond],
+    [9000, 9000, 'cap', 'cuda_graph', 180.0],
+  );
+  assert.equal(result.decodeStages?.['scoring']?.ended, 'eos');
+  const sfx = readAudioResult({
+    artifacts: ['audio.flac'],
+    extra: { audio: { ...DONE_SONG, decode_stages: null, stages_at_cap: null } },
+  });
+  assert.deepEqual([sfx.decodeStages, sfx.stagesAtCap], [null, null]);
+  const bad = { ...DONE_SONG.decode_stages.composing, ended: 'length' };
+  assert.throws(
+    () => readAudioResult({
+      artifacts: [],
+      extra: { audio: { ...DONE_SONG, decode_stages: { composing: bad } } },
+    }),
+    CrucibleProtocolError,
+  );
 });
 
 test('readAudioResult refuses a missing audio block and a kind it does not know', () => {

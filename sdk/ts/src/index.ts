@@ -139,6 +139,7 @@ export type {
   AlignOptions,
   ImageOptions,
   ImageResult,
+  AudioDecodeStage,
   AudioOptions,
   AudioResult,
   PlaygroundField,

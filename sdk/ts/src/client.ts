@@ -74,6 +74,7 @@ import {
   type AlignOptions,
   type ImageOptions,
   type ImageResult,
+  type AudioDecodeStage,
   type AudioOptions,
   type AudioResult,
   type SegmentOptions,
@@ -3581,8 +3582,37 @@ export function readAudioResult(done: DoneData): AudioResult {
     stagePeakBytes: numberMap(nullableObject(audio, 'stage_peak_bytes', at), `${at}.stage_peak_bytes`),
     memoryBytesEstimate: num(audio, 'memory_bytes_estimate', at),
     memoryBasis: str(audio, 'memory_basis', at),
+    lowVram: bool(audio, 'low_vram', at),
+    decodeStages: readDecodeStages(nullableObject(audio, 'decode_stages', at), `${at}.decode_stages`),
+    stagesAtCap: nullableStrArray(audio, 'stages_at_cap', at),
     artifacts: done.artifacts ?? [],
   };
+}
+
+function readDecodeStages(
+  stages: Json | null,
+  where: string,
+): Readonly<Record<string, AudioDecodeStage>> | null {
+  if (stages === null) return null;
+  const read: Record<string, AudioDecodeStage> = {};
+  for (const [name, value] of Object.entries(stages)) {
+    const at = `${where}.${name}`;
+    const stage = asObject(value, at);
+    read[name] = {
+      tokens: num(stage, 'tokens', at),
+      cap: num(stage, 'cap', at),
+      ended: oneOf(str(stage, 'ended', at), ['eos', 'cap'] as const, `${at}.ended`),
+      execution: str(stage, 'execution', at),
+      attention: str(stage, 'attention', at),
+      lowVram: bool(stage, 'low_vram', at),
+      prefixTokens: num(stage, 'prefix_tokens', at),
+      cfgBranches: num(stage, 'cfg_branches', at),
+      seconds: num(stage, 'seconds', at),
+      prefillSeconds: num(stage, 'prefill_seconds', at),
+      tokensPerSecond: num(stage, 'tokens_per_second', at),
+    };
+  }
+  return read;
 }
 
 function readPlaygroundPage(page: Json, where: string): PlaygroundPage {

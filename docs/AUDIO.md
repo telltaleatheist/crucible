@@ -223,9 +223,48 @@ effective parameter, so a sound can be made again:
            "peak_bytes": 12000000000,
            "stage_peak_bytes": {"scoring": 9000000000, "composing": 12000000000, "synthesizing": 11000000000, "decoding": 3000000000},
            "memory_bytes_estimate": 16000000000, "memory_basis": "declared",
-           "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"}},
+           "low_vram": false,
+           "versions": {"yue2-infer": "0.1.6", "torch": "2.10.0", "transformers": "4.57.6"},
+           "notes": null,
+           "decode_stages": {
+             "scoring": {"tokens": 1180, "cap": 4096, "ended": "eos", "execution": "cuda_graph",
+                         "attention": "sdpa", "low_vram": false, "prefix_tokens": 212,
+                         "cfg_branches": 1, "seconds": 9.0, "prefill_seconds": 0.1,
+                         "tokens_per_second": 131.1},
+             "composing": {"tokens": 9000, "cap": 9000, "ended": "cap", "execution": "cuda_graph",
+                           "attention": "sdpa", "low_vram": false, "prefix_tokens": 1395,
+                           "cfg_branches": 1, "seconds": 50.0, "prefill_seconds": 0.2,
+                           "tokens_per_second": 180.0}},
+           "stages_at_cap": ["composing"]},
  "resident": "yue2-3b"}
 ```
+
+### How each token stage ended: `decode_stages`, `stages_at_cap`
+
+YuE2 writes two token streams, one pass each over one prefix (neither is decoded in
+segments): `scoring`, the ABC score, capped at 4096 tokens, and `composing`, the song's
+codec tokens, capped at 9000. Normally the model ends each with its end token. A bad seed can
+keep it going until the cap - on an RTX 3070 one song came out 6:00 long that way, while the
+same seed ended normally on a 3090 Ti (2026-10-09). The finished job says which, from
+yue2-infer's own account of each stage, so nobody has to re-run the seed to find out:
+
+| field | meaning |
+|---|---|
+| `tokens` | every token the model wrote in the stage, its end token included |
+| `cap` | the most the stage may write (yue2-infer's own setting, not a Crucible copy of it) |
+| `ended` | `eos`: the model ended the stage. `cap`: it ran to `cap` without ending |
+| `execution` | `cuda_graph` or `eager` |
+| `attention` | the attention kernel the stage ran on |
+| `low_vram` | whether `[audio] low_vram` held half of YuE2 on the card for this render |
+| `prefix_tokens`, `cfg_branches` | the prompt it decoded after, and 2 when `cfg` is above 1 |
+| `seconds`, `prefill_seconds`, `tokens_per_second` | wall time of the stage and its speed |
+
+`stages_at_cap` lists the stages whose `ended` is `cap`, in order: `[]` when the model ended
+every stage, null for Stable Audio, which decodes no tokens (`decode_stages` is null too). A
+stage at its cap does not fail the job and nothing re-runs it: the audio is real, only longer
+than the model meant. The last progress event says it in words too ("…; composing at its
+9000-token cap without ending"). An instrumental reports the score YuE2 decoded, not the fixed
+score it re-plans from (which decodes nothing).
 
 (The numbers above show the shape; no audio model has been measured through Crucible yet.)
 `steps`, `duration_s` and `cfg` are `null` where the model does not take them. Stable Audio

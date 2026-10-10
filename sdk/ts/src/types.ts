@@ -1702,7 +1702,39 @@ export interface AudioResult {
   readonly stagePeakBytes: Readonly<Record<string, number>>;
   readonly memoryBytesEstimate: number;
   readonly memoryBasis: string;
+  /** Whether `[audio] low_vram` held half of YuE2 on the card at a time for this render. */
+  readonly lowVram: boolean;
+  /**
+   * Each token-decoding stage's own account, in order (`scoring`, then `composing` for YuE2);
+   * null for an engine that decodes no tokens (Stable Audio).
+   */
+  readonly decodeStages: Readonly<Record<string, AudioDecodeStage>> | null;
+  /**
+   * The stages that ran to their token cap without the model ending them: `[]` when every
+   * stage ended itself, null when nothing decodes tokens. The job still succeeds - the audio
+   * is only longer than the model meant - and the server never re-runs it.
+   */
+  readonly stagesAtCap: readonly string[] | null;
   readonly artifacts: readonly string[];
+}
+
+/** One autoregressive stage of an `audio` job, as yue2-infer accounted for it. */
+export interface AudioDecodeStage {
+  /** Every token the model wrote, its end token included. */
+  readonly tokens: number;
+  /** The most the stage may write: 4096 for the score, 9000 for the song. */
+  readonly cap: number;
+  /** `eos`: the model ended the stage. `cap`: it ran to `cap` without ending - a runaway. */
+  readonly ended: 'eos' | 'cap';
+  /** `cuda_graph` or `eager`. */
+  readonly execution: string;
+  readonly attention: string;
+  readonly lowVram: boolean;
+  readonly prefixTokens: number;
+  readonly cfgBranches: number;
+  readonly seconds: number;
+  readonly prefillSeconds: number;
+  readonly tokensPerSecond: number;
 }
 
 /** One field of a playground form, as `GET /v1/playground` states it. */

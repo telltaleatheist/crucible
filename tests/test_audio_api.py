@@ -186,6 +186,7 @@ def test_a_sound_effect_is_made_with_step_progress_and_a_flac(
     assert (audio["revision"], audio["engine"], audio["kind"], audio["score"]) == (spec.revision, "stable-audio-3", "sfx", None)
     assert (audio["sample_rate"], audio["channels"]) == (44100, 2)
     assert audio["peak_bytes"] == 9 and audio["memory_basis"] == "declared"
+    assert (audio["decode_stages"], audio["stages_at_cap"]) == (None, None), "diffusion decodes no tokens"
     flac = ready.get(f"/v1/jobs/{job_id}/artifacts/audio.flac", headers=auth).content
     rate, channels, frames = streaminfo(flac)
     assert (rate, channels) == (44100, 2) and frames == audio["audio_seconds"] * 44100
@@ -268,6 +269,38 @@ def test_a_song_publishes_its_score_beside_the_audio(
     model_dir = home / "models" / SONG / FAKE_BACKEND.kind
     assert (load["engine"], load["parts"]) == ("yue2", {"vae": str(model_dir / "vae")})
     assert load["memory_budget_bytes"] == load_audio_manifest(SONG).spec(FAKE_BACKEND.kind).memory_bytes_estimate
+
+
+def test_a_song_says_how_each_token_stage_ended(ready: TestClient, auth: dict[str, str]) -> None:
+    _, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 3})
+    audio = events[-1]["data"]["audio"]
+    assert list(audio["decode_stages"]) == ["scoring", "composing"]
+    assert {stage["ended"] for stage in audio["decode_stages"].values()} == {"eos"}
+    assert audio["stages_at_cap"] == []
+
+
+def test_a_stage_that_ran_to_its_cap_is_on_the_done_record_and_the_job_still_succeeds(
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch, home: Path
+) -> None:
+    """Victoria's 6-minute song (RTX 3070, 2026-10-09): only a re-run found the stage that
+    never ended. The job is not failed and nothing re-runs it (Owen: a retry "seems like a
+    band aid"); the record says it, for a client and for whoever reads job.json after."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_CAPPED", "composing")
+    job_id, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 3})
+    assert events[-1]["event"] == "done", events[-1]
+    audio = events[-1]["data"]["audio"]
+    assert audio["stages_at_cap"] == ["composing"]
+    composing = audio["decode_stages"]["composing"]
+    assert (composing["tokens"], composing["cap"], composing["ended"]) == (9000, 9000, "cap")
+    last_words = [e["data"]["message"] for e in events if e["event"] == "progress"][-1]
+    assert "composing at its 9000-token cap without ending" in last_words
+    record = json.loads((home / "jobs" / job_id / "job.json").read_text(encoding="utf-8"))
+    kept = record["done_extra"]["audio"]
+    assert kept["stages_at_cap"] == ["composing"] and kept["decode_stages"] == audio["decode_stages"]
+    # What it ran with is on the same record: enough to run the seed again.
+    assert (kept["tags"], kept["lyrics"], kept["seed"], kept["cfg"], kept["instrumental"], kept["low_vram"]) == (
+        TAGS, LYRICS, 3, 1.0, False, False
+    )
 
 
 def test_a_seed_left_out_is_chosen_and_reported(ready: TestClient, auth: dict[str, str]) -> None:
