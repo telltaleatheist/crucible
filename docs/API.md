@@ -76,6 +76,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/settings` | Where each class's work runs and which upstreams are configured. |
 | `PUT /v1/settings` | Apply a partial settings patch, whole or not at all, live without a restart. |
 | `PUT /v1/settings/audio/low-vram` | Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off` are the operator's and Crucible never changes them; `auto` lets Crucible turn it on exactly where this card cannot hold a splittable audio model whole. |
+| `PUT /v1/settings/llm/concurrency` | Set how many requests one chat model runs at once on this server, with `{"model": id, "width": n}`, or `{"model": id, "width": null}` for what its manifest states. |
 | `POST /v1/settings/upstreams/{name}/test` | List what an upstream serves, using the body's `key` or `url` when given, else the stored record. |
 | `GET /v1/setup` | Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`. |
 | `GET /v1/tasks` | The last few tasks, newest first. |
@@ -308,6 +309,14 @@ Apply a partial settings patch, whole or not at all, live without a restart. Ans
 ### `PUT /v1/settings/audio/low-vram`
 
 Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off` are the operator's and Crucible never changes them; `auto` lets Crucible turn it on exactly where this card cannot hold a splittable audio model whole. Decides the audio capability and `[jobs] enable_audio` again, as `crucible audio low-vram` does. Answers the full settings document after the write.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
+### `PUT /v1/settings/llm/concurrency`
+
+Set how many requests one chat model runs at once on this server, with `{"model": id, "width": n}`, or `{"model": id, "width": null}` for what its manifest states. Only lower than the manifest. Read when the model loads: a model on the card keeps its width (`llm_concurrency[].running`) until it is loaded again. Answers the full settings document after the write.
 
 *Door:* token + `X-Crucible-Api: 1`
 
