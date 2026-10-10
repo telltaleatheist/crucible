@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.119 — 2026-10-09
+
 - Settings: every config.toml key can be changed from the operator page; a host or port change offers "Restart now?" inline (the address is written into the service definition, so the page names `crucible service install` when that has to run first). On a PC the port stays fixed at the Windows host's 7100 (`port_fixed_by_windows_host`).
 - New routes: `PUT /v1/settings/jobs/{job_type}`, `PUT /v1/settings/tts/{engine}`, `POST /v1/settings/token/rotate`, `POST /v1/capability/record`, `POST /v1/server/restart`.
 - `PUT /v1/settings` now also takes name, host, port, advertise, cors_origins, open_pairing, install_on_submit, retention_days, max_session_hold_s, hf_token (write-only) and video_desktop (Mac; out of range refused by name).
