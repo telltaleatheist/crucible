@@ -235,6 +235,12 @@ def _one_line(where: str, value: str) -> str:
     return value
 
 
+# `OOMPolicy=continue`: a worker the kernel's out-of-memory killer ends is Crucible's to
+# answer for - the job it ran fails saying so (crucible/workerexit.py) and the server goes
+# on. systemd's default (`DefaultOOMPolicy=stop`, systemd 255 on Ubuntu) instead stops the
+# whole unit the moment any process in its cgroup is OOM-killed, and the workers are in
+# it: on Victoria's laptop (2026-10-10) a YuE2 worker was OOM-killed and the server was
+# stopped right after it, ending the song that was queued behind it.
 def systemd_unit_text(
     *,
     server_name: str,
@@ -274,6 +280,7 @@ def systemd_unit_text(
         + environment("PATH", "PATH", path_value)
         + "Restart=always\n"
         f"RestartSec={RESTART_SECONDS}\n"
+        + "OOMPolicy=continue\n"
         + (f"User={_one_line('run_as', run_as)}\n" if run_as else "")
         + "\n"
         + "[Install]\n"

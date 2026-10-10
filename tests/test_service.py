@@ -86,6 +86,7 @@ Environment="CRUCIBLE_HOME=/home/telltale/.crucible"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 Restart=always
 RestartSec=2
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
@@ -116,6 +117,12 @@ def test_the_unit_restarts_always_and_the_reason_is_the_windows_host() -> None:
     assert "Restart=on-failure" not in EXPECTED_UNIT
     assert f"RestartSec={service.RESTART_SECONDS}\n" in EXPECTED_UNIT
     assert service.RESTART_SECONDS == 2
+
+
+def test_a_worker_the_oom_killer_ends_does_not_stop_the_server() -> None:
+    """systemd's default OOMPolicy=stop stops the whole unit when any process in it is
+    OOM-killed, and the workers are in it: the job fails, the server stays."""
+    assert "OOMPolicy=continue\n" in EXPECTED_UNIT
 
 
 def test_the_launchd_agent_is_deliberately_not_changed_with_it() -> None:
