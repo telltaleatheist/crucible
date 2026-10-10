@@ -481,3 +481,82 @@ def test_a_song_reports_the_workers_host_memory_before_and_after(
         assert reading["rss_bytes"] >= reading["anon_bytes"] > 0
     assert host["peak_rss_bytes"] >= max(host["before"]["rss_bytes"], host["after"]["rss_bytes"])
     assert host["host_homes_bytes"] is None, "the fake engine keeps nothing in host memory"
+
+
+def _kept_request(home: Path, job_id: str) -> Path:
+    return home / "jobs" / job_id / "request.json"
+
+
+def test_a_song_keeps_its_request_and_seed_while_it_runs_and_drops_them_when_done(
+    ready: TestClient, auth: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owen, 2026-10-10: "1 is fine. but it should clear once the job finishes." A song's
+    params and the seed the server chose are on disk from its start; `done` clears them,
+    and done_extra.audio is the record."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_STEP_S", "0.2")
+    response = submit(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS})
+    job_id = response.json()["job_id"]
+    wait_until_running(ready, auth, job_id)
+    deadline = time.monotonic() + 20.0
+    while not _kept_request(home, job_id).is_file():
+        assert time.monotonic() < deadline, "the song never kept its request"
+        time.sleep(0.01)
+    kept = json.loads(_kept_request(home, job_id).read_text(encoding="utf-8"))
+    seed = kept["seed"]
+    assert kept["seed_chosen_by"] == "server" and isinstance(seed, int)
+    assert (kept["type"], kept["model"]) == ("audio", SONG)
+    assert kept["params"] == {"tags": TAGS, "lyrics": LYRICS, "seed": seed}
+    assert kept["settled"]["cfg"] == 1.0 and kept["low_vram"] is False
+    assert f"seed {seed}" in kept["reproduce"]
+    running = ready.get(f"/v1/jobs/{job_id}", headers=auth).json()
+    assert running["request"]["seed"] == seed
+
+    events = events_of(ready, auth, job_id)
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["audio"]["seed"] == seed
+    assert not _kept_request(home, job_id).exists()
+    assert ready.get(f"/v1/jobs/{job_id}", headers=auth).json()["request"] is None
+    record = json.loads((home / "jobs" / job_id / "job.json").read_text(encoding="utf-8"))
+    assert record["done_extra"]["audio"]["seed"] == seed and "params" not in record
+
+
+def test_a_song_that_fails_keeps_what_reproduces_it(
+    ready: TestClient, auth: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Victoria's 1f3da14c: OOM in synthesizing, and nothing on disk said its seed."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL", "1")
+    job_id, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "cfg": 1.5})
+    assert events[-1]["event"] == "failed", events[-1]
+    kept = json.loads(_kept_request(home, job_id).read_text(encoding="utf-8"))
+    assert kept["params"] == {"tags": TAGS, "lyrics": LYRICS, "cfg": 1.5, "seed": kept["seed"]}
+    state = ready.get(f"/v1/jobs/{job_id}", headers=auth).json()
+    assert state["status"] == "failed" and state["request"] == kept
+
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL", "0")
+    again, events = run_job(ready, auth, model=kept["model"], params=kept["params"])
+    assert events[-1]["event"] == "done", events[-1]
+    assert events[-1]["data"]["audio"]["seed"] == kept["seed"]
+
+
+def test_a_cancelled_song_keeps_its_request(
+    ready: TestClient, auth: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_STEP_S", "0.3")
+    job_id = submit(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 9}).json()["job_id"]
+    wait_until_running(ready, auth, job_id)
+    time.sleep(1.0)
+    assert ready.delete(f"/v1/jobs/{job_id}", headers=auth).status_code == 200
+    assert events_of(ready, auth, job_id)[-1]["event"] == "cancelled"
+    kept = json.loads(_kept_request(home, job_id).read_text(encoding="utf-8"))
+    assert (kept["seed"], kept["seed_chosen_by"]) == (9, "client")
+
+
+def test_a_sound_effect_that_ends_done_keeps_nothing_and_other_types_never_had_it(
+    ready: TestClient, auth: dict[str, str], home: Path
+) -> None:
+    job_id, events = run_job(ready, auth)
+    assert events[-1]["event"] == "done"
+    assert not _kept_request(home, job_id).exists()
+    loaded = ready.post("/v1/jobs", headers=auth, json={"type": "load-audio", "model": SFX})
+    assert events_of(ready, auth, loaded.json()["job_id"])[-1]["event"] == "done"
+    assert ready.get(f"/v1/jobs/{loaded.json()['job_id']}", headers=auth).json()["request"] is None

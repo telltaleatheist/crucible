@@ -709,6 +709,7 @@ export class CrucibleClient {
       resumeId: nullableStr(body, 'resume_id', 'job'),
       resumed: bool(body, 'resumed', 'job'),
       removal: readRemovalOrNull(optObject(body, 'removal', 'job'), 'job.removal'),
+      request: optObject(body, 'request', 'job'),
     };
   }
 

@@ -223,6 +223,18 @@ test('a job from a server older than the queue reads with removal null', async (
   assert.equal((await client().job('j1')).removal, null);
 });
 
+test('a failed song reads with the request that reproduces it', async () => {
+  const kept = { type: 'audio', model: 'yue2-3b', params: { tags: 'pop', lyrics: 'la', seed: 7 }, seed: 7 };
+  handler = (_request, _body, response) =>
+    json(response, 200, jobBody({
+      type: 'audio', status: 'failed', error: { code: 'worker_failed', message: 'CUDA OOM' },
+      request: kept,
+    }));
+  assert.deepEqual((await client().job('j1')).request, kept);
+  handler = (_request, _body, response) => json(response, 200, jobBody({ request: null }));
+  assert.equal((await client().job('j1')).request, null);
+});
+
 test('cancelling a waiting job answers removed', async () => {
   handler = (_request, _body, response) => json(response, 200, { job_id: 'j1', status: 'removed' });
   assert.deepEqual(await client().cancel('j1'), { jobId: 'j1', status: 'removed' });

@@ -134,6 +134,8 @@ class FakeEngine:
         for step in range(1, steps + 1):
             time.sleep(pause)
             progress.reached(step)
+        if os.environ.get("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL") == "1":
+            raise RuntimeError("CUDA out of memory (fake, in synthesizing)")
         progress.enter("decoding")
         seconds = job.duration_s or 1.0
         frames = min(int(seconds * job.sample_rate), job.sample_rate // 10)

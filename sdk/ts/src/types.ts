@@ -576,6 +576,13 @@ export interface JobStatus {
   readonly resumed: boolean;
   /** Why the job left the queue without running, when `status` is `removed`; otherwise null. */
   readonly removal: RemovedData | null;
+  /**
+   * An audio job's request while it runs and after it ends anything but `done`: `params` with
+   * the seed it uses written in (submit `type`, `model` and `params` again to reproduce it),
+   * `seed`, `seed_chosen_by`, `settled`, `low_vram` and a `reproduce` sentence. Null once it is
+   * `done` (its `audio` is the record) and for every other job type (docs/AUDIO.md).
+   */
+  readonly request: Readonly<Record<string, unknown>> | null;
 }
 
 /** One journal, as `GET /v1/resumable` lists it; reading it resumes nothing. */

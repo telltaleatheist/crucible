@@ -784,6 +784,7 @@ class JobStore:
             if job is None:
                 continue
             self._jobs[job.id] = job
+            self._read_request(job)
             if (document.get("status"), document.get("finished")) != (
                 job.status, job.finished
             ):
@@ -884,6 +885,68 @@ class JobStore:
 
 
     RECORD_NAME = "job.json"
+
+    # What a job type keeps of its request beside the record (keep_request): today the
+    # audio type, whose params and chosen seed are what reproduce a song that failed.
+    REQUEST_NAME = "request.json"
+
+    def keep_request(self, job: Job, document: dict[str, Any]) -> None:
+        """Write what `job` runs with to `request.json` in its directory, and hold it on
+        the job (GET /v1/jobs/{id} `request`).
+
+        It lives until the job ends `done` - the done event's own record says the same
+        then (an audio job's `done_extra.audio`), so `_finish` drops it - or until the
+        job's directory is reaped. A job that ends failed, cancelled or interrupted keeps
+        it: that is the job it exists for (Victoria's 1f3da14c, 2026-10-10: a song OOM'd
+        in synthesizing and nothing on disk said its seed). `job.json` still never carries
+        `params`; a type that does not call this keeps nothing of its request on disk.
+        Called on the job's thread before its work starts, and written through before it
+        returns; a write that fails is said on stderr and the job goes on, as `_persist`.
+        """
+        job.request = document
+        try:
+            job.dir.mkdir(parents=True, exist_ok=True)
+            path = job.dir / self.REQUEST_NAME
+            temporary = path.with_suffix(".json.writing")
+            temporary.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception as exc:
+            print(
+                f"crucible: could not keep job {job.id}'s request on disk: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _drop_request(self, job: Job) -> None:
+        job.request = None
+        try:
+            (job.dir / self.REQUEST_NAME).unlink(missing_ok=True)
+        except OSError as exc:
+            print(
+                f"crucible: could not remove job {job.id}'s kept request "
+                f"({job.dir / self.REQUEST_NAME}): {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _read_request(self, job: Job) -> None:
+        """A recovered job takes back the request it kept; a `done` job's is removed, the
+        drop a stop between `_finish`'s record and its removal never reached."""
+        path = job.dir / self.REQUEST_NAME
+        if not path.is_file():
+            return
+        if job.status == DONE:
+            self._drop_request(job)
+            return
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(
+                f"crucible: could not read job {job.id}'s kept request ({path}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return
+        job.request = document if isinstance(document, dict) else None
 
     def _persist(self, job: Job) -> None:
         try:
@@ -1127,6 +1190,12 @@ class JobStore:
         if status == INTERRUPTED:
             job.interrupted_at = job.finished
         self._persist(job)
+        if status == DONE:
+            # The done record says what it ran with (done_extra); the copy kept for a
+            # failure has done its work. Dropped after the record says `done`, so a stop
+            # between the two leaves it for `_read_request` to drop, never a done-less job
+            # without it.
+            self._drop_request(job)
         if job.resume_id is not None:
             self._journals.ended(job.resume_id, job.id, status)
         if status == DONE:

@@ -116,16 +116,25 @@ def test_the_clients_own_reference_survives(tmp_path: Path) -> None:
 
 
 def test_the_params_are_not_on_disk(tmp_path: Path) -> None:
+    """A render's params are a chapter of a book: no record carries them, and no type but
+    audio keeps a request beside it (tests/test_song_request_kept_until_done.py)."""
     from crucible.jobs.queue import JobStore
+
+    store = _store(tmp_path)
+    job = store.create("tts", "deathstalker", {"chunks": [{"index": 0, "text": "Chapter one."}]})
+    written = json.loads((job.dir / JobStore.RECORD_NAME).read_text("utf-8"))
+    assert "params" not in written and "request" not in written
+    assert "Chapter one." not in "".join(
+        p.read_text("utf-8", errors="replace") for p in job.dir.rglob("*") if p.is_file()
+    )
+    assert not (job.dir / JobStore.REQUEST_NAME).exists()
 
     directory = tmp_path / "stu901"
     _record(directory, status=RUNNING)
-    written = json.loads((directory / JobStore.RECORD_NAME).read_text("utf-8"))
-    assert "params" not in written
-
-    store = _store(tmp_path)
-    store.restore()
-    assert store.get("stu901").params == {}
+    again = _store(tmp_path)
+    again.restore()
+    assert again.get("stu901").params == {}
+    assert again.get("stu901").request is None
 
 
 def test_a_directory_with_no_record_is_left_alone(tmp_path: Path) -> None:
