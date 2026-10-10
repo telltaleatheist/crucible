@@ -931,6 +931,9 @@ export type ResponseFormat =
       };
     };
 
+/** {@link ChatOptions.jsonWhitespace}: compact JSON, or the default flexible whitespace. */
+export type JsonWhitespace = 'compact' | 'flexible';
+
 /** One turn of a chat. */
 export interface ChatMessage {
   readonly role: 'system' | 'user' | 'assistant';
@@ -950,6 +953,15 @@ export interface ChatOptions {
   readonly seed?: number;
   /** OpenAI's `response_format`, forwarded to the engine exactly as given. */
   readonly responseFormat?: ResponseFormat;
+  /**
+   * The whitespace of a JSON answer, sent as `json_whitespace`. `'compact'`: no whitespace between
+   * JSON tokens, whitespace only inside strings (for a model trained on compact JSON).
+   * `'flexible'` (the server's default): whitespace wherever JSON allows it. Needs a JSON
+   * `responseFormat`; refused `json_whitespace_without_json` otherwise. Compact is kept on vLLM
+   * and mlx-lm and refused `json_whitespace_not_served` on llama-server, mlx-vlm and upstream
+   * models; a schema whose `x-guidance` states whitespace itself is `json_whitespace_conflict`.
+   */
+  readonly jsonWhitespace?: JsonWhitespace;
   /** Whether a reasoning model thinks before it answers. */
   readonly thinking?: boolean;
   /**

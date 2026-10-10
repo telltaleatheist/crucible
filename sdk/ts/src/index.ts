@@ -209,6 +209,7 @@ export type {
   JobRequest,
   JobState,
   JobStatus,
+  JsonWhitespace,
   LlmCapability,
   LoadModelOptions,
   LoadVoiceOptions,

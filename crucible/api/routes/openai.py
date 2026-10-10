@@ -29,7 +29,15 @@ from ...prefill import (
 from ...queuerequest import queue_of
 from ...residency import serves_model
 from ...sampling import SAMPLING_HEADER, apply_defaults
-from ...structured import constrained_fields, refuse_unenforced_constraint
+from ...structured import (
+    COMPACT,
+    constrained_fields,
+    refuse_unenforced_constraint,
+    refuse_unkept_json_whitespace,
+    refuse_upstream_json_whitespace,
+    take_json_whitespace,
+    with_compact_json,
+)
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
 from ..proxy import (
@@ -52,12 +60,16 @@ from ..upstream import forward_to_upstream, routed_upstream_rows
 
 
 def _refuse_before_waiting(
-    body: dict[str, Any], model: str, backend_kind: str, prefill: str | None
+    body: dict[str, Any],
+    model: str,
+    backend_kind: str,
+    prefill: str | None,
+    json_whitespace: str | None,
 ) -> None:
     """What a chat would be refused for once its model is resident is refused now,
     before it waits or a model is loaded for it: a prefill the engine cannot keep, a
-    constraint it does not enforce. A model with no manifest, or no block here, is
-    left to the door's own refusal."""
+    constraint it does not enforce, compact JSON it cannot keep. A model with no
+    manifest, or no block here, is left to the door's own refusal."""
     if prefill is None and not constrained_fields(body):
         return
     try:
@@ -66,7 +78,7 @@ def _refuse_before_waiting(
     except ManifestError:
         return
     resolved = apply_defaults(body, manifest.defaults).body
-    refuse_an_unenforced_constraint(spec.engine, model, resolved)
+    refuse_an_unenforced_constraint(spec.engine, model, resolved, json_whitespace)
     if prefill is None:
         return
     reading = chat_prefill_reading(spec.engine)
@@ -80,7 +92,10 @@ def _refuse_before_waiting(
 
 
 def refuse_an_unenforced_constraint(
-    engine: str, model_id: str, resolved_body: dict[str, Any]
+    engine: str,
+    model_id: str,
+    resolved_body: dict[str, Any],
+    json_whitespace: str | None,
 ) -> None:
     reading = structured_output_reading(engine)
     refuse_unenforced_constraint(
@@ -90,6 +105,13 @@ def refuse_an_unenforced_constraint(
         fields=reading.fields,
         basis=reading.basis,
         body=resolved_body,
+    )
+    refuse_unkept_json_whitespace(
+        engine=engine,
+        model_id=model_id,
+        compact=reading.compact_json,
+        basis=reading.compact_json_basis,
+        mode=json_whitespace,
     )
 
 
@@ -143,10 +165,14 @@ def register(routers: Routers, ctx: AppContext) -> None:
         "Prefill"). A `response_format` or other grammar is enforced by the engine or
         refused `structured_output_not_served` before anything is sent: vLLM,
         llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured
-        output"). A `"form": "<name>"` member names which form of a model that comes in
-        more than one serves the chat (GET /v1/models, the row's `forms`); without it the
-        resident form answers, and a load made for the chat loads the form this card
-        takes. Another form on the card is a reload; an unknown name is refused
+        output"). A `"json_whitespace": "compact"` member, beside a JSON schema or
+        json_object, keeps the answer's JSON free of whitespace between tokens (inside
+        strings only); `"flexible"` is the default. vLLM and mlx-lm keep it; llama-server
+        and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON
+        constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member
+        names which form of a model that comes in more than one serves the chat (GET
+        /v1/models, the row's `forms`); without it the resident form answers, and a load
+        made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused
         `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
         """
         raw = await request.body()
@@ -163,18 +189,21 @@ def register(routers: Routers, ctx: AppContext) -> None:
         queued = queue_of(body)
         prefill = take_prefill(body)
         form = take_form(body)
-        if sent_queue or prefill is not None or form is not None:
+        json_whitespace = take_json_whitespace(body)
+        if sent_queue or prefill is not None or form is not None or json_whitespace is not None:
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
             if form is not None:
                 refuse_upstream_form(requested)
             if prefill is not None:
                 refuse_upstream_prefill(requested)
+            if json_whitespace is not None:
+                refuse_upstream_json_whitespace(requested)
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
         refuse_unknown_form(requested, form, ctx.backend.kind)
-        _refuse_before_waiting(body, requested, ctx.backend.kind, prefill)
+        _refuse_before_waiting(body, requested, ctx.backend.kind, prefill, json_whitespace)
         inflight = ctx.inflight
         act = read_act(request.headers)
         chat_over = settle_after_chat(ctx.settlement)
@@ -203,8 +232,12 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
                 applied = apply_defaults(body, resident.defaults)
                 refuse_an_unenforced_constraint(
-                    resident.engine, resident.model_id, applied.body
+                    resident.engine, resident.model_id, applied.body, json_whitespace
                 )
+                if json_whitespace == COMPACT:
+                    applied = replace(
+                        applied, body=with_compact_json(applied.body), changed=True
+                    )
                 if prefill is not None:
                     reading = chat_prefill_reading(resident.engine)
                     refuse_unkeepable_prefill(

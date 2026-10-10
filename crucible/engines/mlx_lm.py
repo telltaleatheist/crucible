@@ -56,6 +56,17 @@ class MlxLmEngine(SubprocessEngine):
         "and refuses by name anything else, guided_* and grammar included "
         "(engines/structured_mlx.py)"
     )
+    json_whitespace_compact = True
+    json_whitespace_basis = (
+        "Crucible's mlx-lm-structured-output patch compiles a json schema with "
+        "llguidance's grammar_from_json_schema(schema, defaults={whitespace_flexible: "
+        "true}) as vLLM does (engines/structured_mlx.py compile_grammar), and "
+        "llguidance 1.8.0 (the Mac llm env's pin) takes the schema's own x-guidance "
+        "options over those defaults (measured on the Mac Studio, 2026-10-10), so the "
+        "door writes x-guidance.whitespace_flexible false into the schema; a "
+        "json_object goes as the schema {type: object}, which is what the patch "
+        "compiles a json_object to (structured_mlx.ANY_OBJECT)"
+    )
 
     decide_logprobs = True
     max_logprobs = 40

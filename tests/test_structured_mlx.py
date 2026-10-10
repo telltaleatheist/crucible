@@ -191,6 +191,87 @@ def test_eos_is_masked_until_the_grammar_accepts_and_is_all_that_is_left_after(t
     assert allowed == [eos]
 
 
+# What the chat door sends for "json_whitespace": "compact" (crucible/structured.py
+# with_compact_json): llguidance's own option in the schema, over the engine's
+# whitespace_flexible default. Written out here because this file imports no Crucible.
+COMPACT = {"x-guidance": {"whitespace_flexible": False}}
+WHITESPACE = (" ", "\n", "\t", "\r")
+
+
+def outside_strings(text: str) -> str:
+    """The characters of a JSON text that are not inside a string."""
+    out: list[str] = []
+    inside = escaped = False
+    for ch in text:
+        if inside:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                inside = False
+            continue
+        if ch == '"':
+            inside = True
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def whitespace_ids(tok: Any) -> list[int]:
+    """Every token whose text is all whitespace, or that starts with whitespace."""
+    vocab = tok.get_vocab()
+    return [
+        i for token, i in vocab.items()
+        if tok.decode([i]) and tok.decode([i])[0] in WHITESPACE
+    ]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_a_compact_schema_answer_has_no_whitespace_between_tokens(tok: Any, seed: int) -> None:
+    """With random logits nothing steers the model away from whitespace (the flexible
+    tests bias it away): compact alone has to keep it out."""
+    processor = grammar.GrammarProcessor(
+        constraint("json", {**SCHEMA, **COMPACT}), FakeWrapper(tok)
+    )
+    out, _ = run(processor, tok, tok.get_vocab_size(), steps=2000, seed=seed)
+    assert out[-1] == tok.token_to_id("<eos>")
+    text = tok.decode(out[:-1])
+    assert set(json.loads(text)) == {"ok", "n", "word"}
+    assert not any(ch in WHITESPACE for ch in outside_strings(text)), text
+
+
+def test_compact_masks_whitespace_where_flexible_offers_it(tok: Any) -> None:
+    width = tok.get_vocab_size()
+    blank = whitespace_ids(tok)
+    assert blank, "the toy vocabulary has whitespace tokens"
+    for spec, offered in ((SCHEMA, True), ({**SCHEMA, **COMPACT}, False)):
+        processor = grammar.GrammarProcessor(constraint("json", spec), FakeWrapper(tok))
+        tokens = [5]
+        processor(mx.array(tokens, dtype=mx.int32), mx.zeros((1, width)))
+        tokens.append(tok.token_to_id("{"))
+        masked = processor(mx.array(tokens, dtype=mx.int32), mx.zeros((1, width)))
+        allowed = [i for i in blank if masked[0, i].item() != float("-inf")]
+        assert bool(allowed) is offered, (spec, [tok.decode([i]) for i in allowed])
+
+
+def test_a_compact_json_object_is_the_object_schema_with_the_option(tok: Any) -> None:
+    """A json_object goes to the engine as {"type": "object"} carrying the option,
+    which compiles to the grammar the patch builds for json_object, made compact."""
+    sent = grammar.compile_grammar("json", {"type": "object", **COMPACT})
+    assert sent == llguidance.LLMatcher.grammar_from_json_schema(
+        grammar.ANY_OBJECT, defaults={"whitespace_flexible": False}
+    )
+    processor = grammar.GrammarProcessor(
+        grammar.Constraint(grammar=sent, source="json"), FakeWrapper(tok)
+    )
+    out, _ = run(processor, tok, tok.get_vocab_size(), steps=4000, seed=2)
+    assert out[-1] == tok.token_to_id("<eos>")
+    text = tok.decode(out[:-1])
+    assert isinstance(json.loads(text), dict)
+    assert not any(ch in WHITESPACE for ch in outside_strings(text)), text
+
+
 def test_logits_wider_than_the_vocabulary_never_offer_the_padding(tok: Any) -> None:
     processor = grammar.GrammarProcessor(constraint("json_object", None), FakeWrapper(tok))
     width = tok.get_vocab_size() + 77
@@ -502,6 +583,17 @@ def test_constrained_and_plain_chats_at_once(server: Any, tok: Any) -> None:
             assert content in ("yes", "no")
         else:
             assert len(content) == 3 and set(content) <= set("abc")
+
+
+def test_the_server_keeps_a_compact_schema(server: Any, tok: Any) -> None:
+    """The body the door sends for "json_whitespace": "compact", with no bias: the
+    patched server compiles the schema's x-guidance option as vLLM does."""
+    compact = {"type": "json_schema", "json_schema": {"name": "v", "schema": {**SCHEMA, **COMPACT}}}
+    status, body = post(server, {"temperature": 1.0, "seed": 5, "response_format": compact})
+    assert status == 200, body
+    content = body["choices"][0]["message"]["content"]
+    assert set(json.loads(content)) == {"ok", "n", "word"}
+    assert not any(ch in WHITESPACE for ch in outside_strings(content)), content
 
 
 def test_a_streamed_constrained_answer(server: Any, tok: Any) -> None:

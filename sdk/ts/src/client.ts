@@ -1390,6 +1390,15 @@ export class CrucibleClient {
     if (given.responseFormat !== undefined) {
       payload['response_format'] = readResponseFormat(given.responseFormat);
     }
+    if (given.jsonWhitespace !== undefined) {
+      if (given.jsonWhitespace !== 'compact' && given.jsonWhitespace !== 'flexible') {
+        throw new CrucibleConfigError(
+          'jsonWhitespace',
+          `must be 'compact' or 'flexible', got ${JSON.stringify(given.jsonWhitespace)}`,
+        );
+      }
+      payload['json_whitespace'] = given.jsonWhitespace;
+    }
     if (given.thinking !== undefined) {
       if (typeof given.thinking !== 'boolean') {
         throw new CrucibleConfigError(

@@ -100,6 +100,21 @@ class LlamaServerEngine(SubprocessEngine):
         "grammar (common/json-schema-to-grammar.cpp). It reads no structured_outputs "
         "and no guided_* field; read at the b10970 tag 2026-10-10"
     )
+    json_whitespace_compact = False
+    json_whitespace_basis = (
+        "llama-server b10970 compiles a JSON schema with a fixed whitespace rule, "
+        "space ::= | \" \" | \"\\n\"{1,2} [ \\t]{0,20} (common/json-schema-to-grammar.cpp "
+        "L229, set by every converter at L816), and reads no option that changes it "
+        "(tools/server/server-common.cpp L1179-1204). A grammar Crucible built itself "
+        "would not be the same constraint: the jinja chat path wraps the schema in its "
+        "PEG parser, after the reasoning block and with an optional ```json fence "
+        "(common/chat-auto-parser-generator.cpp L117-125), which a raw grammar "
+        "replaces, and the converter's Python port is gone at b10970, so Crucible would "
+        "own a port of its 1,027 lines of C++. Its llguidance grammars need "
+        "LLAMA_LLGUIDANCE, which defaults off (CMakeLists.txt L146) and is off in "
+        "Crucible's cuda-linux build (common/sampling.cpp L213-217 aborts the server "
+        "on one); read at the b10970 tag 2026-10-10"
+    )
 
     decide_logprobs = True
     max_logprobs = None
