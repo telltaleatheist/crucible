@@ -100,7 +100,8 @@ def test_the_pinned_zig_is_placed_whole_with_its_cc_and_stamp(
     text = wrapper.read_text(encoding="utf-8")
     assert text.startswith("#!/bin/sh\n")
     assert text == hosttools.c_compiler_wrapper(tmp_path, build)
-    assert text.endswith(' cc -target x86_64-linux-gnu.2.28 "$@"\n')
+    assert text.endswith(' cc -target x86_64-linux-gnu.2.28 -Wno-macro-redefined "$@"\n')
+    assert " -w " not in text and "-Wno-everything" not in text, "only the one warning is off"
     assert str(tmp_path / "tools" / "zig" / "cache") in text
     stamp = json.loads(hosttools.zig_stamp(tmp_path).read_text())
     assert stamp["sha256"] == build.sha256 and stamp["target"] == build.target
@@ -439,3 +440,36 @@ def test_the_real_cc_builds_a_shared_object_with_zigs_own_crt(tmp_path: Path) ->
                              check=True, capture_output=True, text=True).stdout
     assert "clang" in comment
     assert "GCC" not in comment, f"system crt leaked in: {comment}"
+
+
+@pytest.mark.skipif(
+    hosttools.host_platform() != "linux-x86_64" or not os.environ.get(REAL_ARCHIVE_ENV),
+    reason=f"compiles with the real pinned Zig: linux-x86_64 with ${REAL_ARCHIVE_ENV} only",
+)
+def test_the_real_cc_is_quiet_about_pyconfigs_posix_level_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """Triton's driver.c includes <dlfcn.h> before <Python.h>: zig's glibc defines
+    _POSIX_C_SOURCE as 202405L and pyconfig.h defines it again as 200809L."""
+    archive = Path(os.environ[REAL_ARCHIVE_ENV])
+
+    def fetch(url: str, destination: Path) -> str:
+        shutil.copyfile(archive, destination)
+        return hashlib.sha256(destination.read_bytes()).hexdigest()
+
+    hosttools.ensure_zig(tmp_path, fetch=fetch)
+    cc = str(hosttools.c_compiler_path(tmp_path))
+    launcher = tmp_path / "launcher.c"
+    launcher.write_text(
+        "#include <dlfcn.h>\n#define _POSIX_C_SOURCE 200809L\nint f(void) { return 0; }\n"
+    )
+    quiet = subprocess.run([cc, "-c", str(launcher), "-o", str(tmp_path / "l.o")],
+                           check=True, capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin"})
+    assert "macro redefined" not in quiet.stderr, quiet.stderr
+    loud = tmp_path / "loud.c"
+    loud.write_text("int g(void) { int u; return u; }\n")
+    said = subprocess.run([cc, "-Wall", "-c", str(loud), "-o", str(tmp_path / "g.o")],
+                          check=True, capture_output=True, text=True,
+                          env={"PATH": "/usr/bin:/bin"})
+    assert "-Wuninitialized" in said.stderr, "every other warning still prints"

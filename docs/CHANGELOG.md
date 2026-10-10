@@ -9,6 +9,8 @@ notes.
 
 - Fix: under WSL2 every load stopped the server for over a second ("the event loop has not run for 1.0 s"), because a job's preflight read the card with `nvidia-smi` on the event loop. A preflight now runs off the loop, and the lane checks are made again after it; `GET /v1/info`, `/v1/models` and `/v1/voices` (which read each env, a `pip list` the first time) and `/v1/setup` (which spawns PowerShell on Windows) are read off it too.
 
+- The engine log no longer shows `'_POSIX_C_SOURCE' macro redefined` on every Triton compile (zig's glibc headers say POSIX.1-2024, Python's pyconfig.h says 2008). Crucible's `cc` passes `-Wno-macro-redefined`, and only that; a host's existing `cc` is rewritten the next time an engine or worker starts.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.
