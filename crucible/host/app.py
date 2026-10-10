@@ -39,6 +39,7 @@ from .presence import Presence, PresenceWatcher
 from .state import Distro, Engine, EngineDecision, Owner
 
 LOCK_NAME = "host.pid"
+GUARD_NAME = "host.lock"
 
 PRESENCE_SETTLE_CEILING_SECONDS = (
     presence_module.WATCH_SECONDS
@@ -67,7 +68,7 @@ def acquire(home: Path) -> Path:
     import atexit
 
     from ..processlock import ProcessLock
-    guard = ProcessLock(home / "host.lock")
+    guard = ProcessLock(home / GUARD_NAME)
     if not guard.acquire():
         raise HostError(
             "host_already_running",

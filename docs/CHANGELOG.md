@@ -7,6 +7,9 @@ notes.
 
 ## Unreleased
 
+- CLI: a refused `crucible api` request (a `job submit --follow` included) now leads with `crucible: HTTP <status> <code>: <message>` and exits 1; the server's whole error document still follows on the next lines.
+- Fix: `crucible uninstall` left behind what Crucible itself had placed in its home and reported it as "Crucible did not put this here": `tools` (ffmpeg, silero-vad, zig), `run`, `ladder`, `voice-manifests`, `servers`, `interpreters`, and the host's `host.log`, `host.lock` and `tray.*` files. They are now removed. `journals` and `playground-presets.json` are kept with the other user data, `voice-refs.json` is kept with the voice weights (removed by `--purge-weights`), the Windows home's `wsl` folder (the distro's disk) is kept and named, and a LAN door (`landoor.json`) is withdrawn before the engine stops instead of being left on the machine.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.

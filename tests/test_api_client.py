@@ -215,6 +215,20 @@ def test_a_server_refusal_is_printed_verbatim_with_its_code(
     assert refusal["error"]["code"] == "unknown_job_type"
 
 
+def test_a_refused_follow_leads_with_the_code_and_the_reason_and_exits_nonzero(
+    base: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Snag from Victoria's laptop: a refused `submit --follow` showed only
+    # "HTTP 400" and then a JSON dump. The first line now names the refusal.
+    assert run(base, "job", "submit", "--type", "nosuchtype", "--follow") == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    headline, document = captured.err.split("\n", 1)
+    refusal = json.loads(document)["error"]
+    assert headline == f"crucible: HTTP 400 {refusal['code']}: {refusal['message']}"
+    assert refusal["code"] == "unknown_job_type"
+
+
 def test_artifacts_dir_without_follow_is_refused_rather_than_implying_follow(
     base: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

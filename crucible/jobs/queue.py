@@ -18,7 +18,7 @@ from .. import VERSION, clock
 from ..clock import utcnow
 from ..errors import ApiError, JobCancelled, JobError
 from ..events import JOB, EventHub
-from ..journal import Journals
+from ..journal import JOURNALS_DIRNAME, Journals
 from ..procgroup import STOP_TIMEOUT_SECONDS, stop_budget_seconds
 from ..updating import UpdateHold
 from .base import (
@@ -220,7 +220,7 @@ class JobStore:
         self._announced: dict[str, str] = {}
         home = getattr(config, "home", None)
         self._journals = Journals(
-            None if home is None else Path(home) / "journals",
+            None if home is None else Path(home) / JOURNALS_DIRNAME,
             lambda: float(self._config.retention_days),
             self._live_state,
         )
