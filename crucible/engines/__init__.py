@@ -150,6 +150,44 @@ def decide_items_reading(engine_name: str) -> DecideItemsReading:
     )
 
 
+LIKELIHOOD_ROUTES = ("items", "prompt-logprobs")
+
+
+@dataclass(frozen=True)
+class LikelihoodReading:
+    route: str | None
+    """`items`, `prompt-logprobs`, or None when the engine cannot score candidates."""
+    images: bool
+    basis: str
+
+
+def likelihood_reading(engine_name: str) -> LikelihoodReading:
+    cls = engine_class(engine_name)
+    basis = cls.decide_likelihood_basis
+    route = cls.decide_likelihood_route
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no decide_likelihood_basis. Whether an engine returns "
+            "the log-probability of every token of a candidate is read from its source, "
+            "and the reading says where, or why it cannot"
+        )
+    if route is not None and route not in LIKELIHOOD_ROUTES:
+        raise EngineError(
+            f"{engine_name} states decide_likelihood_route {route!r}; the door reads "
+            f"{list(LIKELIHOOD_ROUTES)}"
+        )
+    if route == "items" and not cls.decide_items_batched:
+        raise EngineError(
+            f"{engine_name} states the items route for likelihood and has no batched "
+            "items route"
+        )
+    if route is None and cls.decide_likelihood_images:
+        raise EngineError(
+            f"{engine_name} states likelihood with images and scores no candidates"
+        )
+    return LikelihoodReading(route=route, images=cls.decide_likelihood_images, basis=basis)
+
+
 def build_engine(
     engine_name: str,
     python: Path,
@@ -306,8 +344,11 @@ __all__ = [
     "with_concurrency",
     "DecideItemsReading",
     "DecideReading",
+    "LIKELIHOOD_ROUTES",
+    "LikelihoodReading",
     "decide_items_reading",
     "decide_reading",
+    "likelihood_reading",
     "ENGINES",
     "STOP_TIMEOUT_SECONDS",
     "EngineError",

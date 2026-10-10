@@ -95,6 +95,17 @@ class LlamaServerEngine(SubprocessEngine):
         "vocabulary"
     )
 
+    decide_likelihood_basis = (
+        "llama-server b10970 returns no log-probability for a prompt token: n_probs "
+        "and post_sampling_probs cover generated tokens only "
+        "(tools/server/server-context.cpp populate_token_probs L1964-2020), "
+        "/v1/completions refuses echo (\"Only no echo is supported\", "
+        "tools/server/server-common.cpp L1050-1053), and /completion's "
+        "return_tokens returns the generated ids; read at the b10970 tag "
+        "2026-10-10. Teacher-forcing one request per candidate token would be a "
+        "different, slower measurement, so the engine does not offer it"
+    )
+
     sigterm_wait_seconds = GRACEFUL_STOP_SECONDS
 
     def missing_executable_hint(self) -> str:

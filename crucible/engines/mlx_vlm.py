@@ -35,6 +35,17 @@ class MlxVlmEngine(SubprocessEngine):
         "of its cache, at the rope positions the lone question would have"
     )
 
+    decide_likelihood_route = "items"
+    decide_likelihood_images = True
+    decide_likelihood_basis = (
+        "Crucible's Mac server (engines/mlx_vlm_serve.py) answers a candidates body on "
+        "POST /v1/crucible/items with engines/items_forward.py: mlx-vlm 0.7.1's "
+        "apply_chat_template passes continue_final_message through to the tokenizer "
+        "(mlx_vlm/prompt_utils.py get_chat_template, read on the Mac Studio "
+        "2026-10-10), the images are embedded once with the shared state, and each "
+        "candidate is scored at every token from a copy of its cache"
+    )
+
     @classmethod
     def served_name(cls, weights_dir: Path, model_id: str) -> str:
         return str(weights_dir)

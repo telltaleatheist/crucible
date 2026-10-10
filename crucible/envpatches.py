@@ -278,7 +278,7 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
     id="mlx-lm-decide-items-helper",
     distribution="mlx-lm",
     rel_path="mlx_lm/_crucible_items.py",
-    marker="ITEMS_VERSION = 2",
+    marker="ITEMS_VERSION = 3",
     absent_marker=None,
     stale_marker=None,
     script="patch_mlx_lm_decide_items_helper.py",
@@ -286,7 +286,8 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
         "the items route runs Crucible's engines/items_forward.py, copied into "
         "the env as mlx_lm/_crucible_items.py; an older copy reads the wrong "
         "request (version 1 re-read the state on every request and ran its "
-        "items one forward each). MlxLmEngine applies it itself at start"
+        "items one forward each; version 2 cannot score a likelihood question's "
+        "candidates). MlxLmEngine applies it itself at start"
     ),
     creates=True,
 )

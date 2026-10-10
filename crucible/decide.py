@@ -46,6 +46,15 @@ IMAGES_NOTE = "The state's images open the user message."
 
 PRIME_USER_TEXT = "The questions follow."
 
+MAX_CANDIDATES = 26
+
+MAX_CANDIDATE_TOKENS = 256
+
+LIKELIHOOD_SYSTEM_PROMPT = (
+    "You are shown a state and one request about it. Reply with exactly what the "
+    "request asks for and nothing else."
+)
+
 IMAGE_SIGNATURES: tuple[tuple[bytes, int, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", 0, "png"),
     (b"\xff\xd8\xff", 0, "jpeg"),
@@ -103,8 +112,50 @@ class YesNoQuestion(_Strict):
     """The statement to judge: "The message conveys urgency"."""
 
 
+class LikelihoodQuestion(_Strict):
+    """Score free-text candidate replies by how likely the model is to say each,
+    instead of generating one. Nothing is decoded, so nothing can fail to parse
+    or run away."""
+
+    type: Literal["likelihood"]
+    """`likelihood`."""
+    instructions: _NonEmpty
+    """The request the candidates answer, as the user turn says it: "Write out
+    the second sentence of the passage, spelled as it should be." Each candidate
+    is scored as the start of the model's reply to it (thinking off)."""
+    candidates: dict[_NonEmpty, _NonEmpty] = Field(min_length=2)
+    """Candidate name to the reply text to score, in the order the answer lists
+    them. 2 to 26 (`too_many_candidates`), each text unique, starting and
+    ending on a non-space (a chat template's open reply drops trailing space),
+    at most 256 tokens as it tokenizes after the context (`candidate_too_long`)."""
+    rank_by: Literal["total", "mean"] = "total"
+    """Which measure picks the `winner`. `total` (the default): the summed
+    log-probability, the model's probability of the whole reply; right for
+    variants of the same content ("cooperate" against "co-operate", OCR
+    readings of one line), where the mean would reward a variant for being
+    split into more, individually likely tokens. `mean`: the log-probability
+    per token, for candidates whose lengths differ by content (chapter titles),
+    where the total penalises every extra token."""
+
+    @field_validator("candidates")
+    @classmethod
+    def _replies(cls, value: dict[str, str]) -> dict[str, str]:
+        texts = list(value.values())
+        if len(set(texts)) != len(texts):
+            raise ValueError("candidate texts must be unique")
+        for name, text in value.items():
+            if text != text.strip():
+                raise ValueError(
+                    f"candidate {name!r} starts or ends with whitespace; the chat "
+                    "template renders an open reply without its trailing space, so it "
+                    "would not be the text that is scored"
+                )
+        return value
+
+
 Question = Annotated[
-    Union[ChoiceQuestion, ScoreQuestion, YesNoQuestion], Field(discriminator="type")
+    Union[ChoiceQuestion, ScoreQuestion, YesNoQuestion, LikelihoodQuestion],
+    Field(discriminator="type"),
 ]
 
 
@@ -348,8 +399,47 @@ class YesNoAnswer(_Answer):
     refused)."""
 
 
+class CandidateScore(_Strict):
+    """One candidate's reading."""
+
+    logprob: float
+    """The summed log-probability of its tokens: ln P(this reply | the context).
+    NOT calibrated."""
+    tokens: int
+    """How many tokens were scored: the candidate as it tokenizes after the
+    context, plus the context's last token when the candidate's first
+    characters merged into it (`boundary_tokens`)."""
+    mean_logprob: float
+    """`logprob` / `tokens`."""
+    probability: float
+    """A softmax over the candidates' `logprob` totals: the model's probability of
+    this reply renormalised over the replies offered. Always over totals,
+    whatever `rank_by` says, because that is the quantity with a meaning."""
+
+
+class LikelihoodAnswer(_Strict):
+    """A likelihood question's reading: every candidate's log-likelihood."""
+
+    type: Literal["likelihood"] = "likelihood"
+    """`likelihood`."""
+    winner: str
+    """The candidate with the largest `logprob` (`rank_by: "total"`) or
+    `mean_logprob` (`"mean"`); on a tie, the first in request order. With
+    `"mean"` it need not hold the largest `probability`."""
+    rank_by: Literal["total", "mean"]
+    """The measure `winner` was picked by, echoed from the question."""
+    candidates: dict[str, CandidateScore]
+    """Candidate name to its reading, in the request's order."""
+    context_tokens: int
+    """The context's tokens: the state, the request and the opened reply."""
+    boundary_tokens: int
+    """Context tokens read again with the candidates because a candidate's
+    first characters merged with the context's last token: 0 or 1."""
+
+
 Answer = Annotated[
-    Union[ChoiceAnswer, ScoreAnswer, YesNoAnswer], Field(discriminator="type")
+    Union[ChoiceAnswer, ScoreAnswer, YesNoAnswer, LikelihoodAnswer],
+    Field(discriminator="type"),
 ]
 
 
@@ -458,7 +548,7 @@ class DecideItemsResponse(_Strict):
 @dataclass(frozen=True)
 class Plan:
     name: str
-    question: ChoiceQuestion | ScoreQuestion | YesNoQuestion
+    question: ChoiceQuestion | ScoreQuestion | YesNoQuestion | LikelihoodQuestion
     labels: tuple[tuple[str, str], ...]
     legend: tuple[tuple[str, str], ...]
 
@@ -479,7 +569,25 @@ def assign_labels(names: list[str], question: str) -> tuple[tuple[str, str], ...
     return tuple(zip(LETTERS, names))
 
 
-def plan(name: str, question: ChoiceQuestion | ScoreQuestion | YesNoQuestion) -> Plan:
+def check_candidate_count(question: LikelihoodQuestion, name: str) -> None:
+    count = len(question.candidates)
+    if count > MAX_CANDIDATES:
+        raise ApiError(
+            400,
+            "too_many_candidates",
+            f"question {name!r} has {count} candidates; a likelihood question scores "
+            f"at most {MAX_CANDIDATES}. Split it, or drop the candidates no reading "
+            "would choose",
+            {"question": name, "candidates": count, "max_candidates": MAX_CANDIDATES},
+        )
+
+
+def plan(
+    name: str, question: ChoiceQuestion | ScoreQuestion | YesNoQuestion | LikelihoodQuestion
+) -> Plan:
+    if isinstance(question, LikelihoodQuestion):
+        check_candidate_count(question, name)
+        return Plan(name=name, question=question, labels=(), legend=())
     if isinstance(question, ChoiceQuestion):
         labels = assign_labels(list(question.options), name)
         legend = tuple(
@@ -547,8 +655,8 @@ def image_part(encoded: str) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": f"data:image/{kind};base64,{encoded}"}}
 
 
-def system_content(state_text: str, has_images: bool) -> str:
-    content = SYSTEM_PROMPT + STATE_HEADER + state_text
+def system_content(state_text: str, has_images: bool, prompt: str = SYSTEM_PROMPT) -> str:
+    content = prompt + STATE_HEADER + state_text
     if has_images:
         content += ("\n\n" if state_text else "") + IMAGES_NOTE
     return content
@@ -850,7 +958,18 @@ def refuse_images_not_served(
     )
 
 
+def label_plans(plans: list[Plan]) -> list[Plan]:
+    return [item for item in plans if not isinstance(item.question, LikelihoodQuestion)]
+
+
+def likelihood_plans(plans: list[Plan]) -> list[Plan]:
+    return [item for item in plans if isinstance(item.question, LikelihoodQuestion)]
+
+
 def refuse_unreadable_labels(resident: Any, reading: Any, plans: list[Plan]) -> None:
+    plans = label_plans(plans)
+    if not plans:
+        return
     if not reading.served:
         raise decide_not_served(resident, reading.basis, None)
     widest = max(plans, key=lambda item: len(item.labels))
@@ -952,6 +1071,7 @@ async def decide_on_engine(
 __all__ = [
     "Answer",
     "ChoiceAnswer",
+    "CandidateScore",
     "ChoiceQuestion",
     "DecideItem",
     "DecideItemsResponse",
@@ -967,6 +1087,11 @@ __all__ = [
     "ItemsTokens",
     "LABEL_MARGIN",
     "LETTERS",
+    "LIKELIHOOD_SYSTEM_PROMPT",
+    "LikelihoodAnswer",
+    "LikelihoodQuestion",
+    "MAX_CANDIDATES",
+    "MAX_CANDIDATE_TOKENS",
     "MAX_IMAGES",
     "MAX_LEVELS",
     "MAX_OPTIONS",
@@ -983,12 +1108,15 @@ __all__ = [
     "YesNoQuestion",
     "answer",
     "assign_labels",
+    "check_candidate_count",
     "check_image_count",
     "decide_not_served",
     "decide_on_engine",
     "image_format",
     "image_part",
     "label_distribution",
+    "label_plans",
+    "likelihood_plans",
     "messages",
     "plan",
     "plan_all",

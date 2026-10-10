@@ -1212,7 +1212,7 @@ One answer distribution per question, read off the resident model's next-token l
 | --- | --- | --- | --- | --- |
 | `model` | string or null | no | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. Absent: the model this server registered for `decide` (`GET /v1/capability`, the decide row's `selected`), or, when `images` are sent, the one it registered for a decision with images (that row's `with_images`: the vision form of the same weights when it fits, else the largest model that reads images and fits at or below decide's 9B goal). The answer's `model` names which one served it. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or LikelihoodQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
 | `options` | object of string or null | no | — | The items form's shared options (name to one-line description, letters A, B, C… in the order given, 2 to 26). An item without its own `options` uses these. |
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
@@ -2327,6 +2327,17 @@ An artifact of a previous job on this server, taken as an input.
 | --- | --- | --- | --- | --- |
 | `file` | string | yes | — |  |
 
+### `CandidateScore`
+
+One candidate's reading.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `logprob` | number | yes | — | The summed log-probability of its tokens: ln P(this reply \| the context). NOT calibrated. |
+| `tokens` | integer | yes | — | How many tokens were scored: the candidate as it tokenizes after the context, plus the context's last token when the candidate's first characters merged into it (`boundary_tokens`). |
+| `mean_logprob` | number | yes | — | `logprob` / `tokens`. |
+| `probability` | number | yes | — | A softmax over the candidates' `logprob` totals: the model's probability of this reply renormalised over the replies offered. Always over totals, whatever `rank_by` says, because that is the quantity with a meaning. |
+
 ### `CardHeldDetails`
 
 `server_busy` from the operator door: what holds the card, in the server's words.
@@ -2398,7 +2409,7 @@ An items-form decision: one choice distribution per item, in item order.
 | --- | --- | --- | --- | --- |
 | `model` | string or null | no | — | The Crucible model id. One that is not resident is loaded for the decision while it waits in the line (`409 model_not_resident` with `"queue": false`). An upstream id (`<upstream>/<id>`) is refused `400 decide_needs_logprobs`: no upstream returns a distribution. Absent: the model this server registered for `decide` (`GET /v1/capability`, the decide row's `selected`), or, when `images` are sent, the one it registered for a decision with images (that row's `with_images`: the vision form of the same weights when it fits, else the largest model that reads images and fits at or below decide's 9B goal). The answer's `model` names which one served it. |
 | `state` | State | yes | — | What the questions are about: a string, used verbatim, or any other JSON value, serialised as compact JSON. Required and never null; may be `""` only when `images` carry the state. |
-| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
+| `questions` | object of ChoiceQuestion or ScoreQuestion or YesNoQuestion or LikelihoodQuestion or null | no | — | Question name to question. Names are single path members (no `/`, `\`, leading dot) and key the answers. Answers come back in this order. Exactly one of `questions` and `items` is sent. |
 | `instructions` | string or null | no | — | The items form's ask, written under every item's text: "Which of the categories listed above does the speaker do in this passage?". Each item's question is `text`, a newline, then this; absent, `text` alone. Refused with `questions`. |
 | `options` | object of string or null | no | — | The items form's shared options (name to one-line description, letters A, B, C… in the order given, 2 to 26). An item without its own `options` uses these. |
 | `items` | array of DecideItem or null | no | — | The items form: an ordered list of choice questions about ONE state, each answered exactly as a lone choice question would be (it sees the state and its own question, never another item), in one request: on the Mac the shared state runs once and every item continues from its cache. Answers come back as a list in this order. At most 512 (`too_many_items`); token caps in docs/internals/api.md. |
@@ -2414,7 +2425,7 @@ A decision: one distribution per question.
 | --- | --- | --- | --- | --- |
 | `model` | ModelProvenance | yes | — | Which weights answered (`{id, revision, fingerprint}`, docs/internals/jobs-runtime.md "Provenance sidecars"). |
 | `engine` | string | yes | — | The engine kind that answered: `vllm`, `llama-server`, `mlx-lm`. |
-| `answers` | object of ChoiceAnswer or ScoreAnswer or YesNoAnswer | yes | — | Question name to answer, in the request's question order. |
+| `answers` | object of ChoiceAnswer or ScoreAnswer or YesNoAnswer or LikelihoodAnswer | yes | — | Question name to answer, in the request's question order. |
 | `timing_ms` | DecideTiming | yes | — | Crucible's clock, per request. |
 | `tokens` | DecideTokens | yes | — | Prompt sizes. |
 
@@ -2604,6 +2615,30 @@ Why a job left the queue without running: `removed` is not `failed`.
 | `resumed` | boolean | yes | — |  |
 | `sampling` | object or null | no | — |  |
 | `removal` | JobRemoval or null | no | — |  |
+
+### `LikelihoodAnswer`
+
+A likelihood question's reading: every candidate's log-likelihood.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'likelihood'` | no | `'likelihood'` | `likelihood`. |
+| `winner` | string | yes | — | The candidate with the largest `logprob` (`rank_by: "total"`) or `mean_logprob` (`"mean"`); on a tie, the first in request order. With `"mean"` it need not hold the largest `probability`. |
+| `rank_by` | `'total'` or `'mean'` | yes | — | The measure `winner` was picked by, echoed from the question. |
+| `candidates` | object of CandidateScore | yes | — | Candidate name to its reading, in the request's order. |
+| `context_tokens` | integer | yes | — | The context's tokens: the state, the request and the opened reply. |
+| `boundary_tokens` | integer | yes | — | Context tokens read again with the candidates because a candidate's first characters merged with the context's last token: 0 or 1. |
+
+### `LikelihoodQuestion`
+
+Score free-text candidate replies by how likely the model is to say each, instead of generating one. Nothing is decoded, so nothing can fail to parse or run away.
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `type` | `'likelihood'` | yes | — | `likelihood`. |
+| `instructions` | string | yes | — | The request the candidates answer, as the user turn says it: "Write out the second sentence of the passage, spelled as it should be." Each candidate is scored as the start of the model's reply to it (thinking off). |
+| `candidates` | object of string | yes | — | Candidate name to the reply text to score, in the order the answer lists them. 2 to 26 (`too_many_candidates`), each text unique, starting and ending on a non-space (a chat template's open reply drops trailing space), at most 256 tokens as it tokenizes after the context (`candidate_too_long`). |
+| `rank_by` | `'total'` or `'mean'` | no | `'total'` | Which measure picks the `winner`. `total` (the default): the summed log-probability, the model's probability of the whole reply; right for variants of the same content ("cooperate" against "co-operate", OCR readings of one line), where the mean would reward a variant for being split into more, individually likely tokens. `mean`: the log-probability per token, for candidates whose lengths differ by content (chapter titles), where the total penalises every extra token. |
 
 ### `ModelProvenance`
 

@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- `POST /v1/decide` scores free-text candidates: a question of `type: "likelihood"` (`instructions`, `candidates` name → reply text, `rank_by` `total` or `mean`) answers each candidate's summed log-probability, token count and mean as the start of the model's reply, a softmax over the totals and the `winner`, with nothing generated (so no format failures and no runaways). It sits beside the label questions in the questions form. vLLM reads prompt log-probabilities (`/tokenize` first, so every refusal comes before a forward pass); mlx-lm and mlx-vlm score every candidate as a row of the items route over the state read once (`mlx-lm-decide-items-helper` is now `ITEMS_VERSION = 3` and applies itself at the next engine start); a llama-server model is refused `400 likelihood_unsupported_on_engine` (b10970 returns no prompt-token log-probability). The SDK's `decide()` takes `DecideLikelihoodQuestion` and reads `DecideLikelihoodAnswer`; a `DecideAnswer` must now be narrowed by `type` before reading `labelMass` (docs/internals/api.md "Likelihood questions").
+
 ## 1.0.125 — 2026-10-10
 
 - Fix: weights left in the store by a model that is no longer in the catalog (`qwen3.5-4b-bside-4bit`, 3.6 GB on an 8 GiB laptop after 1.0.124) can be removed: `crucible remove model <id>` and `DELETE /v1/catalog/model/{id}` find them in the weights store when the catalog has no such model, instead of refusing `subject_unknown`. Nothing is deleted on an update by itself; `crucible doctor` lists such weights and now names that command for this machine's own.

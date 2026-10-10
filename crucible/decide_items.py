@@ -30,7 +30,14 @@ from .decide import (
     system_content,
     top_k,
 )
-from .engines.items_forward import ITEM_TOO_LONG, ITEMS_PATH, PROMPT_TOO_LONG, ItemsRefusal
+from .engines.items_forward import (
+    CANDIDATE_NOT_A_REPLY,
+    CANDIDATE_TOO_LONG,
+    ITEM_TOO_LONG,
+    ITEMS_PATH,
+    PROMPT_TOO_LONG,
+    ItemsRefusal,
+)
 from .errors import ApiError
 
 MAX_ITEMS = 512
@@ -139,6 +146,11 @@ def _field(container: Any, key: str, kind: Any, where: str, engine: str) -> Any:
 
 NEXT_STEP = {
     ITEM_TOO_LONG: "Shorten that item (Briefcase clips a unit at 300 characters)",
+    CANDIDATE_TOO_LONG: "Shorten that candidate, or score the part of it the readings differ in",
+    CANDIDATE_NOT_A_REPLY: (
+        "The model's chat template does not open a reply that the candidate continues; "
+        "score it on a model whose template does (Qwen3.5's does)"
+    ),
     PROMPT_TOO_LONG: (
         "Send a shorter state, or load the model with a longer context "
         "(POST /v1/jobs {\"type\": \"load-model\", \"model\": ..., \"context\": ...})"

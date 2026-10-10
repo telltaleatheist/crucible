@@ -296,11 +296,25 @@ class Reader:
         tokenizer = getattr(self.processor, "tokenizer", self.processor)
         prepared: list[dict[str, Any]] = []
 
-        def tokenize(messages: list[dict[str, Any]]) -> list[int]:
-            inputs = self._prepared(messages, job)
+        def tokenize(messages: list[dict[str, Any]], reply: bool = False) -> list[int]:
+            inputs = self._prepared(messages, job, reply)
             prepared.append(inputs)
             return inputs["input_ids"][0].tolist()
 
+        if isinstance(job.ask, ITEMS.LikelihoodAsk):
+            split = ITEMS.likelihood_prompts(
+                job.ask, tokenize, lambda messages: tokenize(messages, True)
+            )
+            shared_pass, item_pass, head = self._row_passes(split.shared, split.suffixes, prepared[0], job)
+            document = ITEMS.likelihood_document(
+                split,
+                ITEMS.read_likelihood(
+                    split, shared_pass, item_pass,
+                    lambda hidden, targets: ITEMS.token_logprobs(head, hidden, targets),
+                ),
+            )
+            mx.clear_cache()
+            return document
         document = ITEMS.answer_items(
             job.ask,
             tokenize,
@@ -310,14 +324,20 @@ class Reader:
         mx.clear_cache()
         return document
 
-    def _prepared(self, messages: list[dict[str, Any]], job: ItemsJob) -> dict[str, Any]:
+    def _prepared(
+        self, messages: list[dict[str, Any]], job: ItemsJob, reply: bool = False
+    ) -> dict[str, Any]:
         from mlx_vlm.prompt_utils import apply_chat_template
         from mlx_vlm.utils import prepare_inputs, should_add_special_tokens
 
         model, processor = self.model, self.processor
+        # A reply is the candidate rendered as the open assistant message
+        # (`continue_final_message`, which mlx-vlm passes through to the
+        # tokenizer's template), so its prompt ends on the candidate.
+        opened = {"continue_final_message": True} if reply else {}
         formatted = apply_chat_template(
-            processor, model.config, messages, num_images=len(job.images),
-            **job.ask.template_kwargs,
+            processor, model.config, messages, add_generation_prompt=not reply,
+            num_images=len(job.images), **opened, **job.ask.template_kwargs,
         )
         return prepare_inputs(
             processor,
@@ -331,6 +351,12 @@ class Reader:
         )
 
     def _item_rows(self, split: Any, inputs: dict[str, Any], job: ItemsJob) -> list[list[tuple[int, float]]]:
+        shared_pass, item_pass, head = self._row_passes(split.shared, split.suffixes, inputs, job)
+        return ITEMS.read_items(split, shared_pass, item_pass, head, job.ask.top_logprobs)
+
+    def _row_passes(
+        self, shared_tokens: list[int], suffixes: list[list[int]], inputs: dict[str, Any], job: ItemsJob
+    ) -> tuple[Callable[[], list[Any]], Callable[[list[Any], list[int]], Any], Callable[[Any], Any]]:
         import mlx.core as mx
         from mlx_vlm.models.cache import make_prompt_cache
 
@@ -340,13 +366,13 @@ class Reader:
         extra = {
             k: v for k, v in inputs.items() if k not in ("input_ids", "pixel_values", "attention_mask")
         }
-        whole = mx.array([split.shared + max(split.suffixes, key=len)])
+        whole = mx.array([shared_tokens + max(suffixes, key=len)])
         embedding = model.get_input_embeddings(
             whole, inputs.get("pixel_values"), **extra, **self._vision(job)
         )
         embeds = embedding.inputs_embeds
         positions = getattr(embedding, "position_ids", None)
-        shared = len(split.shared)
+        shared = len(shared_tokens)
 
         def forward(ids: Any, embedded: Any, placed: Any, cache: list[Any]) -> Any:
             kwargs: dict[str, Any] = {"inputs_embeds": embedded, "cache": cache}
@@ -369,7 +395,7 @@ class Reader:
             placed = None if positions is None else positions[..., shared:shared + len(suffix)]
             return forward(ids, inner.embed_tokens(ids), placed, own)
 
-        return ITEMS.read_items(split, shared_pass, item_pass, head, job.ask.top_logprobs)
+        return shared_pass, item_pass, head
 
     def _vision(self, job: Asked | ItemsJob) -> dict[str, Any]:
         if job.image_key is None or self.model.config.model_type not in VISION_CACHED_MODEL_TYPES:
@@ -520,6 +546,12 @@ class Batcher:
     def _describe(batch: list[Any], rows: list[Any], elapsed: float) -> str:
         if isinstance(batch[0], ItemsJob):
             document = rows[0]
+            if "groups" in document:
+                candidates = sum(len(group["candidates"]) for group in document["groups"])
+                return (
+                    f"likelihood pass with {len(batch[0].images)} image(s): {elapsed:.2f}s, "
+                    f"{document['shared_tokens']} shared tokens, {candidates} candidates"
+                )
             return (
                 f"items pass with {len(batch[0].images)} image(s): {elapsed:.2f}s, "
                 f"{document['shared_tokens']} shared tokens, {len(document['slots'])} items"
@@ -786,7 +818,7 @@ def parse_question(body: dict[str, Any], served: str) -> Asked:
 
 def parse_items_job(body: dict[str, Any], served: str) -> ItemsJob:
     try:
-        ask = ITEMS.parse_items(body, (served,))
+        ask = ITEMS.parse_request(body, (served,))
     except ITEMS.ItemsRefusal as refusal:
         raise Refusal(refusal.status, refusal.code, str(refusal)) from None
     urls = _image_urls(ask.messages)
