@@ -218,6 +218,57 @@ def start_engine(
         raise
 
 
+def concurrency_flag(engine_name: str) -> str | None:
+    """The flag an engine reads its batch width from; None for an engine whose width
+    is a constant (llama-server runs one slot)."""
+    return engine_class(engine_name).chat_concurrency_flag
+
+
+def stated_concurrency(spec: Any) -> int | None:
+    """How many requests at once the manifest starts this model with."""
+    flag = concurrency_flag(spec.engine)
+    return None if flag is None else int_flag(spec.engine_args, flag)
+
+
+def with_concurrency(spec: Any, args: list[str], width: int, model_id: str) -> list[str]:
+    """`args` with the engine's concurrency flag set to `width`: the person's
+    [llm.concurrency] for this model on this server. It may only lower what the
+    manifest states, because the manifest's number is what the model's memory was
+    planned for (every in-flight sequence holds its own KV)."""
+    flag = concurrency_flag(spec.engine)
+    if flag is None:
+        raise EngineError(
+            f"concurrency_not_settable: config [llm.concurrency] sets {model_id} to "
+            f"{width}, but {spec.engine} runs one request at a time and has no flag "
+            f"for it. `crucible models concurrency {model_id} default` removes it"
+        )
+    stated = int_flag(args, flag)
+    if stated is None:
+        raise EngineError(
+            f"{spec.engine} for {model_id} was given no {flag} ({args}); there is "
+            "nothing for [llm.concurrency] to lower"
+        )
+    if width > stated:
+        raise EngineError(
+            f"concurrency_above_manifest: config [llm.concurrency] sets {model_id} to "
+            f"{width} at once, above the {stated} its manifest was sized for. Set "
+            f"{stated} or fewer, or `crucible models concurrency {model_id} default`"
+        )
+    kept: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == flag:
+            skip = True
+            continue
+        if arg.startswith(flag + "="):
+            continue
+        kept.append(arg)
+    return [*kept, flag, str(width)]
+
+
 def engine_load_args(
     manifest: Any,
     spec: Any,
@@ -226,8 +277,9 @@ def engine_load_args(
     *,
     context: int,
     card_args: tuple[str, ...] = (),
+    concurrency: int | None = None,
 ) -> list[str]:
-    return engine_class(spec.engine).load_args(
+    args = engine_class(spec.engine).load_args(
         spec,
         weights_dir,
         context,
@@ -235,11 +287,17 @@ def engine_load_args(
         card_flags=card_args,
         source=manifest.path.name,
     )
+    if concurrency is None:
+        return args
+    return with_concurrency(spec, args, concurrency, manifest.id)
 
 
 __all__ = [
     "ChatAdmission",
     "chat_admission",
+    "concurrency_flag",
+    "stated_concurrency",
+    "with_concurrency",
     "DecideItemsReading",
     "DecideReading",
     "decide_items_reading",

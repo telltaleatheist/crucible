@@ -471,6 +471,62 @@ def add_model_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     models_pull.set_defaults(func=cmd_models_pull)
 
+    models_concurrency = model_commands.add_parser(
+        "concurrency",
+        help=(
+            "[llm.concurrency]: how many requests a chat model runs at once here, "
+            "lower than its manifest's (fewer leaves the GPU room for the displays). "
+            "No arguments lists them; `default` returns a model to its manifest's"
+        ),
+    )
+    models_concurrency.add_argument("model", nargs="?", default=None)
+    models_concurrency.add_argument("width", nargs="?", default=None)
+    models_concurrency.set_defaults(func=cmd_models_concurrency)
+
+
+def cmd_models_concurrency(args: argparse.Namespace) -> int:
+    from .. import llmconcurrency
+    from ..errors import ConfigError
+
+    config, _backend = common.here()
+    try:
+        rows = llmconcurrency.rows(config)
+    except ConfigError as exc:
+        return _fail(str(exc))
+    if args.model is None:
+        for row in rows:
+            now = row["set"] if row["set"] is not None else row["manifest"]
+            whose = "set in config" if row["set"] is not None else "the manifest's"
+            print(f"{row['model']}: {now} at once ({whose}; manifest {row['manifest']})")
+        return EXIT_OK
+    row = next((r for r in rows if r["model"] == args.model), None)
+    if args.width is None:
+        if row is None:
+            return _fail(f"concurrency_not_settable: {args.model!r} has no concurrency here")
+        now = row["set"] if row["set"] is not None else row["manifest"]
+        print(f"{args.model}: {now} at once (manifest {row['manifest']})")
+        return EXIT_OK
+    if args.width == "default":
+        width = None
+    else:
+        try:
+            width = int(args.width)
+        except ValueError:
+            return _fail(f"{args.width!r} is not a whole number or `default`")
+    try:
+        path = llmconcurrency.set_concurrency(config, args.model, width)
+    except ConfigError as exc:
+        return _fail(str(exc))
+    print(
+        f"[llm.concurrency] {args.model} = "
+        f"{'the manifest' + chr(39) + 's' if width is None else width} — {path}"
+    )
+    print(
+        "read when the model loads: if it is on the card now, it keeps its old width "
+        "until it is unloaded and loaded again"
+    )
+    return EXIT_OK
+
 
 def add_rvc_denoise_parsers(subparsers: argparse._SubParsersAction) -> None:
     rvc = subparsers.add_parser("rvc", help="list and pull RVC voice-conversion models")

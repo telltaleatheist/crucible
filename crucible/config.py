@@ -165,6 +165,11 @@ class Config:
     # may change it whenever the card is decided again. False: a person set it, and
     # nothing but a person changes it.
     audio_low_vram_auto: bool = True
+    # `[llm.concurrency]`: model id -> how many requests that model's engine runs at
+    # once on this server, below what its manifest states (crucible/engines/__init__.py,
+    # with_concurrency). A person's setting; nothing writes it but `crucible models
+    # concurrency`. Read when the model loads.
+    llm_concurrency: tuple[tuple[str, int], ...] = ()
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -185,6 +190,12 @@ class Config:
         for entry in self.tts_engines:
             if entry.engine == narrator_engine:
                 return entry
+        return None
+
+    def concurrency_for(self, model: str) -> int | None:
+        for entry, width in self.llm_concurrency:
+            if entry == model:
+                return width
         return None
 
     def route_model(self, capability: str) -> str | None:
@@ -334,6 +345,31 @@ def _audio_low_vram(table: dict[str, Any]) -> AudioLowVram:
     if "low_vram" not in section:
         return AudioLowVram(on=False, auto=True)
     return AudioLowVram(on=_require(table, "audio", "low_vram", bool), auto=auto)
+
+
+def _llm_concurrency(table: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+    """[llm] is not a writer-owned table, so `crucible install` carries it as it is
+    (_unowned_tables); write_config(llm_concurrency=) sets its `concurrency` table and
+    keeps the rest of [llm]."""
+    section = table.get("llm") or {}
+    if "concurrency" not in section:
+        return ()
+    widths = section["concurrency"]
+    if not isinstance(widths, dict):
+        raise ConfigError(
+            "config [llm] concurrency must be a table of model id = requests at once, "
+            f'e.g. [llm.concurrency] "qwen3.8-27b-8bit" = 4; got {widths!r}'
+        )
+    entries: list[tuple[str, int]] = []
+    for model, width in sorted(widths.items()):
+        if isinstance(width, bool) or not isinstance(width, int) or width < 1:
+            raise ConfigError(
+                f"config [llm.concurrency] {model!r} = {width!r}: it is how many "
+                "requests the model runs at once, a whole number of 1 or more. "
+                f"`crucible models concurrency {model} default` removes it"
+            )
+        entries.append((model, width))
+    return tuple(entries)
 
 
 def _install_on_submit(table: dict[str, Any]) -> bool:
@@ -913,6 +949,7 @@ def load_config(
     upstreams = _upstream_records(table)
     record = _capability_record(table)
     low_vram = _audio_low_vram(table)
+    llm_concurrency = _llm_concurrency(table)
     if not tolerate_stale_record:
         _record_agrees(
             record,
@@ -958,6 +995,7 @@ def load_config(
         max_session_hold_s=_max_session_hold_s(table),
         audio_low_vram=low_vram.on,
         audio_low_vram_auto=low_vram.auto,
+        llm_concurrency=llm_concurrency,
         stamp=stamp,
     )
 
@@ -1035,6 +1073,7 @@ def write_config(
     tts_engines: tuple[EngineFootprint, ...] = (),
     carried_tables: dict[str, Any] | None = None,
     audio_low_vram: AudioLowVram | None = None,
+    llm_concurrency: tuple[tuple[str, int], ...] | None = None,
 ) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
@@ -1130,6 +1169,15 @@ def write_config(
             document["audio"] = audio
         else:
             document.pop("audio", None)
+    if llm_concurrency is not None:
+        # [llm] is likewise not this writer's: only its concurrency table is set.
+        llm = {k: v for k, v in document.get("llm", {}).items() if k != "concurrency"}
+        if llm_concurrency:
+            llm["concurrency"] = dict(llm_concurrency)
+        if llm:
+            document["llm"] = llm
+        else:
+            document.pop("llm", None)
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
@@ -1172,6 +1220,7 @@ def rewrite_config(
     *,
     flags: dict[str, bool] | None = None,
     audio_low_vram: AudioLowVram | None = None,
+    llm_concurrency: tuple[tuple[str, int], ...] | None = None,
 ) -> Path:
     """Write `config` back to its own file with only the named settings changed.
 
@@ -1211,6 +1260,7 @@ def rewrite_config(
         open_pairing=config.open_pairing,
         tts_engines=config.tts_engines,
         audio_low_vram=audio_low_vram,
+        llm_concurrency=llm_concurrency,
         **values,
     )
 

@@ -460,6 +460,7 @@ class LoadModelJobType:
                 card_args=enginespec.card_args(
                     needs.spec, card_for(self._config.home, self._backend.gpu)
                 ),
+                concurrency=self._config.concurrency_for(model),
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
@@ -482,6 +483,7 @@ def occupy_model(
     on_progress: Callable[[str], None] | None = None,
     cancelled: Callable[[], bool],
     card_args: tuple[str, ...] = (),
+    concurrency: int | None = None,
 ) -> ResidentModel:
     say = say_to(on_progress)
 
@@ -497,7 +499,13 @@ def occupy_model(
             f"(context {context}); log {log_path}"
         )
         args = engine_load_args(
-            manifest, spec, weights_dir, plan, context=context, card_args=card_args
+            manifest,
+            spec,
+            weights_dir,
+            plan,
+            context=context,
+            card_args=card_args,
+            concurrency=concurrency,
         )
         start_engine(
             engine, weights_dir, served, port, args, say, timeout, cancelled=cancelled

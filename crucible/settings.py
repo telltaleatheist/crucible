@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable, Mapping
 
-from . import capabilityclasses, classnames, lowvram, memorybudget, upstreamrecord
+from . import capabilityclasses, classnames, llmconcurrency, lowvram, memorybudget, upstreamrecord
 from .backend import CardFacts
 from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .capabilitystore import decide_on, record_of
@@ -116,7 +116,9 @@ def _choices(
     return found
 
 
-def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]:
+def document(
+    config: Config, *, installed: Mapping[str, bool], resident: Any = None
+) -> dict[str, Any]:
     routes: dict[str, Any] = {}
     for name in classnames.ROUTABLE_CLASSES:
         model = config.route_model(name)
@@ -150,6 +152,7 @@ def document(config: Config, *, installed: Mapping[str, bool]) -> dict[str, Any]
         "tailscale_advertise": list(config.tailscale_advertise),
         "lan_advertise": list(config.lan_advertise),
         "audio_low_vram": low_vram_entry(config),
+        "llm_concurrency": llmconcurrency.rows(config, resident),
     }
 
 

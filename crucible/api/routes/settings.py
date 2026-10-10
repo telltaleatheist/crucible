@@ -6,12 +6,12 @@ from typing import Any
 
 from fastapi import Request
 
-from ... import catalog, lowvram, upstreamrecord, upstreams
+from ... import catalog, llmconcurrency, lowvram, upstreamrecord, upstreams
 from ... import settings as settings_module
 from ...capabilitystore import low_vram_not_offered, set_low_vram
 from ...cardfacts import card_for
 from ...config import load_config
-from ...errors import ApiError
+from ...errors import ApiError, ConfigError
 from ...inflight import read_act
 from ..caller import client_agent
 from ..context import AppContext, Routers
@@ -29,7 +29,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """Where each class's work runs and which upstreams are configured. A key is
         never returned; `key_hint` shows its last four characters.
         """
-        return settings_module.document(config, installed=_installed_subjects())
+        return settings_module.document(
+            config, installed=_installed_subjects(), resident=residency.resident_model
+        )
 
     @private.put("/settings")
     async def put_settings(request: Request) -> dict[str, Any]:
@@ -58,7 +60,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 client=client_agent(request),
                 changed=resolved.changed,
             )
-        return settings_module.document(config, installed=_installed_subjects())
+        return settings_module.document(
+            config, installed=_installed_subjects(), resident=residency.resident_model
+        )
 
     @private.put("/settings/audio/low-vram")
     async def put_audio_low_vram(request: Request) -> dict[str, Any]:
@@ -104,7 +108,60 @@ def register(routers: Routers, ctx: AppContext) -> None:
         # and takes up a job type the new verdict turned on, which adopting now would
         # skip. The answer is read from the file just written.
         return settings_module.document(
-            load_config(config.home), installed=_installed_subjects()
+            load_config(config.home),
+            installed=_installed_subjects(),
+            resident=residency.resident_model,
+        )
+
+    @private.put("/settings/llm/concurrency")
+    async def put_llm_concurrency(request: Request) -> dict[str, Any]:
+        """Set how many requests one chat model runs at once on this server, with
+        `{"model": id, "width": n}`, or `{"model": id, "width": null}` for what its
+        manifest states. Only lower than the manifest. Read when the model loads: a
+        model on the card keeps its width (`llm_concurrency[].running`) until it is
+        loaded again. Answers the full settings document after the write.
+        """
+        act = read_act(request.headers)
+        try:
+            body = json.loads(await request.body())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ApiError(
+                400, "invalid_request", f"the concurrency body is not JSON: {exc}"
+            ) from None
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"model", "width"}
+            or not isinstance(body["model"], str)
+            or not (body["width"] is None or type(body["width"]) is int)
+        ):
+            raise ApiError(
+                400,
+                "invalid_request",
+                'the body is exactly {"model": "<id>", "width": <whole number> | '
+                f"null}}, got {body!r}",
+                {"field": "width"},
+            )
+        model, width = body["model"], body["width"]
+        try:
+            await asyncio.to_thread(
+                lambda: llmconcurrency.set_concurrency(config, model, width)
+            )
+        except ConfigError as exc:
+            named = str(exc).split(":", 1)[0]
+            code = named if named.startswith("concurrency_") else "config_refused"
+            raise ApiError(409, code, str(exc), {"field": "width"}) from None
+        ctx.settings_history.record(
+            act=act,
+            client=client_agent(request),
+            changed=[
+                f"[llm.concurrency] {model} = "
+                + ("the manifest's" if width is None else str(width))
+            ],
+        )
+        return settings_module.document(
+            load_config(config.home),
+            installed=_installed_subjects(),
+            resident=residency.resident_model,
         )
 
     @private.post("/settings/upstreams/{name}/test")

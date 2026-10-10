@@ -1713,6 +1713,117 @@
     if (lowVram !== null) {
       body.appendChild(lowVram);
     }
+    var concurrency = renderConcurrency();
+    if (concurrency !== null) {
+      body.appendChild(concurrency);
+    }
+  }
+
+  async function putConcurrency(model, width) {
+    try {
+      state.settings = await call('/v1/settings/llm/concurrency', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: model, width: width })
+      });
+      setRefusal('concurrency', null);
+    } catch (refusal) {
+      setRefusal('concurrency', refusal);
+    } finally {
+      render();
+    }
+  }
+
+  // The width is read when a model loads, so a model on the card at another width is
+  // offered a reload: unloading it, and the next request loads it at the new width.
+  async function reloadForConcurrency(model) {
+    try {
+      await call('/v1/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'unload-model', model: model, params: {} })
+      });
+      setRefusal('concurrency', null);
+    } catch (refusal) {
+      setRefusal('concurrency', refusal);
+    } finally {
+      await loadSettings();
+      render();
+    }
+  }
+
+  // [llm.concurrency]: how many requests each chat model runs at once on this server.
+  function renderConcurrency() {
+    var rows = state.settings.llm_concurrency;
+    if (!rows || rows.length === 0) {
+      return null;
+    }
+    var list = el('div', { class: 'concurrency-rows' });
+    for (var index = 0; index < rows.length; index += 1) {
+      var row = rows[index];
+      var now = row.set === null ? row.manifest : row.set;
+      var select = el('select', {
+        id: 'concurrency-' + row.model,
+        'aria-label': 'requests at once for ' + row.model,
+        onchange: (function (entry) {
+          return function (event) {
+            var width = parseInt(event.target.value, 10);
+            putConcurrency(entry.model, width === entry.manifest ? null : width);
+          };
+        })(row)
+      });
+      for (var width = row.manifest; width >= 1; width -= 1) {
+        select.appendChild(
+          el('option', {
+            value: String(width),
+            text: width === row.manifest ? width + ' (the default)' : String(width)
+          })
+        );
+      }
+      select.value = String(now);
+      var line = el('p', { class: 'note' }, [
+        el('strong', { text: row.display }),
+        ' — ',
+        select,
+        ' at once ',
+        row.set === null ? chip('set automatically') : chip('set manually', 'accent')
+      ]);
+      list.appendChild(line);
+      if (row.running !== null && row.running !== now) {
+        list.appendChild(
+          el('p', { class: 'note' }, [
+            'It is on the card now running ' + row.running + ' at once; the new ' +
+              'number takes effect when it loads again. Reload it now? ',
+            el('button', {
+              id: 'concurrency-reload-' + row.model,
+              class: 'button primary',
+              type: 'button',
+              onclick: (function (model) {
+                return function () {
+                  reloadForConcurrency(model);
+                };
+              })(row.model)
+            }, ['Reload now'])
+          ])
+        );
+      }
+    }
+    var block = el('div', { class: 'block', id: 'concurrency' }, [
+      el('p', { class: 'subhead', text: 'Requests at once' }),
+      el('p', {
+        class: 'note',
+        text:
+          'How many requests each chat model works on together. Fewer leaves the ' +
+          'GPU room for your displays; one request runs just as fast, a batch ' +
+          'finishes later.'
+      }),
+      list
+    ]);
+    var refusal = refusalBox(state.refusals.concurrency);
+    if (refusal) {
+      block.appendChild(refusal);
+    }
+    return block;
   }
 
   var LOW_VRAM_CARD = {
