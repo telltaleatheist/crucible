@@ -487,7 +487,12 @@ class DecideTiming(_Strict):
     """Where the time went."""
 
     total: float
-    """The whole decision, ms, Crucible's clock."""
+    """The decision's run, ms, Crucible's clock: from when it left the server's
+    line to its answer (the wait is `queued`)."""
+    queued: float | None = None
+    """Ms the decision waited in the server's line (a model loading, the engine's
+    slots taken) before it ran; `total` is the run alone. Null in a timing built
+    outside the door."""
     per_question: dict[str, ForwardTiming]
     """Each question's own request."""
     prime: ForwardTiming | None
@@ -536,7 +541,12 @@ class ItemsTiming(_Strict):
     """Where the items form's time went."""
 
     total: float
-    """The whole decision, ms, Crucible's clock."""
+    """The decision's run, ms, Crucible's clock: from when it left the server's
+    line to its answer (the wait is `queued`)."""
+    queued: float | None = None
+    """Ms the decision waited in the server's line (a model loading, the engine's
+    slots taken) before it ran; `total` is the run alone. Null in a timing built
+    outside the door."""
     engine_requests: int
     """1 when the engine read every item in one batched request (mlx-lm,
     mlx-vlm); otherwise one per item plus the shared prefix sent first."""
