@@ -46,6 +46,28 @@ def engine_for(backend_kind: str, modalities: "tuple[str, ...] | list[str]") -> 
     return found
 
 
+# The engine that serves one GGUF file, and the backends that have it. On llama-windows it
+# is the only engine; on cuda-linux it serves a block that names a GGUF `file`, and vLLM
+# serves a block that is a whole HF repo. Owen, 2026-10-09: B-Sides only ever sends one
+# request at a time, so its models gain nothing from vLLM's batching and pay its minutes of
+# compile and graph capture on every swap; they are GGUF on llama-server, text stays vLLM.
+# The engine is still read off the block, never chosen by naming it: the weights' form
+# (one GGUF, or a repo) decides it, and the `engine` key has to agree.
+GGUF_ENGINE = "llama-server"
+
+GGUF_BACKENDS: frozenset[str] = frozenset({LLAMA_WINDOWS, CUDA_LINUX})
+
+
+def block_engine(
+    backend_kind: str, modalities: "tuple[str, ...] | list[str]", *, gguf: bool
+) -> str:
+    """The engine a backend block runs on: llama-server for one GGUF file where the backend
+    has it, otherwise the backend's engine for the family (engine_for)."""
+    if gguf and backend_kind in GGUF_BACKENDS:
+        return GGUF_ENGINE
+    return engine_for(backend_kind, modalities)
+
+
 MODALITIES: frozenset[str] = frozenset({"text", "image"})
 
 SKIP_MM_PROFILING = "--skip-mm-profiling"
@@ -789,11 +811,29 @@ def _parse_model(document: dict[str, Any], path: Path, expected_id: str) -> dict
 
 
 def _check_engine(
-    where: str, kind: str, engine: str, serves_here: tuple[str, ...], modalities: list[str]
+    where: str,
+    kind: str,
+    block: dict[str, Any],
+    serves_here: tuple[str, ...],
+    modalities: list[str],
 ) -> None:
-    expected = engine_for(kind, serves_here)
+    engine = block["engine"]
+    gguf = "file" in block
+    expected = block_engine(kind, serves_here, gguf=gguf)
     if engine == expected:
         return
+    if kind in GGUF_BACKENDS and kind != LLAMA_WINDOWS and GGUF_ENGINE in (engine, expected):
+        weights = (
+            f"names a GGUF `file` ({block['file']!r})"
+            if gguf
+            else "names no `file`, so its weights are the whole repo"
+        )
+        raise ManifestError(
+            f"{where}: engine {engine!r}, and this block {weights}. On {kind} "
+            f"{GGUF_ENGINE} serves one GGUF file and "
+            f"{engine_for(kind, serves_here)!r} serves a repo; the weights' form "
+            f"decides the engine, so this block's is {expected!r}"
+        )
     family = class_family(serves_here)
     raise ManifestError(
         f"{where}: engine {engine!r} does not serve {family!r} models on "
@@ -819,7 +859,7 @@ def _backend_engine_args(where: str, block: dict[str, Any]) -> tuple[str, ...]:
 def _check_llama_files(where: str, block: dict[str, Any], serves_here: tuple[str, ...]) -> None:
     if "file" not in block:
         raise ManifestError(
-            f"{where}: llama-windows needs `file`, the one GGUF in "
+            f"{where}: llama-server needs `file`, the one GGUF in "
             f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
             "quantization of a model and this server pulls one"
         )
@@ -848,15 +888,16 @@ def _check_llama_files(where: str, block: dict[str, Any], serves_here: tuple[str
 def _check_backend_files(
     where: str, kind: str, block: dict[str, Any], serves_here: tuple[str, ...]
 ) -> None:
-    if kind == LLAMA_WINDOWS:
+    if block["engine"] == GGUF_ENGINE:
         _check_llama_files(where, block, serves_here)
         return
     extra = sorted({"file", "mmproj"} & set(block))
     if extra:
         raise ManifestError(
-            f"{where}: {extra} belong to a llama-windows block. On "
-            f"{kind} the whole repo is the weights and there is no "
-            "file to choose"
+            f"{where}: {extra} belong to a llama-windows block, or a "
+            f"{GGUF_ENGINE} block on another backend that has it. On "
+            f"{kind} with {block['engine']!r} the whole repo is the weights and "
+            "there is no file to choose"
         )
 
 
@@ -1033,7 +1074,7 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
     block = _backend_block(where, kind, block)
     modalities = model["modalities"]
     serves_here = _parse_serves(where, block, modalities)
-    _check_engine(where, kind, block["engine"], serves_here, modalities)
+    _check_engine(where, kind, block, serves_here, modalities)
     _check_hf_pin(where, block)
     if block["memory_bytes_estimate"] <= 0:
         raise ManifestError(

@@ -68,7 +68,7 @@ def owned_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         engines_module,
         "build_engine",
-        lambda engine_name, python, log_path: OwnedEngine(python, log_path),
+        lambda engine_name, python, log_path, library_dirs=(): OwnedEngine(python, log_path),
     )
     monkeypatch.setattr(
         engines_module,

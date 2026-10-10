@@ -31,6 +31,12 @@ FATAL_LINES: tuple[tuple[str, str, str], ...] = (
         "a CUDA runtime DLL is missing: the cudart asset did not unpack",
     ),
     (
+        "error while loading shared libraries",
+        PAGES_ENGINE_FAILED,
+        "a CUDA library llama-server loads from the llm env is missing: "
+        "`crucible install llm --force` rebuilds that env",
+    ),
+    (
         "the code execution cannot proceed",
         PAGES_ENGINE_FAILED,
         "a DLL beside llama-server is missing",
@@ -70,8 +76,9 @@ class LlamaServerEngine(SubprocessEngine):
 
     chat_concurrency = 1
     chat_concurrency_basis = (
-        "llama-server is started with --parallel 1 (every llama-windows block's "
-        "engine_args): one slot generates and the rest queue inside the server"
+        "llama-server is started with --parallel 1 (every llama-server block's "
+        "engine_args, on llama-windows and on cuda-linux): one slot generates and "
+        "the rest queue inside the server"
     )
 
     decide_logprobs = True

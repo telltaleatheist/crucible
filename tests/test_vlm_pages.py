@@ -95,7 +95,9 @@ class PageEngines:
 def page_engines(monkeypatch: pytest.MonkeyPatch) -> PageEngines:
     engines = PageEngines()
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(python, log_path, on_post=engines._hook)
         engines.built.append(engine)
         return engine
@@ -311,7 +313,9 @@ def test_only_the_model_field_is_rewritten(
 ) -> None:
     built: list[FakeEngine] = []
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(python, log_path)
         built.append(engine)
         return engine

@@ -23,7 +23,7 @@ from .. import (
     verdict,
 )
 from ..audiomodels import LOW_VRAM_SETTING
-from ..backend import LLAMA_WINDOWS, MLX_DARWIN, Backend
+from ..backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN, Backend
 from ..capabilitystore import decide_for, low_vram_for
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, CapabilityRow, desktop_reserve_words
 from ..config import Config, config_mode, crucible_home
@@ -519,6 +519,22 @@ def check_llm_env(host: Host) -> Section:
             backend.kind,
             llamacpp.INSTALL_COMMAND,
         )
+    if backend.kind == CUDA_LINUX:
+        found = llamacpp.cuda_linux_engine(config.home)
+        entry = {
+            **entry,
+            "llama_server": {
+                "installed": found.installed,
+                "detail": found.detail,
+                "path": None if found.executable is None else str(found.executable),
+                "library_dirs": [str(path) for path in found.library_dirs],
+            },
+        }
+        if not found.installed:
+            findings = [
+                *findings,
+                Finding("llm_env", found.detail, llamacpp.INSTALL_COMMAND),
+            ]
     return Section("llm_env", {"llm_env": entry}, tuple(findings))
 
 

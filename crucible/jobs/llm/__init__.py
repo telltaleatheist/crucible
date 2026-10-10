@@ -6,8 +6,18 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ... import accelerator, engines, enginespec, jobenv, llamacpp, ollamastore, vram, weights
-from ...backend import LLAMA_WINDOWS
+from ... import (
+    accelerator,
+    engines,
+    enginespec,
+    hosttools,
+    jobenv,
+    llamacpp,
+    ollamastore,
+    vram,
+    weights,
+)
+from ...backend import CUDA_LINUX, LLAMA_WINDOWS
 from ...cardfacts import card_for
 from ...cardkinds import KIND_LLM
 from ...clock import utcnow
@@ -18,6 +28,7 @@ from ...errors import ApiError, JobError
 from ...fit import Candidate
 from ...jobtypes import LOAD_MODEL, UNLOAD_MODEL
 from ...manifests import (
+    GGUF_ENGINE,
     BackendSpec,
     ManifestError,
     ModelManifest,
@@ -59,13 +70,45 @@ __all__ = [
 
 
 class LlmEngineStatus:
-    def __init__(self, installed: bool, detail: str, executable: "Any | None") -> None:
+    def __init__(
+        self,
+        installed: bool,
+        detail: str,
+        executable: "Any | None",
+        library_dirs: "tuple[Path, ...]" = (),
+        env: "Path | None" = None,
+    ) -> None:
         self.installed = installed
         self.detail = detail
         self.executable = executable
+        self.library_dirs = library_dirs
+        self.env = env
 
 
-def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
+def llm_engine_status(
+    config: Config, backend: Any, engine: str | None = None
+) -> LlmEngineStatus:
+    """Whether `engine` can start here, and what it starts from. With no engine, whether
+    this backend's whole llm install is here: everything `crucible install llm` places,
+    which on cuda-linux is the vLLM env AND, where Crucible pins a build for the platform,
+    the llama-server a GGUF block runs on."""
+    if backend.kind == CUDA_LINUX:
+        if engine == GGUF_ENGINE:
+            return _cuda_linux_llama_status(config)
+        vllm = _env_status(config, backend)
+        if engine is not None or not vllm.installed or hosttools.llama_server_build() is None:
+            return vllm
+        llama = _cuda_linux_llama_status(config)
+        if not llama.installed:
+            return LlmEngineStatus(
+                installed=False, detail=llama.detail, executable=None, env=llama.env
+            )
+        return LlmEngineStatus(
+            installed=True,
+            detail=f"{vllm.detail}; {llama.detail}",
+            executable=vllm.executable,
+            env=vllm.env,
+        )
     if backend.kind == LLAMA_WINDOWS:
         build = llamacpp.build_for(backend.gpu.vendor)
         found = llamacpp.installed(config, build)
@@ -86,12 +129,30 @@ def llm_engine_status(config: Config, backend: Any) -> LlmEngineStatus:
                 f"{found.path} ({found.bytes / 1e6:.0f} MB)"
             ),
             executable=llamacpp.server_path(config),
+            env=llamacpp.engine_dir(config),
         )
-    env = jobenv.env_status(config.home, jobenv.llm_env(backend.kind), backend.kind)
+    return _env_status(config, backend)
+
+
+def _env_status(config: Config, backend: Any) -> LlmEngineStatus:
+    spec = jobenv.llm_env(backend.kind)
+    env = jobenv.env_status(config.home, spec, backend.kind)
     return LlmEngineStatus(
         installed=env.installed,
         detail=env.detail,
-        executable=None if not env.installed else jobenv.env_python(config.home, jobenv.llm_env(backend.kind)),
+        executable=jobenv.env_python(config.home, spec) if env.installed else None,
+        env=jobenv.env_dir(config.home, spec),
+    )
+
+
+def _cuda_linux_llama_status(config: Config) -> LlmEngineStatus:
+    found = llamacpp.cuda_linux_engine(config.home)
+    return LlmEngineStatus(
+        installed=found.installed,
+        detail=found.detail,
+        executable=found.executable,
+        library_dirs=found.library_dirs,
+        env=jobenv.env_dir(config.home, jobenv.llm_env(CUDA_LINUX)),
     )
 
 
@@ -162,7 +223,13 @@ def model_rows(
     config: Config, backend: Any, residency: Residency
 ) -> list[dict[str, Any]]:
     backend_kind = backend.kind
-    env = llm_engine_status(config, backend)
+    engines_here: dict[str, LlmEngineStatus] = {}
+
+    def engine_status(name: str) -> LlmEngineStatus:
+        if name not in engines_here:
+            engines_here[name] = llm_engine_status(config, backend, name)
+        return engines_here[name]
+
     resident = residency.resident_model
     rows: list[dict[str, Any]] = []
     for manifest in MANIFESTS.all().values():
@@ -218,8 +285,11 @@ def model_rows(
                     f"{backend.gpu.name} has {backend.gpu.vram_bytes / 1024 ** 3:.1f}"
                     " GiB in total"
                 )
-            elif not env.installed:
-                reason = f"the llm env is not ready: {env.detail}"
+            elif not engine_status(spec.engine).installed:
+                reason = (
+                    f"the llm env is not ready for {spec.engine}: "
+                    f"{engine_status(spec.engine).detail}"
+                )
             elif not is_installed:
                 if manifest.weights_of is not None:
                     try:
@@ -278,23 +348,20 @@ def _require_loadable(
     accelerator.refuse_if_card_lacks(
         model_id=model_id, spec=spec, card=card_for(config.home, backend.gpu)
     )
-    if backend_kind == LLAMA_WINDOWS:
-        engine = llm_engine_status(config, backend)
+    if backend_kind == LLAMA_WINDOWS or spec.engine == GGUF_ENGINE:
+        engine = llm_engine_status(config, backend, spec.engine)
         if not engine.installed:
             raise ApiError(
                 409,
                 "env_missing",
                 f"cannot load {model_id!r}: {engine.detail}",
-                {
-                    "model": model_id,
-                    "env": str(llamacpp.engine_dir(config)),
-                },
+                {"model": model_id, "env": str(engine.env)},
             )
-        python = engine.executable
+        launch = EngineLaunch(engine.executable, engine.library_dirs)
     else:
         try:
             env_spec = jobenv.llm_env(backend_kind)
-            python = jobenv.require_env(config.home, env_spec, backend_kind)
+            launch = EngineLaunch(jobenv.require_env(config.home, env_spec, backend_kind))
         except jobenv.EnvError as exc:
             raise ApiError(
                 409,
@@ -316,7 +383,16 @@ def _require_loadable(
             str(exc),
             {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
         ) from None
-    return manifest, spec, (python, installed)
+    return manifest, spec, (launch, installed)
+
+
+@dataclass(frozen=True)
+class EngineLaunch:
+    """What an engine is started from: its executable (the env's python, or a native
+    server binary) and the directories its shared libraries load from, if any."""
+
+    executable: Path
+    library_dirs: tuple[Path, ...] = ()
 
 
 def _load_context(
@@ -339,7 +415,7 @@ def _load_context(
 class LoadNeeds:
     manifest: ModelManifest
     spec: Any
-    python: Any
+    launch: EngineLaunch
     installed: Any
     context: int
     state: Any
@@ -393,7 +469,7 @@ class LoadModelJobType:
         return JobTypeStatus(ready=True, detail=f"{env.detail}; loadable: {ready}")
 
     def requirements(self, model: str, params: LoadParams) -> LoadNeeds:
-        manifest, spec, (python, installed) = _require_loadable(
+        manifest, spec, (launch, installed) = _require_loadable(
             self._config, self._backend, model
         )
         context = _load_context(self._config, self._backend, manifest, params)
@@ -414,7 +490,7 @@ class LoadModelJobType:
         )
         if plan is not None and not plan.fits:
             raise ApiError(409, "insufficient_kv_cache", plan.sentence())
-        return LoadNeeds(manifest, spec, python, installed, context, state, plan)
+        return LoadNeeds(manifest, spec, launch, installed, context, state, plan)
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
@@ -451,7 +527,7 @@ class LoadModelJobType:
                 needs.manifest,
                 needs.spec,
                 needs.installed.path,
-                needs.python,
+                needs.launch.executable,
                 plan=needs.plan,
                 context=needs.context,
                 timeout=params.timeout_s,
@@ -461,6 +537,7 @@ class LoadModelJobType:
                     needs.spec, card_for(self._config.home, self._backend.gpu)
                 ),
                 concurrency=self._config.concurrency_for(model),
+                library_dirs=needs.launch.library_dirs,
             )
         except EngineError as exc:
             raise JobError("engine_failed", str(exc)) from None
@@ -484,12 +561,15 @@ def occupy_model(
     cancelled: Callable[[], bool],
     card_args: tuple[str, ...] = (),
     concurrency: int | None = None,
+    library_dirs: tuple[Path, ...] = (),
 ) -> ResidentModel:
     say = say_to(on_progress)
 
     def start() -> Occupant:
         log_path = residency.log_path_for(manifest.id)
-        engine = engines.build_engine(spec.engine, python, log_path)
+        engine = engines.build_engine(
+            spec.engine, python, log_path, library_dirs=library_dirs
+        )
         served = engines.engine_model_name(
             spec.engine, weights_dir, manifest.id
         )

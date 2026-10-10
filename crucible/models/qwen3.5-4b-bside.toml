@@ -15,30 +15,39 @@ description = "Qwen3.5-4B fine-tuned to answer B-Side's describe prompt: a song 
 thinking = false
 
 # Owen's own weights: the LoRA trained on B-Side's 2,162 describe answers (lyrics_v1, step
-# 256), merged into the base snapshot's full layout, so both engines load it exactly as they
-# load the base (the vision tower is the base's, unchanged and unused). A retrain is a new
-# revision of the same private repo, repinned here.
+# 256), merged into the base snapshot's full layout. A retrain is a new revision of the same
+# private repo, repinned here, and a new GGUF of it below.
+#
+# On a PC it runs on llama.cpp, not vLLM. Owen, 2026-10-09: B-Sides only ever makes single
+# requests, so this model gains nothing from vLLM's batching, and on Victoria's RTX 3070 the
+# first vLLM load took 3 min 22 s (Triton JIT, torch.compile, CUDA graphs) and every later
+# one about a minute, on an album that swaps it with the writer. The GGUF is the merged
+# repo above at e9a563d2, converted text only (no vision tower) by llama.cpp b10970's
+# convert_hf_to_gguf.py --outtype q8_0: 8 bits is effectively lossless on a 4B for tags and
+# lyrics, and at 4.6 GB it fits an 8 GiB card whole, so one block serves every card and the
+# 4-bit vLLM form is gone. One request at a time (--parallel 1), every layer on the card.
 [backends.cuda-linux]
-engine = "vllm"
-hf_repo = "owenmorgan/qwen3.5-4b-bside"
-revision = "e9a563d216895b6c472e1ebd5d3a48541835d731"
-bits = 16
+engine = "llama-server"
+hf_repo = "owenmorgan/qwen3.5-4b-bside-gguf"
+revision = "0000000000000000000000000000000000000000"
+bits = 8
+file = "qwen3.5-4b-bside-Q8_0.gguf"
 serves = ["text"]
-memory_bytes_estimate = 13_393_958_393
-engine_args = [
-    "--dtype", "bfloat16",
-    "--gpu-memory-utilization", "0.52",
-    "--max-num-seqs", "16",
-    "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
-]
+memory_bytes_estimate = 5_897_450_976
+engine_args = ["--parallel", "1", "--n-gpu-layers", "all"]
 max_context = 131072
 
+# Computed, not measured on a card (Victoria's 3070 measures it). Weights: the GGUF's bytes
+# (llama.cpp maps 4,336 MiB of them; the unused MTP layer is the rest). KV: llama.cpp's f16
+# cache for the 8 full-attention layers of 32, 4 KV heads x 256 dims x K and V x 2 bytes x 8
+# = 32,768 B/token (b10970 on CPU at 16384: "KV buffer size = 512.00 MiB"). Overhead: the
+# gated-deltanet layers' recurrent state, 50.25 MiB for the one slot ("RS buffer size"), plus
+# an allowance of 300 MB for the CUDA compute buffer (85 MiB on the CPU backend) and 400 MB
+# for the CUDA context, cuBLAS and the kernels of one architecture.
 [backends.cuda-linux.memory]
-weights_bytes = 9_216_572_511
-overhead_bytes = 3_516_504_474
-# 46,581 B/token: measured for this architecture on vLLM 0.29 (qwen3.5-4b-8bit on an
-# RTX 3070, 2026-10-09: 14,522 tokens in 0.63 GiB, the mamba page padding included).
-kv_bytes_per_token = 46_581
+weights_bytes = 4_610_580_064
+overhead_bytes = 750_000_000
+kv_bytes_per_token = 32_768
 basis = "computed"
 measured_at_context = 16384
 

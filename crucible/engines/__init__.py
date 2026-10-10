@@ -150,9 +150,15 @@ def decide_items_reading(engine_name: str) -> DecideItemsReading:
     )
 
 
-def build_engine(engine_name: str, python: Path, log_path: Path) -> SubprocessEngine:
+def build_engine(
+    engine_name: str,
+    python: Path,
+    log_path: Path,
+    *,
+    library_dirs: tuple[Path, ...] = (),
+) -> SubprocessEngine:
     cls = engine_class(engine_name)
-    return cls(python=python, log_path=log_path)
+    return cls(python=python, log_path=log_path, library_dirs=library_dirs)
 
 
 def build_voice_engine(

@@ -169,8 +169,14 @@ def test_a_file_on_a_backend_that_pulls_a_whole_repo_is_refused() -> None:
         "memory_bytes_estimate = 3000000000",
         'memory_bytes_estimate = 3000000000\nfile = "x.gguf"',
     )
-    with pytest.raises(ManifestError, match="llama-windows block"):
+    # On cuda-linux a GGUF file is a llama-server block, so naming vLLM for it is the error.
+    with pytest.raises(ManifestError, match="names a GGUF `file`"):
         parse_manifest(text, Path("demo-1b.toml"), "demo-1b")
+    on_the_mac = text.replace("[backends.cuda-linux]", "[backends.mlx-darwin]").replace(
+        'engine = "vllm"', 'engine = "mlx-lm"'
+    )
+    with pytest.raises(ManifestError, match="llama-windows block"):
+        parse_manifest(on_the_mac, Path("demo-1b.toml"), "demo-1b")
 
 
 def test_a_llama_windows_block_with_no_file_is_refused() -> None:

@@ -146,7 +146,9 @@ Already there:
 - Lineups: candidates per class.
 - The recorded pick: the capability record, plus `[routes]` for the routable classes and a
   chosen model for the selectable ones.
-- Variants as separate manifests: `qwen3.8-27b-4bit` / `-8bit`, `qwen3.5-4b-bside-4bit`.
+- Variants as separate manifests: `qwen3.8-27b-4bit` / `-8bit`. (`qwen3.5-4b-bside-4bit` is
+  gone: on cuda-linux `qwen3.5-4b-bside` is a Q8_0 GGUF on llama-server, about 5.4 GB at 16k,
+  which an 8 GiB card holds.)
 - The ladder, for ASR widths.
 - Settings choices and a greyed-but-clickable list (`settings.local_model_choices`).
 

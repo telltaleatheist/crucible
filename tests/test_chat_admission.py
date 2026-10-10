@@ -280,20 +280,24 @@ def test_llama_server_admits_its_one_slot_plus_one_waiting() -> None:
     assert basis is not None and "--parallel 1" in basis
 
 
-def test_every_llama_windows_block_says_the_parallel_the_class_states() -> None:
+def test_every_llama_server_block_says_the_parallel_the_class_states() -> None:
     from crucible.manifests import load_all_manifests
 
     blocks = [
-        (model_id, manifest.backends["llama-windows"])
+        (f"{model_id} [{kind}]", block)
         for model_id, manifest in load_all_manifests().items()
-        if "llama-windows" in manifest.backends
+        for kind, block in manifest.backends.items()
+        if block.engine == "llama-server"
     ]
-    assert blocks, "no llama-windows block to check; the test would prove nothing"
+    kinds = {name.split("[")[1] for name, _ in blocks}
+    assert {"llama-windows]", "cuda-linux]"} <= kinds, (
+        "a backend that runs llama-server has no block to check; the test would prove nothing"
+    )
     stated = ENGINES["llama-server"].chat_concurrency
-    for model_id, block in blocks:
+    for name, block in blocks:
         args = list(block.engine_args)
-        assert "--parallel" in args, f"{model_id}: llama-windows states no --parallel"
-        assert args[args.index("--parallel") + 1] == str(stated), model_id
+        assert "--parallel" in args, f"{name}: a llama-server block states no --parallel"
+        assert args[args.index("--parallel") + 1] == str(stated), name
 
 
 def test_each_engine_states_whether_it_serves_a_decision() -> None:
@@ -334,7 +338,7 @@ def test_vllm_constrains_json_with_llguidance_not_xgrammar() -> None:
     newline (B-Side's lyrics, 2026-10-05); llguidance keeps them."""
     from crucible.manifests import load_manifest
 
-    manifest = load_manifest("qwen3.5-4b-bside")
+    manifest = load_manifest("qwen3.5-4b")
     args = engine_load_args(
         manifest, manifest.backends["cuda-linux"], __import__("pathlib").Path("/w"), None,
         context=manifest.context_for("cuda-linux"),

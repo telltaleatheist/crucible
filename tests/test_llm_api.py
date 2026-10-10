@@ -124,7 +124,9 @@ def roomy_client(
 def engines(monkeypatch: pytest.MonkeyPatch) -> list[FakeEngine]:
     built: list[FakeEngine] = []
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(python, log_path)
         built.append(engine)
         return engine
@@ -174,7 +176,7 @@ def test_models_lists_every_manifest_with_its_standing(
     rows = {row["id"]: row for row in response.json()}
     assert [row["id"] for row in response.json()] == [
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside",
-        "qwen3.5-4b-bside-4bit", MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
+        MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
         "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     row = rows[MODEL]
@@ -219,7 +221,7 @@ def test_info_gains_an_llm_capability(
     assert "llm" in by_type
     assert [row["id"] for row in by_type["llm"]["models"]] == [
         PAGE_MODEL, "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside",
-        "qwen3.5-4b-bside-4bit", MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
+        MODEL, "qwen3.5-9b-vl", SMALL_BIG_MODEL,
         "qwen3.8-27b-4bit-vl", MAC_ONLY_MODEL,
     ]
     info = llm_client.get("/v1/info", headers=auth).json()
@@ -1161,7 +1163,9 @@ def test_health_says_warming_while_a_load_is_in_flight(
     hold = threading.Event()
     built: list[FakeEngine] = []
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(python, log_path, hold=hold)
         built.append(engine)
         return engine
@@ -1217,7 +1221,9 @@ def test_an_engine_that_never_becomes_ready_fails_the_job(
 ) -> None:
     built: list[FakeEngine] = []
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(
             python, log_path, fail_ready="vllm exited 1 before it was ready"
         )
@@ -1423,7 +1429,9 @@ def engines_under_a_path_name(
 ) -> list[FakeEngine]:
     built: list[FakeEngine] = []
 
-    def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+    def build(
+        engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+    ) -> FakeEngine:
         engine = FakeEngine(python, log_path)
         built.append(engine)
         return engine

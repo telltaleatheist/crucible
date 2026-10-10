@@ -666,3 +666,136 @@ def ensure_silero_vad(
         f"speech detector: silero-vad {SILERO_VAD.version} placed at {path} "
         f"(sha256 {SILERO_VAD.sha256[:12]}...)"
     )
+
+
+# llama.cpp's llama-server for cuda-linux. ggml-org publishes CUDA builds for Windows only,
+# so Crucible builds this one (scripts/build-llama-server-linux.sh) and re-hosts it on its
+# own tools release. Only the binary is ours: it links cudart and cuBLAS dynamically and
+# loads them from the llm env, which PyPI's nvidia-* wheels fill (crucible/llamacpp.py,
+# CUDA_LINUX_LIBRARIES), never from this archive.
+LLAMA_SERVER_PROGRAM = "llama-server"
+
+LLAMA_SERVER_STAMP_NAME = "llama-server.json"
+
+LLAMA_SERVER_BUILDS: dict[str, ToolBuild] = {
+    "linux-x86_64": ToolBuild(
+        version="b10970-cuda13.0",
+        url=(
+            "https://github.com/telltaleatheist/crucible/releases/download/"
+            "tools/llama-server-b10970-cuda13.0-linux-x86_64.tar.xz"
+        ),
+        sha256="059b6d35b6e0b597e476c162d31a33b432d1c9386266c34169881290c1b3b73f",
+        bytes=106_932_584,
+        root="llama-server-b10970-cuda13.0-linux-x86_64",
+        provenance=(
+            "built on owens-pc (WSL2 Ubuntu 24.04, gcc 13.3) 2026-10-09 by "
+            "scripts/build-llama-server-linux.sh from ggml-org/llama.cpp b10970 "
+            "(bfdc32183d57f1e35bacf35c47d6311e2028bbbc); CUDA 13.0 from PyPI nvidia "
+            "wheels (nvcc 13.0.88, cudart 13.0.96, cuBLAS 13.1.1.3), sm_75/80/86/89/90/120, "
+            "static llama/ggml and libstdc++, links libcudart.so.13 and libcublas.so.13 "
+            "(the llm env's) and libcuda.so.1 (the driver's), glibc 2.38+; MIT"
+        ),
+    ),
+}
+
+
+def llama_server_build(platform_key: str | None = None) -> ToolBuild | None:
+    return LLAMA_SERVER_BUILDS.get(host_platform() if platform_key is None else platform_key)
+
+
+def llama_server_stamp(home: Path) -> Path:
+    return home / TOOLS_DIR_NAME / LLAMA_SERVER_STAMP_NAME
+
+
+def llama_server_path(home: Path) -> Path:
+    return home / TOOLS_DIR_NAME / "bin" / LLAMA_SERVER_PROGRAM
+
+
+def llama_server_placed(home: Path, build: ToolBuild) -> bool:
+    try:
+        record = json.loads(llama_server_stamp(home).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(record, dict) or record.get("sha256") != build.sha256:
+        return False
+    return llama_server_path(home).is_file()
+
+
+def ensure_llama_server(
+    home: Path,
+    *,
+    on_line: Callable[[str], None] | None = None,
+    fetch: Callable[[str, Path], str] | None = None,
+) -> str:
+    build = llama_server_build()
+    if build is None:
+        raise HostToolError(
+            "tool_unpinned",
+            f"there is no pinned llama-server build for {host_platform()}; Crucible "
+            f"builds it for {sorted(LLAMA_SERVER_BUILDS)} only, and a GGUF model on "
+            "cuda-linux has no engine without it",
+        )
+    tools = home / TOOLS_DIR_NAME
+    bin_dir = tools / "bin"
+    target = llama_server_path(home)
+    if llama_server_placed(home, build):
+        return f"llama-server: {build.version} already at {target}"
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".llama-server-", dir=str(tools)))
+    started = time.monotonic()
+    try:
+        archive = staging / build.url.rsplit("/", 1)[-1]
+        if on_line is not None:
+            on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB)")
+        measured = (_download if fetch is None else fetch)(build.url, archive)
+        if measured != build.sha256:
+            raise HostToolError(
+                "tool_sha_mismatch",
+                f"{archive.name} hashed {measured}, and Crucible pins "
+                f"{build.sha256}. Nothing is placed: these are not the bytes on "
+                "Crucible's tools release",
+            )
+        member = f"{build.root}/bin/{LLAMA_SERVER_PROGRAM}"
+        partial = bin_dir / f".{LLAMA_SERVER_PROGRAM}.partial"
+        try:
+            with tarfile.open(archive, "r:xz") as bundle:
+                source = bundle.extractfile(member)
+                if source is None:
+                    raise KeyError(f"{member} is not a file")
+                with source, partial.open("wb") as handle:
+                    shutil.copyfileobj(source, handle, _CHUNK_BYTES)
+            partial.chmod(0o755)
+            os.replace(partial, target)
+        except (tarfile.TarError, KeyError, OSError) as exc:
+            raise HostToolError(
+                "tool_unpack_failed",
+                f"{archive.name} matched its sha256, but {member} could not be "
+                f"taken out of it: {type(exc).__name__}: {exc}",
+            ) from None
+        finally:
+            partial.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    llama_server_stamp(home).write_text(
+        json.dumps(
+            {
+                "tool": LLAMA_SERVER_PROGRAM,
+                "version": build.version,
+                "platform": host_platform(),
+                "url": build.url,
+                "sha256": build.sha256,
+                "provenance": build.provenance,
+                "seconds": round(time.monotonic() - started, 1),
+                "placed": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return (
+        f"llama-server: {build.version} placed at {target} "
+        f"(sha256 {build.sha256[:12]}...)"
+    )

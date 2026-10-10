@@ -670,11 +670,13 @@ The four mlx-lm 0.31.3 patches (`llm` env, mlx-darwin only).
   and allowed only to narrow them), never declared. mlx-darwin needs two engines:
   mlx-lm cannot take images, and `mlx-vlm` is Crucible's own dots-specific page
   server. `llama-windows` uses `llama-server` for both families, with `--mmproj` as
-  the difference.
+  the difference. On `cuda-linux` the weights' form decides: a block that names a GGUF
+  `file` runs on `llama-server`, a whole repo on vLLM (`manifests.block_engine`); the
+  `engine` key must agree, and a mismatch is refused saying which form the block is.
 - **Image rules.** `--skip-mm-profiling` is refused when `image` is served, because
   pages would then meet an engine with no memory reserved for them.
   `--language-model-only` is refused when `image` is served, because the engine
-  would answer pages it cannot see. On llama-windows, `file` is required, `mmproj`
+  would answer pages it cannot see. On every `llama-server` block, `file` is required, `mmproj`
   is required when images are served, and `mmproj` is refused otherwise.
 - **GGUF floor.** Owen 2026-09-26: *"we can quantize if we need to. no less than 4."*
   Q3, Q2 and IQ2 files are refused.

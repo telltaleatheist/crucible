@@ -11,13 +11,18 @@ listed under "Where each part lives", `memorybudget`,
 
 | backend | host | engines |
 |---|---|---|
-| `cuda-linux` | Linux with an NVIDIA card (on Windows: the server inside WSL2) | vLLM for text and pages |
+| `cuda-linux` | Linux with an NVIDIA card (on Windows: the server inside WSL2) | vLLM for text and pages; `llama-server` (llama.cpp) for a block that is one GGUF |
 | `mlx-darwin` | Apple Silicon | `mlx-lm` for text, Crucible's own `mlx_vlm_serve` for pages and for image decisions |
 | `llama-windows` | Windows, natively | `llama-server` (llama.cpp) on GGUF |
 
 - One engine per (backend, class family); `manifests.BACKEND_ENGINES` owns the
   pairing, `engines.build_engine` only maps a name to a class and refuses unknown
-  names.
+  names. The one exception is the weights' form: on `cuda-linux` a block that names
+  a GGUF `file` runs on `llama-server` (`manifests.block_engine`, `GGUF_BACKENDS`).
+  Owen, 2026-10-09: B-Sides sends one request at a time, so its models gain nothing
+  from vLLM's batching and paid its compile and graph capture (3 min 22 s on the
+  first load, about a minute after) on every album's swap; they are GGUF on
+  llama-server, and the text verbs stay on vLLM.
 - `llama-windows` is a full backend, not a relay (Owen, 2026-09-14: *"the windows
   side should still host GPU jobs even if WSL isnt present/workable"*). The WSL
   engine is still better where it runs: batching, parallel page reading, and the
@@ -566,7 +571,7 @@ started exactly as `load-model` would).
   640×360 frame is ~322 prompt tokens and 0.65–0.77 s; three frames ~770
   tokens and 1.2–1.6 s; the first request after load 4 s.
 
-### llama-server (`llama-windows`)
+### llama-server (`llama-windows`, and GGUF blocks on `cuda-linux`)
 
 - `--alias <id>` makes the served name equal the Crucible id, so the proxy
   forwards `model` verbatim.
@@ -574,13 +579,33 @@ started exactly as `load-model` would).
 - Stop sends 30 s of graceful `CTRL_BREAK_EVENT`
   (`sigterm_wait_seconds = GRACEFUL_STOP_SECONDS`) and then terminates the
   tree through the shared stop. This deliberately departs from never-SIGKILL,
-  which applies only inside WSL2; llama-server never runs there.
+  which applies only inside WSL2. On `cuda-linux` the same shared stop sends
+  SIGTERM for those 30 s and never SIGKILLs: a llama-server there holds CUDA
+  inside WSL2 like any other engine.
 - Fatal log lines (CUDA OOM, missing CUDA runtime DLL, unreadable GGUF) end
   the readiness wait immediately as `pages_engine_failed`.
 - Every block runs `--parallel 1`, so the chat door admits 2
   (`tests/test_chat_admission.py` enforces the flag). Decisions are served with
   no small logprob cap (pre-sampling probabilities, b10970).
-- The binary is a pinned **engine subject** (`llamacpp`): `LLAMA_CPP_RELEASE`
+- On `cuda-linux` the binary is Crucible's own build of the same tag
+  (`scripts/build-llama-server-linux.sh`; ggml-org publishes CUDA builds for
+  Windows only), pinned in `hosttools.LLAMA_SERVER_BUILDS` on our `tools`
+  release and placed at `<home>/tools/bin/llama-server` by `crucible install llm`.
+  Only the binary is ours: it is built against CUDA 13.0 and links cudart and
+  cuBLAS dynamically, and the engine starts it with `LD_LIBRARY_PATH` led by the
+  llm env's `nvidia/cu13/lib` (`llamacpp.cuda_linux_engine`), the PyPI wheels
+  vLLM's torch already pins. The driver's `libcuda.so.1` is the host's. The llm
+  install on cuda-linux is whole only with both (`llm_engine_status(config,
+  backend)`); a GGUF load without the binary is `env_missing` on the llm env, so
+  install-on-submit runs `crucible install llm`, which keeps the env and places
+  the binary. Every block names `--n-gpu-layers all`, so a model that does not
+  fit fails its load by name instead of spilling layers to the CPU.
+- Structured output: `response_format` `json_schema` reaches llama-server
+  unchanged and is compiled to its own GBNF grammar (b10970
+  `common/json-schema-to-grammar.cpp`), whose capped string repeats a character
+  rule that includes the escapes, so a `maxLength` string keeps its newlines
+  (the defect that moved vLLM to llguidance does not exist here).
+- On `llama-windows` the binary is a pinned **engine subject** (`llamacpp`): `LLAMA_CPP_RELEASE`
   is never read from a listing. The CUDA build is two zips (the build plus
   `cudart`) unpacked into one directory. Every digest is checked before
   anything is placed, and a zip member that escapes the target is refused.

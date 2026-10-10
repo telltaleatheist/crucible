@@ -61,6 +61,18 @@ def weights_subject_id(model_dir: Path) -> str:
     return Path(model_dir).parent.name
 
 
+LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"
+
+
+def library_path(dirs: "tuple[Path, ...]", inherited: str) -> str:
+    """`dirs` ahead of whatever the server was started with: an engine binary whose shared
+    libraries live in an env (llama-server on cuda-linux, crucible/llamacpp.py) finds
+    those first, and the host's own entries (WSL's /usr/lib/wsl/lib) still resolve."""
+    ours = [str(entry) for entry in dirs]
+    theirs = [entry for entry in inherited.split(os.pathsep) if entry]
+    return os.pathsep.join([*ours, *theirs])
+
+
 def plan_flags(plan: Any) -> list[str]:
     return [] if plan is None else list(plan.flags())
 
@@ -102,9 +114,12 @@ class SubprocessEngine:
 
     binds_a_port = True
 
-    def __init__(self, python: Path, log_path: Path) -> None:
+    def __init__(
+        self, python: Path, log_path: Path, library_dirs: tuple[Path, ...] = ()
+    ) -> None:
         self._python = Path(python)
         self._log_path = Path(log_path)
+        self._library_dirs = tuple(Path(entry) for entry in library_dirs)
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: Any = None
         self._port: int | None = None
@@ -266,6 +281,10 @@ class SubprocessEngine:
         environment = dict(os.environ)
         environment.update(self.environment())
         environment.update(compiler)
+        if self._library_dirs:
+            environment[LIBRARY_PATH_ENV] = library_path(
+                self._library_dirs, environment.get(LIBRARY_PATH_ENV, "")
+            )
         try:
             group = procgroup.own_group()
         except procgroup.ProcessGroupError as exc:

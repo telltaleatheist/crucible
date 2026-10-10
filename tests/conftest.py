@@ -208,11 +208,33 @@ def stamp_env(
     return jobenv.env_dir(home, spec)
 
 
+def place_llama_server(home: Path, env_dir: Path) -> None:
+    """What `crucible install llm` adds to the env on cuda-linux: the pinned llama-server,
+    stamped as placed, and the CUDA libraries it loads from the env's nvidia wheels."""
+    from crucible import hosttools, llamacpp
+
+    build = hosttools.LLAMA_SERVER_BUILDS["linux-x86_64"]
+    binary = hosttools.llama_server_path(home)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"\x7fELF")
+    hosttools.llama_server_stamp(home).write_text(
+        json.dumps({"tool": "llama-server", "sha256": build.sha256}), encoding="utf-8"
+    )
+    lib = env_dir / "lib" / "python3.11" / "site-packages" / llamacpp.CUDA_LINUX_LIBRARY_REL
+    lib.mkdir(parents=True, exist_ok=True)
+    for name in llamacpp.CUDA_LINUX_LIBRARIES:
+        (lib / name).write_bytes(b"\x7fELF")
+
+
 @pytest.fixture
 def fake_env(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    return stamp_env(
+    env_dir = stamp_env(
         home, jobenv.llm_env(FAKE_BACKEND.kind), FAKE_BACKEND.kind, monkeypatch
     )
+    if FAKE_BACKEND.kind == "cuda-linux":
+        monkeypatch.setattr("crucible.hosttools.host_platform", lambda: "linux-x86_64")
+        place_llama_server(home, env_dir)
+    return env_dir
 
 
 @pytest.fixture
@@ -262,7 +284,9 @@ def engine_factory(
     def install(**options: Any) -> list[FakeEngine]:
         built: list[FakeEngine] = []
 
-        def build(engine_name: str, python: Path, log_path: Path) -> FakeEngine:
+        def build(
+            engine_name: str, python: Path, log_path: Path, *, library_dirs: tuple[Path, ...] = ()
+        ) -> FakeEngine:
             engine = FakeEngine(python, log_path, **options)
             built.append(engine)
             return engine

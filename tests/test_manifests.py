@@ -10,6 +10,7 @@ from crucible.manifests import (
     ManifestError,
     OllamaLocal,
     class_family,
+    block_engine,
     engine_for,
     load_all_manifests,
     load_manifest,
@@ -290,7 +291,7 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 
 SHIPPED = [
     "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside",
-    "qwen3.5-4b-bside-4bit",    "qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
+    "qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
 ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl"]
 
@@ -300,7 +301,6 @@ CONTEXTS = {
     "qwen3.5-4b": 16384,
     "qwen3.5-4b-8bit": 8192,
     "qwen3.5-4b-bside": 16384,
-    "qwen3.5-4b-bside-4bit": 8192,
     "qwen3.5-2b": 16384,
     "qwen3.5-0.8b": 8192,
     "qwen3.8-27b-8bit": 12288,
@@ -316,7 +316,6 @@ BACKENDS = {
     # Owen's B-Side fine-tune ships merged safetensors only: no GGUF, so no Windows engine.
     "qwen3.5-4b-bside": ["cuda-linux", "mlx-darwin"],
     # Its 4-bit build is for an 8 GiB CUDA card only; the Mac holds the whole one.
-    "qwen3.5-4b-bside-4bit": ["cuda-linux"],
     "qwen3.5-2b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-0.8b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.8-27b-8bit": ["mlx-darwin"],
@@ -359,7 +358,7 @@ def test_each_shipped_manifest_declares_the_backends_it_serves(model_id: str) ->
     assert sorted(manifest.backends) == BACKENDS[model_id]
     assert manifest.context_default == CONTEXTS[model_id]
     for kind, spec in manifest.backends.items():
-        assert spec.engine == engine_for(kind, spec.serves)
+        assert spec.engine == block_engine(kind, spec.serves, gguf=spec.file is not None)
         assert len(spec.revision) == 40
         expected = BACKEND_CONTEXTS.get((model_id, kind), CONTEXTS[model_id])
         assert manifest.context_for(kind) == expected

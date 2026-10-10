@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import capabilitywords, hosttools, interpreter, jobenv, llamacpp, verdict
-from ..backend import LLAMA_WINDOWS, Backend
+from ..backend import CUDA_LINUX, LLAMA_WINDOWS, Backend
 from ..config import Config
 from ..jobenv import INSTALLABLE_JOB_TYPES, SMOKE_IMPORT
 from ..narratorengines import NARRATOR_ENGINE_SAMPLING
@@ -154,12 +154,46 @@ def cmd_install(args: argparse.Namespace) -> int:
     refusal = _ensure_tools(config, args)
     if refusal is not None:
         return _fail(refusal)
+    if args.job_type == "llm" and backend.kind == CUDA_LINUX:
+        refusal = _ensure_llama_server(config, args)
+        if refusal is not None:
+            return _fail(refusal)
     _measure_step(config, backend, gpu=not args.no_gpu_measure)
     return _capability_step(
         config,
         backend,
         *jobenv.JOB_TYPES_SERVED_BY_ENV.get(args.job_type, (args.job_type,)),
     )
+
+
+def _ensure_llama_server(config: Config, args: argparse.Namespace) -> str | None:
+    """The llm install on cuda-linux is the vLLM env AND the llama-server a GGUF block
+    runs on (crucible/llamacpp.py, cuda_linux_engine). The env is built first because
+    the binary loads its CUDA libraries out of it. A platform Crucible builds no
+    llama-server for has nothing to place; a GGUF model there is refused at its load."""
+    if hosttools.llama_server_build() is None:
+        print(
+            f"llama-server: no pinned build for {hosttools.host_platform()} "
+            f"(Crucible builds it for {sorted(hosttools.LLAMA_SERVER_BUILDS)}); "
+            "GGUF models do not load on this server"
+        )
+        return None
+    try:
+        print(
+            hosttools.ensure_llama_server(
+                config.home,
+                on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+            )
+        )
+    except hosttools.HostToolError as exc:
+        return (
+            f"the llm env is installed, but llama-server is not: {exc}. Installing "
+            "again keeps the env and retries only the llama-server"
+        )
+    found = llamacpp.cuda_linux_engine(config.home)
+    if not found.installed:
+        return f"llama-server was placed and still cannot start: {found.detail}"
+    return None
 
 
 def _build_env(

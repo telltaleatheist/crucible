@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import envpatches, hosttools, jobenv
+from .backend import CUDA_LINUX
 from .config import Config
 from .errors import CrucibleError
 from .weights import (
@@ -343,9 +345,95 @@ def doctor_line(config: Config, gpu_vendor: str) -> str:
     return f"{where}: {found.path} ({found.bytes / 1e9:.2f} GB, pulled {found.pulled})"
 
 
+# cuda-linux. ggml-org publishes no Linux CUDA build, so the binary is Crucible's own, pinned
+# on its tools release and placed by `crucible install llm` (hosttools.LLAMA_SERVER_BUILDS).
+# It is built against CUDA 13.0 and links cudart and cuBLAS dynamically: those come from
+# the llm env, whose recipe pins PyPI's nvidia-cuda-runtime and nvidia-cublas for vLLM's own
+# torch (crucible/envs/llm/cuda-linux.txt), so the heavy libraries reach a server from
+# NVIDIA's mirror and only the binary from ours. The driver (libcuda.so.1) is the host's.
+CUDA_LINUX_LIBRARY_REL = "nvidia/cu13/lib"
+
+CUDA_LINUX_LIBRARIES: tuple[str, ...] = (
+    "libcudart.so.13",
+    "libcublas.so.13",
+    "libcublasLt.so.13",
+)
+
+
+@dataclass(frozen=True)
+class LinuxEngine:
+    installed: bool
+    detail: str
+    executable: Path | None
+    library_dirs: tuple[Path, ...]
+
+
+def cuda_linux_library_dir(home: Path) -> Path | None:
+    packages = envpatches.site_packages(jobenv.env_dir(home, jobenv.llm_env(CUDA_LINUX)))
+    return None if packages is None else packages / CUDA_LINUX_LIBRARY_REL
+
+
+def cuda_linux_engine(home: Path) -> LinuxEngine:
+    """llama-server on cuda-linux: the pinned binary and the llm env's CUDA libraries.
+    Not installed, with the sentence that says which half is missing, until both are."""
+    build = hosttools.llama_server_build()
+    where = (
+        "llama.cpp (no pinned build for this platform)"
+        if build is None
+        else f"llama.cpp {build.version}"
+    )
+    env = jobenv.env_status(home, jobenv.llm_env(CUDA_LINUX), CUDA_LINUX)
+    if not env.installed:
+        return LinuxEngine(
+            installed=False,
+            detail=(
+                f"{where} loads its CUDA libraries from the llm env, which is not "
+                f"ready: {env.detail}"
+            ),
+            executable=None,
+            library_dirs=(),
+        )
+    libraries = cuda_linux_library_dir(home)
+    if libraries is None:
+        absent = list(CUDA_LINUX_LIBRARIES)
+    else:
+        absent = [name for name in CUDA_LINUX_LIBRARIES if not (libraries / name).is_file()]
+    if libraries is None or absent:
+        return LinuxEngine(
+            installed=False,
+            detail=(
+                f"{where} links {list(CUDA_LINUX_LIBRARIES)}, and the llm env at "
+                f"{env.path} has no {absent} under {CUDA_LINUX_LIBRARY_REL}. The "
+                "env's recipe pins the nvidia wheels that carry them, so this env "
+                f"was not built from it — run `{INSTALL_COMMAND} --force`"
+            ),
+            executable=None,
+            library_dirs=(),
+        )
+    server = hosttools.llama_server_path(home)
+    if build is None or not hosttools.llama_server_placed(home, build):
+        return LinuxEngine(
+            installed=False,
+            detail=(
+                f"{where} is not placed at {server} — run `{INSTALL_COMMAND}`, "
+                "which keeps the env it has and fetches the engine"
+            ),
+            executable=None,
+            library_dirs=(),
+        )
+    return LinuxEngine(
+        installed=True,
+        detail=f"{where} at {server}, CUDA libraries from {libraries}",
+        executable=server,
+        library_dirs=(libraries,),
+    )
+
+
 __all__ = [
     "CPU_ASSETS",
     "CPU_BUILD",
+    "CUDA_LINUX_LIBRARIES",
+    "CUDA_LINUX_LIBRARY_REL",
     "CUDA_ASSETS",
     "CUDA_BUILD",
     "ENGINE_KIND",
@@ -353,9 +441,12 @@ __all__ = [
     "LLAMA_CPP_RELEASE",
     "LLAMA_SERVER_EXE",
     "Asset",
+    "LinuxEngine",
     "EngineSubjectError",
     "assets_for",
     "build_for",
+    "cuda_linux_engine",
+    "cuda_linux_library_dir",
     "doctor_line",
     "download",
     "engine_dir",

@@ -439,7 +439,7 @@ def test_a_session_whose_model_will_not_load_never_opens(
 ) -> None:
     _, server = chat_server()
 
-    def refuses(engine_name: str, python: Path, log_path: Path) -> Any:
+    def refuses(engine_name: str, python: Path, log_path: Path, **_: Any) -> Any:
         raise EngineError("this test's engine refuses to start")
 
     monkeypatch.setattr(engines_module, "build_engine", refuses)
