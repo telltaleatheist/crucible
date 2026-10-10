@@ -149,8 +149,7 @@ class MlxLmEngine(SubprocessEngine):
             if self._process is not None and self._process.poll() is not None:
                 raise EngineError(
                     f"{self.name} exited {self._process.returncode} while loading "
-                    f"its weights. Last lines of {self._log_path}:\n"
-                    + self.log_tail()
+                    "its weights. " + self.log_report()
                 )
             request = urllib.request.Request(
                 url,
@@ -176,8 +175,7 @@ class MlxLmEngine(SubprocessEngine):
             if time.monotonic() >= deadline:
                 raise EngineError(
                     f"{self.name} answered /v1/models but could not generate a "
-                    f"token before the timeout: {last}. Last lines of "
-                    f"{self._log_path}:\n" + self.log_tail()
+                    f"token before the timeout: {last}. " + self.log_report()
                 )
             attempt += 1
             if on_progress is not None:

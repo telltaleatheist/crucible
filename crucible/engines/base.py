@@ -13,7 +13,7 @@ from typing import Any, Callable
 from .. import hosttools, procgroup
 from ..enginespec import flag_value
 from ..errors import EngineError, JobCancelled
-from ..logtail import tail_of_last_run
+from ..logtail import led_by_first_error, tail_of_last_run
 
 STOP_TIMEOUT_SECONDS = procgroup.STOP_TIMEOUT_SECONDS
 READY_POLL_SECONDS = 2.0
@@ -333,8 +333,7 @@ class SubprocessEngine:
             self.refuse_a_taken_port()
             if code is not None:
                 raise EngineError(
-                    f"{self.name} exited {code} before it was ready. Last "
-                    f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
+                    f"{self.name} exited {code} before it was ready. " + self.log_report()
                 )
             announcement = self.announced_ready()
             if announcement is not None:
@@ -345,8 +344,7 @@ class SubprocessEngine:
             if time.monotonic() >= deadline:
                 raise EngineError(
                     f"{self.name} did not {self.readiness_description()} within "
-                    f"{timeout:.0f}s. Last "
-                    f"{LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail()
+                    f"{timeout:.0f}s. " + self.log_report()
                 )
             attempt += 1
             if on_progress is not None:
@@ -400,6 +398,14 @@ class SubprocessEngine:
 
     def log_tail(self, lines: int = LOG_TAIL_LINES) -> str:
         return tail_of_last_run(self._log_path, lines)
+
+    def log_report(self) -> str:
+        """What a refusal quotes of this engine's log: the first error its last run
+        printed, which the tail may have cut off, then the tail."""
+        return led_by_first_error(
+            self._log_path,
+            f"Last {LOG_TAIL_LINES} lines of {self._log_path}:\n" + self.log_tail(),
+        )
 
     def _close_log(self) -> None:
         if self._log_handle is not None:

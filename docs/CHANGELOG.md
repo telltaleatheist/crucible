@@ -13,6 +13,8 @@ notes.
 
 - A vLLM engine (and the vLLM ASR worker) no longer logs a `deep_gemm` `AssertionError` traceback as a WARNING on every start: Crucible runs vLLM with `VLLM_USE_DEEP_GEMM=0`. DeepGEMM needs a Hopper or Blackwell card and a CUDA toolkit, which Crucible never places, so it could never run here; with the switch off vLLM stops before trial-importing it.
 
+- A failed load (or any engine or worker that stops) now leads its refusal with the first error its log reports, then the last 40 lines as before. A vLLM start that died on its KV cache showed only the API server's "Engine core initialization failed. See root cause above" traceback, with the engine core's `ValueError: ... KV cache ...` cut off above the tail; it now reads `First error in its log: ValueError: ...`. A traceback logged as a warning (vLLM's deep_gemm import) is not taken for the cause.
+
 ## 1.0.124 — 2026-10-09
 
 - `qwen3.5-4b-bside` on a PC now runs on llama.cpp from a Q8_0 GGUF (about 5.4 GB) instead of vLLM, so B-Sides' tag model loads in seconds instead of minutes and fits an 8 GiB card whole; `qwen3.5-4b-bside-4bit` is gone. `crucible install llm` on a PC also places Crucible's pinned Linux llama-server, which runs on the CUDA libraries the llm env already has.
