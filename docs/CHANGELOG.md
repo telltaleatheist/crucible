@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.121 — 2026-10-09
+
 - Fix: on a card where the desktop allowance leaves about as much as is free (an 8 GiB card), vLLM refused to start ("Free memory on device … is less than desired GPU memory utilization"). The memory plan now leaves vLLM's own CUDA context (0.94 GiB, measured on an RTX 3070 under WSL2) out of the budget it hands the engine.
 
 ## 1.0.120 — 2026-10-09
