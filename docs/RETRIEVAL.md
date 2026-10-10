@@ -37,7 +37,7 @@ queue sessions know your requests (docs/QUEUE.md).
 **When nothing holds a model, the server unloads it after each call.** The next call loads
 it again before it runs, and that load is reported inside `timing_ms.queued`. Measured on
 the Mac (1.0.133, 2026-10-10): every unheld embed or rerank waited about 3 s (the 16 GB
-reloaded from the page cache) and then ran in 0.1–0.3 s; the server log says
+reloaded from the page cache) and then ran in 0.1–0.3 s. On the PC (cuda-linux, the same day) the reload is far slower: an unheld rerank waited 27–29 s and then ran in 1.1 s (one document under a 2.5k-token query) or 3.3 s (twenty). The server log says
 `unloaded qwen3-reranker-8b (the resident llm): nothing holds it — the last chat completion
 finished` after each one.
 
