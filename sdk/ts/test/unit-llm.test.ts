@@ -211,6 +211,11 @@ test('models() reads every field /v1/models promises', async () => {
       form: null,
       formReason: null,
       forms: null,
+      verbs: null,
+      package: null,
+      packageInstalled: null,
+      embed: null,
+      rerank: null,
     },
     {
       id: 'qwen3.8-27b',
@@ -231,6 +236,11 @@ test('models() reads every field /v1/models promises', async () => {
       form: null,
       formReason: null,
       forms: null,
+      verbs: null,
+      package: null,
+      packageInstalled: null,
+      embed: null,
+      rerank: null,
     },
     {
       id: 'mac-only',
@@ -251,6 +261,11 @@ test('models() reads every field /v1/models promises', async () => {
       form: null,
       formReason: null,
       forms: null,
+      verbs: null,
+      package: null,
+      packageInstalled: null,
+      embed: null,
+      rerank: null,
     },
   ]);
   assert.equal(models[0]!.reason, null, 'a loadable model carries no reason');
@@ -393,6 +408,11 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       form: null,
       formReason: null,
       forms: null,
+      verbs: null,
+      package: null,
+      packageInstalled: null,
+      embed: null,
+      rerank: null,
     },
   ]);
   assert.deepEqual(llm.unreadableRows, []);

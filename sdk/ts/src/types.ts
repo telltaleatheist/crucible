@@ -176,6 +176,8 @@ export interface ServerInfo {
    * name here, or with {@link CrucibleClient.has}, instead of comparing versions.
    */
   readonly features: readonly string[];
+  /** The embed and rerank verbs, by name; null from a server before them. */
+  readonly verbs: Readonly<Record<string, VerbInfo>> | null;
 }
 
 /**
@@ -903,6 +905,16 @@ export interface ModelInfo {
   readonly formReason: string | null;
   /** Every form, best first; null for a model with one form. */
   readonly forms: readonly ModelFormInfo[] | null;
+  /** The verbs (capability classes) it serves; null from a server before embed and rerank. */
+  readonly verbs: readonly string[] | null;
+  /** The optional package it is in (`retrieval`), or null. */
+  readonly package: string | null;
+  /** Whether that package is installed here; null for a model in none. */
+  readonly packageInstalled: boolean | null;
+  /** An embedding model's facts and limits; null for any other. */
+  readonly embed: ModelEmbedInfo | null;
+  /** How it reranks (a reranker, or a decide model on the general template); null otherwise. */
+  readonly rerank: ModelRerankInfo | null;
 }
 
 /** One form of a model (`ModelInfo.forms`). */
@@ -1237,6 +1249,186 @@ export interface DecideResponse {
     readonly perQuestion: Readonly<Record<string, number>>;
     readonly images: number;
   };
+}
+
+/** `EmbedRequest.inputType`: a search query (the model's instruction prefix) or a document. */
+export type EmbedInputType = 'query' | 'document';
+
+/** How the vectors come back: JSON numbers, float32 little-endian base64, or IEEE half base64. */
+export type EmbedEncoding = 'float' | 'base64' | 'base64_float16';
+
+/**
+ * `POST /v1/embed`: texts to unit-length vectors. Vectors are comparable only with vectors of the
+ * same `fingerprint`: store {@link EmbedModelInfo.fingerprint} beside them and send it back here on
+ * every later call, and a server that would write anything else refuses `409 fingerprint_mismatch`.
+ */
+export interface EmbedRequest {
+  /** The texts, in order; 1 to 256, each non-empty. */
+  readonly inputs: readonly string[];
+  /** `query` is written with the model's instruction prefix; `document` as it is. */
+  readonly inputType: EmbedInputType;
+  /** What the query is for, in one sentence; refused on a document. Omitted: the model's default. */
+  readonly instruction?: string;
+  /** The Crucible model id. Omitted: the model this server registered for embed. */
+  readonly model?: string;
+  /** Which form of `model`, for a model with more than one. */
+  readonly form?: string;
+  /** An earlier answer's `model.fingerprint`: serve exactly that identity or refuse. */
+  readonly fingerprint?: string;
+  /** A ceiling in billions of parameters, when no model is named. */
+  readonly maxParamsB?: number;
+  /** A Matryoshka prefix length (renormalised); omitted, the model's own length. */
+  readonly dimensions?: number;
+  /** Omitted: `float`. */
+  readonly encodingFormat?: EmbedEncoding;
+}
+
+/** What wrote the vectors: everything that changes a float. */
+export interface EmbedModelInfo {
+  readonly id: string;
+  readonly revision: string;
+  /** The weights file read (a GGUF), or null for a whole repo. */
+  readonly file: string | null;
+  readonly form: string | null;
+  readonly bits: number | null;
+  readonly engine: string;
+  readonly engineBuild: string;
+  /** Crucible's own reading of a vector. */
+  readonly scheme: number;
+  /** All of the above in one string: store it beside the vectors. */
+  readonly fingerprint: string;
+  /** The model's own vector length. */
+  readonly dimensions: number;
+}
+
+/** Ms the call waited in the server's line, apart from how long it ran. */
+export interface VerbTiming {
+  readonly total: number;
+  /** Null in a timing built outside the door. */
+  readonly queued: number | null;
+}
+
+export interface EmbedResponse {
+  readonly model: EmbedModelInfo;
+  /** Each vector's length. */
+  readonly dimensions: number;
+  readonly inputType: EmbedInputType;
+  /** The instruction the queries were written with; null for documents. */
+  readonly instruction: string | null;
+  readonly encodingFormat: EmbedEncoding;
+  /** Unit-length vectors: numbers for `float`, base64 strings otherwise ({@link decodeEmbedding}). */
+  readonly embeddings: readonly (readonly number[])[] | readonly string[];
+  readonly tokens: { readonly perInput: readonly number[]; readonly total: number };
+  readonly timingMs: VerbTiming;
+}
+
+/** `POST /v1/rerank`: a relevance probability per document for one query. */
+export interface RerankRequest {
+  readonly query: string;
+  /** 1 to 256 documents, each non-empty. */
+  readonly documents: readonly string[];
+  /** What relevant means here, in one sentence. Omitted: the model's default. */
+  readonly instruction?: string;
+  /** A dedicated reranker or any decide model. Omitted: the model registered for rerank. */
+  readonly model?: string;
+  readonly form?: string;
+  /** A ceiling in billions of parameters, when no model is named. */
+  readonly maxParamsB?: number;
+}
+
+export interface RerankModelInfo {
+  readonly id: string;
+  readonly revision: string;
+  readonly file: string | null;
+  readonly form: string | null;
+  readonly engine: string;
+  readonly engineBuild: string;
+  /** `model` (the reranker's own prompt) or `crucible-general-1` (a decide model). */
+  readonly template: string;
+  /** Scores compare across calls with the same fingerprint. */
+  readonly fingerprint: string;
+}
+
+export interface RerankResult {
+  readonly index: number;
+  /** P(yes) / (P(yes) + P(no)), 0 to 1. */
+  readonly relevanceScore: number;
+}
+
+export interface RerankResponse {
+  readonly model: RerankModelInfo;
+  readonly instruction: string;
+  /** Each document's relevance, in the request's order. */
+  readonly scores: readonly number[];
+  /** Every document, most relevant first. */
+  readonly results: readonly RerankResult[];
+  readonly tokens: {
+    readonly perDocument: readonly number[];
+    readonly total: number;
+    /** Prompt tokens read from the engine's cache; null when it did not say. */
+    readonly cached: number | null;
+  };
+  readonly timingMs: VerbTiming;
+}
+
+/** Per-call options for {@link CrucibleClient.embed} and {@link CrucibleClient.rerank}. */
+export interface VerbOptions {
+  /** Sent as `X-Crucible-Act` exactly as {@link ChatOptions.act}. */
+  readonly act?: string;
+  /** How the call waits for its model, exactly as {@link ChatOptions.queue}. */
+  readonly queue?: QueueChoice;
+  /** Aborts the request; the abort surfaces as a DOM `AbortError`. */
+  readonly signal?: AbortSignal;
+}
+
+export type EmbedOptions = VerbOptions;
+export type RerankOptions = VerbOptions;
+
+/** A `GET /v1/models` row's `embed`: what an embedding model writes and what a call may carry. */
+export interface ModelEmbedInfo {
+  readonly dimensions: number;
+  /** The `dimensions` a request may ask for, `[low, high]`. */
+  readonly dimensionsRange: readonly [number, number];
+  readonly matryoshka: boolean;
+  readonly pooling: string;
+  readonly normalized: boolean;
+  readonly inputTypes: readonly string[];
+  readonly queryTakesInstruction: boolean;
+  readonly defaultInstruction: string | null;
+  readonly queryTemplate: string;
+  readonly documentTemplate: string;
+  readonly source: string;
+  readonly maxInputs: number;
+  /** Tokens one input may be (the served context); null where the backend has no block. */
+  readonly maxInputTokens: number | null;
+}
+
+/** A `GET /v1/models` row's `rerank`: the template it is judged with and the limits. */
+export interface ModelRerankInfo {
+  /** `model` (its own prompt) or `crucible-general-1`. */
+  readonly template: string;
+  readonly defaultInstruction: string;
+  readonly maxDocuments: number;
+  readonly maxTokens: number | null;
+  /** The reranker's own prompt parts; null for a decide model on the general template. */
+  readonly prefixTemplate: string | null;
+  readonly documentTemplate: string | null;
+  readonly yes: string | null;
+  readonly no: string | null;
+  readonly source: string | null;
+}
+
+/** `GET /v1/info`'s `verbs` entry: whether this server serves the verb now, and with what. */
+export interface VerbInfo {
+  readonly route: string;
+  readonly available: boolean;
+  readonly registered: string | null;
+  readonly reason: string | null;
+  readonly package: string | null;
+  readonly packageInstalled: boolean;
+  /** The models a request may name here, in the order the automatic pick ranks them. */
+  readonly models: readonly string[];
+  readonly limits: { readonly maxInputs: number | null; readonly maxDocuments: number | null };
 }
 
 /** One item of {@link DecideItemsRequest}: its text, and optionally its own options. */
