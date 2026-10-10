@@ -37,7 +37,7 @@ def test_the_document_offers_every_selectable_class_and_null_for_automatic(setti
 
     offered = body["local_model_choices"]["translate"]
     assert [row["id"] for row in offered] == list(PC_TEXT_LINEUP)
-    assert [row["fits"] for row in offered] == [True] * 5
+    assert [row["fits"] for row in offered] == [True] * len(PC_TEXT_LINEUP)
     assert offered[0]["memory_bytes_estimate"] > offered[1]["memory_bytes_estimate"]
     assert all(isinstance(row["installed"], bool) for row in offered)
 
