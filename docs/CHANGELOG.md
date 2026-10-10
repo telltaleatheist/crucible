@@ -7,6 +7,11 @@ notes.
 
 ## Unreleased
 
+- Settings: every config.toml key can be changed from the operator page; a host or port change offers "Restart now?" inline (the address is written into the service definition, so the page names `crucible service install` when that has to run first). On a PC the port stays fixed at the Windows host's 7100 (`port_fixed_by_windows_host`).
+- New routes: `PUT /v1/settings/jobs/{job_type}`, `PUT /v1/settings/tts/{engine}`, `POST /v1/settings/token/rotate`, `POST /v1/capability/record`, `POST /v1/server/restart`.
+- `PUT /v1/settings` now also takes name, host, port, advertise, cors_origins, open_pairing, install_on_submit, retention_days, max_session_hold_s, hf_token (write-only) and video_desktop (Mac; out of range refused by name).
+- Operator page: "Re-measure this card", "Replace the token" (the new token is shown once), and "Reload now?" for a voice started with old `[tts]` numbers.
+- `[auth] open_pairing` now applies without a restart.
 - `docs/CHANGELOG.md`: what changed in each release, back to 0.1.0. `ship.sh` refuses to cut a release with nothing under Unreleased and puts the version's section in the GitHub release notes (`scripts/changelog.py`).
 
 ## 1.0.118 — 2026-10-09
