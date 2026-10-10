@@ -180,8 +180,18 @@ the code does not say by itself.
   `crucible.cmd` shim is written CRLF (cmd.exe can swallow the last line of an
   LF-only batch file) and quotes `%~dp0` because the user's name can contain
   spaces. pip runs with `--quiet --no-warn-script-location`. The script knows it
-  was run by an app when it is saved as `crucible-install.ps1` (`runInstallPs1`'s
-  name) with output redirected; then the install watcher gets `--brief`.
+  was run by an app because the app says so: `-FromApp`, which `runInstallPs1` and the
+  setup `.exe` pass. It used to guess from its own file name (`crucible-install.ps1`)
+  and a redirected output, which any person saving the script under that name, or any
+  pipe, would trip. With `-FromApp` the install watcher gets `--brief`, nothing is asked
+  on the terminal (`lan offer --ask`) and no window is opened: the app is the UI. It
+  changes no check: the packaged-shell refusal applies to an app's run exactly as to a
+  person's, because the app's package redirects its children's writes all the same.
+- `install.ps1` never says "ready" itself. After an update the tray carries the guest to
+  the new release in the background (`Host.carry_guest_to_this_release`), and the old
+  guest answers `local start` meanwhile; the script says the host is installed, and the
+  watcher (`installwatch.await_release`) says ready when the engine answers `/v1/info`
+  with this release, read with the pairing's token.
 - `install.ps1` installs the Windows host only and stops; the host owns the WSL
   sequence. It needs no admin.
 

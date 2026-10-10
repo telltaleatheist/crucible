@@ -303,8 +303,20 @@ Crucible** ticked.
 It never carries Python. It downloads the pinned python-build-standalone archive and this
 release's wheel (NScurl, HTTPS, retrying), checks each against the sha256 built into the setup,
 deletes a mismatch and stops, and then runs the release's own generated `install.ps1` with
-`-PythonArchive`, `-WheelFile` and `-WheelSha` pointing at those checked files: one install
-procedure, not a second one. It adds "Crucible" to Settings → Apps. Uninstalling from there
+`-PythonArchive`, `-WheelFile` and `-WheelSha` pointing at those checked files, and
+`-FromApp`: one install procedure, not a second one.
+
+**An app that runs `install.ps1` passes `-FromApp`** (the setup does, and so does
+`@crucible/bootstrap`'s `install()`). It says the app is the UI: the script hands over to the
+app after a short wait instead of following the Linux setup line by line, asks nothing on the
+terminal and opens no window. It is a statement, not a permission: an app inside a Windows app
+package (MSIX) is still refused `packaged_shell`, since its children write where it does.
+
+After an **update**, the script does not say "ready" when the Windows half is installed: the
+icon by the clock is still carrying the Linux engine to the new release. It says
+`Crucible <release> is ready` when the engine answers on that release, waiting up to 20
+minutes and saying how it stands every 30 seconds; if that runs out it says which release
+still answers and that the icon carries on by itself. It adds "Crucible" to Settings → Apps. Uninstalling from there
 runs the same `install.ps1 -Uninstall`, which runs `crucible uninstall` and then removes the
 host pack; weights are kept, as with the one-liner. The setup is built by
 `scripts/build-installer.sh` (see `docs/internals/scripts.md`).

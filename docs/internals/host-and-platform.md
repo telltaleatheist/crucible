@@ -541,8 +541,18 @@ name it, the `netstat -ano | findstr :7101` command is given instead.
 
 Waits for a real ending (up to 2 min for the tray to decide), prints steps and the ending in
 ASCII wrapped words. An outcome older than the install start (`--since`) is printed as
-history, never as this run's result. With `--brief` (an app ran the script) it keeps the short
-wait. When the door is not answering after the decision window, the console starts the
+history, never as this run's result. With `--brief` (an app ran the script, `-FromApp`) it
+keeps the short wait.
+
+Ready is said here and nowhere else, and only when it is true. When the tray reports the
+engine as a guest it already owns (`wsl-unit`: an update, not a fresh install), the tray is
+carrying that guest to the new release in the background, so the watcher waits until
+`/v1/info`, read with the pairing's token, answers with this release
+(`installwatch.await_release`): up to `READY_BUDGET_SECONDS` (20 min), saying every 30 s
+which release answers or why nothing does, then `Crucible <release> is ready`. If the budget
+runs out it says which release still answers, that the tray carries on in the background,
+and where the controller's log is. The brief (app) watch does the same for an update, so a
+setup `.exe` does not finish on "ready" while the old engine serves. When the door is not answering after the decision window, the console starts the
 controller itself (`controller_client.spawn`, the same call `retry.py`, `local.py` and
 `desktop.py` make through `controller_client.ensure_running`) and waits
 `controller_client.START_SECONDS`, the one controller start deadline; only when that spawn fails or the door still does not

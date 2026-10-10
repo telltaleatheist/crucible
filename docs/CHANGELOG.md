@@ -9,6 +9,8 @@ notes.
 
 - CLI: a refused `crucible api` request (a `job submit --follow` included) now leads with `crucible: HTTP <status> <code>: <message>` and exits 1; the server's whole error document still follows on the next lines.
 - Fix: `crucible uninstall` left behind what Crucible itself had placed in its home and reported it as "Crucible did not put this here": `tools` (ffmpeg, silero-vad, zig), `run`, `ladder`, `voice-manifests`, `servers`, `interpreters`, and the host's `host.log`, `host.lock` and `tray.*` files. They are now removed. `journals` and `playground-presets.json` are kept with the other user data, `voice-refs.json` is kept with the voice weights (removed by `--purge-weights`), the Windows home's `wsl` folder (the distro's disk) is kept and named, and a LAN door (`landoor.json`) is withdrawn before the engine stops instead of being left on the machine.
+- Fix: after an update, `install.ps1` said "Crucible is ready" while the tray was still carrying the Linux engine to the new release. It now says ready only when the engine answers `/v1/info` on the release just installed, waiting up to 20 minutes and saying every 30 s which release answers; if that runs out it says so and names the controller's log. The setup `.exe` waits the same way.
+- `install.ps1 -FromApp`: an app that launches the installer says so (the setup `.exe` and `@crucible/bootstrap`'s `install()` pass it). It replaces the guess from the script's file name and a redirected output. Apps on an older `@crucible/bootstrap` must update it: without the switch the script follows the whole Linux setup as a terminal would.
 
 ## 1.0.124 — 2026-10-09
 

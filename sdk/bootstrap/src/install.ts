@@ -190,7 +190,7 @@ async function runInstallPs1(options: InstallOptions, release: string, runner: R
   const script = `$ErrorActionPreference = 'Stop'; `
     + `$p = Join-Path $env:TEMP 'crucible-install.ps1'; `
     + `Invoke-RestMethod ${quoted(url)} -OutFile $p; `
-    + `& $p -Release ${quoted(release)}`;
+    + `& $p -Release ${quoted(release)} -FromApp`;
   const argv = ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script];
   options.onStep?.({ name: 'host', argv, status: 'running', detail: `install.ps1 ${release}` });
   const result = await runner.stream(argv, {

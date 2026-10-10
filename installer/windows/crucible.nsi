@@ -91,7 +91,7 @@ Section "Crucible"
   Call Fetch
 
   DetailPrint "Installing Crucible into $INSTDIR (a few minutes)"
-  nsExec::ExecToLog '"${POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\${SCRIPT}" -Release ${VERSION} -Root "$INSTDIR" -PythonArchive "$PLUGINSDIR\downloads\${PY_ASSET}" -WheelFile "$PLUGINSDIR\downloads\${WHEEL_NAME}" -WheelSha ${WHEEL_SHA}'
+  nsExec::ExecToLog '"${POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\${SCRIPT}" -Release ${VERSION} -Root "$INSTDIR" -PythonArchive "$PLUGINSDIR\downloads\${PY_ASSET}" -WheelFile "$PLUGINSDIR\downloads\${WHEEL_NAME}" -WheelSha ${WHEEL_SHA} -FromApp'
   Pop $0
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "Crucible did not finish installing (the install step ended with $0). What it said is in the list above.$\r$\n$\r$\nRun this setup again: it carries on from where it stopped."

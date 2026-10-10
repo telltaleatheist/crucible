@@ -12,11 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, TextIO
 
-from .. import controller_client, local
+from .. import VERSION, controller_client, local
 from ..errors import ConfigError
+from ..pairing import parse_pairing_line, read_pairing_file
+from ..peer import OWNER_FOUND, OWNER_WSL_UNIT
 from ..platform import hostconfig
-from ..platform.errors import HostError
-from ..platform.paths import LOG_NAME, door_url
+from ..platform.errors import HostError, LocalError
+from ..platform.paths import LOG_NAME, door_url, engine_url
 from . import outcome
 from .installer import STEP_WORDS, TRY_AGAIN_HINT
 from .log import plain
@@ -29,6 +31,16 @@ BLIND_SECONDS = 45 * 60.0
 HEARTBEAT_SECONDS = 120.0
 
 POLL_SECONDS = 1.0
+
+# After an update the tray carries the guest to the new release by itself
+# (Host.carry_guest_to_this_release): the new wheel into the guest, then a
+# restart. Ready is said when the engine ANSWERS on this release, not when the
+# Windows half is installed. This is how long the installer waits for that,
+# saying how it stands every READY_HEARTBEAT_SECONDS.
+READY_BUDGET_SECONDS = 20 * 60.0
+READY_HEARTBEAT_SECONDS = 30.0
+READY_POLL_SECONDS = 2.0
+ENGINE_READ_SECONDS = 5.0
 
 STREAM_READ_SECONDS = 300.0
 
@@ -67,11 +79,35 @@ DONE_SENTENCE = (
     "else to do."
 )
 
-ALREADY_SENTENCE = (
-    "Crucible's Linux engine was already set up on this PC. If it needs this "
-    "release, Crucible moves it up by itself in the next few minutes. There is "
-    "nothing else to do."
-)
+
+def ready_sentence(release: str) -> str:
+    return (
+        f"Crucible {release} is ready: its engine answers on this PC at {release} "
+        "and takes work."
+    )
+
+
+def moving_sentence(release: str, budget: float) -> str:
+    return (
+        f"Crucible's Linux engine was already set up on this PC, and the icon by "
+        f"the clock is now moving it to {release} by itself; there is nothing to "
+        f"click. This waits until it answers at {release}, for up to "
+        f"{budget / 60:.0f} minutes, and says how it stands as it goes."
+    )
+
+
+def not_ready_sentence(release: str, waited: float, answer: "EngineAnswer") -> str:
+    now = (
+        f"still answers as Crucible {answer.version}" if answer.version is not None
+        else f"is not answering ({answer.detail})"
+    )
+    return (
+        f"Crucible {release} is installed, but after {waited / 60:.0f} minutes its "
+        f"Linux engine {now}. The icon by the clock keeps moving it to {release} in "
+        "the background, and apps keep working on what answers meanwhile. If that "
+        "has not changed in a few more minutes, the controller's log says why:"
+    )
+
 
 FOUND_SENTENCE = (
     "An engine that Crucible did not install is already running on this PC, "
@@ -262,6 +298,63 @@ def _open(path: str, token: str | None, timeout: float):
     return controller_client.open_url(door_url(path), token=token, timeout=timeout)
 
 
+class EngineAnswer:
+    def __init__(self, version: str | None, detail: str) -> None:
+        self.version = version
+        self.detail = detail
+
+
+def engine_answer(home: Path) -> EngineAnswer:
+    """Which release the engine on this PC answers as, read the way an app reads it:
+    /v1/info with the pairing's token. Not answering is an answer, with its reason,
+    because mid-restart that is what a carry looks like."""
+    line = read_pairing_file(home)
+    if line is None:
+        return EngineAnswer(None, f"there is no pairing file in {home} yet")
+    try:
+        token = parse_pairing_line(line).token
+        info = controller_client.request(
+            engine_url("/v1/info"), token=token, timeout=ENGINE_READ_SECONDS
+        )
+    except (OSError, ValueError, LocalError, http.client.HTTPException) as exc:
+        return EngineAnswer(None, one_line(exc, 160))
+    server = info.get("server")
+    version = server.get("version") if isinstance(server, dict) else None
+    if not isinstance(version, str):
+        return EngineAnswer(None, f"{engine_url('/v1/info')} named no server version")
+    return EngineAnswer(version, "answering")
+
+
+def await_release(
+    home: Path, console: Console, *,
+    clock: Callable[[], float], sleep: Callable[[float], None],
+    release: str = VERSION, budget: float = READY_BUDGET_SECONDS,
+    read: Callable[[Path], EngineAnswer] | None = None,
+) -> bool:
+    read = engine_answer if read is None else read
+    started = clock()
+    console.paragraph(moving_sentence(release, budget))
+    heartbeat = started
+    while True:
+        answer = read(home)
+        if answer.version == release:
+            console.paragraph(ready_sentence(release))
+            return True
+        waited = clock() - started
+        if waited >= budget:
+            console.paragraph(not_ready_sentence(release, waited, answer))
+            console.say(f"  {Path(home) / LOG_NAME}")
+            return False
+        if clock() - heartbeat >= READY_HEARTBEAT_SECONDS:
+            heartbeat = clock()
+            now = (
+                f"it answers as {answer.version}" if answer.version is not None
+                else f"not answering: {answer.detail}"
+            )
+            console.say(f"  still moving to {release} ({waited / 60:.1f} min so far; {now})")
+        sleep(READY_POLL_SECONDS)
+
+
 def door_alive() -> bool:
     return controller_client.is_up()
 
@@ -307,12 +400,28 @@ def follow(token: str, console: Console, seen: int) -> int:
     return seen
 
 
+def _owner(home: Path) -> str | None:
+    try:
+        token = _token(home)
+    except TokenUnreadable:
+        return None
+    status = door_status(token)
+    presence = status.get("presence") if status is not None else None
+    owner = presence.get("owner") if isinstance(presence, dict) else None
+    return owner if isinstance(owner, str) else None
+
+
 def _watch_briefly(
     home: Path, since: datetime, console: Console,
     clock: Callable[[], float], sleep: Callable[[float], None],
 ) -> int:
     started = clock()
     while clock() - started < BRIEF_SECONDS:
+        # An update: the guest is already ours and is being carried to this
+        # release, so the app is told ready only once the engine answers on it.
+        if _owner(home) == OWNER_WSL_UNIT:
+            await_release(home, console, clock=clock, sleep=sleep)
+            return 0
         record = recorded(home)
         if is_fresh(record, since):
             assert record is not None
@@ -339,12 +448,14 @@ def follow_command(home: Path, since: datetime) -> str:
 class _Watch:
     def __init__(
         self, home: Path, since: datetime, console: Console, *,
-        clock: Callable[[], float], alive: Callable[[], bool], start: Callable[[Path], bool],
+        clock: Callable[[], float], sleep: Callable[[float], None],
+        alive: Callable[[], bool], start: Callable[[Path], bool],
     ) -> None:
         self._home = home
         self._since = since
         self._console = console
         self._clock = clock
+        self._sleep = sleep
         self._alive = alive
         self._start = start
         self._started = clock()
@@ -386,11 +497,13 @@ class _Watch:
     def _settled_by_owner(self, status: dict[str, object] | None) -> bool:
         presence = status.get("presence") if status is not None else None
         owner = presence.get("owner") if isinstance(presence, dict) else None
-        sentence = {"wsl-unit": ALREADY_SENTENCE, "found": FOUND_SENTENCE}.get(str(owner))
-        if sentence is None:
-            return False
-        self._console.paragraph(sentence)
-        return True
+        if owner == OWNER_WSL_UNIT:
+            await_release(self._home, self._console, clock=self._clock, sleep=self._sleep)
+            return True
+        if owner == OWNER_FOUND:
+            self._console.paragraph(FOUND_SENTENCE)
+            return True
+        return False
 
     def _start_controller_once(self) -> int | None:
         if self._started_controller_at is None:
@@ -438,7 +551,7 @@ def watch(
     if brief:
         return _watch_briefly(home, since, console, clock, sleep)
     console.paragraph(CONSOLE_START)
-    watching = _Watch(home, since, console, clock=clock, alive=alive, start=start)
+    watching = _Watch(home, since, console, clock=clock, sleep=sleep, alive=alive, start=start)
     while True:
         ended = watching.tick()
         if ended is not None:

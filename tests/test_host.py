@@ -515,8 +515,11 @@ def test_install_ps1_ends_by_READING_the_outcome_and_never_by_asserting_one() ->
     assert "'-m', 'crucible.host.installwatch'" in script
     assert "'--since', $Began" in script
     assert "$Watch += '--brief'" in script
-    assert 'Say "Crucible is ready in your notification area."' in script
-    assert "Say \"Crucible is ready in your notification area. The Windows engine works now" not in script
+    # Ready is the watcher's to say, once the engine answers on this release
+    # (installwatch.await_release); the script only says the host is installed.
+    assert "is ready" not in script
+    assert 'Say "Crucible $Release is installed and its icon is by the clock."' in script
+    assert "[switch]$FromApp" in script and "crucible-install.ps1" not in script
     assert "wsl --install" not in script
     assert script.count("{") == script.count("}")
 

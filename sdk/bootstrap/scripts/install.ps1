@@ -7,6 +7,7 @@ param(
   [switch]$PurgeWeights,
   [switch]$DryRun,
   [switch]$WslToo,
+  [switch]$FromApp,
   [string]$PythonArchive = '',
   [string]$WheelFile = '',
   [string]$WheelSha = ''
@@ -266,8 +267,7 @@ Start-Process -WindowStyle Hidden -FilePath $Pythonw -ArgumentList "-m","crucibl
 $said = @(Native { & $Cmd local start })
 if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }
 
-Say "Crucible is ready in your notification area."
-$FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq 'crucible-install.ps1') -and [Console]::IsOutputRedirected)
+Say "Crucible $Release is installed and its icon is by the clock."
 $Watch = @('-m', 'crucible.host.installwatch', '--home', $Root, '--since', $Began)
 if ($FromApp) { $Watch += '--brief' }
 Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }
