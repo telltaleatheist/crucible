@@ -289,6 +289,33 @@ YuE2 reports `scoring` and `composing` (every 64 tokens), `synthesizing`, `decod
 Every progress event carries `fraction`. `DELETE /v1/jobs/{id}` stops the job between two
 steps or tokens; the model stays loaded if a queue session holds it.
 
+### A sound that did not finish: `request`
+
+The `done` event's `audio` is the record of a finished sound. A job that fails, is cancelled
+or is interrupted by a restart never reaches it, so an audio job keeps its request on disk
+from the moment it starts: `request.json` in the job's directory, and `request` on
+`GET /v1/jobs/{id}`. It is the params as sent with the seed this run uses written in (the
+one the server chose when the client sent none), what the server settled around them, and a
+`reproduce` sentence:
+
+```json
+{"job_id": "1f3da14c…", "type": "audio", "model": "yue2-3b",
+ "params": {"tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…", "seed": 2771032915},
+ "seed": 2771032915, "seed_chosen_by": "server",
+ "settled": {"duration_s": null, "steps": null, "cfg": 1.0, "instrumental": false, "seed": 2771032915},
+ "low_vram": true, "revision": "c044757a…", "backend": "cuda-linux",
+ "recorded": "2026-10-10T07:12:03+00:00",
+ "reproduce": "POST /v1/jobs with this record's `type`, `model` and `params` (the seed is in them) runs this again with seed 2771032915; it ran on revision c044757a… (cuda-linux, [audio] low_vram on)"}
+```
+
+Submitting its `type`, `model` and `params` again makes the same sound on the same model and
+machine. The request clears once the job finishes successfully: a job that ends `done` drops
+it (`request` is null, `audio` says the same and more). One that ends `failed`, `cancelled`
+or `interrupted` keeps it until the job itself is reaped ([jobs] retention_days). It is the
+audio job's alone: no other job type keeps anything of its request on disk, since a
+narration's params are a chapter of somebody's book (docs/internals/jobs-runtime.md
+"Durability and restart").
+
 ## Many sounds in a row
 
 The model comes off the card when the job that loaded it ends, unless something holds it. For a

@@ -265,6 +265,18 @@ ladder or the CLI:
   and the terminal end. It does not write on progress. It never raises.
 - The record deliberately omits `params`. A render's params hold a chapter of somebody's book,
   and the client keeps its own text. This was agreed with BookForge on 2026-09-20.
+- The one exception is a request a job type hands the store itself, `ctx.keep_request(doc)`
+  -> `JobStore.keep_request`: it is written to `request.json` beside the record (atomic, on the
+  job's thread, before the call returns, so it is on disk before the work that might fail
+  starts) and held on `Job.request`, which `GET /v1/jobs/{id}` shows as `request`. `_finish`
+  drops it when the job ends `done`, after the `done` record is written; a job that ends
+  `failed`, `cancelled` or `interrupted` (live, by a stop, or by `restore`) keeps it until the
+  reaper takes the directory. `restore` reads it back onto the job, and removes one it finds
+  beside a `done` record (a stop between the record and the removal). Only the `audio` type
+  calls it (Owen, 2026-10-10: a song that fails must be reproducible, and its params and
+  chosen seed are what reproduce it; docs/AUDIO.md "A sound that did not finish"). A type
+  whose params are somebody's text - `tts` above all - never calls it, and
+  `tests/test_song_request_kept_until_done.py` fails if any type but audio does.
 - `restore` runs once at startup, before the API answers. A job found `running` or `queued` comes
   back as **`interrupted`**, which is distinct from `failed`. `failed` is the server judging the
   work. `interrupted` is weather: the client should collect what landed and re-ask for the rest.

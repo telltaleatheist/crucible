@@ -454,6 +454,7 @@ One job's state: `status`, `progress`, `message`, its artifacts and, when it end
 | `resumed` | boolean | yes | — |  |
 | `sampling` | object or null | no | — |  |
 | `removal` | JobRemoval or null | no | — |  |
+| `request` | object or null | no | — | An audio job's request as it runs: its `params` with the seed it uses written in, the values the server settled, and a `reproduce` sentence. Kept from the moment it starts; dropped when it ends `done` (`audio` is the record then) and kept when it ends failed, cancelled or interrupted, until the job is reaped. Null for every other job type (docs/AUDIO.md). |
 
 ### `DELETE /v1/jobs/{job_id}`
 
@@ -2622,6 +2623,7 @@ Why a job left the queue without running: `removed` is not `failed`.
 | `resumed` | boolean | yes | — |  |
 | `sampling` | object or null | no | — |  |
 | `removal` | JobRemoval or null | no | — |  |
+| `request` | object or null | no | — | An audio job's request as it runs: its `params` with the seed it uses written in, the values the server settled, and a `reproduce` sentence. Kept from the moment it starts; dropped when it ends `done` (`audio` is the record then) and kept when it ends failed, cancelled or interrupted, until the job is reaped. Null for every other job type (docs/AUDIO.md). |
 
 ### `LikelihoodAnswer`
 

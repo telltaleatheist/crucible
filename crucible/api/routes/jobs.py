@@ -42,6 +42,7 @@ _JOB_STATE_KEYS: frozenset[str] = frozenset(
         "resume_id",
         "resumed",
         "removal",
+        "request",
     }
 )
 
@@ -70,6 +71,7 @@ def _job_state(store: JobStore, job: Job) -> dict[str, Any]:
         "resume_id": job.resume_id,
         "resumed": job.resumed,
         "removal": job.removal,
+        "request": job.request,
         **{k: v for k, v in job.done_extra.items() if k not in _JOB_STATE_KEYS},
     }
 

@@ -421,8 +421,10 @@ class AudioJobType(ResidentWorker):
         needs = as_job_error(self.requirements, model, params)
         refuse_input_files(ctx)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
+        settled = settle(params, needs.spec, seed)
+        ctx.keep_request(kept_request(job, model, params, needs, settled))
         session = self._worker(ctx, model, needs)
-        self._make(ctx, model, session, params, needs, settle(params, needs.spec, seed))
+        self._make(ctx, model, session, params, needs, settled)
 
     def _make(
         self,
@@ -497,6 +499,41 @@ def generate_request(
         "score_path": str(score) if needs.manifest.takes_lyrics else None,
         "revision": needs.spec.revision,
         "backend": needs.spec.backend,
+    }
+
+
+def kept_request(
+    job: Job, model: str, params: AudioParams, needs: Needs, settled: Settled
+) -> dict[str, Any]:
+    """What an audio job keeps on disk from the moment it starts until it ends `done`
+    (JobStore.keep_request): the params as sent with the seed this run uses written in, so
+    `{type, model, params}` submitted again is the same song, and what the server settled
+    around them. A song that fails or is interrupted keeps it; done_extra.audio is the
+    record of one that finished."""
+    return {
+        "job_id": job.id,
+        "type": job.type,
+        "model": model,
+        "params": {**job.params, "seed": settled.seed},
+        "seed": settled.seed,
+        "seed_chosen_by": "client" if params.seed is not None else "server",
+        "settled": {
+            "duration_s": settled.duration_s,
+            "steps": settled.steps,
+            "cfg": settled.cfg,
+            "instrumental": settled.instrumental,
+            "seed": settled.seed,
+        },
+        "low_vram": needs.low_vram,
+        "revision": needs.spec.revision,
+        "backend": needs.spec.backend,
+        "recorded": utcnow(),
+        "reproduce": (
+            "POST /v1/jobs with this record's `type`, `model` and `params` (the seed is "
+            f"in them) runs this again with seed {settled.seed}; it ran on revision "
+            f"{needs.spec.revision} ({needs.spec.backend}, [audio] low_vram "
+            f"{'on' if needs.low_vram else 'off'})"
+        ),
     }
 
 

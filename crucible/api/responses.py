@@ -134,6 +134,14 @@ class JobStatus(_Open):
     resumed: bool
     sampling: dict[str, Any] | None = None
     removal: JobRemoval | None = None
+    request: dict[str, Any] | None = Field(
+        None,
+        description="An audio job's request as it runs: its `params` with the seed it "
+        "uses written in, the values the server settled, and a `reproduce` sentence. "
+        "Kept from the moment it starts; dropped when it ends `done` (`audio` is the "
+        "record then) and kept when it ends failed, cancelled or interrupted, until the "
+        "job is reaped. Null for every other job type (docs/AUDIO.md).",
+    )
 
 
 class QueueWaitingFor(_Open):

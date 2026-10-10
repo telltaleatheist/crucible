@@ -127,6 +127,10 @@ class Job:
     waiting: dict[str, Any] | None = None
     removal: dict[str, Any] | None = None
     session: str | None = None
+    # What a job type keeps of the request until the job ends done (JobStore.keep_request):
+    # an audio job's params with the seed it ran with, so a song that fails or is
+    # interrupted can be run again. None for every other type, and once a song is done.
+    request: dict[str, Any] | None = None
     # True for a job read back from disk after a restart: its events were rebuilt from
     # its record and no more will come, so a stream that has sent them ends (sse.py).
     events_final: bool = False
@@ -304,6 +308,17 @@ class JobContext:
         self._loop.call_soon_threadsafe(
             self._store.append_event, self._job, "cue", dict(data)
         )
+
+    def keep_request(self, document: dict[str, Any]) -> None:
+        """Keep what this job runs with on disk until it ends `done` (JobStore.keep_request).
+
+        Written here, on the job's own thread, before the call returns: it exists for the
+        job that never gets as far as `done`, so it must be on disk before the work that
+        might fail starts. Only a type whose params are not somebody's private text calls
+        it - a render's params are a chapter of a book and stay off disk."""
+        if not isinstance(document, dict):
+            raise TypeError(f"a kept request must be a dict, got {type(document).__name__}")
+        self._store.keep_request(self._job, document)
 
     def done_extra(self, **keys: Any) -> None:
         self._job.done_extra.update(keys)

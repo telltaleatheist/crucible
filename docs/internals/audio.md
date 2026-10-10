@@ -33,6 +33,17 @@ it up so we can use them."*
   `refuse_what_the_model_cannot_take`), settles defaults from the arm (`settle`), and sends one
   `generate` request. `done.audio` carries the effective params, the revision, the per-stage
   seconds and peaks, the versions the worker reported, and the estimate with its basis.
+- Between settling and loading, `run` hands the store `kept_request(...)` through
+  `ctx.keep_request` (Owen, 2026-10-10: *"1 is fine. but it should clear once the job
+  finishes."*). It is the params as sent with the seed written in - `secrets.randbelow` picks
+  it in `run` when the client sent none, so the seed is fixed before anything can fail -
+  plus `seed_chosen_by`, the `Settled` values, `low_vram`, revision, backend and a
+  `reproduce` sentence. The store writes it to `request.json` before the call returns and
+  drops it when the job ends `done` (`done.audio` is the record); failed, cancelled and
+  interrupted keep it until the directory is reaped (jobs-runtime.md "Durability and
+  restart"). Before this a song that died in synthesizing (Victoria's 1f3da14c, CUDA OOM
+  after composing reached 8960/9000 tokens) left nothing on disk to run it again with.
+  The audio type is the only caller; `tests/test_song_request_kept_until_done.py` pins that.
 
 ## Backends and engines
 
