@@ -309,6 +309,21 @@ def test_an_orchestrator_only_installation_judges_nobodys_engine(monkeypatch, tm
         server.shutdown(); server.server_close(); thread.join()
 
 
+def test_a_home_with_no_config_runs_no_engine_and_judges_none(monkeypatch, tmp_path):
+    # Victoria's laptop, 1.0.121: the reinstalled Windows home had no config.toml
+    # (its engine is the WSL guest's, with its own config in the guest), and the
+    # update ended in local_config_unreadable while the tray was carrying the guest.
+    server, thread = _engine_serving(monkeypatch, tmp_path, "0.0.1-previous")
+    _stub_the_service_path(monkeypatch)
+    assert not (tmp_path / "config.toml").exists()
+    try:
+        observed = local.run_engine_verb("start", tmp_path)
+        assert observed["state"] == "running"
+        assert observed["version"] == "0.0.1-previous"
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
 def test_a_config_that_cannot_be_read_is_refused_by_name_and_never_read_as_ours(
     monkeypatch, tmp_path
 ):

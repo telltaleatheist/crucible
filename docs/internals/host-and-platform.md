@@ -817,8 +817,11 @@ raises (`503 interfaces_unreadable`), never an empty list.
   `/v1/info` gets longer (it enumerates the catalogue). Exception text is wrapped with
   endpoint context.
 - The started-engine version check applies only to an engine **this installation owns**. An
-  installation with no `[server]` section runs no engine; an unreadable config is a refusal,
-  not "ours". An engine that reports no version is not stale.
+  installation with no `[server]` section runs no engine, and neither does one with no
+  `config.toml` at all: a Windows home has one only if the Windows engine ever ran (see "A
+  Windows `config.toml` exists only if the Windows engine ever ran" below), and a guest's
+  engine is the guest's own installation, carried by the tray. An unreadable config is a
+  refusal, not "ours". An engine that reports no version is not stale.
 - On Windows a 401 during start is waited out: the tray rewrites the pairing file from the
   guest within seconds. `door_call` (`controller_client.call`) tries the pairing file's token,
   then `[auth].token`, then asks the guest for its token (Crucible's distro, then the

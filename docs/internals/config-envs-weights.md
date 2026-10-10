@@ -182,8 +182,10 @@ only when they are non-empty.
   forwards into WSL. They are added to the derived addresses, never used instead of
   them. Each has its own owner, so disabling the LAN door does not drop a tailnet
   address.
-- `own_engine_backend`: a config with no `[server]` section runs no engine. On
-  Owen's PC the Windows half is an orchestrator-only config.
+- `own_engine_backend`: a config with no `[server]` section runs no engine, and a home
+  with no `config.toml` runs none either. On Owen's PC the Windows half is an
+  orchestrator-only config; a Windows home whose engine has only ever been the WSL guest
+  has no config at all.
 
 ### One Config per process
 

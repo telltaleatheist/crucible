@@ -997,6 +997,8 @@ def _read_document(home: Path | None) -> tuple[Path, Path, dict[str, Any]]:
 
 
 def own_engine_backend(home: Path | None = None) -> str | None:
+    if not config_path(home if home is not None else crucible_home()).exists():
+        return None
     _root, _path, table = _read_document(home)
     if "server" not in table:
         return None

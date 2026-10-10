@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Fix: updating Crucible on a Windows PC whose engine runs in WSL ended with a false "its engine did not start" (`local_config_unreadable: … no config at …\config.toml`) when the Windows side had never run an engine of its own. A Windows home with no `config.toml` runs no engine, so the guest's engine (carried to the new release by the tray) is no longer judged against it.
+
 ## 1.0.121 — 2026-10-09
 
 - Fix: on a card where the desktop allowance leaves about as much as is free (an 8 GiB card), vLLM refused to start ("Free memory on device … is less than desired GPU memory utilization"). The memory plan now leaves vLLM's own CUDA context (0.94 GiB, measured on an RTX 3070 under WSL2) out of the budget it hands the engine.
