@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 import secrets
 import socket
 import stat
@@ -8,7 +10,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import tomli_w
@@ -270,14 +272,7 @@ def _retention_days(table: dict[str, Any]) -> int:
         raise ConfigError("config is missing the [jobs] section")
     if "retention_days" not in section:
         return DEFAULT_RETENTION_DAYS
-    value = _require(table, "jobs", "retention_days", int)
-    if value < 1:
-        raise ConfigError(
-            f"config [jobs] retention_days: must be at least 1 day, got {value}. "
-            "A server that kept a finished job for no days would delete its "
-            "artifacts before the client that asked for them could fetch them"
-        )
-    return value
+    return check_retention_days(_require(table, "jobs", "retention_days", int))
 
 
 def _desktop_basis(table: dict[str, Any]) -> str:
@@ -303,13 +298,7 @@ def _max_session_hold_s(table: dict[str, Any]) -> int:
     section = table.get("queue")
     if section is None or "max_session_hold_s" not in section:
         return DEFAULT_MAX_SESSION_HOLD_S
-    value = _require(table, "queue", "max_session_hold_s", int)
-    if value < 0:
-        raise ConfigError(
-            f"config [queue] max_session_hold_s: must be 0 (no limit) or a number of "
-            f"seconds, got {value}"
-        )
-    return value
+    return check_max_session_hold_s(_require(table, "queue", "max_session_hold_s", int))
 
 
 @dataclass(frozen=True)
@@ -506,6 +495,78 @@ def _require(table: dict[str, Any], section: str, key: str, kind: type) -> Any:
         raise ConfigError(
             f"config key {section}.{key} must be {kind.__name__}, got "
             f"{type(value).__name__}"
+        )
+    return value
+
+
+MAX_PORT = 65535
+
+_HOSTNAME = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+)
+
+
+def check_server_name(value: Any, where: str = "config [server] name") -> str:
+    """`[server] name`: what apps list this server as. One line, because the service
+    unit and every pairing line carry it."""
+    if not isinstance(value, str) or value.strip() == "":
+        raise ConfigError(f"{where}: a server's name is some text, got {value!r}")
+    if value != value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ConfigError(
+            f"{where}: {value!r} has a line break, a control character or spaces at an "
+            "end; the service unit and every pairing line carry the name on one line"
+        )
+    return value
+
+
+def check_bind_host(value: Any, where: str = "config [server] host") -> str:
+    """`[server] host`: the address the server listens on, an IP address or a host name
+    with nothing else (no scheme, no port)."""
+    if not isinstance(value, str) or value == "":
+        raise ConfigError(
+            f"{where}: the address to listen on, like 127.0.0.1 (this computer only) or "
+            f"0.0.0.0 (every network it is on), got {value!r}"
+        )
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+    if _HOSTNAME.fullmatch(value) is None:
+        raise ConfigError(
+            f"{where}: {value!r} is not an address to listen on. It is an IP address "
+            "like 127.0.0.1 or 0.0.0.0, or a host name, with no scheme and no port"
+        )
+    return value
+
+
+def check_port(value: Any, where: str = "config [server] port") -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_PORT:
+        raise ConfigError(
+            f"{where}: a port is a whole number from 1 to {MAX_PORT}, got {value!r}"
+        )
+    return value
+
+
+def check_retention_days(value: Any, where: str = "config [jobs] retention_days") -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{where}: a whole number of days, got {value!r}")
+    if value < 1:
+        raise ConfigError(
+            f"{where}: must be at least 1 day, got {value}. "
+            "A server that kept a finished job for no days would delete its "
+            "artifacts before the client that asked for them could fetch them"
+        )
+    return value
+
+
+def check_max_session_hold_s(
+    value: Any, where: str = "config [queue] max_session_hold_s"
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(
+            f"{where}: must be 0 (no limit) or a number of seconds, got {value!r}"
         )
     return value
 
@@ -884,6 +945,13 @@ def _tts_engine_records(table: dict[str, Any]) -> tuple[EngineFootprint, ...]:
 
 
 
+def tts_engine_record(engine: str, block: dict[str, Any]) -> EngineFootprint:
+    """One `[tts.<engine>]` table read by the same rules as the file, for a writer that
+    must refuse what the reader would."""
+    (found,) = _tts_engine_records({"tts": {engine: block}})
+    return found
+
+
 def tts_engine_footprints(home: Path | None = None) -> dict[str, EngineFootprint]:
     _root, _path, table = _read_document(home)
     return {entry.engine: entry for entry in _tts_engine_records(table)}
@@ -959,9 +1027,9 @@ def load_config(
     return Config(
         path=path,
         home=root,
-        name=_require(table, "server", "name", str),
-        host=_require(table, "server", "host", str),
-        port=_require(table, "server", "port", int),
+        name=check_server_name(_require(table, "server", "name", str)),
+        host=check_bind_host(_require(table, "server", "host", str)),
+        port=check_port(_require(table, "server", "port", int)),
         advertise=_advertised(table),
         tailscale_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("tailscale_advertise", [])}}),
         lan_advertise=_advertised({"server": {"advertise": table.get("server", {}).get("lan_advertise", [])}}),
@@ -1074,6 +1142,7 @@ def write_config(
     carried_tables: dict[str, Any] | None = None,
     audio_low_vram: AudioLowVram | None = None,
     llm_concurrency: tuple[tuple[str, int], ...] | None = None,
+    unowned: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Path:
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
@@ -1178,6 +1247,12 @@ def write_config(
             document["llm"] = llm
         else:
             document.pop("llm", None)
+    for table_name, keys in (unowned or {}).items():
+        table = _with_unowned_keys(table_name, document.get(table_name, {}), keys)
+        if table:
+            document[table_name] = table
+        else:
+            document.pop(table_name, None)
     for table_name, table in (carried_tables or {}).items():
         if table_name in document:
             raise ConfigError(
@@ -1203,6 +1278,32 @@ def write_config(
     return path
 
 
+def _with_unowned_keys(
+    table_name: str, table: Mapping[str, Any], keys: Mapping[str, Any]
+) -> dict[str, Any]:
+    """`table_name` with `keys` set in it (None removes a key) and every other key in it
+    carried as it was: [queue], [hf] and [video_desktop] are tables this writer does not
+    own, so a setting changes the keys it names and nothing else. A table left empty is
+    dropped, so a default is no table at all."""
+    if table_name in WRITER_OWNED_TABLES:
+        raise ConfigError(
+            f"[{table_name}] is a table this writer owns; its keys are write_config's "
+            "own parameters, not loose keys"
+        )
+    written = dict(table)
+    for key, value in keys.items():
+        if value is None:
+            written.pop(key, None)
+        else:
+            written[key] = value
+    return written
+
+
+def unowned_table(path: Path, table_name: str) -> dict[str, Any]:
+    """One table this writer does not own, as the file on disk has it ({} when absent)."""
+    return dict(_unowned_tables(path).get(table_name, {}))
+
+
 def _low_vram_keys(audio: dict[str, Any], setting: AudioLowVram) -> dict[str, Any]:
     """[audio] with `setting` written into it (AudioLowVram says what each form means).
     Crucible's own off is no keys at all, so a host that never needed it keeps a file
@@ -1221,14 +1322,29 @@ def rewrite_config(
     flags: dict[str, bool] | None = None,
     audio_low_vram: AudioLowVram | None = None,
     llm_concurrency: tuple[tuple[str, int], ...] | None = None,
+    name: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    token: str | None = None,
+    open_pairing: bool | None = None,
+    advertise: tuple[str, ...] | None = None,
+    tailscale_advertise: tuple[str, ...] | None = None,
+    lan_advertise: tuple[str, ...] | None = None,
+    cors_origins: tuple[str, ...] | None = None,
+    install_on_submit: bool | None = None,
+    retention_days: int | None = None,
+    tts_engines: tuple[EngineFootprint, ...] | None = None,
+    unowned: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> Path:
     """Write `config` back to its own file with only the named settings changed.
 
-    The token, the capability record, routes, upstreams, local models, the [tts]
-    footprints, the advertised addresses and every table this writer does not own
-    are written as they were read. This is the door for `crucible jobs enable` and
-    `crucible audio low-vram`: a setting that changes one key must never cost a new
-    token, which is what `crucible init --force` would.
+    Every keyword left None is written as it was read: the token, the capability record,
+    routes, upstreams, local models, the [tts] footprints, the advertised addresses and
+    every table this writer does not own. `unowned` sets keys in a table this writer
+    does not own ([queue], [hf], [video_desktop]; None removes one) and keeps the rest
+    of that table. This is the door for `crucible jobs enable`, `crucible audio
+    low-vram` and every Settings write: a setting that changes one key must never cost
+    a new token, which is what `crucible init --force` would.
     """
     changed = dict(flags or {})
     unknown = sorted(set(changed) - set(CAPABILITY_FLAGS))
@@ -1237,30 +1353,35 @@ def rewrite_config(
             f"{unknown} are not [jobs] flags; the flags are {list(CAPABILITY_FLAGS)}"
         )
     values = {flag: changed.get(flag, getattr(config, flag)) for flag in CAPABILITY_FLAGS}
+
+    def kept(value: Any, field: str) -> Any:
+        return getattr(config, field) if value is None else value
+
     return write_config(
         config.home,
-        name=config.name,
-        host=config.host,
-        port=config.port,
-        token=config.token,
+        name=kept(name, "name"),
+        host=kept(host, "host"),
+        port=kept(port, "port"),
+        token=kept(token, "token"),
         backend_kind=config.backend_kind,
         desktop_allowance_bytes=config.desktop_allowance_bytes,
         desktop_allowance_basis=config.desktop_allowance_basis,
         desktop_allowance_note=config.desktop_allowance_note,
-        retention_days=config.retention_days,
-        install_on_submit=config.install_on_submit,
+        retention_days=kept(retention_days, "retention_days"),
+        install_on_submit=kept(install_on_submit, "install_on_submit"),
         capability=config.capability,
         routes=config.routes,
         local_models=config.local_models,
         upstreams=config.upstreams,
-        advertise=config.advertise,
-        tailscale_advertise=config.tailscale_advertise,
-        lan_advertise=config.lan_advertise,
-        cors_origins=config.cors_origins,
-        open_pairing=config.open_pairing,
-        tts_engines=config.tts_engines,
+        advertise=kept(advertise, "advertise"),
+        tailscale_advertise=kept(tailscale_advertise, "tailscale_advertise"),
+        lan_advertise=kept(lan_advertise, "lan_advertise"),
+        cors_origins=kept(cors_origins, "cors_origins"),
+        open_pairing=kept(open_pairing, "open_pairing"),
+        tts_engines=kept(tts_engines, "tts_engines"),
         audio_low_vram=audio_low_vram,
         llm_concurrency=llm_concurrency,
+        unowned=unowned,
         **values,
     )
 

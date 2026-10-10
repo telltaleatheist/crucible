@@ -19,13 +19,11 @@ def _write_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path
 
 
 def _sync_pairing_file(config: Config) -> None:
-    wanted = pairing.pairing_line(
-        config.name, f"http://{DEFAULT_HOST}:{config.port}", config.token
+    written = pairing.sync_pairing_file(
+        config.home, name=config.name, port=config.port, token=config.token
     )
-    if pairing.read_pairing_file(config.home) == wanted:
-        return
-    written = pairing.write_pairing_file(config.home, wanted)
-    print(f"pairing:  {written} ({_pairing_permission(written)})")
+    if written is not None:
+        print(f"pairing:  {written} ({_pairing_permission(written)})")
 
 
 def _pairing_permission(path: Path) -> str:

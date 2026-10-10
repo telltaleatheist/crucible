@@ -8,7 +8,7 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from ... import gpubusy, hosttools, jobenv, videoweights, weights, workers
+from ... import gpubusy, hosttools, jobenv, videodesktop, videoweights, weights, workers
 from ...backend import MLX_DARWIN
 from ...cardkinds import KIND_VIDEO
 from ...clock import utcnow
@@ -378,34 +378,12 @@ def machine_spec(config: Config, spec: VideoBackendSpec) -> VideoBackendSpec:
     return with_trial(tiled(spec, desktop), trial_settings(config))
 
 
-DESKTOP_TABLE = "video_desktop"
-
-# What the Mac's engine runs with when [video_desktop] does not say otherwise: the values
-# for "responsive while somebody works" on an M1 Ultra (docs/internals/video.md,
-# "Keeping the desktop responsive: [video_desktop]"). They are on by default; only
-# `enabled = false` in the table turns them off.
-DESKTOP_DEFAULTS: dict[str, Any] = {
-    "max_tile_tokens": 16000,
-    "tile_spatial": 1,
-    "tile_overlap": 2,
-    "dit_eval_every": 1,
-    "low_ram": True,
-    "mlx_max_ops_per_buffer": 20,
-    "mlx_max_mb_per_buffer": 40,
-    "gpu_duty_pct": 85,
-}
-
-DESKTOP_MAXIMUM: dict[str, int] = {"gpu_duty_pct": 100}
-
-DESKTOP_MINIMUM: dict[str, int] = {
-    "gpu_duty_pct": 10,
-    "max_tile_tokens": 0,
-    "tile_spatial": 1,
-    "tile_overlap": 0,
-    "dit_eval_every": 0,
-    "mlx_max_ops_per_buffer": 1,
-    "mlx_max_mb_per_buffer": 1,
-}
+# The table's keys, defaults and ranges belong to crucible/videodesktop.py, which the
+# Settings door reads too; these names are the ones this module has always used.
+DESKTOP_TABLE = videodesktop.TABLE
+DESKTOP_DEFAULTS = videodesktop.DEFAULTS
+DESKTOP_MAXIMUM = videodesktop.MAXIMUM
+DESKTOP_MINIMUM = videodesktop.MINIMUM
 
 DESKTOP_ENVIRONMENT: dict[str, str] = {
     "mlx_max_ops_per_buffer": "MLX_MAX_OPS_PER_BUFFER",
@@ -436,13 +414,9 @@ def desktop_settings(config: Config) -> dict[str, Any] | None:
     if table.get("enabled") is False:
         return None
     found = dict(DESKTOP_DEFAULTS)
-    for key, least in DESKTOP_MINIMUM.items():
+    for key in DESKTOP_MINIMUM:
         value = table.get(key)
-        if (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and least <= value <= DESKTOP_MAXIMUM.get(key, value)
-        ):
+        if videodesktop.int_in_range(key, value):
             found[key] = value
     if isinstance(table.get("low_ram"), bool):
         found["low_ram"] = table["low_ram"]
@@ -450,7 +424,7 @@ def desktop_settings(config: Config) -> dict[str, Any] | None:
 
 
 GPU_BUSY_TARGET_DEFAULTS: dict[str, float] = {
-    MLX_DARWIN: 90.0,
+    MLX_DARWIN: videodesktop.GPU_BUSY_TARGET_DEFAULT,
 }
 
 
@@ -470,8 +444,8 @@ def gpu_busy_target(config: Config, backend_kind: str) -> float | None:
         document = {}
     table = document.get(DESKTOP_TABLE)
     if isinstance(table, dict):
-        value = table.get("gpu_busy_target_pct")
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= 100:
+        value = table.get(videodesktop.GPU_BUSY_TARGET)
+        if videodesktop.busy_target_in_range(value):
             return float(value)
     return GPU_BUSY_TARGET_DEFAULTS.get(backend_kind)
 

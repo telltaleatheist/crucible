@@ -786,6 +786,18 @@ EXCLUDED: dict[str, str] = {
     "PUT /v1/settings/llm/concurrency": (
         "`crucible models concurrency` writes the same [llm.concurrency] on the host"
     ),
+    "PUT /v1/settings/jobs/{job_type}": (
+        "`crucible jobs enable|disable` writes the same [jobs] flag on the host"
+    ),
+    "PUT /v1/settings/tts/{engine}": (
+        "the operator page's engine numbers; on the host [tts.<engine>] is config.toml's"
+    ),
+    "POST /v1/settings/token/rotate": (
+        "voids the token the CLI's own connection carries; the operator page shows the "
+        "new one once"
+    ),
+    "POST /v1/capability/record": "`crucible capability --write` records it on the host",
+    "POST /v1/server/restart": "`crucible service restart` restarts it on the host",
     "POST /v1/voices/updates": "`crucible voices check-updates` posts it",
     "POST /v1/pairing/start": "the requesting app's half; this CLI already has a token",
     "POST /v1/pairing/poll": "the requesting app's half; this CLI already has a token",

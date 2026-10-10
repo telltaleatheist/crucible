@@ -150,6 +150,17 @@ def test_each_settings_section_has_one_resolver_in_patch_order():
         "local_models",
         "tailscale_advertise",
         "lan_advertise",
+        "name",
+        "host",
+        "port",
+        "advertise",
+        "cors_origins",
+        "open_pairing",
+        "install_on_submit",
+        "retention_days",
+        "max_session_hold_s",
+        "hf_token",
+        "video_desktop",
     ]
     assert {key for key, _ in settings.SECTION_RESOLVERS} == settings.PATCH_KEYS
 

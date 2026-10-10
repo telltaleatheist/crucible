@@ -272,7 +272,7 @@ def _services(
         settings_history=settings_history,
         removals=catalog.Removals(),
         peer=peer_module.PeerState(),
-        pairing_requests=PairingRequests(open_pairing=config.open_pairing),
+        pairing_requests=PairingRequests(open_pairing=lambda: config.open_pairing),
         settlement=settlement,
         tasks=task_store,
         installs=InstallOnSubmit(config, backend, task_store),
@@ -476,6 +476,10 @@ def create_app(config: Config, backend: Backend) -> FastAPI:
     app.state.residency = residency
     app.state.bind_host = config.host
     app.state.bind_port = config.port
+    # Set by api/serving.py when `crucible serve` runs this app; a restart asked of the
+    # server (crucible/selfrestart.py) stops it through this and sets restart_asked.
+    app.state.uvicorn_server = None
+    app.state.restart_asked = False
     # Added first, so it runs INSIDE the config follower: the allow-list it reads is
     # the file as just re-read.
     app.add_middleware(AllowListedOrigins, config=config)

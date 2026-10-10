@@ -1,33 +1,44 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from . import capabilityclasses, classnames, llmconcurrency, lowvram, memorybudget, upstreamrecord
+from . import (
+    capabilityclasses,
+    classnames,
+    llmconcurrency,
+    lowvram,
+    memorybudget,
+    upstreamrecord,
+    videodesktop,
+)
 from .backend import CardFacts
 from .capabilityrecord import DESKTOP_BASIS_STATED, CapabilityRecord, desktop_reserve_words
 from .capabilitystore import decide_on, record_of
 from .capabilitywords import low_vram_refusal_note
 from .clock import utcnow
-from .config import Config, LocalModelRecord, RouteRecord, _advertised, load_config, write_config
+from .config import (
+    Config,
+    LocalModelRecord,
+    RouteRecord,
+    _advertised,
+    _cors_origins,
+    check_bind_host,
+    check_max_session_hold_s,
+    check_port,
+    check_retention_days,
+    check_server_name,
+    load_config,
+    unowned_table,
+    write_config,
+)
 from .errors import ApiError, ConfigError
 from .events import SETTINGS, EventHub
 from .fit import on_host
 from .upstreamrecord import UPSTREAM_DISPLAY, UPSTREAM_NAMES, UpstreamRecord
 
 HISTORY_LIMIT = 20
-
-PATCH_KEYS: frozenset[str] = frozenset(
-    {
-        "routes",
-        "upstreams",
-        "local_models",
-        "desktop_allowance_bytes",
-        "tailscale_advertise",
-        "lan_advertise",
-    }
-)
-
 
 class History:
 
@@ -153,6 +164,112 @@ def document(
         "lan_advertise": list(config.lan_advertise),
         "audio_low_vram": low_vram_entry(config),
         "llm_concurrency": llmconcurrency.rows(config, resident),
+        **server_entries(config),
+    }
+
+
+# A table nothing in Settings writes, shown as the file has it: [video_trial] lifts the
+# declared clip limits for a measurement and is set by the person running it.
+READ_ONLY_TABLES: tuple[str, ...] = ("video_trial",)
+
+
+def server_entries(config: Config) -> dict[str, Any]:
+    """The [server], [auth], [jobs], [queue], [hf], [tts] and [video_desktop] keys, as
+    Settings shows them. The bearer token and the Hugging Face token are never in it:
+    `token_hint` and `hf.token_hint` are their last four characters."""
+    return {
+        "name": config.name,
+        "host": config.host,
+        "port": config.port,
+        "advertise": list(config.advertise),
+        "cors_origins": list(config.cors_origins),
+        "open_pairing": config.open_pairing,
+        "install_on_submit": config.install_on_submit,
+        "retention_days": config.retention_days,
+        "max_session_hold_s": config.max_session_hold_s,
+        "token_hint": _hint(config.token),
+        "hf": hf_entry(config),
+        "video_desktop": video_desktop_entry(config),
+        "tts_engines": [
+            {"engine": entry.engine, **entry.to_dict()} for entry in config.tts_engines
+        ],
+        "read_only_tables": {
+            name: table
+            for name in READ_ONLY_TABLES
+            if (table := unowned_table(config.path, name))
+        },
+    }
+
+
+HINT_CHARS = 4
+
+
+def _hint(secret: str) -> str:
+    return f"…{secret[-HINT_CHARS:]}"
+
+
+def hf_entry(config: Config) -> dict[str, Any]:
+    """`[hf] token`, write-only. `from_environment`: $HF_TOKEN is set in this server's
+    environment, which wins over the file (weights.hf_token_at)."""
+    import os
+
+    from .weights import HF_TOKEN_ENV
+
+    token = unowned_table(config.path, "hf").get("token")
+    configured = isinstance(token, str) and token.strip() != ""
+    return {
+        "configured": configured,
+        "token_hint": _hint(token.strip()) if configured else None,
+        "from_environment": os.environ.get(HF_TOKEN_ENV, "").strip() != "",
+    }
+
+
+def video_desktop_entry(config: Config) -> dict[str, Any] | None:
+    """`[video_desktop]` on the one backend whose video engine reads it; None elsewhere."""
+    if config.backend_kind != videodesktop.BACKEND:
+        return None
+    return {"rows": videodesktop.rows(unowned_table(config.path, videodesktop.TABLE))}
+
+
+def live_document(
+    config: Config,
+    *,
+    installed: Mapping[str, bool],
+    resident: Any,
+    resident_voice: Any,
+    job_types: list[dict[str, Any]],
+    bound: tuple[str, int],
+) -> dict[str, Any]:
+    """The settings document with what only the running server knows: the address it
+    listens on now (`bound`, and `restart_pending`, the keys written that wait for a
+    restart), every job type's flag and verdict, and the voice on the card with the
+    [tts.<engine>] numbers it was started with."""
+    found = document(config, installed=installed, resident=resident)
+    host, port = bound
+    found["bound"] = {"host": host, "port": port}
+    found["restart_pending"] = [
+        key for key, now in (("host", host), ("port", port)) if getattr(config, key) != now
+    ]
+    found["job_types"] = job_types
+    for row in found["tts_engines"]:
+        row["resident"] = _resident_on_engine(row, resident_voice)
+    return found
+
+
+ENGINE_LEVERS: tuple[str, ...] = (
+    "memory_bytes_estimate", "max_num_seqs", "mem_fraction", "context_length",
+)
+
+
+def _resident_on_engine(row: dict[str, Any], voice: Any) -> dict[str, Any] | None:
+    """The voice on the card served by this row's engine, the numbers it was started
+    with, and whether those differ from the row's (it takes the row's at its next load)."""
+    if voice is None or voice.narrator_engine != row["engine"] or voice.levers is None:
+        return None
+    return {
+        "voice": voice.voice_id,
+        "levers": dict(voice.levers),
+        "reload_needed": any(voice.levers.get(k) != row.get(k) for k in ENGINE_LEVERS),
     }
 
 
@@ -164,6 +281,37 @@ def low_vram_entry(config: Config) -> dict[str, Any] | None:
     if decided is None or decided.need.verdict == lowvram.NOT_OFFERED:
         return None
     return decided.to_dict()
+
+
+# Keys that take effect only when the server starts again: the address it listens on.
+RESTART_KEYS: tuple[str, ...] = ("host", "port")
+
+
+@dataclass
+class ServerKeys:
+    """The [server], [auth] and [jobs] keys Settings writes, as they will be written."""
+
+    name: str
+    host: str
+    port: int
+    advertise: tuple[str, ...]
+    cors_origins: tuple[str, ...]
+    open_pairing: bool
+    install_on_submit: bool
+    retention_days: int
+
+    @classmethod
+    def of(cls, config: Config) -> "ServerKeys":
+        return cls(
+            name=config.name,
+            host=config.host,
+            port=config.port,
+            advertise=config.advertise,
+            cors_origins=config.cors_origins,
+            open_pairing=config.open_pairing,
+            install_on_submit=config.install_on_submit,
+            retention_days=config.retention_days,
+        )
 
 
 class Resolved:
@@ -192,6 +340,10 @@ class Resolved:
         )
         self.tailscale_advertise = config.tailscale_advertise
         self.lan_advertise = config.lan_advertise
+        self.server = ServerKeys.of(config)
+        # Keys set in tables this writer does not own ([queue], [hf], [video_desktop]);
+        # None removes a key.
+        self.unowned: dict[str, dict[str, Any]] = {}
         self.removed: set[str] = set()
         self.changed: list[str] = []
         self.touched_routes = False
@@ -487,6 +639,157 @@ def _resolve_lan_advertise(config: Config, resolved: Resolved, value: Any) -> No
         resolved.changed.append("lan_advertise")
 
 
+def _refused(exc: ConfigError, field: str) -> ApiError:
+    """A config reader's refusal, as the Settings door answers it: 400 with the field.
+    A reader that names its refusal (`code: sentence`) keeps that name."""
+    named, colon, rest = str(exc).partition(": ")
+    if colon and named.replace("_", "").isalpha() and named.islower():
+        return ApiError(400, named, rest, {"field": field})
+    return ApiError(400, "invalid_request", str(exc), {"field": field})
+
+
+def _checked(check: Callable[[Any, str], Any], value: Any, field: str) -> Any:
+    try:
+        return check(value, f"settings {field}")
+    except ConfigError as exc:
+        raise _refused(exc, field) from None
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ApiError(
+            400, "invalid_request", f"{field} is true or false, got {value!r}",
+            {"field": field},
+        )
+    return value
+
+
+def _note(resolved: Resolved, old: Any, new: Any, words: str) -> None:
+    if new != old:
+        resolved.changed.append(words)
+
+
+def _resolve_name(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.name = _checked(check_server_name, value, "name")
+    _note(resolved, config.name, value, f"[server] name = {value}")
+
+
+def _resolve_host(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.host = _checked(check_bind_host, value, "host")
+    _note(resolved, config.host, value,
+          f"[server] host = {value} (takes effect when Crucible restarts)")
+
+
+def port_fixed_by_windows(config: Config) -> str | None:
+    """Why this server's port is not this server's to choose, or None when it is. The
+    Windows host reaches its engine (the WSL2 guest, or its own child) on one fixed
+    port, platform/paths.py ENGINE_PORT, and has no setting to follow another."""
+    from .backend import LLAMA_WINDOWS
+    from .platform.paths import ENGINE_PORT
+    from .service import in_wsl
+
+    if config.backend_kind == LLAMA_WINDOWS or in_wsl():
+        return (
+            f"the Windows host reaches this engine on port {ENGINE_PORT} and has no "
+            "setting to follow another, so the PC would lose its engine. On a PC the "
+            f"port stays {ENGINE_PORT}"
+        )
+    return None
+
+
+def _resolve_port(config: Config, resolved: Resolved, value: Any) -> None:
+    port = _checked(check_port, value, "port")
+    if port != config.port:
+        fixed = port_fixed_by_windows(config)
+        if fixed is not None:
+            raise ApiError(409, "port_fixed_by_windows_host", fixed, {"field": "port"})
+    resolved.server.port = port
+    _note(resolved, config.port, port,
+          f"[server] port = {port} (takes effect when Crucible restarts)")
+
+
+def _resolve_advertise(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.advertise = _advertise_list(value, "advertise")
+    _note(resolved, config.advertise, resolved.server.advertise, "[server] advertise")
+
+
+def _resolve_cors_origins(config: Config, resolved: Resolved, value: Any) -> None:
+    try:
+        resolved.server.cors_origins = _cors_origins({"server": {"cors_origins": value}})
+    except ConfigError as exc:
+        raise _refused(exc, "cors_origins") from None
+    _note(resolved, config.cors_origins, resolved.server.cors_origins,
+          "[server] cors_origins")
+
+
+def _resolve_open_pairing(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.open_pairing = _require_bool(value, "open_pairing")
+    _note(resolved, config.open_pairing, value,
+          f"[auth] open_pairing = {str(value).lower()}")
+
+
+def _resolve_install_on_submit(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.install_on_submit = _require_bool(value, "install_on_submit")
+    _note(resolved, config.install_on_submit, value,
+          f"[jobs] install_on_submit = {str(value).lower()}")
+
+
+def _resolve_retention_days(config: Config, resolved: Resolved, value: Any) -> None:
+    resolved.server.retention_days = _checked(check_retention_days, value, "retention_days")
+    _note(resolved, config.retention_days, value, f"[jobs] retention_days = {value}")
+
+
+def _resolve_max_session_hold_s(config: Config, resolved: Resolved, value: Any) -> None:
+    held = _checked(check_max_session_hold_s, value, "max_session_hold_s")
+    resolved.unowned.setdefault("queue", {})["max_session_hold_s"] = held
+    _note(resolved, config.max_session_hold_s, held, f"[queue] max_session_hold_s = {held}")
+
+
+HF_TOKEN_LEAST_CHARS = 8
+
+
+def _resolve_hf_token(config: Config, resolved: Resolved, value: Any) -> None:
+    if value is not None and (
+        not isinstance(value, str)
+        or len(value.strip()) < HF_TOKEN_LEAST_CHARS
+        or any(c.isspace() for c in value.strip())
+    ):
+        raise ApiError(
+            400,
+            "invalid_request",
+            "hf_token is a Hugging Face access token (hf_...), one word of at least "
+            f"{HF_TOKEN_LEAST_CHARS} characters, or null to remove it",
+            {"field": "hf_token"},
+        )
+    token = None if value is None else value.strip()
+    resolved.unowned.setdefault("hf", {})["token"] = token
+    resolved.changed.append("[hf] token " + ("removed" if token is None else "set"))
+
+
+def _resolve_video_desktop(config: Config, resolved: Resolved, value: Any) -> None:
+    table = _require_object(value, "video_desktop")
+    if config.backend_kind != videodesktop.BACKEND:
+        raise ApiError(
+            409,
+            "video_desktop_not_here",
+            f"[video_desktop] is read only by the video engine on {videodesktop.BACKEND}; "
+            f"this server runs {config.backend_kind}, so nothing would read it",
+            {"field": "video_desktop"},
+        )
+    keys = resolved.unowned.setdefault(videodesktop.TABLE, {})
+    for key in sorted(table):
+        entry = table[key]
+        if entry is not None:
+            try:
+                videodesktop.check_key(key, entry)
+            except ConfigError as exc:
+                raise _refused(exc, f"video_desktop.{key}") from None
+        keys[key] = entry
+        resolved.changed.append(
+            f"[video_desktop] {key} = " + ("the default" if entry is None else repr(entry))
+        )
+
+
 SectionResolver = Callable[[Config, Resolved, Any], None]
 
 SECTION_RESOLVERS: tuple[tuple[str, SectionResolver], ...] = (
@@ -496,7 +799,20 @@ SECTION_RESOLVERS: tuple[tuple[str, SectionResolver], ...] = (
     ("local_models", _resolve_local_models),
     ("tailscale_advertise", _resolve_tailscale_advertise),
     ("lan_advertise", _resolve_lan_advertise),
+    ("name", _resolve_name),
+    ("host", _resolve_host),
+    ("port", _resolve_port),
+    ("advertise", _resolve_advertise),
+    ("cors_origins", _resolve_cors_origins),
+    ("open_pairing", _resolve_open_pairing),
+    ("install_on_submit", _resolve_install_on_submit),
+    ("retention_days", _resolve_retention_days),
+    ("max_session_hold_s", _resolve_max_session_hold_s),
+    ("hf_token", _resolve_hf_token),
+    ("video_desktop", _resolve_video_desktop),
 )
+
+PATCH_KEYS: frozenset[str] = frozenset(key for key, _ in SECTION_RESOLVERS)
 
 
 def resolve(config: Config, patch: Any) -> Resolved:
@@ -587,6 +903,24 @@ def recomputed_capability(
     )
 
 
+def _written_server_keys(config: Config, resolved: Resolved) -> dict[str, Any]:
+    server = resolved.server
+    return {
+        "name": server.name,
+        "host": server.host,
+        "port": server.port,
+        "token": config.token,
+        "advertise": server.advertise,
+        "cors_origins": server.cors_origins,
+        "open_pairing": server.open_pairing,
+        "install_on_submit": server.install_on_submit,
+        "retention_days": server.retention_days,
+        "tailscale_advertise": resolved.tailscale_advertise,
+        "lan_advertise": resolved.lan_advertise,
+        "unowned": resolved.unowned,
+    }
+
+
 def apply(
     config: Config,
     resolved: Resolved,
@@ -597,10 +931,6 @@ def apply(
     routes, upstreams, local_models = resolved.as_records()
     write_config(
         config.home,
-        name=config.name,
-        host=config.host,
-        port=config.port,
-        token=config.token,
         backend_kind=config.backend_kind,
         enable_echo=config.enable_echo,
         enable_llm=config.enable_llm,
@@ -613,7 +943,6 @@ def apply(
         enable_audio=config.enable_audio,
         enable_segment=config.enable_segment,
         enable_video=config.enable_video,
-        retention_days=config.retention_days,
         tts_engines=config.tts_engines,
         desktop_allowance_bytes=resolved.desktop_allowance_bytes,
         desktop_allowance_basis=resolved.desktop_allowance_basis,
@@ -627,16 +956,13 @@ def apply(
         routes=routes,
         upstreams=upstreams,
         local_models=local_models,
-        advertise=config.advertise,
-        tailscale_advertise=resolved.tailscale_advertise,
-        lan_advertise=resolved.lan_advertise,
-        open_pairing=config.open_pairing,
         # Written with the record it was decided with, never apart from it.
         audio_low_vram=(
             resolved.low_vram.setting
             if resolved.low_vram is not None and resolved.low_vram.changed
             else None
         ),
+        **_written_server_keys(config, resolved),
     )
     config.adopt(load_config(config.home))
 
@@ -648,6 +974,8 @@ __all__ = [
     "Resolved",
     "apply",
     "document",
+    "live_document",
+    "server_entries",
     "local_selection",
     "recomputed_capability",
     "resolve",

@@ -48,12 +48,20 @@ class Entry:
 
 
 class PairingRequests:
+    """`open_pairing` is asked at every request rather than held: it reads the live
+    config's `[auth] open_pairing`, so a change in Settings or in the file applies to
+    the next app that asks, with no restart."""
+
     def __init__(self, clock: Callable[[], float] = time.monotonic,
-                 *, open_pairing: bool):
+                 *, open_pairing: Callable[[], bool]):
         self.clock = clock
-        self.open_pairing = open_pairing
+        self._open_pairing = open_pairing
         self.entries: dict[str, Entry] = {}
         self.lock = threading.Lock()
+
+    @property
+    def open_pairing(self) -> bool:
+        return self._open_pairing()
 
     def _expire(self, now: float) -> None:
         self.entries = {key: entry for key, entry in self.entries.items() if entry.expires > now}

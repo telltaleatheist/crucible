@@ -128,6 +128,35 @@ def write_capability(
     return Recorded(path, low_vram.change_sentence if low_vram.changed else None)
 
 
+def turned_off(
+    config: Config, decisions: tuple[verdict.Decision, ...]
+) -> dict[str, bool]:
+    """The [jobs] flags that are on and that `decisions` say this host cannot hold. A
+    re-record only ever turns a type OFF; turning one on is an install."""
+    return {
+        f"enable_{name}": False
+        for name in sorted({d.job_type for d in decisions})
+        if getattr(config, f"enable_{name}")
+        and not verdict.job_type_enabled(name, decisions)
+    }
+
+
+@dataclass(frozen=True)
+class Rerecorded:
+    decisions: tuple[verdict.Decision, ...]
+    turned_off: dict[str, bool]
+    recorded: Recorded
+
+
+def rerecord(config: Config, backend: Backend) -> Rerecorded:
+    """`crucible capability --write`: decide this card again and record it, turning off
+    any type it can no longer hold. Records are re-made by a person, never on a timer
+    (Owen); the CLI and Settings' "Re-measure this card" are that person's two doors."""
+    decisions = decide_for(config, backend)
+    off = turned_off(config, decisions)
+    return Rerecorded(decisions, off, write_capability(config, backend, decisions, off))
+
+
 @dataclass(frozen=True)
 class Redecided:
     decisions: tuple[verdict.Decision, ...]
@@ -181,12 +210,15 @@ __all__ = [
     "LowVramSet",
     "Recorded",
     "Redecided",
+    "Rerecorded",
     "decide_for",
     "decide_on",
     "low_vram_for",
     "low_vram_not_offered",
     "record_of",
     "redecide",
+    "rerecord",
     "set_low_vram",
+    "turned_off",
     "write_capability",
 ]

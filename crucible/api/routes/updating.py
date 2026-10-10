@@ -5,13 +5,18 @@ working?" rather than after it.
 """
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from ... import selfrestart, service
 from ...errors import ApiError
-from ...updating import DEFAULT_HOLD_S, MAX_HOLD_S
+from ...inflight import read_act
+from ...tasks import hostdoor
+from ...updating import DEFAULT_HOLD_S, FOR_SETTINGS, MAX_HOLD_S
 from ..caller import client_agent
 from ..context import AppContext, Routers
 
@@ -65,6 +70,17 @@ def working(ctx: AppContext) -> list[str]:
     return found
 
 
+def _working_refusal(busy: list[str], what: str) -> ApiError:
+    return ApiError(
+        409,
+        SERVER_WORKING,
+        f"this server is working, so it was not {what} and goes on admitting work: "
+        + "; ".join(busy)
+        + ". A restart now would cut that short; ask again when it is done",
+        {"working": busy},
+    )
+
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
 
@@ -82,15 +98,56 @@ def register(routers: Routers, ctx: AppContext) -> None:
         busy = working(ctx)
         if busy:
             ctx.updating.end()
-            raise ApiError(
-                409,
-                SERVER_WORKING,
-                "this server is working, so it was not held for an update and goes on "
-                "admitting work: " + "; ".join(busy) + ". A restart now would cut that "
-                "short; ask again when it is done",
-                {"working": busy},
-            )
+            raise _working_refusal(busy, "held for an update")
         return {"holding": True, **holding.to_dict()}
+
+    @private.post("/server/restart", status_code=202)
+    async def restart_the_server(request: Request) -> dict[str, Any]:
+        """Restart this server so it takes up `host` and `port` (and anything else a
+        start reads), if nothing is working. Refused `409 server_working` naming the
+        work, as `POST /v1/server/updating` is. A server a Windows host started is
+        restarted by that host (an `engine-restart` task, `task_id`); one systemd or
+        launchd runs stops cleanly and its service manager starts it again (`by`).
+        Refused `restart_not_supervised` when nothing would start it again (started
+        from a shell), and `restart_needs_service_install` when the service definition
+        starts it on another address than the config: `details.command` rewrites it
+        and restarts the server. Answers `202` before it stops; poll `GET /v1/ping`
+        at `url` for the server that comes back.
+        """
+        config, client = ctx.config, client_agent(request)
+        url = f"http://{config.host}:{config.port}"
+        if hostdoor.door_from_environment() != "":
+            busy = working(ctx)
+            if busy:
+                raise _working_refusal(busy, "restarted")
+            task = ctx.tasks.submit({"type": "engine-restart"})
+            _record_restart(request, "orchestrator")
+            return {"restarting": True, "by": "orchestrator", "task_id": task.id, "url": url}
+        mechanism = await asyncio.to_thread(
+            lambda: selfrestart.supervisor(
+                config, ctx.backend, runner=service.subprocess_runner,
+                home=service.user_home(), pid=selfrestart.this_pid(),
+            )
+        )
+        ctx.updating.begin(seconds=DEFAULT_HOLD_S, release=None, by=client, reason=FOR_SETTINGS)
+        busy = working(ctx)
+        if busy:
+            ctx.updating.end()
+            raise _working_refusal(busy, "restarted")
+        try:
+            selfrestart.exit_for_restart(ctx.app)
+        except ApiError:
+            ctx.updating.end()
+            raise
+        _record_restart(request, mechanism)
+        return {"restarting": True, "by": mechanism, "pid": os.getpid(), "url": url}
+
+    def _record_restart(request: Request, by: str) -> None:
+        ctx.settings_history.record(
+            act=read_act(request.headers),
+            client=client_agent(request),
+            changed=[f"server restart asked ({by} starts it again)"],
+        )
 
     @private.delete("/server/updating")
     async def release_the_hold() -> dict[str, Any]:

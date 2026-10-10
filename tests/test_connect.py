@@ -37,7 +37,7 @@ def test_pairing_requires_operator_approval_and_device_secret(make_client):
 
 def test_pairing_denial_expiry_and_poll_throttle():
     now = [0.0]
-    store = PairingRequests(lambda: now[0], open_pairing=False)
+    store = PairingRequests(lambda: now[0], open_pairing=lambda: False)
     row = store.start("Foundry", "fixture")
     assert store.poll(row["id"], row["device_code"]) == "pending"
     with pytest.raises(ApiError) as busy:
@@ -57,7 +57,7 @@ def test_pairing_denial_expiry_and_poll_throttle():
 
 def test_pairing_requests_are_bounded_and_expire():
     now = [0.0]
-    store = PairingRequests(lambda: now[0], open_pairing=False)
+    store = PairingRequests(lambda: now[0], open_pairing=lambda: False)
     store.start("one", "same-ip")
     with pytest.raises(ApiError):
         store.start("two", "same-ip")

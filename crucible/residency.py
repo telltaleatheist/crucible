@@ -147,6 +147,10 @@ class ResidentVoice:
     log_path: Path
     loaded_at: str
     reference: dict[str, Any] | None = None
+    # The config's [tts.<engine>] numbers this voice's engine was started with
+    # (memory_bytes_estimate, max_num_seqs, mem_fraction, context_length): Settings
+    # compares them with the file to say a voice on the card is running older ones.
+    levers: dict[str, Any] | None = None
 
     @property
     def id(self) -> str:

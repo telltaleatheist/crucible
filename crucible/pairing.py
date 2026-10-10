@@ -183,6 +183,25 @@ def write_pairing_line(
     return path
 
 
+# The pairing file is for apps on this computer, so it names this server on loopback.
+LOCAL_HOST = "127.0.0.1"
+
+
+def local_pairing_line(name: str, port: int, token: str) -> str:
+    return pairing_line(name, f"http://{LOCAL_HOST}:{port}", token)
+
+
+def sync_pairing_file(home: Path, *, name: str, port: int, token: str) -> Path | None:
+    """Write the local pairing line for this name, port and token when the file says
+    anything else; the path written, or None when it already said it. The Windows host
+    reads a guest's token from this file, and apps on this computer connect with it, so
+    a new token or name is written here the moment it is in the config."""
+    wanted = local_pairing_line(name, port, token)
+    if read_pairing_file(home) == wanted:
+        return None
+    return write_pairing_file(home, wanted)
+
+
 def read_pairing_file(home: Path) -> str | None:
     path = pairing_file_path(Path(home))
     if not path.is_file():
@@ -192,12 +211,15 @@ def read_pairing_file(home: Path) -> str | None:
 
 
 __all__ = [
+    "LOCAL_HOST",
     "PAIRING_FILENAME",
     "Pairing",
     "SCHEME",
     "PairingFileError",
     "icacls_argv",
+    "local_pairing_line",
     "pairing_file_path",
+    "sync_pairing_file",
     "pairing_line",
     "pairing_lines",
     "parse_pairing_line",

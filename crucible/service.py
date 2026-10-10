@@ -815,6 +815,58 @@ def restart(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     raise ServiceError(f"there is no service mechanism called {mechanism!r}")
 
 
+# What a server exits with when it asks its service manager to start it again. Both
+# definitions this module writes start a server that exits with it: the systemd unit's
+# `Restart=always` restarts any exit, and the launchd agent's KeepAlive
+# `SuccessfulExit = false` restarts any exit that is not 0 (EX_TEMPFAIL: "try again").
+SELF_RESTART_EXIT = 75
+
+
+@dataclass(frozen=True)
+class Defined:
+    """What an installed definition starts: the address `serve` is given, and whether
+    the manager starts the server again when it exits with SELF_RESTART_EXIT."""
+
+    host: str | None
+    port: int | None
+    restarts_on_exit: bool
+
+
+def _flag_value(argv: Sequence[str], flag: str) -> str | None:
+    for index, value in enumerate(argv[:-1]):
+        if value == flag:
+            return argv[index + 1]
+    return None
+
+
+def _defined_from(argv: Sequence[str], restarts: bool) -> Defined:
+    port = _flag_value(argv, "--port")
+    return Defined(
+        host=_flag_value(argv, "--host"),
+        port=int(port) if port is not None and port.isdigit() else None,
+        restarts_on_exit=restarts,
+    )
+
+
+def read_defined(mechanism: str, home: Path) -> Defined | None:
+    """The installed definition's address and restart policy; None when there is none."""
+    path = definition_path(mechanism, home)
+    if not path.is_file():
+        return None
+    if mechanism == LAUNCHD:
+        with path.open("rb") as handle:
+            document = plistlib.load(handle)
+        keep = document.get("KeepAlive")
+        restarts = isinstance(keep, dict) and keep.get("SuccessfulExit") is False
+        arguments = document.get("ProgramArguments")
+        return _defined_from(arguments if isinstance(arguments, list) else [], restarts)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next((line for line in lines if line.startswith("ExecStart=")), "")
+    restarts = any(line.strip() == "Restart=always" for line in lines)
+    argv = start.removeprefix("ExecStart=").replace("%%", "%").split()
+    return _defined_from(argv, restarts)
+
+
 def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
     if mechanism == SYSTEMD:
         scope = installed_scope(home)
@@ -842,6 +894,8 @@ def stop(mechanism: str, *, home: Path, runner: Runner) -> list[str]:
 
 __all__ = [
     "CONSOLE_SCRIPT",
+    "Defined",
+    "SELF_RESTART_EXIT",
     "LAUNCHD",
     "LAUNCHD_LABEL",
     "Ran",
@@ -855,6 +909,7 @@ __all__ = [
     "definition_path",
     "install",
     "launchd_plist_text",
+    "read_defined",
     "read_recorded_path",
     "mechanism_for",
     "parse_launchctl_list",

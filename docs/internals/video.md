@@ -490,6 +490,11 @@ removed when the measuring is done.
 
 ## Keeping the desktop responsive: `[video_desktop]`
 
+The keys, defaults and ranges live in `crucible/videodesktop.py`, which this reader and the
+operator page's Settings (`PUT /v1/settings` `video_desktop`) share. Settings refuses a
+value out of range by name; the reader below skips one and runs the default, and
+Settings shows that row with the reason.
+
 Measured on the Mac Studio (M1 Ultra, 2026-09-30): during a 20 s 1280x704 render (53,680 video
 tokens in the full-size pass, allowed there by `[video_trial]`), the refining stage holds the
 GPU at 100% active residency with no idle time. The cursor freezes now and then, because

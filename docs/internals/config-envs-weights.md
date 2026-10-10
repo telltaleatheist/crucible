@@ -70,13 +70,21 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   true, nor a rewriter written before `image` existed turn the image type off. A config
   with no `enable_image` key (every config before 2026-09-28) reads it as false.
   `enable_audio`, `enable_segment` and `enable_video` (all 2026-09-29) follow the same rule.
-- **`rewrite_config(config, flags=, audio_low_vram=AudioLowVram)`** writes a loaded config back with
-  only the named settings changed: token, capability record, routes, upstreams, local
-  models, `[tts.*]`, advertise lists, `cors_origins`, `install_on_submit` and every
-  unowned table are passed through. It is the door for `crucible jobs enable|disable` and
-  `crucible audio low-vram`, which exist because the only other way to turn a type on
-  after install was a hand edit in a distro the operator may not know exists, or
-  `init --force`, which mints a new token (2026-10-08, a laptop install).
+- **`rewrite_config(config, flags=, audio_low_vram=AudioLowVram, ...)`** writes a loaded
+  config back with only the named settings changed: every keyword left None (`name`,
+  `host`, `port`, `token`, `open_pairing`, the advertise lists, `cors_origins`,
+  `install_on_submit`, `retention_days`, `tts_engines`) is written as it was read, and the
+  capability record, routes, upstreams, local models and every unowned table are passed
+  through. `unowned={"queue": {...}, "hf": {...}, "video_desktop": {...}}` sets keys in a
+  table this writer does not own (None removes one, an emptied table is dropped) and keeps
+  the rest of that table; naming an owned table there is refused. It is the door for
+  `crucible jobs enable|disable`, `crucible audio low-vram` and every Settings route,
+  which exist because the only other way to turn a type on after install was a hand edit
+  in a distro the operator may not know exists, or `init --force`, which mints a new
+  token (2026-10-08, a laptop install).
+- `load_config` checks `[server] name` (one line), `host` (an IP address or host name,
+  no scheme or port) and `port` (1-65535) with `check_server_name`, `check_bind_host` and
+  `check_port`, the same checks the Settings door refuses with.
 - `carried_tables` (used only by `crucible init --config-from`) copies whole tables
   unchanged, so keys this build does not know are preserved. A table that is both
   typed and carried is refused.
@@ -94,6 +102,7 @@ default. Values of the wrong type are refused, not coerced; for example,
 | `[jobs] retention_days` | 7 | Owen 2026-09-18. This is a backstop: a job is reaped as soon as its artifacts are fetched. 0 and negative values are refused, because retention cannot be turned off. |
 | `[jobs] install_on_submit` | true | Owen 2026-09-26: *"yes, we need to install a missing environment when a job is submitted"*. `POST /v1/jobs` reads it on every request. |
 | `[audio] low_vram` | absent (off, Crucible decides) | Owen 2026-10-08: *"a configuration for systems with low ram, not for high ram systems like this pc. only for victoria's laptop"*. Holds only the half of YuE2 a stage uses on the card (docs/AUDIO.md); a model without a `low_vram_memory_bytes_estimate` ignores it. Read at each load (the server follows the file). Who decided it is the second key: `low_vram` alone is a person's and nothing else changes it; `low_vram = true` with `low_vram_auto = true` is Crucible's, written by `capabilitystore.write_capability` with the record on a card that needs it (crucible/lowvram.py), and decided again with every record; neither key is Crucible's off. `low_vram_auto` without `low_vram` is refused by name. `write_config` does not own `[audio]`, so a rewrite keeps it; `write_config(audio_low_vram=AudioLowVram)` sets the two keys and keeps the rest of the table. An older Crucible reads `low_vram` and ignores `low_vram_auto`, so a rollback keeps the value. |
+| `[hf] token` | absent | Read for gated pulls (`weights.hf_token_at`); `$HF_TOKEN` in the server's environment wins over it. Set from Settings write-only (`hf_token`), shown only as `hf.token_hint`. `write_config` does not own `[hf]`; Settings sets `token` and keeps any other key in the table. |
 | `[queue] max_session_hold_s` | absent (no limit) | Owen 2026-10-01: some runs take a day, so a queue session stays open as long as its client keeps using it. Set it to end any session open longer than this many seconds (reason `max_hold`); 0 is no limit, a negative value is refused. Read live. `write_config` does not own `[queue]`, so a rewrite keeps it. |
 
 Always-written keys (`install_on_submit`, `retention_days`,
@@ -187,6 +196,50 @@ different server. `follow_file()` re-reads when the file's `(mtime_ns, size)` st
 changes, so a write from another process (`crucible install`, `crucible capability
 --write`) reaches a running server. The stamp is taken before the read. A file that
 does not parse leaves the last good document in place.
+
+## Every key from the operator page
+
+Owen 2026-10-09: *"we should be able to change everything in the config file from the
+crucible ui. for things that require it to restart to take effect, it should ask the
+user if they want it to restart."* Every key is in one of four places:
+
+| how it applies | keys | door |
+|---|---|---|
+| live, on the next request | `[server] name`, `advertise`, `tailscale_advertise`, `lan_advertise`, `cors_origins`; `[auth] open_pairing`; `[jobs] install_on_submit`, `retention_days`; `[queue] max_session_hold_s`; `[hf] token`; `[video_desktop] *` (mlx-darwin); plus routes, upstreams, local models, the desktop allowance, `[audio] low_vram`, `[llm.concurrency]` | `PUT /v1/settings` (and the low-vram and concurrency routes) |
+| live, with the same refusals as the CLI | `[jobs] enable_<type>` | `PUT /v1/settings/jobs/{job_type}` = `crucible jobs enable|disable` (`crucible/jobflags.py`) |
+| when a voice loads | `[tts.<engine>]` | `PUT /v1/settings/tts/{engine}` (`crucible/ttslevers.py`); the document's `tts_engines[].resident` names the voice on the card and the numbers it started with, and the page offers its reload (`unload-voice`) |
+| when the server restarts | `[server] host`, `port` | `PUT /v1/settings`, then `POST /v1/server/restart`; until then `restart_pending` lists them and `bound` says the address in use |
+| shown, set by an act | `[auth] token` (`POST /v1/settings/token/rotate`), `[capability]` (`POST /v1/capability/record` = `crucible capability --write`; re-records are a person's act, never automatic), `[backend] kind` (the install), `[video_trial]` (shown read-only; a measurement knob) | |
+
+Not shown: `[orchestrator]` lives in the Windows host's config, not this server's.
+
+- **`[auth] open_pairing` is read live.** `PairingRequests` asks the live config at every
+  request instead of holding the value it started with, so a change in Settings or in the
+  file applies to the next app that asks.
+- **A new token or name rewrites the pairing file at once** (`pairing.sync_pairing_file`):
+  the Windows host reads a guest's token from it and apps on this computer connect with it.
+  Rotating the token answers the new one once; every paired app has to pair again.
+- **A port change is refused on a PC** (`port_fixed_by_windows_host`): the Windows host
+  reaches its engine, WSL guest or its own child, on `ENGINE_PORT` (7100) and has no
+  setting to follow another.
+- **`[video_desktop]` refuses out of range by name** (`video_desktop_out_of_range`,
+  `video_desktop_unknown_key`; ranges in `crucible/videodesktop.py`, which the engine's
+  reader shares). The engine still skips a hand-edited value out of range; the document's
+  row for it says so (`problem`).
+- **The restart** (`crucible/selfrestart.py`). A server a Windows host started is
+  restarted by that host (the `engine-restart` task). A server systemd or launchd runs
+  takes the update hold (reason "to take up a settings change"), refuses
+  `server_working` if anything is working, stops cleanly and exits
+  `service.SELF_RESTART_EXIT` (75), and the definition `crucible service install` wrote
+  starts it again (`Restart=always`; KeepAlive `SuccessfulExit = false`). Both are
+  checked, not assumed: the service's MainPID must be this process
+  (`restart_not_supervised` otherwise: a `crucible serve` by hand would not come back),
+  and the definition must restart on exit and carry the config's host and port. The
+  address is written into the definition, which the server cannot rewrite from inside
+  it (a system unit needs root, and launchd re-reads a plist only on bootstrap), so a
+  changed address is refused `restart_needs_service_install` with `details.command`
+  (`crucible service install`, or `crucible guest service install` for a WSL guest),
+  which writes it and restarts the server onto it.
 
 ## The settings door (`settings.py`)
 

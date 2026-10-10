@@ -9,7 +9,14 @@ from typing import Any
 from .. import cardfacts, installplan, ladder, memorybudget, verdict
 from ..backend import MLX_DARWIN, Backend
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, desktop_reserve_words
-from ..capabilitystore import Redecided, decide_for, low_vram_for, redecide, write_capability
+from ..capabilitystore import (
+    Redecided,
+    decide_for,
+    low_vram_for,
+    redecide,
+    turned_off,
+    write_capability,
+)
 from ..config import Config
 from ..memorybudget import GIB, gib_text
 from . import common
@@ -96,12 +103,7 @@ def cmd_capability(args: argparse.Namespace) -> int:
     decisions = decide_for(config, backend)
     low_vram = low_vram_for(config, backend)
 
-    turn_off = {
-        f"enable_{name}": False
-        for name in sorted({d.job_type for d in decisions})
-        if getattr(config, f"enable_{name}")
-        and not verdict.job_type_enabled(name, decisions)
-    }
+    turn_off = turned_off(config, decisions)
 
     if args.json:
         print(

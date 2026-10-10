@@ -29,6 +29,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/activity` | What this server is doing and how far along, in one read with no job id. |
 | `GET /v1/capability` | What this server can hold, per capability class, and why not; `enabled: false` is an answer, not an error. |
 | `GET /v1/capability/plan` | What an install (`?job_type=`) or a pull (`?subject=`) would give this card, decided live and writing nothing. |
+| `POST /v1/capability/record` | Decide this card again and record it, as `crucible capability --write` does: the operator's "re-measure", never run by itself. |
 | `GET /v1/catalog` | Every subject this backend can hold, installed or not. |
 | `DELETE /v1/catalog/{kind}/{subject_id}` | Delete an installed subject's files. |
 | `POST /v1/decide` | One answer distribution per question, read off the resident model's next-token logprobs; with `items`, one choice answer per item in one request. |
@@ -71,12 +72,16 @@ Every route this server answers and every job type it runs, one line each. The s
 | `GET /v1/resumable` | Every resume journal this server keeps, newest first, with progress, inputs and expiry. |
 | `GET /v1/resumable/{resume_id}` | One journal, as `GET /v1/resumable` lists it. |
 | `DELETE /v1/resumable/{resume_id}` | Discard a journal now; refused `resume_in_use` while a job writes it. |
+| `POST /v1/server/restart` | Restart this server so it takes up `host` and `port` (and anything else a start reads), if nothing is working. |
 | `POST /v1/server/updating` | Stop admitting work so a deploy can restart this server, if nothing is working. |
 | `DELETE /v1/server/updating` | Let go of an update hold (a deploy whose install failed): work is admitted again. |
-| `GET /v1/settings` | Where each class's work runs and which upstreams are configured. |
-| `PUT /v1/settings` | Apply a partial settings patch, whole or not at all, live without a restart. |
+| `GET /v1/settings` | Every setting in config.toml this server reads, and what the running server is doing with them: where each class's work runs, the upstreams, the [server], [auth], [jobs], [queue], [hf], [tts.<engine>] and (on mlx-darwin) [video_desktop] keys, every job type's flag and verdict, the address it listens on now (`bound`) and the keys that wait for a restart (`restart_pending`). |
+| `PUT /v1/settings` | Apply a partial settings patch, whole or not at all. |
 | `PUT /v1/settings/audio/low-vram` | Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off` are the operator's and Crucible never changes them; `auto` lets Crucible turn it on exactly where this card cannot hold a splittable audio model whole. |
+| `PUT /v1/settings/jobs/{job_type}` | Turn a job type on or off with `{"enabled": true \| false}`, as `crucible jobs enable\|disable` does and with the same refusals: `job_type_undecided` (no capability record), `job_type_cannot_hold` (the card cannot hold it) and `env_not_built` (install it instead). |
 | `PUT /v1/settings/llm/concurrency` | Set how many requests one chat model runs at once on this server, with `{"model": id, "width": n}`, or `{"model": id, "width": null}` for what its manifest states. |
+| `POST /v1/settings/token/rotate` | Replace this server's bearer token with a new one, at once. |
+| `PUT /v1/settings/tts/{engine}` | Change `[tts.<engine>]` with an object of its keys: `memory_bytes_estimate`, `estimate_basis`, `estimate_note`, `max_num_seqs`, `max_num_seqs_note`, `mem_fraction`, `mem_fraction_note`, `context_length`, `context_length_note` (null removes an optional one). |
 | `POST /v1/settings/upstreams/{name}/test` | List what an upstream serves, using the body's `key` or `url` when given, else the stored record. |
 | `GET /v1/setup` | Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`. |
 | `GET /v1/tasks` | The last few tasks, newest first. |
@@ -286,13 +291,21 @@ What an install (`?job_type=`) or a pull (`?subject=`) would give this card, dec
 
 *Answers:* `200`
 
+### `POST /v1/capability/record`
+
+Decide this card again and record it, as `crucible capability --write` does: the operator's "re-measure", never run by itself. A job type the card can no longer hold is turned off (`turned_off`); none is turned on, which is an install. Answers what was recorded and `low_vram_change`, the sentence when `[audio] low_vram` moved with it; read `GET /v1/capability` for the rows.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
 ## Settings
 
 The one door apps configure Crucible through. Crucible is set-and-forget; everything an app wants changed is written here.
 
 ### `GET /v1/settings`
 
-Where each class's work runs and which upstreams are configured. A key is never returned; `key_hint` shows its last four characters.
+Every setting in config.toml this server reads, and what the running server is doing with them: where each class's work runs, the upstreams, the [server], [auth], [jobs], [queue], [hf], [tts.<engine>] and (on mlx-darwin) [video_desktop] keys, every job type's flag and verdict, the address it listens on now (`bound`) and the keys that wait for a restart (`restart_pending`). No secret is returned: `key_hint`, `token_hint` and `hf.token_hint` show the last four characters.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -300,7 +313,7 @@ Where each class's work runs and which upstreams are configured. A key is never 
 
 ### `PUT /v1/settings`
 
-Apply a partial settings patch, whole or not at all, live without a restart. Answers the full settings document after the write.
+Apply a partial settings patch, whole or not at all. Live without a restart, except `host` and `port`: those are written and listed in `restart_pending` until the server starts again (`POST /v1/server/restart`). A `port` change is refused `port_fixed_by_windows_host` on a PC, whose Windows host reaches its engine on 7100. `hf_token` is write-only (null removes it); `video_desktop` sets `[video_desktop]` keys on mlx-darwin (null: the default) and refuses a value out of range by name. Answers the full settings document after the write.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -314,6 +327,18 @@ Set `[audio] low_vram` with `{"state": "on" \| "off" \| "auto"}`: `on` and `off`
 
 *Answers:* `200`
 
+### `PUT /v1/settings/jobs/{job_type}`
+
+Turn a job type on or off with `{"enabled": true \| false}`, as `crucible jobs enable\|disable` does and with the same refusals: `job_type_undecided` (no capability record), `job_type_cannot_hold` (the card cannot hold it) and `env_not_built` (install it instead). Taken up by the next request; nothing restarts. Answers the full settings document after the write.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `job_type` | path | yes | string |  |
+
+*Answers:* `200`, `422` HTTPValidationError
+
 ### `PUT /v1/settings/llm/concurrency`
 
 Set how many requests one chat model runs at once on this server, with `{"model": id, "width": n}`, or `{"model": id, "width": null}` for what its manifest states. Only lower than the manifest. Read when the model loads: a model on the card keeps its width (`llm_concurrency[].running`) until it is loaded again. Answers the full settings document after the write.
@@ -321,6 +346,26 @@ Set how many requests one chat model runs at once on this server, with `{"model"
 *Door:* token + `X-Crucible-Api: 1`
 
 *Answers:* `200`
+
+### `POST /v1/settings/token/rotate`
+
+Replace this server's bearer token with a new one, at once. Every app paired with the old token, and the page that asked, is refused from the next request: the answer is the only place the new `token` is said, with the `pairing` lines that carry it. The local pairing file is rewritten with it (`pairing_file_error` says when it could not be).
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `200`
+
+### `PUT /v1/settings/tts/{engine}`
+
+Change `[tts.<engine>]` with an object of its keys: `memory_bytes_estimate`, `estimate_basis`, `estimate_note`, `max_num_seqs`, `max_num_seqs_note`, `mem_fraction`, `mem_fraction_note`, `context_length`, `context_length_note` (null removes an optional one). Checked by the config's own rules: a number carries its note, and a refusal is `tts_lever_invalid` naming the rule. A voice reads them when it loads, so a voice on the card keeps its numbers until it loads again (`tts_engines[].resident`). Answers the full settings document.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `engine` | path | yes | string |  |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/settings/upstreams/{name}/test`
 
@@ -1191,6 +1236,14 @@ The whole API reference as markdown: every route, every job type, every model.
 *Door:* open
 
 *Answers:* `200`
+
+### `POST /v1/server/restart`
+
+Restart this server so it takes up `host` and `port` (and anything else a start reads), if nothing is working. Refused `409 server_working` naming the work, as `POST /v1/server/updating` is. A server a Windows host started is restarted by that host (an `engine-restart` task, `task_id`); one systemd or launchd runs stops cleanly and its service manager starts it again (`by`). Refused `restart_not_supervised` when nothing would start it again (started from a shell), and `restart_needs_service_install` when the service definition starts it on another address than the config: `details.command` rewrites it and restarts the server. Answers `202` before it stops; poll `GET /v1/ping` at `url` for the server that comes back.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+*Answers:* `202`
 
 ### `POST /v1/server/updating`
 

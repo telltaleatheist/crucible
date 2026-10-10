@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from crucible import cli
+from crucible import cli, jobflags
 from crucible.backend import Backend, Gpu
-from crucible.cli import jobs_cmd
 from crucible.config import config_path, load_config
 
 from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND
@@ -56,7 +55,7 @@ def _decided(capsys: pytest.CaptureFixture[str]) -> None:
 
 @pytest.fixture
 def envs_built(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(jobs_cmd, "env_built", lambda _config, _backend, _type: True)
+    monkeypatch.setattr(jobflags, "env_built", lambda _config, _backend, _type: True)
 
 
 def test_jobs_enable_turns_one_flag_on_and_keeps_the_token_and_every_other_table(

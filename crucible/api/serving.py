@@ -48,4 +48,7 @@ def server_for(app: Any, *, host: str, port: int, log_level: str) -> Server:
         log_level=log_level,
         timeout_keep_alive=KEEP_ALIVE_SECONDS,
     )
-    return Server(config, app.state.events)
+    server = Server(config, app.state.events)
+    # The handle POST /v1/server/restart stops the server through (crucible/selfrestart.py).
+    app.state.uvicorn_server = server
+    return server

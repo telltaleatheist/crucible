@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .. import API_VERSION, VERSION, pairing, reach
+from .. import API_VERSION, VERSION, pairing, reach, service
 from ..config import Config
 from . import common, token
 from .common import EXIT_OK, _fail
@@ -47,6 +47,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     else:
         from ..api.serving import server_for
         server_for(app, host=host, port=port, log_level=args.log_level).run()
+    if app.state.restart_asked:
+        # POST /v1/server/restart: the service manager starts the server again on this
+        # exit (crucible/selfrestart.py).
+        print(f"stopped to restart; exiting {service.SELF_RESTART_EXIT} for the service manager")
+        return service.SELF_RESTART_EXIT
     return EXIT_OK
 
 

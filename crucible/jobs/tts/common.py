@@ -367,6 +367,18 @@ def voice_provenance(backend_kind: str, voice_id: str | None) -> dict[str, Any] 
     }
 
 
+def started_levers(manifest: VoiceManifest, spec: VoiceBackendSpec) -> dict[str, Any]:
+    """The [tts.<engine>] numbers a voice loads with, as merged into its manifest from
+    the config (voicerepo.merge): what Settings compares with the file."""
+    serving = manifest.serving
+    return {
+        "memory_bytes_estimate": spec.memory_bytes_estimate,
+        "max_num_seqs": None if serving is None else serving.max_num_seqs,
+        "mem_fraction": None if serving is None else serving.mem_fraction,
+        "context_length": None if serving is None else serving.context_length,
+    }
+
+
 def voice_load_plan(
     config: Config, backend: Any, manifest: VoiceManifest, spec: VoiceBackendSpec
 ) -> "ttsplan.LoadPlan":
@@ -509,6 +521,7 @@ def occupy_voice(
             log_path=log_path,
             loaded_at=utcnow(),
             reference=None if reference is None else reference.to_report(),
+            levers=started_levers(manifest, spec),
         )
         return Occupant(resident, engine=engine)
 

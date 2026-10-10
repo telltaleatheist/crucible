@@ -43,6 +43,11 @@ MAX_HOLD_S = 1800
 RETRY_AFTER_S = 15
 
 
+# Why the server is about to restart, in the words a refused client is told.
+FOR_AN_UPDATE = "for an update"
+FOR_SETTINGS = "to take up a settings change"
+
+
 @dataclass(frozen=True)
 class Holding:
     release: str | None
@@ -50,9 +55,11 @@ class Holding:
     since: datetime
     until: datetime
     deadline: float
+    reason: str = FOR_AN_UPDATE
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "reason": self.reason,
             "release": self.release,
             "by": self.by,
             "since": self.since.isoformat(),
@@ -68,7 +75,14 @@ class UpdateHold:
         self._holding: Holding | None = None
         self._monotonic = monotonic
 
-    def begin(self, *, seconds: int, release: str | None, by: str | None) -> Holding:
+    def begin(
+        self,
+        *,
+        seconds: int,
+        release: str | None,
+        by: str | None,
+        reason: str = FOR_AN_UPDATE,
+    ) -> Holding:
         if not 1 <= seconds <= MAX_HOLD_S:
             raise ApiError(
                 400,
@@ -83,6 +97,7 @@ class UpdateHold:
             since=now,
             until=now + timedelta(seconds=seconds),
             deadline=self._monotonic() + seconds,
+            reason=reason,
         )
         with self._lock:
             self._holding = holding
@@ -114,7 +129,7 @@ class UpdateHold:
         raise ApiError(
             503,
             SERVER_UPDATING,
-            f"this server is about to restart for an update{for_release}, so it is "
+            f"this server is about to restart {holding.reason}{for_release}, so it is "
             f"not starting {what}. Nothing was admitted: ask again in "
             f"{RETRY_AFTER_S}s, and once the new server answers the request is taken "
             "as usual",
@@ -125,6 +140,8 @@ class UpdateHold:
 
 __all__ = [
     "DEFAULT_HOLD_S",
+    "FOR_AN_UPDATE",
+    "FOR_SETTINGS",
     "Holding",
     "MAX_HOLD_S",
     "RETRY_AFTER_S",
