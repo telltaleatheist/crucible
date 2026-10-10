@@ -23,21 +23,43 @@ thinking = false
 # On a PC it runs on llama.cpp, not vLLM. Owen, 2026-10-09: B-Sides only ever makes single
 # requests, so this model gains nothing from vLLM's batching, and on Victoria's RTX 3070 the
 # first vLLM load took 3 min 22 s (Triton JIT, torch.compile, CUDA graphs) and every later
-# one about a minute, on an album that swaps it with the writer. The GGUF is the merged
+# one about a minute, on an album that swaps it with the writer. The GGUFs are the merged
 # repo above at 3e499e62, converted text only (no vision tower) by llama.cpp b10970's
-# convert_hf_to_gguf.py --outtype q8_0: 8 bits is effectively lossless on a 4B for tags and
-# lyrics, and at 4.6 GB it fits an 8 GiB card whole, so one block serves every card and the
-# 4-bit vLLM form is gone. One request at a time (--parallel 1), every layer on the card.
+# convert_hf_to_gguf.py. One request at a time (--parallel 1), every layer on the card.
+#
+# Two FORMS of the same weights, best first (docs/FITS-AND-THE-CARD.md section 8). Owen,
+# 2026-10-10: full precision on the Mac and this PC, 8-bit on Victoria's laptop. Each host
+# serves the best form its card holds (total less the desktop allowance), so the PC's 24 GiB
+# takes bf16 and an 8 GiB card q8_0; B-Sides names the model and never the form.
+#
+# Both GGUFs live in the repo below at one revision (2a9bc567, 2026-10-10), which is why the
+# forms share the block's pin:
+#   qwen3.5-4b-bside-BF16.gguf  8,665,620,064 B
+#     sha256 01b814ccb3384a20d5831d24edfb8a42a7c42e4ad1abbd3d6307c06067be1822
+#   qwen3.5-4b-bside-Q8_0.gguf  4,610,579,872 B (the same file as at 5e326c86)
+#     sha256 b414a76eca78b4470f449e5db424f956ab8ee38554f0ebc1ccd9f809f5645652
 [backends.cuda-linux]
 engine = "llama-server"
 hf_repo = "owenmorgan/qwen3.5-4b-bside-gguf"
-revision = "5e326c86dc5bf31e82b23c37e3b611f347547a0b"
-bits = 8
-file = "qwen3.5-4b-bside-Q8_0.gguf"
+revision = "2a9bc5673485439ecff9fcd55eb81743b1fc0c2f"
 serves = ["text"]
-memory_bytes_estimate = 5_897_450_784
 engine_args = ["--parallel", "1", "--n-gpu-layers", "all"]
 max_context = 131072
+
+# Computed, not measured on a card. Weights: the GGUF's bytes. KV and overhead are the q8_0
+# form's: the cache and the recurrent state are f16/f32 whatever the weights' precision.
+[[backends.cuda-linux.forms]]
+name = "bf16"
+bits = 16
+file = "qwen3.5-4b-bside-BF16.gguf"
+memory_bytes_estimate = 9_952_490_976
+
+[backends.cuda-linux.forms.memory]
+weights_bytes = 8_665_620_064
+overhead_bytes = 750_000_000
+kv_bytes_per_token = 32_768
+basis = "computed"
+measured_at_context = 16384
 
 # Computed, not measured on a card (Victoria's 3070 measures it). Weights: the GGUF's bytes
 # (llama.cpp maps 4,336 MiB of them; the unused MTP layer is the rest). KV: llama.cpp's f16
@@ -45,8 +67,15 @@ max_context = 131072
 # = 32,768 B/token (b10970 on CPU at 16384: "KV buffer size = 512.00 MiB"). Overhead: the
 # gated-deltanet layers' recurrent state, 50.25 MiB for the one slot ("RS buffer size"), plus
 # an allowance of 300 MB for the CUDA compute buffer (85 MiB on the CPU backend) and 400 MB
-# for the CUDA context, cuBLAS and the kernels of one architecture.
-[backends.cuda-linux.memory]
+# for the CUDA context, cuBLAS and the kernels of one architecture. 8 bits is effectively
+# lossless on a 4B for tags and lyrics, and at 4.6 GB it fits an 8 GiB card whole.
+[[backends.cuda-linux.forms]]
+name = "q8_0"
+bits = 8
+file = "qwen3.5-4b-bside-Q8_0.gguf"
+memory_bytes_estimate = 5_897_450_784
+
+[backends.cuda-linux.forms.memory]
 weights_bytes = 4_610_579_872
 overhead_bytes = 750_000_000
 kv_bytes_per_token = 32_768

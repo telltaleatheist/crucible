@@ -55,8 +55,14 @@ class Candidate:
     serves_images: bool = False
 
     @classmethod
-    def of(cls, manifest: Any, backend_kind: str) -> "Candidate":
-        spec = manifest.spec(backend_kind)
+    def of(cls, manifest: Any, backend_kind: str, form: str | None = None) -> "Candidate":
+        """The candidate a manifest's block is here: for a block with forms, the form this
+        host takes, or `form` where one is named."""
+        spec = (
+            manifest.spec(backend_kind)
+            if form is None
+            else manifest.spec(backend_kind, form)
+        )
         return cls(
             id=manifest.id,
             memory_bytes_estimate=spec.memory_bytes_estimate,

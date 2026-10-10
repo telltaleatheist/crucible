@@ -397,6 +397,17 @@ __all__ = [
 
 
 @pytest.fixture(autouse=True)
+def _no_host_outlives_its_test() -> Iterator[None]:
+    """create_app and the CLI register the host whose card picks a model's form
+    (crucible/manifests.py, use_host); a test's host never leaks into the next."""
+    from crucible import manifests
+
+    manifests.use_host_fit(None)
+    yield
+    manifests.use_host_fit(None)
+
+
+@pytest.fixture(autouse=True)
 def _never_the_real_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CRUCIBLE_HOME", str(tmp_path / "unconfigured-home"))
     monkeypatch.delenv("HF_TOKEN", raising=False)

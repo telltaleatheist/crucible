@@ -96,6 +96,7 @@ const MODEL_ROW = {
   memory_bytes_estimate: 21000000000, held_by: null, unclaimed_since: null,
   context_default: 12288,
   max_model_len: 12288,
+  form: null, form_reason: null, forms: null,
 };
 
 const COMPLETION = {
@@ -157,6 +158,7 @@ test('models() reads every field /v1/models promises', async () => {
         memory_bytes_estimate: 54000000000, held_by: null, unclaimed_since: null,
         context_default: 12288,
         max_model_len: 12288,
+        form: null, form_reason: null, forms: null,
       },
       {
         // A model this host's backend cannot serve has no revision here to
@@ -179,6 +181,7 @@ test('models() reads every field /v1/models promises', async () => {
         memory_bytes_estimate: null,
         context_default: 4096,
         max_model_len: null,
+        form: null, form_reason: null, forms: null,
       },
     ]);
 
@@ -205,6 +208,9 @@ test('models() reads every field /v1/models promises', async () => {
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
       maxModelLen: 12288,
+      form: null,
+      formReason: null,
+      forms: null,
     },
     {
       id: 'qwen3.8-27b',
@@ -222,6 +228,9 @@ test('models() reads every field /v1/models promises', async () => {
       memoryBytesEstimate: 54000000000,
       contextDefault: 12288,
       maxModelLen: 12288,
+      form: null,
+      formReason: null,
+      forms: null,
     },
     {
       id: 'mac-only',
@@ -239,9 +248,51 @@ test('models() reads every field /v1/models promises', async () => {
       memoryBytesEstimate: null,
       contextDefault: 4096,
       maxModelLen: null,
+      form: null,
+      formReason: null,
+      forms: null,
     },
   ]);
   assert.equal(models[0]!.reason, null, 'a loadable model carries no reason');
+});
+
+test('a model with forms says which this card takes, why, and each form', async () => {
+  // docs/FITS-AND-THE-CARD.md section 8: one id, its forms best first, the server's pick.
+  const reason = 'q8_0 needs 5.49 GiB and RTX 3070 Laptop gives a model 7.00 GiB';
+  handle = (_request, response) =>
+    json(response, 200, [{
+      ...MODEL_ROW, id: 'qwen3.5-4b-bside', form: 'q8_0', form_reason: reason,
+      forms: [
+        { name: 'bf16', bits: 16, file: 'b-BF16.gguf', memory_bytes_estimate: 9952490976,
+          fits: false, installed: false, picked: false, resident: false,
+          pull_command: 'crucible models pull qwen3.5-4b-bside --form bf16' },
+        { name: 'q8_0', bits: 8, file: 'b-Q8_0.gguf', memory_bytes_estimate: 5897450784,
+          fits: true, installed: true, picked: true, resident: true,
+          pull_command: 'crucible models pull qwen3.5-4b-bside' },
+      ],
+    }]);
+  const [model] = await client().models();
+  assert.equal(model!.form, 'q8_0');
+  assert.equal(model!.formReason, reason);
+  assert.deepEqual(model!.forms!.map((form) => [form.name, form.fits, form.picked]), [
+    ['bf16', false, false],
+    ['q8_0', true, true],
+  ]);
+  assert.equal(model!.forms![0]!.pullCommand, 'crucible models pull qwen3.5-4b-bside --form bf16');
+});
+
+test('form is sent on a chat and on a load only when it is given', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({ model: 'qwen3.5-4b-bside', messages: [{ role: 'user', content: 'hi' }], form: 'bf16' });
+  assert.equal(JSON.parse(lastBody).form, 'bf16');
+  await client().chat({ model: 'qwen3.5-4b-bside', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal('form' in JSON.parse(lastBody), false);
+
+  handle = (_request, response) => json(response, 200, { job_id: 'j1' });
+  await client().loadModel('qwen3.5-4b-bside', { form: 'q8_0' });
+  assert.deepEqual(JSON.parse(lastBody).params, { form: 'q8_0' });
+  await client().loadModel('qwen3.5-4b-bside');
+  assert.deepEqual(JSON.parse(lastBody).params, {});
 });
 
 test('a model row carries weights_of: the base, or null, and never absent', async () => {
@@ -339,6 +390,9 @@ test("info() reads the llm capability's rows with the /models reader", async () 
       memoryBytesEstimate: 21000000000,
       contextDefault: 12288,
       maxModelLen: 12288,
+      form: null,
+      formReason: null,
+      forms: null,
     },
   ]);
   assert.deepEqual(llm.unreadableRows, []);

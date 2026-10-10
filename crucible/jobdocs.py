@@ -167,6 +167,11 @@ JOB_DOCS: dict[str, JobDoc] = {
             "(`context_over_limit`; GET /v1/capability's `generate` row lists it per "
             "model); without it the model's own default is used. A plan that leaves "
             "too little KV cache is refused 409 `insufficient_kv_cache`.",
+            "`form` loads one form of a model that comes in more than one (GET "
+            "/v1/models, the row's `forms`); without it, the form this card takes. "
+            "An unknown name is 400 `unknown_form`; a form this card does not take and "
+            "that is not pulled is 409 `form_not_installed`, with its pull command "
+            "(docs/FITS-AND-THE-CARD.md section 8).",
             LOAD_STAYS,
             INSTALLS_ON_SUBMIT,
             ENGINE_IN_USE,

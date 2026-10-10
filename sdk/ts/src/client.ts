@@ -126,6 +126,7 @@ import {
   type LoadModelOptions,
   type LoadVoiceOptions,
   type ModelDescriptor,
+  type ModelFormInfo,
   type ModelInfo,
   type PagesEngine,
   type Ping,
@@ -1269,7 +1270,10 @@ export class CrucibleClient {
     return this.submit({
       type: 'load-model',
       model: requireText(model, 'model'),
-      params: options?.context === undefined ? {} : { context: options.context },
+      params: {
+        ...(options?.context === undefined ? {} : { context: options.context }),
+        ...(options?.form === undefined ? {} : { form: requireText(options.form, 'form') }),
+      },
       inputs: {},
     });
   }
@@ -1395,6 +1399,7 @@ export class CrucibleClient {
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
     }
     if (given.prefill !== undefined) payload['prefill'] = requireText(given.prefill, 'prefill');
+    if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
     const queue = this.#callQueue(given.queue);
     if (queue !== null) payload['queue'] = queue;
     if (given.contextTokens !== undefined) {
@@ -1437,6 +1442,7 @@ export class CrucibleClient {
     const questions = readDecideQuestions(given.questions);
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     payload['questions'] = decideQuestionsWire(questions);
@@ -1469,6 +1475,7 @@ export class CrucibleClient {
     const items = readDecideItems(given.items, shared);
     const payload: Record<string, unknown> = {};
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
     payload['state'] = given.state;
     if (given.images !== undefined) payload['images'] = requireStrings(given.images, 'images');
     if (given.instructions !== undefined) payload['instructions'] = requireText(given.instructions, 'instructions');
@@ -3877,7 +3884,30 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     memoryBytesEstimate: nullableNum(entry, 'memory_bytes_estimate', where),
     contextDefault: num(entry, 'context_default', where),
     maxModelLen: nullableNum(entry, 'max_model_len', where),
+    form: nullableStr(entry, 'form', where),
+    formReason: nullableStr(entry, 'form_reason', where),
+    forms: readModelForms(entry, where),
   };
+}
+
+function readModelForms(entry: Json, where: string): ModelFormInfo[] | null {
+  const rows = nullableArray(entry, 'forms', where);
+  if (rows === null) return null;
+  return rows.map((raw, index) => {
+    const at = `${where}.forms[${index}]`;
+    const row = asObject(raw, at);
+    return {
+      name: str(row, 'name', at),
+      bits: num(row, 'bits', at),
+      file: str(row, 'file', at),
+      memoryBytesEstimate: num(row, 'memory_bytes_estimate', at),
+      fits: nullableBool(row, 'fits', at),
+      installed: bool(row, 'installed', at),
+      picked: bool(row, 'picked', at),
+      resident: bool(row, 'resident', at),
+      pullCommand: str(row, 'pull_command', at),
+    };
+  });
 }
 
 function readVoiceInfo(entry: Json, where: string): VoiceInfo {
@@ -5165,6 +5195,8 @@ function readCatalogRow(row: Json, where: string): CatalogRow {
     license: nullableStr(row, 'license', where),
     source: str(row, 'source', where),
     resident: bool(row, 'resident', where),
+    form: nullableStr(row, 'form', where),
+    formReason: nullableStr(row, 'form_reason', where),
   };
 }
 

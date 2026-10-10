@@ -30,9 +30,12 @@ from ...jobtypes import LOAD_MODEL, UNLOAD_MODEL
 from ...manifests import (
     GGUF_ENGINE,
     BackendSpec,
+    HostFit,
     ManifestError,
     ModelManifest,
+    UnknownForm,
     fingerprint,
+    host_fit_of,
     load_all_manifests,
 )
 from ...memorybudget import available_bytes
@@ -175,6 +178,14 @@ class LoadParams(BaseModel):
         "refused `context_over_limit`; loading the resident model at a new context "
         "is a reload.",
     )
+    form: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Which form of the model to load, for a model whose block on this "
+        "backend states more than one (GET /v1/models lists them under `forms`); null "
+        "loads the one this host's card takes (the row's `form`). A name the model does "
+        "not have is refused `unknown_form`.",
+    )
 
 
 MANIFESTS: ManifestCatalog[ModelManifest] = ManifestCatalog(
@@ -231,6 +242,7 @@ def model_rows(
         return engines_here[name]
 
     resident = residency.resident_model
+    host = host_fit_of(config, backend)
     rows: list[dict[str, Any]] = []
     for manifest in MANIFESTS.all().values():
         supported = manifest.supports(backend_kind)
@@ -242,18 +254,19 @@ def model_rows(
         already_here: dict[str, Any] | None = None
         is_installed = False
         reason: str | None = None
+        forms: dict[str, Any] | None = None
         if not supported:
             reason = (
                 f"{manifest.path.name} has no {backend_kind} block; it declares "
                 f"{sorted(manifest.backends)}"
             )
         else:
-            spec = manifest.spec(backend_kind)
+            spec = manifest.spec(backend_kind, host=host)
             estimate = spec.memory_bytes_estimate
             revision = spec.revision
             terms = spec.memory
             if terms is not None:
-                ceiling_here = Candidate.of(manifest, backend_kind).context_ceiling(
+                ceiling_here = Candidate.of(manifest, backend_kind, spec.form).context_ceiling(
                     available_bytes(
                         backend.gpu.vram_bytes, config.desktop_allowance_bytes
                     ),
@@ -279,6 +292,7 @@ def model_rows(
             )
             is_installed = weights.installed(config, manifest, spec) is not None
             already_here = _in_the_ollama_store(manifest, backend_kind)
+            forms = form_rows(config, manifest, host, resident)
             if estimate > backend.gpu.vram_bytes:
                 reason = (
                     f"needs {estimate / 1024 ** 3:.1f} GiB and "
@@ -290,6 +304,8 @@ def model_rows(
                     f"the llm env is not ready for {spec.engine}: "
                     f"{engine_status(spec.engine).detail}"
                 )
+            elif not is_installed and forms is not None:
+                reason = _form_not_pulled(manifest, forms)
             elif not is_installed:
                 if manifest.weights_of is not None:
                     try:
@@ -331,6 +347,11 @@ def model_rows(
                 if resident is not None and resident.model_id == manifest.id
                 else manifest.defaults.to_dict()
             ),
+            **(
+                {"form": None, "form_reason": None, "forms": None}
+                if forms is None
+                else forms
+            ),
         }
         if reason is not None:
             row["reason"] = reason
@@ -338,12 +359,150 @@ def model_rows(
     return rows
 
 
+def form_spec(
+    manifest: ModelManifest, backend_kind: str, form: str | None, host: HostFit
+) -> BackendSpec:
+    """The block a load of `form` reads (None: the form `host`'s card takes), or the
+    refusal of a form the model does not have, by name and with the forms it has."""
+    try:
+        return manifest.spec(backend_kind, form, host=host)
+    except UnknownForm as exc:
+        raise ApiError(400, exc.code, str(exc), exc.details()) from None
+
+
+def installed_forms(
+    config: Config, manifest: ModelManifest, backend_kind: str
+) -> tuple[str, ...]:
+    block = manifest.block(backend_kind)
+    return tuple(
+        name
+        for name in block.form_names
+        if weights.installed(config, manifest, block.with_form(name, manifest.id))
+        is not None
+    )
+
+
+def form_pull_command(manifest: ModelManifest, form: str | None, picked: str | None) -> str:
+    """What pulls `form` here: the plain pull for the form this card takes, which is what
+    `crucible models pull <id>` fetches, and `--form` for any other."""
+    if form is None or form == picked:
+        return manifest.pull_command
+    return f"{manifest.pull_command} --form {form}"
+
+
+def _not_installed(
+    config: Config,
+    manifest: ModelManifest,
+    spec: BackendSpec,
+    named: str | None,
+    exc: weights.WeightsError,
+    host: HostFit,
+) -> ApiError:
+    """The refusal of a load whose weights are not here. For a model with forms it says
+    which form, why that one, and which forms ARE installed: a host never loads a smaller
+    form because the better one is missing. The form this card takes is pulled by
+    install-on-submit like any model (`model_not_installed`); a form named that this card
+    does not take is refused `form_not_installed`, with the command that pulls it."""
+    details: dict[str, Any] = {
+        "model": manifest.id, "hf_repo": spec.hf_repo, "revision": spec.revision,
+    }
+    if spec.form is None:
+        return ApiError(409, "model_not_installed", str(exc), details)
+    pick = manifest.form_pick(spec.backend, host)
+    assert pick is not None
+    taken = named is None or named == pick.form.name
+    here = [
+        name for name in installed_forms(config, manifest, spec.backend)
+        if name != spec.form
+    ]
+    command = form_pull_command(manifest, named, pick.form.name)
+    which = (
+        f"the {spec.form} form, the one this card takes ({pick.reason})"
+        if taken
+        else f"the {spec.form} form the request named"
+    )
+    others = ""
+    if here:
+        verb = "is" if len(here) == 1 else "are"
+        others = f"; {' and '.join(here)} {verb} installed, and {verb} not loaded in its place"
+    details.update(
+        form=spec.form,
+        file=spec.file,
+        picked=pick.form.name,
+        installed_forms=here,
+        command=command,
+    )
+    return ApiError(
+        409,
+        "model_not_installed" if taken else "form_not_installed",
+        f"{manifest.id!r} is not installed in {which}: {spec.file} is not in "
+        f"{weights.subject_dir(config, manifest, spec.backend)}{others} — run "
+        f"`{command}`",
+        details,
+    )
+
+
+def form_rows(
+    config: Config, manifest: ModelManifest, host: HostFit, resident: Any
+) -> dict[str, Any] | None:
+    """A model row's forms (None for a block with one form): which form this card takes
+    and why, and each form with whether it fits, is installed, is the pick and is the one
+    on the card. The row's own estimate, revision and memory terms are the pick's."""
+    backend_kind = host.backend_kind
+    pick = manifest.form_pick(backend_kind, host)
+    if pick is None:
+        return None
+    block = manifest.block(backend_kind)
+    here = set(installed_forms(config, manifest, backend_kind))
+    on_card = (
+        resident.form
+        if resident is not None and resident.model_id == manifest.id
+        else None
+    )
+    return {
+        "form": pick.form.name,
+        "form_reason": pick.reason,
+        "forms": [
+            {
+                "name": entry.name,
+                "bits": entry.bits,
+                "file": entry.file,
+                "memory_bytes_estimate": entry.memory_bytes_estimate,
+                "fits": pick.form_fits(entry.name),
+                "installed": entry.name in here,
+                "picked": entry.name == pick.form.name,
+                "resident": entry.name == on_card,
+                "pull_command": form_pull_command(manifest, entry.name, pick.form.name),
+            }
+            for entry in block.forms
+        ],
+    }
+
+
+def _form_not_pulled(manifest: ModelManifest, forms: dict[str, Any]) -> str:
+    picked = forms["form"]
+    others = [row["name"] for row in forms["forms"] if row["installed"]]
+    held = ""
+    if others:
+        verb = "is" if len(others) == 1 else "are"
+        held = (
+            f"; {' and '.join(others)} {verb} installed, and {verb} not what this card "
+            "takes"
+        )
+    return (
+        f"the {picked} form this card takes is not installed ({forms['form_reason']})"
+        f"{held} — run `{manifest.pull_command}`"
+    )
+
+
 def _require_loadable(
-    config: Config, backend: Any, model_id: str
+    config: Config, backend: Any, model_id: str, form: str | None = None
 ) -> tuple[ModelManifest, Any, Any]:
     backend_kind = backend.kind
     manifest = MANIFESTS.known(model_id)
-    spec = worker_type.require_block(manifest, model_id, backend_kind, "model")
+    worker_type.require_block(manifest, model_id, backend_kind, "model")
+    host = host_fit_of(config, backend)
+    spec = form_spec(manifest, backend_kind, form, host)
     worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)
     accelerator.refuse_if_card_lacks(
         model_id=model_id, spec=spec, card=card_for(config.home, backend.gpu)
@@ -377,12 +536,7 @@ def _require_loadable(
     try:
         installed = weights.require_installed(config, manifest, spec)
     except weights.WeightsError as exc:
-        raise ApiError(
-            409,
-            "model_not_installed",
-            str(exc),
-            {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
-        ) from None
+        raise _not_installed(config, manifest, spec, form, exc, host) from None
     return manifest, spec, (launch, installed)
 
 
@@ -396,7 +550,11 @@ class EngineLaunch:
 
 
 def _load_context(
-    config: Config, backend: Any, manifest: ModelManifest, params: "LoadParams"
+    config: Config,
+    backend: Any,
+    manifest: ModelManifest,
+    params: "LoadParams",
+    form: str | None,
 ) -> int:
     if params.context is None:
         return manifest.context_for(backend.kind)
@@ -407,6 +565,7 @@ def _load_context(
             backend.gpu.vram_bytes, config.desktop_allowance_bytes
         ),
         context=params.context,
+        form=form,
     )
     return params.context
 
@@ -470,9 +629,9 @@ class LoadModelJobType:
 
     def requirements(self, model: str, params: LoadParams) -> LoadNeeds:
         manifest, spec, (launch, installed) = _require_loadable(
-            self._config, self._backend, model
+            self._config, self._backend, model, params.form
         )
-        context = _load_context(self._config, self._backend, manifest, params)
+        context = _load_context(self._config, self._backend, manifest, params, spec.form)
         state = card_guard(
             self._config,
             model=model,
@@ -519,6 +678,15 @@ class LoadModelJobType:
         if needs.plan is not None:
             ctx.warming(needs.plan.detail())
 
+        if needs.spec.form is not None:
+            ctx.warming(
+                _form_words(
+                    needs.manifest,
+                    needs.spec,
+                    params.form,
+                    host_fit_of(self._config, self._backend),
+                )
+            )
         ctx.raise_if_cancelled()
         ctx.progress(0.0, f"loading {model}")
         try:
@@ -545,6 +713,21 @@ class LoadModelJobType:
         extra: dict[str, Any] = {"resident": resident.model_id}
         ctx.progress(1.0, f"{model} is resident")
         ctx.done_extra(**extra)
+
+
+def _form_words(
+    manifest: ModelManifest, spec: BackendSpec, named: str | None, host: HostFit
+) -> str:
+    pick = manifest.form_pick(spec.backend, host)
+    assert pick is not None
+    if named is None:
+        return f"{manifest.id}: the {spec.form} form — {pick.reason}"
+    if named == pick.form.name:
+        return f"{manifest.id}: the {spec.form} form, as the request named (and this card takes)"
+    return (
+        f"{manifest.id}: the {spec.form} form, as the request named; this card takes "
+        f"{pick.form.name} — {pick.reason}"
+    )
 
 
 def occupy_model(
@@ -604,6 +787,7 @@ def occupy_model(
             log_path=log_path,
             loaded_at=utcnow(),
             engine_args=tuple(args),
+            form=spec.form,
         )
         return Occupant(resident, engine=engine, base_url=engine.base_url)
 

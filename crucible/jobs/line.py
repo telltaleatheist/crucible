@@ -87,6 +87,9 @@ class Call:
     act: str | None = None
     client_ref: str | None = None
     session: str | None = None
+    # The form of the model the call named (docs/FITS-AND-THE-CARD.md section 8); None
+    # takes whichever form is resident, and the form this card takes when one is loaded.
+    form: str | None = None
     id: str = field(default_factory=lambda: CALL_PREFIX + uuid.uuid4().hex)
     status: str = "queued"
 

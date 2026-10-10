@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
 from .errors import CrucibleError
+from .memorybudget import available_bytes, gib_text
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
 
@@ -110,9 +113,10 @@ _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
     "hf_repo": str,
     "revision": str,
-    "memory_bytes_estimate": int,
 }
 _BACKEND_OPTIONAL: dict[str, type] = {
+    "memory_bytes_estimate": int,
+    "forms": list,
     "bits": int,
     "engine_args": list,
     "file": str,
@@ -132,6 +136,26 @@ _MEMORY_REQUIRED: dict[str, type] = {
 }
 
 MEMORY_BASES: frozenset[str] = frozenset({"measured", "computed", "declared"})
+
+# A backend block's FORMS (docs/FITS-AND-THE-CARD.md section 8): the same weights in more
+# than one precision, best first, each one GGUF file of the block's repo at the block's
+# revision. Each form owns what differs between them; the block keeps what they share
+# (engine, repo, revision, serves, engine_args, context).
+_FORM_REQUIRED: dict[str, type] = {
+    "name": str,
+    "bits": int,
+    "file": str,
+    "memory_bytes_estimate": int,
+}
+_FORM_OPTIONAL: dict[str, type] = {
+    "memory": dict,
+}
+
+# What a block with forms leaves to its forms: stating one of these at the block as well
+# would be one fact with two owners (docs/ARCHITECTURE.md R1).
+FORM_OWNED_KEYS: tuple[str, ...] = ("file", "bits", "memory_bytes_estimate", "memory")
+
+FORM_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
 MEMORY_TERMS_TOLERANCE = 0.05
 
@@ -225,10 +249,40 @@ class BackendSpec:
     mmproj: str | None = None
     serves: tuple[str, ...] = ()
     bits: int | None = None
+    # The block's forms, best first, when it states more than one (empty: the block IS its
+    # one form). A block with forms is read through ModelManifest.spec, which hands back
+    # one form flattened into a spec (`with_form`), and `form` names which. The block as
+    # stated (ModelManifest.block) holds only what the forms share: its file, bits and
+    # memory are None and its memory_bytes_estimate 0, and it is never loaded.
+    forms: "tuple[ModelForm, ...]" = ()
+    form: str | None = None
 
     @property
     def files(self) -> tuple[str, ...]:
         return tuple(name for name in (self.file, self.mmproj) if name is not None)
+
+    @property
+    def form_names(self) -> tuple[str, ...]:
+        return tuple(entry.name for entry in self.forms)
+
+    def form_named(self, name: str, model_id: str) -> "ModelForm":
+        for entry in self.forms:
+            if entry.name == name:
+                return entry
+        raise UnknownForm(model_id, self.backend, name, self.form_names)
+
+    def with_form(self, name: str, model_id: str) -> "BackendSpec":
+        """This block as its form `name`: the form's file, bits and memory in place of the
+        block's, and `form` saying which it is."""
+        chosen = self.form_named(name, model_id)
+        return replace(
+            self,
+            file=chosen.file,
+            bits=chosen.bits,
+            memory_bytes_estimate=chosen.memory_bytes_estimate,
+            memory=chosen.memory,
+            form=chosen.name,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -245,7 +299,213 @@ class BackendSpec:
             "mmproj": self.mmproj,
             "serves": list(self.serves),
             "bits": self.bits,
+            "form": self.form,
+            "forms": [entry.to_dict() for entry in self.forms],
         }
+
+
+@dataclass(frozen=True)
+class ModelForm:
+    """One form of a block's weights: a precision, its file, and what it takes on a card."""
+
+    name: str
+    bits: int
+    file: str
+    memory_bytes_estimate: int
+    memory: "MemoryTerms | None" = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "bits": self.bits,
+            "file": self.file,
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "memory": None if self.memory is None else self.memory.to_dict(),
+        }
+
+
+class UnknownForm(CrucibleError):
+    """A form name a model's block does not state, or any form named for a block that has
+    one. `code` is the wire's."""
+
+    code = "unknown_form"
+
+    def __init__(
+        self, model_id: str, backend_kind: str, name: str, forms: tuple[str, ...]
+    ) -> None:
+        self.model_id = model_id
+        self.backend = backend_kind
+        self.name = name
+        self.forms = forms
+        if forms:
+            said = (
+                f"model {model_id!r} has no form {name!r} on {backend_kind}; its forms "
+                f"are {list(forms)}, best first. Omit `form` to take the one this "
+                "card fits"
+            )
+        else:
+            said = (
+                f"model {model_id!r} has one form on {backend_kind}, so there is no "
+                f"form {name!r} to choose; omit `form`"
+            )
+        super().__init__(said)
+
+    def details(self) -> dict[str, Any]:
+        return {"model": self.model_id, "form": self.name, "forms": list(self.forms)}
+
+
+@dataclass(frozen=True)
+class HostFit:
+    """What a host gives a model: its card's total less the desktop allowance, the same
+    `available_bytes` the capability record and every verb's fit read. A form is picked
+    against this and nothing live (free memory, what is resident), so a host's pick moves
+    only when its card or its allowance does."""
+
+    backend_kind: str
+    card: str
+    total_bytes: int
+    desktop_allowance_bytes: int
+
+    @property
+    def available_bytes(self) -> int:
+        return available_bytes(self.total_bytes, self.desktop_allowance_bytes)
+
+    def words(self) -> str:
+        return (
+            f"{self.card} gives a model {gib_text(self.available_bytes, 2)} "
+            f"({gib_text(self.total_bytes, 2)} less the "
+            f"{gib_text(self.desktop_allowance_bytes, 2)} desktop allowance)"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend_kind,
+            "card": self.card,
+            "total_bytes": self.total_bytes,
+            "desktop_allowance_bytes": self.desktop_allowance_bytes,
+            "available_bytes": self.available_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class FormPick:
+    """The form a host serves of a block with forms, and why. `fits` is None where no card
+    is known (a catalog read with no host registered: the manifest's first form, not
+    weighed against anything)."""
+
+    form: ModelForm
+    fits: bool | None
+    reason: str
+    host: HostFit | None
+    fitting: tuple[str, ...]
+
+    def form_fits(self, name: str) -> bool | None:
+        if self.host is None:
+            return None
+        return name in self.fitting
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "form": self.form.name,
+            "bits": self.form.bits,
+            "fits": self.fits,
+            "reason": self.reason,
+            "host": None if self.host is None else self.host.to_dict(),
+        }
+
+
+def _need_words(form: ModelForm) -> str:
+    return f"{form.name} needs {gib_text(form.memory_bytes_estimate, 2)}"
+
+
+def pick_form(model_id: str, spec: BackendSpec, host: HostFit | None) -> FormPick:
+    """The best form of `spec` that fits `host`: the first, in the manifest's best-first
+    order, whose memory_bytes_estimate is within the host's available bytes, which is the
+    fit a verb's candidate is held to with no working context (fit.Candidate.holds). With
+    no form fitting, the smallest is TRIED, as a model named by id is (docs/VERB-SIZING.md),
+    and the reason carries the numbers. Never reads what is installed: a better form that
+    fits and is not downloaded is reported as needing a pull, never passed over."""
+    if not spec.forms:
+        raise ValueError(f"{model_id}'s {spec.backend} block has no forms to pick from")
+    if host is None:
+        first = spec.forms[0]
+        return FormPick(
+            form=first,
+            fits=None,
+            reason=(
+                f"no card is known here, so {first.name}, the manifest's first and best "
+                "form; a server picks against its own card"
+            ),
+            host=None,
+            fitting=(),
+        )
+    room = host.available_bytes
+    fitting = tuple(f.name for f in spec.forms if f.memory_bytes_estimate <= room)
+    passed: list[ModelForm] = []
+    for candidate in spec.forms:
+        if candidate.memory_bytes_estimate > room:
+            passed.append(candidate)
+            continue
+        over = ""
+        if passed:
+            verb = "does" if len(passed) == 1 else "do"
+            over = f"; {', '.join(_need_words(f) for f in passed)}, which {verb} not fit"
+        best = "the best form" if not passed else "the best form that fits"
+        return FormPick(
+            form=candidate,
+            fits=True,
+            reason=f"{_need_words(candidate)} and {host.words()}: {best}{over}",
+            host=host,
+            fitting=fitting,
+        )
+    smallest = min(spec.forms, key=lambda f: f.memory_bytes_estimate)
+    return FormPick(
+        form=smallest,
+        fits=False,
+        reason=(
+            f"no form fits: {', '.join(_need_words(f) for f in spec.forms)}, and "
+            f"{host.words()}. {smallest.name}, the smallest, is tried, as a model "
+            "named by id is"
+        ),
+        host=host,
+        fitting=(),
+    )
+
+
+# The host whose card picks forms in this process. The server (api.create_app) and the CLI
+# (cli.common.here) register a reader of the live config, so a re-measured allowance moves
+# the pick without a restart. A process that registers none (the lineup generator, a test
+# reading the catalog) reads a block with forms as its first form, and the pick says so.
+_host_fit: Callable[[], HostFit] | None = None
+
+
+def use_host_fit(reader: Callable[[], HostFit] | None) -> None:
+    global _host_fit
+    _host_fit = reader
+
+
+def host_fit_of(config: Any, backend: Any) -> HostFit:
+    """This host as forms are picked against it: the detected card's total (the figure
+    every fit on this host reads, `backend.gpu.vram_bytes`) and the config's allowance."""
+    return HostFit(
+        backend_kind=backend.kind,
+        card=backend.gpu.name,
+        total_bytes=backend.gpu.vram_bytes,
+        desktop_allowance_bytes=config.desktop_allowance_bytes,
+    )
+
+
+def use_host(config: Any, backend: Any) -> None:
+    """Register this process's host: a reader of the live config, so the pick follows a
+    re-measured allowance."""
+    use_host_fit(lambda: host_fit_of(config, backend))
+
+
+def host_fit(backend_kind: str) -> HostFit | None:
+    if _host_fit is None:
+        return None
+    found = _host_fit()
+    return found if found.backend_kind == backend_kind else None
 
 
 @dataclass(frozen=True)
@@ -374,9 +634,11 @@ class ModelManifest:
         return None if found is None else fingerprint(self.id, found.revision)
 
     def serves(self, backend_kind: str) -> tuple[str, ...]:
-        return self.spec(backend_kind).serves
+        return self.block(backend_kind).serves
 
-    def spec(self, backend_kind: str) -> BackendSpec:
+    def block(self, backend_kind: str) -> BackendSpec:
+        """The backend block as the manifest states it. For a block with forms that is
+        the part the forms share (no file, bits or memory); what loads is `spec`'s."""
         found = self.backends.get(backend_kind)
         if found is None:
             raise ManifestError(
@@ -384,6 +646,34 @@ class ModelManifest:
                 f"declares {sorted(self.backends)}"
             )
         return found
+
+    def form_pick(
+        self, backend_kind: str, host: HostFit | None = None
+    ) -> FormPick | None:
+        """The form a host serves of a block with forms, and why; None for a block with
+        one form. `host` is the host to pick for; omitted, this process's registered host
+        (use_host), and with none registered the manifest's first form, unweighed."""
+        found = self.block(backend_kind)
+        if not found.forms:
+            return None
+        return pick_form(self.id, found, host if host is not None else host_fit(backend_kind))
+
+    def spec(
+        self, backend_kind: str, form: str | None = None, *, host: HostFit | None = None
+    ) -> BackendSpec:
+        """The block a pull, a load and a fit read: for a block with forms, the form
+        named, or with none named the one the host's card takes (form_pick, with `host`
+        as it reads it). Naming a form of a block that has one is UnknownForm."""
+        found = self.block(backend_kind)
+        if not found.forms:
+            if form is not None:
+                raise UnknownForm(self.id, backend_kind, form, ())
+            return found
+        if form is None:
+            pick = self.form_pick(backend_kind, host)
+            assert pick is not None
+            form = pick.form.name
+        return found.with_form(form, self.id)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -818,13 +1108,15 @@ def _check_engine(
     modalities: list[str],
 ) -> None:
     engine = block["engine"]
-    gguf = "file" in block
+    gguf = "file" in block or "forms" in block
     expected = block_engine(kind, serves_here, gguf=gguf)
     if engine == expected:
         return
     if kind in GGUF_BACKENDS and kind != LLAMA_WINDOWS and GGUF_ENGINE in (engine, expected):
         weights = (
             f"names a GGUF `file` ({block['file']!r})"
+            if "file" in block
+            else "states its forms, each one GGUF `file`"
             if gguf
             else "names no `file`, so its weights are the whole repo"
         )
@@ -857,7 +1149,7 @@ def _backend_engine_args(where: str, block: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _check_llama_files(where: str, block: dict[str, Any], serves_here: tuple[str, ...]) -> None:
-    if "file" not in block:
+    if "file" not in block and "forms" not in block:
         raise ManifestError(
             f"{where}: llama-server needs `file`, the one GGUF in "
             f"{block['hf_repo']!r} this row is. A GGUF repo holds every "
@@ -891,6 +1183,13 @@ def _check_backend_files(
     if block["engine"] == GGUF_ENGINE:
         _check_llama_files(where, block, serves_here)
         return
+    if "forms" in block:
+        raise ManifestError(
+            f"{where}: forms on a {block['engine']!r} block. A form is one GGUF file "
+            f"of the block's repo at its revision, which {GGUF_ENGINE} loads; with "
+            f"{block['engine']!r} the whole repo is the weights, and a second "
+            "precision of it is a second repo — a second model id today"
+        )
     extra = sorted({"file", "mmproj"} & set(block))
     if extra:
         raise ManifestError(
@@ -1069,6 +1368,96 @@ def _backend_block(where: str, kind: str, block: Any) -> dict[str, Any]:
     return block
 
 
+def _check_estimate(where: str, table: dict[str, Any]) -> None:
+    if table["memory_bytes_estimate"] <= 0:
+        raise ManifestError(
+            f"{where}: memory_bytes_estimate must be positive, got "
+            f"{table['memory_bytes_estimate']}"
+        )
+
+
+def _check_block_numbers(where: str, block: dict[str, Any]) -> None:
+    """A block with forms leaves file, bits and memory to them; a block without states
+    its own estimate."""
+    if "forms" in block:
+        stated = [key for key in FORM_OWNED_KEYS if key in block]
+        if stated:
+            raise ManifestError(
+                f"{where}: {stated} stated on a block that has forms. Each form states "
+                "its own file, bits, memory_bytes_estimate and memory; the block keeps "
+                "only what its forms share, so no number has two owners"
+            )
+        return
+    if "memory_bytes_estimate" not in block:
+        raise ManifestError(f"{where}: missing required key(s) ['memory_bytes_estimate']")
+    _check_estimate(where, block)
+
+
+def _form_table(where: str, entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise ManifestError(f"{where}: must be a table ([[...forms]])")
+    check_table(where, entry, _FORM_REQUIRED, _FORM_OPTIONAL, error=ManifestError)
+    if not FORM_NAME_PATTERN.match(entry["name"]):
+        raise ManifestError(
+            f"{where}: name {entry['name']!r} must be lower-case and start with a "
+            "letter or digit ([a-z0-9][a-z0-9_.-]*); it is what a request's `form` says"
+        )
+    _check_estimate(where, entry)
+    file = _gguf_name(where, "file", entry["file"])
+    if file != Path(file).name or file.startswith("."):
+        raise ManifestError(
+            f"{where}: file {file!r} must be a plain file name inside the repo, not a path"
+        )
+    return entry
+
+
+def _check_form_order(where: str, forms: list[ModelForm]) -> None:
+    """Best first: each form narrower and smaller than the one before, so the first that
+    fits is the best that fits and a later form is never picked over a better one."""
+    for before, after in zip(forms, forms[1:]):
+        if after.bits >= before.bits or after.memory_bytes_estimate >= before.memory_bytes_estimate:
+            raise ManifestError(
+                f"{where}: forms are best first, each narrower and smaller than the one "
+                f"before; {after.name!r} ({after.bits}-bit, {after.memory_bytes_estimate} "
+                f"bytes) follows {before.name!r} ({before.bits}-bit, "
+                f"{before.memory_bytes_estimate} bytes)"
+            )
+
+
+def _parse_forms(
+    where: str, block: dict[str, Any], served: int, shared: BackendSpec
+) -> tuple[ModelForm, ...]:
+    entries = block["forms"]
+    if len(entries) < 2:
+        raise ManifestError(
+            f"{where}: forms lists {len(entries)} form(s). A block with one form says "
+            "so by stating its file, bits and memory itself; forms are for two or more"
+        )
+    forms: list[ModelForm] = []
+    for index, entry in enumerate(entries):
+        form_where = f"{where}.forms[{index}]"
+        table = _form_table(form_where, entry)
+        form = ModelForm(
+            name=table["name"],
+            bits=table["bits"],
+            file=table["file"],
+            memory_bytes_estimate=table["memory_bytes_estimate"],
+            memory=_parse_memory(form_where, table, served),
+        )
+        _check_stated_bits(form_where, replace(shared, file=form.file, bits=form.bits))
+        forms.append(form)
+    for key in ("name", "file"):
+        values = [getattr(form, key) for form in forms]
+        if len(set(values)) != len(values):
+            raise ManifestError(f"{where}: two forms state the same {key}: {values}")
+    if block.get("mmproj") in {form.file for form in forms}:
+        raise ManifestError(
+            f"{where}: mmproj is also a form's file; the projector is a second file"
+        )
+    _check_form_order(where, forms)
+    return tuple(forms)
+
+
 def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> BackendSpec:
     where = f"{path.name} [backends.{kind}]"
     block = _backend_block(where, kind, block)
@@ -1076,11 +1465,7 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
     serves_here = _parse_serves(where, block, modalities)
     _check_engine(where, kind, block, serves_here, modalities)
     _check_hf_pin(where, block)
-    if block["memory_bytes_estimate"] <= 0:
-        raise ManifestError(
-            f"{where}: memory_bytes_estimate must be positive, got "
-            f"{block['memory_bytes_estimate']}"
-        )
+    _check_block_numbers(where, block)
     engine_args = _backend_engine_args(where, block)
     _check_backend_files(where, kind, block, serves_here)
     _check_vision_flags(where, serves_here, engine_args)
@@ -1093,7 +1478,7 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
         engine=block["engine"],
         hf_repo=block["hf_repo"],
         revision=block["revision"],
-        memory_bytes_estimate=block["memory_bytes_estimate"],
+        memory_bytes_estimate=block.get("memory_bytes_estimate", 0),
         engine_args=engine_args,
         context_default=backend_context,
         max_context=block_max,
@@ -1103,6 +1488,8 @@ def _parse_backend(kind: str, block: Any, path: Path, model: dict[str, Any]) -> 
         serves=serves_here,
         bits=block.get("bits"),
     )
+    if "forms" in block:
+        return replace(spec, forms=_parse_forms(where, block, served, spec))
     _check_stated_bits(where, spec)
     return spec
 
@@ -1203,6 +1590,13 @@ def _check_shared_pins(manifest: ModelManifest, base: ModelManifest) -> None:
                 f"declared here and {base.path.name} declares no {kind} block "
                 f"(it declares {sorted(base.backends)}). There is no download of "
                 f"{manifest.weights_of!r} on {kind} to share"
+            )
+        if spec.forms or base_spec.forms:
+            raise ManifestError(
+                f"{where}: weights_of_forms — [backends.{kind}] shares "
+                f"{manifest.weights_of!r}'s download and one of the two blocks states "
+                "forms. Which form an alias shares is not something a manifest says "
+                "yet; give the alias its own block"
             )
         pins, detail = _differing(spec, base_spec, WEIGHTS_OF_PIN_FIELDS, base.path.name)
         if pins:

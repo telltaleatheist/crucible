@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from .. import VERSION, catalog, upstreams
+from .. import VERSION, catalog, manifests, upstreams
 from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
@@ -461,6 +461,9 @@ def _mount_operator_page(app: FastAPI) -> None:
 
 
 def create_app(config: Config, backend: Backend) -> FastAPI:
+    # Before anything reads a model's block: a block with forms is read as the form this
+    # card takes (docs/FITS-AND-THE-CARD.md section 8).
+    manifests.use_host(config, backend)
     residency = Residency(config)
     keeper = RegistryKeeper(config, backend, residency)
     app = FastAPI(

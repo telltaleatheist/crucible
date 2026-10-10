@@ -13,6 +13,7 @@ from ... import upstreamrecord
 from ...callqueue import take_a_turn
 from ...engines import chat_admission, chat_prefill_reading
 from ...errors import ApiError
+from ...formrequest import refuse_unknown_form, refuse_upstream_form, take_form
 from ...inflight import read_act
 from ...manifests import ManifestError, load_manifest
 from ...prefill import (
@@ -22,6 +23,7 @@ from ...prefill import (
     with_prefill,
 )
 from ...queuerequest import queue_of
+from ...residency import serves_model
 from ...sampling import SAMPLING_HEADER, apply_defaults
 from ..caller import client_agent, queue_session
 from ..context import AppContext, Routers
@@ -94,6 +96,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                     "fingerprint": resident.fingerprint,
                     "max_model_len": resident.max_model_len,
                     "defaults": resident.defaults.to_dict(),
+                    "form": resident.form,
                 },
                 *data,
             ],
@@ -111,7 +114,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         writes on from it; the reply's content is what it wrote after the prefill
         (vLLM and llama-server; thinking stated off; no response_format or other
         grammar; refused by name otherwise: docs/internals/engines-and-capability.md,
-        "Prefill").
+        "Prefill"). A `"form": "<name>"` member names which form of a model that comes in
+        more than one serves the chat (GET /v1/models, the row's `forms`); without it the
+        resident form answers, and a load made for the chat loads the form this card
+        takes. Another form on the card is a reload; an unknown name is refused
+        `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
         """
         raw = await request.body()
         body = chat_body(raw)
@@ -126,14 +133,18 @@ def register(routers: Routers, ctx: AppContext) -> None:
         sent_queue = "queue" in body
         queued = queue_of(body)
         prefill = take_prefill(body)
-        if sent_queue or prefill is not None:
+        form = take_form(body)
+        if sent_queue or prefill is not None or form is not None:
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
+            if form is not None:
+                refuse_upstream_form(requested)
             if prefill is not None:
                 refuse_upstream_prefill(requested)
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
+        refuse_unknown_form(requested, form, ctx.backend.kind)
         if prefill is not None:
             _refuse_a_prefill_before_waiting(body, requested, ctx.backend.kind)
         inflight = ctx.inflight
@@ -147,6 +158,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 request, line=ctx.line, residency=residency, inflight=inflight,
                 settle=chat_over, kind="chat", model=requested, act=act,
                 client=client_agent(request), max_wait_s=queued, session=session,
+                form=form,
             )
             if isinstance(turn, Response):
                 return turn
@@ -157,8 +169,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
         try:
             async with residency.settled_for("a chat request"):
                 resident = residency.resident_model
-                if resident is None or resident.model_id != requested:
-                    raise model_not_resident(requested, resident, "a chat request")
+                if not serves_model(resident, requested, form):
+                    raise model_not_resident(requested, resident, "a chat request", form)
                 refuse_an_exited_engine(residency, resident)
 
                 applied = apply_defaults(body, resident.defaults)

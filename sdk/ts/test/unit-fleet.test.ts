@@ -44,6 +44,7 @@ function modelRow(id: string, overrides: Record<string, unknown> = {}): Record<s
     modalities: ['text'], weights_of: null, orphan: null, backend_supported: true,
     installed: true, resident: false, loadable: true, memory_bytes_estimate: null,
     held_by: null, unclaimed_since: null, context_default: 12288, max_model_len: null,
+    form: null, form_reason: null, forms: null,
     ...overrides,
   };
 }

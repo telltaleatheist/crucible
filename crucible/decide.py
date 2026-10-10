@@ -188,6 +188,12 @@ class DecideRequest(_Strict):
     form of the same weights when it fits, else the largest model that reads
     images and fits at or below decide's 9B goal). The answer's `model` names
     which one served it."""
+    form: _NonEmpty | None = None
+    """Which form of the model serves the decision, for a model whose block here
+    states more than one (`GET /v1/models`, the row's `forms`). Absent: whichever
+    form is resident, and the form this server's card takes when one is loaded.
+    Another form of the same model on the card is a reload; a name the model does
+    not have is refused `400 unknown_form` before anything waits."""
     state: Any
     """What the questions are about: a string, used verbatim, or any other JSON
     value, serialised as compact JSON. Required and never null; may be `""` only

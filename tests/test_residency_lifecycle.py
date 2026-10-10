@@ -117,7 +117,7 @@ def test_the_wire_shapes_are_the_golden_ones() -> None:
         + json.dumps(NO_DEFAULTS.to_dict())
         + ', "memory_bytes_estimate": 2, "log_path": '
         + log
-        + ', "loaded_at": "' + AT + '"}, '
+        + ', "loaded_at": "' + AT + '", "form": null}, '
         '"voice": {"voice": "sigma", "backend": "cuda-linux", '
         '"narrator_engine": "higgs-v3", "revision": "r", "fingerprint": "f", '
         '"sample_rate": 24000, "max_chars": null, "memory_bytes_estimate": 1, '

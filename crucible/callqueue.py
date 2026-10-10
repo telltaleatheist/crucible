@@ -41,6 +41,7 @@ from .inflight import Entry, InFlight
 from .jobs.base import DONE, TERMINAL_STATES
 from .jobs.line import ADMITTED, CLIENT, Call, WaitingCall, WaitingLine
 from .queuesessions import QueueSession
+from .residency import serves_model
 
 IN = "in"
 WAIT = "wait"
@@ -136,7 +137,7 @@ async def _open_slot(
     line = ctx.store.line
     async with ctx.residency.settled_for(f"a queued {call.type}"):
         resident = ctx.residency.resident_model
-        if resident is None or resident.model_id != call.model:
+        if not serves_model(resident, call.model, call.form):
             return None
         if not _slot_free(resident, inflight):
             return WAIT
@@ -167,6 +168,7 @@ async def _load_for(waiting: WaitingCall, ctx: AdmissionContext) -> str | ApiErr
         JobRequest(
             type="load-model",
             model=call.model,
+            params={} if call.form is None else {"form": call.form},
             client=call.client,
             client_ref=f"for the queued {call.type} {call.id}",
             from_the_line=True,
@@ -246,6 +248,7 @@ async def take_a_turn(
     client: str | None,
     max_wait_s: int,
     session: QueueSession | None = None,
+    form: str | None = None,
 ) -> Entry | Response:
     """An open in-flight slot on ``model`` for this request, waiting in the line for it
     when it must; a Response when the caller left while it waited. Raises the line's
@@ -261,11 +264,7 @@ async def take_a_turn(
     if nothing_ahead:
         async with residency.settled_for(f"a queued {kind}"):
             resident = residency.resident_model
-            if (
-                resident is not None
-                and resident.model_id == model
-                and _slot_free(resident, inflight)
-            ):
+            if serves_model(resident, model, form) and _slot_free(resident, inflight):
                 return inflight.open(act=act, model=model, client=client, session=session_id)
 
     async def give_back(entry: Entry) -> None:
@@ -274,7 +273,9 @@ async def take_a_turn(
 
     return await wait_in_line(
         request, line,
-        Call(type=kind, model=model, client=client, act=act, session=session_id),
+        Call(
+            type=kind, model=model, client=client, act=act, session=session_id, form=form
+        ),
         max_wait_s, give_back,
     )
 

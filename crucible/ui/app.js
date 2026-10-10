@@ -3609,6 +3609,15 @@
     if (row.license) {
       middle.appendChild(chip(row.license, 'floor'));
     }
+    if (row.form) {
+      // A model that comes in more than one form: the one this card takes, which is
+      // what installed, the size and the pull below are about.
+      var form = chip(row.form, 'floor');
+      if (row.form_reason) {
+        form.title = row.form_reason;
+      }
+      middle.appendChild(form);
+    }
     var offered = offeredCapabilities();
     if (offered !== null && offered.indexOf(row.job_type) === -1) {
       middle.appendChild(chip(row.job_type + ' not installed', 'warn'));

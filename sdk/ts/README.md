@@ -446,6 +446,13 @@ with work Crucible does not own — `unknown_model`, `model_not_installed`,
 `backend_unsupported`, `insufficient_memory`, `accelerator_busy`, `env_missing`. Nothing is
 ever evicted to make room.
 
+A model that comes in more than one form (precision) of the same weights lists them in
+`models()` (`form`, the one this server's card takes, `formReason`, and `forms`). Naming
+the model is all a caller needs: the server loads the best form its card holds. For the
+granular control, `loadModel(id, {form: 'q8_0'})`, and `form` on `chat()`, `decide()` and
+`decideItems()`, name one; another form on the card is a reload, and an unknown name is
+`unknown_form`.
+
 ### `chat()` and `chatStream()`
 
 Both take `{model, messages, temperature?, topP?, maxTokens?, stop?, seed?,

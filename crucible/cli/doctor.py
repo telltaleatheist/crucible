@@ -19,13 +19,15 @@ from .. import (
     ladder,
     llamacpp,
     lowvram,
+    manifests,
     service,
     verdict,
+    weights,
 )
 from ..audiomodels import LOW_VRAM_SETTING
 from ..backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN, Backend
-from ..capabilitystore import decide_for, low_vram_for
 from ..capabilityrecord import DESKTOP_BASIS_MEASURED, CapabilityRow, desktop_reserve_words
+from ..capabilitystore import decide_for, low_vram_for
 from ..config import Config, config_mode, crucible_home
 from ..errors import ConfigError, NoViableBackend
 from ..jobenv import INSTALLER_FOR
@@ -107,6 +109,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("audio_low_vram", lambda: None),
     ("path", lambda: None),
     ("stranded_weights", lambda: None),
+    ("model_forms", list),
     ("ffmpeg", lambda: None),
     ("c_compiler", lambda: None),
     ("notes", list),
@@ -124,6 +127,8 @@ def survey(home: Path) -> Host:
         config, config_refusal = common.load_config(home, tolerate_stale_record=True), None
     except ConfigError as exc:
         config, config_refusal = None, exc
+    if config is not None and backend is not None:
+        manifests.use_host(config, backend)
     return Host(home, backend, backend_refusal, config, config_refusal, summary)
 
 
@@ -780,6 +785,56 @@ def check_desktop_reserve(host: Host) -> Section:
     ))
 
 
+def _form_entry(config: Config, backend: Backend, manifest: Any) -> dict[str, Any] | None:
+    pick = manifest.form_pick(backend.kind, manifests.host_fit_of(config, backend))
+    if pick is None:
+        return None
+    block = manifest.block(backend.kind)
+    here = [
+        name
+        for name in block.form_names
+        if weights.installed(config, manifest, block.with_form(name, manifest.id)) is not None
+    ]
+    return {
+        "id": manifest.id,
+        "form": pick.form.name,
+        "fits": pick.fits,
+        "reason": pick.reason,
+        "forms": list(block.form_names),
+        "installed_forms": here,
+    }
+
+
+def check_model_forms(host: Host) -> Section:
+    """Each chat model that comes in more than one form: the form this card takes, and a
+    problem when a different form is installed than the one it takes. Never one for a
+    model with no form pulled (that is a model not pulled, not a wrong one)."""
+    config, backend = host.config, host.backend
+    if config is None or backend is None or not config.enable_llm:
+        return Section("model_forms", {})
+    entries: list[dict[str, Any]] = []
+    findings: list[Finding] = []
+    for manifest in manifests.load_all_manifests().values():
+        if not manifest.supports(backend.kind):
+            continue
+        entry = _form_entry(config, backend, manifest)
+        if entry is None:
+            continue
+        entries.append(entry)
+        here = entry["installed_forms"]
+        if not here or entry["form"] in here:
+            continue
+        verb = "is" if len(here) == 1 else "are"
+        findings.append(Finding.run(
+            "model_form_not_installed",
+            f"{manifest.id}: this card takes the {entry['form']} form ({entry['reason']}), "
+            f"and {' and '.join(here)} {verb} installed instead; a load is refused "
+            "rather than serve a form this card does not take",
+            manifest.pull_command,
+        ))
+    return Section("model_forms", {"model_forms": entries}, tuple(findings))
+
+
 CHECKS: tuple[Check, ...] = (
     check_backend,
     check_path,
@@ -793,6 +848,7 @@ CHECKS: tuple[Check, ...] = (
     check_video_envs,
     check_llm_patches,
     check_job_types,
+    check_model_forms,
     check_desktop_reserve,
 )
 
@@ -1049,6 +1105,12 @@ def lines_stranded_weights(report: dict[str, Any]) -> Iterator[str]:
         )
 
 
+def lines_model_forms(report: dict[str, Any]) -> Iterator[str]:
+    for entry in report["model_forms"] or ():
+        here = ", ".join(entry["installed_forms"]) or "none"
+        yield f"form:    {entry['id']}: {entry['form']} ({entry['reason']}); installed: {here}"
+
+
 def lines_notes(report: dict[str, Any]) -> Iterator[str]:
     for note in report["notes"]:
         yield f"note:    {note}"
@@ -1066,6 +1128,7 @@ TEXT_SECTIONS: tuple[Callable[[dict[str, Any]], Iterable[str]], ...] = (
     lines_c_compiler,
     lines_job_types,
     lines_stranded_weights,
+    lines_model_forms,
     lines_notes,
 )
 

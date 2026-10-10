@@ -14,7 +14,13 @@ from ..client import transport
 from ..client.connection import Connection
 from ..errors import CrucibleError
 from ..imagemodels import ImageManifest, ImageManifestError, load_all_image_manifests
-from ..manifests import ManifestError, ModelManifest, load_all_manifests
+from ..manifests import (
+    ManifestError,
+    ModelManifest,
+    UnknownForm,
+    host_fit_of,
+    load_all_manifests,
+)
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
 from ..segmentmodels import SegmentManifest, SegmentManifestError, load_all_segment_manifests
 from ..videomodels import VideoManifest, VideoManifestError, load_all_video_manifests
@@ -157,8 +163,24 @@ def cmd_models_list(args: argparse.Namespace) -> int:
                 }
             )
             continue
-        spec = manifest.spec(backend.kind)
+        forms = (
+            _form_facts(config, backend, manifest)
+            if isinstance(manifest, ModelManifest)
+            else None
+        )
+        spec = (
+            manifest.spec(backend.kind)
+            if forms is None
+            else manifest.spec(backend.kind, forms["form"])
+        )
         found = _installed(config, manifest, spec)
+        detail = (
+            f"{found.bytes / 1e9:.2f} GB at {found.path}"
+            if found is not None
+            else f"not pulled — `crucible models pull {manifest.id}`"
+        )
+        if forms is not None:
+            detail = _form_detail(manifest, forms, detail, found is not None)
         rows.append(
             {
                 "id": manifest.id,
@@ -172,11 +194,8 @@ def cmd_models_list(args: argparse.Namespace) -> int:
                     if isinstance(manifest, ModelManifest)
                     else None
                 ),
-                "detail": (
-                    f"{found.bytes / 1e9:.2f} GB at {found.path}"
-                    if found is not None
-                    else f"not pulled — `crucible models pull {manifest.id}`"
-                ),
+                **({} if forms is None else forms),
+                "detail": detail,
             }
         )
     if args.json:
@@ -188,6 +207,43 @@ def cmd_models_list(args: argparse.Namespace) -> int:
         )
         print(f"{row['id']:<16} {mark:<12} {row['detail']}")
     return EXIT_OK
+
+
+def _form_facts(config: Any, backend: Any, manifest: ModelManifest) -> dict[str, Any] | None:
+    """A model's forms here: the one this card takes, why, and which are installed."""
+    pick = manifest.form_pick(backend.kind, host_fit_of(config, backend))
+    if pick is None:
+        return None
+    block = manifest.block(backend.kind)
+    installed = [
+        name
+        for name in block.form_names
+        if weights.installed(config, manifest, block.with_form(name, manifest.id)) is not None
+    ]
+    return {
+        "form": pick.form.name,
+        "form_reason": pick.reason,
+        "forms": list(block.form_names),
+        "installed_forms": installed,
+    }
+
+
+def _form_detail(
+    manifest: ModelManifest, forms: dict[str, Any], detail: str, picked_installed: bool
+) -> str:
+    """The listing's line for a model with forms: which form, and, when the form this card
+    takes is not the one installed, that it needs a pull."""
+    form = forms["form"]
+    if picked_installed:
+        return f"{form} form; {detail}"
+    others = forms["installed_forms"]
+    if not others:
+        return f"{form} form (the one this card takes) {detail}"
+    verb = "is" if len(others) == 1 else "are"
+    return (
+        f"{form} form needed — {forms['form_reason']}; {' and '.join(others)} {verb} "
+        f"installed instead — run `crucible models pull {manifest.id}`"
+    )
 
 
 def cmd_models_pull(args: argparse.Namespace) -> int:
@@ -207,8 +263,27 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
             f"model {args.model!r} has no {backend.kind} block; "
             f"{manifest.path.name} declares {sorted(manifest.backends)}"
         )
-    spec = manifest.spec(backend.kind)
+    if args.form is not None and not isinstance(manifest, ModelManifest):
+        return _fail(f"{manifest.id!r} is not a chat model; only a chat model has forms")
+    host = host_fit_of(config, backend)
+    try:
+        spec = (
+            manifest.spec(backend.kind, args.form, host=host)
+            if isinstance(manifest, ModelManifest)
+            else manifest.spec(backend.kind)
+        )
+    except UnknownForm as exc:
+        return _fail(f"{exc.code}: {exc}")
     print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+    if spec.form is not None:
+        assert isinstance(manifest, ModelManifest)
+        pick = manifest.form_pick(backend.kind, host)
+        assert pick is not None
+        if args.form is None:
+            print(f"  the {spec.form} form ({spec.file}): {pick.reason}")
+        else:
+            taken = "" if args.form == pick.form.name else f"; this card takes {pick.form.name}"
+            print(f"  the {spec.form} form ({spec.file}), as named{taken}")
     try:
         pull = (
             audioweights.pull if isinstance(manifest, AudioManifest)
@@ -468,6 +543,14 @@ def add_model_parsers(subparsers: argparse._SubParsersAction) -> None:
     models_pull.add_argument("model", help="the Crucible model id, e.g. qwen3.5-9b")
     models_pull.add_argument(
         "--force", action="store_true", help="re-pull even if it is already installed"
+    )
+    models_pull.add_argument(
+        "--form",
+        default=None,
+        help=(
+            "for a model that comes in more than one form (`crucible models list` names "
+            "them), pull this one; omitted, the form this card takes"
+        ),
     )
     models_pull.set_defaults(func=cmd_models_pull)
 

@@ -145,18 +145,33 @@ def refuse_an_exited_engine(residency: Residency, resident: Any) -> None:
     )
 
 
-def model_not_resident(requested: str, resident: Any, answering: str) -> ApiError:
+def model_not_resident(
+    requested: str, resident: Any, answering: str, form: str | None = None
+) -> ApiError:
+    wanted = repr(requested) if form is None else f"{requested!r} in its {form} form"
+    if resident is None:
+        here = "no model is. "
+    elif form is not None and resident.model_id == requested:
+        here = f"its {resident.form} form is. "
+    else:
+        here = f"{resident.model_id!r} is. "
+    details: dict[str, Any] = {
+        "requested": requested,
+        "resident": None if resident is None else resident.model_id,
+    }
+    if form is not None:
+        details["form"] = form
+        details["resident_form"] = None if resident is None else resident.form
     return ApiError(
         409,
         "model_not_resident",
-        f"{requested!r} is not resident on this server; "
-        + (f"{resident.model_id!r} is. " if resident is not None else "no model is. ")
+        f"{wanted} is not resident on this server; "
+        + here
         + f"Sent with \"queue\": false, {answering} is never waited for or loaded "
         'for: submit a {"type": "load-model"} job first, '
         'or send it again without "queue": false to wait while the server loads it '
         "(docs/QUEUE.md).",
-        {"requested": requested, "resident": None if resident is None
-         else resident.model_id},
+        details,
     )
 
 

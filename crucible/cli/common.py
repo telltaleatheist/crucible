@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .. import API_HEADER, API_VERSION, VERSION, jobenv
+from .. import API_HEADER, API_VERSION, VERSION, jobenv, manifests
 from ..backend import (
     CUDA_LINUX,
     LLAMA_WINDOWS,
@@ -107,6 +107,7 @@ def here(
         raise Refusal(no_viable_backend(exc)) from exc
     if backend.kind != config.backend_kind:
         raise Refusal("backend_not_here: " + backend_changed_fix(config, backend))
+    manifests.use_host(config, backend)
     return config, backend
 
 
