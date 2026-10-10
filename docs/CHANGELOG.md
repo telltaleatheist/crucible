@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.125 — 2026-10-10
+
 - Fix: weights left in the store by a model that is no longer in the catalog (`qwen3.5-4b-bside-4bit`, 3.6 GB on an 8 GiB laptop after 1.0.124) can be removed: `crucible remove model <id>` and `DELETE /v1/catalog/model/{id}` find them in the weights store when the catalog has no such model, instead of refusing `subject_unknown`. Nothing is deleted on an update by itself; `crucible doctor` lists such weights and now names that command for this machine's own.
 - Fix: a job's done event says what is on the card even when the settlement after it took the model off and then failed stopping its process; before, `resident` kept the id the job read before the settlement.
 - `crucible install llm` on a PC says the llama-server download (107 MB, xz) and the binary it unpacks (140 MB) apart, so the two figures no longer look like a mismatch.
