@@ -414,7 +414,7 @@ model's reply to `instructions`, nothing decoded.
 The answer (the numbers show the shape; they were not measured):
 
 ```json
-{"answers": {"spelling": {"type": "likelihood", "winner": "plain", "rank_by": "total",
+{"answers": {"spelling": {"type": "likelihood", "winner": "plain", "rank_by": "total", "normalize": "softmax",
    "candidates": {"plain":  {"logprob": -1.92, "tokens": 8, "mean_logprob": -0.24, "probability": 0.81},
                   "hyphen": {"logprob": -3.37, "tokens": 10, "mean_logprob": -0.337, "probability": 0.19}},
    "context_tokens": 71, "boundary_tokens": 0}}, ...}
@@ -427,28 +427,57 @@ The answer (the numbers show the shape; they were not measured):
   by the path they always take; the likelihood questions then run by the engine's
   route (engines-and-capability.md), and the answers come back in question order.
 - `logprob` is the sum over the candidate's tokens, `mean_logprob` that over `tokens`,
-  `probability` a softmax over the totals (the model's probability of each reply
-  renormalised over the replies offered). `winner` is by `rank_by`: `total` (default)
+  `probability` by `normalize` (below). `winner` is by `rank_by`: `total` (default)
   for variants of one content, where the mean would reward a variant for being cut
   into more, individually likely tokens (`co-operate`'s later pieces are nearly
   certain); `mean` for candidates whose lengths differ by content. With `mean` the
   winner need not hold the largest `probability`.
-- Limits: 26 candidates (`400 too_many_candidates`, like options), each unique and
-  without leading or trailing whitespace (schema), at most 256 scored tokens
-  (`400 candidate_too_long`, naming the question and the candidate), each whole prompt
-  at most `min(32768, max_model_len - 1)` (`400 item_prompt_too_long`). 256 is several
-  OCR lines or a long title; a candidate is the part the readings differ in plus enough
-  around it to judge, not a page.
+- `normalize` says what `probability` is, and never moves `winner`:
+  - `softmax` (default): the totals renormalised over the candidates offered, so they
+    sum to 1. Use it to PICK ONE of mutually exclusive replies (which spelling, which
+    title, the one genre a song is).
+  - `none`: exp(`logprob`), each reply's own probability under the model, independent of
+    the others and summing to nothing in particular. Use it to read how likely one reply
+    is in absolute terms, or to compare a reply across requests (a softmax moves when
+    the candidate list does).
+  - Neither answers "which of these apply" (multi-label tagging). A reply's probability
+    is the model's chance of saying exactly that as its whole first words: it falls with
+    the reply's length, is shared among every phrasing of the same idea, and a model that
+    would say two tags gives the first one it would say the mass. A tag that clearly
+    applies can score far below one that merely comes first. Ask "which apply" as the
+    items form, one yes/no item per option ("Does the tag 'lo-fi' fit this song?"): each
+    item gets its own P(Yes), independent and calibrated to the question asked, and the
+    items form reads the state once for all of them.
+- Scored tokens are the candidate's own: the reply stays open, so no end-of-turn token
+  is scored on any engine. A candidate that is the start of another ("rock" and "rock
+  and roll") is therefore always at least as likely as the longer one; list such pairs
+  only when that is what you mean, or rank by `mean`.
+- Limits: 256 candidates (`400 too_many_candidates`; a label question's 26 is its
+  letters, and a candidate needs none), each unique and without leading or trailing
+  whitespace (schema), at most 256 scored tokens (`400 candidate_too_long`, naming the
+  question and the candidate), each whole prompt at most `min(32768, max_model_len - 1)`
+  (`400 item_prompt_too_long`). 256 is several OCR lines or a long title; a candidate is
+  the part the readings differ in plus enough around it to judge, not a page.
+- What 88 and 256 short candidates cost (one question, a ~210-token state, tags of
+  1-5 tokens, qwen3.5-4b-bside or qwen3.5-4b, measured 2026-10-10): the Mac (mlx-lm,
+  M1 Ultra, bf16) 0.8 s / 2.4 s with the state held, 1.0 s / 2.6 s without; vLLM
+  (qwen3.5-4b bf16, RTX 3090 Ti) 3.8 s / 11.2 s (3.1 / 8.7 s of it the prompts, the
+  rest `/tokenize`); llama-server (qwen3.5-4b-bside BF16 GGUF, same card) 14 s / 43 s of
+  forced continuations, ~150 ms each, plus rendering and tokenizing (~2 s for 256).
+  engines-and-capability.md says where each one's time goes.
 - `timing_ms.per_question` for a likelihood question is the request(s) that scored it:
   the one items request on the Mac (`cached_tokens`: state tokens the engine reused),
   the candidates' requests on vLLM summed (`prompt_tokens` summed; `cached_tokens` 0,
-  because a prompt-logprobs request never reads the cache). `tokens.per_question` is
-  the same `prompt_tokens`.
-- Refused by name before anything waits: a llama-server model
-  (`likelihood_unsupported_on_engine`) and images on an engine that scores text only
-  (`likelihood_images_unsupported_on_engine`). An engine process whose items route is
-  older than the server's answers `unknown_field`, reported as `503 decide_not_served`
-  naming the `load-model` job that applies the current route.
+  because a prompt-logprobs request never reads the cache), and on llama-server the
+  candidates' forced continuations summed (`prompt_tokens` the context once per
+  candidate, `cached_tokens` what the engine read from its cache, all but the last few
+  context tokens of each). `tokens.per_question` is the same `prompt_tokens`.
+- Refused by name before anything waits: images on an engine that scores text only
+  (`likelihood_images_unsupported_on_engine`; every engine but mlx-vlm), and a model on
+  an engine that states no route (`likelihood_unsupported_on_engine`; none today). An
+  engine process whose items route is older than the server's answers `unknown_field`,
+  reported as `503 decide_not_served` naming the `load-model` job that applies the
+  current route.
 
 ## The operator page
 

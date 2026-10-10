@@ -486,6 +486,7 @@ const LIKELY: DecideRequest = {
       instructions: 'Name the chapter.',
       candidates: { long: 'The Long Road', short: 'Road' },
       rankBy: 'mean',
+      normalize: 'none',
     },
   },
 };
@@ -499,13 +500,13 @@ function likelyReply(): Record<string, any> {
     engine: 'vllm',
     answers: {
       spelling: {
-        type: 'likelihood', winner: 'plain', rank_by: 'total',
+        type: 'likelihood', winner: 'plain', rank_by: 'total', normalize: 'softmax',
         candidates: { plain: score(-3.0, 6, 0.88), hyphen: score(-5.0, 8, 0.12) },
         context_tokens: 61, boundary_tokens: 0,
       },
       title: {
-        type: 'likelihood', winner: 'long', rank_by: 'mean',
-        candidates: { long: score(-3.0, 3, 0.27), short: score(-2.0, 1, 0.73) },
+        type: 'likelihood', winner: 'long', rank_by: 'mean', normalize: 'none',
+        candidates: { long: score(-3.0, 3, 0.05), short: score(-2.0, 1, 0.14) },
         context_tokens: 55, boundary_tokens: 1,
       },
     },
@@ -532,6 +533,8 @@ test('a likelihood question travels with rank_by in the server\'s spelling, only
   });
   assert.equal(body.questions.title.rank_by, 'mean');
   assert.equal('rankBy' in body.questions.title, false);
+  assert.equal(body.questions.title.normalize, 'none');
+  assert.equal('normalize' in body.questions.spelling, false);
 });
 
 test('a likelihood answer reads every candidate, the winner and the boundary', async () => {
@@ -541,9 +544,10 @@ test('a likelihood answer reads every candidate, the winner and the boundary', a
     type: 'likelihood',
     winner: 'long',
     rankBy: 'mean',
+    normalize: 'none',
     candidates: {
-      long: { logprob: -3.0, tokens: 3, meanLogprob: -1.0, probability: 0.27 },
-      short: { logprob: -2.0, tokens: 1, meanLogprob: -2.0, probability: 0.73 },
+      long: { logprob: -3.0, tokens: 3, meanLogprob: -1.0, probability: 0.05 },
+      short: { logprob: -2.0, tokens: 1, meanLogprob: -2.0, probability: 0.14 },
     },
     contextTokens: 55,
     boundaryTokens: 1,
@@ -559,6 +563,10 @@ test('a likelihood answer naming a candidate nobody offered, or another ranking,
   ranked.answers.title.rank_by = 'total';
   handle = (_request, response) => json(response, 200, ranked);
   await assert.rejects(client().decide(LIKELY), CrucibleProtocolError);
+  const renormalised = likelyReply();
+  renormalised.answers.title.normalize = 'softmax';
+  handle = (_request, response) => json(response, 200, renormalised);
+  await assert.rejects(client().decide(LIKELY), CrucibleProtocolError);
 });
 
 test('a likelihood question with a bad rankBy or one candidate is refused before any request', async () => {
@@ -566,6 +574,10 @@ test('a likelihood question with a bad rankBy or one candidate is refused before
   const bad = (question: unknown) => client().decide({ state: 's', questions: { q: question as any } });
   await assert.rejects(
     bad({ type: 'likelihood', instructions: 'x', candidates: { a: 'a', b: 'b' }, rankBy: 'median' }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(
+    bad({ type: 'likelihood', instructions: 'x', candidates: { a: 'a', b: 'b' }, normalize: 'sigmoid' }),
     CrucibleConfigError,
   );
   await assert.rejects(bad({ type: 'likelihood', instructions: 'x', candidates: { a: 'a' } }), CrucibleConfigError);

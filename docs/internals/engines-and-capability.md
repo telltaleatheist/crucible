@@ -763,11 +763,10 @@ started exactly as `load-model` would).
   every token of a free-text candidate instead of one label token. How an engine does
   it is `decide_likelihood_route` (with `decide_likelihood_basis`, read by
   `engines.likelihood_reading`): `items` (mlx-lm, mlx-vlm: the items route reads a
-  `candidates` body, ITEMS_VERSION 3), `prompt-logprobs` (vLLM) or None (llama-server,
-  refused `400 likelihood_unsupported_on_engine` before anything waits; b10970 returns
-  no prompt-token log-probability: `n_probs` covers generated tokens only and
-  `/v1/completions` refuses `echo`). `decide_likelihood_images` says whether images may
-  ride along (mlx-vlm only; elsewhere `400 likelihood_images_unsupported_on_engine`).
+  `candidates` body, ITEMS_VERSION 4), `prompt-logprobs` (vLLM), `forced-tokens`
+  (llama-server) or None (refused `400 likelihood_unsupported_on_engine` before anything
+  waits; no engine today). `decide_likelihood_images` says whether images may ride along
+  (mlx-vlm only; elsewhere `400 likelihood_images_unsupported_on_engine`).
 - A candidate's prompt is the chat template's **open assistant reply**: the question's
   turns plus `{"role": "assistant", "content": <candidate>}` rendered with
   `continue_final_message` (thinking off), so it ends on the candidate's last
@@ -784,13 +783,69 @@ started exactly as `load-model` would).
   candidate_not_a_reply` (the template does not continue the reply it opened). All of
   a question's candidates are scored from one boundary, so their totals compare the
   same thing.
-- **Mac**: one items request for every likelihood question of a decision. The state
-  runs once (and is kept in `StateCache` as for items), each candidate is a row of a
-  batched forward (`read_likelihood_rows`; mlx-vlm one forward per candidate,
-  `read_likelihood`), and the head runs on the candidate's positions only, 64 at a
-  time (`SCORE_CHUNK`), float32 log-softmax, the target token gathered. The shared part
-  stops one token before the earliest boundary, because a row must read the hidden
-  state that predicts its first scored token.
+- **Mac**: one items request for every likelihood question of a decision
+  (`read_likelihood_rows`, ITEMS_VERSION 4). The state runs once (and is kept in
+  `StateCache` as for items). Each QUESTION's context past the state (its request, the
+  opened reply) is then read once over a copy of the state's cache, and the hidden state
+  at its last token gives every candidate's FIRST token from one head application
+  (`next_logprobs`). A candidate of k tokens is a row of its first k-1 tokens in a
+  batched forward over the question's cache (row position i predicts token i+1; the
+  last token is never an input), so a one-token candidate costs no forward at all. Every
+  row of a forward is scored together (`spans_logprobs`: the rows' positions gathered
+  into one matrix, the head 64 positions at a time, `SCORE_CHUNK`, float32
+  log-softmax). Rows per forward are bounded by `ROW_BYTES` of repeated cache as for
+  items (58 MB a row for qwen3.5-4b-bside at a 210-token state, so 9 rows). mlx-vlm
+  keeps one forward per candidate (`read_likelihood`).
+- Why version 4, measured on the Mac Studio M1 Ultra 2026-10-10 (qwen3.5-4b-bside bf16,
+  one question, 210-token state, 256 tags of 1-5 tokens, 15/128/84/24/5 of 1/2/3/4/5):
+  version 3 made every row re-read the context's last token and the candidate's
+  never-read last token (rows of k+1 tokens, 2-6, padded) and applied the 1.3 GB head
+  once per candidate, then 8.7 s for 256 (3.0 s for 88) at the engine; version 4's rows
+  are k-1 tokens and the head runs once per forward: 2.35 s held / 2.6 s cold for 256,
+  0.79 / 1.05 s for 88. A forward of 9 short rows costs ~70 ms on the 4B whatever its
+  length; raising `ROW_BYTES` to 1-4 GiB (36-73 rows) did not measurably beat the
+  run-to-run noise, so the memory bound stays where it was. The two versions agree to
+  0.05 nat on average (bf16, a different batch shape), same winner and top 10.
+- **llama-server** (`forced-tokens`): b10970 returns no prompt-token log-probability
+  (`/v1/completions` refuses `echo`), so each candidate is GENERATED, forced. The door
+  renders the context and every candidate's open reply through llama-server's own
+  `/apply-template` (the parser its chat completions use) and `/tokenize`
+  (`add_special`, `parse_special`), splits them with `likelihood_split` like every other
+  engine, and sends one `/completion` per candidate: `prompt` the context's token ids up
+  to the boundary, `grammar` `root ::= <[id1]> <[id2]> ...` (a GBNF of token IDS,
+  src/llama-grammar.cpp `parse_token` L186-230, so the reply is exactly the tokens the
+  boundary scored, never another tokenization of the same text), `n_predict` their
+  count, `n_probs: 1`, `post_sampling_probs: false`, `temperature: 0`,
+  `cache_prompt: true`, `return_tokens: true`. The reply must have generated exactly
+  those ids (`engine_error` otherwise), and each `completion_probabilities[i].logprob`
+  is read; llama-server writes a zero probability as -3.4e38, refused as `engine_error`.
+- Why that logprob is the same quantity as vLLM's prompt logprobs and the Mac's rows
+  (read at the b10970 tag): with `post_sampling_probs` false, `populate_token_probs`
+  (tools/server/server-context.cpp L1964-2020) reads `get_token_probabilities`
+  (server-common.cpp L1524-1573), a max-subtracted softmax over `llama_get_logits_ith`,
+  the context's raw logits over the whole vocabulary, with no temperature; the grammar
+  and the sampler chain work on the sampler's own copy (common/sampling.cpp `set_logits`
+  L130-162, `common_sampler_sample` L594-660), so the forced token's probability is not
+  1. Asking for pre-sampling probabilities turns backend sampling off, so no candidate
+  list truncates the vocabulary (server-context.cpp L1790-1796). The sampled token's
+  probability is found in the full list whatever `n_probs` is. Measured: a forced
+  "lo-fi" reads -5.52 there and -5.56 on the Mac.
+- PC against Mac, the same question (210-token state, 256 B-Sides-style tags,
+  qwen3.5-4b-bside: BF16 GGUF on llama-server on the 3090 Ti, bf16 safetensors on mlx-lm
+  on the M1 Ultra, 2026-10-10): the same 212-token context and the same token count for
+  every candidate; totals differ by 0.062 nat on average (median 0.049, max 0.23), the
+  same winner ("lo-fi") and the same top 10, softmax probabilities within 0.0074,
+  Spearman 0.9998. That is the size of the Mac's own difference between two batch
+  shapes, i.e. bf16 arithmetic, not a different quantity.
+- llama-server's cost is per request: one slot, so the candidates go in turn, and this
+  hybrid model's recurrent state cannot be rolled back, so each request restores the
+  checkpoint llama-server took 4 tokens before the prompt's end and re-reads those 4
+  (L3285-3400, L3559-3576): ~100 ms of "prompt eval" for 4 tokens, plus ~15 ms per
+  forced token after the first, ~150 ms a candidate (88: 14 s, 256: 43 s on the 3090 Ti
+  BF16). Re-reading the whole 100-token context without the cache cost the same (95 ms),
+  so the price is the checkpointing, not the cache. Rendering and tokenizing 256
+  candidates is another ~2 s (one call at a time: llama-server's HTTP threads took twice
+  as long with 256 at once).
 - **vLLM**: `/tokenize` renders the context (`add_generation_prompt`) and every
   candidate (`continue_final_message`) first, on the CPU, so every refusal is made
   before a forward pass; then one `/v1/chat/completions` per candidate with
@@ -803,6 +858,25 @@ started exactly as `load-model` would).
   them, but a long state costs N prefills. vLLM writes -inf as -9999.0
   (`clamp_prompt_logprobs`); the door refuses that as `engine_error` rather than
   reporting a number the model never gave.
+- What N prefills cost (2026-10-10, qwen3.5-4b bf16 on the 3090 Ti, 214-token prompts,
+  16 at a time): 88 candidates 3.1 s, 256 candidates 8.7 s (54,916 prompt tokens, ~6,300
+  tokens/s), plus 0.7 / 2.5 s of `/tokenize`. The cache would not help a state this
+  short anyway: a hybrid model's prefix cache works in whole blocks of 528+ tokens, so
+  a state under one block caches nothing even without `prompt_logprobs`.
+  `skip_reading_prefix_cache` is a SamplingParams field the chat and completions
+  protocols do not expose (vllm/entrypoints/openai/chat_completion/protocol.py builds
+  SamplingParams without it, L712-748), so no request can lift it. Forcing candidates as
+  generated tokens, the llama-server route, is NOT valid on vLLM: the structured-output
+  bitmask is applied to the logits before the sampler (v1/worker/gpu_model_runner.py
+  L4657-4661) and the sampler computes even `raw_logprobs` from those masked logits
+  (v1/sample/sampler.py L81-95), so a forced token reads probability 1. A route that
+  would be valid and cache-friendly is a custom logits processor (applied AFTER the raw
+  logprobs, sampler.py L99-101) that forces the tokens named in `vllm_xargs`, loaded with
+  `--logits-processors`; not built, because it pays only for states longer than a block.
+- vLLM's prompt logprobs are not deterministic across runs at bf16: the same 88-candidate
+  request twice moved totals by up to 0.29 nat (batch composition changes the kernels),
+  enough to swap a winner whose margin is 0.001. Read margins under ~0.3 nat as ties on
+  every engine.
 - **Raw-text continuation is not built.** Every use so far has a natural request
   (spell this sentence, read this line, title this chapter, say this word), and an
   instruct model scored off its template is a distribution nobody tuned. If one turns

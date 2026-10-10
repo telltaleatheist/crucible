@@ -206,13 +206,14 @@ def decide_items_reading(engine_name: str) -> DecideItemsReading:
     )
 
 
-LIKELIHOOD_ROUTES = ("items", "prompt-logprobs")
+LIKELIHOOD_ROUTES = ("items", "prompt-logprobs", "forced-tokens")
 
 
 @dataclass(frozen=True)
 class LikelihoodReading:
     route: str | None
-    """`items`, `prompt-logprobs`, or None when the engine cannot score candidates."""
+    """`items`, `prompt-logprobs`, `forced-tokens`, or None when the engine cannot
+    score candidates."""
     images: bool
     basis: str
 

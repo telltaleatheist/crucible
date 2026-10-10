@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 3
+ITEMS_VERSION = 4
 
 ITEMS_PATH = "/v1/crucible/items"
 
@@ -422,30 +422,103 @@ def token_logprobs(head: Callable[[Any], Any], hidden: Any, targets: Sequence[in
 
 ScoreFn = Callable[[Any, Sequence[int]], list[float]]
 
+Span = tuple[int, int, Sequence[int]]
+"""One candidate in a batched forward's hidden states: its row, the position
+that predicts its first token, and its tokens."""
+
+SpansFn = Callable[[Any, Sequence[Span]], list[list[float]]]
+
+
+def spans_logprobs(
+    head: Callable[[Any], Any], hidden: Any, spans: Sequence[Span]
+) -> list[list[float]]:
+    """`token_logprobs` for every candidate of one batched forward at once: their
+    positions gathered into one [positions, width] matrix and scored SCORE_CHUNK
+    at a time, so the head's weights (the whole vocabulary, 1.3 GB on a 4B) are
+    read once per chunk instead of once per candidate."""
+    import mlx.core as mx
+
+    gathered = mx.concatenate(
+        [hidden[row, start:start + len(targets)] for row, start, targets in spans], axis=0
+    )
+    flat = token_logprobs(head, gathered, [token for _, _, targets in spans for token in targets])
+    read: list[list[float]] = []
+    at = 0
+    for _, _, targets in spans:
+        read.append(flat[at:at + len(targets)])
+        at += len(targets)
+    return read
+
+
+def next_logprobs(head: Callable[[Any], Any], hidden: Any, targets: Sequence[int]) -> list[float]:
+    """ln P(target | the context) for many targets at ONE position (`hidden`,
+    [1, width]): the head applied once, in float32, every target gathered from
+    the same distribution."""
+    import mlx.core as mx
+
+    logits = head(hidden).astype(mx.float32)[0]
+    values = mx.take(logits, mx.array(list(targets))) - mx.logsumexp(logits)
+    mx.eval(values)
+    return [float(value) for value in values.tolist()]
+
+
+def question_tail(split: LikelihoodSplit, member: int, read: int) -> list[int]:
+    """What a question's candidates share past the `read` tokens the shared pass
+    read: its context up to its boundary (the question, the opened reply), read
+    once per question."""
+    scored = split.scored[member]
+    whole = split.shared + split.suffixes[member]
+    assert read <= len(split.shared)
+    return whole[read: len(split.shared) + scored.start + 1]
+
 
 def read_likelihood_rows(
     split: LikelihoodSplit,
+    read_by_shared: int,
     shared_pass: Callable[[], list[Any]],
+    question_pass: Callable[[list[Any], list[int]], tuple[list[Any], Any]],
     rows_pass: Callable[[list[Any], list[list[int]]], Any],
-    score: ScoreFn,
+    score: SpansFn,
+    first: ScoreFn,
     per_row_bytes: Callable[[list[Any]], int],
 ) -> list[list[float]]:
-    """Every candidate read as one row of a batched forward over the shared
-    cache, as `read_rows` reads items, and scored at every one of its tokens
-    instead of at its end."""
+    """Every candidate scored at every one of its tokens over the shared state
+    read once (`shared_pass` reads the first `read_by_shared` tokens of
+    `split.shared`). Per question: the rest of its context is read once over a
+    copy of the state's cache (`question_pass`, which also returns the hidden
+    state at its last token), every candidate's FIRST token is read off that
+    one position (`first`), and a candidate of k tokens is one row of its first
+    k-1 tokens in a batched forward over the question's cache: the row's
+    position i predicts token i+1, and its last token is never an input. A
+    one-token candidate costs no forward at all. Rows are grouped as
+    `read_rows` groups items, bounded by the bytes of the repeated cache, and
+    every row of a forward is scored together."""
     import mlx.core as mx
 
     cache = shared_pass()
-    row_bytes = per_row_bytes(cache)
     read: list[list[float] | None] = [None] * len(split.suffixes)
-    for group in row_groups(split.suffixes, lambda longest: rows_per_pass(row_bytes, longest)):
-        rows, _ = padded([split.suffixes[index] for index in group])
-        hidden = rows_pass(cache, rows)
-        for row, index in enumerate(group):
-            scored = split.scored[index]
-            stop = scored.start + len(scored.targets)
-            read[index] = score(hidden[row, scored.start:stop], scored.targets)
-    mx.clear_cache()
+    members: dict[int, list[int]] = {}
+    for index, scored in enumerate(split.scored):
+        members.setdefault(scored.group, []).append(index)
+    for indexes in members.values():
+        own, last = question_pass(cache, question_tail(split, indexes[0], read_by_shared))
+        firsts = first(last, [split.scored[index].targets[0] for index in indexes])
+        for index, value in zip(indexes, firsts):
+            read[index] = [value]
+        longer = [index for index in indexes if len(split.scored[index].targets) > 1]
+        if not longer:
+            continue
+        inputs = [list(split.scored[index].targets[:-1]) for index in longer]
+        row_bytes = per_row_bytes(own)
+        for batch in row_groups(inputs, lambda longest: rows_per_pass(row_bytes, longest)):
+            rows, _ = padded([inputs[at] for at in batch])
+            hidden = rows_pass(own, rows)
+            spans = [(row, 0, split.scored[longer[at]].targets[1:]) for row, at in enumerate(batch)]
+            for at, values in zip(batch, score(hidden, spans)):
+                head_value = read[longer[at]]
+                assert head_value is not None and len(head_value) == 1
+                read[longer[at]] = head_value + values
+        mx.clear_cache()
     done = [row for row in read if row is not None]
     assert len(done) == len(read)
     return done
@@ -803,6 +876,33 @@ class MlxLmShared:
                 mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
         return self.inner(mx.array(rows), cache=own)
 
+    def question_pass(self, cache: list[Any], tail: list[int]) -> tuple[list[Any], Any]:
+        """A question's context tail read over a copy of the state's cache: that
+        copy, and the hidden state at the tail's last token ([1, width])."""
+        import mlx.core as mx
+        from mlx_lm.models.cache import make_prompt_cache
+
+        own = make_prompt_cache(self.model)
+        if self.shared:
+            copied(own, cache)
+        ids = mx.array(tail)
+        hidden: Any = None
+        for start in range(0, len(tail), CHUNK_TOKENS):
+            hidden = self.inner(ids[None, start:start + CHUNK_TOKENS], cache=own)
+            mx.eval([entry.state for entry in own])
+        steps = len(tail) - 1 - (len(tail) - 1) // CHUNK_TOKENS * CHUNK_TOKENS
+        return own, hidden[0, steps:steps + 1]
+
+    def question_rows(self, cache: list[Any], rows: list[list[int]]) -> Any:
+        """Rows over a question's cache, which always holds its tail."""
+        import mlx.core as mx
+        from mlx_lm.models.cache import make_prompt_cache
+
+        own = make_prompt_cache(self.model)
+        for mine, theirs in zip(own, cache):
+            mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
+        return self.inner(mx.array(rows), cache=own)
+
     def per_row_bytes(self, cache: list[Any]) -> int:
         return state_bytes(cache) if self.shared else 0
 
@@ -824,12 +924,16 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     if isinstance(ask, LikelihoodAsk):
         likely = likelihood_prompts(ask, tokenize, lambda messages: tokenize(messages, True))
         # The state is kept where it ends, as for items: what every row shares
-        # with the open turn left empty.
+        # with the open turn left empty. Only the state is read as shared: what
+        # follows it up to each question's boundary is that question's own pass,
+        # which also yields the hidden state its candidates' first tokens are
+        # read from.
         state_end = min(len(likely.shared), common_prefix([*likely_rows(likely), open_turn]))
-        held = MlxLmShared(model, inner, likely.shared, state_end)
+        held = MlxLmShared(model, inner, likely.shared[:state_end], state_end)
         logprobs = read_likelihood_rows(
-            likely, held.shared_pass, held.rows_hidden,
-            lambda hidden, targets: token_logprobs(head, hidden, targets), held.per_row_bytes,
+            likely, state_end, held.shared_pass, held.question_pass, held.question_rows,
+            lambda hidden, spans: spans_logprobs(head, hidden, spans),
+            lambda hidden, targets: next_logprobs(head, hidden, targets), state_bytes,
         )
         return likelihood_document(likely, logprobs, held.reused)
 

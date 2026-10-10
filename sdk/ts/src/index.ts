@@ -182,6 +182,7 @@ export type {
   DecideItemsRequest,
   DecideItemsResponse,
   DecideMissing,
+  DecideNormalize,
   DecideOptions,
   DecideLikelihoodAnswer,
   DecideLikelihoodQuestion,

@@ -123,7 +123,9 @@ class SubprocessEngine:
     decide_likelihood_route: str | None = None
     """How the engine scores a likelihood question's candidates: `items` (the
     batched items route, every candidate a row) or `prompt-logprobs` (one
-    request per candidate, the log-probability of every prompt token read back).
+    request per candidate, the log-probability of every prompt token read back)
+    or `forced-tokens` (one request per candidate, the candidate's tokens forced
+    as the generated continuation and each one's raw log-probability read back).
     None: it cannot, and `decide_likelihood_basis` says why."""
 
     decide_likelihood_images: bool = False

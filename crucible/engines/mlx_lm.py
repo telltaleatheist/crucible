@@ -77,11 +77,12 @@ class MlxLmEngine(SubprocessEngine):
 
     decide_likelihood_route = "items"
     decide_likelihood_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 3) reads a "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 4) reads a "
         "candidates body: every candidate's prompt is the chat template's open "
-        "assistant reply (continue_final_message), the shared state runs once, and "
-        "each candidate is a batched row whose every token is scored off the head "
-        "in float32"
+        "assistant reply (continue_final_message), the shared state runs once, each "
+        "question's context once over it, every candidate's first token is read "
+        "off that question's last position, and the rest of a candidate is a "
+        "batched row whose every token is scored off the head in float32"
     )
 
     decide_questions_batched = True
