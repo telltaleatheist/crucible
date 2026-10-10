@@ -276,9 +276,9 @@ def test_the_door_sends_one_items_request_and_reads_every_group() -> None:
     reply = {
         "object": "crucible.likelihood", "shared_tokens": 300, "cached_tokens": 280,
         "groups": [
-            {"context_tokens": 330, "boundary": 330,
+            {"context_tokens": 330, "boundary": 330, "read_tokens": 50,
              "candidates": [{"logprobs": [-0.5, -0.1]}, {"logprobs": [-2.0, -0.1, -0.1]}]},
-            {"context_tokens": 320, "boundary": 319,
+            {"context_tokens": 320, "boundary": 319, "read_tokens": 19,
              "candidates": [{"logprobs": [-1.0, -1.0, -1.0]}, {"logprobs": [-2.5]},
                             {"logprobs": [-1.2, -1.2]}]},
         ],
@@ -303,7 +303,12 @@ def test_the_door_sends_one_items_request_and_reads_every_group() -> None:
     spelling, timing, tokens = scored["spelling"]
     assert spelling.winner == "plain" and spelling.candidates["plain"].logprob == pytest.approx(-0.6)
     assert spelling.boundary_tokens == 0
-    assert tokens == (330 + 2) + (330 + 3) and timing.cached_tokens == 280
+    # Each candidate's prompt is its boundary, as llama-server is sent it; the 300-token
+    # state was 280 held and 20 read, plus the question's own 30: 50 read, 610 cached.
+    assert tokens == 330 * 2 and timing.prompt_tokens == 660
+    assert timing.cached_tokens == 660 - 50
+    assert scored["title"][1].prompt_tokens == 319 * 3
+    assert scored["title"][1].cached_tokens == 319 * 3 - 19
     title = scored["title"][0]
     assert title.winner == "one", "by the mean: -1.0 a token beats -1.2 and -2.5"
     assert title.boundary_tokens == 1
@@ -331,9 +336,14 @@ def test_a_reply_with_the_wrong_shape_is_engine_error() -> None:
     plans = decide.plan_all(_request(spelling=SPELLING))
     for reply in (
         {"groups": []},
-        {"groups": [{"context_tokens": 3, "boundary": 3, "candidates": [{"logprobs": [-1.0]}]}]},
-        {"groups": [{"context_tokens": 3, "boundary": 3,
+        {"groups": [{"context_tokens": 3, "boundary": 3, "read_tokens": 3,
+                     "candidates": [{"logprobs": [-1.0]}]}]},
+        {"groups": [{"context_tokens": 3, "boundary": 3, "read_tokens": 3,
                      "candidates": [{"logprobs": [-1.0]}, {"logprobs": []}]}]},
+        {"groups": [{"context_tokens": 3, "boundary": 3,
+                     "candidates": [{"logprobs": [-1.0]}, {"logprobs": [-1.0]}]}]},
+        {"groups": [{"context_tokens": 3, "boundary": 3, "read_tokens": 7,
+                     "candidates": [{"logprobs": [-1.0]}, {"logprobs": [-1.0]}]}]},
     ):
         with pytest.raises(ApiError) as caught:
             decide_likelihood.read_likelihood_reply(reply, "mlx-lm", plans)
@@ -476,6 +486,10 @@ def test_every_candidate_token_is_scored_at_its_own_position_in_one_batched_forw
         "'w' [6], '!x' [60])"
     )
     assert document["shared_tokens"] == shared and document["cached_tokens"] == 0
+    assert [g["read_tokens"] for g in document["groups"]] == [shared + tail_a, tail_a - 1], (
+        "what each question's pass read, as the forwards above: the state once, with "
+        "the first question, then each question's own tail; candidates are not prompt"
+    )
 
 
 def test_one_token_candidates_cost_no_forward_past_their_question(likely_mlx: Any) -> None:
@@ -499,6 +513,9 @@ def test_the_next_likelihood_pass_on_the_same_state_skips_its_prefill(likely_mlx
     assert likely_mlx.model.forwards == [(1, len("cq") + 3), (1, len("dq") + 3)], (
         "no prefill: each question's tail straight away, and one-token candidates need no row"
     )
+    assert [g["read_tokens"] for g in document["groups"]] == [len("cq") + 3, len("dq") + 3], (
+        "the held state is read by no question, so each reads only its own tail"
+    )
 
 
 def test_a_candidate_past_its_cap_is_refused_before_any_forward(likely_mlx: Any) -> None:
@@ -509,10 +526,26 @@ def test_a_candidate_past_its_cap_is_refused_before_any_forward(likely_mlx: Any)
     assert likely_mlx.model.forwards == []
 
 
+def test_each_reader_counts_what_its_passes_read_per_question() -> None:
+    # Two questions over a 4-token shared part; boundaries 6 and 7; two candidates each.
+    split = likelihood_split(
+        [[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 8, 9, 10]],
+        [[[1, 2, 3, 4, 5, 6, 20], [1, 2, 3, 4, 5, 6, 21]],
+         [[1, 2, 3, 4, 8, 9, 10, 20], [1, 2, 3, 4, 8, 9, 10, 21]]],
+        100, 100, 10,
+    )
+    assert split.boundaries == [6, 7] and len(split.shared) == 4
+    assert items_forward.question_read_tokens(split, 4, 0) == [4 + 2, 3]
+    assert items_forward.question_read_tokens(split, 4, 3) == [1 + 2, 3], "3 held"
+    assert items_forward.row_read_tokens(split) == [4 + 2 * 2, 3 * 2], (
+        "mlx-vlm reads the shared part once and every candidate's own row to its boundary"
+    )
+
+
 def test_a_non_finite_log_probability_is_engine_error_not_a_number() -> None:
     split = likelihood_split([[1, 2]], [[[1, 2, 3], [1, 2, 4]]], 10, 10, 10)
     with pytest.raises(ItemsRefusal) as caught:
-        items_forward.likelihood_document(split, [[-1.0], [-math.inf]])
+        items_forward.likelihood_document(split, [[-1.0], [-math.inf]], [2])
     assert caught.value.code == "engine_error" and caught.value.details == {"group": 0}
 
 

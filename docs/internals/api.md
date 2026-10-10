@@ -484,6 +484,9 @@ The answer (the numbers show the shape; they were not measured):
 
 ## Embed (`POST /v1/embed`)
 
+**How to use it, with examples: [docs/RETRIEVAL.md](../RETRIEVAL.md).** This section is
+the reference.
+
 > **Vectors from different models are not comparable, and neither are vectors from the
 > same model in another precision, another engine build or another version of Crucible's
 > reading of it.** Every answer names exactly what wrote its vectors: `model.fingerprint`.
@@ -555,7 +558,9 @@ The answer (the numbers show the shape; they were not measured):
   model_not_for_verb`, so an OpenAI model name sent to the compatible route is refused, not
   mapped.
 - **The line**: as a decision (`queue`, sessions, `timing_ms.queued` apart from `total`,
-  cancelled when the caller leaves; crucible/api/verbcall.py). An embedding model is its own
+  cancelled when the caller leaves; crucible/api/verbcall.py). A model nothing holds is
+  unloaded after each call, so an unheld call loads it first, inside `timing_ms.queued`
+  (~3 s on the Mac from the page cache, 2026-10-10): a run of calls holds a queue session. An embedding model is its own
   engine: llama-server started `--embedding --pooling last` (engines/llama_server.py derives
   the flags from `[embed]`), so loading it takes whatever was on the card off, as any load
   does. The two retrieval models are about 16 GB each in bf16: on the PC's 24 GB card they do
@@ -564,8 +569,10 @@ The answer (the numbers show the shape; they were not measured):
 - **On each engine**: llama-server is sent token ids it tokenized with `add_special: false`
   and `parse_special: true` (one `/tokenize` per input, all of them before anything is
   embedded), then every input in one `/v1/embeddings`; its one slot embeds them in turn.
-  The Mac's items route (`ITEMS_VERSION` 6) tokenizes the same way and reads the inputs as
-  right-padded rows of one forward within the engine's prefill step. vLLM writes no vectors
+  The Mac's items route (`ITEMS_VERSION` 7) tokenizes the same way and reads the inputs as
+  right-padded rows of one forward within the engine's prefill step, so the same text in
+  another batch reads slightly differently (up to ~1.4e-3 a component on the Mac,
+  2026-10-10; cosine > 0.9999), under the same fingerprint. vLLM writes no vectors
   here: a pooling runner is an engine start no Crucible load makes, and the PC's embedding
   model is a GGUF (engines/vllm.py `embed_basis`).
 - **A backfill** (thousands of transcripts, ~15M tokens) is many requests of up to 256
@@ -591,6 +598,9 @@ The answer (the numbers show the shape; they were not measured):
   that did not install it never pulls the model by itself.
 
 ## Rerank (`POST /v1/rerank`)
+
+**How to use it, with examples: [docs/RETRIEVAL.md](../RETRIEVAL.md).** This section is
+the reference.
 
 ```json
 {"query": "What did the guest say about the harvest?",
@@ -632,7 +642,11 @@ The answer (the numbers show the shape; they were not measured):
   route's state, read once and kept between requests, and each document's tail is read once
   over it; a one-token reply costs no forward of its own. On llama-server the documents go
   in turn and each one's request shares the query with the one before, so the slot's cache
-  holds it (`tokens.cached`). On vLLM a prompt-logprobs request never reads the prefix cache
+  holds it. `tokens.total` counts every document's prompt with its query, as llama-server
+  is sent it (once per candidate, so twice: yes and no); `tokens.cached` is the part no
+  pass read again, so `total - cached` is what the engine read. The Mac's route says per
+  question what its passes read (`read_tokens`, `ITEMS_VERSION` 7): version 6 said
+  nothing, and a rerank there reported its query once per document and 0 cached. On vLLM a prompt-logprobs request never reads the prefix cache
   (vllm/sampling_params.py L540-543), so every document's two requests read the query again:
   a general model on the PC reranks at full prefill cost.
 - **Limits**: 256 documents (schema); the query and one document together at most the

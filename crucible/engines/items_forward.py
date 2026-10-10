@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 6
+ITEMS_VERSION = 7
 
 ITEMS_PATH = "/v1/crucible/items"
 
@@ -641,12 +641,45 @@ def read_likelihood(
     return read
 
 
+def question_read_tokens(split: LikelihoodSplit, state_end: int, reused: int) -> list[int]:
+    """The prompt tokens each question's pass actually read on the per-question reader
+    (read_likelihood_rows): its tail from the state's end to its boundary, once per
+    question, and the first question also the state past what a held cache supplied.
+    A candidate's own tokens are scored, not counted: they are the reply, as on
+    llama-server, whose forced tokens are not prompt."""
+    read = [boundary - state_end for boundary in split.boundaries]
+    if read:
+        read[min(scored.group for scored in split.scored)] += state_end - reused
+    return read
+
+
+def row_read_tokens(split: LikelihoodSplit) -> list[int]:
+    """The same for the per-row reader (read_likelihood, mlx-vlm): the whole shared part
+    once, then every candidate's own row up to its group's boundary."""
+    shared = len(split.shared)
+    read = [0] * len(split.boundaries)
+    for scored in split.scored:
+        read[scored.group] += split.boundaries[scored.group] - shared
+    if read:
+        read[min(scored.group for scored in split.scored)] += shared
+    return read
+
+
 def likelihood_document(
-    split: LikelihoodSplit, logprobs: Sequence[Sequence[float]], cached_tokens: int | None = None
+    split: LikelihoodSplit,
+    logprobs: Sequence[Sequence[float]],
+    read_tokens: Sequence[int],
+    cached_tokens: int | None = None,
 ) -> dict[str, Any]:
+    """`read_tokens`, per question, are the prompt tokens this request actually read
+    for it (question_read_tokens or row_read_tokens): Crucible reports each question's
+    prompt as its boundary once per candidate, as llama-server is sent it, and what
+    was not read as cached, so a shared state read once reads as cached for every
+    other question (version 6 sent no such count, and a rerank on the Mac reported
+    its query once per document and nothing cached, 2026-10-10)."""
     groups: list[dict[str, Any]] = [
-        {"context_tokens": context, "boundary": boundary, "candidates": []}
-        for context, boundary in zip(split.context_tokens, split.boundaries)
+        {"context_tokens": context, "boundary": boundary, "read_tokens": read, "candidates": []}
+        for context, boundary, read in zip(split.context_tokens, split.boundaries, read_tokens)
     ]
     for index, (scored, row) in enumerate(zip(split.scored, logprobs)):
         if len(row) != len(scored.targets):
@@ -1069,7 +1102,9 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
             lambda hidden, spans: spans_logprobs(head, hidden, spans),
             lambda hidden, targets: next_logprobs(head, hidden, targets), state_bytes, step,
         )
-        return likelihood_document(likely, logprobs, held.reused)
+        return likelihood_document(
+            likely, logprobs, question_read_tokens(likely, state_end, held.reused), held.reused
+        )
 
     open_turn = tokenize(item_messages(ask.messages, ""))
     prompts = [tokenize(item_messages(ask.messages, question)) for question in ask.questions]

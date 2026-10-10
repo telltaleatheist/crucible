@@ -150,7 +150,7 @@ class MlxLmEngine(SubprocessEngine):
 
     decide_likelihood_prompt = True
     decide_likelihood_prompt_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 6) reads a "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 7) reads a "
         "candidates body with `prompt` in place of `messages`: each context is the prompt "
         "and the question as one text, each candidate that text and the candidate, "
         "tokenized whole by the tokenizer's encode with add_special_tokens false (the "
@@ -161,7 +161,7 @@ class MlxLmEngine(SubprocessEngine):
 
     embed_route = "items"
     embed_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 6, mlx_lm_embed) "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 7, mlx_lm_embed) "
         "reads an inputs body: each input tokenized by encode with add_special_tokens "
         "false, the inner model's last hidden state (after its final norm: mlx-lm "
         "0.31.3's qwen3 Qwen3Model.__call__ returns norm(h), as transformers' AutoModel "
@@ -171,7 +171,7 @@ class MlxLmEngine(SubprocessEngine):
 
     decide_likelihood_route = "items"
     decide_likelihood_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 6) reads a "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 7) reads a "
         "candidates body: every candidate's prompt is the chat template's open "
         "assistant reply (continue_final_message), the shared state runs once, each "
         "question's context once over it, every candidate's first token is read "

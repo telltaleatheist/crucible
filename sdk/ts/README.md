@@ -628,6 +628,9 @@ went as its own request (`timingMs.engineRequests` says which).
 
 ### `embed()`
 
+How to use embed and rerank together, with the measured costs: the server repo's
+`docs/RETRIEVAL.md`.
+
 Unit-length vectors for up to 256 texts. **Vectors compare only within one fingerprint**:
 store `answer.model.fingerprint` beside them and send it back as `fingerprint` on every later
 call; a server that would write anything else refuses `409 fingerprint_mismatch` (a
@@ -659,6 +662,11 @@ needs no package.
 const ranked = await crucible.rerank({ query, documents: passages, instruction: 'Find the answer' });
 ranked.results[0];  // {index, relevanceScore}
 ```
+
+**Hold a session for a run of calls.** A model nothing holds is unloaded after each call,
+so an unheld `embed()` or `rerank()` reloads it first (~3 s on the Mac, inside
+`timingMs.queued`). Open `crucible.session({act: 'embed', model: 'qwen3-embedding-8b'})`
+(or `act: 'rerank'`) and call through the session.
 
 ## tts
 

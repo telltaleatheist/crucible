@@ -147,7 +147,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
     )
     async def rerank(request: Request, body: RerankRequest) -> Response:
         """A relevance probability per document for one query: P(yes) normalised
-        against P(no) under the model's prompt, so the same model's scores compare
+        against P(no) under the model's prompt (how to use it, with examples:
+        docs/RETRIEVAL.md in the server's repo), so the same model's scores compare
         across calls and a fixed cutoff means the same thing every time. `scores` are
         in document order; `results` the same, most relevant first. The prompt is
         Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any

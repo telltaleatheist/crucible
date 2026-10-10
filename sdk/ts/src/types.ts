@@ -1364,8 +1364,10 @@ export interface RerankResponse {
   readonly results: readonly RerankResult[];
   readonly tokens: {
     readonly perDocument: readonly number[];
+    /** Every document's prompt with its query, as llama-server is sent it (once per candidate). */
     readonly total: number;
-    /** Prompt tokens read from the engine's cache; null when it did not say. */
+    /** Of `total`, what no pass read again (the shared query, a held cache): `total - cached`
+     * is what the engine read. Null when the engine did not say. */
     readonly cached: number | null;
   };
   readonly timingMs: VerbTiming;
