@@ -7,6 +7,7 @@ notes.
 
 ## Unreleased
 
+- An instrumental whose score comes back unusable now says which way it failed (`truncated`: it ran to the score's token cap without ending, or `empty`: the model ended it with no score, with the token count) and keeps the plan YuE2 wrote (tokens, timing, how it ended) in the job's `failed-plan/` beside its kept request. Victoria's two-album run had 2 of ~11 instrumentals fail there with nothing saying why. Nothing re-runs it.
 - An audio job (a song) that fails, is cancelled or is interrupted can now be run again: from the moment it starts it keeps its request on disk (`request.json` in the job's directory, `request` on `GET /v1/jobs/{id}`): the params as sent with the seed it uses written in, the seed the server chose when the client sent none, the settled values, `low_vram` and a `reproduce` sentence. It clears once the job finishes successfully: a song that ends `done` drops it (`done_extra.audio` is the record); one that ends otherwise keeps it until the job is reaped. Victoria's job 1f3da14c (CUDA OOM in synthesizing) left no params and no seed. No other job type keeps anything of its request; a narration's params stay off disk (docs/AUDIO.md "A sound that did not finish").
 
 ## 1.0.132 — 2026-10-10
