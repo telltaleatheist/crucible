@@ -626,6 +626,7 @@ test('win32 with NO host: install.ps1 is RUN, not printed for somebody to type',
   const script = argv[5] ?? '';
   assert.match(script, /releases\/download\/v0\.6\.0\/install\.ps1/);
   assert.match(script, /-Release '0\.6\.0'/, 'the release the caller asked for, not the channel latest');
+  assert.match(script, /-Release '0\.6\.0' -FromApp$/, 'an app says it launched the script; the script never guesses');
   assert.doesNotMatch(script, /RunAs/, 'bootstrap still never elevates');
 });
 

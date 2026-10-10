@@ -7,6 +7,10 @@ from .platform.wsl_table import CRUCIBLE_DISTRO
 
 WSL_EXE = "wsl.exe"
 
+# Under the Windows home: where the installer imports the distro, so its disk
+# (ext4.vhdx) lives here. Uninstall keeps it: the distro is never unregistered.
+DISTRO_DIRNAME = "wsl"
+
 GUEST_USER = "crucible"
 ROOT_USER = "root"
 

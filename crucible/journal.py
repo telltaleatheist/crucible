@@ -17,6 +17,8 @@ from typing import Any, Callable
 from . import clock
 from .errors import ApiError
 
+JOURNALS_DIRNAME = "journals"
+
 JOURNAL_FORMAT = 1
 
 GONE = "_gone"

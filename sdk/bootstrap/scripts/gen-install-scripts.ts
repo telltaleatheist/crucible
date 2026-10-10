@@ -351,8 +351,6 @@ function psQuote(value: string): string {
 
 const PIP_QUIET = '--quiet --disable-pip-version-check --no-warn-script-location';
 
-const APP_SCRIPT_NAME = 'crucible-install.ps1';
-
 const MAC_APP = '$HOME/Applications/Crucible.app';
 
 function wslConfPrintf(): string {
@@ -429,6 +427,11 @@ export function generateInstallPs1(): string {
     '  [switch]$PurgeWeights,',
     '  [switch]$DryRun,',
     '  [switch]$WslToo,',
+    // -FromApp: an app launched this script (install() in this SDK, the setup .exe) and is
+    // the UI. It is said, never guessed from the file's name: the watcher hands over to the
+    // app instead of following the setup, nothing is asked on the terminal and no window is
+    // opened. It changes no check: the packaged-shell refusal applies to an app's run too.
+    '  [switch]$FromApp,',
     "  [string]$PythonArchive = '',",
     "  [string]$WheelFile = '',",
     "  [string]$WheelSha = ''",
@@ -662,9 +665,9 @@ export function generateInstallPs1(): string {
     '$said = @(Native { & $Cmd local start })',
     'if ($LASTEXITCODE -ne 0) { $said | Show; Die "Crucible is installed, but its engine did not start. Run this installer again; it carries on from where it stopped." }',
     '',
-    'Say "Crucible is ready in your notification area."',
-    '$FromApp = [bool]($PSCommandPath -and ([System.IO.Path]::GetFileName($PSCommandPath) -eq '
-      + `${psQuote(APP_SCRIPT_NAME)}) -and [Console]::IsOutputRedirected)`,
+    // Not "ready": after an update the tray is still carrying the guest to this release.
+    // The watcher says ready when the engine answers on it (installwatch.await_release).
+    'Say "Crucible $Release is installed and its icon is by the clock."',
     "$Watch = @('-m', 'crucible.host.installwatch', '--home', $Root, '--since', $Began)",
     "if ($FromApp) { $Watch += '--brief' }",
     'Native { & $PythonExe @Watch } | ForEach-Object { Write-Host $_ }',

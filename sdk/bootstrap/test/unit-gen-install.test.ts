@@ -494,6 +494,21 @@ test('install.sh opens Crucible.app only on a fresh install typed at the Mac its
   assert.match(tail, /open "\$HOME\/Applications\/Crucible.app"/);
 });
 
+test('install.ps1 is TOLD an app launched it (-FromApp) and never guesses it from its own name', () => {
+  const ps1 = generateInstallPs1();
+  assert.match(ps1, /^ {2}\[switch\]\$FromApp,$/m);
+  assert.doesNotMatch(ps1, /\$FromApp\s*=/, 'nothing assigns it: the switch is the only source');
+  assert.doesNotMatch(ps1, /crucible-install\.ps1|IsOutputRedirected/, 'the old guess is gone');
+  assert.match(ps1, /if \(\$FromApp\) \{ \$Watch \+= '--brief' \}/);
+  assert.ok(ps1.indexOf('$PackageCode -eq 0') < ps1.indexOf('$FromApp)'), 'an app run meets the packaged-shell refusal first');
+});
+
+test('install.ps1 never says ready before the watcher sees the engine answer on this release', () => {
+  const ps1 = generateInstallPs1();
+  assert.doesNotMatch(ps1, /is ready/);
+  assert.match(ps1, /Say "Crucible \$Release is installed and its icon is by the clock\."/);
+});
+
 test('install.ps1 opens the Crucible window only on a fresh install typed at the PC itself', () => {
   const ps1 = generateInstallPs1();
   assert.ok(ps1.indexOf('$Fresh = -not (Test-Path -LiteralPath $Cmd)') < ps1.indexOf('Native { & $Cmd local shutdown }'),

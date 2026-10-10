@@ -64,3 +64,88 @@ def test_no_sentence_claims_live_progress_where_there_is_none() -> None:
         assert "shows how it is going" not in text
         assert "shows how that is going" not in text
     assert "Install the WSL2 engine" not in (ROOT / "docs" / "INSTALL-UNINSTALL.md").read_text(encoding="utf-8")
+
+
+class _Engine:
+    """What the engine answers on each read: a list of versions, None for not answering."""
+
+    def __init__(self, answers: list[str | None]) -> None:
+        self._answers = answers
+        self.reads = 0
+
+    def __call__(self, home: Path) -> installwatch.EngineAnswer:
+        version = self._answers[min(self.reads, len(self._answers) - 1)]
+        self.reads += 1
+        return installwatch.EngineAnswer(
+            version, "answering" if version is not None else "connection refused"
+        )
+
+
+def _await(answers: list[str | None], budget: float = 600.0) -> tuple[bool, str, _Engine]:
+    tick = iter(float(n) for n in range(0, 100000, 2))
+    out = io.StringIO()
+    engine = _Engine(answers)
+    ready = installwatch.await_release(
+        ROOT, installwatch.Console(out), clock=lambda: next(tick),
+        sleep=lambda seconds: None, release="1.0.200", budget=budget, read=engine,
+    )
+    return ready, " ".join(out.getvalue().split()), engine
+
+
+def test_an_update_is_ready_only_once_the_engine_answers_on_the_new_release() -> None:
+    # Victoria's laptop, 1.0.114: "ready" was printed while the tray was still
+    # carrying the guest. Owen: ready is when it can actually do real work.
+    ready, said, engine = _await(["1.0.199"] * 20 + [None] * 15 + ["1.0.200"])
+    assert ready is True
+    assert engine.reads == 36, "it waited through the old release and the restart"
+    assert said.index("moving it to 1.0.200") < said.index("Crucible 1.0.200 is ready")
+    assert "it answers as 1.0.199" in said, "the wait says how it stands"
+    assert "not answering: connection refused" in said
+
+
+def test_an_engine_that_never_reaches_the_release_is_named_after_the_stated_budget() -> None:
+    ready, said, _ = _await(["1.0.199"], budget=300.0)
+    assert ready is False
+    assert "is ready" not in said
+    assert "up to 5 minutes" in said, "the budget is stated before the wait"
+    assert "after 5 minutes its Linux engine still answers as Crucible 1.0.199" in said
+    assert str(ROOT / "host.log") in said
+
+
+def test_the_brief_watch_of_an_update_waits_for_the_release_too(monkeypatch) -> None:
+    monkeypatch.setattr(installwatch, "_owner", lambda home: installwatch.OWNER_WSL_UNIT)
+    engine = _Engine([None, installwatch.VERSION])
+    monkeypatch.setattr(installwatch, "engine_answer", engine)
+    tick = iter(float(n) for n in range(1000))
+    out = io.StringIO()
+    assert installwatch.watch(ROOT, SINCE, brief=True, out=out, clock=lambda: next(tick),
+                              sleep=lambda seconds: None) == 0
+    text = " ".join(out.getvalue().split())
+    assert f"Crucible {installwatch.VERSION} is ready" in text
+    assert installwatch.APP_SENTENCE.split(".")[0] not in text, "no hand-over: it is ready"
+
+
+def test_the_engine_is_read_with_the_pairing_token_and_named_when_it_will_not_answer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from crucible import controller_client
+
+    assert "no pairing file" in installwatch.engine_answer(tmp_path).detail
+    (tmp_path / "pairing").write_text("crucible://c@127.0.0.1:7100/#tok\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def answers(url: str, **kwargs: object) -> dict:
+        seen.update(url=url, **kwargs)
+        return {"server": {"version": "1.0.200"}}
+
+    monkeypatch.setattr(controller_client, "request", answers)
+    answer = installwatch.engine_answer(tmp_path)
+    assert answer.version == "1.0.200"
+    assert seen["url"] == "http://127.0.0.1:7100/v1/info" and seen["token"] == "tok"
+
+    def refused(url: str, **kwargs: object) -> dict:
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(controller_client, "request", refused)
+    answer = installwatch.engine_answer(tmp_path)
+    assert answer.version is None and "connection refused" in answer.detail

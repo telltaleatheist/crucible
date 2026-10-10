@@ -64,6 +64,9 @@ def download(connection: Connection, path: str, destination: Path | None) -> int
 def report_http_error(
     exc: urllib.error.HTTPError, connection: Connection | None = None
 ) -> int:
+    # stdout first: under --follow it may already hold the accepted line and
+    # events, and a refusal printed ahead of them reads as out of order.
+    sys.stdout.flush()
     raw = exc.read()
     body, error = error_in(raw)
     if body is None:
@@ -76,7 +79,11 @@ def report_http_error(
     if step is not None:
         print(f"crucible: HTTP {exc.code} {step}", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"crucible: HTTP {exc.code}", file=sys.stderr)
+    # The refusal's own sentence leads, so a person reads the code and the reason
+    # on the first line; the whole document follows for its details (a 400's
+    # `problems`, a 409's holder), which a script parses from the second line.
+    headline = "" if error is None else f" {error.code}: {error.message}"
+    print(f"crucible: HTTP {exc.code}{headline}", file=sys.stderr)
     json.dump(body, sys.stderr, indent=2)
     sys.stderr.write("\n")
     return EXIT_REFUSED

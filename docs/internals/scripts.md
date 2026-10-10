@@ -67,8 +67,9 @@ the script refuses and says so. The script:
 - pins the setup to the wheel it is given: its sha256 is compiled in, so `--wheel` must be the
   exact file the release uploads (`release.sh` passes it).
 - compiles `installer/windows/crucible.nsi` with the generated `install.ps1` embedded as
-  `crucible-install.ps1` (that name tells `install.ps1` an app is driving it, so it watches the
-  WSL setup briefly and does not open the window itself; the setup's Finish page does).
+  `crucible-install.ps1` and runs it with `-FromApp`, which tells `install.ps1` an app is driving
+  it, so it watches the WSL setup briefly and does not open the window itself; the setup's
+  Finish page does.
 
 The setup downloads with NScurl (`/INSIST`, cancellable, with a progress bar), checks
 `NScurl::sha256` against the compiled pins, runs `install.ps1 -PythonArchive -WheelFile

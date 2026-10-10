@@ -50,8 +50,28 @@ SUBJECT_DIRS: dict[str, str] = {
     "engine": "engines",
 }
 
-STATE_DIRS: tuple[str, ...] = ("logs", "downloads")
-USER_DATA_DIRS: tuple[str, ...] = ("jobs", "uploads")
+# Every name below is placed under the home by some other module; that module
+# keeps the name, and tests/test_uninstall.py checks each one against it.
+STATE_DIRS: tuple[str, ...] = (
+    "logs",
+    "downloads",
+    "tools",            # hosttools: ffmpeg, silero-vad, zig (the C compiler)
+    "run",              # residency: what is on the card
+    "ladder",           # cardfacts: this card's measurement, re-measured on need
+    "voice-manifests",  # voicerepo: a cache of fetched voice manifests
+    "servers",          # `crucible pair`: other servers' pairings, tokens and all
+)
+USER_DATA_DIRS: tuple[str, ...] = ("jobs", "uploads", "journals")
+USER_DATA_FILES: tuple[str, ...] = ("playground-presets.json",)
+
+# Which ref each voice follows: it describes the voice weights, so it is kept
+# with them and goes with them under --purge-weights.
+WEIGHTS_FILES: tuple[str, ...] = ("voice-refs.json",)
+
+INTERPRETERS_DIR = "interpreters"
+DISTRO_DIR = wsl.DISTRO_DIRNAME
+LAN_RECORD = "landoor.json"
+SHARING_RECORD = "sharing.json"
 
 STATE_FILES: tuple[str, ...] = (
     "migration-cleanup.json",
@@ -63,6 +83,12 @@ STATE_FILES: tuple[str, ...] = (
     "app.lock",
     "app.door",
     "app.log",
+    "host.log",
+    "host.log.1",
+    "host.lock",
+    "tray.pid",
+    "tray.lock",
+    "tray.close",
 )
 
 ENVS_DIR = "envs"
@@ -78,7 +104,9 @@ LOCAL_VERB: tuple[str, ...] = ("-m", "crucible.cli", "local")
 
 CONTROLLER_STEPS: frozenset[str] = frozenset({"stop-engine", "stop-controller"})
 
-FATAL_BEFORE_REMOVAL: frozenset[str] = CONTROLLER_STEPS | {"remove-sharing", "remove-service"}
+FATAL_BEFORE_REMOVAL: frozenset[str] = CONTROLLER_STEPS | {
+    "remove-sharing", "remove-lan", "remove-service",
+}
 
 
 @dataclass(frozen=True)
@@ -258,10 +286,13 @@ def known_entries() -> set[str]:
         CONFIG_NAME,
         PAIRING_NAME,
         ENVS_DIR,
-        "launcher.json", "sharing.json", "bin",
+        "launcher.json", SHARING_RECORD, LAN_RECORD, "bin",
+        INTERPRETERS_DIR, DISTRO_DIR,
         *PACK_DIRS,
         *STATE_DIRS,
         *USER_DATA_DIRS,
+        *USER_DATA_FILES,
+        *WEIGHTS_FILES,
         *STATE_FILES,
         *SUBJECT_DIRS.values(),
     }
@@ -288,6 +319,7 @@ def plan(
     )
     steps += _registration_steps(home, platform, env, runner, mechanism, operator_home, running_from)
     steps += _file_steps(home)
+    steps.append(_interpreters_step(home, running_from))
     steps += _kept_steps(home, running_from, purge_weights=purge_weights)
     steps.append(_home_step(home, steps))
     return Plan(
@@ -306,8 +338,10 @@ def _prerequisite_steps(
     mechanism: str, operator_home: Path, running_from: Path, *, purge_weights: bool, wsl_too: bool,
 ) -> list[Step]:
     steps: list[Step] = []
-    if (home / "sharing.json").is_file():
+    if (home / SHARING_RECORD).is_file():
         steps.append(_sharing_step(home, platform, env))
+    if (home / LAN_RECORD).is_file():
+        steps.append(_lan_step(home, platform, env))
     steps.append(_stop_step(mechanism, home, operator_home, runner, running_from))
     if wsl_too:
         steps.append(_wsl_step(platform, runner, purge_weights=purge_weights))
@@ -321,8 +355,25 @@ def _sharing_step(home: Path, platform: str, env: Mapping[str, str]) -> Step:
     from .platform.runner import ProcessRunner
     return Step(
         name="remove-sharing", what="withdraw the owned Tailscale address and forward",
-        action=REMOVE, target=str(home / "sharing.json"),
+        action=REMOVE, target=str(home / SHARING_RECORD),
         act=lambda: [str(sharing.disable(home, ProcessRunner(platform, env), sharing.PairedEngine(home)))],
+    )
+
+
+def _lan_step(home: Path, platform: str, env: Mapping[str, str]) -> Step:
+    # Before the engine stops and the pairing goes, for the reason the sharing step
+    # is: withdrawing the door tells the engine to stop advertising it, and a door
+    # whose record outlives the pairing could never be withdrawn by Crucible again.
+    # Deleting the record alone would leave the port forward and the firewall rule
+    # on the machine, owned by nothing.
+    from . import lan, sharing
+    from .platform.runner import ProcessRunner
+    return Step(
+        name="remove-lan",
+        what=("withdraw the LAN door: the port forward and the firewall rule "
+              "`crucible lan enable` added (Windows asks for administrator permission)"),
+        action=REMOVE, target=str(home / LAN_RECORD),
+        act=lambda: [str(lan.disable(home, ProcessRunner(platform, env), sharing.PairedEngine(home, "lan")))],
     )
 
 
@@ -369,17 +420,67 @@ def _file_steps(home: Path) -> list[Step]:
     ]
 
 
+def _interpreters_step(home: Path, running_from: Path) -> Step:
+    path = home / INTERPRETERS_DIR
+    what = "the pinned standalone pythons the job environments were built on"
+    if path.is_dir() and _contains(path, running_from):
+        return Step(
+            name="remove-interpreters",
+            what=(f"{what} — kept: the interpreter running this very command is in "
+                  "it, and a process cannot delete what it is running from"),
+            action=KEEP, target=str(path), bytes=path_bytes(path),
+        )
+    return _path_step(
+        name="remove-interpreters", what=what, home=home, path=path,
+        absent_code="interpreters_absent",
+    )
+
+
+def _contains(directory: Path, running_from: Path) -> bool:
+    try:
+        return directory.resolve() in running_from.resolve().parents
+    except OSError:
+        return False
+
+
 def _kept_steps(home: Path, running_from: Path, *, purge_weights: bool) -> list[Step]:
     steps: list[Step] = []
-    for name in USER_DATA_DIRS:
+    for name in (*USER_DATA_DIRS, *USER_DATA_FILES):
         path = home / name
         if path.exists():
             steps.append(Step(
-                name=f"keep-data:{name}", what="user inputs and partial job output survive uninstall",
+                name=f"keep-data:{name}",
+                what="user inputs, saved presets and partial job output survive uninstall",
                 action=KEEP, target=str(path), bytes=path_bytes(path),
             ))
     for kind in catalog.KINDS:
         steps.append(_weights_step(home, kind, SUBJECT_DIRS[kind], purge_weights=purge_weights))
+    for name in WEIGHTS_FILES:
+        path = home / name
+        if not path.exists():
+            continue
+        if purge_weights:
+            steps.append(_path_step(
+                name=f"weights:{name}", what=f"<home>/{name}, removed with the weights",
+                home=home, path=path, absent_code="file_absent",
+            ))
+        else:
+            steps.append(Step(
+                name=f"weights:{name}",
+                what="which ref each voice follows — KEPT with the voices it describes",
+                action=KEEP, target=str(path), bytes=path_bytes(path),
+            ))
+    distro = home / DISTRO_DIR
+    if distro.is_dir():
+        steps.append(Step(
+            name=f"keep-distro:{DISTRO_DIR}",
+            what=(
+                f"the {CRUCIBLE_DISTRO!r} WSL distro's disk — kept, because this "
+                f"command never unregisters the distro. `wsl --unregister "
+                f"{CRUCIBLE_DISTRO}` deletes the distro and its disk"
+            ),
+            action=KEEP, target=str(distro), bytes=path_bytes(distro),
+        ))
     for name in PACK_DIRS:
         step = _pack_step(home, name, running_from)
         if step is not None:
@@ -471,10 +572,7 @@ def _pack_step(home: Path, name: str, running_from: Path) -> Step | None:
     path = home / name
     if not path.is_dir():
         return None
-    try:
-        inside = path.resolve() in running_from.resolve().parents
-    except OSError:
-        inside = False
+    inside = _contains(path, running_from)
     whose = (
         "the interpreter running this very command"
         if inside
@@ -841,7 +939,10 @@ __all__ = [
     "SUBJECT_DIRS",
     "Step",
     "UNINSTALL_MECHANISM",
+    "USER_DATA_DIRS",
+    "USER_DATA_FILES",
     "UninstallError",
+    "WEIGHTS_FILES",
     "gib",
     "known_entries",
     "mechanism_for_platform",

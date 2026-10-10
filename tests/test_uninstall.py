@@ -261,6 +261,151 @@ def test_an_entry_crucible_did_not_write_is_kept_and_reported(
     assert str(stray) in plan.kept()["paths"]
 
 
+def test_every_name_uninstall_knows_is_the_one_its_owner_places() -> None:
+    # One fact, one owner (docs/ARCHITECTURE.md R1): each module keeps the name it
+    # writes under the home, and this is what catches a rename the uninstall
+    # table did not follow.
+    from crucible import (
+        cardfacts, hosttools, interpreter, journal, lan, playgroundpresets,
+        residency, sharing, traylife, voicerefs, voicerepo, wsl,
+    )
+    from crucible.client import connection
+    from crucible.host import app as host_app
+    from crucible.platform import paths
+
+    home = Path("/h")
+    assert {
+        hosttools.TOOLS_DIR_NAME,
+        residency.resident_record_path(home).parent.name,
+        cardfacts.record_path(home).parent.name,
+        voicerepo.MANIFEST_CACHE_DIRNAME,
+        connection.SERVERS_DIR,
+    } <= set(uninstall.STATE_DIRS)
+    assert {
+        paths.LOG_NAME, paths.LOG_PREVIOUS_NAME,
+        host_app.LOCK_NAME, host_app.GUARD_NAME,
+        traylife.PID_NAME, traylife.LOCK_NAME, traylife.CLOSE_NAME,
+    } <= set(uninstall.STATE_FILES)
+    assert journal.JOURNALS_DIRNAME in uninstall.USER_DATA_DIRS
+    assert playgroundpresets.FILE_NAME in uninstall.USER_DATA_FILES
+    assert voicerefs.REFS_FILE in uninstall.WEIGHTS_FILES
+    assert interpreter.INTERPRETERS_DIRNAME == uninstall.INTERPRETERS_DIR
+    assert wsl.DISTRO_DIRNAME == uninstall.DISTRO_DIR
+    assert lan.RECORD == uninstall.LAN_RECORD
+    assert sharing.RECORD == uninstall.SHARING_RECORD
+
+
+def _placed_by_crucible(home: Path) -> None:
+    for relative in (
+        "tools/bin/cc", "tools/zig/0.17.0/zig", "tools/silero-vad/vad.onnx",
+        "tools/ffmpeg.json", "run/resident.json", "ladder/card.json",
+        "voice-manifests/mistborn.toml", "servers/mac.pairing",
+        "interpreters/3.11.14/bin/python3", "host.log", "host.log.1", "host.lock",
+        "tray.pid", "tray.lock", "tray.close",
+    ):
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+
+def test_what_crucible_placed_under_its_home_is_removed_not_reported_as_a_stranger(
+    installed_home: Path, unit_home: Path
+) -> None:
+    # Victoria's laptop, 2026-10-09: an uninstall left <home>/tools (ffmpeg,
+    # silero, zig) behind, reported as "Crucible did not put this here".
+    _placed_by_crucible(installed_home)
+    plan = uninstall.run(make(installed_home, user_home=unit_home))
+    assert not plan.fatal
+    assert not [s.name for s in plan.steps if s.name.startswith("keep-unknown:")]
+    for name in ("tools", "run", "ladder", "voice-manifests", "servers", "interpreters",
+                 "host.log", "host.log.1", "host.lock", "tray.pid", "tray.lock", "tray.close"):
+        assert not (installed_home / name).exists(), name
+
+
+def test_a_purged_home_with_everything_crucible_placed_is_removed_entirely(
+    installed_home: Path, unit_home: Path, tmp_path: Path
+) -> None:
+    _placed_by_crucible(installed_home)
+    import shutil
+    shutil.rmtree(installed_home / "server")
+    shutil.rmtree(installed_home / "jobs")
+    shutil.rmtree(installed_home / "uploads")
+    (installed_home / "voice-refs.json").write_text("{}", encoding="utf-8")
+    plan = uninstall.run(uninstall.plan(
+        home=installed_home, platform="linux", env={}, runner=Runner(),
+        user_home=unit_home, purge_weights=True,
+        executable=str(tmp_path / "elsewhere" / "python"),
+    ))
+    assert not plan.fatal, [s.to_dict() for s in plan.fatal]
+    assert not installed_home.exists()
+
+
+def test_user_data_and_the_voice_refs_are_kept_and_the_refs_go_with_purged_weights(
+    installed_home: Path, unit_home: Path
+) -> None:
+    (installed_home / "journals" / "r1").mkdir(parents=True)
+    (installed_home / "playground-presets.json").write_text("{}", encoding="utf-8")
+    refs = installed_home / "voice-refs.json"
+    refs.write_text("{}", encoding="utf-8")
+    kept = uninstall.run(make(installed_home, user_home=unit_home))
+    assert step(kept, "keep-data:journals").action == uninstall.KEEP
+    assert step(kept, "keep-data:playground-presets.json").action == uninstall.KEEP
+    assert step(kept, "weights:voice-refs.json").action == uninstall.KEEP
+    assert refs.is_file()
+    purged = uninstall.run(make(installed_home, user_home=unit_home, purge_weights=True))
+    assert step(purged, "weights:voice-refs.json").done
+    assert not refs.exists()
+    assert (installed_home / "journals" / "r1").is_dir()
+
+
+def test_interpreters_it_is_running_from_are_kept_and_named(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    python = home / "interpreters" / "3.11.14" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("x", encoding="utf-8")
+    plan = uninstall.run(uninstall.plan(
+        home=home, platform="linux", env={}, runner=Runner(),
+        user_home=tmp_path / "operator", executable=str(python),
+    ))
+    kept = step(plan, "remove-interpreters")
+    assert kept.action == uninstall.KEEP
+    assert "running this very command" in kept.what
+    assert python.is_file()
+
+
+def test_the_wsl_distro_disk_is_kept_by_name_and_never_called_a_stranger(
+    installed_home: Path, unit_home: Path
+) -> None:
+    disk = installed_home / "wsl" / "ext4.vhdx"
+    disk.parent.mkdir()
+    disk.write_bytes(b"d")
+    plan = uninstall.run(make(installed_home, user_home=unit_home, purge_weights=True))
+    kept = step(plan, "keep-distro:wsl")
+    assert kept.action == uninstall.KEEP
+    assert "wsl --unregister" in kept.what
+    assert disk.is_file()
+    assert "wsl" in (step(plan, "remove-home").refused or uninstall.Refusal("", "", False)).message
+
+
+def test_a_lan_door_is_withdrawn_before_the_engine_stops_and_a_failure_removes_nothing(
+    installed_home: Path, unit_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from crucible import lan
+    (installed_home / "landoor.json").write_text("{}", encoding="utf-8")
+    names = [s.name for s in make(installed_home, user_home=unit_home).steps]
+    assert names.index("remove-lan") < names.index("stop-engine")
+
+    def declined(*_args: object, **_kwargs: object) -> None:
+        raise lan.LanError("lan_admin_prompt_declined: the prompt was declined")
+
+    monkeypatch.setattr(lan, "disable", declined)
+    plan = uninstall.run(make(installed_home, user_home=unit_home))
+    refused = step(plan, "remove-lan").refused
+    assert refused is not None and refused.code == "lan_admin_prompt_declined"
+    assert (installed_home / "pairing").is_file(), "the door can only be withdrawn while the pairing exists"
+    assert (installed_home / "config.toml").is_file()
+
+
 def test_nothing_outside_crucible_home_is_ever_removed(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -559,5 +704,9 @@ def test_the_cli_refuses_by_name_when_this_host_cannot_say_where_home_is(
     monkeypatch.delenv("CRUCIBLE_HOME", raising=False)
     monkeypatch.setattr(cli.uninstall_cmd.sys, "platform", "win32")
     monkeypatch.setattr(cli.uninstall_cmd.os, "environ", {}, raising=False)
+    # Pretending to be Windows reaches the packaged-shell probe first, which asks
+    # kernel32; this test is about the home, so the shell is an ordinary one.
+    from crucible.platform import packaged
+    monkeypatch.setattr(packaged, "_kernel32_package_name", lambda: None)
     assert cli.main(["uninstall", "--dry-run"]) == 1
     assert "LOCALAPPDATA" in capsys.readouterr().err

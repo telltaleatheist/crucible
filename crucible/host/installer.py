@@ -527,7 +527,7 @@ class EngineInstall:
         if self._distro in distros:
             self._keep_the_imported_distro()
             return
-        downloads, destination = self._home / "downloads", self._home / "wsl"
+        downloads, destination = self._home / "downloads", self._home / wsl.DISTRO_DIRNAME
         downloads.mkdir(parents=True, exist_ok=True)
         destination.mkdir(parents=True, exist_ok=True)
         self._clear_half_import(destination)
