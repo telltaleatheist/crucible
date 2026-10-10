@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -25,6 +26,14 @@ TOOLS_DIR_NAME = "tools"
 FFMPEG_STAMP_NAME = "ffmpeg.json"
 
 FFMPEG_PROGRAMS: tuple[str, ...] = ("ffmpeg", "ffprobe")
+
+ZIG_STAMP_NAME = "zig.json"
+
+ZIG_DIR_NAME = "zig"
+
+C_COMPILER_NAME = "cc"
+
+C_COMPILER_ENV = "CC"
 
 
 class HostToolError(CrucibleError):
@@ -74,6 +83,38 @@ FFMPEG_BUILDS: dict[str, ToolBuild] = {
             "signature checked against key D67658D8); LGPL 2.1+, static, Apple clang, "
             "macOS 13+, system frameworks only, ad-hoc signed"
         ),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class CompilerBuild(ToolBuild):
+    """A pinned Zig whose ``zig cc`` is this host's C compiler.
+
+    ``target`` is passed on every compile. Naming the glibc version makes zig link
+    against its own glibc stubs and crt files, so the host needs no libc6-dev and no
+    gcc; without it zig picks up whatever crt files the system has, and a fresh
+    Crucible distro has none.
+    """
+
+    target: str
+
+
+ZIG_BUILDS: dict[str, CompilerBuild] = {
+    "linux-x86_64": CompilerBuild(
+        version="0.17.0",
+        url=(
+            "https://github.com/telltaleatheist/crucible/releases/download/"
+            "tools/zig-x86_64-linux-0.17.0.tar.xz"
+        ),
+        sha256="1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026",
+        bytes=57_332_648,
+        root="zig-x86_64-linux-0.17.0",
+        provenance=(
+            "ziglang.org/download/0.17.0 zig-x86_64-linux-0.17.0.tar.xz, the sha256 "
+            "ziglang.org/download/index.json lists, re-hosted unchanged; MIT"
+        ),
+        target="x86_64-linux-gnu.2.28",
     ),
 }
 
@@ -329,6 +370,253 @@ def ensure_ffmpeg(
         encoding="utf-8",
     )
     return f"ffmpeg: {build.version} placed in {bin_dir} (sha256 {build.sha256[:12]}...)"
+
+
+def zig_build(platform_key: str | None = None) -> CompilerBuild | None:
+    return ZIG_BUILDS.get(host_platform() if platform_key is None else platform_key)
+
+
+def zig_stamp(home: Path) -> Path:
+    return home / TOOLS_DIR_NAME / ZIG_STAMP_NAME
+
+
+def zig_dir(home: Path, build: CompilerBuild) -> Path:
+    return home / TOOLS_DIR_NAME / ZIG_DIR_NAME / build.version
+
+
+def zig_cache_dir(home: Path) -> Path:
+    return home / TOOLS_DIR_NAME / ZIG_DIR_NAME / "cache"
+
+
+def c_compiler_path(home: Path) -> Path:
+    return home / TOOLS_DIR_NAME / "bin" / C_COMPILER_NAME
+
+
+def c_compiler_wrapper(home: Path, build: CompilerBuild) -> str:
+    """The ``cc`` Crucible hands Triton: zig's clang, aimed at zig's own glibc.
+
+    Zig's caches are kept beside it under the Crucible home, so a service whose
+    $HOME is unusable still compiles, and nothing is written outside the home.
+    """
+    zig = shlex.quote(str(zig_dir(home, build) / "zig"))
+    cache = shlex.quote(str(zig_cache_dir(home)))
+    return (
+        "#!/bin/sh\n"
+        f"# Crucible's C compiler: zig {build.version} cc, placed by `crucible install`.\n"
+        "# Triton JIT-compiles a small C launcher the first time a kernel runs.\n"
+        f"ZIG_GLOBAL_CACHE_DIR={cache}\n"
+        f"ZIG_LOCAL_CACHE_DIR={cache}\n"
+        "export ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR\n"
+        f'exec {zig} cc -target {build.target} "$@"\n'
+    )
+
+
+def _zig_unpacked(home: Path, build: CompilerBuild) -> bool:
+    try:
+        record = json.loads(zig_stamp(home).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(record, dict) or record.get("sha256") != build.sha256:
+        return False
+    return (zig_dir(home, build) / "zig").is_file()
+
+
+def zig_placed(home: Path, build: CompilerBuild) -> bool:
+    if not _zig_unpacked(home, build):
+        return False
+    try:
+        written = c_compiler_path(home).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return written == c_compiler_wrapper(home, build)
+
+
+def _write_wrapper(home: Path, build: CompilerBuild) -> None:
+    target = c_compiler_path(home)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f".{target.name}.partial")
+    partial.write_text(c_compiler_wrapper(home, build), encoding="utf-8", newline="\n")
+    partial.chmod(0o755)
+    os.replace(partial, target)
+
+
+def _unpack_zig(
+    home: Path,
+    build: CompilerBuild,
+    on_line: Callable[[str], None] | None,
+    fetch: Callable[[str, Path], str] | None,
+) -> None:
+    final = zig_dir(home, build)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".zig-", dir=str(home / TOOLS_DIR_NAME)))
+    started = time.monotonic()
+    try:
+        archive = staging / build.url.rsplit("/", 1)[-1]
+        if on_line is not None:
+            on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB)")
+        measured = (_download if fetch is None else fetch)(build.url, archive)
+        if measured != build.sha256:
+            raise HostToolError(
+                "tool_sha_mismatch",
+                f"{archive.name} hashed {measured}, and Crucible pins "
+                f"{build.sha256}. Nothing is placed: these are not the bytes on "
+                "Crucible's tools release",
+            )
+        unpacked = staging / "unpacked"
+        try:
+            with tarfile.open(archive, "r:xz") as bundle:
+                bundle.extractall(unpacked)
+        except (tarfile.TarError, OSError) as exc:
+            raise HostToolError(
+                "tool_unpack_failed",
+                f"{archive.name} matched its sha256, but could not be unpacked: "
+                f"{type(exc).__name__}: {exc}",
+            ) from None
+        tree = unpacked / build.root
+        if not (tree / "zig").is_file():
+            raise HostToolError(
+                "tool_unpack_failed",
+                f"{archive.name} matched its sha256, but holds no {build.root}/zig",
+            )
+        if final.exists():
+            # No stamp vouches for this tree (zig_placed said so before we got
+            # here): an earlier place stopped between the rename and the stamp.
+            # The verified tree replaces it whole.
+            shutil.rmtree(final)
+        os.replace(tree, final)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    zig_stamp(home).write_text(
+        json.dumps(
+            {
+                "tool": "zig",
+                "version": build.version,
+                "platform": host_platform(),
+                "url": build.url,
+                "sha256": build.sha256,
+                "provenance": build.provenance,
+                "target": build.target,
+                "seconds": round(time.monotonic() - started, 1),
+                "placed": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def ensure_zig(
+    home: Path,
+    *,
+    on_line: Callable[[str], None] | None = None,
+    fetch: Callable[[str, Path], str] | None = None,
+) -> str:
+    """Place Crucible's C compiler: the pinned Zig, and the ``cc`` that runs it.
+
+    Idempotent. The tree is unpacked into a staging directory beside its home and
+    renamed into place whole, so nothing ever reads half of it. The wrapper is
+    rewritten whenever it is not exactly what this pin says, which also repairs a
+    Crucible home that has moved. A failed fetch is not retried here, as with
+    ffmpeg: installing again retries only what is missing.
+    """
+    build = zig_build()
+    if build is None:
+        return f"c compiler: none is placed on {host_platform()}"
+    wrapper = c_compiler_path(home)
+    if zig_placed(home, build):
+        return f"c compiler: zig {build.version} cc already at {wrapper}"
+    if _zig_unpacked(home, build):
+        how = "was unpacked; its cc is rewritten"
+    else:
+        _unpack_zig(home, build, on_line, fetch)
+        how = f"placed in {zig_dir(home, build)} (sha256 {build.sha256[:12]}...)"
+    _write_wrapper(home, build)
+    return f"c compiler: zig {build.version} {how}; {wrapper} runs it for {build.target}"
+
+
+def env_runs_triton(env_dir: Path) -> bool:
+    """Whether this env holds Triton, which JIT-compiles C the first time a kernel runs."""
+    return any(env_dir.glob("lib/python*/site-packages/triton/__init__.py"))
+
+
+def compiler_environment(env_dir: Path, home: Path | None = None) -> dict[str, str]:
+    """``CC`` for a process started from ``env_dir``, or a refusal by name.
+
+    The one owner of CC for Crucible's subprocesses: the engines
+    (``engines/base.py`` ``start``) and the job workers (``workers._spawn``) both
+    merge this over the environment they inherit, and every process they start
+    inherits it in turn. Nothing is set on a host with no pinned compiler
+    (mlx-darwin, Windows) or for an env without Triton.
+
+    Crucible's compiler always wins over a ``CC`` the server inherited: this is an
+    appliance, and the target that makes zig use its own glibc is what keeps the
+    host free of a system toolchain. An env that runs Triton on a host whose
+    compiler is not placed is misconfiguration, refused here before anything
+    launches rather than minutes later at the first kernel.
+    """
+    build = zig_build()
+    if build is None or not env_runs_triton(env_dir):
+        return {}
+    if home is None:
+        from .config import crucible_home
+
+        home = crucible_home()
+    if not zig_placed(home, build):
+        raise HostToolError(
+            "c_compiler_missing",
+            f"{env_dir} runs Triton, which compiles a C launcher the first time a "
+            f"kernel runs, and Crucible's C compiler (zig {build.version} cc) is not "
+            f"at {c_compiler_path(home)}. {_install_sentence(home, env_dir)}",
+        )
+    return {C_COMPILER_ENV: str(c_compiler_path(home))}
+
+
+def _envs_running_triton(home: Path) -> list[tuple[str, str]]:
+    from . import jobenv
+    from .backend import CUDA_LINUX
+
+    return [
+        (str(jobenv.env_dir(home, spec)), jobenv.install_command(spec))
+        for spec in jobenv.every_env(CUDA_LINUX)
+        if env_runs_triton(jobenv.env_dir(home, spec))
+    ]
+
+
+def _install_sentence(home: Path, env_dir: Path) -> str:
+    for path, command in _envs_running_triton(home):
+        if path == str(env_dir):
+            return f"Run `{command}`, which places it"
+    return (
+        "That env is none of the ones `crucible install` builds under "
+        f"{home / 'envs'}, so no install here places the compiler for it"
+    )
+
+
+def c_compiler_report(home: Path) -> dict[str, object]:
+    build = zig_build()
+    if build is None:
+        return {
+            "platform": host_platform(),
+            "pinned_version": None,
+            "placed": False,
+            "path": None,
+            "needed_by": [],
+        }
+    return {
+        "platform": host_platform(),
+        "pinned_version": build.version,
+        "placed": zig_placed(home, build),
+        "path": str(c_compiler_path(home)),
+        "needed_by": [
+            {"env": path, "fix": command} for path, command in _envs_running_triton(home)
+        ],
+    }
+
+
+def needs_c_compiler(home: Path) -> bool:
+    return zig_build() is not None and bool(_envs_running_triton(home))
 
 
 def silero_vad_path(home: Path) -> Path:

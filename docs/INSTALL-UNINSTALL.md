@@ -78,7 +78,8 @@ are ARCHIVE sizes, so an unpacked env is larger. They come from the mirrors per
 machine now, and only when the recipe moved.
 
 `crucible install <type>` turns its type on when the card can hold it, and places
-Crucible's ffmpeg whatever the type. After that, nothing about a type needs a hand edit of
+Crucible's ffmpeg whatever the type, and on cuda-linux the C compiler Triton needs (a
+pinned Zig as `tools/bin/cc`) whenever an env there holds Triton. After that, nothing about a type needs a hand edit of
 config.toml, nor `init --force` (which mints a new token):
 
 ```bash

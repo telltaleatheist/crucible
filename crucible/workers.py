@@ -123,6 +123,10 @@ def _spawn(
     if environment is not None:
         merged.update(environment)
     merged["PATH"] = hosttools.worker_path(merged.get("PATH", ""))
+    try:
+        merged.update(hosttools.compiler_environment(python.parent.parent))
+    except hosttools.HostToolError as exc:
+        raise WorkerError(str(exc)) from None
 
     try:
         return subprocess.Popen(

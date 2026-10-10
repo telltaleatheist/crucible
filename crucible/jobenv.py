@@ -290,6 +290,14 @@ def worker_env(job_type: str, backend_kind: str) -> EnvSpec:
     )
 
 
+def install_command(spec: EnvSpec) -> str:
+    """The command that builds this one env: a tts env on cuda-linux is one per
+    narrator engine, so its command names the engine its key carries."""
+    if spec.job_type == "tts" and spec.key != "tts":
+        return f"crucible install tts --narrator-engine {spec.key.removeprefix('tts-')}"
+    return f"crucible install {spec.job_type}"
+
+
 def every_env(backend_kind: str) -> tuple[EnvSpec, ...]:
     """Every env this backend can build, one spec per venv under envs/.
 

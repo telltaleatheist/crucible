@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import procgroup
+from .. import hosttools, procgroup
 from ..enginespec import flag_value
 from ..errors import EngineError, JobCancelled
 from ..logtail import tail_of_last_run
@@ -247,6 +247,10 @@ class SubprocessEngine:
                 + self.missing_model_hint(model_dir, served_name)
             )
 
+        try:
+            compiler = hosttools.compiler_environment(self._python.parent.parent)
+        except hosttools.HostToolError as exc:
+            raise EngineError(f"{self.name} cannot start: {exc}") from None
         command = self.command(model_dir, served_name, port, args)
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         existed = self._log_path.is_file() and self._log_path.stat().st_size > 0
@@ -261,6 +265,7 @@ class SubprocessEngine:
 
         environment = dict(os.environ)
         environment.update(self.environment())
+        environment.update(compiler)
         try:
             group = procgroup.own_group()
         except procgroup.ProcessGroupError as exc:

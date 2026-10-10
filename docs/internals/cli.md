@@ -242,6 +242,18 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
     the capability step, so no flag turns on without ffmpeg. Re-running retries only
     ffmpeg. The silero VAD for `asr`'s `speech_only` is placed too, but its failure is not
     a refusal: a `speech_only` job fetches it itself.
+  - The C compiler (Owen, 2026-10-09: *"ship gcc with the required environment … for every
+    system"*): Triton JIT-compiles a small C launcher the first time a kernel runs, and a
+    fresh distro has no compiler (`RuntimeError: Failed to find C compiler`, after the
+    weights loaded, on Victoria's laptop). gcc is not shippable, so `_ensure_tools` places
+    Zig 0.17.0 from the same `tools` release (`hosttools.ensure_zig`, `ZIG_BUILDS`) under
+    `tools/zig/<version>/` and writes `tools/bin/cc`, which execs `zig cc -target
+    x86_64-linux-gnu.2.28`: naming the glibc makes zig link its own glibc stubs and crt,
+    so the host needs no gcc and no libc6-dev. It is placed when any env in the home holds
+    Triton (`hosttools.env_runs_triton`; on cuda-linux that is every env but `asr`), so
+    the next `crucible install` of any type gives an existing install the compiler. No
+    pin on mlx-darwin or Windows, so nothing is placed there. A failure is a refusal, as
+    ffmpeg's is.
   - `_measure_step`: Owen, 2026-09-26: *"our measurement tool should determine how much
     space is available, whether tensors are available, cuda graphs, vllm, etc. and install
     the best the user can use"*. It measures first, then decides. It never refuses the

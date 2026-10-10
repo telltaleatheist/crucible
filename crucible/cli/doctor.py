@@ -108,6 +108,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("path", lambda: None),
     ("stranded_weights", lambda: None),
     ("ffmpeg", lambda: None),
+    ("c_compiler", lambda: None),
     ("notes", list),
     ("problems", list),
 )
@@ -248,10 +249,31 @@ def check_files(host: Host) -> Section:
     config = host.config
     if config is None:
         return Section("files", {})
-    return Section("files", {
-        "stranded_weights": catalog.stranded_weights(config),
-        "ffmpeg": hosttools.ffmpeg_report(config.home),
-    })
+    compiler = hosttools.c_compiler_report(config.home)
+    return Section(
+        "files",
+        {
+            "stranded_weights": catalog.stranded_weights(config),
+            "ffmpeg": hosttools.ffmpeg_report(config.home),
+            "c_compiler": compiler,
+        },
+        tuple(_compiler_findings(compiler)),
+    )
+
+
+def _compiler_findings(compiler: dict[str, Any]) -> list[Finding]:
+    if compiler["placed"] or not compiler["needed_by"]:
+        return []
+    first = compiler["needed_by"][0]
+    envs = ", ".join(entry["env"] for entry in compiler["needed_by"])
+    return [Finding.run(
+        "c_compiler_missing",
+        f"{envs} run Triton, which compiles a C launcher the first time a kernel "
+        f"runs, and Crucible's C compiler (zig {compiler['pinned_version']} cc) is "
+        f"not at {compiler['path']}; their engines and workers are refused until it "
+        "is. Installing any of them places it",
+        first["fix"],
+    )]
 
 
 def _stale_findings(config: Config, backend: Backend) -> list[Finding]:
@@ -964,6 +986,18 @@ def lines_ffmpeg(report: dict[str, Any]) -> Iterator[str]:
         yield f"ffmpeg:  NONE — no pinned build for {tool['platform']}, and none on PATH"
 
 
+def lines_c_compiler(report: dict[str, Any]) -> Iterator[str]:
+    compiler = report["c_compiler"]
+    if compiler is None or compiler["pinned_version"] is None:
+        return
+    if compiler["placed"]:
+        yield f"cc:      {compiler['path']} (Crucible's pinned zig {compiler['pinned_version']})"
+    elif compiler["needed_by"]:
+        yield f"cc:      NONE — zig {compiler['pinned_version']} is not at {compiler['path']}"
+    else:
+        yield "cc:      none placed; no env here runs Triton"
+
+
 def _job_mark(entry: dict[str, Any]) -> str:
     if entry["ready"]:
         return "ready"
@@ -1003,6 +1037,7 @@ TEXT_SECTIONS: tuple[Callable[[dict[str, Any]], Iterable[str]], ...] = (
     lines_patches,
     lines_capability,
     lines_ffmpeg,
+    lines_c_compiler,
     lines_job_types,
     lines_stranded_weights,
     lines_notes,

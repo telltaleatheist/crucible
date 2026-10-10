@@ -266,6 +266,21 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
             f"the env is installed, but Crucible's ffmpeg is not: {exc}. "
             "Installing again retries only the ffmpeg"
         )
+    if hosttools.needs_c_compiler(config.home):
+        try:
+            print(
+                hosttools.ensure_zig(
+                    config.home,
+                    on_line=(lambda line: print(f"  {line}")) if args.verbose else None,
+                )
+            )
+        except hosttools.HostToolError as exc:
+            return (
+                f"the env is installed, but Crucible's C compiler is not: {exc}. "
+                "Triton in it compiles C the first time a kernel runs, and its "
+                "engine is refused until the compiler is placed. Installing again "
+                "retries only the compiler"
+            )
     try:
         print(hosttools.ensure_silero_vad(config.home))
     except hosttools.HostToolError as exc:

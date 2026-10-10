@@ -407,6 +407,20 @@ A recipe measured on its own replaces its row here and its header line together.
   clang. When the recorded compiler is missing, `build_environment` sets gcc, else
   cc, else clang, with the matching C++ compiler. This was measured on `diffq`
   (2026-09-26).
+- **Triton's compiler (`CC`).** At run time, not at build time: Triton JIT-compiles a C
+  launcher the first time a kernel runs, and Triton reads `$CC` first. Every env on
+  cuda-linux except `asr` holds Triton. `hosttools.compiler_environment(env_dir)` is the
+  one owner of `CC`: `SubprocessEngine.start` (vLLM, narrator and the stack it starts)
+  and `workers._spawn` (every job worker) merge it over what they inherit, and their
+  children inherit it in turn. It is `<home>/tools/bin/cc`, the wrapper around
+  Crucible's pinned Zig (`zig cc -target x86_64-linux-gnu.2.28`, zig's own glibc and
+  crt, so no system toolchain), placed by `crucible install` (see
+  [cli.md](cli.md), `_ensure_tools`). Ours wins over a `CC` the server inherited: this
+  is an appliance. An env with Triton on a host whose compiler is not placed is refused
+  before launch, `c_compiler_missing`, naming that env's `crucible install` command;
+  `crucible doctor` reports the same. Nothing is set on mlx-darwin or Windows (no pin),
+  nor for an env without Triton. The env build's own `CC` (above) is separate and
+  unchanged.
 - `PipFailure` extracts one line naming the failing package and reason. The cause
   used to scroll out of the tail, 40 lines up.
 - A direct reference must pin a 40-character commit. `pip list` reports declared
