@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.130 — 2026-10-10
+
 - YuE2 no longer grows in host memory song after song. Every move of its backbone between the card and host memory (yue2-infer's decode parks the whole 7.26 GB backbone while the VAE runs; `[audio] low_vram` swaps the halves around every synthesis chunk) allocated fresh host copies, and glibc's heap kept the freed ones: since 1.0.125 kept YuE2 loaded between queued songs, a worker on an 8 GiB laptop in a 15.8 GB WSL guest grew to 15.5 GB and was OOM-killed on track 12 of an album. Each parameter and buffer now keeps the host tensor its load made for the life of the worker (`yue2_worker.HostHomes`): a move to the card copies from it, a move back points at it, nothing is allocated in host memory after the load. Measured on the 3090 Ti with low_vram on: anonymous memory 1.95 GB after song 1 and 1.98 GB after song 6 (it was 9.76 GB after song 1 and 12.24 GB after song 2). Each audio job's `done_extra.audio.host_memory` now reports the worker's `before`, `after` and `peak_rss_bytes` and the `host_homes_bytes` it keeps; the YuE2 manifest declares `host_memory_bytes_estimate`, and `crucible doctor` names the model and both figures (`audio_host_memory`) when this machine has less memory than that (docs/internals/audio.md "Host memory").
 
 ## 1.0.129 — 2026-10-10
