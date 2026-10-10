@@ -656,6 +656,30 @@ test('prefill is sent as the prefill member, and the cached prompt tokens are re
   assert.equal(answer.usage?.cachedTokens, 16);
 });
 
+test('jsonWhitespace is sent as json_whitespace, and only compact or flexible', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  const responseFormat = {
+    type: 'json_schema',
+    json_schema: { name: 'v', schema: { type: 'object' } },
+  } as const;
+  await client().chat({
+    model: 'qwen3.5-9b',
+    messages: [{ role: 'user', content: 'hi' }],
+    responseFormat,
+    jsonWhitespace: 'compact',
+  });
+  assert.equal(JSON.parse(lastBody)['json_whitespace'], 'compact');
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b',
+      messages: [{ role: 'user', content: 'hi' }],
+      responseFormat,
+      jsonWhitespace: 'tight' as unknown as 'compact',
+    }),
+    (error: unknown) => error instanceof CrucibleConfigError && /jsonWhitespace/.test(String(error)),
+  );
+});
+
 test('the optional sampling knobs are omitted entirely when not given', async () => {
   handle = (_request, response) => json(response, 200, COMPLETION);
   await client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] });

@@ -608,7 +608,9 @@ started exactly as `load-model` would).
   unchanged and is compiled to its own GBNF grammar (b10970
   `common/json-schema-to-grammar.cpp`), whose capped string repeats a character
   rule that includes the escapes, so a `maxLength` string keeps its newlines
-  (the defect that moved vLLM to llguidance does not exist here).
+  (the defect that moved vLLM to llguidance does not exist here). Its whitespace rule
+  is fixed, so `"json_whitespace": "compact"` is refused here
+  (`json_whitespace_not_served`; "Structured output").
 - On `llama-windows` the binary is a pinned **engine subject** (`llamacpp`): `LLAMA_CPP_RELEASE`
   is never read from a listing. The CUDA build is two zips (the build plus
   `cudart`) unpacked into one directory. Every digest is checked before
@@ -970,12 +972,12 @@ every engine states what it enforces, with where that was read:
 `structured_output_fields` and `structured_output_basis`, read by
 `engines.structured_output_reading`.
 
-| engine | `response_format` | other fields |
-|---|---|---|
-| vLLM 0.29.0 | `json_schema`, `json_object`, `structural_tag` | `structured_outputs` |
-| llama-server b10970 | `json_schema`, `json_object` | `json_schema`, `grammar` |
-| mlx-lm 0.31.3 + patch | `json_schema`, `json_object` | `structured_outputs` (`json`, `json_object`, `regex`, `choice`, `grammar`) |
-| mlx-vlm (Crucible's server) | none | none |
+| engine | `response_format` | other fields | `json_whitespace: compact` |
+|---|---|---|---|
+| vLLM 0.29.0 | `json_schema`, `json_object`, `structural_tag` | `structured_outputs` | kept |
+| llama-server b10970 | `json_schema`, `json_object` | `json_schema`, `grammar` | refused |
+| mlx-lm 0.31.3 + patch | `json_schema`, `json_object` | `structured_outputs` (`json`, `json_object`, `regex`, `choice`, `grammar`) | kept |
+| mlx-vlm (Crucible's server) | none | none | refused |
 
 `structured_output_not_served` (400) names what the resident engine does not
 enforce and what it does; nothing is sent. A queued chat is refused from its
@@ -983,6 +985,57 @@ manifest's engine before it waits or loads anything, and again from the resident
 engine. vLLM 0.29.0 has no `guided_*` field any more (it logs one as ignored), so a
 `guided_json` is refused there too. Whether the constraint itself compiles is the
 engine's to say: its own 400 is relayed.
+
+`structured_outputs` options that vLLM 0.29.0 declares but reads only from its
+server-wide config (`disable_any_whitespace`, `disable_additional_properties`,
+`whitespace_pattern`: `sampling_params.py` L96-98, `backend_guidance.py` L91-95) are
+refused `structured_output_not_served` when set to anything but their default; vLLM
+would drop them from a request without a word.
+
+**Whitespace between JSON tokens (`json_whitespace`).** Every engine compiles a JSON
+schema with flexible whitespace (a space, or newlines and indentation, wherever JSON
+allows one), as OpenAI and vLLM do, and that stays the default (Owen, 2026-10-10). A
+client whose model is trained on compact JSON (B-Sides) sends
+`"json_whitespace": "compact"`: no whitespace between tokens, whitespace only inside
+strings. `"flexible"` states the default. It is Crucible's member, taken off the body
+before it is forwarded (`structured.take_json_whitespace`), like `prefill` and `form`.
+
+- It is valid only beside a JSON constraint: `response_format` `json_schema` or
+  `json_object`, or `structured_outputs` `json` or `json_object`. Otherwise
+  `json_whitespace_without_json`. A value other than `compact`/`flexible`, or a schema
+  that is not a JSON object, is `invalid_request`; a schema whose `x-guidance` states
+  `whitespace_flexible` or `whitespace_pattern` itself is `json_whitespace_conflict`
+  (state it once).
+- Each engine states whether it keeps compact (`json_whitespace_compact`) and where
+  that was read (`json_whitespace_basis`), read with the rest by
+  `structured_output_reading`. An engine that does not is refused
+  `json_whitespace_not_served` from the manifest's engine before the chat waits or
+  loads anything, and again from the resident engine; an upstream model is refused it
+  too. Flexible is never refused for the engine.
+- **vLLM and mlx-lm** both compile a JSON schema with llguidance's
+  `grammar_from_json_schema(schema, defaults={"whitespace_flexible": true})`, and
+  llguidance takes the schema's own `x-guidance` options over those defaults (1.7.6 in
+  the PC's llm env and 1.8.0 in the Mac's, measured 2026-10-10: the grammar for a schema
+  carrying `"x-guidance": {"whitespace_flexible": false}` is byte-equal to the one
+  compiled with that default). So the door writes the option into the schema
+  (`structured.with_compact_json`); a `json_object` is sent as `json_schema` with the
+  schema `{"type": "object"}`, which is exactly what both compile a json_object to.
+  The mlx-lm patch needs no change for it (`GRAMMAR_VERSION` stays 1). vLLM 0.29.0's
+  own per-request `structured_outputs.disable_any_whitespace` is read by no backend
+  (only the server-wide `--structured-outputs-config` is, `backend_guidance.py` L91-92),
+  which is why the door does not use it.
+- **llama-server b10970** is refused. Its converter's whitespace rule is fixed,
+  `space ::= | " " | "
+"{1,2} [ 	]{0,20}` (`common/json-schema-to-grammar.cpp` L229,
+  set at L816), and no request field changes it (`server-common.cpp` L1179-1204). A
+  GBNF built by Crucible and sent as `grammar` would not be the same constraint: the
+  jinja chat path wraps a response_format schema in its PEG parser, after the reasoning
+  block and with an optional ```` ```json ```` fence
+  (`common/chat-auto-parser-generator.cpp` L117-125), and the converter's Python port
+  is gone at b10970, so Crucible would own a port of 1,027 lines of C++. llama.cpp's
+  llguidance grammars need `LLAMA_LLGUIDANCE`, off by default and off in Crucible's
+  cuda-linux build. `qwen3.5-4b-bside` is a llama-server block on cuda-linux, so B-Sides
+  gets compact on the Mac and is refused it on the PC.
 
 **mlx-lm.** `patch_mlx_lm_structured_output.py`, self-applied at engine start
 with `mlx_lm/_crucible_grammar.py` (a verbatim copy of `engines/structured_mlx.py`,

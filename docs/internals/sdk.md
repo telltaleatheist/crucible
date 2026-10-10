@@ -112,7 +112,10 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
 - `thinking` sends `chat_template_kwargs: {enable_thinking}`, read per request by
   mlx-lm and vLLM. `prefill` is sent as the body's `prefill` member, which the
   server turns into an open assistant message (engines-and-capability.md,
-  "Prefill"). `ChatUsage.cachedTokens` is `usage.prompt_tokens_details.
+  "Prefill"). `jsonWhitespace` is sent as the body's `json_whitespace` member,
+  which the server writes into the schema for the engines that keep it and refuses
+  by name elsewhere (engines-and-capability.md, "Structured output"); the SDK checks
+  only that it is `compact` or `flexible`. `ChatUsage.cachedTokens` is `usage.prompt_tokens_details.
   cached_tokens`, null when the engine did not say. `contextTokens` reaches Ollama as `options.num_ctx`; omitted,
   the server sends the tag's own context. A reasoning model that runs out of
   budget answers with `reasoning` and no `content`; that is a protocol error whose

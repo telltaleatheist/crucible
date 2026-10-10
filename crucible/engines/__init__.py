@@ -109,6 +109,9 @@ class StructuredOutputReading:
     formats: frozenset[str]
     fields: frozenset[str]
     basis: str
+    compact_json: bool
+    """Whether `"json_whitespace": "compact"` is kept (structured.with_compact_json)."""
+    compact_json_basis: str
 
     @property
     def served(self) -> bool:
@@ -134,10 +137,29 @@ def structured_output_reading(engine_name: str) -> StructuredOutputReading:
         raise EngineError(
             f"{engine_name} lists response_format text as a constraint; text is none"
         )
+    served = bool(cls.structured_output_formats or cls.structured_output_fields)
+    compact_basis = cls.json_whitespace_basis
+    if compact_basis is None:
+        if served or cls.json_whitespace_compact:
+            raise EngineError(
+                f"{engine_name} enforces structured output and states no "
+                "json_whitespace_basis. Whether it keeps compact JSON is read from its "
+                "source, and the reading says where"
+            )
+        compact_basis = f"it enforces no structured output ({basis})"
+    if cls.json_whitespace_compact and not (
+        {"json_schema", "json_object"} <= cls.structured_output_formats
+    ):
+        raise EngineError(
+            f"{engine_name} states json_whitespace_compact without enforcing "
+            "response_format json_schema and json_object, which it is written into"
+        )
     return StructuredOutputReading(
         formats=cls.structured_output_formats,
         fields=cls.structured_output_fields,
         basis=basis,
+        compact_json=cls.json_whitespace_compact,
+        compact_json_basis=compact_basis,
     )
 
 

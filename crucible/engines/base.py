@@ -120,6 +120,14 @@ class SubprocessEngine:
     """Where both were read. The chat door refuses `structured_output_not_served` for a
     constraint the engine does not state, so it is never sent to be ignored."""
 
+    json_whitespace_compact: bool = False
+    """Whether the engine keeps `"json_whitespace": "compact"` (no whitespace between
+    JSON tokens) when the door writes it into the schema (structured.with_compact_json)."""
+
+    json_whitespace_basis: str | None = None
+    """Where that was read. Required of an engine that enforces any structured output;
+    the chat door refuses `json_whitespace_not_served` with it."""
+
     decide_likelihood_route: str | None = None
     """How the engine scores a likelihood question's candidates: `items` (the
     batched items route, every candidate a row) or `prompt-logprobs` (one

@@ -116,6 +116,21 @@ class VllmEngine(SubprocessEngine):
         "field and logs any field it does not know as ignored "
         "(vllm/entrypoints/serve/engine/protocol.py); read 2026-10-10"
     )
+    json_whitespace_compact = True
+    json_whitespace_basis = (
+        "vLLM 0.29.0's guidance backend reads disable_any_whitespace only from the "
+        "server-wide --structured-outputs-config (v1/structured_output/"
+        "backend_guidance.py L91-92, L118); a request's "
+        "structured_outputs.disable_any_whitespace and whitespace_pattern "
+        "(sampling_params.py L96-98) are read by no backend. It compiles a json schema "
+        "with llguidance's grammar_from_json_schema(schema, defaults="
+        "{whitespace_flexible: true}) (serialize_guidance_grammar L228-255), and "
+        "llguidance 1.7.6 takes the schema's own x-guidance options over those "
+        "defaults (measured in the PC's llm env, 2026-10-10), so the door writes "
+        "x-guidance.whitespace_flexible false into the schema; a json_object goes as "
+        "the schema {type: object}, which is what the backend compiles a json_object "
+        "to (L248-255)"
+    )
     decide_likelihood_route = "prompt-logprobs"
     decide_likelihood_basis = (
         "vLLM 0.29.0's /v1/chat/completions takes prompt_logprobs, "
