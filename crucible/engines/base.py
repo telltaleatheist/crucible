@@ -174,6 +174,14 @@ class SubprocessEngine:
         return [*spec.engine_args, *plan_flags(plan)]
 
     @classmethod
+    def model_args(
+        cls, manifest: Any, args: list[str], weights_dir: Path, context: int
+    ) -> list[str]:
+        """`args` with what this engine derives from the model (mlx-lm: its
+        prefill step). Most engines derive nothing."""
+        return args
+
+    @classmethod
     def served_name(cls, weights_dir: Path, model_id: str) -> str:
         return model_id
 

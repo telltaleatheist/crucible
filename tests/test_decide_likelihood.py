@@ -422,7 +422,10 @@ def likely_mlx(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         fake_token_logprob(head(hidden)[0], target) for target in targets])
     monkeypatch.setattr(items_forward, "STATES", items_forward.StateCache(4, 1 << 30))
     model = LikelyModel()
-    return SimpleNamespace(model=model, provider=SimpleNamespace(load=lambda *a: (model, LikelyTokenizer())))
+    return SimpleNamespace(model=model, provider=SimpleNamespace(
+        load=lambda *a: (model, LikelyTokenizer()),
+        cli_args=SimpleNamespace(prefill_step_size=2048),
+    ))
 
 
 def _likely_job(state: str, groups: list[tuple[str, list[str]]]) -> items_forward.MlxLmItemsJob:

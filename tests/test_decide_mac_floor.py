@@ -203,9 +203,11 @@ class Arr:
         return 4 * sum(len(row) for row in self.rows)
 
     def __getitem__(self, index: Any) -> "Arr":
-        none, span = index
-        assert none is None
-        return Arr([self.rows[0][span]])
+        first, span = index
+        if first is None:
+            return Arr([self.rows[0][span]])
+        assert first == slice(None), "rows are only ever sliced whole"
+        return Arr([row[span] for row in self.rows])
 
 
 class Hidden:
@@ -271,6 +273,9 @@ def fake_mlx(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     core.repeat = lambda arr, n, axis: Arr(arr.rows * n)
     core.arange = lambda n: list(range(n))
     core.clear_cache = lambda: None
+    # Pieces of one forward: the last piece's contexts are the whole rows (the cache
+    # holds everything read), positions counted from where the first piece began.
+    core.concatenate = lambda pieces, axis: Hidden(pieces[-1].contexts, pieces[0].base)
     mlx = types.ModuleType("mlx")
     mlx.core = core
     cache_module = types.ModuleType("mlx_lm.models.cache")
@@ -287,7 +292,8 @@ def fake_mlx(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     monkeypatch.setattr(items_forward, "top_of", top_of)
     monkeypatch.setattr(items_forward, "STATES", items_forward.StateCache(4, 1 << 30))
     model = FakeModel()
-    provider = SimpleNamespace(load=lambda *args: (model, FakeTokenizer()))
+    cli_args = SimpleNamespace(prefill_step_size=2048)
+    provider = SimpleNamespace(load=lambda *args: (model, FakeTokenizer()), cli_args=cli_args)
     return SimpleNamespace(model=model, provider=provider)
 
 
@@ -342,6 +348,27 @@ def test_a_different_state_is_read_whole(fake_mlx: Any) -> None:
     document = items_forward.mlx_lm_answer(fake_mlx.provider, _job("other", ["ab", "c"]))
     assert document["cached_tokens"] == 0, "a held state that does not open this one is not used"
     assert fake_mlx.model.forwards[0] == (1, len("other") + 3)
+
+
+def test_no_forward_reads_more_than_the_engines_prefill_step(fake_mlx: Any) -> None:
+    # The engine's --prefill-step-size bounds every evaluation of the items pass:
+    # the state is read in steps, rows per forward are step // longest, and a row
+    # longer than the step is read in pieces that continue its cache.
+    fake_mlx.provider.cli_args.prefill_step_size = 4
+    questions = ["abcdefghij", "k", "lm"]
+    document = items_forward.mlx_lm_answer(fake_mlx.provider, _job("statestate", questions))
+    shared = len("statestate") + 3
+    assert fake_mlx.model.forwards[:4] == [(1, 4), (1, 4), (1, 4), (1, 1)], "the state in steps"
+    assert all(rows * tokens <= 4 for rows, tokens in fake_mlx.model.forwards)
+    assert fake_mlx.model.forwards[4:] == [(1, 4), (1, 4), (1, 4), (1, 4), (1, 3)], (
+        "the 12-token row in three pieces of 4 over its own cache, then the others "
+        "one row each (4 // 4 and 4 // 3 rows)"
+    )
+    for question, slot in zip(questions, document["slots"]):
+        whole = _expected("statestate", question)
+        assert slot["top_logprobs"][0]["token"] == str(len(whole)), question
+        assert slot["top_logprobs"][1]["token"] == str(sum(whole) % 997), question
+    assert document["shared_tokens"] == shared
 
 
 def test_rows_are_split_when_the_state_is_too_big_to_repeat(

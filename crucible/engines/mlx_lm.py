@@ -5,7 +5,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .. import envpatches
 from ..envpatches import PatchError
@@ -22,6 +22,68 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "--prompt-concurrency",
     "--prompt-cache-size",
 )
+
+PREFILL_STEP_FLAG = "--prefill-step-size"
+
+MLX_LM_PREFILL_STEP = 2048
+"""mlx-lm 0.31.3's own --prefill-step-size default: the most tokens one prefill
+step reads, and the most a step here is ever given."""
+
+EVAL_BUDGET_FLOPS = 2 * 27e9 * 256
+"""The GPU work one evaluation may hold: a prompt is read in steps of at most
+this many FLOPs (2 x params x tokens). macOS cannot preempt a running Metal
+workload, and while one runs the window server's compositing can wait for ALL of
+it: measured on the Mac Studio M1 Ultra (2026-10-10), a 2048-token step of
+qwen3.8-27b-8bit is 12-13 s of GPU and the desktop froze for 12.6 s at a time
+(the window server's own IPC unanswered, a 60 Hz Metal client blocked 13.2 s),
+while the 9B's 3.7 s steps never froze it. The budget is the 27B at 256 tokens:
+1.59 s per step, at the same throughput as 2048 (164 vs 162-170 tok/s; 128
+tokens cost 8%, 64 cost 18%). Every model's step is derived from it, so each
+step is about the same stretch of GPU time (docs/internals/engines-and-capability.md,
+"Prefill steps hold the GPU")."""
+
+
+def attention_flops_per_position(weights_dir: Path) -> float:
+    """FLOPs one new token spends per token already in the cache: QK^T and the
+    weighted sum over V, 4 x heads x head_dim per full-attention layer (a linear-
+    attention layer's cost does not grow with the cache). Read from the weights'
+    config.json, the only place the architecture is stated."""
+    path = Path(weights_dir) / "config.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise EngineError(
+            f"model_config_unreadable: {path} cannot be read ({exc}); the prefill step "
+            "is sized from the model's attention layers"
+        ) from None
+    text = config.get("text_config", config)
+    try:
+        layers = int(text["num_hidden_layers"])
+        heads = int(text["num_attention_heads"])
+        head_dim = int(text.get("head_dim") or int(text["hidden_size"]) // heads)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EngineError(
+            f"model_config_unreadable: {path} states no {exc} for its attention layers"
+        ) from None
+    types = text.get("layer_types")
+    if isinstance(types, list):
+        full = sum(1 for kind in types if kind == "full_attention")
+    else:
+        full = layers // int(text.get("full_attention_interval") or 1)
+    return 4.0 * full * heads * head_dim
+
+
+def prefill_step(params_b: float, attention_per_position: float, context: int) -> int:
+    """Tokens per prefill step: EVAL_BUDGET_FLOPS of work for a step at the deepest
+    position the context allows (2 x params per token, plus attention over every
+    token already cached), never more than mlx-lm's own step. Measured on the 27B
+    at a 24k-token prompt: 2048-token steps grew 12.2 -> 13.7 s along it."""
+    if params_b <= 0 or context <= 0:
+        raise EngineError(
+            f"prefill_step: params_b and context must be positive, got {params_b}, {context}"
+        )
+    per_token = 2 * params_b * 1e9 + attention_per_position * context
+    return max(1, min(MLX_LM_PREFILL_STEP, int(EVAL_BUDGET_FLOPS / per_token)))
 
 
 class MlxLmEngine(SubprocessEngine):
@@ -88,7 +150,7 @@ class MlxLmEngine(SubprocessEngine):
 
     decide_likelihood_route = "items"
     decide_likelihood_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 4) reads a "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 5) reads a "
         "candidates body: every candidate's prompt is the chat template's open "
         "assistant reply (continue_final_message), the shared state runs once, each "
         "question's context once over it, every candidate's first token is read "
@@ -107,9 +169,35 @@ class MlxLmEngine(SubprocessEngine):
         "a row of one forward over a state it keeps between decisions"
     )
 
+    @classmethod
+    def model_args(
+        cls, manifest: Any, args: list[str], weights_dir: Path, context: int
+    ) -> list[str]:
+        """The prefill step, derived from the model's size and attention at the
+        context it is loaded with (`prefill_step`). One owner: a manifest that
+        states the flag itself is refused."""
+        if int_flag(args, PREFILL_STEP_FLAG) is not None:
+            raise EngineError(
+                f"prefill_step_stated: {manifest.path.name} states {PREFILL_STEP_FLAG} "
+                f"({args}); Crucible derives it from params_b so every model's step "
+                "holds the GPU about as long (engines/mlx_lm.py, EVAL_BUDGET_FLOPS). "
+                "Remove it from the manifest"
+            )
+        step = prefill_step(
+            manifest.params_b, attention_flops_per_position(weights_dir), context
+        )
+        return [*args, PREFILL_STEP_FLAG, str(step)]
+
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:
+        if int_flag(args, PREFILL_STEP_FLAG) is None:
+            raise EngineError(
+                f"mlx_lm_prefill_step_unset: this argv states no {PREFILL_STEP_FLAG} "
+                f"({args}); mlx-lm's own {MLX_LM_PREFILL_STEP} would hold the GPU for "
+                "up to 13 s per step on a 27B and freeze the desktop. Start the "
+                "engine through engine_load_args, which derives it"
+            )
         missing = [flag for flag in REQUIRED_FLAGS if int_flag(args, flag) is None]
         if missing:
             raise EngineError(

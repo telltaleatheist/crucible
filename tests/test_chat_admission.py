@@ -20,13 +20,34 @@ class _FakeResident:
         self.engine = engine
         self.engine_args = engine_args
 
+
+# The attention layers of the Qwen3.5 / 3.8 weights, as their config.json states them
+# (read on the Mac Studio 2026-10-10): every 4th layer is full attention.
+QWEN_CONFIGS = {
+    "qwen3.5-0.8b": (24, 8), "qwen3.5-2b": (24, 8), "qwen3.5-4b": (32, 16),
+    "qwen3.5-9b": (32, 16), "qwen3.8-27b-8bit": (64, 24),
+}
+
+
+def _weights(model_id: str) -> Path:
+    import tempfile
+
+    layers, heads = QWEN_CONFIGS[model_id]
+    here = Path(tempfile.mkdtemp())
+    (here / "config.json").write_text(json.dumps({"text_config": {
+        "num_hidden_layers": layers, "num_attention_heads": heads, "head_dim": 256,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention",
+                        "full_attention"] * (layers // 4),
+    }}))
+    return here
+
 def _mlx_args(model_id: str = "qwen3.5-9b") -> tuple[str, ...]:
     from crucible.manifests import load_manifest
 
     manifest = load_manifest(model_id)
     return tuple(
         engine_load_args(
-            manifest, manifest.backends["mlx-darwin"], Path("/w"), None,
+            manifest, manifest.backends["mlx-darwin"], _weights(model_id), None,
             context=manifest.context_for("mlx-darwin"),
         )
     )
@@ -368,3 +389,43 @@ def test_a_cap_on_an_engine_that_serves_nothing_is_refused(
     with pytest.raises(EngineError) as caught:
         decide_reading("mlx-vlm")
     assert "serves no decision" in str(caught.value)
+
+
+def test_mlx_lm_reads_prompts_in_steps_derived_from_the_models_size() -> None:
+    from crucible.engines.base import int_flag
+    from crucible.engines.mlx_lm import (
+        MLX_LM_PREFILL_STEP, PREFILL_STEP_FLAG, attention_flops_per_position, prefill_step,
+    )
+
+    # At their manifest contexts (27B 12288, 9B 16384): the step shrinks with the
+    # attention a step at the deepest position pays.
+    assert int_flag(_mlx_args("qwen3.8-27b-8bit"), PREFILL_STEP_FLAG) == 234
+    assert int_flag(_mlx_args("qwen3.5-9b"), PREFILL_STEP_FLAG) == 686
+    assert int_flag(_mlx_args("qwen3.5-0.8b"), PREFILL_STEP_FLAG) == MLX_LM_PREFILL_STEP
+    big = attention_flops_per_position(_weights("qwen3.8-27b-8bit"))
+    assert big == 4 * 16 * 24 * 256, "16 of 64 layers are full attention"
+    assert prefill_step(27, big, 24576) == 217, "Content Studio's 24k context"
+    assert prefill_step(27, big, 131072) < prefill_step(27, big, 24576)
+    assert prefill_step(27, 0.0, 1) == 256, "the budget is the 27B at 256 tokens, shallow"
+    with pytest.raises(EngineError):
+        prefill_step(0, big, 8)
+
+
+def test_a_manifest_that_states_the_prefill_step_is_refused() -> None:
+    from types import SimpleNamespace
+
+    manifest = SimpleNamespace(path=Path("m.toml"), params_b=9)
+    with pytest.raises(EngineError) as caught:
+        ENGINES["mlx-lm"].model_args(
+            manifest, ["--prefill-step-size", "2048"], _weights("qwen3.5-9b"), 8192
+        )
+    assert str(caught.value).startswith("prefill_step_stated:")
+
+
+def test_weights_without_a_readable_config_are_refused_by_name(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    manifest = SimpleNamespace(path=Path("m.toml"), params_b=9)
+    with pytest.raises(EngineError) as caught:
+        ENGINES["mlx-lm"].model_args(manifest, [], tmp_path, 8192)
+    assert str(caught.value).startswith("model_config_unreadable:")

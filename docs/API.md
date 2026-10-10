@@ -2440,7 +2440,8 @@ Where the time went.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
+| `total` | number | yes | — | The decision's run, ms, Crucible's clock: from when it left the server's line to its answer (the wait is `queued`). |
+| `queued` | number or null | no | — | Ms the decision waited in the server's line (a model loading, the engine's slots taken) before it ran; `total` is the run alone. Null in a timing built outside the door. |
 | `per_question` | object of ForwardTiming | yes | — | Each question's own request. |
 | `prime` | ForwardTiming or null | yes | — | The shared prefix sent alone first — present when the decision had more than one question, null when it had one, and null when the engine read every question in one batched request (mlx-lm: each question's timing is then that one request). |
 
@@ -2520,7 +2521,8 @@ Where the items form's time went.
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
-| `total` | number | yes | — | The whole decision, ms, Crucible's clock. |
+| `total` | number | yes | — | The decision's run, ms, Crucible's clock: from when it left the server's line to its answer (the wait is `queued`). |
+| `queued` | number or null | no | — | Ms the decision waited in the server's line (a model loading, the engine's slots taken) before it ran; `total` is the run alone. Null in a timing built outside the door. |
 | `engine_requests` | integer | yes | — | 1 when the engine read every item in one batched request (mlx-lm, mlx-vlm); otherwise one per item plus the shared prefix sent first. |
 
 ### `ItemsTokens`

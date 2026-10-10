@@ -511,6 +511,69 @@ started exactly as `load-model` would).
 - Blocks must state `--decode-concurrency`, `--prompt-concurrency` and
   `--prompt-cache-size` (`REQUIRED_FLAGS`). mlx-lm 0.31.3 batches continuously
   up to `--decode-concurrency`, and the door admits that + 1.
+- `--prefill-step-size` is NOT stated by a block: `MlxLmEngine.model_args`
+  derives it from the manifest's `params_b`, the weights' `config.json` (full-attention
+  layers x heads x head_dim) and the context the model is loaded at (`prefill_step`;
+  unreadable config: `model_config_unreadable`; a block that states
+  it is refused `prefill_step_stated`, and `start` refuses an argv without it,
+  `mlx_lm_prefill_step_unset`). See "Prefill steps hold the GPU" below.
+
+#### Prefill steps hold the GPU
+
+macOS cannot preempt a running Metal workload, and while an MLX evaluation runs
+the window server's compositing can wait for ALL of it. mlx-lm reads a prompt in
+steps of `--prefill-step-size` tokens (default 2048), one evaluation each, and
+2048 tokens of qwen3.8-27b-8bit are 12-13 s of GPU. That is the Mac Studio's
+freeze with the 27B (cursor stopped ~10 s at a time, GPU at 100%, memory
+pressure green): it is not memory and not the 8-bit kernels.
+
+Measured on the M1 Ultra, 2026-10-10, with three probes in separate processes at
+60 Hz: a Metal render pass + 1-pixel blit (a compositor-like GPU client), a tiny
+MLX compute job, and `CGWindowListCopyWindowInfo` (an IPC the window server's
+own thread answers):
+
+| workload | longest eval | render client | window server IPC |
+| --- | --- | --- | --- |
+| idle | - | max 84 ms | - |
+| 27B-8bit, chat prompts, live engine (2048 steps) | 12-13 s | 8 stalls > 1 s, max 13.2 s | 2 stalls > 1 s, max 12.6 s; its CPU fell from ~30% to 0 |
+| 9B bf16, same load, live engine | ~3.7 s | 12 stalls > 1 s, max 3.2 s | none > 28 ms |
+| 27B-8bit, standalone mlx-lm server, 256-token steps | 1.6 s | max 12 ms | max 46 ms |
+| 27B-8bit at context 24576, one 24k-token prompt, live engine (2048 steps) | 12.2 -> 13.7 s along the prompt | max 41 ms (a session that interleaved) | max 42 ms |
+| the same prompt, standalone server, 217-token steps (the derived step at 24576) | 1.40 -> 1.72 s | max 27 ms, p50 1.8 ms | max 76 ms |
+
+- The stall is intermittent: in some sessions the render client interleaves with
+  MLX at ~10 ms (p50 8-16 ms at 2048-token steps), in others it waits for the
+  whole evaluation, sometimes several in a row (23 s at 512-token steps once).
+  Which one a session gets was not found: not memory (+16 GB of GPU ballast and
+  no wired limit at all both stalled), not the 8-bit kernels (a 27B-shaped
+  quantized matmul is 43 ms at 2048 rows, bits 8 and 4 alike, ~8.6 TFLOPS vs
+  bf16's 10), not the engine's process type. When it happens the stall is the
+  evaluation, so the evaluation's length is the lever. (The 256-step row above is
+  from a session that interleaved; in a stalling one the bound is the 1.6 s step.)
+- `EVAL_BUDGET_FLOPS` = 2 x 27e9 x 256: the 27B at 256 tokens, 1.59 s per step at
+  the same throughput as 2048 near the start of a prompt (27B prefill: 2048 162-170
+  tok/s, 512 168, 256 164, 128 152, 64 135). A step's cost grows with the tokens
+  already cached (attention): 2048-token steps of a 24k prompt went 12.2 -> 13.7 s.
+  So `prefill_step` sizes the step for the DEEPEST position the loaded context
+  allows: budget / (2 x params + 4 x full-attention layers x heads x head_dim x
+  context), at most mlx-lm's 2048. 27B: 234 at its 12288 default, 217 at 24576, 130
+  at 131072; 9B 686 at 16384; 4B 1523 at 8192; 2B and 0.8B 2048. Each step is then at
+  most about the same stretch of GPU on every model and context.
+- The cost, measured: none near the start of a prompt (above), about 10% on a
+  24k-token prompt (the 27B read it in ~168 s at 217-token steps vs ~153 s at 2048).
+- Not built yet: a step that corrects itself (time each prefill evaluation, halve
+  the step for the rest of the engine's life when one runs past the budget, and log
+  it). mlx-lm 0.31.3 times each step itself in `BatchGenerator.next`
+  (generate.py ~L1883, `tic`/`toc` around `self._prompt_batch.prompt`), so it is a
+  few lines there plus the same in `generate_step` (~L445) for the unbatched path:
+  a new self-applied env patch to `mlx_lm/generate.py` with its marker and tests.
+- The items route uses the same step (`provider.cli_args.prefill_step_size`), so a
+  decision holds the GPU no longer per evaluation than a chat prompt does
+  (`items_forward.MlxLmShared`, ITEMS_VERSION 5; "The decision door" below).
+- Decode is unaffected: a step is one token per sequence, tens of ms on the 27B.
+- A second GPU client slows the engine: the 60 Hz MLX probe alone cost the 27B's
+  prefill 25% (162 -> 122 tok/s), a steady matmul loop 40%. A model that "slows
+  down as it goes" on a desktop in use is sharing the GPU.
 - A closed socket does not stop a non-streamed request. Cancelling stops
   further sends, and the settlement's SIGTERM stops the rest.
 - Top logprobs are capped at 11 upstream. `patch_mlx_lm_top_logprobs` raises
@@ -690,12 +753,14 @@ started exactly as `load-model` would).
   stated with `decide_items_basis` and read by `engines.decide_items_reading`.
   mlx-lm and mlx-vlm answer `POST /v1/crucible/items` with
   `engines/items_forward.py`: every item's lone-question prompt is tokenized
-  through the chat template, the common token prefix runs once (in
-  2,048-token chunks), and the items' tails are read as rows of batched
-  forwards over that cache repeated per row (`read_rows`: right-padded, each
-  row read at its own last token, longest tails grouped first; rows per
-  forward bounded by `ROW_BYTES`, 512 MiB of repeated cache, and by
-  `CHUNK_TOKENS`); the head is applied to those positions only, in float32,
+  through the chat template, the common token prefix runs once (in steps of
+  the engine's `--prefill-step-size`; mlx-vlm keeps `CHUNK_TOKENS`, 2,048), and
+  the items' tails are read as rows of batched forwards over that cache repeated
+  per row (`read_rows`: right-padded, each row read at its own last token,
+  longest tails grouped first; rows per forward bounded by `ROW_BYTES`, 512 MiB
+  of repeated cache, and by the step; a row longer than the step is read in
+  pieces of the step, each evaluated before the next, `MlxLmShared._rows_forward`,
+  so no evaluation holds the GPU longer than a chat prompt's step); the head is applied to those positions only, in float32,
   top-k by argsort. Why rows and not one forward per item, measured on the Mac
   Studio M1 Ultra 9B bf16 2026-10-01: MLX's bf16 matmul leaves its
   matrix-vector kernel past one row (0.8 GB of weights: 1.6 ms at 1 row, 6.0 ms
@@ -765,7 +830,7 @@ started exactly as `load-model` would).
   every token of a free-text candidate instead of one label token. How an engine does
   it is `decide_likelihood_route` (with `decide_likelihood_basis`, read by
   `engines.likelihood_reading`): `items` (mlx-lm, mlx-vlm: the items route reads a
-  `candidates` body, ITEMS_VERSION 4), `prompt-logprobs` (vLLM), `forced-tokens`
+  `candidates` body, ITEMS_VERSION 5), `prompt-logprobs` (vLLM), `forced-tokens`
   (llama-server) or None (refused `400 likelihood_unsupported_on_engine` before anything
   waits; no engine today). `decide_likelihood_images` says whether images may ride along
   (mlx-vlm only; elsewhere `400 likelihood_images_unsupported_on_engine`).
@@ -786,7 +851,7 @@ started exactly as `load-model` would).
   a question's candidates are scored from one boundary, so their totals compare the
   same thing.
 - **Mac**: one items request for every likelihood question of a decision
-  (`read_likelihood_rows`, ITEMS_VERSION 4). The state runs once (and is kept in
+  (`read_likelihood_rows`, ITEMS_VERSION 5). The state runs once (and is kept in
   `StateCache` as for items). Each QUESTION's context past the state (its request, the
   opened reply) is then read once over a copy of the state's cache, and the hidden state
   at its last token gives every candidate's FIRST token from one head application

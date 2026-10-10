@@ -5,13 +5,18 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 4
+ITEMS_VERSION = 5
 
 ITEMS_PATH = "/v1/crucible/items"
 
 MAX_TOP_LOGPROBS = 40
 
 CHUNK_TOKENS = 2048
+"""Tokens one forward reads where the engine states no step of its own (the
+mlx-vlm reader). On mlx-lm every forward here reads at most the engine's
+--prefill-step-size tokens (rows x positions), which Crucible derives from the
+model's size so one evaluation holds the GPU about 1.6 s (engines/mlx_lm.py,
+EVAL_BUDGET_FLOPS): a longer one can freeze the desktop for all of it."""
 
 ROW_BYTES = 512 << 20
 """Bytes of copied shared-state cache one batched item forward may hold. Every
@@ -481,6 +486,7 @@ def read_likelihood_rows(
     score: SpansFn,
     first: ScoreFn,
     per_row_bytes: Callable[[list[Any]], int],
+    step: int = CHUNK_TOKENS,
 ) -> list[list[float]]:
     """Every candidate scored at every one of its tokens over the shared state
     read once (`shared_pass` reads the first `read_by_shared` tokens of
@@ -510,7 +516,7 @@ def read_likelihood_rows(
             continue
         inputs = [list(split.scored[index].targets[:-1]) for index in longer]
         row_bytes = per_row_bytes(own)
-        for batch in row_groups(inputs, lambda longest: rows_per_pass(row_bytes, longest)):
+        for batch in row_groups(inputs, lambda longest: rows_per_pass(row_bytes, longest, step)):
             rows, _ = padded([inputs[at] for at in batch])
             hidden = rows_pass(own, rows)
             spans = [(row, 0, split.scored[longer[at]].targets[1:]) for row, at in enumerate(batch)]
@@ -649,9 +655,9 @@ def common_prefix(prompts: Sequence[Sequence[int]]) -> int:
     return common
 
 
-def rows_per_pass(per_row_bytes: int, longest: int) -> int:
+def rows_per_pass(per_row_bytes: int, longest: int, step: int = CHUNK_TOKENS) -> int:
     by_bytes = ROW_BYTES // max(1, per_row_bytes)
-    by_tokens = CHUNK_TOKENS // max(1, longest)
+    by_tokens = step // max(1, longest)
     return max(1, min(MAX_ROWS, by_bytes, by_tokens))
 
 
@@ -685,6 +691,7 @@ def read_rows(
     head: Callable[[Any], Any],
     k: int,
     per_row_bytes: Callable[[list[Any]], int],
+    step: int = CHUNK_TOKENS,
 ) -> list[list[tuple[int, float]]]:
     """Every item read as one row of a batched forward over the shared state's
     cache: one forward per group of items, not one per item. On Apple silicon a
@@ -696,7 +703,7 @@ def read_rows(
     cache = shared_pass()
     row_bytes = per_row_bytes(cache)
     tops: list[list[tuple[int, float]] | None] = [None] * len(split.suffixes)
-    for group in row_groups(split.suffixes, lambda longest: rows_per_pass(row_bytes, longest)):
+    for group in row_groups(split.suffixes, lambda longest: rows_per_pass(row_bytes, longest, step)):
         rows, lasts = padded([split.suffixes[index] for index in group])
         for index, top in zip(group, top_of(head, rows_pass(cache, rows, lasts), k)):
             tops[index] = top
@@ -830,22 +837,44 @@ def state_bytes(cache: list[Any]) -> int:
 class MlxLmShared:
     """The shared part of one items or likelihood pass on mlx-lm: the state
     taken from a held cache where one opens it, read and kept where none does,
-    then whatever else every row shares."""
+    then whatever else every row shares. No forward reads more than `step`
+    tokens (rows x positions): the engine's --prefill-step-size."""
 
-    def __init__(self, model: Any, inner: Any, shared: list[int], state_end: int) -> None:
+    def __init__(
+        self, model: Any, inner: Any, shared: list[int], state_end: int, step: int
+    ) -> None:
         self.model = model
         self.inner = inner
         self.shared = shared
         self.state_end = state_end
+        self.step = step
         self.reused = 0
 
     def _prefill(self, cache: list[Any], tokens: list[int]) -> None:
         import mlx.core as mx
 
         ids = mx.array(tokens)
-        for start in range(0, len(tokens), CHUNK_TOKENS):
-            self.inner(ids[None, start:start + CHUNK_TOKENS], cache=cache)
+        for start in range(0, len(tokens), self.step):
+            self.inner(ids[None, start:start + self.step], cache=cache)
             mx.eval([entry.state for entry in cache])
+
+    def _rows_forward(self, own: list[Any], rows: list[list[int]]) -> Any:
+        """Equal-length rows read over `own` in pieces of at most `step` tokens
+        (rows x positions), each evaluated before the next is sent, and their
+        hidden states joined. The model is causal and each piece continues the
+        cache the one before it filled, so the result is the one forward's."""
+        import mlx.core as mx
+
+        ids = mx.array(rows)
+        width = max(1, self.step // len(rows))
+        if len(rows[0]) <= width:
+            return self.inner(ids, cache=own)
+        pieces = []
+        for start in range(0, len(rows[0]), width):
+            hidden = self.inner(ids[:, start:start + width], cache=own)
+            mx.eval(hidden, [entry.state for entry in own])
+            pieces.append(hidden)
+        return mx.concatenate(pieces, axis=1)
 
     def shared_pass(self) -> list[Any]:
         import mlx.core as mx
@@ -874,7 +903,7 @@ class MlxLmShared:
         if self.shared:
             for mine, theirs in zip(own, cache):
                 mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
-        return self.inner(mx.array(rows), cache=own)
+        return self._rows_forward(own, rows)
 
     def question_pass(self, cache: list[Any], tail: list[int]) -> tuple[list[Any], Any]:
         """A question's context tail read over a copy of the state's cache: that
@@ -887,10 +916,10 @@ class MlxLmShared:
             copied(own, cache)
         ids = mx.array(tail)
         hidden: Any = None
-        for start in range(0, len(tail), CHUNK_TOKENS):
-            hidden = self.inner(ids[None, start:start + CHUNK_TOKENS], cache=own)
+        for start in range(0, len(tail), self.step):
+            hidden = self.inner(ids[None, start:start + self.step], cache=own)
             mx.eval([entry.state for entry in own])
-        steps = len(tail) - 1 - (len(tail) - 1) // CHUNK_TOKENS * CHUNK_TOKENS
+        steps = len(tail) - 1 - (len(tail) - 1) // self.step * self.step
         return own, hidden[0, steps:steps + 1]
 
     def question_rows(self, cache: list[Any], rows: list[list[int]]) -> Any:
@@ -901,7 +930,7 @@ class MlxLmShared:
         own = make_prompt_cache(self.model)
         for mine, theirs in zip(own, cache):
             mine.state = [mx.repeat(array, len(rows), axis=0) for array in theirs.state]
-        return self.inner(mx.array(rows), cache=own)
+        return self._rows_forward(own, rows)
 
     def per_row_bytes(self, cache: list[Any]) -> int:
         return state_bytes(cache) if self.shared else 0
@@ -913,6 +942,9 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     model, tokenizer = provider.load("default_model", None, "default_model")
     inner, head = text_parts(model)
     ask = job.ask
+    # The engine's own prefill step, which Crucible derives from the model's size:
+    # an items pass holds the GPU no longer per evaluation than a chat's prompt.
+    step = provider.cli_args.prefill_step_size
 
     def tokenize(messages: list[dict[str, Any]], reply: bool = False) -> list[int]:
         return list(tokenizer.apply_chat_template(
@@ -929,11 +961,11 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
         # which also yields the hidden state its candidates' first tokens are
         # read from.
         state_end = min(len(likely.shared), common_prefix([*likely_rows(likely), open_turn]))
-        held = MlxLmShared(model, inner, likely.shared[:state_end], state_end)
+        held = MlxLmShared(model, inner, likely.shared[:state_end], state_end, step)
         logprobs = read_likelihood_rows(
             likely, state_end, held.shared_pass, held.question_pass, held.question_rows,
             lambda hidden, spans: spans_logprobs(head, hidden, spans),
-            lambda hidden, targets: next_logprobs(head, hidden, targets), state_bytes,
+            lambda hidden, targets: next_logprobs(head, hidden, targets), state_bytes, step,
         )
         return likelihood_document(likely, logprobs, held.reused)
 
@@ -951,14 +983,14 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
             shared=split.shared[:state_end],
             suffixes=[split.shared[state_end:] + split.suffixes[0]],
         )
-    held = MlxLmShared(model, inner, split.shared, state_end)
+    held = MlxLmShared(model, inner, split.shared, state_end, step)
 
     def rows_pass(cache: list[Any], rows: list[list[int]], lasts: list[int]) -> Any:
         hidden = held.rows_hidden(cache, rows)
         return hidden[mx.arange(len(rows)), mx.array(lasts)]
 
     tops = read_rows(
-        split, held.shared_pass, rows_pass, head, ask.top_logprobs, held.per_row_bytes
+        split, held.shared_pass, rows_pass, head, ask.top_logprobs, held.per_row_bytes, step
     )
     return items_document(
         split, tops, lambda token: tokenizer.convert_ids_to_tokens([token])[0], held.reused

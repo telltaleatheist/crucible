@@ -426,6 +426,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
             if answered is None:
                 response: Response = caller_gone(resident)
             else:
+                # A client that sent several decisions at once reads each one's
+                # wait apart from its run (Briefcase read waits as slowdowns).
+                answered.timing_ms.queued = round((started - arrived) * 1000.0, 1)
                 response = JSONResponse(content=answered.model_dump(mode="json"))
                 _log_timing(body, model, client_agent(request), arrived, started)
             inflight.close(entry)

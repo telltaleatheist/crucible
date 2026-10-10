@@ -322,7 +322,7 @@ back as a list, one choice answer per item in today's shape (`probabilities`,
  "answers": [{"type": "choice", "choice": "none", "probabilities": {...},
               "logprobs": {...}, "confidence": 0.79, "label_mass": 0.998,
               "missing_labels": []}, ...],
- "timing_ms": {"total": 81500.0, "engine_requests": 1},
+ "timing_ms": {"total": 81500.0, "queued": 0.0, "engine_requests": 1},
  "tokens": {"shared": 5166, "per_item": [5290, 5283], "images": 0}}
 ```
 
@@ -349,6 +349,9 @@ back as a list, one choice answer per item in today's shape (`probabilities`,
   through the questions machinery: the shared prefix alone first, then one
   request per item under the engine's admission (vLLM batches them itself and
   reuses the prefix). `timing_ms.engine_requests` says which happened;
+  `timing_ms.total` is the run alone and `timing_ms.queued` the wait in the
+  server's line before it (every decision form carries both: three decisions
+  sent at once run in turn, and the later ones' waits are not slowdowns);
   `tokens.shared` is null on the second.
 
 Measured on the Mac Studio (qwen3.5-9b, mlx-lm 0.31.3), Briefcase's 250 units

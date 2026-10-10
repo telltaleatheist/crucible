@@ -129,6 +129,7 @@ def test_the_worked_example_end_to_end(
         assert timed["cached_tokens"] > 0
     assert body["tokens"]["images"] == 0
     assert body["timing_ms"]["total"] >= 0.0
+    assert body["timing_ms"]["queued"] >= 0.0, "the wait in the line, apart from the run"
 
 
 def test_the_model_triple_is_the_load_s_own_provenance(
