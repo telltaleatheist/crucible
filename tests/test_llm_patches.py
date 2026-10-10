@@ -28,6 +28,7 @@ DETOK_SCRIPT = envpatches.LLM_SCRIPTS_DIR / DETOK.script
 FP32_SCRIPT = envpatches.LLM_SCRIPTS_DIR / FP32.script
 MLX_ARGS = [
     "--decode-concurrency", "16", "--prompt-concurrency", "4", "--prompt-cache-size", "10",
+    "--prefill-step-size", "768",
 ]
 MAC_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("mlx-darwin")))
 CUDA_PINS = jobenv.recipe_pins(jobenv.recipe_for(jobenv.llm_env("cuda-linux")))
@@ -298,6 +299,19 @@ def test_a_patched_env_passes_the_gate(tmp_path: Path) -> None:
     with pytest.raises(EngineError) as caught:
         engine.start(tmp_path / "no-weights", "m", 0, MLX_ARGS)
     assert "no model directory" in str(caught.value)
+
+
+def test_an_argv_without_a_prefill_step_is_refused_at_engine_start(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    patch_all(env)
+    args = list(MLX_ARGS)
+    at = args.index("--prefill-step-size")
+    del args[at : at + 2]
+    engine = MlxLmEngine(python=env / "bin" / "python", log_path=tmp_path / "e.log")
+    with pytest.raises(EngineError) as caught:
+        engine.start(tmp_path / "weights", "m", 0, args)
+    assert str(caught.value).startswith("mlx_lm_prefill_step_unset:")
+    assert not (tmp_path / "e.log").exists(), "nothing was spawned"
 
 
 @pytest.mark.parametrize("missing", REQUIRED_FLAGS)

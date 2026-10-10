@@ -5,7 +5,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .. import envpatches
 from ..envpatches import PatchError
@@ -22,6 +22,33 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "--prompt-concurrency",
     "--prompt-cache-size",
 )
+
+PREFILL_STEP_FLAG = "--prefill-step-size"
+
+MLX_LM_PREFILL_STEP = 2048
+"""mlx-lm 0.31.3's own --prefill-step-size default: the most tokens one prefill
+step reads, and the most a step here is ever given."""
+
+EVAL_BUDGET_FLOPS = 2 * 27e9 * 256
+"""The GPU work one evaluation may hold: a prompt is read in steps of at most
+this many FLOPs (2 x params x tokens). macOS cannot preempt a running Metal
+workload, and while one runs the window server's compositing can wait for ALL of
+it: measured on the Mac Studio M1 Ultra (2026-10-10), a 2048-token step of
+qwen3.8-27b-8bit is 12-13 s of GPU and the desktop froze for 12.6 s at a time
+(the window server's own IPC unanswered, a 60 Hz Metal client blocked 13.2 s),
+while the 9B's 3.7 s steps never froze it. The budget is the 27B at 256 tokens:
+1.59 s per step, at the same throughput as 2048 (164 vs 162-170 tok/s; 128
+tokens cost 8%, 64 cost 18%). Every model's step is derived from it, so each
+step is about the same stretch of GPU time (docs/internals/engines-and-capability.md,
+"Prefill steps hold the GPU")."""
+
+
+def prefill_step(params_b: float) -> int:
+    """Tokens per prefill step for a dense model of `params_b` billion parameters:
+    EVAL_BUDGET_FLOPS of work, never more than mlx-lm's own step."""
+    if params_b <= 0:
+        raise EngineError(f"prefill_step: params_b must be positive, got {params_b}")
+    return max(1, min(MLX_LM_PREFILL_STEP, int(EVAL_BUDGET_FLOPS / (2 * params_b * 1e9))))
 
 
 class MlxLmEngine(SubprocessEngine):
@@ -88,7 +115,7 @@ class MlxLmEngine(SubprocessEngine):
 
     decide_likelihood_route = "items"
     decide_likelihood_basis = (
-        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 4) reads a "
+        "Crucible's items route (engines/items_forward.py, ITEMS_VERSION 5) reads a "
         "candidates body: every candidate's prompt is the chat template's open "
         "assistant reply (continue_final_message), the shared state runs once, each "
         "question's context once over it, every candidate's first token is read "
@@ -107,9 +134,29 @@ class MlxLmEngine(SubprocessEngine):
         "a row of one forward over a state it keeps between decisions"
     )
 
+    @classmethod
+    def model_args(cls, manifest: Any, args: list[str]) -> list[str]:
+        """The prefill step, derived from the model's size (`prefill_step`). One
+        owner: a manifest that states the flag itself is refused."""
+        if int_flag(args, PREFILL_STEP_FLAG) is not None:
+            raise EngineError(
+                f"prefill_step_stated: {manifest.path.name} states {PREFILL_STEP_FLAG} "
+                f"({args}); Crucible derives it from params_b so every model's step "
+                "holds the GPU about as long (engines/mlx_lm.py, EVAL_BUDGET_FLOPS). "
+                "Remove it from the manifest"
+            )
+        return [*args, PREFILL_STEP_FLAG, str(prefill_step(manifest.params_b))]
+
     def start(
         self, model_dir: Path, served_name: str, port: int, args: list[str]
     ) -> None:
+        if int_flag(args, PREFILL_STEP_FLAG) is None:
+            raise EngineError(
+                f"mlx_lm_prefill_step_unset: this argv states no {PREFILL_STEP_FLAG} "
+                f"({args}); mlx-lm's own {MLX_LM_PREFILL_STEP} would hold the GPU for "
+                "up to 13 s per step on a 27B and freeze the desktop. Start the "
+                "engine through engine_load_args, which derives it"
+            )
         missing = [flag for flag in REQUIRED_FLAGS if int_flag(args, flag) is None]
         if missing:
             raise EngineError(

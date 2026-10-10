@@ -402,13 +402,17 @@ def engine_load_args(
     card_args: tuple[str, ...] = (),
     concurrency: int | None = None,
 ) -> list[str]:
-    args = engine_class(spec.engine).load_args(
-        spec,
-        weights_dir,
-        context,
-        plan,
-        card_flags=card_args,
-        source=manifest.path.name,
+    cls = engine_class(spec.engine)
+    args = cls.model_args(
+        manifest,
+        cls.load_args(
+            spec,
+            weights_dir,
+            context,
+            plan,
+            card_flags=card_args,
+            source=manifest.path.name,
+        ),
     )
     if concurrency is None:
         return args

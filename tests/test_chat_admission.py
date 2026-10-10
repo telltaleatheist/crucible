@@ -368,3 +368,24 @@ def test_a_cap_on_an_engine_that_serves_nothing_is_refused(
     with pytest.raises(EngineError) as caught:
         decide_reading("mlx-vlm")
     assert "serves no decision" in str(caught.value)
+
+
+def test_mlx_lm_reads_prompts_in_steps_derived_from_the_models_size() -> None:
+    from crucible.engines.base import int_flag
+    from crucible.engines.mlx_lm import MLX_LM_PREFILL_STEP, PREFILL_STEP_FLAG, prefill_step
+
+    assert int_flag(_mlx_args("qwen3.8-27b-8bit"), PREFILL_STEP_FLAG) == 256
+    assert int_flag(_mlx_args("qwen3.5-9b"), PREFILL_STEP_FLAG) == 768
+    assert int_flag(_mlx_args("qwen3.5-0.8b"), PREFILL_STEP_FLAG) == MLX_LM_PREFILL_STEP
+    assert prefill_step(4) == 1728
+    with pytest.raises(EngineError):
+        prefill_step(0)
+
+
+def test_a_manifest_that_states_the_prefill_step_is_refused() -> None:
+    from types import SimpleNamespace
+
+    manifest = SimpleNamespace(path=Path("m.toml"), params_b=9)
+    with pytest.raises(EngineError) as caught:
+        ENGINES["mlx-lm"].model_args(manifest, ["--prefill-step-size", "2048"])
+    assert str(caught.value).startswith("prefill_step_stated:")

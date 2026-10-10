@@ -260,7 +260,7 @@ class Plan:
 
 
 def test_each_engine_builds_its_own_argv() -> None:
-    manifest = SimpleNamespace(path=Path("m.toml"))
+    manifest = SimpleNamespace(path=Path("m.toml"), params_b=9)
     here = Path("/w")
     assert engine_load_args(
         manifest, _spec("vllm"), here, Plan(), context=8, card_args=("--card",)
@@ -271,10 +271,12 @@ def test_each_engine_builds_its_own_argv() -> None:
         manifest, _spec("llama-server", file="x.gguf", mmproj="p.gguf"), here, None,
         context=8,
     ) == ["-m", str(here / "x.gguf"), "--a", "--mmproj", str(here / "p.gguf"), "-c", "8"]
-    for cls in (MlxLmEngine, MlxVlmEngine):
-        assert engine_load_args(
-            manifest, _spec(cls.name), here, Plan(), context=8, card_args=("--c",)
-        ) == ["--a", "--plan"]
+    assert engine_load_args(
+        manifest, _spec(MlxVlmEngine.name), here, Plan(), context=8, card_args=("--c",)
+    ) == ["--a", "--plan"]
+    assert engine_load_args(
+        manifest, _spec(MlxLmEngine.name), here, Plan(), context=8, card_args=("--c",)
+    ) == ["--a", "--plan", "--prefill-step-size", "768"], "mlx-lm derives its step"
     with pytest.raises(EngineError, match="m.toml's b block names no `file`"):
         engine_load_args(manifest, _spec("llama-server"), here, None, context=8)
     assert engine_load_args(
