@@ -151,6 +151,24 @@ def test_the_pinned_archive_is_placed_and_stamped(tmp_path: Path, monkeypatch: p
     assert "already at" in hosttools.ensure_llama_server(tmp_path, fetch=_fetch_from(archive))
 
 
+def test_the_install_says_the_download_and_the_unpacked_size_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Victoria's laptop, 2026-10-09: "fetching ... (107 MB)" then a 139.5 MB file on
+    # disk. Both figures are right; the lines say which is which.
+    body = bytes(range(256)) * 9_000
+    archive = _archive("llama-server-b10970-cuda13.0-test", body)
+    _pinned(monkeypatch, archive)
+    lines: list[str] = []
+    said = hosttools.ensure_llama_server(tmp_path, fetch=_fetch_from(archive), on_line=lines.append)
+    assert lines == [
+        f"fetching llama-server-b10970-cuda13.0-test.tar.xz "
+        f"({len(archive) / 1e6:.0f} MB to download)"
+    ]
+    assert f"{len(body) / 1e6:.1f} MB unpacked" in said
+    assert f"{len(archive) / 1e6:.1f} MB download" in said
+
+
 def test_bytes_that_do_not_match_the_pin_place_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = _archive("llama-server-b10970-cuda13.0-test")
     _pinned(monkeypatch, archive, sha256="0" * 64)

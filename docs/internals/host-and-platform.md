@@ -937,7 +937,9 @@ names the directories and PATH searched (`searched_note`).
 `LLAMA_SERVER_BUILDS` pins llama.cpp's `llama-server` for linux-x86_64 on the same release:
 our own build of the tag Windows pins (`scripts/build-llama-server-linux.sh`), CUDA 13.0,
 sm_75/80/86/89/90/120, static llama/ggml with libstdc++ folded in, no OpenMP and no rpath.
-The archive holds the binary, llama.cpp's LICENSE and a BUILD.txt; cudart and cuBLAS are not
+The archive holds the binary, llama.cpp's LICENSE and a BUILD.txt; for b10970 the `.tar.xz` is
+106,932,584 B to download and the binary it unpacks is 139,514,616 B, and the install's lines
+say both (the pin's `bytes` is the archive's). cudart and cuBLAS are not
 in it and come from the llm env (`llamacpp.cuda_linux_engine`). `ensure_llama_server` is
 called by `crucible install llm` on cuda-linux only, checks the digest before placing, and
 refuses a platform with no pin (`tool_unpinned`) rather than skipping it.

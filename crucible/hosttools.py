@@ -747,7 +747,7 @@ def ensure_llama_server(
     try:
         archive = staging / build.url.rsplit("/", 1)[-1]
         if on_line is not None:
-            on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB)")
+            on_line(f"fetching {archive.name} ({build.bytes / 1e6:.0f} MB to download)")
         measured = (_download if fetch is None else fetch)(build.url, archive)
         if measured != build.sha256:
             raise HostToolError(
@@ -795,7 +795,10 @@ def ensure_llama_server(
         + "\n",
         encoding="utf-8",
     )
+    # The archive is xz: the binary it unpacks is a third larger than the download
+    # (b10970: 106,932,584 B fetched, 139,514,616 B placed), so both are said.
     return (
         f"llama-server: {build.version} placed at {target} "
-        f"(sha256 {build.sha256[:12]}...)"
+        f"({target.stat().st_size / 1e6:.1f} MB unpacked from a "
+        f"{build.bytes / 1e6:.1f} MB download; sha256 {build.sha256[:12]}...)"
     )
