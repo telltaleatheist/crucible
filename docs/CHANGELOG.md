@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- `qwen3.5-4b-8bit` carries its measurement from an RTX 3070 Laptop (8 GiB): 4.86 GiB of weights, about 0.65 GiB of warm-up above weights and KV, 46,581 B/token of KV. It holds 5.95 GiB resident; an 8 GiB card's text verbs need 5.9-6.2 GiB with it.
+
 - Fix: updating Crucible on a Windows PC whose engine runs in WSL ended with a false "its engine did not start" (`local_config_unreadable: … no config at …\config.toml`) when the Windows side had never run an engine of its own. A Windows home with no `config.toml` runs no engine, so the guest's engine (carried to the new release by the tray) is no longer judged against it.
 
 ## 1.0.121 — 2026-10-09

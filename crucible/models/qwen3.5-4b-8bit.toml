@@ -24,7 +24,7 @@ hf_repo = "owenmorgan/qwen3.5-4b-w8a16"
 revision = "84a25838e4890597cffb63c4f69dcf0164172ff3"
 bits = 8
 serves = ["text"]
-memory_bytes_estimate = 7_050_000_000
+memory_bytes_estimate = 6_300_000_000
 engine_args = [
     "--dtype", "bfloat16",
     "--max-num-seqs", "4",
@@ -33,13 +33,15 @@ engine_args = [
 ]
 max_context = 32768
 
-# Computed, to be replaced by the measurement on Victoria's RTX 3070 (8 GiB): the
-# text-only tensors are 4.90 GB on disk, and the 4-bit B-Side 4B loaded 0.22 GB above its
-# text-only tensors (3.12 GB on disk, "Model loading took 3.11 GiB"); its overhead past
-# the weights and KV was 1.6 GB.
+# Measured 2026-10-09 on Victoria's RTX 3070 Laptop (8 GiB, WSL2, vLLM 0.29), with a
+# 0.63 GiB KV pool: "Model loading took 4.86 GiB"; "GPU KV cache size: 14,522 tokens" for
+# 0.63 GiB (46,581 B/token, the mamba page padding included); CUDA graphs 0.06 GiB.
+# nvidia-smi peaked at 7,175 MiB while loading and held 5,951 MiB resident; less vLLM's
+# CUDA context (vram.VLLM_CUDA_CONTEXT_BYTES), the weights and the pool, the warm-up
+# peak above them is about 0.65 GiB.
 [backends.cuda-linux.memory]
-weights_bytes = 5_120_000_000
-overhead_bytes = 1_600_000_000
-kv_bytes_per_token = 40_337
-basis = "computed"
+weights_bytes = 5_218_000_000
+overhead_bytes = 700_000_000
+kv_bytes_per_token = 46_581
+basis = "measured"
 measured_at_context = 8192
