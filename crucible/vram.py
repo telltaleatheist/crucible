@@ -9,6 +9,15 @@ from .memorybudget import engine_budget_bytes, gib_text
 
 MAX_NUM_SEQS_FLAG = "--max-num-seqs"
 
+# What vLLM's own process holds on the card before it checks that the budget is free:
+# its CUDA context. vLLM refuses to start when gpu_memory_utilization x total exceeds the
+# free memory IT sees, which is the probe's free less this. Measured on Victoria's RTX
+# 3070 Laptop (WSL2, 2026-10-09): the probe saw 7.83 GiB free, vLLM 6.95 GiB, so 0.88
+# GiB; rounded up to the next 64 MiB. A budget of the whole 7.0 GiB the desktop
+# allowance leaves was refused there; on a 24 GiB card the allowance is always the
+# smaller term, which is why it never showed.
+VLLM_CUDA_CONTEXT_BYTES = 960 * 1024**2
+
 
 def _gib(value: int) -> str:
     return gib_text(value, 2)
@@ -102,7 +111,9 @@ def plan_vllm_memory(
 
     free_after_eviction = card.free_bytes + reclaimable_bytes
     budget = engine_budget_bytes(
-        card.total_bytes, desktop_allowance_bytes, free_after_eviction
+        card.total_bytes,
+        desktop_allowance_bytes,
+        free_after_eviction - VLLM_CUDA_CONTEXT_BYTES,
     )
     room = max(0, budget - terms.fixed_bytes)
     concurrency = max_num_seqs(spec, model_id)

@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- Fix: on a card where the desktop allowance leaves about as much as is free (an 8 GiB card), vLLM refused to start ("Free memory on device … is less than desired GPU memory utilization"). The memory plan now leaves vLLM's own CUDA context (0.94 GiB, measured on an RTX 3070 under WSL2) out of the budget it hands the engine.
+
 ## 1.0.120 — 2026-10-09
 
 - New model `qwen3.5-4b-8bit` (cuda-linux): the 4B at 8 bits, text only (`owenmorgan/qwen3.5-4b-w8a16`). On an 8 GiB card every text verb now picks it instead of `qwen3.5-0.8b`; larger cards are unchanged.

@@ -172,8 +172,12 @@ def test_the_pool_is_the_budget_less_weights_and_overhead():
         reclaimable_bytes=0,
     )
     assert plan is not None
-    assert plan.budget_bytes == free_mib * MIB
-    assert plan.pool_bytes == free_mib * MIB - NINE_B.fixed_bytes
+    # The free memory the probe reports, less what vLLM's own CUDA context holds.
+    from crucible.vram import VLLM_CUDA_CONTEXT_BYTES
+
+    reachable = free_mib * MIB - VLLM_CUDA_CONTEXT_BYTES
+    assert plan.budget_bytes == reachable
+    assert plan.pool_bytes == reachable - NINE_B.fixed_bytes
 
 
 def test_a_card_too_full_refuses_by_name_with_every_term_in_the_sentence():
@@ -254,3 +258,30 @@ def test_the_slope_is_measured_and_not_computed():
     assert terms is not None
     assert terms.basis == "measured"
     assert terms.kv_bytes_per_token > 32_768
+
+
+def test_the_budget_leaves_vllms_own_cuda_context_free_on_an_8_gib_card():
+    """Victoria's RTX 3070, 2026-10-09: the probe saw 7.83 GiB free and the allowance left
+    7.0 GiB, so the budget was 7.0 GiB (utilization 0.875); vLLM, holding its CUDA
+    context, saw 6.95 GiB free and refused to start."""
+    from crucible.vram import VLLM_CUDA_CONTEXT_BYTES
+
+    total = 8 * GIB
+    eight = AcceleratorState(
+        backend="cuda-linux", total_bytes=total, free_bytes=int(7.83 * GIB),
+        compute_apps=(), detail="fixture",
+    )
+    plan = plan_vllm_memory(
+        model_id="qwen3.5-4b-8bit",
+        spec=spec(memory=MemoryTerms(
+            weights_bytes=5_120_000_000, overhead_bytes=1_600_000_000,
+            kv_bytes_per_token=40_337, basis="computed", measured_at_context=8192,
+        ), args=("--max-num-seqs", "4")),
+        context=8192,
+        card=eight,
+        desktop_allowance_bytes=GIB,
+        reclaimable_bytes=0,
+    )
+    assert plan is not None and plan.fits
+    assert plan.budget_bytes == int(7.83 * GIB) - VLLM_CUDA_CONTEXT_BYTES
+    assert plan.budget_bytes <= int(6.95 * GIB), "what vLLM saw free there"
