@@ -7,7 +7,7 @@ notes.
 
 ## Unreleased
 
-- Fix: on a cuda-linux host with no C compiler (a fresh WSL distro), a model loaded its weights and then died with `RuntimeError: Failed to find C compiler`, because Triton compiles a C launcher on its first kernel. `crucible install` now places a pinned Zig 0.17.0 as `~/.crucible/tools/bin/cc` and Crucible's engines and workers run with `CC` set to it; an existing install gets it from its next `crucible install`, and until then a load is refused by name (`c_compiler_missing`) and `crucible doctor` names the fix.
+- Fix: on a cuda-linux host with no C compiler (a fresh WSL distro), a model loaded its weights and then died with `RuntimeError: Failed to find C compiler`, because Triton compiles a C launcher on its first kernel. `crucible install` now places a pinned Zig 0.17.0 as `~/.crucible/tools/bin/cc` and Crucible's engines and workers run with `CC` set to it; a host updated by a deploy places it the first time an engine or worker needs it (57 MB, once); only a placement that fails is refused by name (`c_compiler_missing`), and `crucible doctor` names the fix.
 
 - `qwen3.5-4b-8bit` carries its measurement from an RTX 3070 Laptop (8 GiB): 4.86 GiB of weights, about 0.65 GiB of warm-up above weights and KV, 46,581 B/token of KV. It holds 5.95 GiB resident; an 8 GiB card's text verbs need 5.9-6.2 GiB with it.
 
