@@ -155,7 +155,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
     )
     async def embed(request: Request, body: EmbedRequest) -> Response:
         """Unit-length vectors for a list of texts, each answer naming exactly what
-        wrote them (`model.fingerprint`). Vectors are comparable only with vectors of
+        wrote them (`model.fingerprint`). How to use embed and rerank, with examples and
+        the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing
+        holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of
         the same fingerprint: store it with them and send it on later calls, and a
         server that would write anything else refuses `fingerprint_mismatch` instead
         of answering. `input_type` says whether the texts are queries (written with the

@@ -132,9 +132,11 @@ class RerankTokens(_Strict):
     per_document: list[int]
     """Each document's context: the prompt up to where the reply opens."""
     total: int
-    """Prompt tokens the engine was sent for the request, cached ones included."""
+    """Every document's prompt with its query, once per candidate (yes and no), as
+    llama-server is sent it: cached ones included."""
     cached: int | None
-    """Of those, read from the engine's cache (null when it did not say)."""
+    """Of those, what no pass read again (the query shared by every document, a held
+    cache), so `total - cached` is what the engine read; null when it did not say."""
 
 
 class RerankResponse(_Strict):

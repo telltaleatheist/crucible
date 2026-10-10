@@ -278,7 +278,7 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
     id="mlx-lm-decide-items-helper",
     distribution="mlx-lm",
     rel_path="mlx_lm/_crucible_items.py",
-    marker="ITEMS_VERSION = 6",
+    marker="ITEMS_VERSION = 7",
     absent_marker=None,
     stale_marker=None,
     script="patch_mlx_lm_decide_items_helper.py",
@@ -292,7 +292,8 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
         "once per candidate; version 4 read up to 2048 tokens per forward whatever "
         "the model, 13 s of GPU on the 27B, long enough to freeze the desktop; "
         "version 5 reads no embed request and no prompt-form likelihood, which the "
-        "embed and rerank doors send). "
+        "embed and rerank doors send; version 6 says no question's read tokens, so a "
+        "rerank reported its query once per document and nothing cached). "
         "MlxLmEngine applies it itself at start"
     ),
     creates=True,

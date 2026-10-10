@@ -274,9 +274,10 @@ def likelihood_body(
 
 def read_groups_reply(
     data: Any, engine: str, counts: list[int]
-) -> tuple[list[tuple[list[list[float]], int, int]], int | None]:
-    """Each group's candidate rows, context tokens and boundary, and the state
-    tokens the engine reused (null when it did not say)."""
+) -> tuple[list[tuple[list[list[float]], int, int, int]], int | None]:
+    """Each group's candidate rows, context tokens, boundary and the prompt tokens the
+    engine read for it (`read_tokens`), and the state tokens it took from a held cache
+    (null when it did not say)."""
     groups = data.get("groups") if isinstance(data, dict) else None
     if not isinstance(groups, list) or len(groups) != len(counts):
         raise _engine_error(engine, f"reply.groups is not a list of {len(counts)} groups")
@@ -285,6 +286,7 @@ def read_groups_reply(
         where = f"groups[{index}]"
         context = _int(group, "context_tokens", where, engine)
         boundary = _int(group, "boundary", where, engine)
+        group_read = _int(group, "read_tokens", where, engine)
         rows = group.get("candidates") if isinstance(group, dict) else None
         if not isinstance(rows, list) or len(rows) != expected:
             raise _engine_error(engine, f"{where}.candidates is not a list of {expected}")
@@ -303,7 +305,13 @@ def read_groups_reply(
                     engine, f"{where}.candidates[{n}].logprobs is not a non-empty list of numbers"
                 )
             values.append([float(v) for v in logprobs])
-        read.append((values, context, boundary))
+        if group_read > boundary * len(values):
+            raise _engine_error(
+                engine,
+                f"{where}.read_tokens is {group_read}, more than its {len(values)} "
+                f"candidate(s)' prompts of {boundary} tokens",
+            )
+        read.append((values, context, boundary, group_read))
     cached = data.get("cached_tokens")
     if cached is not None and (isinstance(cached, bool) or not isinstance(cached, int)):
         raise _engine_error(engine, f"reply.cached_tokens is {type(cached).__name__}, expected int")
@@ -312,7 +320,7 @@ def read_groups_reply(
 
 def read_likelihood_reply(
     data: Any, engine: str, plans: list[Plan]
-) -> tuple[list[tuple[list[list[float]], int, int]], int | None]:
+) -> tuple[list[tuple[list[list[float]], int, int, int]], int | None]:
     return read_groups_reply(data, engine, [len(_question(item).candidates) for item in plans])
 
 
@@ -328,12 +336,16 @@ async def score_groups_on_items(
     except ApiError as error:
         raise refusal(error) from None
     wall_ms = round((time.perf_counter() - sent) * 1000.0, 1)
-    groups, cached = read_groups_reply(
+    groups, _held = read_groups_reply(
         data, resident.engine, [len(texts) for texts in scoring.candidates]
     )
     scored: list[GroupScore] = []
-    for rows, context, boundary in groups:
-        prompt_tokens = sum(boundary + len(row) for row in rows)
+    for rows, context, boundary, group_read in groups:
+        # Each candidate's prompt is the group's context to its boundary, counted as
+        # llama-server is sent it; whatever of that the engine did not read for this
+        # group (the state read once, a held cache) is cached.
+        prompt_tokens = boundary * len(rows)
+        cached = prompt_tokens - group_read
         scored.append(GroupScore(
             rows=rows,
             context_tokens=context,

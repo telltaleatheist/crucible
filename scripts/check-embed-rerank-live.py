@@ -19,13 +19,15 @@ What it proves, each a numbered check that passes or fails by itself:
     keeps the same ranking.
  3. two calls name the same fingerprint, and a fingerprint with another scheme is refused
     409 fingerprint_mismatch with nothing embedded.
- 4. base64 and base64_float16 decode to the float vectors (to float16's precision).
+ 4. base64 and base64_float16 decode to the float vector of the same batch (to float16's
+    precision), and a text embedded alone is its vector beside another to cosine search
+    (cosine > 0.9999; on the Mac the batch moves components by up to ~1.4e-3).
  5. rerank reproduces the model card: its query against its two documents gives
     logit(score) within 0.5 of 5.0625 and -14.25 (sentence-transformers' CrossEncoder
     logit differences; the score is their sigmoid).
- 6. rerank reads the query once: a second document's request reports cached tokens
-    (`tokens.cached` > 0 on llama-server; on the Mac the second identical call reports the
-    state reused), and the compatible route's top_n=1 is the native route's best.
+ 6. rerank reads the query once: what the engine read (`tokens.total` - `tokens.cached`)
+    is less than the documents' prompts added up (skipped on vLLM, which re-reads it),
+    and the compatible route's top_n=1 is the native route's best.
  7. with --general MODEL: that decide model reranks with Crucible's general template and
     ranks the card's relevant document first.
 """
@@ -114,17 +116,26 @@ def embed_checks(args: argparse.Namespace) -> None:
     })
     check("3 another scheme is refused", status == 409
           and refused.get("error", {}).get("code") == "fingerprint_mismatch", f"{status}")
-    _, b64 = post(args, "/v1/embed", {"inputs": EMBED_DOCUMENTS[:1], "input_type": "document",
-                                       "encoding_format": "base64"})
-    _, b16 = post(args, "/v1/embed", {"inputs": EMBED_DOCUMENTS[:1], "input_type": "document",
-                                       "encoding_format": "base64_float16"})
+    # Each encoding against a float call of the SAME batch: on the Mac a text embedded
+    # beside another reads up to ~1.4e-3 off the same text alone (bf16 over padded rows,
+    # measured 2026-10-10), which is the batch, not the encoding.
+    one = {"inputs": EMBED_DOCUMENTS[:1], "input_type": "document"}
+    _, plain = post(args, "/v1/embed", one)
+    _, b64 = post(args, "/v1/embed", {**one, "encoding_format": "base64"})
+    _, b16 = post(args, "/v1/embed", {**one, "encoding_format": "base64_float16"})
+    alone = plain["embeddings"][0]
     raw32 = base64.b64decode(b64["embeddings"][0])
     raw16 = base64.b64decode(b16["embeddings"][0])
     f32 = struct.unpack(f"<{len(raw32) // 4}f", raw32)
     f16 = struct.unpack(f"<{len(raw16) // 2}e", raw16)
+    off32 = max(abs(a - b) for a, b in zip(f32, alone))
+    off16 = max(abs(a - b) for a, b in zip(f16, alone))
     check("4 the encodings decode to the vector",
-          max(abs(a - b) for a, b in zip(f32, d[0])) < 1e-6
-          and max(abs(a - b) for a, b in zip(f16, d[0])) < 2e-3)
+          len(f32) == len(f16) == len(alone) and off32 < 1e-6 and off16 < 2e-3,
+          f"float32 off by {off32:.1e}, float16 by {off16:.1e}")
+    batched = max(abs(a - b) for a, b in zip(alone, d[0]))
+    check("4 a text alone and beside another is the same vector to cosine search",
+          cosine(alone, d[0]) > 0.9999, f"largest component difference {batched:.1e}")
 
 
 def logit(p: float) -> float:
@@ -142,10 +153,20 @@ def rerank_checks(args: argparse.Namespace) -> None:
     worst = max(abs(a - b) for a, b in zip(logits, RERANK_CARD_LOGITS))
     check("5 rerank reproduces the model card", worst <= LOGIT_TOLERANCE,
           f"logits {[round(x, 3) for x in logits]}, worst {worst:.3f}")
-    _, again = post(args, "/v1/rerank", body)
-    cached = again["tokens"]["cached"]
-    check("6 the query is read from the engine's cache", cached is not None and cached > 0,
-          f"tokens {again['tokens']}")
+    tokens, engine = answer["tokens"], answer["model"]["engine"]
+    if engine == "vllm":
+        # vLLM reads prompt log-probabilities, which never read its prefix cache: every
+        # document's request reads the query again (rerank.py), and it says 0 cached.
+        print("skip  6 vLLM re-reads the query for every document; nothing to check")
+    else:
+        # Each document's prompt counts its query, as llama-server is sent it; what the
+        # engine actually read is total - cached, which is less than the documents'
+        # prompts added up only if the query was read once and shared.
+        cached = tokens["cached"]
+        read = None if cached is None else tokens["total"] - cached
+        check("6 the query is read once for every document",
+              read is not None and cached > 0 and read < sum(tokens["per_document"]),
+              f"tokens {tokens}, read {read}")
     status, compat = post(args, "/v1/openai/rerank", {**body, "top_n": 1})
     check("6 the compatible route's top_n=1 is the best",
           status == 200 and compat["results"][0]["index"] == answer["results"][0]["index"])

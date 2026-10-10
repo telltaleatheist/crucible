@@ -17,7 +17,11 @@ from typing import Any
 import pytest
 
 from crucible import capabilityclasses, embed, manifests, rerank, verbspec, verdict
-from crucible.decide_likelihood import Scoring, score_groups_on_forced_tokens
+from crucible.decide_likelihood import (
+    Scoring,
+    score_groups_on_forced_tokens,
+    score_groups_on_items,
+)
 from crucible.embed import EmbedRequest
 from crucible.engines import embed_reading, items_forward, likelihood_reading
 from crucible.engines.items_forward import ItemsRefusal
@@ -585,6 +589,26 @@ def test_the_prompt_form_reads_the_query_once_and_each_document_s_tail_once(
         assert group["boundary"] == len(whole)
         for text, row in zip("yn", group["candidates"]):
             assert row["logprobs"] == pytest.approx([fake_token_logprob(whole, ord(text))])
+    assert [g["read_tokens"] for g in document["groups"]] == [3 + 3, 5], (
+        "the query read once, with the first document, then each document's own tail"
+    )
+
+    # Through the door: each document's yes and no are each its 6- or 8-token prompt, as
+    # llama-server is sent them (28), and all but the 11 tokens read are cached (the
+    # Mac's 2026-10-10 rerank reported its query once per document and 0 cached).
+    async def call(path: str, wire: dict) -> Any:
+        assert path == items_forward.ITEMS_PATH
+        return document
+
+    scoring = Scoring(messages=None, prompt="PQ|", questions=["d1>", "doc2>"],
+                      candidates=[["y", "n"], ["y", "n"]])
+    resident = SimpleNamespace(engine="mlx-lm", engine_model_name="w", max_model_len=8192)
+    groups = asyncio.run(score_groups_on_items(call, resident, scoring))
+    model = rerank.RerankModel(id=RERANK, revision="r", file=None, form=None, engine="mlx-lm",
+                               engine_build="b", template="model", fingerprint="f")
+    tokens = rerank.answer(groups, model, "i", 0.0).tokens
+    assert (tokens.total, tokens.cached) == (6 * 2 + 8 * 2, 6 * 2 + 8 * 2 - 11)
+    assert tokens.per_document == [6, 8]
 
 
 def test_a_likelihood_request_is_the_chat_form_or_the_prompt_form_never_both() -> None:
@@ -639,6 +663,34 @@ def test_llama_server_scores_the_prompt_form_with_no_template_and_nothing_added(
         context = [ord(c) for c in "P:" + question]
         yes, no = (fake_token_logprob(context, ord(t)) for t in "yn")
         assert rerank.relevance(group) == pytest.approx(math.exp(yes) / (math.exp(yes) + math.exp(no)))
+
+
+def test_llama_server_reports_every_prompt_it_was_sent_and_what_its_slot_reused() -> None:
+    sent: list[tuple[str, dict]] = []
+    plain = _llama_forced(sent)
+    last: list[int] = []
+
+    async def call(path: str, wire: dict) -> Any:
+        data = await plain(path, wire)
+        if path == "/completion":
+            prompt = list(wire["prompt"])
+            common = 0
+            while common < min(len(prompt), len(last)) and prompt[common] == last[common]:
+                common += 1
+            # The slot re-reads at least the prompt's last token, as llama-server does.
+            data["timings"] = {"cache_n": min(common, len(prompt) - 1)}
+            last[:] = prompt
+        return data
+
+    scoring = Scoring(messages=None, prompt="P:", questions=["a>", "bb>"],
+                      candidates=[["y", "n"], ["y", "n"]])
+    resident = SimpleNamespace(engine="llama-server", max_model_len=8192)
+    groups = asyncio.run(score_groups_on_forced_tokens(call, resident, scoring))
+    assert [g.prompt_tokens for g in groups] == [4 * 2, 5 * 2]
+    assert [g.timing.cached_tokens for g in groups] == [0 + 3, 2 + 4], (
+        "the first prompt read whole; its no reuses 3; the next document reuses the "
+        "shared 'P:' and then 4 of its own 5"
+    )
 
 
 def test_relevance_is_p_yes_against_p_no_and_results_sort_most_relevant_first() -> None:

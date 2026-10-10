@@ -312,6 +312,7 @@ class Reader:
                     split, shared_pass, item_pass,
                     lambda hidden, targets: ITEMS.token_logprobs(head, hidden, targets),
                 ),
+                ITEMS.row_read_tokens(split),
             )
             mx.clear_cache()
             return document

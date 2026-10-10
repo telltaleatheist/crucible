@@ -74,7 +74,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `POST /v1/queue/sessions/{session_id}/touch` | "Still here", for a long gap on the client's side with nothing in flight. |
 | `DELETE /v1/queue/{job_id}` | Take a waiting job, call or queue session out of the queue (reason `operator`), or end the open queue session; a job that has started is cancelled with DELETE /v1/jobs/{id}. |
 | `POST /v1/queue/{job_id}/heartbeat` | Say the client that queued this job is still there. |
-| `POST /v1/rerank` | A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt, so the same model's scores compare across calls and a fixed cutoff means the same thing every time. |
+| `POST /v1/rerank` | A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. |
 | `GET /v1/resumable` | Every resume journal this server keeps, newest first, with progress, inputs and expiry. |
 | `GET /v1/resumable/{resume_id}` | One journal, as `GET /v1/resumable` lists it. |
 | `DELETE /v1/resumable/{resume_id}` | Discard a journal now; refused `resume_in_use` while a job writes it. |
@@ -1341,7 +1341,7 @@ The whole API reference as markdown: every route, every job type, every model.
 
 ### `POST /v1/embed`
 
-Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else the biggest under `max_params_b` that fits, else what this server registered for embed; its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). How to use embed and rerank, with examples and the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else the biggest under `max_params_b` that fits, else what this server registered for embed; its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1378,7 +1378,7 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 
 ### `POST /v1/rerank`
 
-A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt, so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else the biggest under `max_params_b` that fits, else what this server registered for rerank; the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else the biggest under `max_params_b` that fits, else what this server registered for rerank; the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -3073,8 +3073,8 @@ A relevance probability per document, in document order, and the same sorted.
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `per_document` | array of integer | yes | — | Each document's context: the prompt up to where the reply opens. |
-| `total` | integer | yes | — | Prompt tokens the engine was sent for the request, cached ones included. |
-| `cached` | integer or null | yes | — | Of those, read from the engine's cache (null when it did not say). |
+| `total` | integer | yes | — | Every document's prompt with its query, once per candidate (yes and no), as llama-server is sent it: cached ones included. |
+| `cached` | integer or null | yes | — | Of those, what no pass read again (the query shared by every document, a held cache), so `total - cached` is what the engine read; null when it did not say. |
 
 ### `ScoreAnswer`
 
