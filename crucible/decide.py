@@ -46,7 +46,12 @@ IMAGES_NOTE = "The state's images open the user message."
 
 PRIME_USER_TEXT = "The questions follow."
 
-MAX_CANDIDATES = 26
+MAX_CANDIDATES = 256
+"""Candidates one likelihood question scores. A label question is capped by its
+letters (26); a candidate needs no letter, so the cap is what one question costs:
+256 short candidates (a client's whole tag set) are 256 rows over the state read
+once on the Mac, 256 prompts on vLLM and 256 forced continuations on llama-server
+(docs/internals/engines-and-capability.md, "Likelihood questions")."""
 
 MAX_CANDIDATE_TOKENS = 256
 
@@ -125,7 +130,7 @@ class LikelihoodQuestion(_Strict):
     is scored as the start of the model's reply to it (thinking off)."""
     candidates: dict[_NonEmpty, _NonEmpty] = Field(min_length=2)
     """Candidate name to the reply text to score, in the order the answer lists
-    them. 2 to 26 (`too_many_candidates`), each text unique, starting and
+    them. 2 to 256 (`too_many_candidates`), each text unique, starting and
     ending on a non-space (a chat template's open reply drops trailing space),
     at most 256 tokens as it tokenizes after the context (`candidate_too_long`)."""
     rank_by: Literal["total", "mean"] = "total"
@@ -136,6 +141,16 @@ class LikelihoodQuestion(_Strict):
     split into more, individually likely tokens. `mean`: the log-probability
     per token, for candidates whose lengths differ by content (chapter titles),
     where the total penalises every extra token."""
+    normalize: Literal["softmax", "none"] = "softmax"
+    """What each candidate's `probability` is. `softmax` (the default): the
+    totals renormalised over the candidates offered, so they sum to 1; right
+    when exactly one candidate is the answer (which spelling, which title, which
+    one genre). `none`: exp(`logprob`), the model's own probability of that
+    reply, each candidate on its own and nothing summed; for reading how likely
+    one reply is in absolute terms, or comparing it across requests. Neither
+    answers "which of these apply": a reply's probability falls with its length
+    and is shared out among every way of saying it, so it is no "does this
+    apply" score. Ask that as the items form, one yes/no item per option."""
 
     @field_validator("candidates")
     @classmethod
@@ -418,9 +433,11 @@ class CandidateScore(_Strict):
     mean_logprob: float
     """`logprob` / `tokens`."""
     probability: float
-    """A softmax over the candidates' `logprob` totals: the model's probability of
-    this reply renormalised over the replies offered. Always over totals,
-    whatever `rank_by` says, because that is the quantity with a meaning."""
+    """By the question's `normalize`. `softmax`: a softmax over the candidates'
+    `logprob` totals, the model's probability of this reply renormalised over the
+    replies offered (they sum to 1). `none`: exp(`logprob`), this reply's own
+    probability, independent of the others. Always from the total, whatever
+    `rank_by` says, because that is the quantity with a meaning."""
 
 
 class LikelihoodAnswer(_Strict):
@@ -434,6 +451,8 @@ class LikelihoodAnswer(_Strict):
     `"mean"` it need not hold the largest `probability`."""
     rank_by: Literal["total", "mean"]
     """The measure `winner` was picked by, echoed from the question."""
+    normalize: Literal["softmax", "none"]
+    """What `probability` is, echoed from the question."""
     candidates: dict[str, CandidateScore]
     """Candidate name to its reading, in the request's order."""
     context_tokens: int

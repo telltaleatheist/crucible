@@ -1036,11 +1036,10 @@ export interface DecideYesNoQuestion {
 }
 
 /**
- * Score 2–26 free-text candidate replies by how likely the model is to say each, instead of
+ * Score 2–256 free-text candidate replies by how likely the model is to say each, instead of
  * generating one: nothing is decoded, so nothing fails to parse or runs away. Each candidate is
  * scored as the start of the model's reply to `instructions` (thinking off), at most 256 tokens.
- * Served on vLLM, mlx-lm and mlx-vlm; a llama-server model is 400
- * `likelihood_unsupported_on_engine`.
+ * Served on vLLM, llama-server, mlx-lm and mlx-vlm (images on mlx-vlm only).
  */
 export interface DecideLikelihoodQuestion {
   readonly type: 'likelihood';
@@ -1049,6 +1048,8 @@ export interface DecideLikelihoodQuestion {
   readonly candidates: Readonly<Record<string, string>>;
   /** Which measure picks `winner`. Omitted: `total`. */
   readonly rankBy?: DecideRankBy;
+  /** What each candidate's `probability` is. Omitted: `softmax`. */
+  readonly normalize?: DecideNormalize;
 }
 
 /**
@@ -1056,6 +1057,14 @@ export interface DecideLikelihoodQuestion {
  * of one line). `mean`: per token, for candidates whose lengths differ by content (titles).
  */
 export type DecideRankBy = 'total' | 'mean';
+
+/**
+ * `softmax`: the totals renormalised over the candidates offered (they sum to 1), for picking the
+ * one answer among mutually exclusive replies. `none`: exp(`logprob`), each reply's own
+ * probability, independent of the others. Neither says "which of these apply": ask that as the
+ * items form, one yes/no item per option.
+ */
+export type DecideNormalize = 'softmax' | 'none';
 
 export type DecideQuestion =
   | DecideChoiceQuestion
@@ -1145,7 +1154,10 @@ export interface DecideCandidateScore {
   readonly tokens: number;
   /** `logprob / tokens`. */
   readonly meanLogprob: number;
-  /** A softmax over the candidates' totals, whatever `rankBy` says. */
+  /**
+   * By the question's `normalize`: a softmax over the candidates' totals (`softmax`), or
+   * exp(`logprob`) on its own (`none`); from the total whatever `rankBy` says.
+   */
   readonly probability: number;
 }
 
@@ -1155,6 +1167,8 @@ export interface DecideLikelihoodAnswer {
   /** The best candidate by `rankBy`; on a tie the first asked. */
   readonly winner: string;
   readonly rankBy: DecideRankBy;
+  /** What each `probability` is, echoed from the question. */
+  readonly normalize: DecideNormalize;
   /** Candidate name → its reading, in the order asked. */
   readonly candidates: Readonly<Record<string, DecideCandidateScore>>;
   /** The context's tokens: the state, the request and the opened reply. */

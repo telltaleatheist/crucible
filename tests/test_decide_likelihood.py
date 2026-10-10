@@ -53,6 +53,7 @@ def _request(**questions: Any) -> DecideRequest:
 def test_a_likelihood_question_validates_with_total_as_its_default_ranking() -> None:
     question = _request(spelling=SPELLING).questions["spelling"]
     assert isinstance(question, LikelihoodQuestion) and question.rank_by == "total"
+    assert question.normalize == "softmax"
     (item,) = decide.plan_all(_request(spelling=SPELLING))
     assert item.labels == () and decide.likelihood_plans([item]) == [item]
     assert decide.label_plans([item]) == []
@@ -67,6 +68,7 @@ def test_a_likelihood_question_validates_with_total_as_its_default_ranking() -> 
         ({"candidates": {"a": " x", "b": "y"}}, "whitespace"),
         ({"candidates": {"a": "", "b": "y"}}, "at least 1 character"),
         ({"rank_by": "median"}, "'total' or 'mean'"),
+        ({"normalize": "sigmoid"}, "'softmax' or 'none'"),
         ({"options": {"a": "x", "b": "y"}}, "Extra inputs"),
     ],
 )
@@ -76,13 +78,13 @@ def test_a_malformed_likelihood_question_is_refused_by_the_schema(change: dict, 
     assert fragment in str(caught.value)
 
 
-def test_twenty_seven_candidates_are_too_many_by_name() -> None:
-    body = _request(q={**SPELLING, "candidates": {f"c{i}": f"text {i}" for i in range(27)}})
+def test_two_hundred_fifty_seven_candidates_are_too_many_by_name() -> None:
+    body = _request(q={**SPELLING, "candidates": {f"c{i}": f"text {i}" for i in range(257)}})
     with pytest.raises(ApiError) as caught:
         decide.plan_all(body)
     assert caught.value.code == "too_many_candidates"
-    assert caught.value.details == {"question": "q", "candidates": 27, "max_candidates": 26}
-    decide.plan_all(_request(q={**SPELLING, "candidates": {f"c{i}": f"t{i}" for i in range(26)}}))
+    assert caught.value.details == {"question": "q", "candidates": 257, "max_candidates": 256}
+    decide.plan_all(_request(q={**SPELLING, "candidates": {f"c{i}": f"t{i}" for i in range(256)}}))
 
 
 def test_the_context_asks_for_a_reply_not_a_letter() -> None:
@@ -146,9 +148,12 @@ def test_the_shared_part_stops_before_the_earliest_group_s_boundary() -> None:
 # --- the math -----------------------------------------------------------------------
 
 
-def _answer(rows: list[list[float]], rank_by: str = "total", **names: str) -> Any:
+def _answer(
+    rows: list[list[float]], rank_by: str = "total", normalize: str = "softmax", **names: str
+) -> Any:
     candidates = names or {"a": "x", "b": "y"}
-    (item,) = decide.plan_all(_request(q={**SPELLING, "candidates": candidates, "rank_by": rank_by}))
+    (item,) = decide.plan_all(_request(q={
+        **SPELLING, "candidates": candidates, "rank_by": rank_by, "normalize": normalize}))
     return decide_likelihood.likelihood_answer(item, rows, 40, 39)
 
 
@@ -160,8 +165,18 @@ def test_totals_means_and_a_softmax_over_the_totals() -> None:
     assert b.mean_logprob == pytest.approx(-5.02 / 3)
     assert a.probability == pytest.approx(1 / (1 + math.exp(-3.02)))
     assert a.probability + b.probability == pytest.approx(1.0)
-    assert answer.winner == "a" and answer.rank_by == "total"
+    assert answer.winner == "a" and answer.rank_by == "total" and answer.normalize == "softmax"
     assert answer.context_tokens == 40 and answer.boundary_tokens == 1
+
+
+def test_normalize_none_is_each_reply_s_own_probability_summed_with_nothing() -> None:
+    answer = _answer([[-2.0], [-5.0, -0.01, -0.01]], normalize="none")
+    a, b = answer.candidates["a"], answer.candidates["b"]
+    assert a.probability == pytest.approx(math.exp(-2.0))
+    assert b.probability == pytest.approx(math.exp(-5.02))
+    assert a.probability + b.probability < 0.2, "independent: nothing makes them sum to 1"
+    assert answer.normalize == "none" and answer.winner == "a", "the winner does not move"
+    assert (a.logprob, b.logprob) == (-2.0, pytest.approx(-5.02))
 
 
 def test_ranking_by_the_mean_can_pick_what_the_total_does_not() -> None:
@@ -192,14 +207,19 @@ def test_each_engine_states_whether_and_how_it_scores_candidates() -> None:
     assert likelihood_reading("mlx-lm").route == "items"
     assert likelihood_reading("mlx-vlm").route == "items" and likelihood_reading("mlx-vlm").images
     llama = likelihood_reading("llama-server")
-    assert llama.route is None and "echo" in llama.basis and "b10970" in llama.basis
+    assert llama.route == "forced-tokens" and llama.images is False
+    assert "post_sampling_probs" in llama.basis and "b10970" in llama.basis
 
 
-def test_llama_server_is_refused_by_name_and_images_where_the_engine_reads_text_only() -> None:
+def test_an_engine_that_cannot_score_is_refused_by_name_and_images_where_it_reads_text_only() -> None:
+    cannot = SimpleNamespace(route=None, images=False, basis="it returns no log-probabilities")
     with pytest.raises(ApiError) as caught:
-        decide_likelihood.refuse_unscorable("m", "llama-server", likelihood_reading("llama-server"), 0)
+        decide_likelihood.refuse_unscorable("m", "some-engine", cannot, 0)
     assert caught.value.status_code == 400
     assert caught.value.code == "likelihood_unsupported_on_engine"
+    with pytest.raises(ApiError) as caught:
+        decide_likelihood.refuse_unscorable("m", "llama-server", likelihood_reading("llama-server"), 1)
+    assert caught.value.code == "likelihood_images_unsupported_on_engine"
     with pytest.raises(ApiError) as caught:
         decide_likelihood.refuse_unscorable("m", "vllm", likelihood_reading("vllm"), 1)
     assert caught.value.code == "likelihood_images_unsupported_on_engine"
@@ -385,6 +405,7 @@ def likely_mlx(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         Arr(value) if value and isinstance(value[0], list) else Arr([value]))
     core.eval = lambda *args: None
     core.repeat = lambda arr, n, axis: Arr(arr.rows * n)
+    core.concatenate = lambda parts, axis: [context for part in parts for context in part]
     core.clear_cache = lambda: None
     mlx = types.ModuleType("mlx")
     mlx.core = core
@@ -397,6 +418,8 @@ def likely_mlx(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(items_forward, "token_logprobs",
                         lambda head, hidden, targets: _fake_score(head(hidden), targets))
+    monkeypatch.setattr(items_forward, "next_logprobs", lambda head, hidden, targets: [
+        fake_token_logprob(head(hidden)[0], target) for target in targets])
     monkeypatch.setattr(items_forward, "STATES", items_forward.StateCache(4, 1 << 30))
     model = LikelyModel()
     return SimpleNamespace(model=model, provider=SimpleNamespace(load=lambda *a: (model, LikelyTokenizer())))
@@ -438,9 +461,29 @@ def test_every_candidate_token_is_scored_at_its_own_position_in_one_batched_forw
                 [fake_token_logprob(whole[:p], whole[p]) for p in range(boundary, len(whole))]
             ), f"{text!r} is read at its own positions, not the padding"
     shared = len("state") + 3
-    assert likely_mlx.model.forwards[0] == (1, shared), "the state once"
-    assert [rows for rows, _ in likely_mlx.model.forwards[1:]] == [5], "then every candidate as a row"
+    tail_a = context_a - shared
+    assert likely_mlx.model.forwards == [
+        (1, shared),
+        (1, tail_a), (2, len("co-op") - 1),
+        (1, tail_a - 1), (3, 2),
+    ], (
+        "the state once; per question its context once, then every candidate but "
+        "its first token and its never-read last token as a row ('cat' and 'co-op' "
+        "read 2 and 4 tokens; bq re-reads the opened reply's 6, so 'yz' reads [6, y], "
+        "'w' [6], '!x' [60])"
+    )
     assert document["shared_tokens"] == shared and document["cached_tokens"] == 0
+
+
+def test_one_token_candidates_cost_no_forward_past_their_question(likely_mlx: Any) -> None:
+    document = items_forward.mlx_lm_answer(likely_mlx.provider, _likely_job("state", [("q", ["a", "b", "c"])]))
+    shared = len("state") + 3
+    assert likely_mlx.model.forwards == [(1, shared), (1, len("q") + 3)], (
+        "the state, then the question's tail; every first token read off its last position"
+    )
+    for text, row in zip("abc", document["groups"][0]["candidates"]):
+        whole = _whole("state", "q", text)
+        assert row["logprobs"] == pytest.approx([fake_token_logprob(whole[:-1], whole[-1])])
 
 
 def test_the_next_likelihood_pass_on_the_same_state_skips_its_prefill(likely_mlx: Any) -> None:
@@ -450,7 +493,9 @@ def test_the_next_likelihood_pass_on_the_same_state_skips_its_prefill(likely_mlx
         likely_mlx.provider, _likely_job("state", [("cq", ["e", "f"]), ("dq", ["g", "h"])])
     )
     assert document["cached_tokens"] == len("state") + 3
-    assert [rows for rows, _ in likely_mlx.model.forwards] == [4], "no prefill: the rows straight away"
+    assert likely_mlx.model.forwards == [(1, len("cq") + 3), (1, len("dq") + 3)], (
+        "no prefill: each question's tail straight away, and one-token candidates need no row"
+    )
 
 
 def test_a_candidate_past_its_cap_is_refused_before_any_forward(likely_mlx: Any) -> None:
@@ -553,6 +598,114 @@ def test_vllm_s_clamped_minus_infinity_is_not_read_as_a_number() -> None:
     assert caught.value.code == "engine_error" and "no probability" in caught.value.message
 
 
+# --- the llama-server path: forced continuations, against a fake engine -------------
+
+
+LLAMA_OPEN = "<a>"
+
+
+def _llama_render(wire: dict) -> str:
+    """A template whose open reply is the generation prompt plus the content."""
+    msgs = wire["messages"]
+    assert wire["chat_template_kwargs"] == {"enable_thinking": False}
+    if wire["continue_final_message"]:
+        assert wire["add_generation_prompt"] is False
+        *turns, last = msgs
+        return "".join(f"[{m['content']}]" for m in turns) + LLAMA_OPEN + last["content"]
+    assert wire["add_generation_prompt"] is True
+    return "".join(f"[{m['content']}]" for m in msgs) + LLAMA_OPEN
+
+
+def _llama_call(
+    sent: list[tuple[str, dict]], spoil: Callable[[dict, dict], dict] | None = None
+) -> Callable[[str, dict], Any]:
+    async def call(path: str, wire: dict) -> Any:
+        sent.append((path, wire))
+        if path == decide_likelihood.APPLY_TEMPLATE_PATH:
+            return {"prompt": _llama_render(wire)}
+        if path == decide_likelihood.TOKENIZE_PATH:
+            assert wire["add_special"] is True and wire["parse_special"] is True
+            return {"tokens": [ord(c) for c in wire["content"]]}
+        assert path == decide_likelihood.COMPLETION_PATH
+        prompt, grammar = list(wire["prompt"]), wire["grammar"]
+        forced = [int(t) for t in grammar.removeprefix("root ::= ").replace("<[", "").replace("]>", "").split()]
+        reply = {
+            "tokens": forced,
+            "completion_probabilities": [
+                {"id": t, "logprob": fake_token_logprob(prompt + forced[:i], t), "top_logprobs": []}
+                for i, t in enumerate(forced)
+            ],
+            "timings": {"cache_n": len(prompt) - 4, "prompt_n": 4},
+        }
+        return reply if spoil is None else spoil(wire, reply)
+
+    return call
+
+
+def _llama(body: DecideRequest, sent: list, spoil: Callable[[dict, dict], dict] | None = None) -> Any:
+    resident = SimpleNamespace(**{**vars(RESIDENT), "engine": "llama-server"})
+    return asyncio.run(decide_likelihood.score_on_forced_tokens(
+        _llama_call(sent, spoil), resident, body, decide.plan_all(body),
+    ))
+
+
+def test_llama_server_tokenizes_everything_first_then_forces_each_candidate() -> None:
+    body = _request(spelling=SPELLING)
+    sent: list[tuple[str, dict]] = []
+    scored = _llama(body, sent)
+    paths = [path for path, _ in sent]
+    assert paths == ["/apply-template", "/tokenize"] * 3 + ["/completion"] * 2, (
+        "no forward before every check"
+    )
+    msgs = decide_likelihood.likelihood_messages(decide.render_state(body.state), [], SPELLING["instructions"])
+    prefix = [ord(c) for c in "".join(f"[{m['content']}]" for m in msgs) + LLAMA_OPEN]
+    completions = [wire for path, wire in sent if path == "/completion"]
+    answer, timing, tokens = scored["spelling"]
+    for wire, (name, text) in zip(completions, SPELLING["candidates"].items()):
+        targets = [ord(c) for c in text]
+        assert wire["prompt"] == prefix, "the context up to the boundary, as token ids"
+        assert wire["grammar"] == "root ::= " + " ".join(f"<[{t}]>" for t in targets)
+        assert wire["n_predict"] == len(targets) and wire["n_probs"] == 1
+        assert wire["post_sampling_probs"] is False and wire["cache_prompt"] is True
+        assert wire["return_tokens"] is True and wire["stream"] is False
+        whole = prefix + targets
+        expected = [fake_token_logprob(whole[:p], whole[p]) for p in range(len(prefix), len(whole))]
+        assert answer.candidates[name].logprob == pytest.approx(math.fsum(expected))
+        assert answer.candidates[name].tokens == len(text)
+    assert answer.context_tokens == len(prefix) and answer.boundary_tokens == 0
+    assert tokens == 2 * len(prefix) and timing.prompt_tokens == tokens
+    assert timing.cached_tokens == 2 * (len(prefix) - 4)
+
+
+def test_llama_server_refuses_a_long_candidate_before_any_forward() -> None:
+    long = {**SPELLING, "candidates": {"a": "x", "b": "y" * 300}}
+    sent: list[tuple[str, dict]] = []
+    with pytest.raises(ApiError) as caught:
+        _llama(_request(q=long), sent)
+    assert caught.value.code == "candidate_too_long" and caught.value.details["candidate_name"] == "b"
+    assert all(path != "/completion" for path, _ in sent)
+
+
+@pytest.mark.parametrize(
+    "spoil,fragment",
+    [
+        (lambda wire, reply: {**reply, "tokens": reply["tokens"][:-1]}, "did not hold the reply"),
+        (lambda wire, reply: {**reply, "completion_probabilities": reply["completion_probabilities"][1:]},
+         "completion_probabilities"),
+        (lambda wire, reply: {**reply, "completion_probabilities": [
+            {**entry, "logprob": -3.4028234663852886e38} for entry in reply["completion_probabilities"]]},
+         "no probability at all"),
+        (lambda wire, reply: {**reply, "timings": {}}, "cache_n"),
+    ],
+)
+def test_a_llama_server_reply_that_is_not_the_forced_candidate_is_engine_error(
+    spoil: Callable[[dict, dict], dict], fragment: str
+) -> None:
+    with pytest.raises(ApiError) as caught:
+        _llama(_request(spelling=SPELLING), [], spoil)
+    assert caught.value.code == "engine_error" and fragment in caught.value.message
+
+
 # --- the door, end to end ------------------------------------------------------------
 
 
@@ -606,9 +759,12 @@ def test_a_likelihood_question_beside_a_label_question_end_to_end(
     assert len(scored) == 2 and all("logprobs" not in r for r in scored)
 
 
-def test_a_likelihood_question_for_a_llama_server_model_is_refused_before_it_waits(
-    llm_client: TestClient, auth: dict[str, str]  # noqa: F811
+def test_a_likelihood_question_for_an_engine_that_cannot_score_is_refused_before_it_waits(
+    llm_client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
+    from crucible.engines.llama_server import LlamaServerEngine
+
+    monkeypatch.setattr(LlamaServerEngine, "decide_likelihood_route", None)
     response = llm_client.post("/v1/decide", headers=auth, json={
         "model": "qwen3.5-4b-bside", "state": "s", "questions": {"spelling": SPELLING},
     })

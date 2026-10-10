@@ -108,6 +108,7 @@ import {
   type DecideItemsResponse,
   type DecideLikelihoodAnswer,
   type DecideLikelihoodQuestion,
+  type DecideNormalize,
   type DecideRankBy,
   type DecideCallTiming,
   type DecideOptions,
@@ -4155,6 +4156,8 @@ const DECIDE_TYPES = ['choice', 'score', 'yesno', 'likelihood'] as const;
 
 const RANK_BY = ['total', 'mean'] as const;
 
+const NORMALIZE = ['softmax', 'none'] as const;
+
 /** The questions as the server reads them: a likelihood question's `rankBy` is `rank_by`. */
 function decideQuestionsWire(questions: Record<string, DecideQuestion>): Record<string, unknown> {
   const wire: Record<string, unknown> = {};
@@ -4193,7 +4196,7 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
         : type === 'score'
           ? ['type', 'instructions', 'levels']
           : type === 'likelihood'
-            ? ['type', 'instructions', 'candidates', 'rankBy']
+            ? ['type', 'instructions', 'candidates', 'rankBy', 'normalize']
             : ['type', 'instructions'];
     for (const key of Object.keys(question)) {
       if (!known.includes(key)) {
@@ -4218,22 +4221,34 @@ function readDecideQuestions(value: unknown): Record<string, DecideQuestion> {
       out[name] = { type, instructions, levels: requireStrings(question['levels'], `${where}.levels`) };
     } else if (type === 'likelihood') {
       const candidates = readOptionMap(question['candidates'], `${where}.candidates`);
-      const rankBy = question['rankBy'];
-      if (rankBy === undefined) {
-        out[name] = { type, instructions, candidates };
-      } else if (typeof rankBy === 'string' && (RANK_BY as readonly string[]).includes(rankBy)) {
-        out[name] = { type, instructions, candidates, rankBy: rankBy as DecideRankBy };
-      } else {
-        throw new CrucibleConfigError(
-          `${where}.rankBy`,
-          `must be ${RANK_BY.map((word) => `'${word}'`).join(' or ')}, got ${JSON.stringify(rankBy)}`,
-        );
-      }
+      const rankBy = optionalWord(question['rankBy'], RANK_BY, `${where}.rankBy`);
+      const normalize = optionalWord(question['normalize'], NORMALIZE, `${where}.normalize`);
+      out[name] = {
+        type,
+        instructions,
+        candidates,
+        ...(rankBy === undefined ? {} : { rankBy: rankBy as DecideRankBy }),
+        ...(normalize === undefined ? {} : { normalize: normalize as DecideNormalize }),
+      };
     } else {
       out[name] = { type: 'yesno', instructions };
     }
   }
   return out;
+}
+
+/** An optional field that, when given, is one of `words`. */
+function optionalWord(value: unknown, words: readonly string[], where: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'string' && words.includes(value)) {
+    return value;
+  }
+  throw new CrucibleConfigError(
+    where,
+    `must be ${words.map((word) => `'${word}'`).join(' or ')}, got ${JSON.stringify(value)}`,
+  );
 }
 
 function readOptionMap(value: unknown, where: string): Record<string, string> {
@@ -4459,6 +4474,13 @@ function readLikelihoodAnswer(
   if (rankBy !== asked) {
     throw new CrucibleProtocolError(`${where}.rank_by is ${JSON.stringify(rankBy)} but the question asked for ${asked}`);
   }
+  const normalize = oneOf(str(entry, 'normalize', where), NORMALIZE, `${where}.normalize`);
+  const askedNormalize = question.normalize === undefined ? 'softmax' : question.normalize;
+  if (normalize !== askedNormalize) {
+    throw new CrucibleProtocolError(
+      `${where}.normalize is ${JSON.stringify(normalize)} but the question asked for ${askedNormalize}`,
+    );
+  }
   const raw = objectField(entry, 'candidates', where);
   sameKeys(Object.keys(raw), names, `${where}.candidates`, 'the candidates asked');
   const candidates: Record<string, DecideCandidateScore> = {};
@@ -4476,6 +4498,7 @@ function readLikelihoodAnswer(
     type: 'likelihood',
     winner,
     rankBy,
+    normalize,
     candidates,
     contextTokens: num(entry, 'context_tokens', where),
     boundaryTokens: num(entry, 'boundary_tokens', where),

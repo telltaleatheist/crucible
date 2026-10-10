@@ -90,13 +90,17 @@ def softmax(values: list[float]) -> list[float]:
 def likelihood_answer(
     item: Plan, rows: list[list[float]], context_tokens: int, boundary: int
 ) -> LikelihoodAnswer:
-    """Each candidate's total, count and mean, a softmax over the totals, and the
-    winner by the question's `rank_by` (the first in request order on a tie)."""
+    """Each candidate's total, count and mean, its probability by the question's
+    `normalize` (a softmax over the totals, or each total's own exp), and the
+    winner by its `rank_by` (the first in request order on a tie)."""
     question = _question(item)
     names = list(question.candidates)
     assert len(rows) == len(names)
     totals = [math.fsum(row) for row in rows]
-    probabilities = softmax(totals)
+    probabilities = (
+        softmax(totals) if question.normalize == "softmax"
+        else [math.exp(total) for total in totals]
+    )
     scores = {
         name: CandidateScore(
             logprob=total,
@@ -118,6 +122,7 @@ def likelihood_answer(
     return LikelihoodAnswer(
         winner=winner,
         rank_by=question.rank_by,
+        normalize=question.normalize,
         candidates=scores,
         context_tokens=context_tokens,
         boundary_tokens=context_tokens - boundary,
@@ -396,6 +401,165 @@ async def score_on_prompt_logprobs(
     return scored
 
 
+# --- one forced continuation per candidate (llama-server) --------------------------
+
+
+APPLY_TEMPLATE_PATH = "/apply-template"
+
+COMPLETION_PATH = "/completion"
+
+LLAMA_NO_PROBABILITY = -1e30
+"""llama-server writes a probability of 0 as the float's lowest value,
+-3.4e38 (`completion_token_output::logarithm`, tools/server/server-task.cpp
+L304-307, b10970): the model gives that token no probability at all, which is
+no number. Anything at or below this is read as that."""
+
+
+def template_body(msgs: list[dict[str, Any]], *, reply_open: bool) -> dict[str, Any]:
+    """llama-server's /apply-template renders through the parser its chat
+    completions use (oaicompat_chat_params_parse), so the context and each
+    candidate's open reply are the prompts its own chat path would send."""
+    return {
+        "messages": msgs,
+        "add_generation_prompt": not reply_open,
+        "continue_final_message": reply_open,
+        "chat_template_kwargs": dict(TEMPLATE_KWARGS),
+    }
+
+
+def llama_tokenize_body(prompt: str) -> dict[str, Any]:
+    """The rendered prompt tokenized as the chat path tokenizes it: special
+    tokens added where the model's vocabulary says to, and the template's
+    special-token text read as those tokens."""
+    return {"content": prompt, "add_special": True, "parse_special": True}
+
+
+def forced_grammar(targets: list[int]) -> str:
+    """A GBNF grammar that admits exactly this token sequence, by token id
+    (`<[id]>`, src/llama-grammar.cpp parse_token L186-230, b10970), so the
+    candidate is continued as the very tokens the boundary scored, not as
+    whatever other tokenization of its text the model likes better."""
+    return "root ::= " + " ".join(f"<[{token}]>" for token in targets)
+
+
+def forced_body(prompt: list[int], targets: list[int]) -> dict[str, Any]:
+    """The context up to the boundary as token ids, continued by exactly the
+    candidate's tokens, each generated token's probability read from the raw
+    logits (`post_sampling_probs: false`). `cache_prompt` lets every candidate
+    of a question continue from the same cached context."""
+    return {
+        "prompt": prompt,
+        "n_predict": len(targets),
+        "grammar": forced_grammar(targets),
+        "n_probs": 1,
+        "post_sampling_probs": False,
+        "temperature": 0,
+        "cache_prompt": True,
+        "return_tokens": True,
+        "stream": False,
+    }
+
+
+def read_forced(data: Any, engine: str, targets: list[int]) -> tuple[list[float], int]:
+    """The log-probability of each forced token, read off a /completion reply
+    that must have generated exactly `targets`; and the prompt tokens the
+    engine read from its cache."""
+    tokens = _int_list(data, "tokens", "reply", engine)
+    if tokens != targets:
+        raise _engine_error(
+            engine,
+            f"the forced continuation generated {len(tokens)} tokens {tokens[:8]} and "
+            f"the candidate is {len(targets)} tokens {targets[:8]}; the grammar did not "
+            "hold the reply to the candidate",
+        )
+    entries = data.get("completion_probabilities") if isinstance(data, dict) else None
+    if not isinstance(entries, list) or len(entries) != len(targets):
+        raise _engine_error(
+            engine, f"reply.completion_probabilities is not a list of {len(targets)} tokens"
+        )
+    read: list[float] = []
+    for position, (entry, token) in enumerate(zip(entries, targets)):
+        where = f"completion_probabilities[{position}]"
+        if _int(entry, "id", where, engine) != token:
+            raise _engine_error(engine, f"{where}.id is not the candidate's token {token}")
+        logprob = entry.get("logprob")
+        if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
+            raise _engine_error(engine, f"{where} carries no logprob")
+        if logprob <= LLAMA_NO_PROBABILITY or not math.isfinite(logprob):
+            raise _engine_error(
+                engine,
+                f"{where}.logprob is {logprob}: the model gives token {token} no "
+                "probability at all",
+            )
+        read.append(float(logprob))
+    timings = data.get("timings") if isinstance(data, dict) else None
+    return read, _int(timings, "cache_n", "reply.timings", engine)
+
+
+async def score_on_forced_tokens(
+    call: EngineCall,
+    resident: Any,
+    body: DecideRequest,
+    plans: list[Plan],
+) -> dict[str, tuple[Answer, ForwardTiming, int]]:
+    """Each question's context and candidates rendered and tokenized through the
+    engine's own template first, so every refusal is made before anything is
+    scored; then each candidate as a forced continuation of the context, one
+    request after another (llama-server has one slot). The context is the same
+    prompt for every candidate of a question, so the engine reuses its cache and
+    reads only the last few context tokens again (a recurrent layer is restored
+    from the checkpoint it took near the prompt's end)."""
+    state_text = render_state(body.state)
+    images = list(body.images or [])
+    engine = resident.engine
+    cap = prompt_cap(resident.max_model_len)
+
+    async def tokens(msgs: list[dict[str, Any]], reply_open: bool) -> list[int]:
+        rendered = await call(APPLY_TEMPLATE_PATH, template_body(msgs, reply_open=reply_open))
+        prompt = rendered.get("prompt") if isinstance(rendered, dict) else None
+        if not isinstance(prompt, str):
+            raise _engine_error(engine, "the /apply-template reply carries no prompt")
+        data = await call(TOKENIZE_PATH, llama_tokenize_body(prompt))
+        return _int_list(data, "tokens", "tokenize reply", engine)
+
+    # One render and one tokenize at a time: llama-server answers them on its
+    # HTTP threads, and 256 candidates sent at once took twice as long (4.4 s
+    # against 2.0 s, b10970 on owens-pc, 2026-10-10).
+    contexts: list[list[int]] = []
+    prompts: list[list[list[int]]] = []
+    for item in plans:
+        question = _question(item)
+        msgs = likelihood_messages(state_text, images, question.instructions)
+        contexts.append(await tokens(msgs, False))
+        prompts.append([await tokens(reply(msgs, text), True)
+                        for text in question.candidates.values()])
+    try:
+        split = likelihood_split(contexts, prompts, cap, cap, MAX_CANDIDATE_TOKENS)
+    except ItemsRefusal as refusal:
+        raise named(refusal_error(refusal), plans) from None
+
+    scored: dict[str, tuple[Answer, ForwardTiming, int]] = {}
+    for group, item in enumerate(plans):
+        boundary = split.boundaries[group]
+        sent = time.perf_counter()
+        rows: list[list[float]] = []
+        cached = 0
+        for expected in prompts[group]:
+            targets = expected[boundary:]
+            data = await call(COMPLETION_PATH, forced_body(expected[:boundary], targets))
+            row, reused = read_forced(data, engine, targets)
+            rows.append(row)
+            cached += reused
+        wall_ms = round((time.perf_counter() - sent) * 1000.0, 1)
+        prompt_tokens = boundary * len(rows)
+        scored[item.name] = (
+            likelihood_answer(item, rows, split.context_tokens[group], boundary),
+            ForwardTiming(wall_ms=wall_ms, prompt_tokens=prompt_tokens, cached_tokens=cached),
+            prompt_tokens,
+        )
+    return scored
+
+
 # --- the questions form with likelihood questions in it ----------------------------
 
 
@@ -447,7 +611,8 @@ def refuse_unscorable(model: str, engine: str, reading: Any, n_images: int) -> N
             400,
             "likelihood_unsupported_on_engine",
             f"{model!r} runs on {engine}, which cannot score a likelihood question: "
-            f"{reading.basis}. Send it to a model served by vLLM, mlx-lm or mlx-vlm",
+            f"{reading.basis}. Send it to a model served by vLLM, llama-server, mlx-lm "
+            "or mlx-vlm",
             {"model": model, "engine": engine},
         )
     if n_images and not reading.images:
@@ -462,9 +627,13 @@ def refuse_unscorable(model: str, engine: str, reading: Any, n_images: int) -> N
 
 
 __all__ = [
+    "APPLY_TEMPLATE_PATH",
     "CHAT_PATH",
+    "COMPLETION_PATH",
     "TOKENIZE_PATH",
     "decide_with_likelihood",
+    "forced_body",
+    "forced_grammar",
     "likelihood_answer",
     "likelihood_body",
     "likelihood_messages",
@@ -472,10 +641,13 @@ __all__ = [
     "open_messages",
     "prompt_logprobs_body",
     "read_likelihood_reply",
+    "read_forced",
     "read_prompt_logprobs",
     "refuse_unscorable",
     "score_on_items",
+    "score_on_forced_tokens",
     "score_on_prompt_logprobs",
     "softmax",
+    "template_body",
     "tokenize_body",
 ]

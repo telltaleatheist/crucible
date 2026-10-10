@@ -266,6 +266,8 @@ def _with_likelihood(
     def likely() -> Any:
         if route == "items":
             return decide_likelihood.score_on_items(call, resident, body, scored)
+        if route == "forced-tokens":
+            return decide_likelihood.score_on_forced_tokens(call, resident, body, scored)
         assert route == "prompt-logprobs", route
         return decide_likelihood.score_on_prompt_logprobs(
             call, resident, body, scored, concurrency=concurrency

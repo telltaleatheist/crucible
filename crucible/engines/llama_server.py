@@ -115,15 +115,29 @@ class LlamaServerEngine(SubprocessEngine):
         "vocabulary"
     )
 
+    decide_likelihood_route = "forced-tokens"
     decide_likelihood_basis = (
-        "llama-server b10970 returns no log-probability for a prompt token: n_probs "
-        "and post_sampling_probs cover generated tokens only "
-        "(tools/server/server-context.cpp populate_token_probs L1964-2020), "
-        "/v1/completions refuses echo (\"Only no echo is supported\", "
-        "tools/server/server-common.cpp L1050-1053), and /completion's "
-        "return_tokens returns the generated ids; read at the b10970 tag "
-        "2026-10-10. Teacher-forcing one request per candidate token would be a "
-        "different, slower measurement, so the engine does not offer it"
+        "llama-server b10970 returns no log-probability for a prompt token "
+        "(/v1/completions refuses echo, tools/server/server-common.cpp L1050-1053), "
+        "so each candidate is GENERATED as a forced continuation of the context: "
+        "/completion with the context's token ids, a GBNF grammar of the "
+        "candidate's token ids (<[id]>, src/llama-grammar.cpp parse_token "
+        "L186-230) and n_probs with post_sampling_probs false. That logprob is "
+        "the raw distribution's: populate_token_probs (tools/server/"
+        "server-context.cpp L1964-2020) reads get_token_probabilities "
+        "(server-common.cpp L1524-1573), a softmax over llama_get_logits_ith, the "
+        "model's logits over the whole vocabulary, with no temperature, while the "
+        "grammar and the sampler chain work on the sampler's own copy "
+        "(common/sampling.cpp set_logits L130-162, common_sampler_sample "
+        "L594-660); asking for pre-sampling probabilities turns backend sampling "
+        "off, so the whole vocabulary is there (server-context.cpp L1790-1796). "
+        "It is the quantity vLLM's prompt logprobs and the Mac's rows read, at "
+        "the same tokens: the door tokenizes through /apply-template and "
+        "/tokenize and forces exactly the ids the boundary scored. One request "
+        "per candidate in turn (one slot); the context is the same prompt each "
+        "time, so cache_prompt reuses it and a recurrent layer restarts from the "
+        "checkpoint taken 4 tokens before the prompt's end (server-context.cpp "
+        "L3559-3576). Text only. Read at the b10970 tag 2026-10-10"
     )
 
     sigterm_wait_seconds = GRACEFUL_STOP_SECONDS
