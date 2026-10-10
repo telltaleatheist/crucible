@@ -9,6 +9,7 @@ import workerio
 sys.path.pop(0)
 workerio.claim_stdout()
 
+import contextlib
 import gc
 
 audiocore = workerio.load_sibling("audiocore", __file__)
@@ -95,6 +96,55 @@ def _halves(model) -> tuple[list, list]:
     if not nar:
         raise RuntimeError("this YuE2 has no nar_* modules; low_vram cannot split it")
     return ar, nar
+
+
+def _ar_layer_parts(layer) -> list:
+    """One DecoderLayer's AR modules: everything that is not `nar_*`."""
+    return [child for name, child in layer.named_children() if not name.startswith("nar_")]
+
+
+@contextlib.contextmanager
+def ar_one_layer_at_a_time(model, home: "HostHomes", device):
+    """While the body runs, YuE2's embeddings and each AR layer come to the card only for
+    their own turn: the embeddings when they are called, layer i when its
+    `input_layernorm` is (the first thing the synthesis prefill does with a layer,
+    yue2/nar.py CachedNAR._prefill), and whatever was on the card before goes home first.
+    So at any moment one layer of the AR half's weights is on the card, beside the prefix
+    keys and values the prefill has written so far. Every forward hook is removed and the
+    last resident part sent home when the body ends, and a prefill that did not walk
+    every layer is refused rather than trusted."""
+    backbone = model.model
+    resident: list = []
+    walked: list = []
+    handles = []
+
+    def arrive(parts, label):
+        def hook(_module, _args):
+            home.place(resident, "cpu")
+            resident[:] = parts
+            home.place(parts, device)
+            walked.append(label)
+        return hook
+
+    try:
+        handles.append(backbone.embed_tokens.register_forward_pre_hook(
+            arrive([backbone.embed_tokens], "embed_tokens")))
+        for index, layer in enumerate(backbone.layers):
+            handles.append(layer.input_layernorm.register_forward_pre_hook(
+                arrive(_ar_layer_parts(layer), index)))
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
+        home.place(resident, "cpu")
+    expected = ["embed_tokens", *range(len(backbone.layers))]
+    if walked != expected:
+        raise RuntimeError(
+            f"the synthesis prefill walked {walked[:4]}...{walked[-2:]} ({len(walked)} parts); "
+            f"the worker streams YuE2's AR half in the order embed_tokens, layers 0 to "
+            f"{len(backbone.layers) - 1}, once each. Bring the env to its recipe "
+            "(`crucible install audio`)"
+        )
 
 
 class HostHomes:
@@ -191,18 +241,33 @@ class HostHomes:
 
 def own_residency(pipe, torch, low_vram: bool) -> dict:
     """The worker decides where each part of YuE2 lives, on a CUDA card, and every part
-    keeps its host copy (HostHomes). With `[audio] low_vram` only the half a stage uses is
-    on the card and the other waits at home. Measured on the 3090 Ti (2026-10-08): 6.37 to
+    keeps its host copy (HostHomes). With `[audio] low_vram` only what a stage uses is on
+    the card and the rest waits at home. Measured on the 3090 Ti (2026-10-08): 6.37 to
     6.62 GiB over the desktop against 8.73, the audio within -105 dB of the whole model,
     about the same time.
 
-    Three of yue2-infer's internals are replaced or wrapped, and each is checked first so
+    Under low_vram the synthesizing stage's weights on the card do not depend on the
+    song's length (Victoria's 3070 laptop, 2026-10-10: a song composed to 8,960 tokens
+    ran out of its 6.8 GiB cap 4 s into synthesizing). yue2-infer synthesizes a song as
+    one chunk up to about 10,000 frames (`chunk_ranges`: half the context left after the
+    prefix), and each chunk first runs the AR half over the whole prefix plus every codec
+    token, keeping every layer's keys and values for the solve: 112 KiB a token, 1.44 GiB
+    for that song's 13,483 tokens. It used to do that with the whole AR half, embeddings
+    and lm_head on the card (4.03 GiB), so the keys grew on top of them and the prefill's
+    last layers passed the cap. Now the synthesis prefill brings the AR half one layer at
+    a time (`ar_one_layer_at_a_time`; lm_head is never used there and stays home), and the
+    solve holds the NAR half (2.63 GiB) beside those keys. What still grows with the song
+    is the keys and values the solve attends to, which the composing stage already holds
+    for its whole token budget before it writes a token, so synthesizing stays below
+    composing at any length.
+
+    Four of yue2-infer's internals are replaced or wrapped, and each is checked first so
     another version is refused rather than half-applied: the pipeline's `_load_model`
     (which moves the whole model to the card on every stage), its `decode` (which loads
     the VAE on first use, so its homes are taken there), and, for low_vram,
     `yue2.nar._offload_ar` (which only moves AR off for the solve, leaving NAR where it
-    was). Returns the host bytes the homes hold, by part, filled as each part loads."""
-    import contextlib
+    was) and `yue2.nar.CachedNAR._prefill` (which runs with the whole AR half resident).
+    Returns the host bytes the homes hold, by part, filled as each part loads."""
     import inspect
 
     import yue2.nar as nar_module
@@ -212,17 +277,25 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
     expected = ["model", "enabled"]
     found = list(inspect.signature(getattr(nar_module, "_offload_ar", lambda: None)).parameters)
     decode_found = list(inspect.signature(pipe.decode).parameters) if hasattr(pipe, "decode") else None
+    cached_nar = getattr(nar_module, "CachedNAR", None)
+    prefill_found = (
+        list(inspect.signature(cached_nar._prefill).parameters)
+        if cached_nar is not None and hasattr(cached_nar, "_prefill") else None
+    )
     if (
         found != expected
         or not hasattr(pipe, "_load_model")
         or decode_found != ["latents", "full", "vae"]
         or not hasattr(pipe, "_vae")
+        or prefill_found != ["self"]
     ):
         raise RuntimeError(
             f"the worker is written against yue2-infer's nar._offload_ar{tuple(expected)}, "
-            "YuE2Pipeline._load_model and YuE2Pipeline.decode(latents, full, vae); this "
-            f"yue2-infer has _offload_ar{tuple(found)} and decode{tuple(decode_found or ())}. "
-            "Bring the env to its recipe (`crucible install audio`)"
+            "nar.CachedNAR._prefill(self), YuE2Pipeline._load_model and "
+            "YuE2Pipeline.decode(latents, full, vae); this yue2-infer has "
+            f"_offload_ar{tuple(found)}, _prefill{tuple(prefill_found or ())} and "
+            f"decode{tuple(decode_found or ())}. Bring the env to its recipe "
+            "(`crucible install audio`)"
         )
     if pipe.quantization != "none" or pipe.backend == "vllm":
         raise RuntimeError(
@@ -248,12 +321,17 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
             return model
         ar, nar = _halves(model)
         home.place(nar, "cpu")
-        home.place([child for name, child in model.named_children() if name != "model"], device)
-        home.place([part for name, part in model.model.named_children() if name != "layers"], device)
-        home.place(ar, device)
+        if for_nar:
+            # Synthesis: both halves wait at home. Its prefill brings the AR half one
+            # layer at a time and its solve brings the NAR half (`swap`).
+            home.place(ar, "cpu")
+            torch.cuda.empty_cache()
+        home.place(_adapters(model), device)
+        if not for_nar:
+            home.place(ar, device)
         misplaced = [
             name for name, tensor in model.named_parameters()
-            if (".nar_" in name) != (tensor.device.type == "cpu")
+            if (tensor.device.type == "cpu") != (".nar_" in name or (for_nar and _is_ar(name)))
         ]
         if misplaced:
             raise RuntimeError(
@@ -263,6 +341,10 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
 
     @contextlib.contextmanager
     def swap(model, enabled):
+        # yue2-infer enters this around each chunk's solve, after that chunk's prefill.
+        # The AR half is already home (the prefill sent each layer back as it finished)
+        # and stays there afterwards: the next chunk's prefill streams it again, and every
+        # later stage places it through `load`.
         if not enabled:
             yield
             return
@@ -276,7 +358,12 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
         finally:
             home.place(nar, "cpu")
             torch.cuda.empty_cache()
-            home.place(ar, device)
+
+    prefill = cached_nar._prefill
+
+    def prefill_one_layer_at_a_time(self):
+        with ar_one_layer_at_a_time(self.model, homes["model"], device):
+            prefill(self)
 
     decode = pipe.decode
 
@@ -298,7 +385,26 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
     if low_vram:
         pipe.offload_ar = True
         nar_module._offload_ar = swap
+        cached_nar._prefill = prefill_one_layer_at_a_time
     return held
+
+
+def _adapters(model) -> list:
+    """What low_vram keeps on the card in every stage: lm_head's siblings (the NAR
+    adapters vae2llm, llm2vae, time_embedder and latent_pos_embed) and the backbone's
+    final norm and rotary embedding."""
+    return [
+        *(child for name, child in model.named_children() if name not in ("model", "lm_head")),
+        *(part for name, part in model.model.named_children() if name not in ("layers", "embed_tokens")),
+    ]
+
+
+def _is_ar(name: str) -> bool:
+    """Whether a parameter of YuE2ForCausalLM is in the AR half `_halves` names: the
+    embeddings, lm_head, or a layer's non-`nar_*` modules."""
+    return name.startswith(("model.embed_tokens.", "lm_head.")) or (
+        name.startswith("model.layers.") and ".nar_" not in name
+    )
 
 
 def decode_facts(timing: dict, truncated: bool, cap: int, low_vram: bool) -> dict:
