@@ -106,6 +106,7 @@ class FakeEngine:
         self.versions = {"fake": "1.0", "engine": request["engine"]}
         self.notes = None
         self.decode_stages = None
+        self.host_homes = None
 
     def _decode_stages(self, job) -> dict | None:
         """A song's two token stages as yue2_worker.decode_facts words them; a stage named

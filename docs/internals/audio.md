@@ -135,6 +135,48 @@ it subtracts), and on CUDA every other worker gets `set_per_process_memory_fract
 estimate. The worker reports peaks per stage: `max_memory_reserved` on CUDA, the Metal driver's
 allocation on MPS.
 
+### Host memory
+
+YuE2's backbone moves between the card and host memory several times a song: yue2-infer's
+`decode` parks the whole 7.26 GB backbone in host memory while the VAE runs, and under
+`[audio] low_vram` the two halves swap around every synthesis chunk. `Module.to("cpu")`
+allocates a fresh host copy of every tensor it moves, and glibc's heap kept the freed copies:
+on Victoria's 3070 laptop (2026-10-10, a 15.8 GB WSL guest, songs back to back since 1.0.125
+kept YuE2 loaded) the worker grew from about 10 GB to 15.5 GB of anonymous memory and was
+OOM-killed on track 12 of an album. Measured on the 3090 Ti in the YuE2 env, the tensors
+actually referenced stayed at 7.53 GB song after song while the heap's free-but-held pages
+grew (1.8 GB after one song, 6.0 GB after two; `malloc_trim` handed 4.3 GB back): allocator
+retention fed by churn, not a reference leak.
+
+`yue2_worker.HostHomes` stops the churn. When the model and the VAE load, each parameter and
+buffer keeps the host tensor the load made as its home for the life of the worker; a move to
+the card copies from it and a move back points the module at it again, so nothing is
+allocated in host memory after the load. The pipeline's own `.to(...)` calls on the backbone
+and the VAE are routed through the homes, `_load_model` and `decode` are wrapped (the VAE is
+loaded there the way yue2-infer loads it, so its homes exist before decode moves it), and
+`low_vram`'s swap places halves from the homes. Because the loader maps the safetensors file,
+the backbone's homes are that file's pages: file-backed and clean, which the kernel can drop
+and re-read, not anonymous memory. On Apple silicon the card is host memory, so the homes are
+not taken there and yue2-infer's moves stay.
+
+| 3090 Ti, 6 songs of 38-62 s | anon after song 1 | after song 2 | after song 6 | peak RSS |
+| --- | --- | --- | --- | --- |
+| before, low_vram on | 9.76 GB | 12.24 GB (stopped) | - | 12.27 GB anon |
+| before, low_vram off | 9.19 GB | 12.25 GB (stopped) | - | 12.25 GB anon |
+| HostHomes, low_vram on | 1.95 GB | 1.94 GB | 1.98 GB | 9.90 GB (7.72 GB of it file-backed) |
+| HostHomes, low_vram off | 1.95 GB | 1.94 GB | 1.98 GB | 9.90 GB (7.72 GB of it file-backed) |
+
+The same seeds give bit-identical audio before and after, low_vram on and off, and the songs
+ran faster (the second song 104 s before, 31 s after, with low_vram on: the heap had pushed the
+13 GB guest into swap).
+
+Each song's result carries `host_memory` (`before`, `after`, `peak_rss_bytes` from
+`/proc/self/status` with the peak mark reset at the song's start, and `host_homes_bytes`), and
+the job's `done_extra.audio.host_memory` repeats it, so growth across a run is read off the
+jobs. The manifest declares `host_memory_bytes_estimate` for the cuda arm and `crucible doctor`
+(`audio_host_memory`, crucible/hostmemory.py) names the model and both figures when this
+machine's MemTotal is below it.
+
 ## What the first runs through Crucible must measure
 
 After deployment, one job per arm through Crucible (never a bare script) settles:

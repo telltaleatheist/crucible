@@ -93,30 +93,141 @@ def _halves(model) -> tuple[list, list]:
     return ar, nar
 
 
-def hold_halves(pipe, torch) -> None:
-    """`[audio] low_vram`: only the half a stage uses is on the card, the other waits in
-    host memory. Measured on the 3090 Ti (2026-10-08): 6.37 to 6.62 GiB over the desktop
-    against 8.73, the audio within -105 dB of the whole model, about the same time.
+class HostHomes:
+    """Every parameter and buffer of a model keeps, for the life of the worker, the one
+    host copy it was loaded into. Sending a module to the card copies from that copy;
+    bringing it back points the module at it again. Nothing is written to host memory
+    after the load, so a worker that makes song after song holds the same host memory
+    after the hundredth as after the first.
 
-    Two of yue2-infer's internals are replaced, and both are checked first so another
-    version is refused rather than half-applied: the pipeline's `_load_model` (which moves
-    the whole model to the card on every stage) and `yue2.nar._offload_ar` (which only
-    moves AR off for the solve, leaving NAR where it was)."""
+    Why (Victoria's 3070 laptop, 2026-10-10: the worker was OOM-killed at 15.5 GB of
+    anonymous memory on track 12 of an album, in a 15.8 GB WSL guest): `Module.to("cpu")`
+    allocates a fresh host copy of every tensor it moves, and YuE2 moves its backbone
+    between the card and host memory several times a song - yue2-infer's own decode parks
+    the whole 7.2 GB backbone in host memory while its VAE runs, and `[audio] low_vram`
+    swaps the two halves around every synthesis chunk. Each round freed gigabytes of host
+    copies into glibc's heap and allocated gigabytes more, and the heap kept the freed
+    pages: measured on the 3090 Ti, two songs left 6.0 GB free-but-held in the heap
+    (`malloc_trim` handed 4.3 GB of it back), while the tensors actually referenced stayed
+    at 7.5 GB song after song. It was allocator retention fed by churn, not a reference
+    leak, so the cure is to stop the churn rather than to trim after it.
+
+    The model's weights never change while it serves (inference only, `eval()`), so the
+    loaded copy is always the right one to come back to. When the loader maps the
+    safetensors file, the homes are that file's pages: clean, file-backed, and reclaimable
+    by the kernel, never anonymous memory."""
+
+    def __init__(self, root, torch, label: str) -> None:
+        self._torch = torch
+        self._label = label
+        self._slots: dict = {}
+        storages: dict = {}
+        for module in root.modules():
+            slots = []
+            for is_parameter, table in ((True, module._parameters), (False, module._buffers)):
+                for name, tensor in table.items():
+                    if tensor is None:
+                        continue
+                    if tensor.device.type != "cpu":
+                        raise RuntimeError(
+                            f"{label}'s {name!r} is on {tensor.device} as its host home is "
+                            "taken; the home is the copy the load put in host memory"
+                        )
+                    home = tensor.detach()
+                    storage = home.untyped_storage()
+                    storages[storage.data_ptr()] = storage.nbytes()
+                    slots.append((table, name, is_parameter, home))
+            self._slots[module] = slots
+        self.bytes = sum(storages.values())
+        homes = self
+
+        def to(*args, **kwargs):
+            if kwargs or len(args) != 1 or not isinstance(args[0], (str, torch.device)):
+                raise RuntimeError(
+                    f"{label} moves only between the card and its host home, given one "
+                    f"device; this call passed {args!r} {kwargs!r}"
+                )
+            homes.place([root], args[0])
+            return root
+
+        # yue2-infer's pipeline moves the model and its decoder with `.to(...)` (decode
+        # parks the backbone, sends the VAE to the card and brings it back); routing that
+        # through the homes is what keeps those moves from allocating host copies too.
+        root.to = to
+
+    def _device(self, device):
+        target = self._torch.device(device)
+        if target.type == "cuda" and target.index is None:
+            target = self._torch.device("cuda", self._torch.cuda.current_device())
+        return target
+
+    def place(self, modules, device) -> None:
+        """Put every parameter and buffer of `modules` on `device`: a copy of its home on
+        the card, the home itself in host memory."""
+        target = self._device(device)
+        with self._torch.no_grad():
+            for module in modules:
+                for part in module.modules():
+                    slots = self._slots.get(part)
+                    if slots is None:
+                        raise RuntimeError(
+                            f"{type(part).__name__} in {self._label} was not part of it when "
+                            "its host homes were taken, so it has no home to come back to"
+                        )
+                    for table, name, is_parameter, home in slots:
+                        current = table[name]
+                        if current.device == target:
+                            continue
+                        moved = home if target.type == "cpu" else home.to(target)
+                        if is_parameter:
+                            current.data = moved
+                        else:
+                            table[name] = moved
+
+
+def own_residency(pipe, torch, low_vram: bool) -> dict:
+    """The worker decides where each part of YuE2 lives, on a CUDA card, and every part
+    keeps its host copy (HostHomes). With `[audio] low_vram` only the half a stage uses is
+    on the card and the other waits at home. Measured on the 3090 Ti (2026-10-08): 6.37 to
+    6.62 GiB over the desktop against 8.73, the audio within -105 dB of the whole model,
+    about the same time.
+
+    Three of yue2-infer's internals are replaced or wrapped, and each is checked first so
+    another version is refused rather than half-applied: the pipeline's `_load_model`
+    (which moves the whole model to the card on every stage), its `decode` (which loads
+    the VAE on first use, so its homes are taken there), and, for low_vram,
+    `yue2.nar._offload_ar` (which only moves AR off for the solve, leaving NAR where it
+    was). Returns the host bytes the homes hold, by part, filled as each part loads."""
     import contextlib
     import inspect
 
     import yue2.nar as nar_module
+    from yue2.modeling_vae import YuE2VAE
     from yue2.modeling_yue2 import YuE2ForCausalLM
 
     expected = ["model", "enabled"]
     found = list(inspect.signature(getattr(nar_module, "_offload_ar", lambda: None)).parameters)
-    if found != expected or not hasattr(pipe, "_load_model"):
+    decode_found = list(inspect.signature(pipe.decode).parameters) if hasattr(pipe, "decode") else None
+    if (
+        found != expected
+        or not hasattr(pipe, "_load_model")
+        or decode_found != ["latents", "full", "vae"]
+        or not hasattr(pipe, "_vae")
+    ):
         raise RuntimeError(
-            f"low_vram is written against yue2-infer's nar._offload_ar{tuple(expected)} and "
-            f"YuE2Pipeline._load_model; this yue2-infer has _offload_ar{tuple(found)}. Turn "
-            "[audio] low_vram off or bring the env to its recipe (`crucible install audio`)"
+            f"the worker is written against yue2-infer's nar._offload_ar{tuple(expected)}, "
+            "YuE2Pipeline._load_model and YuE2Pipeline.decode(latents, full, vae); this "
+            f"yue2-infer has _offload_ar{tuple(found)} and decode{tuple(decode_found or ())}. "
+            "Bring the env to its recipe (`crucible install audio`)"
+        )
+    if pipe.quantization != "none" or pipe.backend == "vllm":
+        raise RuntimeError(
+            f"the worker holds YuE2 unquantized on the torch backend; this pipeline is "
+            f"{pipe.quantization} on {pipe.backend}"
         )
     device = pipe.device
+    held: dict = {}
+    homes: dict = {}
 
     def load(for_nar=False):
         if pipe._model is None:
@@ -124,18 +235,18 @@ def hold_halves(pipe, torch) -> None:
                 pipe.model_dir, local_files_only=True, torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             ).eval()
+            homes["model"] = HostHomes(pipe._model, torch, "YuE2's backbone")
+            held["model"] = homes["model"].bytes
         model = pipe._model
+        home = homes["model"]
+        if not low_vram:
+            home.place([model], device)
+            return model
         ar, nar = _halves(model)
-        for module in nar:
-            module.to("cpu")
-        for name, child in model.named_children():
-            if name != "model":
-                child.to(device)
-        for name, part in model.model.named_children():
-            if name != "layers":
-                part.to(device)
-        for module in ar:
-            module.to(device)
+        home.place(nar, "cpu")
+        home.place([child for name, child in model.named_children() if name != "model"], device)
+        home.place([part for name, part in model.model.named_children() if name != "layers"], device)
+        home.place(ar, device)
         misplaced = [
             name for name, tensor in model.named_parameters()
             if (".nar_" in name) != (tensor.device.type == "cpu")
@@ -152,23 +263,38 @@ def hold_halves(pipe, torch) -> None:
             yield
             return
         ar, nar = _halves(model)
-        for module in ar:
-            module.to("cpu")
+        home = homes["model"]
+        home.place(ar, "cpu")
         torch.cuda.empty_cache()
-        for module in nar:
-            module.to(device)
+        home.place(nar, device)
         try:
             yield
         finally:
-            for module in nar:
-                module.to("cpu")
+            home.place(nar, "cpu")
             torch.cuda.empty_cache()
-            for module in ar:
-                module.to(device)
+            home.place(ar, device)
+
+    decode = pipe.decode
+
+    def decode_at_home(latents, *, full=False, vae=None):
+        if vae is not None:
+            raise RuntimeError("the worker decodes with the pipeline's own VAE, never another")
+        if pipe._vae is None:
+            # The same load yue2-infer's decode makes on first use, taken here so its
+            # homes exist before decode sends it to the card.
+            pipe._vae = YuE2VAE.from_pretrained(
+                pipe.vae_dir, decoder_only=True, device="cpu", local_files_only=True
+            )
+            homes["vae"] = HostHomes(pipe._vae, torch, "YuE2's VAE")
+            held["vae"] = homes["vae"].bytes
+        return decode(latents, full=full)
 
     pipe._load_model = load
-    pipe.offload_ar = True
-    nar_module._offload_ar = swap
+    pipe.decode = decode_at_home
+    if low_vram:
+        pipe.offload_ar = True
+        nar_module._offload_ar = swap
+    return held
 
 
 def decode_facts(timing: dict, truncated: bool, cap: int, low_vram: bool) -> dict:
@@ -209,6 +335,9 @@ class YuE2Engine:
     spans = SPANS
     notes = None
     decode_stages = None
+    # The host bytes each part's HostHomes hold, by part ("model", "vae"), filled as each
+    # loads; None on Apple silicon, where yue2-infer's own moves stay.
+    host_homes = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -239,8 +368,10 @@ class YuE2Engine:
             memory_budget_gib=budget / GIB + YUE2_RESERVE_GIB,
             progress=False,
         )
+        # On Apple silicon the card and host memory are the same memory, so a host home
+        # beside the copy on the GPU would hold the model twice; yue2-infer's own moves stay.
+        self.host_homes = own_residency(self._pipe, torch, low_vram) if self.device == "cuda" else None
         if low_vram:
-            hold_halves(self._pipe, torch)
             # YuE2 capped this process at the card less 2 GiB, which on an 8 GiB card is
             # below the 6.05 GiB a halved composing stage reserves. Crucible admitted the
             # load against its own measured need, so that need is the cap.

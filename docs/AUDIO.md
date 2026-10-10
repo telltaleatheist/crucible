@@ -235,9 +235,25 @@ effective parameter, so a sound can be made again:
                            "attention": "sdpa", "low_vram": false, "prefix_tokens": 1395,
                            "cfg_branches": 1, "seconds": 50.0, "prefill_seconds": 0.2,
                            "tokens_per_second": 180.0}},
-           "stages_at_cap": ["composing"]},
+           "stages_at_cap": ["composing"],
+           "host_memory": {
+             "before": {"rss_bytes": 9760000000, "anon_bytes": 1950000000, "file_bytes": 7720000000},
+             "after": {"rss_bytes": 9780000000, "anon_bytes": 1980000000, "file_bytes": 7720000000},
+             "peak_rss_bytes": 9780000000,
+             "host_homes_bytes": {"model": 7261000000, "vae": 270000000}}},
  "resident": "yue2-3b"}
 ```
+
+### The worker's host memory: `host_memory`
+
+The worker's own memory in the machine (on a PC, the WSL guest), from `/proc/self/status`:
+`before` as the song began, `after` once it was saved and its audio released, and
+`peak_rss_bytes` between them. `anon_bytes` is what the kernel's OOM killer weighs;
+`file_bytes` is mapped weights the kernel can drop and read again. `host_homes_bytes` is what
+the engine keeps in host memory on purpose, by part (YuE2 keeps the host copy each part of the
+model was loaded into; null for Stable Audio). A worker that makes song after song should
+show the same `after` each time: YuE2 once grew here until the OOM killer took it on track 12
+of an album (docs/internals/audio.md "Host memory"). `host_memory` is null on a Mac.
 
 ### How each token stage ended: `decode_stages`, `stages_at_cap`
 

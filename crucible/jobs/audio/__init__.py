@@ -542,6 +542,10 @@ def effective_params(
         "notes": result.get("notes"),
         "decode_stages": result["decode_stages"],
         "stages_at_cap": stages_at_cap(result["decode_stages"]),
+        # The worker's host memory as the song began, once it was saved, and its peak
+        # between (audiocore.host_memory); `after` climbing from one song to the next is a
+        # worker keeping something of each song. None on macOS.
+        "host_memory": result["host_memory"],
     }
 
 

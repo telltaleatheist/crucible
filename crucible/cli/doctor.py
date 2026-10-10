@@ -14,6 +14,7 @@ from .. import (
     cardfacts,
     catalog,
     envpatches,
+    hostmemory,
     hosttools,
     jobenv,
     ladder,
@@ -107,6 +108,7 @@ REPORT_DEFAULTS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("tts_patches", list),
     ("capability", lambda: None),
     ("audio_low_vram", lambda: None),
+    ("audio_host_memory", lambda: None),
     ("path", lambda: None),
     ("stranded_weights", lambda: None),
     ("model_forms", list),
@@ -656,6 +658,31 @@ def check_audio_envs(host: Host) -> Section:
     return Section("audio_envs", {"audio_envs": envs}, tuple(findings))
 
 
+def check_audio_host_memory(host: Host) -> Section:
+    """An audio model that keeps more in host memory than this machine has in all
+    (crucible/hostmemory.py): named, with both figures, before a long run of songs finds
+    it out from the OOM killer."""
+    config, backend = host.config, host.backend
+    if (
+        config is None
+        or backend is None
+        or not config.enable_audio
+        or not hostmemory.weighed_here(backend.kind)
+    ):
+        return Section("audio_host_memory", {})
+    from ..jobs.audio import MANIFESTS as AUDIO_MANIFESTS
+
+    total = hostmemory.memory_total_bytes()
+    short = hostmemory.short_of_host(AUDIO_MANIFESTS.all().values(), backend.kind, total)
+    return Section(
+        "audio_host_memory",
+        {"audio_host_memory": {"total_bytes": total, "short": [s.to_dict() for s in short]}},
+        tuple(
+            Finding("audio_host_memory", s.words, hostmemory.WSL_MEMORY_FIX) for s in short
+        ),
+    )
+
+
 def check_video_envs(host: Host) -> Section:
     config, backend = host.config, host.backend
     if config is None or backend is None or not config.enable_video:
@@ -845,6 +872,7 @@ CHECKS: tuple[Check, ...] = (
     check_worker_envs,
     check_tts_envs,
     check_audio_envs,
+    check_audio_host_memory,
     check_video_envs,
     check_llm_patches,
     check_job_types,
@@ -1023,6 +1051,12 @@ def lines_capability(report: dict[str, Any]) -> Iterator[str]:
     low_vram = report["audio_low_vram"]
     if low_vram is not None:
         yield f"audio:   {low_vram['words']}"
+    host = report["audio_host_memory"]
+    if host is not None and not host["short"]:
+        yield (
+            f"audio:   this machine's {gib_text(host['total_bytes'])} of host memory holds "
+            "what each audio model keeps there while it serves"
+        )
     for name in entry["could_enable"]:
         yield (
             f"note:    this host can hold {name}, and [jobs] enable_{name} "
