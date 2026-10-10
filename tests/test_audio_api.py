@@ -466,3 +466,18 @@ def test_a_missing_env_is_installed_on_submit(
         assert "installing the audio environment" in error["message"]
         started = client.app.state.tasks.get(error["details"]["task_id"])
         assert started.request["module"]["job_types"] == [{"type": "audio"}]
+
+
+def test_a_song_reports_the_workers_host_memory_before_and_after(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    """Victoria's album (2026-10-10): the worker grew song after song until the OOM killer
+    took it on track 12, and nothing on any job said so. Each song now carries the
+    worker's host memory as it began and once it was saved, and the peak between."""
+    _, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 3})
+    host = events[-1]["data"]["audio"]["host_memory"]
+    for reading in (host["before"], host["after"]):
+        assert set(reading) == {"rss_bytes", "anon_bytes", "file_bytes"}
+        assert reading["rss_bytes"] >= reading["anon_bytes"] > 0
+    assert host["peak_rss_bytes"] >= max(host["before"]["rss_bytes"], host["after"]["rss_bytes"])
+    assert host["host_homes_bytes"] is None, "the fake engine keeps nothing in host memory"

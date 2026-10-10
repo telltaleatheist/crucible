@@ -65,6 +65,8 @@ class StableAudio3Engine:
     notes = None
     # A diffusion model: no stage decodes tokens, so none can run to a cap.
     decode_stages = None
+    # Nothing is kept in host memory on purpose (yue2_worker.HostHomes is YuE2's).
+    host_homes = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:
