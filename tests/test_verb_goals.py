@@ -181,10 +181,12 @@ def test_an_8_gib_card_runs_every_text_verb_on_a_smaller_model(
     card: tuple[str, int, int, str], name: str
 ) -> None:
     verdict = on(card, name)
+    # A scaled 1 GiB reserve leaves 7 GiB, which holds the 8-bit 4B; a flat 3 GiB leaves 5.
+    picked = "qwen3.5-4b-8bit" if card is EIGHT_UNMEASURED else "qwen3.5-0.8b"
     assert verdict.enabled is True
-    assert verdict.selected == "qwen3.5-0.8b"
+    assert verdict.selected == picked
     assert verdict.summary.startswith(
-        f"can {BY_NAME[name].plainly}, using qwen3.5-0.8b (goal "
+        f"can {BY_NAME[name].plainly}, using {picked} (goal "
         + BY_NAME[name].goal.words
         + "; the largest that fits this card)"
     )
@@ -247,7 +249,7 @@ def test_the_install_plan_names_the_goal_and_its_best_within_it() -> None:
     assert rows["decide"]["best"] == "qwen3.5-9b"
     assert rows["decide"]["goal"]["params_b"] == 9
     assert rows["decide"]["line"].startswith(
-        "Will decide with qwen3.5-0.8b (goal 9B; the largest that fits this card). "
+        "Will decide with qwen3.5-4b-8bit in 8-bit (goal 9B; the largest that fits this card). "
         "The best, qwen3.5-9b, needs "
     )
     assert rows["translate"]["best"] == "qwen3.8-27b-4bit"

@@ -82,7 +82,7 @@ def test_best_precision_first_not_smallest_that_fits() -> None:
     assert verdict.fit_count == 6
     pc = _decide("translate", "cuda-linux", 200 * GIB, CUDA_RESERVE)
     assert pc.selected == "qwen3.8-27b-4bit"
-    assert pc.fit_count == 5
+    assert pc.fit_count == 6, "the 27B, the 9B and the four small tiers (the 4B twice)"
     assert "qwen3.8-27b-8bit" not in [c.id for c in pc.candidates]
 
 
@@ -114,7 +114,7 @@ def test_higgs_is_binary_and_a_six_gig_card_loses_tts_entirely() -> None:
 def test_translate_is_off_only_where_even_the_0_8b_does_not_fit_and_says_so() -> None:
     verdict = _decide("translate", "cuda-linux", SIX_GIG, CUDA_RESERVE)
     assert verdict.enabled is False
-    assert "the smallest of 5 qwen3.8 and qwen3.5 variants is qwen3.5-0.8b" in verdict.reason
+    assert "the smallest of 6 qwen3.8 and qwen3.5 variants is qwen3.5-0.8b" in verdict.reason
     assert verdict.summary.startswith("cannot translate")
 
 

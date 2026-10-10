@@ -20,6 +20,10 @@ GIB = 1024 ** 3
 TEXT_CLASSES = ("clean", "translate", "simplify", "analysis")
 TEXT_VERBS = ("clean", "translate", "simplify", "analysis", "generate", "decide")
 SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b")
+# CUDA also carries the 8-bit 4B, for an 8 GiB card (Victoria's 3070).
+# The catalog lists by size, so the 16-bit 2B comes before it; the pick still takes the
+# 4B first (params, then bits: docs/VERB-SIZING.md).
+CUDA_SMALL_TIERS = ("qwen3.5-4b", "qwen3.5-2b", "qwen3.5-4b-8bit", "qwen3.5-0.8b")
 
 
 def ids(name: str, backend: str) -> list[str]:
@@ -66,10 +70,10 @@ def test_every_text_verb_has_its_goal_and_no_floor() -> None:
 
 
 LINEUPS = {
-    ("clean", CUDA_LINUX): ["qwen3.5-9b", *SMALL_TIERS],
+    ("clean", CUDA_LINUX): ["qwen3.5-9b", *CUDA_SMALL_TIERS],
     ("clean", MLX_DARWIN): ["qwen3.5-9b", *SMALL_TIERS],
     ("clean", LLAMA_WINDOWS): ["qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
-    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
+    ("translate", CUDA_LINUX): ["qwen3.8-27b-4bit", "qwen3.5-9b", *CUDA_SMALL_TIERS],
     ("translate", MLX_DARWIN): ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b",
                                 *SMALL_TIERS],
     ("translate", LLAMA_WINDOWS): ["qwen3.8-27b-4bit", "qwen3.5-9b", *SMALL_TIERS],
@@ -89,7 +93,8 @@ def test_the_text_classes_run_down_to_the_0_8b(backend: str) -> None:
 def test_decide_offers_every_tier_best_first(backend: str) -> None:
     expected = {
         CUDA_LINUX: ["qwen3.8-27b-4bit-vl", "qwen3.5-9b-vl", "qwen3.8-27b-4bit",
-                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
+                     "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-4b-8bit",
+                     "qwen3.5-0.8b"],
         MLX_DARWIN: ["qwen3.8-27b-8bit", "qwen3.8-27b-4bit", "qwen3.5-9b-vl",
                      "qwen3.5-9b", "qwen3.5-4b", "qwen3.5-2b", "qwen3.5-0.8b"],
         LLAMA_WINDOWS: ["qwen3.8-27b-4bit-vl", "qwen3.8-27b-4bit",

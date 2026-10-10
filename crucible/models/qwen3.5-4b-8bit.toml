@@ -1,0 +1,45 @@
+[model]
+id = "qwen3.5-4b-8bit"
+family = "qwen3.5"
+params_b = 4
+context_default = 8192
+
+trained_context = 262144
+modalities = ["text"]
+display = "Qwen 3.5 · 4B (8-bit)"
+description = "The 4B at 8 bits, text only, for a card too small for it whole: every text verb's pick on an 8 GiB card, where the 16-bit 4B does not fit."
+
+[defaults]
+thinking = false
+
+# Qwen/Qwen3.5-4B @ 851bf6e8 with the language model's linear layers at 8 bits (W8A16,
+# compressed-tensors pack-quantized, symmetric, one scale per 128 inputs,
+# round-to-nearest); the tied embeddings, the linear-attention gates and the vision tower
+# stay bfloat16, and the tower is not loaded (--language-model-only). Owen, 2026-10-09:
+# Victoria's 8 GiB card "can hold at least a 4 bit 4b. maybe 8 bit 4b" — quantize to what
+# should fit, test it there, and go lower only if it does not.
+[backends.cuda-linux]
+engine = "vllm"
+hf_repo = "owenmorgan/qwen3.5-4b-w8a16"
+revision = "84a25838e4890597cffb63c4f69dcf0164172ff3"
+bits = 8
+serves = ["text"]
+memory_bytes_estimate = 7_050_000_000
+engine_args = [
+    "--dtype", "bfloat16",
+    "--max-num-seqs", "4",
+    "--language-model-only",
+    "--limit-mm-per-prompt", '{"image": 0, "video": 0}',
+]
+max_context = 32768
+
+# Computed, to be replaced by the measurement on Victoria's RTX 3070 (8 GiB): the
+# text-only tensors are 4.90 GB on disk, and the 4-bit B-Side 4B loaded 0.22 GB above its
+# text-only tensors (3.12 GB on disk, "Model loading took 3.11 GiB"); its overhead past
+# the weights and KV was 1.6 GB.
+[backends.cuda-linux.memory]
+weights_bytes = 5_120_000_000
+overhead_bytes = 1_600_000_000
+kv_bytes_per_token = 40_337
+basis = "computed"
+measured_at_context = 8192

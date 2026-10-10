@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- New model `qwen3.5-4b-8bit` (cuda-linux): the 4B at 8 bits, text only (`owenmorgan/qwen3.5-4b-w8a16`). On an 8 GiB card every text verb now picks it instead of `qwen3.5-0.8b`; larger cards are unchanged.
+
 ## 1.0.119 — 2026-10-09
 
 - Settings: every config.toml key can be changed from the operator page; a host or port change offers "Restart now?" inline (the address is written into the service definition, so the page names `crucible service install` when that has to run first). On a PC the port stays fixed at the Windows host's 7100 (`port_fixed_by_windows_host`).
