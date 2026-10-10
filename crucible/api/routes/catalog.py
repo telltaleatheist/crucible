@@ -82,35 +82,10 @@ def _subject_holder(ctx: AppContext, subject: catalog.Subject) -> dict | None:
 
 
 def _installed_subject(ctx: AppContext, kind: str, subject_id: str) -> tuple[Any, Any]:
-    ids = {"kind": kind, "id": subject_id}
-    if kind not in catalog.KINDS:
-        raise ApiError(
-            404,
-            "subject_unknown",
-            f"{kind!r} is not a subject kind; they are {list(catalog.KINDS)}",
-            ids,
-        )
-    subject = catalog.find(ctx.config, ctx.backend, kind, subject_id)
-    if subject is None:
-        raise ApiError(
-            404,
-            "subject_unknown",
-            f"this server has no {kind} called {subject_id!r} for "
-            f"{ctx.backend.kind}. GET /v1/catalog lists every subject it can hold",
-            ids,
-        )
-    found = subject.installed()
-    if found is None:
-        raise ApiError(
-            409,
-            "subject_not_installed",
-            f"{kind} {subject_id!r} is not installed on this server, so "
-            "there is nothing to remove. Refused rather than answered 204: "
-            "a caller told 'done' about a subject that was never there "
-            "would believe a migration had deleted something",
-            ids,
-        )
-    return subject, found
+    try:
+        return catalog.locate_installed(ctx.config, ctx.backend, kind, subject_id)
+    except catalog.RemoveRefused as exc:
+        raise ApiError(exc.status_code, exc.code, str(exc), exc.details) from None
 
 
 def _refuse_if_held(ctx: AppContext, subject: catalog.Subject, kind: str, subject_id: str) -> None:

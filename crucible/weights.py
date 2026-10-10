@@ -440,6 +440,15 @@ def stranded(
     return found
 
 
+def remove_stranded(config: Config, entry: StrandedWeights) -> Path:
+    # A stranded directory has no manifest left to ask about local sources or
+    # aliases: `stranded` only ever names a folder under the store's own root,
+    # which Crucible wrote, so the folder itself is what is removed.
+    _remove(entry.path)
+    _prune_empty(entry.path.parent, weights_root(config, entry.family))
+    return entry.path
+
+
 def hf_token(config: Config) -> str | None:
     return hf_token_at(config.path)
 

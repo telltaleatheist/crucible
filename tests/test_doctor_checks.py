@@ -134,3 +134,22 @@ def test_env_patch_checks_the_job_type_it_was_given(monkeypatch: pytest.MonkeyPa
     )
     assert doctor.cmd_env_patch(argparse.Namespace(job_type="llm")) == 0
     assert checked == ["llm"]
+
+
+def test_a_stranded_folder_on_this_backend_names_the_remove_that_reclaims_it() -> None:
+    def entry(backend: str) -> dict[str, Any]:
+        return {
+            "family": "models",
+            "id": "qwen3.5-4b-bside-4bit",
+            "backend": backend,
+            "path": f"/h/models/qwen3.5-4b-bside-4bit/{backend}",
+            "bytes": 3_600_000_000,
+        }
+
+    report = {
+        "backend": {"kind": "cuda-linux"},
+        "stranded_weights": [entry("cuda-linux"), entry("mlx-darwin")],
+    }
+    here, other = list(doctor.lines_stranded_weights(report))
+    assert "`crucible remove model qwen3.5-4b-bside-4bit` reclaims the space" in here
+    assert "crucible remove" not in other and "delete the directory" in other

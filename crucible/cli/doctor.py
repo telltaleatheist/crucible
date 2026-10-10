@@ -1029,13 +1029,23 @@ def lines_job_types(report: dict[str, Any]) -> Iterator[str]:
         yield f"job {entry['name']}: {_job_mark(entry)} — {entry['detail']}"
 
 
+def _reclaim(entry: dict[str, Any], here: str | None) -> str:
+    if entry["backend"] == here:
+        return f"`crucible remove model {entry['id']}` reclaims the space"
+    return (
+        f"they are {entry['backend']}'s, not this server's, so delete the "
+        "directory to reclaim the space"
+    )
+
+
 def lines_stranded_weights(report: dict[str, Any]) -> Iterator[str]:
+    here = None if report["backend"] is None else report["backend"]["kind"]
     for entry in report["stranded_weights"] or ():
         why = f"no manifest in this build declares {entry['id']!r} on {entry['backend']}"
         yield (
             f"note:    {entry['bytes'] / 1e9:.2f} GB of weights at "
             f"{entry['path']} belong to nothing: {why}. Nothing will use "
-            "them; delete the directory to reclaim the space"
+            f"them; {_reclaim(entry, here)}"
         )
 
 

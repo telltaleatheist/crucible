@@ -319,3 +319,81 @@ def test_remove_subject_asks_the_holder_before_touching_the_files(
     with pytest.raises(catalog.RemoveRefused) as gone:
         catalog.locate_installed(config, FAKE_BACKEND, "model", "qwen3.5-9b")
     assert gone.value.code == "subject_not_installed"
+
+
+def _retired(home: Path, model_id: str, backend: str) -> Path:
+    directory = home / "models" / model_id / backend
+    directory.mkdir(parents=True)
+    (directory / "model.safetensors").write_bytes(b"\0" * 4096)
+    (directory / weights.STAMP_NAME).write_text(
+        json.dumps({"family": "models", "id": model_id, "backend": backend}),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_a_model_retired_from_the_catalog_can_still_be_removed_from_the_store(
+    client: TestClient, auth: dict[str, str], home: Path
+) -> None:
+    # Victoria's laptop, 1.0.123: qwen3.5-4b-bside-4bit left the catalog and its
+    # 3.6 GB stayed, with `crucible remove` answering subject_unknown.
+    directory = _retired(home, "qwen3.5-4b-bside-4bit", FAKE_BACKEND.kind)
+    assert all(row["id"] != "qwen3.5-4b-bside-4bit" for row in catalog_rows(client, auth))
+
+    response = client.delete("/v1/catalog/model/qwen3.5-4b-bside-4bit", headers=auth)
+    assert response.status_code == 204, response.text
+    assert not directory.exists()
+    assert not directory.parent.exists()
+    assert (home / "models").is_dir()
+    [row] = client.get("/v1/activity", headers=auth).json()["catalog"]["removals"]
+    assert row["id"] == "qwen3.5-4b-bside-4bit" and row["bytes_freed"] >= 4096
+
+
+def test_a_retired_model_s_folder_for_another_backend_is_not_this_server_s_to_remove(
+    client: TestClient, auth: dict[str, str], home: Path
+) -> None:
+    other = "mlx-darwin" if FAKE_BACKEND.kind != "mlx-darwin" else "cuda-linux"
+    directory = _retired(home, "qwen3.5-4b-bside-4bit", other)
+    response = client.delete("/v1/catalog/model/qwen3.5-4b-bside-4bit", headers=auth)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "subject_unknown"
+    assert directory.is_dir()
+
+
+def test_a_retired_model_still_on_the_card_is_not_removed(
+    client: TestClient, auth: dict[str, str], home: Path
+) -> None:
+    directory = _retired(home, "qwen3.5-4b-bside-4bit", FAKE_BACKEND.kind)
+    residency = client.app.state.residency
+
+    class Resident:
+        id = "qwen3.5-4b-bside-4bit"
+        kind = "llm"
+
+    residency._resident = Resident()
+    try:
+        response = client.delete("/v1/catalog/model/qwen3.5-4b-bside-4bit", headers=auth)
+    finally:
+        residency._resident = None
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "subject_in_use"
+    assert directory.exists()
+
+
+def test_the_files_path_removes_a_retired_model_too(
+    home: Path, make_app: Callable[..., Any]
+) -> None:
+    from crucible import catalog
+    from crucible.config import load_config
+
+    make_app(enable_llm=True)
+    config = load_config(home)
+    directory = _retired(home, "qwen3.5-4b-bside-4bit", FAKE_BACKEND.kind)
+    removed = catalog.remove_subject(
+        config, FAKE_BACKEND, "model", "qwen3.5-4b-bside-4bit", holder=lambda _s: None
+    )
+    assert removed.path == directory and removed.found.bytes >= 4096
+    assert not directory.exists()
+    with pytest.raises(catalog.RemoveRefused) as gone:
+        catalog.locate_installed(config, FAKE_BACKEND, "model", "qwen3.5-4b-bside-4bit")
+    assert gone.value.code == "subject_unknown"
