@@ -44,6 +44,8 @@ def test_every_context_shaped_class_declares_its_work_with_a_source() -> None:
         "analysis",
         "generate",
         "decide",
+        "embed",
+        "rerank",
         "pages",
     }
     for entry in declared:

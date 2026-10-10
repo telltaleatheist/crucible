@@ -68,7 +68,7 @@ ECHO = Family("echo", None, ("echo",))
 LLM = Family(
     "llm",
     LLM_ENV,
-    (*ROUTABLE_CLASSES, "decide", "pages"),
+    (*ROUTABLE_CLASSES, "decide", "embed", "rerank", "pages"),
     frozenset({"model_not_installed"}),
 )
 TTS = Family("tts", TTS_ENV, ("tts",), frozenset({"voice_not_installed"}))

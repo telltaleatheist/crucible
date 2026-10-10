@@ -16,6 +16,7 @@ export type {
 } from './client.js';
 
 export { fleetSession } from './fleet.js';
+export { decodeEmbedding } from './embedding.js';
 export type {
   FleetDropout,
   FleetPlace,
@@ -195,6 +196,22 @@ export type {
   DecideTiming,
   DecideYesNoAnswer,
   DecideYesNoQuestion,
+  EmbedEncoding,
+  EmbedInputType,
+  EmbedModelInfo,
+  EmbedOptions,
+  EmbedRequest,
+  EmbedResponse,
+  ModelEmbedInfo,
+  ModelRerankInfo,
+  RerankModelInfo,
+  RerankOptions,
+  RerankRequest,
+  RerankResponse,
+  RerankResult,
+  VerbInfo,
+  VerbOptions,
+  VerbTiming,
   DoneData,
   EstimateBasis,
   FailedData,

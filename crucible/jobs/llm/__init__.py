@@ -39,6 +39,7 @@ from ...manifests import (
     load_all_manifests,
 )
 from ...memorybudget import available_bytes
+from ...packages import package_not_installed
 from ...residency import (
     DEFAULT_READY_TIMEOUT_SECONDS,
     Occupant,
@@ -241,8 +242,11 @@ def model_rows(
             engines_here[name] = llm_engine_status(config, backend, name)
         return engines_here[name]
 
+    from ... import verbfacts
+
     resident = residency.resident_model
     host = host_fit_of(config, backend)
+    served_by = verbfacts.served_by_class()
     rows: list[dict[str, Any]] = []
     for manifest in MANIFESTS.all().values():
         supported = manifest.supports(backend_kind)
@@ -351,6 +355,9 @@ def model_rows(
                 {"form": None, "form_reason": None, "forms": None}
                 if forms is None
                 else forms
+            ),
+            **verbfacts.model_facts(
+                manifest, served_by, max_model_len if supported else None, config.packages
             ),
         }
         if reason is not None:
@@ -501,6 +508,10 @@ def _require_loadable(
     backend_kind = backend.kind
     manifest = MANIFESTS.known(model_id)
     worker_type.require_block(manifest, model_id, backend_kind, "model")
+    if manifest.package is not None and manifest.package not in config.packages:
+        # Before anything is pulled for it: a server without the package never holds
+        # its models (install-on-submit included).
+        raise package_not_installed(model_id, manifest.package, "load it")
     host = host_fit_of(config, backend)
     spec = form_spec(manifest, backend_kind, form, host)
     worker_type.refuse_if_larger_than_host(backend, model_id, spec.memory_bytes_estimate)

@@ -17,7 +17,7 @@ import tomli_w
 
 from .backend import CPU_VENDOR
 from .capabilityrecord import DESKTOP_BASES, CapabilityRecord, CapabilityRow
-from .classnames import ROUTABLE_CLASSES, SELECTABLE_CLASSES
+from .classnames import PACKAGE_NAMES, ROUTABLE_CLASSES, SELECTABLE_CLASSES
 from .errors import ConfigError
 from .narratorengines import ESTIMATE_BASES, NARRATOR_ENGINE_SAMPLING, EngineFootprint
 from .tomltable import check_table
@@ -172,6 +172,10 @@ class Config:
     # with_concurrency). A person's setting; nothing writes it but `crucible models
     # concurrency`. Read when the model loads.
     llm_concurrency: tuple[tuple[str, int], ...] = ()
+    # The optional packages installed here (`[packages] <name> = true`; classnames
+    # PACKAGE_NAMES). Written by `crucible install <package>`, read by every verb whose
+    # models are in one.
+    packages: frozenset[str] = frozenset()
     stamp: tuple[int, int] | None = None
 
     def follow_file(self) -> bool:
@@ -299,6 +303,30 @@ def _max_session_hold_s(table: dict[str, Any]) -> int:
     if section is None or "max_session_hold_s" not in section:
         return DEFAULT_MAX_SESSION_HOLD_S
     return check_max_session_hold_s(_require(table, "queue", "max_session_hold_s", int))
+
+
+def _packages(table: dict[str, Any]) -> frozenset[str]:
+    """`[packages]`: the optional packages installed here, `<name> = true`. Not a
+    writer-owned table, so `crucible install` carries it as it is; `crucible install
+    <package>` sets its key through rewrite_config(unowned=)."""
+    section = table.get("packages")
+    if section is None:
+        return frozenset()
+    if not isinstance(section, dict):
+        raise ConfigError("config [packages] must be a table of package = true|false")
+    unknown = sorted(set(section) - set(PACKAGE_NAMES))
+    if unknown:
+        raise ConfigError(
+            f"config [packages] names {unknown}; this build's packages are "
+            f"{list(PACKAGE_NAMES)}"
+        )
+    for name, value in section.items():
+        if not isinstance(value, bool):
+            raise ConfigError(
+                f"config [packages] {name} = {value!r}: it is true when the package is "
+                "installed here, false or absent when it is not"
+            )
+    return frozenset(name for name, value in section.items() if value)
 
 
 @dataclass(frozen=True)
@@ -1066,6 +1094,7 @@ def load_config(
         audio_low_vram=low_vram.on,
         audio_low_vram_auto=low_vram.auto,
         llm_concurrency=llm_concurrency,
+        packages=_packages(table),
         stamp=stamp,
     )
 

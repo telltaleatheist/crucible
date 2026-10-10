@@ -14,6 +14,8 @@ PAGES_ENGINE_FAILED = "pages_engine_failed"
 
 FATAL_SCAN_LINES = 200
 
+EMBED_FLAGS: tuple[str, ...] = ("--embedding", "--embeddings", "--pooling")
+
 FATAL_LINES: tuple[tuple[str, str, str], ...] = (
     (
         "cuda error: out of memory",
@@ -167,6 +169,32 @@ class LlamaServerEngine(SubprocessEngine):
         "L3559-3576). Text only. Read at the b10970 tag 2026-10-10"
     )
 
+    decide_likelihood_prompt = True
+    decide_likelihood_prompt_basis = (
+        "the forced-token route already sends token ids: the prompt form skips "
+        "/apply-template and sends the rendered text to /tokenize with add_special false "
+        "and parse_special true (tools/server/server-context.cpp post_tokenize "
+        "L5084-5122), so "
+        "<|im_start|> and the like are read as those tokens and nothing is added. Each "
+        "document's request shares the query with the one before it, so cache_prompt "
+        "reads the query once per request and the slot reuses it (pure-attention models "
+        "here: no recurrent checkpoint to restore). Read at the b10970 tag 2026-10-10"
+    )
+
+    embed_route = "openai-embeddings"
+    embed_basis = (
+        "llama-server b10970 started with --embedding --pooling last (the flags derived "
+        "from the manifest's [embed], model_args) answers POST /v1/embeddings: an input "
+        "may be token ids (tokenize_input_prompts, tools/server/server-common.cpp "
+        "L800-850), which Crucible sends after /tokenize with add_special false and "
+        "parse_special true; `embd_normalize: -1` returns the pooled state unnormalised "
+        "(server-context.cpp L5436-5458, send_embedding L2150-2190); with last pooling "
+        "and a KV cache an input longer than the micro-batch is split across it "
+        "(server_slot::can_split L440-447), so -ub needs no raising. A missing state is "
+        "sent as zeros (send_embedding L2170-2176), which Crucible refuses as no vector. "
+        "One slot (--parallel 1): a request's inputs run in turn"
+    )
+
     sigterm_wait_seconds = GRACEFUL_STOP_SECONDS
 
     def missing_executable_hint(self) -> str:
@@ -202,6 +230,25 @@ class LlamaServerEngine(SubprocessEngine):
             str(context),
             *plan_flags(plan),
         ]
+
+    @classmethod
+    def model_args(
+        cls, manifest: Any, args: list[str], weights_dir: Path, context: int
+    ) -> list[str]:
+        """An embedding model's flags, derived from its manifest's [embed] (one owner): the
+        server answers /v1/embeddings with the pooling the manifest states. A manifest
+        that states them in engine_args as well is refused."""
+        stated = [flag for flag in EMBED_FLAGS if flag in args]
+        if stated:
+            raise EngineError(
+                f"embed_flags_stated: {manifest.path.name} states {stated} in engine_args "
+                f"({args}); Crucible derives them from the manifest's [embed] table. "
+                "Remove them from engine_args"
+            )
+        embed = getattr(manifest, "embed", None)
+        if embed is None:
+            return args
+        return [*args, "--embedding", "--pooling", embed.pooling]
 
     def command(
         self, model_dir: Path, served_name: str, port: int, args: list[str]

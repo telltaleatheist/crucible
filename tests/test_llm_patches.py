@@ -5,6 +5,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Callable
 
 import pytest
 
@@ -23,6 +25,10 @@ GEN_SHA256 = "270778ad53eaca55a8533d82e6752660fe5d2605c4aa0879b48a50a91f69345f"
 FP32 = envpatches.MLX_LM_FP32_LOGPROBS
 TOK_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_tokenizer_utils.py.txt"
 TOK_SHA256 = "25784bb03c922d0d7832ce6c66a6cd4eb3a4820b6c5a8e583dedb63a018fb56a"
+QWEN3_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "mlx_lm_0.31.3_models_qwen3.py.txt"
+QWEN3_SHA256 = "2284df96ecb669109b281df4534470b18f285aa9a5e41735ad682f601f93c639"
+BARE = envpatches.MLX_LM_QWEN3_BARE_CHECKPOINT
+BARE_SCRIPT = envpatches.LLM_SCRIPTS_DIR / BARE.script
 DETOK = envpatches.MLX_LM_DETOKENIZER_TOKENMAP
 DETOK_SCRIPT = envpatches.LLM_SCRIPTS_DIR / DETOK.script
 FP32_SCRIPT = envpatches.LLM_SCRIPTS_DIR / FP32.script
@@ -55,6 +61,10 @@ def pristine_tokenizer_utils() -> str:
     return TOK_FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
+def pristine_qwen3() -> str:
+    return QWEN3_FIXTURE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
 def write_mlx_lm(
     package: Path,
     server_text: str,
@@ -71,6 +81,9 @@ def write_mlx_lm(
     for name, body in files.items():
         with open(package / name, "w", encoding="utf-8", newline="") as handle:
             handle.write(body)
+    (package / "models").mkdir()
+    with open(package / "models" / "qwen3.py", "w", encoding="utf-8", newline="") as handle:
+        handle.write(pristine_qwen3())
 
 
 def make_env(
@@ -625,6 +638,7 @@ def test_the_engine_applies_the_items_patches_itself_at_start(
         ITEMS.script, ITEMS_HELPER.script, DETOK.script,
         envpatches.MLX_LM_STRUCTURED_OUTPUT_HELPER.script,
         envpatches.MLX_LM_STRUCTURED_OUTPUT.script,
+        BARE.script,
     ]
     assert ITEMS.marker in server_of(env).read_text(encoding="utf-8")
     assert helper_of(env).is_file()
@@ -643,6 +657,62 @@ def test_an_items_patch_that_will_not_go_in_is_refused_by_name_at_start(
     assert message.startswith("llm_env_unpatched:") and "mlx-lm-decide-items" in message
     assert "crucible env patch llm" in message
     assert not (tmp_path / "e.log").exists(), "nothing was spawned"
+
+
+def qwen3_of(env: Path) -> Path:
+    return env / "lib" / "python3.11" / "site-packages" / "mlx_lm" / "models" / "qwen3.py"
+
+
+def test_the_qwen3_fixture_is_the_stock_file() -> None:
+    raw = QWEN3_FIXTURE.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(raw).hexdigest() == QWEN3_SHA256
+    assert BARE.marker not in pristine_qwen3()
+
+
+def _sanitize(text: str, tied: bool) -> Callable[[dict], dict]:
+    """The patched Model.sanitize, run on its own: no mlx is needed for a dict of names."""
+    body = text[text.index("    def sanitize(self, weights):"):text.index("    def shard(")]
+    namespace: dict = {}
+    exec("class Model:\n" + body, namespace)
+    model = namespace["Model"]()
+    model.args = SimpleNamespace(tie_word_embeddings=tied)
+    return model.sanitize
+
+
+def test_the_bare_checkpoint_applier_reads_qwen3_embedding_s_layout(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    done = run_script(env, BARE_SCRIPT)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("PATCHED ")
+    text = qwen3_of(env).read_text(encoding="utf-8")
+    assert text.count(BARE.marker) == 1
+    assert Path(str(qwen3_of(env)) + ".orig").read_text(encoding="utf-8") == pristine_qwen3()
+    again = run_script(env, BARE_SCRIPT)
+    assert again.stdout.startswith("ALREADY_PATCHED ")
+    untied = _sanitize(text, tied=False)
+    bare = {"embed_tokens.weight": "E", "norm.weight": "N", "layers.0.mlp.up_proj.weight": "U"}
+    assert untied(dict(bare)) == {
+        "model.embed_tokens.weight": "E", "model.norm.weight": "N",
+        "model.layers.0.mlp.up_proj.weight": "U", "lm_head.weight": "E",
+    }, "prefixed, and the head given the input embeddings"
+    chat = {"model.embed_tokens.weight": "E", "lm_head.weight": "H"}
+    assert untied(dict(chat)) == chat, "a checkpoint with the prefix loads as before"
+    assert _sanitize(text, tied=True)(dict(bare)) == {
+        "model.embed_tokens.weight": "E", "model.norm.weight": "N",
+        "model.layers.0.mlp.up_proj.weight": "U",
+    }
+    [row] = envpatches.check_patches(env, MAC_PINS, patches=(BARE,))
+    assert row["status"] == envpatches.APPLIED
+
+
+def test_the_bare_checkpoint_applier_writes_nothing_when_sanitize_moved(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    moved = pristine_qwen3().replace("    def sanitize(self, weights):\n", "    def sanitize(self, w):\n")
+    with open(qwen3_of(env), "w", encoding="utf-8", newline="") as handle:
+        handle.write(moved)
+    done = run_script(env, BARE_SCRIPT)
+    assert done.returncode == 2 and "ANCHOR_NOT_FOUND" in done.stderr
+    assert qwen3_of(env).read_text(encoding="utf-8") == moved
 
 
 def tokenizer_utils_of(env: Path) -> Path:

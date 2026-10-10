@@ -264,6 +264,10 @@ class LikelihoodReading:
     score candidates."""
     images: bool
     basis: str
+    prompt: bool = False
+    """The route also scores the prompt form (text Crucible rendered from a manifest,
+    tokenized as it is): what a dedicated reranker's own prompt needs."""
+    prompt_basis: str = ""
 
 
 def likelihood_reading(engine_name: str) -> LikelihoodReading:
@@ -290,7 +294,49 @@ def likelihood_reading(engine_name: str) -> LikelihoodReading:
         raise EngineError(
             f"{engine_name} states likelihood with images and scores no candidates"
         )
-    return LikelihoodReading(route=route, images=cls.decide_likelihood_images, basis=basis)
+    prompt_basis = cls.decide_likelihood_prompt_basis
+    if route is not None and prompt_basis is None:
+        raise EngineError(
+            f"{engine_name} scores candidates and states no decide_likelihood_prompt_basis: "
+            "whether it also scores a Crucible-rendered prompt is read from its source, "
+            "and the reading says where, or why not"
+        )
+    return LikelihoodReading(
+        route=route,
+        images=cls.decide_likelihood_images,
+        basis=basis,
+        prompt=route is not None and cls.decide_likelihood_prompt,
+        prompt_basis=prompt_basis or basis,
+    )
+
+
+EMBED_ROUTES = ("openai-embeddings", "items")
+
+
+@dataclass(frozen=True)
+class EmbedReading:
+    route: str | None
+    """`openai-embeddings` (token ids to the engine's /v1/embeddings) or `items` (the
+    items route's inputs body); None when the engine writes no vectors."""
+    basis: str
+
+
+def embed_reading(engine_name: str) -> EmbedReading:
+    cls = engine_class(engine_name)
+    basis = cls.embed_basis
+    route = cls.embed_route
+    if basis is None:
+        raise EngineError(
+            f"{engine_name} states no embed_basis. Whether an engine writes vectors is read "
+            "from its source, and the reading says where, or why it does not"
+        )
+    if route is not None and route not in EMBED_ROUTES:
+        raise EngineError(
+            f"{engine_name} states embed_route {route!r}; the door reads {list(EMBED_ROUTES)}"
+        )
+    if route == "items" and not cls.decide_items_batched:
+        raise EngineError(f"{engine_name} states the items route for embed and has none")
+    return EmbedReading(route=route, basis=basis)
 
 
 def build_engine(
@@ -461,8 +507,11 @@ __all__ = [
     "DecideReading",
     "LIKELIHOOD_ROUTES",
     "LikelihoodReading",
+    "EMBED_ROUTES",
+    "EmbedReading",
     "decide_items_reading",
     "decide_reading",
+    "embed_reading",
     "likelihood_reading",
     "ENGINES",
     "STOP_TIMEOUT_SECONDS",

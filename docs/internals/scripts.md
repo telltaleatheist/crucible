@@ -286,6 +286,14 @@ a voice it does not mention is fine, and non-band keys (`_README`) are skipped.
 - `keeper-tts-live.sh` refuses if anything other than this server holds more than the desktop
   allowance on the card, samples the card during the render (the peak is the figure), and
   prints manifest lines to paste.
+- **`check-embed-rerank-live.py`** runs against a running server with the retrieval package
+  installed (`--url`, `--token`; stdlib only, so it runs from any machine) and checks what
+  only a card proves: embed's cosine matrix on Qwen3-Embedding's model-card example within
+  0.01 of the card's, unit length and a Matryoshka prefix, one fingerprint across calls and
+  a refusal for another, the base64 encodings; rerank's logits on Qwen3-Reranker's card
+  example within 0.5 of 5.0625 and -14.25, the query read from the engine's cache, the
+  compatible route; `--general MODEL` also reranks on a decide model. It loads both 8B
+  models: it needs Owen's go for the card.
 - **`measure-llm-memory.sh`** measures memory used minus memory used before the engine
   started, on both backends. Not "available" (macOS reclaims inactive pages) and not RSS:
   MLX memory-maps weights, and on `qwen3.8-27b-4bit` RSS read 14,643 MiB against a 32,116 MiB

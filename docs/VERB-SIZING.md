@@ -2,7 +2,8 @@
 
 Owen, 2026-10-09. Phase 1 (§3 item 1) BUILT and merged (§7). Decide's image form, the
 9B marker's removal and the API-key recommendation BUILT on `feat/decide-vision-and-api-hint`,
-not merged (§8). The rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
+not merged (§8). The embed and rerank verbs, with the request-level model and ceiling at their
+doors, BUILT on `feat/embed-rerank`, not merged (§9). The rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
 where it disagrees with them, it says so (§6).
 
 ## 0. The ruling, in his words
@@ -368,3 +369,50 @@ SDKs released before this demand the key (as `license` is always null).
   chosen default: the 0.8B and the 2B are what small cards get today.
 - It never refuses and never changes the pick. `decide` is never advised (no upstream returns
   the logprobs it reads), and neither is a model a person chose in Settings.
+
+## 9. embed and rerank (2026-10-10, `feat/embed-rerank`)
+
+Owen's rulings, 2026-10-10: two verbs, `embed` and `rerank`, sized by this plan exactly
+(always available where they are installed, the biggest that fits up to the goal,
+precedence request model > request ceiling > Settings > auto), goals Qwen3-Embedding-8B
+and Qwen3-Reranker-8B. Then, the same day, the scope: *the 8B models only, at full
+precision (bf16), on the PC and the Mac; no ladder below the 8B for now ("if we do [need
+smaller] we can pull them")*, and *embed and rerank are an OPTIONAL install package, like
+the voice/Higgs package: a machine that doesn't install it (Victoria's 8 GiB laptop) never
+gets these models*. Built on the branch, not merged; nothing run on a card.
+
+- **The classes** (`crucible/capabilityclasses.py`): `embed` (goal 8B, the
+  `qwen3-embedding` family) and `rerank` (goal 8B, the `qwen3-reranker` family AND every
+  decide text model). Both `job_type` `llm`, working context 8192 tokens x 1 (the model
+  cards' max_length; one request at a time on llama-server's one slot).
+- **The rerank lineup**: `CapabilityClass.first_families` ranks the dedicated reranker
+  before every decide model whatever its size, so the automatic pick is the reranker
+  wherever it fits, and a decide model (Crucible's general template, crucible/rerank.py) is
+  reached by naming it in a request or choosing it in Settings. Chosen so because a
+  dedicated reranker is trained for the judgement and a general model of the same size is
+  not, and because the two's scores are not comparable, so the pick never swaps one for the
+  other by itself.
+- **The ladder is the 8B alone for now.** One manifest per verb, bf16 on both backends:
+  the PC a bf16 GGUF on llama-server (one form), the Mac Qwen's own safetensors on mlx-lm.
+  The sizing code is general: a smaller model is a manifest added to the family, and the
+  pick ranks it by this plan's rules with no other change.
+- **The package** (`classnames.PACKAGE_NAMES`, `crucible/packages.py`): `retrieval`, whose
+  models are those with an `[embed]` or `[rerank]` table. `crucible install retrieval`
+  refuses a server without the llm engine or a card that cannot hold the models (by name,
+  nothing pulled), pulls both, writes `[packages] retrieval = true` and decides the card
+  again. Where it is not installed, the verdict refuses both classes by name (naming the
+  command), and so do the doors, `load-model` and install-on-submit (`409
+  package_not_installed`): a server without it never pulls the models. A decide model
+  chosen for rerank in Settings, or named in a request, needs no package.
+- **What each card picks** (estimates, the package installed): the PC (24 GiB, 3 GiB
+  reserve) embeds on `qwen3-embedding-8b` (bf16, 15.9 GiB at 8192, 5.1 GiB to spare) and
+  reranks on `qwen3-reranker-8b` (17.1 GiB, 3.9 to spare); the Mac (64 GiB) the same, with
+  about 30 GiB to spare. **The two are about 16 GB each in bf16, so on the PC's card they do
+  not stay loaded together: they swap like any two models**, and a client alternating the
+  verbs pays a reload each time (§1a.1: batch by verb). An 8 GiB card holds neither
+  (`crucible install retrieval` refuses there).
+- **The request's precedence** is built at these doors (crucible/verbmodel.py): `model`
+  (refused `model_does_not_fit` with the verb's pick named, unless it is the Settings
+  choice), then `max_params_b` (the pick again with the goal lowered to it), then the
+  registered row (the Settings choice or the automatic pick). It is the first door to do
+  §1a.3 per request; chat's is still owed (§3 item 2).

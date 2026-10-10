@@ -108,6 +108,8 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `chatStream(options)` | the same, streamed | `AsyncIterable<string>` of content deltas |
 | `decide(request, {act?})` | `POST /v1/decide` | `DecideResponse` |
 | `decideItems(request, {act?})` | `POST /v1/decide` with `items` | `DecideItemsResponse` |
+| `embed(request, {act?, queue?, signal?})` | `POST /v1/embed` | `EmbedResponse` |
+| `rerank(request, {act?, queue?, signal?})` | `POST /v1/rerank` | `RerankResponse` |
 | `voices()` | `GET /v1/voices` | `VoiceInfo[]` |
 | `loadVoice(id)` | `POST /v1/jobs {type: "load-voice"}` | the job id |
 | `unloadVoice(id)` | `POST /v1/jobs {type: "unload-voice"}` | the job id |
@@ -623,6 +625,40 @@ frame.answers[0];   // {type: 'choice', choice: 'yes', probabilities, confidence
 At most 512 items (400 `too_many_items`); an item past 1,024 tokens is 400 `item_too_long`
 naming it. `tokens.shared` is the state's size when it ran once, `null` where each item
 went as its own request (`timingMs.engineRequests` says which).
+
+### `embed()`
+
+Unit-length vectors for up to 256 texts. **Vectors compare only within one fingerprint**:
+store `answer.model.fingerprint` beside them and send it back as `fingerprint` on every later
+call; a server that would write anything else refuses `409 fingerprint_mismatch` (a
+`CrucibleRefused`) rather than mix incomparable vectors. `inputType` is required: `query`
+takes the model's instruction prefix (with an optional `instruction`), `document` none. The
+models are the server's optional retrieval package; where it is not installed the call is
+refused `409 package_not_installed`.
+
+```ts
+const corpus = await crucible.embed({ inputs: passages, inputType: 'document', dimensions: 1024 });
+store(corpus.embeddings, corpus.model.fingerprint);
+const query = await crucible.embed({
+  inputs: ['What did the guest say about the harvest?'],
+  inputType: 'query',
+  fingerprint: storedFingerprint,
+  encodingFormat: 'base64_float16',
+});
+const vector = decodeEmbedding(query.embeddings[0]!, query.encodingFormat); // Float32Array
+```
+
+### `rerank()`
+
+A relevance probability per document for one query (P(yes) against P(no) under the
+model's own prompt): `scores` in document order, `results` most relevant first. A
+dedicated reranker by default; any decide model when named (`model: 'qwen3.5-9b'`), which
+needs no package.
+
+```ts
+const ranked = await crucible.rerank({ query, documents: passages, instruction: 'Find the answer' });
+ranked.results[0];  // {index, relevanceScore}
+```
 
 ## tts
 

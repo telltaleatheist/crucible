@@ -144,6 +144,23 @@ class VllmEngine(SubprocessEngine):
         "/tokenize, whose handling of image placeholders is not checked"
     )
 
+    decide_likelihood_prompt_basis = (
+        "the door scores vLLM through /v1/chat/completions, which renders the model's "
+        "chat template; a Crucible-rendered prompt would go through /v1/completions, "
+        "whose prompt_logprobs reply this door has not read. No reranker manifest names "
+        "a vLLM block: cuda-linux rerankers are GGUF forms on llama-server, whose cache "
+        "the query is read into once (a vLLM request with prompt_logprobs never reads "
+        "the prefix cache, vllm/sampling_params.py L540-543)"
+    )
+
+    embed_basis = (
+        "an embedding model on vLLM 0.29.0 is its own engine started with --runner "
+        "pooling --convert embed (vllm/config/model.py RunnerOption, ConvertType), which "
+        "no Crucible load starts; cuda-linux embedding models are Qwen's GGUF forms on "
+        "llama-server, so every card from 8 GiB up takes the 8B at the precision it "
+        "holds (docs/VERB-SIZING.md section 9)"
+    )
+
     chat_concurrency_flag = "--max-num-seqs"
     chat_concurrency_basis = (
         "vLLM 0.29.0 schedules at most --max-num-seqs sequences per step "

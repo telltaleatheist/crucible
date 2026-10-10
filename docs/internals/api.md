@@ -482,6 +482,175 @@ The answer (the numbers show the shape; they were not measured):
   reported as `503 decide_not_served` naming the `load-model` job that applies the
   current route.
 
+## Embed (`POST /v1/embed`)
+
+> **Vectors from different models are not comparable, and neither are vectors from the
+> same model in another precision, another engine build or another version of Crucible's
+> reading of it.** Every answer names exactly what wrote its vectors: `model.fingerprint`.
+> **Store the fingerprint beside the vectors, and send it back as `fingerprint` on every
+> later call** (each query against that corpus, each addition to it). The server then
+> serves exactly that identity, or refuses `409 fingerprint_mismatch` naming what it would
+> serve instead, before anything is embedded. It never substitutes another model: a model
+> the request names that this server's card does not hold is refused `409
+> model_does_not_fit` (only a model a person chose for embed in Settings is tried past the
+> estimate, docs/VERB-SIZING.md section 1a.4). Mixing fingerprints in one index is a
+> mistake, not an approximation: two runtime builds of one quantised model gave cosines of
+> 0.97 to 0.99 against each other (Briefcase, 2026-10).
+
+```json
+{"inputs": ["What did the guest say about the harvest?"],
+ "input_type": "query", "instruction": "Given a podcast question, find the transcript passages that answer it",
+ "dimensions": 1024, "encoding_format": "float",
+ "fingerprint": "qwen3-embedding-8b@ac37281f6437:qwen3-embedding-8b-bf16.gguf:llama-server-b10970-llg1.7.6-cuda13.0:e1"}
+```
+
+```json
+{"object": "crucible.embeddings",
+ "model": {"id": "qwen3-embedding-8b", "revision": "ac37281f64377cd7546c556999bc7dbc6791f8da",
+           "file": "qwen3-embedding-8b-bf16.gguf", "form": null, "bits": 16, "engine": "llama-server",
+           "engine_build": "llama-server-b10970-llg1.7.6-cuda13.0", "scheme": 1,
+           "fingerprint": "qwen3-embedding-8b@ac37281f6437:qwen3-embedding-8b-bf16.gguf:llama-server-b10970-llg1.7.6-cuda13.0:e1",
+           "dimensions": 4096},
+ "dimensions": 1024, "input_type": "query",
+ "instruction": "Given a podcast question, find the transcript passages that answer it",
+ "encoding_format": "float", "embeddings": [[0.0123, -0.0456, "..."]],
+ "tokens": {"per_input": [31], "total": 31}, "timing_ms": {"total": 41.7, "queued": 0.4}}
+```
+
+- **The fingerprint** is `<id>@<revision, 12>:<weights file, or repo>:<engine build>:e<scheme>`:
+  the weights' pin, the file read, the engine and its build as this Crucible installs it
+  (`llama-server-b10970-llg1.7.6-cuda13.0` on the PC, `mlx-lm-0.31.3+mlx-0.32.2` on the
+  Mac), and `EMBED_SCHEME` (crucible/embed.py), Crucible's own reading: the format, the
+  pooling, the truncation, the normalisation. Any of them moving is a new fingerprint. The
+  PC and the Mac write different fingerprints for the same model id (a GGUF on llama-server
+  against the safetensors on mlx-lm), so a corpus embedded on one is queried on the same
+  one. Floats can still differ in their last bits between two cards of one fingerprint.
+- **`input_type`** is required: `query` is written with the model's instruction prefix
+  (Qwen3-Embedding: `Instruct: <instruction>\nQuery:<text>`, exactly as its model card's
+  `get_detailed_instruct` and its sentence-transformers prompt write it, no space after the
+  colon), `document` as it is. `instruction` is optional on a query (absent: the model's
+  default, and the answer says which was used) and refused `instruction_not_taken` on a
+  document. The format is the model's, in its manifest's `[embed]` (crucible/verbspec.py),
+  never the app's: a model with other conventions (nomic's `search_query: ` and
+  `search_document: `) is a manifest whose `query` and `document` templates say so.
+- **The vector** is the model's pooling (`last`: the hidden state at the input's last
+  token, which for Qwen3-Embedding is the `<|endoftext|>` its tokenizer appends, written
+  into the template and so added by nothing else), truncated to `dimensions` where the model
+  is trained for it (Matryoshka: `embed.dimensions_range` on `GET /v1/models`, 32 to 4096 for
+  the 8B; `dimensions_not_supported` otherwise), then scaled to unit length BY CRUCIBLE: the
+  engines return the pooled state unnormalised (llama-server `embd_normalize: -1`, the Mac's
+  route raw), so one owner normalises on every engine. A vector with no length (llama-server
+  writes zeros for a state it failed to read) is `502 engine_error`, never an answer.
+- **Encodings**: `float` (JSON numbers), `base64` (float32 little-endian, OpenAI's), and
+  `base64_float16` (IEEE half, little-endian: half the bytes, about three significant digits).
+- **Limits**: 256 inputs a request (schema); each input, with the format around it, at most
+  the served context in tokens (8192 as loaded; a `load-model` with `params.context` up to
+  32768 raises it), refused `400 embed_input_too_long` naming the input before anything is
+  embedded. `GET /v1/models` (`embed.max_inputs`, `embed.max_input_tokens`) and `GET /v1/info`
+  (`verbs.embed`) state both.
+- **Which model**: `model` (or the model `fingerprint` names), else the biggest embedding
+  model at or below `max_params_b` that fits (`nothing_fits_ceiling`), else the model this
+  server registered for embed (its capability row: the Settings choice, else the automatic
+  pick, docs/VERB-SIZING.md section 9). A model that serves no embed is `400
+  model_not_for_verb`, so an OpenAI model name sent to the compatible route is refused, not
+  mapped.
+- **The line**: as a decision (`queue`, sessions, `timing_ms.queued` apart from `total`,
+  cancelled when the caller leaves; crucible/api/verbcall.py). An embedding model is its own
+  engine: llama-server started `--embedding --pooling last` (engines/llama_server.py derives
+  the flags from `[embed]`), so loading it takes whatever was on the card off, as any load
+  does. The two retrieval models are about 16 GB each in bf16: on the PC's 24 GB card they do
+  not stay loaded together, and a client that alternates embed and rerank pays a reload each
+  time; batch by verb, or keep one queue session per verb.
+- **On each engine**: llama-server is sent token ids it tokenized with `add_special: false`
+  and `parse_special: true` (one `/tokenize` per input, all of them before anything is
+  embedded), then every input in one `/v1/embeddings`; its one slot embeds them in turn.
+  The Mac's items route (`ITEMS_VERSION` 6) tokenizes the same way and reads the inputs as
+  right-padded rows of one forward within the engine's prefill step. vLLM writes no vectors
+  here: a pooling runner is an engine start no Crucible load makes, and the PC's embedding
+  model is a GGUF (engines/vllm.py `embed_basis`).
+- **A backfill** (thousands of transcripts, ~15M tokens) is many requests of up to 256
+  inputs in ONE queue session (docs/QUEUE.md), so the model stays on the card between them
+  and nothing else is loaded in between; each request answers with its own fingerprint, and
+  a request whose fingerprint moved is refused, so a backfill can never mix two. **Designed,
+  not built**: an `embed` job (`POST /v1/jobs {"type": "embed", "model", "params":
+  {"input_type", "instruction", "dimensions", "inputs_blob"}}`) that reads its inputs from an
+  upload (`blob_id`), writes the vectors as a float32 artifact plus a JSON index, banks each
+  finished batch (R6: a cancelled backfill keeps what it embedded, and `params.resume`
+  continues it), reports `progress` per batch on its event stream, and stamps the
+  fingerprint into its provenance sidecar. Until it is built, the session is the backfill.
+- **The compatible route**: `POST /v1/openai/embeddings` and `/openai/v1/embeddings` take
+  OpenAI's body (`input` a string or a list of strings, `model`, `encoding_format`,
+  `dimensions`, `user`) and answer OpenAI's shape (`{object: "list", data: [{object:
+  "embedding", index, embedding}], model, usage}`) with what wrote the vectors under
+  `crucible` (its `model.fingerprint`). `input_type` defaults to `document` there (an OpenAI
+  client embeds text as it is); a search query sends `"input_type": "query"`. Token arrays
+  are refused: the format is written around text.
+- **The package**: the embedding model is the optional `retrieval` package (`crucible
+  install retrieval`; crucible/packages.py). Where it is not installed, `POST /v1/embed`,
+  `load-model` and install-on-submit refuse `409 package_not_installed` by name, so a server
+  that did not install it never pulls the model by itself.
+
+## Rerank (`POST /v1/rerank`)
+
+```json
+{"query": "What did the guest say about the harvest?",
+ "documents": ["We brought the wheat in early this year.", "The episode opens with the news."],
+ "instruction": "Given a podcast question, find the transcript passages that answer it"}
+```
+
+```json
+{"object": "crucible.rerank",
+ "model": {"id": "qwen3-reranker-8b", "revision": "fb4e6db0e58b2f236672e5eba58823de3af43d68",
+           "file": "Qwen3-Reranker-8B-bf16.gguf", "form": null, "engine": "llama-server",
+           "engine_build": "llama-server-b10970-llg1.7.6-cuda13.0", "template": "model",
+           "fingerprint": "qwen3-reranker-8b@fb4e6db0e58b:Qwen3-Reranker-8B-bf16.gguf:llama-server-b10970-llg1.7.6-cuda13.0:r1-model"},
+ "instruction": "Given a podcast question, find the transcript passages that answer it",
+ "scores": [0.962, 0.004],
+ "results": [{"index": 0, "relevance_score": 0.962}, {"index": 1, "relevance_score": 0.004}],
+ "tokens": {"per_document": [86, 84], "total": 340, "cached": 296},
+ "timing_ms": {"total": 312.5, "queued": 0.3}}
+```
+
+- **The score** is P(yes) normalised against P(no): the softmax of the two replies'
+  log-probabilities after the prompt, which is exactly Qwen3-Reranker's own (the model
+  card's log_softmax over the last position's logits for `no` and `yes`). A probability,
+  so one model's scores compare across calls and a fixed cutoff means the same every time;
+  across models (or fingerprints) they do not. `scores` are in document order, `results`
+  most relevant first (a tie keeps the request's order).
+- **The prompt is Crucible's**: a dedicated reranker's own, from its manifest's `[rerank]`
+  (`template: "model"`), written as text and tokenized as it is (the prompt form; the
+  repo's own chat template is never read); or, for any decide model (`model: "qwen3.5-9b"`),
+  Crucible's general template (`crucible-general-1`, crucible/rerank.py): the reranker's
+  wording as chat turns through the model's own chat template, the instruction and the
+  query in the system turn, the document as the user turn, `yes`/`no` as the open reply.
+  The app sends the query, the documents and optionally the instruction, never a prompt.
+- **On the decide machinery**: each document is a group of two candidates of the
+  likelihood route (crucible/decide_likelihood.py `Scoring`, `score_groups`), so every
+  engine that scores a likelihood question reranks: llama-server (forced tokens), mlx-lm
+  (the items route) and vLLM (prompt log-probabilities, chat form only).
+- **The query is read once**: on the Mac the prompt (instruction and query) is the items
+  route's state, read once and kept between requests, and each document's tail is read once
+  over it; a one-token reply costs no forward of its own. On llama-server the documents go
+  in turn and each one's request shares the query with the one before, so the slot's cache
+  holds it (`tokens.cached`). On vLLM a prompt-logprobs request never reads the prefix cache
+  (vllm/sampling_params.py L540-543), so every document's two requests read the query again:
+  a general model on the PC reranks at full prefill cost.
+- **Limits**: 256 documents (schema); the query and one document together at most the
+  served context (8192 as loaded), refused `400 item_prompt_too_long` naming the document.
+- **Which model**: `model`, else the biggest at or below `max_params_b` that fits, else the
+  registered model (the dedicated reranker, ranked before every decide model whatever its
+  size: docs/VERB-SIZING.md section 9). A dedicated reranker on an engine that scores chat
+  turns only is `400 rerank_unsupported_on_engine` (none ships so).
+- **The package**: the dedicated reranker is the optional `retrieval` package. Where it is
+  not installed, a rerank naming no model, or naming the reranker, is `409
+  package_not_installed`; a rerank naming a decide model works wherever that model decides,
+  with no package (it loads no package model).
+- **The compatible route**: `POST /v1/openai/rerank` and `/openai/v1/rerank` take Cohere's
+  and Jina's body (`query`, `documents` as strings or `{"text"}` objects, `model`, `top_n`,
+  `return_documents`) and answer `{id, model, results: [{index, relevance_score,
+  document?}], usage}`, most relevant first, `top_n` of them, with the identity and every
+  score in document order under `crucible`.
+
 ## The operator page
 
 `GET /` redirects 307 to `/ui/` because `index.html` loads its assets by

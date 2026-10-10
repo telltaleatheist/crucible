@@ -15,6 +15,8 @@ SEGMENT_CLASSES: tuple[str, ...] = ("cutout", "select")
 SELECTABLE_CLASSES: tuple[str, ...] = (
     *ROUTABLE_CLASSES,
     "decide",
+    "embed",
+    "rerank",
     "pages",
     "tts",
     "asr",
@@ -28,3 +30,11 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)
+
+# Optional packages: models a server holds only when it is installed (`crucible install
+# <name>`, recorded as `[packages] <name> = true`). `retrieval` is the embed and rerank
+# verbs' own models (Owen, 2026-10-10: "an OPTIONAL install package, like the voice/Higgs
+# package"); a model is in it by having an [embed] or [rerank] table (crucible/verbspec.py).
+RETRIEVAL_PACKAGE = "retrieval"
+
+PACKAGE_NAMES: tuple[str, ...] = (RETRIEVAL_PACKAGE,)

@@ -1,0 +1,82 @@
+[model]
+id = "qwen3-reranker-8b"
+# Its own family: rerank offers it first, and no other verb offers it at all.
+family = "qwen3-reranker"
+params_b = 8
+context_default = 8192
+
+trained_context = 32768
+modalities = ["text"]
+display = "Qwen3 Reranker · 8B"
+description = "The rerank verb's model: one query and a list of documents to a relevance probability per document, P(yes) against P(no) under its own prompt; an optional instruction says what relevant means. In the optional retrieval package."
+
+# The model's own prompt (crucible/verbspec.py): the instruction and the query once, then
+# each document and the opened reply, scored as the probability of "yes" against "no".
+# Crucible writes these bytes itself and tokenizes them as they are, so the repo's
+# chat_template.jinja (a sentence-transformers CrossEncoder template at the pinned
+# revision) and the GGUF's chat template are never read.
+[rerank]
+prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n<Instruct>: {instruction}\n<Query>: {query}\n"
+document = "<Document>: {document}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+yes = "yes"
+no = "no"
+default_instruction = "Given a web search query, retrieve relevant passages that answer the query"
+source = "Qwen/Qwen3-Reranker-8B @ 77d193c791ed757ca307ee72715aa132723da912: the model card's prefix, format_instruction and suffix (system 'Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".', then '<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}', then the assistant turn with an empty think block), its default instruction, and the score: log_softmax over the last position's logits for 'no' (2152) and 'yes' (9693) (1_LogitScore/config.json false_token_id, true_token_id), exp of yes's"
+
+# Owen, 2026-10-10: the 8B only, at full precision (bf16), on the PC and the Mac.
+#
+# A reranker is a causal model scored on llama-server's forced-token route
+# (decide_likelihood.score_groups_on_forced_tokens). Qwen publishes no reranker GGUF; this
+# is Mungert's bf16 conversion of Qwen/Qwen3-Reranker-8B (general.base_model Qwen3 8B
+# Base, general.file_type 32 = bf16, read 2026-10-10).
+#   Qwen3-Reranker-8B-bf16.gguf  16,383,663,360 B
+#     sha256 0733f71106e59cbef51ac65185b57224fec4e8c4934dca50f8a5ccca4d8f3c6a
+[backends.cuda-linux]
+engine = "llama-server"
+hf_repo = "Mungert/Qwen3-Reranker-8B-GGUF"
+revision = "fb4e6db0e58b2f236672e5eba58823de3af43d68"
+bits = 16
+file = "Qwen3-Reranker-8B-bf16.gguf"
+serves = ["text"]
+memory_bytes_estimate = 18_341_622_912
+engine_args = ["--parallel", "1", "--n-gpu-layers", "all"]
+max_context = 32768
+
+# Computed, not measured on a card. Weights: the GGUF's bytes. KV: llama.cpp's f16 cache,
+# 36 layers x 8 KV heads x 128 dims x K and V x 2 bytes = 147,456 B/token, at the 8192
+# tokens one query and document may be. Overhead: the allowance qwen3.5-4b-bside's forms
+# carry for the CUDA context, cuBLAS and llama.cpp's compute buffer (750 MB).
+[backends.cuda-linux.memory]
+weights_bytes = 16_383_663_360
+overhead_bytes = 750_000_000
+kv_bytes_per_token = 147_456
+basis = "computed"
+measured_at_context = 8192
+
+# Qwen's own repo at bf16: a plain Qwen3ForCausalLM that stock mlx-lm 0.31.3 loads, scored
+# on Crucible's items route in the prompt form: the query once, then each document's tail.
+#   model-00001-of-00005.safetensors  4,027,618,768 B  sha256 22cdfea4a13b7b3e866573800eeeb638fc38962940adf631d06dc03befed047a
+#   model-00002-of-00005.safetensors  4,060,268,160 B  sha256 d2163b74137e35b4614bd2aa5bf27bcb07de4ca61c6962495feb968385eb0df8
+#   model-00003-of-00005.safetensors  4,043,508,680 B  sha256 a5038caa78c817e8acce6806104869675938a33fd4e60ed038e9931d390d6989
+#   model-00004-of-00005.safetensors  3,003,274,088 B  sha256 247f85538c5996d4c296291b0e4004f618c9b17ca8cdc25d1fc726567eb15803
+#   model-00005-of-00005.safetensors  1,242,472,576 B  sha256 8ba41b93c2e4ec8339ad16b000bc977fde196aeac054956cbfc8c0186ee6d4cf
+[backends.mlx-darwin]
+engine = "mlx-lm"
+hf_repo = "Qwen/Qwen3-Reranker-8B"
+revision = "77d193c791ed757ca307ee72715aa132723da912"
+bits = 16
+serves = ["text"]
+memory_bytes_estimate = 19_654_146_918
+engine_args = [
+    "--decode-concurrency", "1",
+    "--prompt-concurrency", "1",
+    "--prompt-cache-size", "1",
+]
+max_context = 32768
+
+[backends.mlx-darwin.memory]
+weights_bytes = 16_377_142_272
+overhead_bytes = 2_069_045_094
+kv_bytes_per_token = 147_456
+basis = "computed"
+measured_at_context = 8192

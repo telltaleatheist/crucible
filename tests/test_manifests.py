@@ -290,13 +290,15 @@ def test_an_unknown_model_id_names_what_is_shipped(tmp_path: Path) -> None:
 
 
 SHIPPED = [
-    "dots-ocr", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside",
+    "dots-ocr", "qwen3-embedding-8b", "qwen3-reranker-8b", "qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-4b-8bit", "qwen3.5-4b-bside",
     "qwen3.5-9b", "qwen3.8-27b-4bit", "qwen3.8-27b-8bit",
 ]
 ALIASES = ["qwen3.5-9b-vl", "qwen3.8-27b-4bit-vl"]
 
 CONTEXTS = {
     "dots-ocr": 32768,
+    "qwen3-embedding-8b": 8192,
+    "qwen3-reranker-8b": 8192,
     "qwen3.5-9b": 16384,
     "qwen3.5-4b": 16384,
     "qwen3.5-4b-8bit": 8192,
@@ -309,6 +311,9 @@ CONTEXTS = {
 
 BACKENDS = {
     "dots-ocr": ["cuda-linux", "llama-windows", "mlx-darwin"],
+    # The retrieval package: the 8B at bf16 on the PC and the Mac only (Owen, 2026-10-10).
+    "qwen3-embedding-8b": ["cuda-linux", "mlx-darwin"],
+    "qwen3-reranker-8b": ["cuda-linux", "mlx-darwin"],
     "qwen3.5-9b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     "qwen3.5-4b": ["cuda-linux", "llama-windows", "mlx-darwin"],
     # The 8-bit 4B is for an 8 GiB CUDA card (Victoria's 3070); bigger cards hold the 16-bit one.

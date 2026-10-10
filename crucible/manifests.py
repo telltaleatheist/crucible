@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from .backend import CUDA_LINUX, LLAMA_WINDOWS, MLX_DARWIN
+from .classnames import RETRIEVAL_PACKAGE
 from .errors import CrucibleError
 from .memorybudget import available_bytes, gib_text
 from .precision import MIN_WEIGHT_BITS, below_floor, gguf_bits, implied_bits
 from .tomltable import HF_REPO_PATTERN, MODEL_ID_PATTERN, REVISION_PATTERN, check_table
+from .verbspec import EmbedSpec, RerankSpec, VerbSpecError, parse_embed, parse_rerank
 
 MODELS_DIR_ENV = "CRUCIBLE_MODELS_DIR"
 
@@ -593,8 +595,20 @@ class ModelManifest:
     weights_base: "ModelManifest | None" = field(
         default=None, compare=False, repr=False
     )
+    # The model writes vectors (`embed`) or judges relevance with its own prompt
+    # (`rerank`): its [embed] or [rerank] table (crucible/verbspec.py).
+    embed: EmbedSpec | None = None
+    rerank: RerankSpec | None = None
 
     weights_family = "models"
+
+    @property
+    def package(self) -> str | None:
+        """The optional package this model is in (classnames.PACKAGE_NAMES): a model that
+        embeds or reranks with its own prompt is in `retrieval`, every other in none."""
+        if self.embed is not None or self.rerank is not None:
+            return RETRIEVAL_PACKAGE
+        return None
 
     @property
     def pull_command(self) -> str:
@@ -687,6 +701,8 @@ class ModelManifest:
             "description": self.description,
             "defaults": self.defaults.to_dict(),
             "weights_of": self.weights_of,
+            "embed": None if self.embed is None else self.embed.to_dict(),
+            "rerank": None if self.rerank is None else self.rerank.to_dict(),
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -957,7 +973,7 @@ def _parse_serves(
     return tuple(served)
 
 
-_TOP_LEVEL_TABLES = frozenset({"model", "backends", "defaults", "local"})
+_TOP_LEVEL_TABLES = frozenset({"model", "backends", "defaults", "local", "embed", "rerank"})
 
 
 def _check_document(document: dict[str, Any], path: Path) -> None:
@@ -965,8 +981,9 @@ def _check_document(document: dict[str, Any], path: Path) -> None:
     if unknown:
         raise ManifestError(
             f"{path.name}: unknown top-level table(s) {unknown}; a manifest has "
-            "exactly [model], [backends.<kind>], an optional [defaults] and an "
-            "optional [local]"
+            "exactly [model], [backends.<kind>], an optional [defaults], an "
+            "optional [local] and, for a model that embeds or reranks, its [embed] "
+            "or [rerank]"
         )
     if "model" not in document:
         raise ManifestError(f"{path.name}: missing the [model] table")
@@ -1504,11 +1521,38 @@ def _parse_backends(table: Any, path: Path, model: dict[str, Any]) -> dict[str, 
     return {kind: _parse_backend(kind, block, path, model) for kind, block in table.items()}
 
 
+def _parse_verbs(
+    document: dict[str, Any], path: Path, modalities: tuple[str, ...]
+) -> tuple[EmbedSpec | None, RerankSpec | None]:
+    """A model's [embed] or [rerank] table: the input format that belongs to its weights
+    (crucible/verbspec.py). One model is one or the other, and reads text only."""
+    stated = [name for name in ("embed", "rerank") if name in document]
+    if not stated:
+        return None, None
+    if len(stated) > 1:
+        raise ManifestError(
+            f"{path.name}: [embed] and [rerank] both; a model writes vectors or judges "
+            "relevance with its own prompt, never both"
+        )
+    if modalities != ("text",):
+        raise ManifestError(
+            f"{path.name}: [{stated[0]}] on a model whose modalities are "
+            f"{list(modalities)}; its format is written for text alone"
+        )
+    try:
+        if "embed" in document:
+            return parse_embed(document["embed"], f"{path.name} [embed]"), None
+        return None, parse_rerank(document["rerank"], f"{path.name} [rerank]")
+    except VerbSpecError as exc:
+        raise ManifestError(str(exc)) from None
+
+
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManifest:
     _check_document(document, path)
     model = _parse_model(document, path, expected_id)
     backends = _parse_backends(document["backends"], path, model)
     modalities = tuple(model["modalities"])
+    embed, rerank = _parse_verbs(document, path, modalities)
     defaults = document.get("defaults")
     local = document.get("local")
     return ModelManifest(
@@ -1525,6 +1569,8 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> ModelManif
         description=model.get("description"),
         weights_of=model.get("weights_of"),
         local=None if "local" not in document else _parse_local(local, path, modalities),
+        embed=embed,
+        rerank=rerank,
     )
 
 

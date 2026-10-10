@@ -33,6 +33,7 @@ from .decide import (
 from .engines.items_forward import (
     CANDIDATE_NOT_A_REPLY,
     CANDIDATE_TOO_LONG,
+    EMBED_INPUT_TOO_LONG,
     ITEM_TOO_LONG,
     ITEMS_PATH,
     PROMPT_TOO_LONG,
@@ -153,6 +154,10 @@ NEXT_STEP = {
     ),
     PROMPT_TOO_LONG: (
         "Send a shorter state, or load the model with a longer context "
+        "(POST /v1/jobs {\"type\": \"load-model\", \"model\": ..., \"context\": ...})"
+    ),
+    EMBED_INPUT_TOO_LONG: (
+        "Split that input, or load the model with a longer context "
         "(POST /v1/jobs {\"type\": \"load-model\", \"model\": ..., \"context\": ...})"
     ),
 }

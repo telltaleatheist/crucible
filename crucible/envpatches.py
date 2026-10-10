@@ -278,7 +278,7 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
     id="mlx-lm-decide-items-helper",
     distribution="mlx-lm",
     rel_path="mlx_lm/_crucible_items.py",
-    marker="ITEMS_VERSION = 5",
+    marker="ITEMS_VERSION = 6",
     absent_marker=None,
     stale_marker=None,
     script="patch_mlx_lm_decide_items_helper.py",
@@ -290,7 +290,9 @@ MLX_LM_DECIDE_ITEMS_HELPER = EnvPatch(
         "candidates; version 3 re-read each question's context and each "
         "candidate's last token in every candidate's row and applied the head "
         "once per candidate; version 4 read up to 2048 tokens per forward whatever "
-        "the model, 13 s of GPU on the 27B, long enough to freeze the desktop). "
+        "the model, 13 s of GPU on the 27B, long enough to freeze the desktop; "
+        "version 5 reads no embed request and no prompt-form likelihood, which the "
+        "embed and rerank doors send). "
         "MlxLmEngine applies it itself at start"
     ),
     creates=True,
@@ -371,6 +373,26 @@ MLX_LM_STRUCTURED_OUTPUT_HELPER = EnvPatch(
     creates=True,
 )
 
+MLX_LM_QWEN3_BARE_CHECKPOINT = EnvPatch(
+    id="mlx-lm-qwen3-bare-checkpoint",
+    distribution="mlx-lm",
+    rel_path="mlx_lm/models/qwen3.py",
+    marker='weights = {"model." + key: value for key, value in weights.items()}',
+    absent_marker=None,
+    stale_marker=None,
+    script="patch_mlx_lm_qwen3_bare_checkpoint.py",
+    why=(
+        "Qwen3-Embedding-8B is saved from transformers' AutoModel, the bare Qwen3Model: "
+        "keys without the `model.` prefix and no lm_head, and stock mlx-lm 0.31.3's "
+        "qwen3 Model.sanitize passes them on as they are, so load_weights refuses the "
+        "checkpoint (read in mlx_lm/models/qwen3.py and utils.load_model, 2026-10-10). "
+        "Patched, such a checkpoint's keys are prefixed and an untied head is given the "
+        "input embeddings: the embed route reads the hidden state and never the head. "
+        "A checkpoint with the prefix (every chat model) loads as before. MlxLmEngine "
+        "applies it itself at start"
+    ),
+)
+
 SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_DECIDE_ITEMS,
     MLX_LM_DECIDE_ITEMS_HELPER,
@@ -378,6 +400,7 @@ SELF_APPLIED_LLM_PATCHES: tuple[EnvPatch, ...] = (
     MLX_LM_STRUCTURED_OUTPUT_HELPER,
     MLX_LM_STRUCTURED_OUTPUT,
     MLX_LM_STRUCTURED_OUTPUT_BATCH,
+    MLX_LM_QWEN3_BARE_CHECKPOINT,
 )
 
 LLM_PATCHES: tuple[EnvPatch, ...] = (

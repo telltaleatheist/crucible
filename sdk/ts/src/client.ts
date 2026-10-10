@@ -116,6 +116,19 @@ import {
   type DecideRequest,
   type DecideResponse,
   type DoneData,
+  type EmbedEncoding,
+  type EmbedInputType,
+  type EmbedOptions,
+  type EmbedRequest,
+  type EmbedResponse,
+  type ModelEmbedInfo,
+  type ModelRerankInfo,
+  type RerankOptions,
+  type RerankRequest,
+  type RerankResponse,
+  type VerbInfo,
+  type VerbOptions,
+  type VerbTiming,
   type EngineOwner,
   type EngineRef,
   type Health,
@@ -388,6 +401,7 @@ export class CrucibleClient {
       },
       jobTypes: strArray(body, 'job_types', 'info'),
       features: strArray(body, 'features', 'info'),
+      verbs: readVerbsInfo(body),
       capabilities: capabilities.map((entry, index) => readCapability(entry, index)),
       ...role,
       pagesEngine: readPagesEngine(body, role.role),
@@ -1496,6 +1510,65 @@ export class CrucibleClient {
 
     const body = await this.#postDecide(payload, options, 'decideItems');
     return readDecideItemsResponse(body, items, report);
+  }
+
+  /** `POST` a verb's body with the client's (or the call's) `queue`, as {@link decide} does. */
+  async #postVerb(
+    path: string,
+    payload: Record<string, unknown>,
+    options: VerbOptions,
+    what: string,
+  ): Promise<Json> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options.act !== undefined) headers['X-Crucible-Act'] = requireText(options.act, 'act');
+    const queue = this.#callQueue(options.queue);
+    const body = queue === null ? payload : { ...payload, queue };
+    const init: RequestInit = { method: 'POST', headers, body: JSON.stringify(body) };
+    if (options.signal !== undefined) init.signal = options.signal;
+    return this.#json(path, init, what);
+  }
+
+  /**
+   * `POST /v1/embed` — unit-length vectors for a list of texts, the answer naming exactly what
+   * wrote them. Vectors compare only within one `model.fingerprint`: store it beside them and send
+   * it back as `fingerprint` on later calls, and a server that would write anything else refuses
+   * `409 fingerprint_mismatch` (a {@link CrucibleRefused}) instead of answering.
+   */
+  async embed(request: EmbedRequest, options: EmbedOptions = {}): Promise<EmbedResponse> {
+    const given = request as Partial<EmbedRequest> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('request', 'embed(...) needs {inputs, inputType}');
+    }
+    const inputs = readVerbTexts(given.inputs, 'inputs', MAX_VERB_TEXTS);
+    const inputType = readWord(given.inputType, EMBED_INPUT_TYPES, 'inputType');
+    const payload: Record<string, unknown> = { inputs, input_type: inputType };
+    if (given.instruction !== undefined) payload['instruction'] = requireText(given.instruction, 'instruction');
+    putVerbModel(payload, given);
+    if (given.fingerprint !== undefined) payload['fingerprint'] = requireText(given.fingerprint, 'fingerprint');
+    if (given.dimensions !== undefined) payload['dimensions'] = requireCount(given.dimensions, 'dimensions');
+    if (given.encodingFormat !== undefined) {
+      payload['encoding_format'] = readWord(given.encodingFormat, EMBED_ENCODINGS, 'encodingFormat');
+    }
+    const body = await this.#postVerb('/v1/embed', payload, options, 'embed');
+    return readEmbedResponse(body, inputs.length);
+  }
+
+  /**
+   * `POST /v1/rerank` — a relevance probability per document for one query (P(yes) against P(no)
+   * under the model's own prompt), in document order and sorted most relevant first.
+   */
+  async rerank(request: RerankRequest, options: RerankOptions = {}): Promise<RerankResponse> {
+    const given = request as Partial<RerankRequest> | undefined;
+    if (given === undefined || given === null) {
+      throw new CrucibleConfigError('request', 'rerank(...) needs {query, documents}');
+    }
+    const payload: Record<string, unknown> = { query: requireText(given.query, 'query') };
+    const documents = readVerbTexts(given.documents, 'documents', MAX_VERB_TEXTS);
+    payload['documents'] = documents;
+    if (given.instruction !== undefined) payload['instruction'] = requireText(given.instruction, 'instruction');
+    putVerbModel(payload, given);
+    const body = await this.#postVerb('/v1/rerank', payload, options, 'rerank');
+    return readRerankResponse(body, documents.length);
   }
 
   /**
@@ -3898,6 +3971,11 @@ function readModelInfo(entry: Json, where: string): ModelInfo {
     form: nullableStr(entry, 'form', where),
     formReason: nullableStr(entry, 'form_reason', where),
     forms: readModelForms(entry, where),
+    verbs: optStrArray(entry, 'verbs', where),
+    package: optStr(entry, 'package', where),
+    packageInstalled: optBool(entry, 'package_installed', where),
+    embed: readModelEmbed(entry, where),
+    rerank: readModelRerank(entry, where),
   };
 }
 
@@ -4349,6 +4427,239 @@ function readDecideItemsResponse(body: Json, items: readonly ReadItem[], report:
       images: num(tokens, 'images', `${where}.tokens`),
     },
   };
+}
+
+// --- embed and rerank -------------------------------------------------------------------
+
+/** What one `embed` or `rerank` call may carry (crucible/embed.py, crucible/rerank.py). */
+const MAX_VERB_TEXTS = 256;
+
+const EMBED_INPUT_TYPES: readonly EmbedInputType[] = ['query', 'document'];
+
+const EMBED_ENCODINGS: readonly EmbedEncoding[] = ['float', 'base64', 'base64_float16'];
+
+function readVerbTexts(value: unknown, option: string, most: number): string[] {
+  if (value === undefined || value === null) {
+    throw new CrucibleConfigError(option, 'is required and was not given');
+  }
+  const texts = requireStrings(value, option);
+  if (texts.length === 0 || texts.length > most) {
+    throw new CrucibleConfigError(option, `must hold 1 to ${most} texts, got ${texts.length}`);
+  }
+  texts.forEach((text, index) => {
+    if (text.trim() === '') throw new CrucibleConfigError(`${option}[${index}]`, 'is blank');
+  });
+  return texts;
+}
+
+function readWord<T extends string>(value: unknown, words: readonly T[], option: string): T {
+  if (value === undefined || value === null) {
+    throw new CrucibleConfigError(option, 'is required and was not given');
+  }
+  if (typeof value !== 'string' || !(words as readonly string[]).includes(value)) {
+    throw new CrucibleConfigError(
+      option,
+      `must be one of ${words.map((word) => `'${word}'`).join(', ')}, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value as T;
+}
+
+function requireCount(value: unknown, option: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new CrucibleConfigError(option, `must be a positive integer, got ${String(value)}`);
+  }
+  return value;
+}
+
+function putVerbModel(
+  payload: Record<string, unknown>,
+  given: { readonly model?: unknown; readonly form?: unknown; readonly maxParamsB?: unknown },
+): void {
+  if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+  if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
+  if (given.maxParamsB !== undefined) {
+    const ceiling = requireFinite(given.maxParamsB, 'maxParamsB');
+    if (ceiling <= 0) throw new CrucibleConfigError('maxParamsB', `must be above 0, got ${ceiling}`);
+    payload['max_params_b'] = ceiling;
+  }
+}
+
+function numArray(body: Json, key: string, where: string): number[] {
+  return arrayField(body, key, where).map((entry, index) => {
+    if (typeof entry !== 'number' || !Number.isFinite(entry)) {
+      throw new CrucibleProtocolError(`${where}.${key}[${index}] is not a finite number`);
+    }
+    return entry;
+  });
+}
+
+function readVerbTiming(body: Json, where: string): VerbTiming {
+  const timing = objectField(body, 'timing_ms', where);
+  return { total: num(timing, 'total', `${where}.timing_ms`), queued: nullableNum(timing, 'queued', `${where}.timing_ms`) };
+}
+
+function readEmbedResponse(body: Json, asked: number): EmbedResponse {
+  const where = 'embed';
+  const model = objectField(body, 'model', where);
+  const at = `${where}.model`;
+  const encodingFormat = oneOf(str(body, 'encoding_format', where), EMBED_ENCODINGS, `${where}.encoding_format`);
+  const dimensions = num(body, 'dimensions', where);
+  const raw = arrayField(body, 'embeddings', where);
+  if (raw.length !== asked) {
+    throw new CrucibleProtocolError(`${where}.embeddings holds ${raw.length} vectors for ${asked} inputs`);
+  }
+  const embeddings =
+    encodingFormat === 'float'
+      ? raw.map((vector, index) => {
+          const values = numArray({ v: vector } as Json, 'v', `${where}.embeddings[${index}]`);
+          if (values.length !== dimensions) {
+            throw new CrucibleProtocolError(
+              `${where}.embeddings[${index}] has ${values.length} values, not ${dimensions}`,
+            );
+          }
+          return values;
+        })
+      : raw.map((vector, index) => {
+          if (typeof vector !== 'string') {
+            throw new CrucibleProtocolError(`${where}.embeddings[${index}] is not a base64 string`);
+          }
+          return vector;
+        });
+  const tokens = objectField(body, 'tokens', where);
+  const perInput = numArray(tokens, 'per_input', `${where}.tokens`);
+  if (perInput.length !== asked) {
+    throw new CrucibleProtocolError(`${where}.tokens.per_input holds ${perInput.length} counts for ${asked} inputs`);
+  }
+  return {
+    model: {
+      id: str(model, 'id', at),
+      revision: str(model, 'revision', at),
+      file: nullableStr(model, 'file', at),
+      form: nullableStr(model, 'form', at),
+      bits: nullableNum(model, 'bits', at),
+      engine: str(model, 'engine', at),
+      engineBuild: str(model, 'engine_build', at),
+      scheme: num(model, 'scheme', at),
+      fingerprint: str(model, 'fingerprint', at),
+      dimensions: num(model, 'dimensions', at),
+    },
+    dimensions,
+    inputType: oneOf(str(body, 'input_type', where), EMBED_INPUT_TYPES, `${where}.input_type`),
+    instruction: nullableStr(body, 'instruction', where),
+    encodingFormat,
+    embeddings,
+    tokens: { perInput, total: num(tokens, 'total', `${where}.tokens`) },
+    timingMs: readVerbTiming(body, where),
+  };
+}
+
+function readRerankResponse(body: Json, asked: number): RerankResponse {
+  const where = 'rerank';
+  const model = objectField(body, 'model', where);
+  const at = `${where}.model`;
+  const scores = numArray(body, 'scores', where);
+  if (scores.length !== asked) {
+    throw new CrucibleProtocolError(`${where}.scores holds ${scores.length} scores for ${asked} documents`);
+  }
+  const results = arrayField(body, 'results', where).map((raw, index) => {
+    const row = asObject(raw, `${where}.results[${index}]`);
+    return {
+      index: num(row, 'index', `${where}.results[${index}]`),
+      relevanceScore: num(row, 'relevance_score', `${where}.results[${index}]`),
+    };
+  });
+  const seen = results.map((result) => result.index).sort((a, b) => a - b);
+  if (seen.length !== asked || seen.some((index, at2) => index !== at2)) {
+    throw new CrucibleProtocolError(`${where}.results does not name each of the ${asked} documents once`);
+  }
+  const tokens = objectField(body, 'tokens', where);
+  return {
+    model: {
+      id: str(model, 'id', at),
+      revision: str(model, 'revision', at),
+      file: nullableStr(model, 'file', at),
+      form: nullableStr(model, 'form', at),
+      engine: str(model, 'engine', at),
+      engineBuild: str(model, 'engine_build', at),
+      template: str(model, 'template', at),
+      fingerprint: str(model, 'fingerprint', at),
+    },
+    instruction: str(body, 'instruction', where),
+    scores,
+    results,
+    tokens: {
+      perDocument: numArray(tokens, 'per_document', `${where}.tokens`),
+      total: num(tokens, 'total', `${where}.tokens`),
+      cached: nullableNum(tokens, 'cached', `${where}.tokens`),
+    },
+    timingMs: readVerbTiming(body, where),
+  };
+}
+
+function readModelEmbed(entry: Json, where: string): ModelEmbedInfo | null {
+  const embed = optObject(entry, 'embed', where);
+  if (embed === null) return null;
+  const at = `${where}.embed`;
+  const range = numArray(embed, 'dimensions_range', at);
+  if (range.length !== 2) throw new CrucibleProtocolError(`${at}.dimensions_range is not [low, high]`);
+  return {
+    dimensions: num(embed, 'dimensions', at),
+    dimensionsRange: [range[0] as number, range[1] as number],
+    matryoshka: bool(embed, 'matryoshka', at),
+    pooling: str(embed, 'pooling', at),
+    normalized: bool(embed, 'normalized', at),
+    inputTypes: strArray(embed, 'input_types', at),
+    queryTakesInstruction: bool(embed, 'query_takes_instruction', at),
+    defaultInstruction: nullableStr(embed, 'default_instruction', at),
+    queryTemplate: str(embed, 'query_template', at),
+    documentTemplate: str(embed, 'document_template', at),
+    source: str(embed, 'source', at),
+    maxInputs: num(embed, 'max_inputs', at),
+    maxInputTokens: nullableNum(embed, 'max_input_tokens', at),
+  };
+}
+
+function readModelRerank(entry: Json, where: string): ModelRerankInfo | null {
+  const rerank = optObject(entry, 'rerank', where);
+  if (rerank === null) return null;
+  const at = `${where}.rerank`;
+  return {
+    template: str(rerank, 'template', at),
+    defaultInstruction: str(rerank, 'default_instruction', at),
+    maxDocuments: num(rerank, 'max_documents', at),
+    maxTokens: nullableNum(rerank, 'max_tokens', at),
+    prefixTemplate: optStr(rerank, 'prefix_template', at),
+    documentTemplate: optStr(rerank, 'document_template', at),
+    yes: optStr(rerank, 'yes', at),
+    no: optStr(rerank, 'no', at),
+    source: optStr(rerank, 'source', at),
+  };
+}
+
+function readVerbsInfo(body: Json): Record<string, VerbInfo> | null {
+  const verbs = optObject(body, 'verbs', 'info');
+  if (verbs === null) return null;
+  const read: Record<string, VerbInfo> = {};
+  for (const name of Object.keys(verbs)) {
+    const at = `info.verbs.${name}`;
+    const verb = objectField(verbs, name, 'info.verbs');
+    const limits = objectField(verb, 'limits', at);
+    read[name] = {
+      route: str(verb, 'route', at),
+      available: bool(verb, 'available', at),
+      registered: nullableStr(verb, 'registered', at),
+      reason: nullableStr(verb, 'reason', at),
+      package: nullableStr(verb, 'package', at),
+      packageInstalled: bool(verb, 'package_installed', at),
+      models: strArray(verb, 'models', at),
+      limits: {
+        maxInputs: optNum(limits, 'max_inputs', `${at}.limits`),
+        maxDocuments: optNum(limits, 'max_documents', `${at}.limits`),
+      },
+    };
+  }
+  return read;
 }
 
 function readDecideResponse(

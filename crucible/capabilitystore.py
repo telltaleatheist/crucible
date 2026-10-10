@@ -20,6 +20,7 @@ def decide_on(
     card: CardFacts | None,
     chosen: Mapping[str, str],
     audio_low_vram: bool,
+    packages: frozenset[str],
 ) -> tuple[verdict.Decision, ...]:
     return verdict.decide_all(
         backend_kind,
@@ -29,6 +30,7 @@ def decide_on(
         chosen=chosen,
         audio_low_vram=audio_low_vram,
         card=card,
+        packages=packages,
     )
 
 
@@ -54,6 +56,7 @@ def decide_for(
         chosen={entry.capability: entry.model for entry in config.local_models},
         audio_low_vram=low_vram_for(config, backend).on,
         card=card if card is not None else card_for(config.home, backend.gpu),
+        packages=config.packages,
     )
 
 

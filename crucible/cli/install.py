@@ -6,10 +6,20 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from .. import capabilitywords, hosttools, interpreter, jobenv, llamacpp, verdict
+from .. import (
+    capabilitywords,
+    hosttools,
+    interpreter,
+    jobenv,
+    llamacpp,
+    packages,
+    verdict,
+    weights,
+)
 from ..backend import CUDA_LINUX, LLAMA_WINDOWS, Backend
+from ..classnames import PACKAGE_NAMES
 from ..config import Config
 from ..jobenv import INSTALLABLE_JOB_TYPES, SMOKE_IMPORT
 from ..narratorengines import NARRATOR_ENGINE_SAMPLING
@@ -131,7 +141,69 @@ def _smoke_import(python: Path, key: str, backend_kind: str) -> str | None:
     )
 
 
+def _package_refusal(config: Config, backend: Backend, models: list, host: Any) -> str | None:
+    """Why this server cannot take the package's models: an engine it has not installed,
+    or a card that does not hold one of them. Nothing is pulled when it cannot."""
+    from ..jobs.llm import llm_engine_status
+
+    for manifest in models:
+        spec = manifest.spec(backend.kind, host=host)
+        engine = llm_engine_status(config, backend, spec.engine)
+        if not engine.installed:
+            return (
+                f"{manifest.id} runs on {spec.engine}, which is not installed here: "
+                f"{engine.detail}. Run `crucible install llm` first. Nothing was pulled"
+            )
+        if spec.memory_bytes_estimate > host.available_bytes:
+            return (
+                f"{manifest.id} needs {spec.memory_bytes_estimate / 1024 ** 3:.1f} GiB and "
+                f"{host.words()}: this card does not hold the package. Nothing was pulled"
+            )
+    return None
+
+
+def _install_package(
+    config: Config, backend: Backend, package: str, args: argparse.Namespace
+) -> int:
+    """`crucible install <package>`: every model of the optional package this backend
+    runs, pulled (the form this card takes), then `[packages] <package> = true` written
+    and this card's capability decided again, so its verbs pick from them."""
+    from ..config import load_config, rewrite_config
+    from ..manifests import host_fit_of, load_all_manifests
+
+    if args.narrator_engine is not None:
+        return _fail(f"--narrator-engine means nothing for the {package} package")
+    models = packages.models_of(package, load_all_manifests(), backend.kind)
+    if not models:
+        return _fail(f"the {package} package has no model with a {backend.kind} block")
+    print(f"package: {package}, {packages.PURPOSE[package]}")
+    host = host_fit_of(config, backend)
+    refusal = _package_refusal(config, backend, models, host)
+    if refusal is not None:
+        return _fail(refusal)
+    for manifest in models:
+        spec = manifest.spec(backend.kind, host=host)
+        print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
+        try:
+            result = weights.pull(
+                config, manifest, spec, force=args.force,
+                on_line=lambda line: print(f"  {line}"),
+            )
+        except weights.WeightsError as exc:
+            return _fail(
+                f"{exc}. The package is not turned on; `crucible install {package}` again "
+                "pulls only what is missing"
+            )
+        print(f"{manifest.id}: {result.bytes / 1e9:.2f} GB at {result.path}")
+    rewrite_config(config, unowned={"packages": {package: True}})
+    print(f"[packages] {package} = true")
+    return _capability_step(load_config(config.home), backend, "llm")
+
+
 def cmd_install(args: argparse.Namespace) -> int:
+    if args.job_type in PACKAGE_NAMES:
+        config, backend = common.here()
+        return _install_package(config, backend, args.job_type, args)
     missing = jobenv.no_installer(args.job_type)
     if missing is not None:
         if missing.shared_with is not None:
@@ -371,9 +443,12 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     install.add_argument(
         "job_type",
-        choices=sorted(INSTALLABLE_JOB_TYPES),
+        choices=sorted({*INSTALLABLE_JOB_TYPES, *PACKAGE_NAMES}),
         help=(
-            "the job type to install. 'rvc' also installs 'denoise', which "
+            "the job type or optional package to install. 'retrieval' is the embed and "
+            "rerank verbs' models (Qwen3-Embedding-8B and Qwen3-Reranker-8B at bf16, "
+            "about 16 GB each), pulled and turned on; it needs 'llm' installed first and "
+            "a card that holds them. 'rvc' also installs 'denoise', which "
             "shares its env (audio-separator is torch, and the rvc env already "
             "holds the torch it wants). 'audio' builds one env per audio engine "
             "this backend runs (Stable Audio 3; YuE2 on cuda-linux). 'segment' "

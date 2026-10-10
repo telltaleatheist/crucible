@@ -11,6 +11,7 @@ from starlette.background import BackgroundTask
 
 from ... import upstreamrecord
 from ...callqueue import take_a_turn
+from ...embed import refuse_vectors_only
 from ...engines import (
     chat_admission,
     chat_prefill_reading,
@@ -237,6 +238,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
         refuse_unknown_form(requested, form, ctx.backend.kind)
+        refuse_vectors_only(requested, "chat")
         _refuse_before_waiting(body, requested, ctx.backend.kind, prefill, json_whitespace)
         inflight = ctx.inflight
         act = read_act(request.headers)

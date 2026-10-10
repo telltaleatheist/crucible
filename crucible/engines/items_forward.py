@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
-ITEMS_VERSION = 5
+ITEMS_VERSION = 6
 
 ITEMS_PATH = "/v1/crucible/items"
 
@@ -50,6 +50,7 @@ LIKELIHOOD_FIELDS = frozenset(
     {
         "model",
         "messages",
+        "prompt",
         "candidates",
         "chat_template_kwargs",
         "max_prompt_tokens",
@@ -57,6 +58,10 @@ LIKELIHOOD_FIELDS = frozenset(
         "max_candidate_tokens",
     }
 )
+
+EMBED_FIELDS = frozenset({"model", "inputs", "max_input_tokens"})
+
+EMBED_INPUT_TOO_LONG = "embed_input_too_long"
 
 SCORE_CHUNK = 64
 """Positions one head application reads when a candidate's tokens are scored:
@@ -200,12 +205,18 @@ class CandidateGroup:
 @dataclass(frozen=True)
 class LikelihoodAsk:
     model: str
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] | None
+    """The chat form: the turns every question completes, rendered by the model's chat
+    template; None in the prompt form."""
     groups: list[CandidateGroup]
     template_kwargs: dict[str, Any]
     max_prompt_tokens: int
     max_item_tokens: int
     max_candidate_tokens: int
+    prompt: str | None = None
+    """The prompt form: text every question continues, as it is (Crucible rendered it
+    from the model's manifest); each question's text, then each candidate's, appended to
+    it and tokenized whole with no special tokens added. None in the chat form."""
 
 
 def _groups(body: dict[str, Any]) -> list[CandidateGroup]:
@@ -233,6 +244,20 @@ def _groups(body: dict[str, Any]) -> list[CandidateGroup]:
     return read
 
 
+def _prompt(body: dict[str, Any]) -> str:
+    prompt = body.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise ItemsRefusal(400, "bad_prompt", "prompt must be a non-empty string")
+    if "messages" in body or "chat_template_kwargs" in body:
+        raise ItemsRefusal(
+            400,
+            "prompt_and_messages",
+            "a likelihood request is the chat form (messages, chat_template_kwargs) or the "
+            "prompt form (prompt), never both",
+        )
+    return prompt
+
+
 def parse_likelihood(body: dict[str, Any], served: Sequence[str]) -> LikelihoodAsk:
     unknown = sorted(set(body) - LIKELIHOOD_FIELDS)
     if unknown:
@@ -246,21 +271,65 @@ def parse_likelihood(body: dict[str, Any], served: Sequence[str]) -> LikelihoodA
         raise ItemsRefusal(
             404, "model_not_found", f"{body.get('model')!r} is not loaded; {served[0]!r} is"
         )
+    raw = "prompt" in body
     return LikelihoodAsk(
         model=body["model"],
-        messages=_messages(body),
+        messages=None if raw else _messages(body),
         groups=_groups(body),
-        template_kwargs=_template_kwargs(body),
+        template_kwargs={} if raw else _template_kwargs(body),
         max_prompt_tokens=_positive_int(body, "max_prompt_tokens"),
         max_item_tokens=_positive_int(body, "max_item_tokens"),
         max_candidate_tokens=_positive_int(body, "max_candidate_tokens"),
+        prompt=_prompt(body) if raw else None,
     )
 
 
-def parse_request(body: Any, served: Sequence[str]) -> ItemsAsk | LikelihoodAsk:
-    """The items route reads two asks: questions, whose answer is the top tokens
-    at each prompt's end, and candidates, whose answer is the log-probability of
-    every token of each candidate reply."""
+@dataclass(frozen=True)
+class EmbedAsk:
+    """Texts to vectors: each input as it is (Crucible rendered it from the model's
+    manifest, its end-of-text marker included), tokenized with no special tokens added;
+    its vector is the model's last hidden state at its last token, unnormalised."""
+
+    model: str
+    inputs: list[str]
+    max_input_tokens: int
+
+
+def parse_embed(body: dict[str, Any], served: Sequence[str]) -> EmbedAsk:
+    unknown = sorted(set(body) - EMBED_FIELDS)
+    if unknown:
+        raise ItemsRefusal(
+            400,
+            "unknown_field",
+            f"an embed request does not carry {unknown}; it reads {sorted(EMBED_FIELDS)}",
+        )
+    if body.get("model") not in served:
+        raise ItemsRefusal(
+            404, "model_not_found", f"{body.get('model')!r} is not loaded; {served[0]!r} is"
+        )
+    inputs = body.get("inputs")
+    if (
+        not isinstance(inputs, list)
+        or not inputs
+        or not all(isinstance(text, str) and text for text in inputs)
+    ):
+        raise ItemsRefusal(
+            400, "bad_inputs", "inputs must be a non-empty list of non-empty strings"
+        )
+    return EmbedAsk(
+        model=body["model"],
+        inputs=list(inputs),
+        max_input_tokens=_positive_int(body, "max_input_tokens"),
+    )
+
+
+def parse_request(body: Any, served: Sequence[str]) -> ItemsAsk | LikelihoodAsk | EmbedAsk:
+    """The items route reads three asks: questions, whose answer is the top tokens
+    at each prompt's end; candidates, whose answer is the log-probability of
+    every token of each candidate reply; and inputs, whose answer is each one's
+    vector."""
+    if isinstance(body, dict) and "inputs" in body:
+        return parse_embed(body, served)
     if isinstance(body, dict) and "candidates" in body:
         return parse_likelihood(body, served)
     return parse_items(body, served)
@@ -395,9 +464,31 @@ def likelihood_prompts(
     tokenize_context: Callable[[list[dict[str, Any]]], Sequence[int]],
     tokenize_reply: Callable[[list[dict[str, Any]]], Sequence[int]],
 ) -> LikelihoodSplit:
-    contexts = [tokenize_context(item_messages(ask.messages, group.question)) for group in ask.groups]
+    """The chat form's split: each question's context and each candidate's prompt
+    rendered by the chat template."""
+    assert ask.messages is not None, "the prompt form is split by prompt_likelihood_split"
+    messages = ask.messages
+    contexts = [tokenize_context(item_messages(messages, group.question)) for group in ask.groups]
     candidates = [
-        [tokenize_reply(reply_messages(ask.messages, group.question, text)) for text in group.texts]
+        [tokenize_reply(reply_messages(messages, group.question, text)) for text in group.texts]
+        for group in ask.groups
+    ]
+    return likelihood_split(
+        contexts, candidates, ask.max_prompt_tokens, ask.max_item_tokens,
+        ask.max_candidate_tokens,
+    )
+
+
+def prompt_likelihood_split(
+    ask: LikelihoodAsk, tokenize: Callable[[str], Sequence[int]]
+) -> LikelihoodSplit:
+    """The prompt form's split: each question's context is the prompt and the question
+    as one text, each candidate's prompt that text and the candidate, every one
+    tokenized whole."""
+    assert ask.prompt is not None, "the chat form is split by likelihood_prompts"
+    contexts = [tokenize(ask.prompt + group.question) for group in ask.groups]
+    candidates = [
+        [tokenize(ask.prompt + group.question + text) for text in group.texts]
         for group in ask.groups
     ]
     return likelihood_split(
@@ -827,7 +918,7 @@ def refusal_document(refusal: ItemsRefusal) -> dict[str, Any]:
 
 @dataclass
 class MlxLmItemsJob:
-    ask: ItemsAsk | LikelihoodAsk
+    ask: ItemsAsk | LikelihoodAsk | EmbedAsk
 
 
 def state_bytes(cache: list[Any]) -> int:
@@ -946,20 +1037,31 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     # an items pass holds the GPU no longer per evaluation than a chat's prompt.
     step = provider.cli_args.prefill_step_size
 
+    if isinstance(ask, EmbedAsk):
+        return mlx_lm_embed(model, inner, tokenizer, ask, step)
+
     def tokenize(messages: list[dict[str, Any]], reply: bool = False) -> list[int]:
         return list(tokenizer.apply_chat_template(
             messages, add_generation_prompt=not reply, tokenize=True,
             **({"continue_final_message": True} if reply else {}), **ask.template_kwargs,
         ))
 
-    open_turn = tokenize(item_messages(ask.messages, ""))
+    def encode(text: str) -> list[int]:
+        return list(tokenizer.encode(text, add_special_tokens=False))
+
     if isinstance(ask, LikelihoodAsk):
-        likely = likelihood_prompts(ask, tokenize, lambda messages: tokenize(messages, True))
+        if ask.prompt is None:
+            assert ask.messages is not None
+            likely = likelihood_prompts(ask, tokenize, lambda messages: tokenize(messages, True))
+            open_turn = tokenize(item_messages(ask.messages, ""))
+        else:
+            likely = prompt_likelihood_split(ask, encode)
+            open_turn = encode(ask.prompt)
         # The state is kept where it ends, as for items: what every row shares
-        # with the open turn left empty. Only the state is read as shared: what
-        # follows it up to each question's boundary is that question's own pass,
-        # which also yields the hidden state its candidates' first tokens are
-        # read from.
+        # with the open turn left empty (in the prompt form, the prompt). Only the
+        # state is read as shared: what follows it up to each question's boundary
+        # is that question's own pass, which also yields the hidden state its
+        # candidates' first tokens are read from.
         state_end = min(len(likely.shared), common_prefix([*likely_rows(likely), open_turn]))
         held = MlxLmShared(model, inner, likely.shared[:state_end], state_end, step)
         logprobs = read_likelihood_rows(
@@ -969,6 +1071,7 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
         )
         return likelihood_document(likely, logprobs, held.reused)
 
+    open_turn = tokenize(item_messages(ask.messages, ""))
     prompts = [tokenize(item_messages(ask.messages, question)) for question in ask.questions]
     split = split_shared(prompts, ask.max_prompt_tokens, ask.max_item_tokens)
     # Where the state ends: what every item shares with the open turn left
@@ -995,6 +1098,70 @@ def mlx_lm_answer(provider: Any, job: MlxLmItemsJob) -> dict[str, Any]:
     return items_document(
         split, tops, lambda token: tokenizer.convert_ids_to_tokens([token])[0], held.reused
     )
+
+
+def embed_ids(
+    tokenizer: Any, ask: EmbedAsk
+) -> list[list[int]]:
+    """Each input's tokens as the model reads it, every refusal made before a forward."""
+    ids = [list(tokenizer.encode(text, add_special_tokens=False)) for text in ask.inputs]
+    for index, row in enumerate(ids):
+        if len(row) > ask.max_input_tokens:
+            raise ItemsRefusal(
+                400,
+                EMBED_INPUT_TOO_LONG,
+                f"input {index} is {len(row)} tokens; one input may be at most "
+                f"{ask.max_input_tokens}",
+                {"input": index, "tokens": len(row), "max_tokens": ask.max_input_tokens},
+            )
+    return ids
+
+
+def embed_document(ids: Sequence[Sequence[int]], vectors: Sequence[Sequence[float]]) -> dict[str, Any]:
+    widths = {len(vector) for vector in vectors}
+    if len(vectors) != len(ids) or len(widths) != 1:
+        raise ItemsRefusal(
+            500, "engine_error",
+            f"{len(vectors)} vectors of widths {sorted(widths)} for {len(ids)} inputs",
+        )
+    for index, vector in enumerate(vectors):
+        if not all(math.isfinite(value) for value in vector):
+            raise ItemsRefusal(
+                500, "engine_error", f"input {index}'s vector has a value that is not finite",
+                {"input": index},
+            )
+    return {
+        "object": "crucible.embeddings",
+        "dimensions": widths.pop(),
+        "data": [
+            {"embedding": [float(v) for v in vector], "tokens": len(row)}
+            for row, vector in zip(ids, vectors)
+        ],
+    }
+
+
+def mlx_lm_embed(model: Any, inner: Any, tokenizer: Any, ask: EmbedAsk, step: int) -> dict[str, Any]:
+    """Every input's vector: the inner model's last hidden state (after its final norm,
+    what transformers' AutoModel calls last_hidden_state) at the input's last token,
+    unnormalised. Inputs are rows of one forward where they fit the step (right-padded:
+    the model is causal, so a real position never reads the padding after it), and a
+    long one is read in pieces of the step over its own cache."""
+    import mlx.core as mx
+
+    ids = embed_ids(tokenizer, ask)
+    reader = MlxLmShared(model, inner, [], 0, step)
+    vectors: list[list[float] | None] = [None] * len(ids)
+    for group in row_groups(ids, lambda longest: rows_per_pass(0, longest, step)):
+        rows, lasts = padded([ids[index] for index in group])
+        hidden = reader.rows_hidden([], rows)
+        picked = hidden[mx.arange(len(rows)), mx.array(lasts)].astype(mx.float32)
+        mx.eval(picked)
+        for index, vector in zip(group, picked.tolist()):
+            vectors[index] = vector
+    mx.clear_cache()
+    done = [vector for vector in vectors if vector is not None]
+    assert len(done) == len(ids)
+    return embed_document(ids, done)
 
 
 def likely_rows(split: LikelihoodSplit) -> list[list[int]]:
