@@ -507,9 +507,12 @@ JOB_DOCS: dict[str, JobDoc] = {
         model="An audio model id (GET /v1/catalog): `stable-audio-3-small-sfx` (sound "
         "effects), `stable-audio-3-medium` (music), `yue2-3b` (songs).",
         params=AudioParams,
-        inputs="None; an audio job reads no files (`invalid_inputs`).",
+        inputs="None, except a YuE2 cover: exactly one input, the score `score` names "
+        "(YuE2's two-voice ABC, uploaded or `{\"artifact\": {\"job_id\", \"name\"}}` of "
+        "a held job). Any other input is `invalid_inputs`.",
         returns="`audio.flac` (24-bit, the default), `audio.wav` or `audio.mp3` (192 "
-        "kbps), per `format`; a song adds `score.abc`, the score YuE2 writes first. "
+        "kbps), per `format`; a song adds `score.abc`, the score YuE2 rendered, and a "
+        "cover `given-score.abc`, the score as it was sent. "
         "The `done` event gives `audio`, every effective parameter (seed included) "
         "plus timings and memory, and `resident` " + RESIDENT_AFTER_A_JOB + ".",
         example={
@@ -537,6 +540,18 @@ JOB_DOCS: dict[str, JobDoc] = {
             "(docs/AUDIO.md). `planning_set` names a pool set instead (its ids are the "
             "`planning_set` options in GET /v1/playground; an unknown one is "
             "`planning_set_unknown` with the ids).",
+            "A cover renders a given score instead of planning one (docs/AUDIO.md "
+            "\"Covers\"): `score` names the input, `instrumental: true` moves its Vocal "
+            "melody to the instrument and sings nothing (no `lyrics`), and without it the "
+            "melody is sung with `lyrics` the client wrote to the score's phrases. `chords` "
+            "(`keep` or `strip`; null keeps them for an instrumental, strips them for a "
+            "sung cover) decides cot `full` or `melody`. `planning_lyrics`, `planning_set` "
+            "and a length range are refused beside a score (`audio_param_conflict`). A "
+            "score the skill's parser refuses fails the job `score_invalid` before YuE2 "
+            "loads; one longer than 360 s `score_too_long`; one past the 4096-token "
+            "planning budget `score_too_many_tokens`. `audio.cover` records the kind, "
+            "source (`upload` or `reference`), cot, chords, `score_tokens` and "
+            "`score_seconds`.",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics; "
             "`min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) are a "

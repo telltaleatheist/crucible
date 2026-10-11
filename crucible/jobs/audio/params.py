@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...audiomodels import KIND_WORDS, OPTIONAL_PARAMS, AudioBackendSpec, AudioManifest
 from ...errors import ApiError
+from ..base import validate_member_name
 from . import planning
 
 MAX_SEED = 2**32 - 1
@@ -23,7 +24,7 @@ MIN_SONG_SECONDS = 30.0
 FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 
 TEXT_FIELDS: tuple[str, ...] = (
-    "prompt", "tags", "lyrics", "planning_lyrics", "planning_set", "negative_prompt"
+    "prompt", "tags", "lyrics", "planning_lyrics", "planning_set", "negative_prompt", "score"
 )
 
 # A lyrics line that is only a section tag ([Verse], [Chorus], ...): all an instrumental's
@@ -120,6 +121,22 @@ class AudioParams(BaseModel):
         description="Songs (YuE2): true renders the planned melody on an instrument, "
         "so nothing is sung. Null is false.",
     )
+    score: str | None = Field(
+        default=None,
+        description="Covers (YuE2): the name of the job's input that carries a score "
+        "(YuE2's two-voice ABC, uploaded or another job's held artifact), rendered "
+        "instead of a score YuE2 plans. With `instrumental` its Vocal melody moves to the "
+        "instrument and nothing is sung; without it the melody is sung with `lyrics`, "
+        "written to the score's phrases. Never beside planning_lyrics, planning_set or "
+        "a length range (docs/AUDIO.md \"Covers\").",
+    )
+    chords: Literal["keep", "strip"] | None = Field(
+        default=None,
+        description="Covers (YuE2), only beside `score`: keep the score's chord symbols "
+        "(YuE2 renders with cot `full`, the harmony fixed) or strip them (cot `melody`, "
+        "the accompaniment free). Null keeps them for an instrumental cover and strips "
+        "them for a sung one, as YuE2's own skill does.",
+    )
     format: Literal["flac", "wav", "mp3"] = Field(
         default="flac",
         description="The artifact: `flac` (24-bit), `wav` (24-bit PCM) or `mp3` "
@@ -131,6 +148,13 @@ class AudioParams(BaseModel):
     def says_something(cls, value: str | None) -> str | None:
         if value is not None and value.strip() == "":
             raise ValueError("is empty; send words, or leave the param out")
+        return value
+
+    @field_validator("score")
+    @classmethod
+    def names_an_input(cls, value: str | None) -> str | None:
+        if value is not None:
+            validate_member_name(value)
         return value
 
     @field_validator("planning_lyrics")
@@ -189,14 +213,15 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
         )
     if params.lyrics is not None and not manifest.takes_lyrics:
         raise _not_taken("lyrics", manifest, spec)
+    if params.score is not None or params.chords is not None:
+        _refuse_score(params, manifest, spec)
     if params.instrumental and params.lyrics is not None:
-        sung = [line for line in params.lyrics.splitlines()
-                if line.strip() and not SECTION_TAG.fullmatch(line.strip())]
+        sung = sung_lines(params.lyrics)
         if sung:
             raise _refusal(
                 "audio_param_conflict",
                 f"an instrumental sings nothing, but these lyrics have words to sing "
-                f"({sung[0].strip()!r} first). Untick instrumental to sing them, or send "
+                f"({sung[0]!r} first). Untick instrumental to sing them, or send "
                 "only section tags such as [Verse] and [Chorus] to shape the instrumental",
                 manifest,
                 spec,
@@ -222,6 +247,71 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
             manifest,
             spec,
             missing=missing,
+        )
+
+
+# What a given score replaces: the words a score is planned from and the length a planned
+# score is sized toward. Beside a score they would mean nothing, so they are refused.
+PLANNING_ONLY: tuple[str, ...] = (
+    "planning_lyrics", "planning_set", "min_duration_s", "max_duration_s"
+)
+
+
+def sung_lines(lyrics: str) -> list[str]:
+    """The lines of `lyrics` that are words to sing, not section tags or blanks."""
+    return [line.strip() for line in lyrics.splitlines()
+            if line.strip() and not SECTION_TAG.fullmatch(line.strip())]
+
+
+def _refuse_score(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    """A cover (docs/AUDIO.md "Covers"): the score is the plan, so nothing that plans or
+    sizes one is taken beside it; an instrumental cover sings nothing and takes no lyrics;
+    a sung cover needs words to sing."""
+    for param in ("score", "chords"):
+        if getattr(params, param) is not None and param not in spec.takes:
+            raise _not_taken(param, manifest, spec)
+    if params.score is None:
+        raise _refusal(
+            "audio_param_conflict",
+            "chords keeps or strips the chord symbols of a given score, and this song has "
+            "none. Send `score` naming the input that carries it, or drop `chords`",
+            manifest,
+            spec,
+            param="chords",
+        )
+    for param in PLANNING_ONLY:
+        if getattr(params, param) is not None:
+            raise _refusal(
+                "audio_param_conflict",
+                f"a cover renders the score it is given, so nothing is planned and nothing "
+                f"is sized: {param} means nothing beside `score`. Drop {param!r}; the "
+                "score's own bars and tempo are the song's length",
+                manifest,
+                spec,
+                param=param,
+            )
+    if params.instrumental:
+        if params.lyrics is not None:
+            raise _refusal(
+                "audio_param_conflict",
+                "an instrumental cover sings nothing, and its section tags come from the "
+                "score itself. Drop `lyrics`, or untick instrumental to sing them to the "
+                "score's melody",
+                manifest,
+                spec,
+                param="lyrics",
+            )
+        return
+    if params.lyrics is None or not sung_lines(params.lyrics):
+        raise _refusal(
+            "audio_param_missing",
+            "a sung cover sings new words to the score's Vocal melody, and these lyrics "
+            f"{'are missing' if params.lyrics is None else 'have only section tags'}. Send "
+            "`lyrics` written to the score's phrases, in sections tagged [Verse], [Chorus] "
+            "and so on, or send `instrumental: true` to play the melody",
+            manifest,
+            spec,
+            missing=["lyrics"],
         )
 
 
@@ -401,7 +491,8 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
 def _planning_lyrics(params: AudioParams, spec: AudioBackendSpec, seed: int) -> dict[str, Any] | None:
     if params.planning_lyrics is not None:
         return planning.record(planning.REQUEST, params.planning_lyrics, None)
-    if not params.instrumental or params.lyrics is not None:
+    # A cover's score is given, not planned (docs/AUDIO.md "Covers").
+    if not params.instrumental or params.lyrics is not None or params.score is not None:
         return None
     pool = planning.load_pool(spec.engine)
     if params.planning_set is not None:

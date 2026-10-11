@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -123,6 +124,9 @@ def materialise_inputs(
 ) -> None:
     planned: list[tuple[str, Path, str | None, bytes | None]] = []
     linked: list[tuple[Path, Path]] = []
+    # Where each input came from, for a job type that records it (an audio cover says
+    # whether its score was uploaded or another job's artifact): JobContext.input_sources.
+    sources: dict[str, dict[str, str]] = {}
     for name, declared in inputs.items():
         try:
             validate_member_name(name)
@@ -143,6 +147,7 @@ def materialise_inputs(
                     "server does not hold",
                 )
             planned.append((name, target, declared.blob_id, None))
+            sources[name] = {"from": "blob"}
         elif declared.inline_base64 is not None:
             try:
                 payload = base64.b64decode(declared.inline_base64, validate=True)
@@ -153,8 +158,14 @@ def materialise_inputs(
                     f"input {name!r} is not valid base64: {exc}",
                 ) from None
             planned.append((name, target, None, payload))
+            sources[name] = {"from": "inline"}
         elif declared.artifact is not None:
             linked.append((target, referenced_artifact(store, name, declared.artifact)))
+            sources[name] = {
+                "from": "artifact",
+                "job_id": declared.artifact.job_id,
+                "name": declared.artifact.name,
+            }
         else:
             raise ApiError(
                 400,
@@ -162,6 +173,8 @@ def materialise_inputs(
                 f"input {name!r} names neither a blob nor inline bytes",
             )
 
+    if sources:
+        job.input_sources_path.write_text(json.dumps(sources, indent=2) + "\n", encoding="utf-8")
     for target, source in linked:
         try:
             os.link(source, target)

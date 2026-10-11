@@ -69,6 +69,8 @@ class StableAudio3Engine:
     host_homes = None
     # No score, so no score length to read (yue2_worker's `length`).
     length = None
+    # It takes no score to cover (yue2_worker's `score_tokens`).
+    score_tokens = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:

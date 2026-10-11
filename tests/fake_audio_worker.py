@@ -111,6 +111,7 @@ class FakeEngine:
         self.length = None
         self.decode_stages = None
         self.host_homes = None
+        self.score_tokens = None
 
     def _decode_stages(self, job) -> dict | None:
         """A song's two token stages as yue2_worker.decode_facts words them; a stage named
@@ -120,6 +121,8 @@ class FakeEngine:
         capped = set(filter(None, (os.environ.get("CRUCIBLE_FAKE_AUDIO_CAPPED") or "").split(",")))
         stages = {}
         for stage, cap, written in (("scoring", 4096, 1180), ("composing", 9000, 4321)):
+            if stage == "scoring" and job.cover is not None:
+                continue  # a cover's score is given, so nothing decodes one
             tokens = cap if stage in capped else written
             stages[stage] = {
                 "tokens": tokens, "cap": cap, "ended": "cap" if stage in capped else "eos",
@@ -134,7 +137,22 @@ class FakeEngine:
                      "instrumental": job.instrumental, "lyrics": job.lyrics,
                      "planning_lyrics": job.planning_lyrics,
                      "min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
-                     "longest_s": job.longest_s, "planning_resizable": job.planning_resizable})
+                     "longest_s": job.longest_s, "planning_resizable": job.planning_resizable,
+                     "cover": job.cover, "tags": job.tags, "cfg": job.cfg})
+        self.score_tokens = None
+        if job.cover is not None:
+            # yue2_worker._given_plan's budget check, at the count the test writes to the
+            # file $CRUCIBLE_FAKE_AUDIO_SCORE_TOKENS names (read per song: the worker
+            # outlives a song); 900 without one.
+            counted = os.environ.get("CRUCIBLE_FAKE_AUDIO_SCORE_TOKENS")
+            tokens = int(Path(counted).read_text(encoding="utf-8")) if counted else 900
+            if tokens > 4096:
+                raise audiocore.Refused(
+                    "score_too_many_tokens",
+                    f"the score is {tokens} tokens in YuE2's tokenizer, past the 4096-token "
+                    "budget YuE2 plans a score within (fake)",
+                )
+            self.score_tokens = tokens
         if job.kind == "song":
             # yue2_worker.length_record's shape, for a score of FAKE_SCORE_SECONDS.
             seconds = FAKE_SCORE_SECONDS
@@ -161,6 +179,8 @@ class FakeEngine:
         seconds = job.duration_s or 1.0
         frames = min(int(seconds * job.sample_rate), job.sample_rate // 10)
         score = FAKE_SCORE if job.kind == "song" else None
+        if job.cover is not None:
+            score = job.cover["abc"]
         self.decode_stages = self._decode_stages(job)
         return TinyAudio(frames, job.sample_rate, job.channels), score, {"denoising": 7, "decoding": 9}
 

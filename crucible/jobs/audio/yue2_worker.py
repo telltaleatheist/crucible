@@ -512,6 +512,8 @@ class YuE2Engine:
     # The host bytes each part's HostHomes hold, by part ("model", "vae"), filled as each
     # loads; None on Apple silicon, where yue2-infer's own moves stay.
     host_homes = None
+    # A cover's score in YuE2's tokens (_given_plan); None for a song YuE2 planned.
+    score_tokens = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -637,6 +639,37 @@ class YuE2Engine:
         self.notes = {"instrumental_transfer": transfer, "score_before_transfer": planned.abc}
         return fixed
 
+    def _given_plan(self, job, progress):
+        """A cover: the score the client gave, which the server has checked with the skill
+        and, for an instrumental, moved to the instrument (crucible/jobs/audio/cover.py),
+        becomes the plan as it is - YuE2 decodes no score, so there is no scoring stage to
+        report. One pass: nothing here re-plans or retries.
+
+        YuE2 plans a score within 4096 tokens, and yue2-infer does not hold a given score
+        to that budget; the skill's generate() refuses one past it before rendering
+        (instrumental.py, `len(pipe.tokenizer.encode(abc)) > 4096`), and so does this, by
+        the same count with the model's own tokenizer, as a refusal that leaves the
+        worker loaded (audiocore.Refused)."""
+        given = job.cover
+        budget = self._pipe.generation_config.abc.max_tokens
+        tokens = len(self._pipe.tokenizer.encode(given["abc"]))
+        if tokens > budget:
+            raise audiocore.Refused(
+                "score_too_many_tokens",
+                f"the score is {tokens} tokens in YuE2's tokenizer, past the {budget}-token "
+                "budget YuE2 plans a score within; send a shorter or more compact score",
+            )
+        progress.enter("scoring")
+        plan = self._pipe.plan(
+            job.tags, given["lyrics"], abc=given["abc"], cot=given["cot"],
+            seed=job.seed, cfg_scale=job.cfg,
+        )
+        if plan.abc != given["abc"]:
+            raise RuntimeError("YuE2 did not keep the score it was given")
+        self.score_tokens = tokens
+        self.length = length_record(None, None, None, plan, None)
+        return plan
+
     def _score(self, job, progress):
         """Plan the song's one score. Always one score and one render (Owen, 2026-10-10:
         "strictly one pass"); a length range never re-plans, refuses or fails a song.
@@ -703,9 +736,13 @@ class YuE2Engine:
         self.notes = None
         self.length = None
         self.decode_stages = {}
-        plan = self._score(job, progress)
-        if job.instrumental:
-            plan = self._instrumental_plan(job, plan)
+        self.score_tokens = None
+        if job.cover is not None:
+            plan = self._given_plan(job, progress)
+        else:
+            plan = self._score(job, progress)
+            if job.instrumental:
+                plan = self._instrumental_plan(job, plan)
         self._close_stage(peaks, "scoring")
         progress.enter("composing", caps.semantic.max_tokens)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)

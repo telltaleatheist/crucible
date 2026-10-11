@@ -54,6 +54,17 @@ class Cancelled(Exception):
         self.step = step
 
 
+class Refused(Exception):
+    """A request the engine will not render, said by name (`code`) before it renders
+    anything: the worker answers it as a result and stays loaded, where any other error
+    ends the worker. Only for what the request carries, never for what went wrong."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class CancelBox:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -173,6 +184,9 @@ class Job:
         self.max_duration_s = nullable("max_duration_s", (int, float))
         self.longest_s = required("longest_s", (int, float))
         self.planning_resizable = required("planning_resizable", bool)
+        # A cover's score, ready to render ({kind, abc, cot, lyrics}: the server checked it
+        # and made any transfer, crucible/jobs/audio/cover.py); null for a planned song.
+        self.cover = nullable("cover", dict)
         self.sample_rate = required("sample_rate", int)
         self.channels = required("channels", int)
         self.format = required("format", str)
@@ -273,6 +287,9 @@ class Worker:
             # The score's nominal length, and the range asked and what it did
             # (yue2_worker.length_record); None for an engine that writes no score.
             "length": self.engine.length,
+            # A cover's score in YuE2's own tokens (yue2_worker._given_plan); None for a
+            # song the engine planned, or an engine that takes no score.
+            "score_tokens": self.engine.score_tokens,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
             # keeps in host memory on purpose (yue2_worker.HostHomes), None for an engine
@@ -297,6 +314,10 @@ class Worker:
             result = self._run(job)
         except Cancelled as stopped:
             send("progress", stage="cancelled", step=stopped.step, during=stopped.stage)
+            send("done")
+            return
+        except Refused as refused:
+            send("result", refused={"code": refused.code, "message": refused.message})
             send("done")
             return
         finally:

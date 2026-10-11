@@ -331,6 +331,8 @@ in-range rate and the mean distance from the range of the ones that missed.
 | `planning_lyrics` | song, with `instrumental` | a pool set picked by the seed | words the instrumental's score is planned from and never sung ("Planning lyrics" above); at most 36 lines and 2000 characters |
 | `planning_set` | song, with `instrumental` | picked by the seed | a pool set's id (`GET /v1/playground` lists them); never beside `planning_lyrics` or `lyrics`; unknown: `planning_set_unknown` |
 | `min_duration_s`, `max_duration_s` | song | none | a length to aim at ("Song length" above): sizes a pool-planned instrumental's set, recorded for every song, never refuses one; each 30 to 360, the minimum below the maximum. Stable Audio refuses them: send `duration_s` |
+| `score` | song | none | the name of the job's one input that carries a score to cover ("Covers" below); never beside `planning_lyrics`, `planning_set` or a length range |
+| `chords` | song, with `score` | `keep` for an instrumental cover, `strip` for a sung one | `keep` or `strip` the score's chord symbols: cot `full` (harmony fixed) or `melody` (accompaniment free) |
 | `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
 | `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
 | `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
@@ -341,7 +343,113 @@ in-range rate and the mean distance from the range of the ones that missed.
 Unknown params are refused, never ignored. A param the named model does not take is refused
 `audio_param_unsupported` with the reason and the list of what it does take; a missing one is
 `audio_param_missing`; a value past the model's ceiling is `audio_param_out_of_range`. An audio
-job takes no input files (`invalid_inputs`).
+job takes no input files (`invalid_inputs`), except a cover's one score.
+
+### Covers: a song rendered from a given score (`score`)
+
+YuE2 writes a score and then makes the song from it, and it will take the score instead of
+writing one: given an ABC, it decodes no score and composes the song from that one. Two
+covers come from it (Owen, 2026-10-11), both made in one pass like every song - nothing is
+re-planned and nothing is retried:
+
+- **An instrumental cover** (`instrumental: true`): the score's Vocal melody moves note for
+  note to the instrument - the same vendored skill the planned instrumental uses
+  (`instrumentalize.convert_score`, checked by `instrumental.validate_score`) - and the result
+  is rendered with lyrics that are only the score's own section tags (`% verse` becomes
+  `[Verse]`), so nothing is sung.
+- **A sung cover** (no `instrumental`): the score's Vocal melody is sung with new `lyrics`.
+  This is upstream's own recipe (YuE repo at the pinned commit, `skills/yue2-music`: "Cover
+  from a score ... use a validated melody-only ABC and the desired lyrics", rendered with
+  `cot="melody"`).
+
+The score is YuE2's own two-voice ABC dialect, as YuE2 writes it into `score.abc` and as the
+`score` job writes from a recording: `X:1`, a blank `T:`, `M:`, an `L:1/32`-style unit, a
+`Q:1/4=` tempo, the `Vocal` and `Ins` voices, `% section` comments. **No `w:` lines**: the
+dialect carries no words, and a score with any is refused; a sung cover's words go in
+`lyrics`.
+
+It arrives as **the job's one input**, and `score` names it - uploaded:
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "Instrumental, warm piano and strings, no vocals, no singing, 72 BPM",
+            "instrumental": true, "score": "score.abc", "seed": 3},
+ "inputs": {"score.abc": {"blob_id": "<from POST /v1/uploads>"}}}
+```
+
+or **by reference** to another job's artifact, so a score the `score` job made (or a song's
+`score.abc`) is covered without the client handling it; the source job is sent with
+`"hold": true` (or held with `POST /v1/jobs/{id}/hold`) so its artifact outlives being
+fetched:
+
+```json
+{"type": "audio",
+ "model": "yue2-3b",
+ "params": {"tags": "English, intimate acoustic folk, warm male voice, fingerpicked guitar, 72 BPM",
+            "lyrics": "[Verse]\nThe lantern by the harbour wall\nStill burns when no one comes\n\n[Chorus]\n…",
+            "score": "melody.abc"},
+ "inputs": {"melody.abc": {"artifact": {"job_id": "<the score job>", "name": "score.abc"}}}}
+```
+
+`inline_base64` works too. The job carries exactly that one input; any other is
+`invalid_inputs`.
+
+**`chords`** keeps or strips the score's chord symbols (vendored `abc_tools.strip_chords`).
+YuE2 renders with cot `full` when the Vocal voice still carries chords (the harmony is fixed)
+and `melody` when it does not (the accompaniment is free). Left out, an instrumental cover
+keeps them (the skill's conversion keeps the harmony) and a sung cover strips them (the
+skill's melody-only cover).
+
+**What the app must provide.** For a sung cover, `lyrics` written to the score's phrases:
+sections tagged as the score's `% section` comments are (`[Verse]`, `[Chorus]`, ...), a line
+for each phrase, syllables fitted to its notes. Crucible does not write or fit them - it
+sends the words to YuE2 as given - and a sung cover without words to sing (no `lyrics`, or
+section tags alone) is refused `audio_param_missing`. An instrumental cover takes no
+`lyrics` (`audio_param_conflict`): its section tags come from the score.
+
+**What a score turns off.** The score is the plan, so nothing that plans or sizes one is
+taken beside it, each refused `audio_param_conflict` naming the param: `planning_lyrics`,
+`planning_set` (no pool set is picked either) and `min_duration_s`/`max_duration_s` (the
+score's bars at its tempo are the song's length).
+
+**Refused by name, before anything renders.** Checked on the server before YuE2 is loaded,
+failing the job:
+
+- `score_invalid`: not UTF-8, carries `w:` lines, or the skill's parser refuses it - its own
+  reason is in the message (e.g. `group 9, Vocal, bar 33: note/rest exceeds meter
+  duration`); for an instrumental cover, the transfer or `validate_score` refusing the
+  result; for a sung cover, a Vocal voice with no notes to sing.
+- `score_too_long`: the score's nominal length (its bars at its tempo, `scorelength.read`)
+  is past the 360 s YuE2 composes.
+
+Checked by the worker, which has YuE2's tokenizer, before it plans anything:
+
+- `score_too_many_tokens`: the score is more than 4096 tokens, the budget YuE2 plans a score
+  within. yue2-infer does not hold a given score to it; the skill's own `generate()`
+  refuses one past it, by the same count (`len(pipe.tokenizer.encode(abc))`). The server
+  has no tokenizer (it would need tiktoken and the model's `qwen.tiktoken`), so this one
+  needs the worker loaded; the worker answers the refusal and stays loaded.
+
+**The result.** As for any song: `audio.<format>` and `score.abc` - **what was rendered**
+(after the transfer or the chord removal) - plus `given-score.abc`, the score as it was
+sent. The `done` event's `audio.cover` says how:
+
+```json
+"cover": {"kind": "instrumental", "source": "reference", "input": "melody.abc",
+          "reference": {"job_id": "4b60493b…", "name": "score.abc"},
+          "given": "given-score.abc", "cot": "full", "chords": "kept",
+          "chords_chosen_by": "default", "score_tokens": 1180, "score_seconds": 95.0,
+          "score": {"seconds": 95.0, "bars": 26, "quarters": 104.0, "bpm": 66, "meter": "4/4"}}
+```
+
+`source` is `upload` (a blob or inline bytes; `reference` null) or `reference`.
+`score_seconds` is the nominal length the server read; `audio.length.score_seconds` is the
+same reading of the rendered score. An instrumental cover's `audio.notes` carries the
+transfer report (`instrumental_transfer`) and `score_before_transfer` (the given score), as a
+planned instrumental's does. `audio.planning_lyrics` is null, and `audio.decode_stages` has
+no `scoring` stage: nothing decoded a score. A kept request (`request`, "A sound that did not
+finish") carries the same `cover` under `settled`, with `score_tokens` null.
 
 ## The result
 
