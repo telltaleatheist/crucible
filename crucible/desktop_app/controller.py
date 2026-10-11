@@ -286,14 +286,16 @@ class Controller:
         self.changed()
 
     def _idle_passed(self) -> None:
-        """A session's idle deadline also moves when its client touches it, which no event
+        """A session's idle deadline also moves when its client touches it, and its
+        first-work deadline goes when its first item arrives, which no session event
         says, so a countdown that ran out with the session still open is read again."""
         activity = self.doc("activity")
         session = activity.get("session") if isinstance(activity, Mapping) else None
-        deadline = session.get("idle_deadline") if isinstance(session, Mapping) else None
-        if not isinstance(deadline, str):
+        if not isinstance(session, Mapping):
             return
-        if datetime.fromisoformat(deadline) <= self.wall():
+        deadlines = [session.get(name) for name in ("idle_deadline", "first_work_deadline")]
+        if any(isinstance(deadline, str) and datetime.fromisoformat(deadline) <= self.wall()
+               for deadline in deadlines):
             with self.lock:
                 self.stale.add("activity")
 

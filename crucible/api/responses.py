@@ -4,6 +4,8 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..queuesessions import FIRST_WORK_S
+
 Number = Union[int, float]
 
 
@@ -332,6 +334,11 @@ class SessionState(_Open):
     created: str
     opened_at: str | None
     idle_deadline: str | None
+    first_work_deadline: str | None = Field(
+        description="When an open session that has sent no work yet closes `unused` "
+        f"({FIRST_WORK_S} s after it opened, whatever its idle_s); null once it has sent any, and "
+        "while it is queued or closed."
+    )
     max_hold_deadline: str | None
     items_run: int
     in_flight: list[dict[str, Any]]

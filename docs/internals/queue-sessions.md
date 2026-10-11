@@ -17,9 +17,13 @@ them.
 - **One open session per server.** Other sessions wait in the line.
 - **No maximum hold by default.** Some runs take a day. `[queue] max_session_hold_s` in
   config.toml sets one (absent or 0 is none); a session past it ends `max_hold`.
-- **Liveness is `idle_s` alone** (default 300, up to 86400). Anything in flight counts as
+- **Liveness is `idle_s`** (default 300, up to 86400). Anything in flight counts as
   presence, so a day-long job inside a session never idles it out. `touch` is a timestamp
   in memory.
+- **An unused session closes at 90 s** (2026-10-11, option A: *"a session that has sent
+  no work within a short window after it opens closes, whatever idle_s it asked for;
+  after its first piece of work it gets its normal idle_s"*, "then maybe alert the
+  calling app"). Reason `unused`; `FIRST_WORK_S` in `crucible/queuesessions.py`.
 - **Same-client requests are members.** The `X-Crucible-Session` header is the explicit
   form; a request from the client holding the open session is an implicit item of it.
 - **TTS streams run inside a session, with no priority** and no claim of their own. A
@@ -63,6 +67,19 @@ refused `accelerator_busy` at admission is never started, and one that ended
 sentence, says `waiting` on the session's stream, and paces the next try by
 `CARD_RECHECK_S`); its `max_wait_s` bounds the wait. Queued calls do the same in
 `callqueue.admit_call` / `_load_for`.
+
+### The first-work window
+
+`QueueSession.first_work_at` is set once, by `QueueSessions.work_sent`, from three places:
+`api/caller.py:queue_session` (every item route resolves its session there before any
+admission, so a refused or waiting item counts), `item_arrived`/`adopt_stream_session`
+(a stream's own session, opened before the stream had a session to name), and `due()`
+whenever the session has anything in flight. `due()` closes an open session `unused` at
+`opened_at + FIRST_WORK_S` when `first_work_at` is still None, unless its `idle_s` runs out
+first (then `idle`). `opened_at` is set by `opened()`, which `admit_session` reaches only
+after the session's own `load-model` is done, so the window never runs during that load.
+`state()` reports it as `first_work_deadline`. The ticketed-stream claim (`STREAM_CLAIM_S`,
+60 s, reason `idle`) is older and narrower: it fires first for those sessions.
 
 ### Streams
 

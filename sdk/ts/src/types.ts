@@ -290,14 +290,17 @@ export interface ActivityChat {
 export type QueueSessionStatus = 'queued' | 'open' | 'closed';
 
 /**
- * Why a queue session ended. `client`: its client closed it. `idle`: `idle_s` passed with nothing
- * in flight, no item and no touch. `operator`: a person ended it. `max_hold`: the server's
+ * Why a queue session ended. `client`: its client closed it. `unused`: it sent no work (no item, no
+ * stream) within 90 s of opening, whatever `idleS` it asked for: the server took it to be left
+ * behind by an app that crashed or restarted. `idle`: `idle_s` passed with nothing in flight, no
+ * item and no touch. `operator`: a person ended it. `max_hold`: the server's
  * configured maximum hold. `server_restart`: the server stopped. A session that never opened ends
  * `expired` (it waited `max_wait_s`, or nobody followed it), `load_failed` (its model would not
  * load), or with one of the reasons above.
  */
 export type QueueSessionReason =
   | 'client'
+  | 'unused'
   | 'idle'
   | 'operator'
   | 'max_hold'
@@ -326,6 +329,11 @@ export interface QueueSessionState {
   readonly openedAt: string | null;
   /** When it closes `idle` unless something arrives; null while anything is in flight. */
   readonly idleDeadline: string | null;
+  /**
+   * When it closes `unused` unless its first item arrives: 90 s after it opened. Null once it has
+   * sent any work, and while it is queued or closed.
+   */
+  readonly firstWorkDeadline: string | null;
   /** When it closes `max_hold`; null unless the server sets a maximum. */
   readonly maxHoldDeadline: string | null;
   readonly itemsRun: number;
@@ -369,7 +377,9 @@ export interface SessionOptions {
   readonly model?: string;
   /**
    * Close the session after this many seconds with nothing in flight, no item and no touch:
-   * 10..86400, the server's default 300. A running job or an answer in flight always counts as
+   * 10..86400, the server's default 300. It applies from the session's first item on: until
+   * then the server closes it `unused` 90 s after it opens, so send the first item as soon as
+   * `session(...)` resolves. A running job or an answer in flight always counts as
    * activity; work on the app's own side (a cloud call, a file copy) does not, so call
    * `touch()` across a long gap.
    */

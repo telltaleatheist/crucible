@@ -322,7 +322,9 @@ POST /v1/queue/sessions
   error); a card held by someone else is not a failure, the session waits for it at the
   front (a `waiting` event, "When the card is held by someone else"). Leave it out to open on whatever is resident. An upstream model is refused
   `409 upstream_never_resident`; an unknown one `404 unknown_model`.
-- `idle_s` (default 300, 10 to 86400): see "How a session ends".
+- `idle_s` (default 300, 10 to 86400): see "How a session ends". It applies from the
+  session's first item on; until then a session that sends nothing closes `unused` 90 s
+  after it opens.
 - `max_wait_s` (as the queue's): how long it may wait in the line to open.
 
 It answers `202` at once, never blocking:
@@ -353,8 +355,10 @@ or it is removed `expired`.
 `GET /v1/queue/sessions/{id}` reads it: `status` (`queued`, `open`, `closed`), `position`,
 `opened_at`, `items_run`, `in_flight` (what it has running or waiting: jobs, chats,
 queued calls, stream rows being said), `stream_session` (the TTS stream open in it, if any),
-`idle_deadline` (null while anything is in flight), `max_hold_deadline` (null unless the
-server sets a maximum), `load_job`, and `reason`/`message`/`error` once it is closed.
+`idle_deadline` (null while anything is in flight), `first_work_deadline` (when it closes
+`unused` if its first item has not arrived; null once one has), `max_hold_deadline` (null
+unless the server sets a maximum), `load_job`, and `reason`/`message`/`error` once it is
+closed.
 
 ### Send its items
 
@@ -409,6 +413,7 @@ app's Queue, or `DELETE /v1/queue/{id}`).
 | reason | when |
 |---|---|
 | `client` | its client sends `DELETE /v1/queue/sessions/{id}` (a queued one leaves the line) |
+| `unused` | it sent no work within 90 s of opening, whatever `idle_s` it asked for |
 | `idle` | `idle_s` passes with no item arriving, nothing in flight, no running job and no touch |
 | `operator` | an operator ends it: `DELETE /v1/queue/{id}`, or the desktop Queue's End |
 | `max_hold` | only if the server sets `[queue] max_session_hold_s` in config.toml; none by default |
@@ -417,6 +422,35 @@ app's Queue, or `DELETE /v1/queue/{id}`).
 Anything in flight is presence: a session running a day-long job never idles out. For a
 long gap on your side with nothing in flight (a NAS copy between two steps), send
 `POST /v1/queue/sessions/{id}/touch`; it is a timestamp in memory, so every 30 s is fine.
+
+**Send the first item as soon as it opens.** An open session that sends no work within
+**90 s** of opening closes `unused`, whatever `idle_s` it asked for (2026-10-11: a B-Sides
+session orphaned by its app restarting held a laptop's only slot, with nothing resident,
+for its whole `idle_s`; an app can ask for up to a day). After its first piece of work the
+session has its own `idle_s`, as above.
+
+- The window starts when the session **opens**, not when it was asked for: time waiting in
+  the line does not count, and neither does the load of the `model` it asked for, which
+  runs before it opens. A 27B that takes minutes to load cannot run the window out.
+- **Work** is any request that is one of its items, explicit (`X-Crucible-Session`) or
+  implicit (from the client that holds it): a job (a `load-model` too), a chat, a decision,
+  an embedding, a TTS stream opened in it. It counts on arrival, so an item that is refused
+  or has to wait (its model installing or loading) still counts, and so does anything of
+  the session's in flight. A **touch is not work**: it says the client is alive, not that
+  it is using the card.
+- 90 s is fixed (the server's `FIRST_WORK_S`); a client cannot ask for more. Nothing an
+  app does between hearing `opened` and sending its first request needs longer; work of
+  its own to do first belongs before it asks for the session.
+- A session whose `idle_s` is shorter than the window still closes `idle` at its `idle_s`.
+
+The app hears it three ways: its events stream ends `closed {reason: "unused", message}`
+(the message says it sent no work within 90 s of opening), `GET /v1/queue/sessions/{id}`
+shows `reason: "unused"` and that message, and any later request naming the session
+(`X-Crucible-Session`, or its touch) is refused `409 session_closed` with
+`details.reason: "unused"` and the message: `session ses-… closed (unused): it sent no work
+within 90 s of opening, …`. The server-wide feed (`GET /v1/events`, `session.closed`) and
+the server's log (`closed session ses-… (unused): …`) say the same, and the desktop app
+and the Queue panel count down to it ("unless the app sends its first request").
 
 When a session closes, its items still waiting leave the line (`removed`, reason
 `session_closed`), a TTS stream open in it closes, and the card is settled: unloaded

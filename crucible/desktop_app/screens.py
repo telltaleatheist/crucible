@@ -539,10 +539,14 @@ def session_line(activity: Any, now: datetime | None = None) -> SessionLine | No
     stream = session.get("stream_session")
     if isinstance(stream, Mapping):
         parts.append(f"streaming narration in {stream.get('voice')}")
-    idle = countdown_text(session.get("idle_deadline"), now)
-    if idle:
-        parts.append(f"it closes {idle} unless {client if client != 'An app' else 'the app'} "
-                     "sends more")
+    app = client if client != "An app" else "the app"
+    unused, idle = _when(session.get("first_work_deadline")), _when(session.get("idle_deadline"))
+    if unused is not None and (idle is None or unused <= idle):
+        parts.append(f"it closes {countdown_text(session.get('first_work_deadline'), now)} "
+                     f"unless {app} sends its first request")
+    elif idle is not None:
+        parts.append(f"it closes {countdown_text(session.get('idle_deadline'), now)} "
+                     f"unless {app} sends more")
     return SessionLine(
         session_id=str(session["session_id"]),
         title=f"{client} has Crucible to itself for {session.get('act')}",

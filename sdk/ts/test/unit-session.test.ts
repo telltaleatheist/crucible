@@ -97,7 +97,8 @@ function state(overrides: Record<string, unknown>): Record<string, unknown> {
     session_id: 'ses-1', status: 'open', act: 'analysis', client: 'session-test', model: null,
     position: null, idle_s: 300, max_wait_s: 3600, created: '2026-10-01T10:00:00+00:00',
     opened_at: '2026-10-01T10:00:01+00:00', idle_deadline: '2026-10-01T10:05:01+00:00',
-    max_hold_deadline: null, items_run: 0, in_flight: [], stream_session: null, load_job: null,
+    first_work_deadline: null, max_hold_deadline: null, items_run: 0, in_flight: [],
+    stream_session: null, load_job: null,
     closed_at: null, reason: null, message: null, error: null,
     ...overrides,
   };
@@ -371,6 +372,33 @@ test('an item the server refuses session_closed ends the session for its client 
   };
   await assert.rejects(session.loadModel('qwen3.5-9b'), CrucibleSessionClosed);
   assert.equal((await session.closed).reason, 'operator');
+});
+
+test('a session closed unused names why on the next request, and its client hears the end', async () => {
+  const message =
+    'it sent no work within 90 s of opening, so it was taken to be abandoned (its client ' +
+    'crashed or restarted) whatever idle_s (180 s) it asked for';
+  const refused = await client().session({ act: 'generate' });
+  extra = (request, _body, response) => {
+    if (request.method !== 'POST' || request.url !== '/v1/jobs') return false;
+    json(response, 409, {
+      error: {
+        code: 'session_closed',
+        message: `session ses-1 closed (unused): ${message}. Nothing more runs in it`,
+        details: { session_id: 'ses-1', status: 'closed', reason: 'unused' },
+      },
+    });
+    return true;
+  };
+  await assert.rejects(refused.loadModel('qwen3.5-27b'), (error: unknown) => {
+    assert.ok(error instanceof CrucibleSessionClosed);
+    assert.equal(error.reason, 'unused');
+    assert.match(error.serverMessage, /sent no work within 90 s of opening/);
+    return true;
+  });
+  const end = await refused.closed;
+  assert.equal(end.reason, 'unused');
+  assert.match(end.message, /sent no work within 90 s/);
 });
 
 test('a dropped follow reconnects with Last-Event-ID and still hears the end', async () => {

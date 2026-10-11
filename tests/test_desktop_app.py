@@ -640,6 +640,17 @@ def test_the_open_session_counts_down_to_its_idle_close() -> None:
     assert "it closes in 2 min unless bookforge sends more" in c.view("activity").session.detail
 
 
+def test_an_unused_session_counts_down_to_its_first_work_close() -> None:
+    activity = {**ACTIVITY, "session": {**ACTIVITY["session"], "in_flight": [], "items_run": 0,
+                                        "first_work_deadline": "2026-10-01T12:01:05+00:00",
+                                        "idle_deadline": "2026-10-01T12:04:05+00:00"}}
+    c = controller(FakeApi({"/v1/activity": activity}))
+    c.refresh_now("activity")
+    detail = c.view("activity").session.detail
+    assert "unless bookforge sends its first request" in detail
+    assert "sends more" not in detail, "the earlier deadline is the one it shows"
+
+
 class Envelope(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         body = json.dumps({"error": {"code": "unknown_subject", "message": "no model called 'x'. "

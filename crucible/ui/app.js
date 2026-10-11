@@ -913,7 +913,9 @@
       if (held.stream_session) {
         line += ', streaming narration in ' + held.stream_session.voice;
       }
-      if (held.idle_deadline) {
+      if (held.first_work_deadline && (!held.idle_deadline || Date.parse(held.first_work_deadline) <= Date.parse(held.idle_deadline))) {
+        line += ', closes unused at ' + clockText(held.first_work_deadline) + ' unless it sends work';
+      } else if (held.idle_deadline) {
         line += ', idle at ' + clockText(held.idle_deadline);
       }
       rows.push(['a queue session', line + ' (see Queue)']);
@@ -1148,7 +1150,9 @@
       doing += ', streaming narration in ' + session.stream_session.voice;
     }
     var closes;
-    if (session.idle_deadline) {
+    if (session.first_work_deadline && (!session.idle_deadline || Date.parse(session.first_work_deadline) <= Date.parse(session.idle_deadline))) {
+      closes = el('span', null, [untilSpan('closes unless it sends work ', session.first_work_deadline, true)]);
+    } else if (session.idle_deadline) {
       closes = el('span', null, [untilSpan('closes if idle ', session.idle_deadline, true)]);
     } else {
       closes = el('span', { text: 'busy, so not idling' });
