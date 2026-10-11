@@ -195,6 +195,14 @@ def _registered(entry: CapabilityClass, config: Any) -> str:
     return row.selected
 
 
+def registered(verb: str, config: Any) -> str:
+    """The model this server registered for `verb` (its capability record's row: the
+    Settings choice, else Crucible's own pick), for a request that names none; refused by
+    name when nothing is registered. The door a job type with no ceiling reads (the
+    `image` verb, crucible/jobs/__init__.py resolve_model)."""
+    return _registered(BY_NAME[verb], config)
+
+
 def resolve(
     verb: str,
     config: Any,
@@ -232,4 +240,4 @@ def resolve(
     return VerbModel(model=picked, form=None, chosen_by=REGISTERED)
 
 
-__all__ = ["CEILING", "MODEL", "REGISTERED", "VerbModel", "resolve"]
+__all__ = ["CEILING", "MODEL", "REGISTERED", "VerbModel", "registered", "resolve"]

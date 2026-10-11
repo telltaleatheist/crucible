@@ -62,6 +62,8 @@ const SONG_PAGE = {
   available: true,
   reason: null,
   download_bytes: null,
+  registered: true,
+  facts: null,
   fields: [
     {
       name: 'tags', label: 'Style tags', kind: 'tags', required: true, default: null,
@@ -84,6 +86,56 @@ test('playground() reads each page: its standing, and a song form with suggestio
   assert.deepEqual(tags?.conflicts, { 'male vocal': [{ tag: 'female vocal', why: 'one lead voice' }] });
   const cfg = page?.fields[2];
   assert.deepEqual([cfg?.default, cfg?.min, cfg?.max, cfg?.step, cfg?.suggestions], [1.0, 0.5, 3, 0.1, null]);
+});
+
+const IMAGE_PAGE = {
+  job_type: 'image',
+  id: 'dreamshaper-xl-lightning',
+  name: 'DreamShaper XL Lightning',
+  media: 'image',
+  kind: 'image',
+  makes: 'images',
+  standing: 'ready',
+  available: true,
+  reason: null,
+  download_bytes: null,
+  registered: true,
+  fields: [],
+  facts: {
+    native_width: 1024,
+    native_height: 1024,
+    quality_min_side: 768,
+    size_note: 'SDXL is trained at about one megapixel',
+    size_multiple: 32,
+    max_side: 2048,
+    max_pixels: 1048576,
+    default_steps: 6,
+    default_guidance: 2.0,
+    negative_prompt: {
+      read_when_guidance_above: 1.0,
+      costs_extra_pass: false,
+      default: 'text, letters, words, watermark, signature, logo, blurry, deformed',
+    },
+    image_to_image: false,
+    inpaint: false,
+  },
+};
+
+test('playground() reads an image page\'s facts and whether it is the server\'s pick', async () => {
+  answer(200, { pages: [IMAGE_PAGE, { ...SONG_PAGE, registered: false }] });
+  const [image, song] = await client().playground();
+  assert.equal(image?.registered, true);
+  assert.deepEqual(
+    [image?.facts?.nativeWidth, image?.facts?.nativeHeight, image?.facts?.qualityMinSide, image?.facts?.defaultSteps],
+    [1024, 1024, 768, 6],
+  );
+  assert.deepEqual(image?.facts?.negativePrompt, {
+    readWhenGuidanceAbove: 1.0,
+    costsExtraPass: false,
+    default: 'text, letters, words, watermark, signature, logo, blurry, deformed',
+  });
+  assert.deepEqual([image?.facts?.imageToImage, image?.facts?.inpaint], [false, false]);
+  assert.deepEqual([song?.registered, song?.facts], [false, null]);
 });
 
 test('playground() refuses a standing it does not know, rather than drawing a guess', async () => {

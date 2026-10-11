@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from . import catalog, installonsubmit, weights
 from .audiomodels import KIND_WORDS, MUSIC, SFX, SONG
+from .capabilityclasses import BY_NAME
 from .jobenv import INSTALLER_FOR
 from .jobs import audio as audio_job
 from .jobs import disabled_error
@@ -150,12 +151,16 @@ def side_fields(default_width: int, default_height: int, low: int, high: int,
 def image_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     return [
         field("prompt", "Prompt", TEXT, required=True, placeholder=IMAGE_EXAMPLE),
-        *side_fields(image_job.DEFAULT_SIDE, image_job.DEFAULT_SIDE, image_job.MIN_SIDE,
+        *side_fields(spec.native_width, spec.native_height, image_job.MIN_SIDE,
                      min(image_job.MAX_SIDE, spec.max_side), spec.size_multiple),
-        field("steps", "Steps", INTEGER, default=image_job.DEFAULT_STEPS, min=1,
+        field("steps", "Steps", INTEGER, default=spec.default_steps, min=1,
               max=image_job.MAX_STEPS, step=1, hint="more is slower, and usually cleaner"),
         seed_field(),
     ]
+
+
+def image_facts(manifest: Any, spec: Any) -> dict[str, Any]:
+    return spec.facts()
 
 
 def video_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
@@ -230,13 +235,16 @@ class Family:
     media: str
     manifests: ManifestCatalog[Any]
     fields: Callable[[Any, Any], list[dict[str, Any]]]
+    # What a client needs to ask the model for its work without knowing it (its native
+    # size, defaults, what it does with a negative prompt); None for a family without.
+    facts: Callable[[Any, Any], dict[str, Any]] | None = None
 
     def kind(self, manifest: Any) -> str:
         return getattr(manifest, "kind", self.media)
 
 
 FAMILIES: tuple[Family, ...] = (
-    Family(image_job.JOB_TYPE, "image", image_job.MANIFESTS, image_fields),
+    Family(image_job.JOB_TYPE, "image", image_job.MANIFESTS, image_fields, image_facts),
     Family(video_job.JOB_TYPE, "video", video_job.MANIFESTS, video_fields),
     Family(audio_job.JOB_TYPE, "audio", audio_job.MANIFESTS, audio_fields),
 )
@@ -343,12 +351,15 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
             and subject.job_type in {family.job_type for family in FAMILIES}
         },
     )
+    registered = _registered_models(config)
     rows: list[dict[str, Any]] = []
     for family in FAMILIES:
+        found: list[dict[str, Any]] = []
         for manifest in family.manifests.all().values():
             standing, reason, size = _standing(family, manifest, here)
             kind = family.kind(manifest)
-            rows.append({
+            supported = manifest.supports(backend.kind)
+            found.append({
                 "job_type": family.job_type,
                 "id": manifest.id,
                 "name": manifest.display,
@@ -359,12 +370,33 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
                 "available": standing != UNAVAILABLE,
                 "reason": reason,
                 "download_bytes": size,
+                "registered": (family.job_type, manifest.id) in registered,
                 "fields": (
                     family.fields(manifest, _spec_here(family, manifest, here))
-                    if manifest.supports(backend.kind) else []
+                    if supported else []
+                ),
+                "facts": (
+                    family.facts(manifest, _spec_here(family, manifest, here))
+                    if supported and family.facts is not None else None
                 ),
             })
+        # The model this server registered for the verb comes first in its family, so a
+        # client that takes the first ready page takes the verb's own pick.
+        rows.extend(sorted(found, key=lambda row: not row["registered"]))
     return rows
+
+
+def _registered_models(config: Any) -> set[tuple[str, str]]:
+    """(job type, model) for every model this server's capability record registered for
+    a verb: the Settings choice, else the biggest that fits (docs/VERB-SIZING.md)."""
+    record = config.capability
+    if record is None:
+        return set()
+    return {
+        (BY_NAME[row.capability].job_type, row.selected)
+        for row in record.rows
+        if row.enabled and row.selected and row.capability in BY_NAME
+    }
 
 
 __all__ = ["DOWNLOAD", "FAMILIES", "READY", "UNAVAILABLE", "pages"]

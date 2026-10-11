@@ -165,6 +165,9 @@ class MfluxEngine:
         import mlx.core as mx
         from mflux.models.qwen21.variants.txt2img.qwen_image_21 import QwenImage21
 
+        pipeline = require(request, "pipeline", str)
+        if pipeline != "qwen-image-2.1":
+            raise RuntimeError(f"mflux runs qwen-image-2.1 here, not {pipeline!r}")
         self._mx = mx
         self._model_class = QwenImage21
         self._model_dir = require(request, "model_dir", str)
@@ -659,7 +662,153 @@ def _moved(tensors: dict, device: str) -> dict:
     return {name: None if tensor is None else tensor.to(device) for name, tensor in tensors.items()}
 
 
-ENGINES = {MfluxEngine.name: MfluxEngine, DiffusersEngine.name: DiffusersEngine}
+class DiffusersSdxlEngine:
+    """An SDXL checkpoint (dreamshaper-xl-lightning) on diffusers, the whole pipeline
+    resident: both CLIP text encoders, the UNet and the VAE stay on the card between
+    pictures (4.14 GiB measured, 2026-10-10), so a picture is its steps and a decode,
+    about 3 s, not a load of each part.
+
+    The UNet is stored in `storage_dtype` (fp8) and computed in `dtype` (fp16): diffusers'
+    layerwise casting upcasts each layer as it runs. That is a cast of the fp16
+    checkpoint for storage, not a quantized model (docs/internals/image.md). The VAE is the
+    block's companion, retrained not to overflow in fp16 (SDXL's own makes NaN, a black
+    picture), tiled so a decode's activations stay small. The recipe is the measured one
+    (E:\\claude-files\\scratch\\dreamshaper\\covers.py, owens-pc, 2026-10-10).
+
+    Image-to-image and inpainting are not built for this arm (the manifest says so and the
+    controller refuses them by name), so a request that reaches it with an input image
+    is a controller bug.
+    """
+
+    name = "diffusers"
+
+    def __init__(self, request: dict) -> None:
+        import diffusers
+        import torch
+        from diffusers import AutoencoderKL, StableDiffusionXLPipeline
+
+        self._torch = torch
+        self.device = require(request, "device", str)
+        dtype = _torch_dtype(torch, require(request, "dtype", str))
+        storage = optional(request, "storage_dtype", str)
+        cap_memory(torch, optional(request, "memory_cap_bytes", int))
+        vae_dir = optional(request, "vae_dir", str)
+        components = {}
+        if vae_dir is not None:
+            components["vae"] = AutoencoderKL.from_pretrained(vae_dir, torch_dtype=dtype)
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            require(request, "model_dir", str),
+            variant=optional(request, "variant", str),
+            torch_dtype=dtype,
+            add_watermarker=False,
+            **components,
+        )
+        scheduler = optional(request, "scheduler", str)
+        if scheduler is not None:
+            pipe.scheduler = _sdxl_scheduler(diffusers, scheduler, pipe.scheduler.config)
+        pipe.vae.enable_tiling()
+        if storage is not None:
+            pipe.unet.enable_layerwise_casting(
+                storage_dtype=_torch_dtype(torch, storage), compute_dtype=dtype
+            )
+        pipe.to(self.device)
+        pipe.set_progress_bar_config(disable=True)
+        self._pipe = pipe
+        self.versions = {
+            "diffusers": diffusers.__version__,
+            "torch": torch.__version__,
+            "transformers": _version_of(None, "transformers"),
+        }
+
+    def peak_bytes(self) -> int:
+        return int(self._torch.cuda.max_memory_reserved(0))
+
+    def _release(self) -> None:
+        gc.collect()
+        self._torch.cuda.empty_cache()
+        self._torch.cuda.reset_peak_memory_stats(0)
+
+    def nbytes(self, encoded: dict) -> int:
+        return sum(tensor.numel() * tensor.element_size() for tensor in encoded.values() if tensor is not None)
+
+    def _encode(self, job: Job) -> dict:
+        guided = job.guidance > 1.0
+        with self._torch.no_grad():
+            embeds, negative, pooled, negative_pooled = self._pipe.encode_prompt(
+                job.prompt,
+                device=self.device,
+                num_images_per_prompt=1,
+                do_classifier_free_guidance=guided,
+                negative_prompt=job.negative_prompt,
+            )
+        return {
+            "prompt_embeds": embeds,
+            "negative_prompt_embeds": negative if guided else None,
+            "pooled_prompt_embeds": pooled,
+            "negative_pooled_prompt_embeds": negative_pooled if guided else None,
+        }
+
+    def generate(self, job: Job, progress: Progress, cached: "dict | None") -> "tuple[object, dict, dict]":
+        if job.image_path is not None or job.mask_path is not None:
+            raise RuntimeError(
+                "the sdxl pipeline makes pictures from a prompt only; the controller "
+                "refuses image_strength and mask for it (image_to_image and inpaint are "
+                "false in its manifest), so an input image reaching the worker is a bug there"
+            )
+        peaks: dict = {}
+        self._release()
+        progress.enter("encoding")
+        encoded = _moved(cached, self.device) if cached is not None else self._encode(job)
+        kept = cached if cached is not None else _moved(encoded, "cpu")
+        peaks["encoding"] = self.peak_bytes()
+        self._release()
+        progress.enter("denoising")
+
+        def on_step(pipeline, index, timestep, tensors):
+            progress.stepped()
+            if index + 1 == job.steps:
+                peaks["denoising"] = self.peak_bytes()
+                self._torch.cuda.reset_peak_memory_stats(0)
+                progress.enter("decoding")
+            return tensors
+
+        with self._torch.no_grad():
+            picture = self._pipe(
+                **{name: tensor for name, tensor in encoded.items() if tensor is not None},
+                num_inference_steps=job.steps,
+                guidance_scale=job.guidance,
+                width=job.width,
+                height=job.height,
+                generator=self._torch.Generator(self.device).manual_seed(job.seed),
+                callback_on_step_end=on_step,
+            ).images[0]
+        peaks["decoding"] = self.peak_bytes()
+        self._release()
+        return picture, peaks, kept
+
+
+def _sdxl_scheduler(diffusers, name: str, config):
+    """The sampler a manifest names, built from the checkpoint's own scheduler config."""
+    if name == "dpmpp-sde-karras":
+        return diffusers.DPMSolverMultistepScheduler.from_config(
+            config, algorithm_type="sde-dpmsolver++", use_karras_sigmas=True
+        )
+    raise RuntimeError(f"no sdxl scheduler {name!r}; the manifest's scheduler reaches this line verbatim")
+
+
+DIFFUSERS_PIPELINES = {"qwen-image-2.1": DiffusersEngine, "sdxl": DiffusersSdxlEngine}
+
+
+def _diffusers(request: dict):
+    """The diffusers engine for the block's pipeline."""
+    pipeline = require(request, "pipeline", str)
+    engine_class = DIFFUSERS_PIPELINES.get(pipeline)
+    if engine_class is None:
+        raise RuntimeError(f"diffusers runs no pipeline {pipeline!r} here; it runs {sorted(DIFFUSERS_PIPELINES)}")
+    return engine_class(request)
+
+
+ENGINES = {MfluxEngine.name: MfluxEngine, "diffusers": _diffusers}
 
 
 def _version_of(module, distribution: str) -> str | None:

@@ -148,6 +148,7 @@ export type {
   AudioResult,
   PlaygroundField,
   PlaygroundPage,
+  ImageFacts,
   PlaygroundPreset,
   PlaygroundTagConflict,
   PlaygroundTagGroup,

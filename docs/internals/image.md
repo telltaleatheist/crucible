@@ -1,7 +1,7 @@
 # Image generation internals
 
 Covers `crucible/jobs/image/` (the `image`, `load-image` and `unload-image` job types and `worker.py`),
-`crucible/imagemodels.py`, `crucible/image/*.toml`, `crucible/envs/image/*.txt`, the fifth
+`crucible/imagemodels.py`, `crucible/imageweights.py`, `crucible/image/*.toml`, `crucible/envs/image/*.txt`, the fifth
 resident kind (`KIND_IMAGE`, noun `generator`) and the `image` capability class. The caller's
 page is [IMAGE.md](../IMAGE.md). The job-type machinery it plugs into is
 [jobs-runtime.md](jobs-runtime.md); install, recipes and weights are
@@ -22,9 +22,15 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
   (`UnloadJobType`, `generator_not_resident`). `load-model` stays text-only: its card effect
   makes an LLM resident and its manifests are the LLM catalog.
 - One env per backend, `image`, built by `crucible install image`, installed on submit like
-  every worker env. One manifest, `qwen-image-2.1`, pulled with `crucible models pull` (the
-  `models` weights family, like the ASR and align manifests). `catalog_is_complete`: an id
-  the directory does not declare is refused, never pulled.
+  every worker env. Two manifests, two rungs of one verb: `qwen-image-2.1` (both backends)
+  and `dreamshaper-xl-lightning` (cuda-linux only, for 8 GiB cards; "The small rung",
+  below). Each is pulled on its own with `crucible models pull` (the `models` weights
+  family, like the ASR and align manifests). `catalog_is_complete`: an id the directory
+  does not declare is refused, never pulled.
+- A request may leave `model` out: it is served by what this server registered for the
+  `image` verb (its capability record's row: the Settings choice, else the biggest that
+  fits, docs/VERB-SIZING.md). `ImageJobType.registered_model` reads it through
+  `verbmodel.registered`, and `jobs.resolve_model` calls it for a type that has it.
 - The worker is a `WorkerSession` (`workerio.serve`, ops `load` and `generate`, interrupt
   `cancel`) held by `Residency` as the resident. Settlement unloads it when the job ends
   unless a queue session holds it (jobs-runtime.md section 6). A batch runs inside a queue
@@ -36,10 +42,16 @@ the mac it doesnt exceed 16 gb at once, even at bf16."*
 
 ## Backends
 
-| backend | engine | weights | size multiple | image-to-image | inpaint |
-| --- | --- | --- | --- | --- | --- |
-| `mlx-darwin` | mflux 0.20.0 (`QwenImage21`, MLX) | `Qwen/Qwen-Image-2.1` bf16 | 16 | yes (`image_strength`) | yes (`mask`) |
-| `cuda-linux` | diffusers at `5ff8e59f` (`QwenImage21Pipeline`) | the same repo and revision, bf16 | 32 | yes (`image_strength`) | yes (`mask`) |
+| model | backend | engine, `pipeline` | weights | size multiple | image-to-image | inpaint |
+| --- | --- | --- | --- | --- | --- | --- |
+| `qwen-image-2.1` | `mlx-darwin` | mflux 0.20.0, `qwen-image-2.1` (`QwenImage21`, MLX) | `Qwen/Qwen-Image-2.1` bf16 | 16 | yes (`image_strength`) | yes (`mask`) |
+| `qwen-image-2.1` | `cuda-linux` | diffusers at `5ff8e59f`, `qwen-image-2.1` (`QwenImage21Pipeline`) | the same repo and revision, bf16 | 32 | yes (`image_strength`) | yes (`mask`) |
+| `dreamshaper-xl-lightning` | `cuda-linux` | the same diffusers, `sdxl` (`StableDiffusionXLPipeline`) | `Lykon/dreamshaper-xl-lightning` fp16, UNet stored fp8; VAE `madebyollin/sdxl-vae-fp16-fix` | 32 | no | no |
+
+`pipeline` is a required block key: the worker builds the engine for (engine, pipeline)
+(`worker.ENGINES` and `DIFFUSERS_PIPELINES`), and the parse refuses a pair the engine does
+not run (mflux runs `qwen-image-2.1` only). `scheduler`, `storage_dtype`, `variant` and
+`companions` are read only by the `sdxl` pipeline and refused on a block that runs another.
 
 Windows (`llama-windows`) is never an image backend: the class answers the one `NEEDS_WSL`
 sentence there, and `crucible install image` refuses it `needs_wsl`.
@@ -61,12 +73,24 @@ sentence there, and `crucible install image` refuses it `needs_wsl`.
   copy of the scheduler set the same way. Both blocks say `image_to_image = true`.
 - **Inpainting.** Below, in its own section. Both blocks say `inpaint = true`, a required key
   like `image_to_image`; an arm without it refuses `mask` with `inpaint_unsupported`.
-- **Guidance.** Both pipelines sample Qwen-Image 2.1 without guidance (1.0). A negative prompt
-  is read only when guidance is above 1.0, and guidance above 1.0 does nothing without a
-  negative prompt, so each without the other is refused (`invalid_params`) rather than
-  silently ignored.
+- **Defaults are the model's.** `native_width`, `native_height`, `default_steps`,
+  `default_guidance` and `default_negative_prompt` are block keys; a request that leaves one
+  out gets the chosen model's (`settings_for` in `jobs/image/__init__.py`, the one place
+  they are filled in). Width and height come together or not at all.
+- **Guidance and the negative prompt: one rule, per-model defaults.** A negative prompt is
+  read only when guidance is above 1.0, and guidance above 1.0 needs one, sent or the
+  model's `default_negative_prompt`; each without the other is refused (`invalid_params`)
+  rather than silently ignored. Both pipelines sample Qwen-Image 2.1 without guidance (its
+  default 1.0) and it has no default negative prompt, so a negative prompt there needs
+  guidance raised: true CFG, a second transformer pass per step, twice the time.
+  DreamShaper XL Lightning runs classifier-free guidance at its default 2.0 (SDXL's batched
+  conditional and unconditional pass), so its default negative prompt ("text, letters,
+  words, watermark, signature, logo, blurry, deformed": album covers carry no writing) costs
+  nothing more; `guidance` 1.0 turns CFG off there and reads no negative prompt. A block's
+  `negative_prompt` property publishes this per model (`costs_extra_pass`, `default`).
 - **No quantize param.** mflux can quantize the transformer (`-q 8`), but no arm needs it to fit
-  and none declares it, so the param does not exist and is refused as unknown.
+  and none declares it, so the param does not exist and is refused as unknown. The small
+  rung's fp8 is not a param and not a quantization (below).
 
 ## Staged placement: why the estimate is below the download
 
@@ -167,6 +191,103 @@ plus the CUDA context and set `memory_basis = "measured"`. Watch the VAE decode:
 was the largest stage at 1024x1024 (about 15 GB of activations on a 1.35 GB VAE). If the
 PC's decode passes the 19 GB cap it fails inside the worker as a CUDA OOM (never on the
 desktop), and the fix is a lower `max_pixels` on the cuda block or VAE tiling, measured.
+
+## The small rung
+
+Owen, 2026-10-10: album covers need no text, *"just something that generates artistic
+images"*, and Victoria's RTX 3070 Laptop (8 GiB) must make them. Qwen-Image 2.1 needs 19 GB
+on CUDA, so on that card the `image` verb had no model. `dreamshaper-xl-lightning` is a
+smaller rung of the same verb, not a second verb: the `image` capability class has no goal
+and picks the first that fits in the catalog's order, largest need first
+(docs/VERB-SIZING.md), so the PC (24 GiB) and the Mac keep `qwen-image-2.1` and an 8 GiB
+CUDA card gets DreamShaper. A request naming a model is served or refused exactly as
+before; a request naming none is served by the registered pick.
+
+**The model.** DreamShaper XL Lightning, an SDXL fine-tune distilled for few steps
+(`Lykon/dreamshaper-xl-lightning` at `561086c2`), fp16 variant only: the two CLIP text
+encoders, the UNet, the tokenizers and configs, 6.77 GB (`files` names each; the repo's
+fp32 copies and its two single-file checkpoints are never pulled). The repo's own VAE is
+SDXL's, which overflows in fp16 and decodes NaN, a black picture; it is replaced by the
+block's one companion, `vae`, `madebyollin/sdxl-vae-fp16-fix` at `207b116d` (two files,
+sha256-verified by `weights.pull_files`, 0.33 GB), placed at `<model dir>/vae/` and handed
+to the worker as `vae_dir`. A model is installed only when the repo files and the companion
+both are (`imageweights`, through `companionweights`, the owner of the main-repo-plus-
+companions shape that audio and video use too).
+
+**The recipe** (measured, below): the whole pipeline resident, the UNet stored as fp8 and
+computed in fp16 (`enable_layerwise_casting`), the VAE tiled, DPM++ SDE with Karras sigmas
+(`scheduler = "dpmpp-sde-karras"`), 6 steps, guidance 2.0, the default negative prompt above.
+The worker (`DiffusersSdxlEngine`) builds it once on `load` and keeps it on the card: a
+picture is `encoding` (both CLIP encoders, resident, a fraction of a second; the prompt
+cache still applies), `denoising` (the pipeline's own loop, the step callback reporting
+progress and checking the cancel) and `decoding` (entered from the last step's callback;
+the pipeline decodes and post-processes, as in the measured script). Unlike Qwen's arm
+nothing is loaded per stage: 4.14 GiB stays on the card between pictures.
+
+**Measured** (owens-pc, 2026-10-10, the image env: diffusers 0.41.0.dev0, torch 2.14
+cu130; a script beside Crucible, `E:\claude-files\scratch\dreamshaper\covers.py`, not yet
+through the worker). The RTX 3090 Ti was held to an 8 GiB laptop card's room: a 6.8 GiB
+torch memory fraction, and a VRAM filler leaving 7.4 GiB on the card. Twelve covers at
+1024x1024, six moods by two seeds:
+
+| | fp8-stored UNet, all resident (chosen) |
+| --- | --- |
+| resident after load | 4.14 GiB |
+| peak allocated / reserved, 1024x1024 | 4.99 GiB / 6.15 GiB |
+| to the card | 4.7 s |
+| a picture, warm, 6 steps | 3.2 s |
+
+The manifest's `memory_bytes_estimate` is 7,300,000,000 (6.8 GiB): the cap it ran under,
+which is also the worker's `set_per_process_memory_fraction`, so a picture that outgrows it
+fails inside the worker as a CUDA OOM. It covers the 6.15 GiB reserved plus the CUDA
+context, and fits an 8 GiB card with the 1 GiB desktop allowance an unmeasured 8 GiB card
+gets (7 GiB for a model). An fp16 "staged" variant of the script ran out of memory, but only
+because it moved the text encoders onto the card while the UNet stayed resident; that is the
+script, not a limit of the model, and the resident fp8 design is what ships.
+
+**Sizes.** SDXL is trained at about one megapixel. 512x512 came back visibly worse and only
+1.6 s faster, so the block's `native_width` x `native_height` is 1024x1024 and its
+`quality_min_side` is 768: a client should render at the native size and downscale itself.
+The size rules are the verb's (a multiple of 32 on cuda-linux, at most 1,048,576 pixels);
+the native size and the floor are published per model (IMAGE.md, "Which model, and its
+sizes").
+
+**Image-to-image and inpainting are not built for this rung**, and its block says
+`image_to_image = false` and `inpaint = false`, so `image_strength` and `mask` are refused
+by name (`image_to_image_unsupported`, `inpaint_unsupported`, naming the models that do).
+The existing CUDA path does not carry over with little code: it is written for Qwen-Image
+2.1's flow-matching schedule (the blend `(1 - sigma) * clean + sigma * noise`, a sigma tail
+handed to the pipeline), its packed 16-pixel latent grid and its VAE's normalisation.
+SDXL under DPM++ SDE noises as `alpha_t * clean + sigma_t * noise` from Karras sigmas, keeps
+a multistep history, packs nothing, works on an 8-pixel grid and scales latents by 0.13025;
+the start step would need a custom timestep tail for a Karras schedule. Each part is
+buildable (diffusers' own SDXL img2img and inpaint pipelines do it), but none of it can be
+measured without a card, and half of it would be worse than none.
+
+## fp8 storage is not quantization
+
+The 2026-09-28 ruling (above, candidate 4: *drop quantization unless measurement shows bf16
+does not fit*) still holds, and the small rung keeps it in both halves.
+
+- **What it is.** diffusers' layerwise casting stores each UNet weight as
+  `float8_e4m3fn` and upcasts it to fp16 just before its layer runs; every multiply-add is
+  fp16. There are no calibration data, no scales, no fused low-precision kernels and no
+  quantized checkpoint: the fp16 checkpoint is cast for storage, and on Ampere (sm_86, no
+  fp8 tensor cores) that cast is all fp8 can do. That is why it runs on the 3070 Laptop and
+  the 3090 Ti, where the fp8 compute the 09-28 note rejected (sm_89) does not.
+- **Why it is needed: fp16 does not fit with the encoders.** The UNet is 5.14 GB in fp16
+  and half that stored as fp8. fp16 resident, it plus the two text encoders (1.64 GB) and
+  the VAE (0.17 GB in fp16) is 6.95 GB, 6.5 GiB, of weights, leaving 0.3 GiB of the
+  6.8 GiB for a picture that measured 0.85 GiB of working memory above resident at
+  1024x1024 (4.99 less 4.14 GiB allocated), before the allocator's slack. That is
+  arithmetic on the measured figures; the fp16 attempt that was run moved the encoders on
+  and off and ran out of memory for that reason (above). With fp8 storage the whole
+  pipeline is 4.14 GiB resident and peaked at 6.15 GiB reserved, inside the cap. So the
+  ruling's condition (full precision does not fit) holds, and what is used is the least
+  change that fits: the precision of storage only.
+- **What it is not.** It is not a `quantize` param (there is none), and the rung's `dtype`
+  is `float16`, what the model computes in; `storage_dtype` is stated beside it and
+  reported in `done.image`.
 
 ## Recipes
 

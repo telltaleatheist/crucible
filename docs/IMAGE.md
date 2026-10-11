@@ -1,9 +1,33 @@
 # Image generation: the `image` job
 
-One prompt in, one PNG out, on the Mac (mflux, MLX) and on a CUDA card (diffusers). The model
-is `qwen-image-2.1` (Qwen-Image 2.1, bf16) on both. How it runs and why is
-[internals/image.md](internals/image.md); this page is what a caller sends, what comes back,
-and how to write a prompt that works.
+One prompt in, one PNG out, on the Mac (mflux, MLX) and on a CUDA card (diffusers). How it
+runs and why is [internals/image.md](internals/image.md); this page is what a caller sends,
+what comes back, and how to write a prompt that works.
+
+## Which model, and its sizes
+
+The `image` verb has two rungs, and each server uses the biggest its card holds:
+
+| model | where | memory | native size | below this side it degrades | default steps, guidance | image-to-image, inpainting |
+| --- | --- | --- | --- | --- | --- | --- |
+| `qwen-image-2.1` (Qwen-Image 2.1, bf16) | the Mac, and a CUDA card with about 22 GB free for a model (the PC) | 17.2 GB (Mac), 19 GB (CUDA) | 1024x1024 | 256 (none seen to break) | 40, 1.0 | yes |
+| `dreamshaper-xl-lightning` (DreamShaper XL Lightning, SDXL) | CUDA only, down to an 8 GiB card (Victoria's laptop) | 7.3 GB | 1024x1024 | 768 | 6, 2.0 | no |
+
+- **Leave `model` out** and the server uses the one it registered for the verb (its
+  `GET /v1/capability` `image` row: the Settings choice, else the biggest that fits). Name
+  a model to get exactly that one; one the card cannot hold is refused before anything
+  loads (`insufficient_memory`), and DreamShaper on a Mac is refused by name.
+- **Leave `width` and `height` out** and the picture is the model's native size. Both
+  models draw best near one megapixel; render at the native size and downscale in the app.
+  DreamShaper below about 768 a side is visibly worse and hardly faster (512x512 saves
+  1.6 s of 3.2). Qwen-Image holds up small: B-Sides' covers at 256x256 (about 16 times
+  faster than 1024) and Owen's 384x512 thumbnails are in use.
+- **Where a client reads this:** `GET /v1/playground` gives each image model's page a
+  `facts` object (`native_width`, `native_height`, `quality_min_side`, `size_note`,
+  `size_multiple`, `max_side`, `max_pixels`, `default_steps`, `default_guidance`,
+  `negative_prompt`, `image_to_image`, `inpaint`) and marks the server's pick
+  `registered: true`, listed first among the image pages (the TS SDK's `playground()`
+  reads both: `page.facts`, `page.registered`).
 
 ## Turning it on
 
@@ -13,10 +37,18 @@ crucible install image              # builds the image env and records whether t
 crucible models pull qwen-image-2.1 # ~33 GB; on a Mac that already has it in ~/.cache/huggingface, linked, not copied
 ```
 
+On an 8 GiB CUDA card, pull the small rung instead; nothing of Qwen-Image is fetched:
+
+```bash
+crucible install image
+crucible models pull dreamshaper-xl-lightning   # 7.1 GB: the fp16 checkpoint and the fp16-safe VAE
+crucible capability --write                     # registers it for the verb (a deploy does not re-record)
+```
+
 None of these is needed by hand: a job submitted for an env or model that is missing starts the
-install and answers `409 installing` (the same install-on-submit every other type has), and
-`GET /v1/capability` has an `image` row saying whether this host can make images and with which
-model.
+install and answers `409 installing` (the same install-on-submit every other type has); a job
+that names no model pulls only the model this server registered. `GET /v1/capability` has an
+`image` row saying whether this host can make images and with which model.
 
 ## The request
 
@@ -30,18 +62,41 @@ model.
 | param | default | rule |
 | --- | --- | --- |
 | `prompt` | required | not blank |
-| `width`, `height` | 1024 | 256 to 2048, a multiple of 16; the CUDA arm needs a multiple of 32 (`image_size_not_supported` names it); width x height at most 1,048,576 pixels (`image_too_large`), the size the memory was sized at |
-| `seed` | chosen by the server and reported | 0 to 4294967295; the same seed, prompt and params on the same backend give the same picture |
-| `steps` | 40 | 1 to 100; fewer is faster and rougher |
-| `guidance` | 1.0 | 1.0 to 10.0; above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt` |
-| `negative_prompt` | none | only with `guidance` above 1.0 |
+| `width`, `height` | the model's native size (1024x1024 for both) | sent together or not at all; 256 to 2048, a multiple of 16; the CUDA arm needs a multiple of 32 (`image_size_not_supported` names it); width x height at most 1,048,576 pixels (`image_too_large`), the size the memory was sized at |
+| `seed` | chosen by the server and reported | 0 to 4294967295; the same seed, prompt and params on the same backend and model give the same picture |
+| `steps` | the model's (qwen-image-2.1 40, dreamshaper-xl-lightning 6) | 1 to 100; fewer is faster and rougher |
+| `guidance` | the model's (qwen-image-2.1 1.0, dreamshaper-xl-lightning 2.0) | 1.0 to 10.0; above 1.0 runs classifier-free guidance and needs a negative prompt (below) |
+| `negative_prompt` | the model's, when guidance is above 1.0 (dreamshaper-xl-lightning's; qwen-image-2.1 has none) | read only with guidance above 1.0; see Negative prompts |
 | `image_strength` | none | 0 to 1 exclusive, image-to-image: send exactly one input image (PNG, JPEG or WebP) and this; higher keeps more of the input. Both arms: the input is stretched to width x height and denoising starts at step `max(1, int(steps * image_strength))`. Useful range 0.03 to 0.3; see Image-to-image below. With `mask` it is optional and applies to the masked region only |
 | `mask` | none | inpainting and outpainting: the name of the input that carries the mask, for example `"mask.png"`. The job then carries exactly two inputs, the image and the mask; see Inpainting and outpainting below |
 | `mask_blur` | 8 when `mask` is sent | 0 to 256 pixels, only with `mask` (`invalid_params` without one): how far inside the mask's edge the new picture fades into the kept one. Nothing outside the mask ever changes |
 
 Unknown params are refused, never ignored. Every refusal names the param and what to send instead.
 
+## Negative prompts
+
+One rule for both models: a negative prompt is read only when guidance is above 1.0, and
+guidance above 1.0 needs one, sent or the model's default. What differs is the default, and
+so what a negative prompt costs:
+
+| model | default guidance | a negative prompt | default negative prompt |
+| --- | --- | --- | --- |
+| `qwen-image-2.1` | 1.0 (no guidance) | needs `guidance` above 1.0 too, which runs a second pass per step: twice the time | none |
+| `dreamshaper-xl-lightning` | 2.0 (classifier-free guidance on) | free: both passes already run | `"text, letters, words, watermark, signature, logo, blurry, deformed"` |
+
+So a DreamShaper picture that sends no `negative_prompt` is guided away from writing; send
+one to replace it (`done.image.negative_prompt_is_default` says which was used), or send
+`guidance: 1.0` to run without guidance and without any negative prompt. Each page's
+`facts.negative_prompt` publishes this: `read_when_guidance_above` (1.0),
+`costs_extra_pass` (true for Qwen-Image) and `default`.
+
 ## Image-to-image
+
+DreamShaper does not take an input image or a mask: `image_strength` and `mask` sent to it
+are refused by name (`image_to_image_unsupported`, `inpaint_unsupported`, with the models
+that do in `details.models`). On a server whose pick is DreamShaper, name `qwen-image-2.1`
+for these, on a server whose card holds it.
+
 
 Send one picture as an input and `image_strength` with a new prompt, and the model redraws
 the picture toward the prompt. The whole picture is redrawn. To redraw one region, or to extend
@@ -160,8 +215,10 @@ The job publishes `image.png` (and, with a mask, `generated.png`). Its `done` ev
 {"artifacts": ["image.png"],
  "image": {"model": "qwen-image-2.1", "hf_repo": "Qwen/Qwen-Image-2.1",
            "revision": "790c92633540aa0cb11d9abf19eb46d861714758",
-           "backend": "mlx-darwin", "engine": "mflux", "dtype": "bfloat16",
-           "prompt": "…", "negative_prompt": null, "width": 1024, "height": 1024,
+           "backend": "mlx-darwin", "engine": "mflux", "pipeline": "qwen-image-2.1",
+           "dtype": "bfloat16", "storage_dtype": null, "scheduler": null,
+           "prompt": "…", "negative_prompt": null, "negative_prompt_is_default": false,
+           "width": 1024, "height": 1024,
            "seed": 1, "steps": 2, "guidance": 1.0, "image_strength": null, "input": null,
            "mask": null, "mask_blur": null, "mask_coverage": null,
            "mask_outside_drift": null, "mask_blend_steps": null,
@@ -175,7 +232,10 @@ The job publishes `image.png` (and, with a mask, `generated.png`). Its `done` ev
 ```
 
 `input` is the image input's name, `mask` the mask input's, `mask_blur` the fade used, and
-`mask_coverage` the share of the picture the mask selected (0 to 1).
+`mask_coverage` the share of the picture the mask selected (0 to 1). `steps`, `guidance`,
+`width`, `height` and `negative_prompt` are what ran, defaults included. `pipeline` is
+`qwen-image-2.1` or `sdxl`; DreamShaper's `storage_dtype` is `float8_e4m3fn` (its UNet is
+stored as fp8 and computed in fp16, `dtype`) and its `scheduler` `dpmpp-sde-karras`.
 
 A masked job also reports two health numbers and publishes a second artifact:
 
@@ -236,7 +296,9 @@ inside its session:
 Its `done` event carries `resident`; the first picture then starts at once. Outside a session,
 `load-image` leaves the model loaded until the next picture ends.
 
-**Same prompt, different seeds is fastest.** Turning a prompt into embeddings needs the 17.5 GB
+**Same prompt, different seeds is fastest** (on Qwen-Image; DreamShaper keeps its small
+text encoders loaded, so its encoding is a fraction of a second either way, and a warm
+1024x1024 picture is about 3 s). Turning a prompt into embeddings needs the 17.5 GB
 text encoder, loaded and freed per picture (17 to 25 s on the PC). The loaded model remembers the
 embeddings of its last 32 prompts, so a picture whose prompt and negative prompt were already
 encoded skips the encoder entirely (`prompt_cache: "hit"`, `stage_seconds.encoding` near 0).
@@ -244,6 +306,10 @@ Change the seed, size or steps freely; change a word of the prompt and it is enc
 memory goes when the model is unloaded.
 
 ## Memory
+
+DreamShaper is held whole on the card, 4.14 GiB between pictures and at most 6.15 GiB while
+making a 1024x1024 one; its estimate is 7.3 GB (internals/image.md, "The small rung").
+The rest of this section is Qwen-Image.
 
 The model is ~33 GB on disk, and it never needs that much at once (measured on the Mac: at
 most 16.4 GB, at 1024x1024): its three parts run one after

@@ -241,13 +241,16 @@ def resolve_model(plugin: JobType, model: str | None) -> str | None:
     offered = plugin.describe_models()
     ids = [descriptor.id for descriptor in offered]
     if model is None:
-        if ids:
+        if not ids:
+            return None
+        registered = getattr(plugin, "registered_model", None)
+        if registered is None:
             raise ApiError(
                 400,
                 "model_required",
                 f"job type {plugin.name!r} requires a model; it offers {ids}",
             )
-        return None
+        model = registered()
     if model not in ids:
         raise ApiError(
             400,
