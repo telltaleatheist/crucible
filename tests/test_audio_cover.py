@@ -163,6 +163,9 @@ def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     workerio = types.ModuleType("workerio")
     workerio.claim_stdout = lambda: None
     workerio.send = lambda *args, **kwargs: None
+    # audiocore imports the shared encoder by name (crucible/jobs/workerio.py); these
+    # tests stop before a song is saved, so it is never called.
+    workerio.write_audio = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "workerio", workerio)
     spec = importlib.util.spec_from_file_location("audiocore_under_test", AUDIOCORE)
     audiocore = importlib.util.module_from_spec(spec)
