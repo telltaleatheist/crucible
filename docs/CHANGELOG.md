@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.2 — 2026-10-11
+
 - A token is optional, like Ollama (Owen, 2026-10-11: "lets make it so b sides and any other claude agent is capable of making calls to crucible without requiring the access token"). `[auth] mode = "none"` lets every route answer without `Authorization` and ignores a bearer sent anyway, right or wrong; `"token"` is today's lock. A new `crucible init` writes `"none"` (`--auth token` for the lock); a config without the key keeps `"token"`, so the four servers change only when switched with `crucible auth none` (or `auth` in `PUT /v1/settings`, or the operator page's Settings), live from the next request. `GET /v1/ping` and `GET /v1/info` say `auth`. With `none`, `/v1/setup` and an approved pairing answer `token: null` and token-less pairing lines (`crucible://name@host:port/`), pairing needs no approval, and token rotation is refused `auth_off`. `crucible api --url <url>` alone sends no token, `crucible pair` against such a server saves a line at once, the SDK's `token` is optional (`Ping.auth`, `ServerSetup.auth`, `Pairing.token: string | null`), and the operator page does not ask. The `426 api_version_required` message names the `X-Crucible-Api` header and the curl flag (docs/DESIGN.md section 9).
 
 ## 2.0.1 — 2026-10-11
