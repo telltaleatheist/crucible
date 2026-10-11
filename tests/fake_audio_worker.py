@@ -141,19 +141,12 @@ class FakeEngine:
             asked = job.min_duration_s is not None or job.max_duration_s is not None
             holds = (job.min_duration_s is None or seconds >= job.min_duration_s) and (
                 job.max_duration_s is None or seconds <= job.max_duration_s)
-            attempt = {"attempt": 1, "body_sections": None, "structure": None, "lines": None,
-                       "score_seconds": seconds, "score": None, "unread": None,
-                       "score_tokens": 1180, "score_ended": "eos",
-                       "in_range": holds if asked else None}
-            if asked and not holds:
-                raise audiocore.Refused(
-                    "song_length_out_of_range", f"the fake score lasts {seconds} s",
-                    {"min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
-                     "score_seconds": seconds, "attempts": [attempt]},
-                )
             self.length = {"min_duration_s": job.min_duration_s,
-                           "max_duration_s": job.max_duration_s, "score_seconds": seconds,
-                           "in_range": attempt["in_range"], "attempts": [attempt],
+                           "max_duration_s": job.max_duration_s,
+                           "sized": asked and job.planning_resizable, "body_sections": None,
+                           "structure": None, "lines": None, "score_seconds": seconds,
+                           "score": None, "unread": None,
+                           "in_range": holds if asked else None,
                            "resized_planning_lyrics": None}
         pause = float(os.environ.get("CRUCIBLE_FAKE_AUDIO_STEP_S") or 0)
         steps = job.steps or 4

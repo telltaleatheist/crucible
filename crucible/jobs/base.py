@@ -55,25 +55,16 @@ class JobTypeStatus:
 class JobFailure:
     code: str
     message: str
-    # What a client acts on beside the sentence (JobError.details); only a failure that
-    # has some carries the key.
-    details: dict[str, Any] | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        document: dict[str, Any] = {"code": self.code, "message": self.message}
-        if self.details is not None:
-            document["details"] = self.details
-        return document
+    def to_dict(self) -> dict[str, str]:
+        return {"code": self.code, "message": self.message}
 
     @classmethod
     def from_dict(cls, document: Any) -> "JobFailure | None":
         if not isinstance(document, dict):
             return None
-        details = document.get("details")
         return cls(
-            code=str(document.get("code", "")),
-            message=str(document.get("message", "")),
-            details=details if isinstance(details, dict) else None,
+            code=str(document.get("code", "")), message=str(document.get("message", ""))
         )
 
 
@@ -145,7 +136,7 @@ class Job:
     events_final: bool = False
 
     @property
-    def error(self) -> dict[str, Any] | None:
+    def error(self) -> dict[str, str] | None:
         return None if self.failure is None else self.failure.to_dict()
 
     @property

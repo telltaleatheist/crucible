@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- A YuE2 song is made in one pass again, always: one score, one render (Owen, 2026-10-10: "strictly one pass"; "dont rely on lyrics to determine length"). `min_duration_s` and `max_duration_s` are now a length to aim at, never a refusal: a pool-planned instrumental's set (the seed's or `planning_set`'s) is still sized toward the range by whole sections before its one score (8.6 s a planning line; 21 scores now run 4.7 to 14.4, median 8.9), and every other song is made from its words as sent with the range only recorded (a `note` says so). Gone: the score re-plans and their budget, `song_length_out_of_range`, `instrumental_length_not_reached`, `score_length_unreadable`, the kept request's `refused`, and the `details` on a job failure that only they used. `audio.length` is one record: the range, `sized`, the `body_sections`, `structure` and `lines` sized to, `score_seconds`, `score`, `unread`, `in_range` (no `attempts`); the SDK's `AudioLength` follows (`AudioLengthAttempt` and `JobFailure.details` removed). The 1.0.137 card check: the audio ran 0.959 to 0.982 of its score; 2 of 6 first scores landed in their range and the rest missed by 4.6 to 21.3 s. `scripts/check-song-length.py` reports one row per song and the in-range rate and mean miss, failing only on errors (docs/AUDIO.md "Song length").
+
 ## 1.0.139 — 2026-10-10
 
 - `crucible models pull` takes an image model again (`dreamshaper-xl-lightning`, `qwen-image-2.1`): it read `spec.form`, which only a chat model's spec has, and died with AttributeError — the install step for the 8 GiB image rung.

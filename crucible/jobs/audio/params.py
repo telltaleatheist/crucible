@@ -82,18 +82,19 @@ class AudioParams(BaseModel):
     min_duration_s: float | None = Field(
         default=None,
         gt=0,
-        description="Songs (YuE2): the shortest the song may be, in seconds "
-        f"({MIN_SONG_SECONDS:g} up to the model's longest). Checked against the score "
-        "before anything is composed: an instrumental planned from the server's pool is "
-        "re-planned to land in the range, a song from the client's words is refused "
-        "`song_length_out_of_range` (docs/AUDIO.md \"Song length\"). Null: no minimum.",
+        description="Songs (YuE2): the short end of a length to aim at, in seconds "
+        f"({MIN_SONG_SECONDS:g} up to the model's longest). A nudge, never a guarantee: an "
+        "instrumental planned from the server's pool has its set sized toward the range; "
+        "a song from the client's words is made as written and the range only recorded. "
+        "The song is always made in one pass and `audio.length` says where its score "
+        "landed (docs/AUDIO.md \"Song length\"). Null: no minimum.",
     )
     max_duration_s: float | None = Field(
         default=None,
         gt=0,
-        description="Songs (YuE2): the longest the song may be, in seconds, above "
-        "`min_duration_s` when both are sent; as `min_duration_s`. Null: no maximum "
-        "beyond the model's own.",
+        description="Songs (YuE2): the long end of a length to aim at, in seconds, above "
+        "`min_duration_s` when both are sent; a nudge as `min_duration_s` is. Null: no "
+        "maximum beyond the model's own.",
     )
     seed: int | None = Field(
         default=None,

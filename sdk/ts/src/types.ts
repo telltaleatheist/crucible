@@ -536,13 +536,6 @@ export interface RemovedData {
 export interface JobFailure {
   readonly code: string;
   readonly message: string;
-  /**
-   * Facts to act on beside the sentence, for the failures that have some: a song refused
-   * for its length (`song_length_out_of_range`, `instrumental_length_not_reached`) carries
-   * `score_seconds`, the range, `ratio_needed` and its `attempts` (docs/AUDIO.md "Song
-   * length"). Absent (undefined) otherwise.
-   */
-  readonly details?: Readonly<Record<string, unknown>>;
 }
 
 /** `GET /v1/jobs/{id}`. */
@@ -2050,41 +2043,32 @@ export interface AudioOptions {
    */
   readonly planningSet?: string;
   /**
-   * A song model only (YuE2): the shortest and longest the song may be, in seconds (each 30 to
-   * 360; either alone). The score is checked before anything is composed: an instrumental from
-   * the server's pool is re-planned to land in the range; a song from the client's words that
-   * misses fails `song_length_out_of_range` with the ratio its words need in
-   * {@link JobFailure.details}. {@link AudioResult.length} says what the score measured.
+   * A song model only (YuE2): a length to aim at, in seconds (each 30 to 360; either alone).
+   * A nudge, never a guarantee, and never a refusal: an instrumental planned from the server's
+   * pool has its set sized toward the range before its one score; any other song is made from
+   * its words as sent and the range only recorded. {@link AudioResult.length} says where the
+   * score landed.
    */
   readonly minDurationS?: number;
   readonly maxDurationS?: number;
 }
 
-/** One score planned for a song: its structure (when resized), its nominal seconds and whether it held. */
-export interface AudioLengthAttempt {
-  readonly attempt: number;
-  /** Body sections of the pool set planned from; null for words not resized. */
-  readonly bodySections: number | null;
-  /** The section labels in order; null for words not resized. */
-  readonly structure: readonly string[] | null;
-  readonly lines: number | null;
-  /** The score's bars at its tempo; null (with `unread`) only for a score that could not be timed. */
-  readonly scoreSeconds: number | null;
-  readonly unread: string | null;
-  readonly scoreTokens: number;
-  readonly scoreEnded: 'eos' | 'cap';
-  /** Null when no range was asked. */
-  readonly inRange: boolean | null;
-}
-
-/** A song's score length against the range asked (docs/AUDIO.md "Song length"). */
+/** A YuE2 song's one score against the range asked (docs/AUDIO.md "Song length"). */
 export interface AudioLength {
+  /** The range asked; null ends when not sent. */
   readonly minDurationS: number | null;
   readonly maxDurationS: number | null;
-  /** The nominal seconds of the score the song was composed from: its bars at its tempo. */
+  /** Whether the range shaped the plan: true only for an instrumental planned from the server's pool. */
+  readonly sized: boolean;
+  /** The pool set's body sections, section labels and lines it was sized to; null when not sized. */
+  readonly bodySections: number | null;
+  readonly structure: readonly string[] | null;
+  readonly lines: number | null;
+  /** The score's nominal seconds (its bars at its tempo); null, with `unread`, only for a score that could not be timed. */
   readonly scoreSeconds: number | null;
+  readonly unread: string | null;
+  /** Whether the score landed in the range; null when no range was asked. */
   readonly inRange: boolean | null;
-  readonly attempts: readonly AudioLengthAttempt[];
 }
 
 /** What an instrumental's score was planned from (never sung): the client's words or a pool set. */
@@ -2095,7 +2079,7 @@ export interface AudioPlanningLyrics {
   readonly id: string | null;
   /** True when the client named the set (`planningSet`), false when the seed picked it; null for the client's own words. */
   readonly requested: boolean | null;
-  /** True when the set was grown or cut by whole sections to land in a length range; `lyrics` is then the text planned from. */
+  /** True when the set was grown or cut by whole sections toward a length range; `lyrics` is then the text planned from. */
   readonly resized: boolean;
   /** The text, which sent back as `planningLyrics` plans the same song whatever the pool says later. */
   readonly lyrics: string;
@@ -2125,7 +2109,7 @@ export interface AudioResult {
    * score, and an instrumental shaped by section tags in its `lyrics`.
    */
   readonly planningLyrics: AudioPlanningLyrics | null;
-  /** A song's score length against the range asked, with every score planned; null for Stable Audio. */
+  /** A YuE2 song's score length, and the range asked; null for Stable Audio. */
   readonly length: AudioLength | null;
   /** The audio artifact's name: `audio.flac`, `audio.wav` or `audio.mp3`. */
   readonly artifact: string;
