@@ -128,6 +128,8 @@ import {
   type RerankOptions,
   type RerankRequest,
   type RerankResponse,
+  type ResolveOptions,
+  type ResolvePreview,
   type VerbInfo,
   type VerbOptions,
   type VerbTiming,
@@ -422,6 +424,36 @@ export class CrucibleClient {
       'capability',
     );
     return readCapabilityRecord(body);
+  }
+
+  /**
+   * `GET /v1/resolve` — which model a request would be served by, without sending it: nothing is
+   * loaded or queued (1.0.142+). Ask with the request's own choosing fields.
+   *
+   * ```ts
+   * const pick = await crucible.resolve({ maxParamsB: 4 });
+   * if (pick.refused === null) console.log(pick.model, pick.source, pick.fit?.fits);
+   * ```
+   */
+  async resolve(options: ResolveOptions = {}): Promise<ResolvePreview> {
+    const query = new URLSearchParams();
+    if (options.verb !== undefined) query.set('verb', requireText(options.verb, 'verb'));
+    if (options.model !== undefined) query.set('model', requireText(options.model, 'model'));
+    if (options.maxParamsB !== undefined) query.set('max_params_b', String(requireCeiling(options.maxParamsB)));
+    if (options.form !== undefined) query.set('form', requireText(options.form, 'form'));
+    if (options.images !== undefined) {
+      if (!Number.isInteger(options.images) || options.images < 0) {
+        throw new CrucibleConfigError('images', `must be a whole number of images, got ${String(options.images)}`);
+      }
+      query.set('images', String(options.images));
+    }
+    const suffix = query.toString();
+    const body = await this.#json(
+      '/v1/resolve' + (suffix === '' ? '' : `?${suffix}`),
+      { method: 'GET' },
+      'resolve',
+    );
+    return readResolvePreview(body);
   }
 
   /** `GET /v1/settings` — where each class's work runs, and which upstreams are configured. */
@@ -4728,6 +4760,44 @@ function readModelRerank(entry: Json, where: string): ModelRerankInfo | null {
     yes: optStr(rerank, 'yes', at),
     no: optStr(rerank, 'no', at),
     source: optStr(rerank, 'source', at),
+  };
+}
+
+function readResolvePreview(body: Json): ResolvePreview {
+  const where = 'resolve';
+  const fit = nullableObject(body, 'fit', where);
+  const refused = nullableObject(body, 'refused', where);
+  return {
+    verb: str(body, 'verb', where),
+    door: nullableStr(body, 'door', where),
+    model: nullableStr(body, 'model', where),
+    source: nullableStr(body, 'source', where),
+    paramsB: nullableNum(body, 'params_b', where),
+    bits: nullableNum(body, 'bits', where),
+    engine: nullableStr(body, 'engine', where),
+    form: nullableStr(body, 'form', where),
+    installed: nullableBool(body, 'installed', where),
+    resident: nullableBool(body, 'resident', where),
+    fit:
+      fit === null
+        ? null
+        : {
+            fits: bool(fit, 'fits', `${where}.fit`),
+            needBytes: num(fit, 'need_bytes', `${where}.fit`),
+            availableBytes: num(fit, 'available_bytes', `${where}.fit`),
+            contextTokens: nullableNum(fit, 'context_tokens', `${where}.fit`),
+            concurrency: nullableNum(fit, 'concurrency', `${where}.fit`),
+          },
+    facts: nullableObject(body, 'facts', where),
+    refused:
+      refused === null
+        ? null
+        : {
+            status: num(refused, 'status', `${where}.refused`),
+            code: str(refused, 'code', `${where}.refused`),
+            message: str(refused, 'message', `${where}.refused`),
+            details: nullableObject(refused, 'details', `${where}.refused`),
+          },
   };
 }
 

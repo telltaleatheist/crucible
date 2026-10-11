@@ -91,9 +91,10 @@ class EmbedRequest(_Strict):
     instead, so stored vectors are never mixed with incomparable ones. Implies `model`
     (and `form`); sending them as well, they must agree."""
     max_params_b: Annotated[float, Field(gt=0)] | None = None
-    """A ceiling in billions of parameters: the biggest embedding model that fits this
-    server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or
-    `fingerprint` names one."""
+    """A ceiling in billions of parameters on this server's own pick for embed: kept when
+    it is at or below the ceiling, else the biggest embedding model that fits at or below
+    it (docs/VERB-SIZING.md rule 8, section 11). Beside a `model` or a `fingerprint`:
+    `model_with_ceiling`."""
     dimensions: Annotated[int, Field(ge=1)] | None = None
     """The vector's length: a prefix of the model's own, normalised again (Matryoshka).
     Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32

@@ -419,6 +419,12 @@ console.log(tags.model);
 const session = await crucible.session({ act: 'generate', maxParamsB: 4 });
 console.log(session.model);   // the model the session holds
 await crucible.loadModel(null, { verb: 'generate', maxParamsB: 4 });
+
+// Which model would it be? Nothing is loaded; a refusal comes back as the door's own.
+const pick = await crucible.resolve({ maxParamsB: 4 });
+console.log(pick.model, pick.source, pick.fit?.fits, pick.refused?.code);
+const cover = await crucible.resolve({ verb: 'image' });
+console.log(cover.facts?.['quality_min_side']);   // size the picture to the model it will get
 ```
 
 ### `models()`

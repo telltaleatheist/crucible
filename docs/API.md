@@ -75,6 +75,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `DELETE /v1/queue/{job_id}` | Take a waiting job, call or queue session out of the queue (reason `operator`), or end the open queue session; a job that has started is cancelled with DELETE /v1/jobs/{id}. |
 | `POST /v1/queue/{job_id}/heartbeat` | Say the client that queued this job is still there. |
 | `POST /v1/rerank` | A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. |
+| `GET /v1/resolve` | Which model a request would be served by, without sending it: nothing is loaded, reserved or queued. |
 | `GET /v1/resumable` | Every resume journal this server keeps, newest first, with progress, inputs and expiry. |
 | `GET /v1/resumable/{resume_id}` | One journal, as `GET /v1/resumable` lists it. |
 | `DELETE /v1/resumable/{resume_id}` | Discard a journal now; refused `resume_in_use` while a job writes it. |
@@ -1373,7 +1374,7 @@ The whole API reference as markdown: every route, every job type, every model.
 
 ### `POST /v1/embed`
 
-Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). How to use embed and rerank, with examples and the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else the biggest under `max_params_b` that fits, else what this server registered for embed; its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). How to use embed and rerank, with examples and the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else what this server registered for embed, capped by `max_params_b` (kept at or below it, else the biggest that fits under it); its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1387,7 +1388,7 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 | `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
 | `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for embed: kept when it is at or below the ceiling, else the biggest embedding model that fits at or below it (docs/VERB-SIZING.md rule 8, section 11). Beside a `model` or a `fingerprint`: `model_with_ceiling`. |
 | `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
 | `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
@@ -1410,7 +1411,7 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 
 ### `POST /v1/rerank`
 
-A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else the biggest under `max_params_b` that fits, else what this server registered for rerank; the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else what this server registered for rerank, capped by `max_params_b` (kept at or below it, else the biggest that fits under it); the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1423,7 +1424,7 @@ A relevance probability per document for one query: P(yes) normalised against P(
 | `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
 | `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for rerank: kept when it is at or below the ceiling, else the biggest that fits at or below it (docs/VERB-SIZING.md section 11). Beside a `model`: `model_with_ceiling`. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 *Answers:* `200` RerankResponse, `422` HTTPValidationError
@@ -1439,6 +1440,22 @@ A relevance probability per document for one query: P(yes) normalised against P(
 | `results` | array of RerankResult | yes | — | Every document, most relevant first (a tie keeps the request's order). |
 | `tokens` | RerankTokens | yes | — |  |
 | `timing_ms` | RerankTiming | yes | — |  |
+
+### `GET /v1/resolve`
+
+Which model a request would be served by, without sending it: nothing is loaded, reserved or queued. The query is the request's own choosing fields: `verb` (default `generate`, a chat; also `clean`, `translate`, `simplify`, `analysis`, `decide`, `embed`, `rerank`, `image`), `model`, `max_params_b`, `form`, and for `decide` `images` (how many the decision carries). The answer names the `model`, its `source` (`model`, `max_params_b`, `settings`, `auto`), its `params_b`, `bits`, `engine` and `form`, whether it is `installed` and `resident`, its `fit` for the verb's working context (`need_bytes`, `available_bytes`), and its `facts`: a text model's GET /v1/models row, an image model's playground facts (native size, `quality_min_side`, defaults, negative prompt). A request the door would refuse while choosing answers 200 with `refused` holding the same `status`, `code`, `message` and `details` the door would send, and `model` null. It reads what the door reads before anything waits; what a door refuses later, about the body itself (a schema, a prefill), it does not.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `verb` | query | no | string or null | The verb whose door is previewed: `generate` (the default: a chat), `clean`, `translate`, `simplify`, `analysis` (a chat naming that verb), `decide`, `embed`, `rerank`, `image`. |
+| `model` | query | no | string or null | As the request's `model`. |
+| `max_params_b` | query | no | string or null | As the request's `max_params_b`, read the same way (a number above 0); `decide` and `image` take none. |
+| `form` | query | no | string or null | As the request's `form`. |
+| `images` | query | no | string or null | For `decide`: how many images the decision carries (with images it may be served by a vision form). |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/server/restart`
 
@@ -2373,6 +2390,7 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `queue.sessions` | /v1/queue/sessions: an app's session holds the machine for a run of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md). |
 | `rerank` | POST /v1/rerank: a relevance probability per document for one query, P(yes) against P(no), from a dedicated reranker (the retrieval package) or any decide model. |
 | `rerank.compat` | POST /v1/openai/rerank and /openai/v1/rerank: the same, Cohere/Jina-shaped (`results` with `index` and `relevance_score`, `top_n`). |
+| `resolve` | GET /v1/resolve?verb=&model=&max_params_b=&form=: which model a request would be served by, how it was chosen, whether it is installed and fits, and its facts, or the refusal the door would send; nothing is loaded (docs/VERB-SIZING.md section 11). |
 | `rvc` | The `rvc` job: voice conversion. |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
 | `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
@@ -2714,7 +2732,7 @@ What wrote the vectors: everything that changes a float.
 | `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
 | `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for embed: kept when it is at or below the ceiling, else the biggest embedding model that fits at or below it (docs/VERB-SIZING.md rule 8, section 11). Beside a `model` or a `fingerprint`: `model_with_ceiling`. |
 | `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
 | `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
@@ -3078,7 +3096,7 @@ What judged the documents.
 | `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
 | `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for rerank: kept when it is at or below the ceiling, else the biggest that fits at or below it (docs/VERB-SIZING.md section 11). Beside a `model`: `model_with_ceiling`. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 ### `RerankResponse`

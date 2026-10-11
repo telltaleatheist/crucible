@@ -309,7 +309,10 @@ async def proxy_stream(
     resident: Any,
     extra_headers: dict[str, str],
     when_relayed: Callable[[], Awaitable[None]],
+    observe: Callable[[int, bytes], None] | None = None,
 ) -> Response:
+    """Relay the engine's streamed answer. `observe`, when given, is shown every piece
+    as it is relayed, with the engine's status (the chat door's log line reads it)."""
     log_path = resident.log_path
     request = client.build_request(
         "POST",
@@ -336,6 +339,8 @@ async def proxy_stream(
     if upstream.status_code != 200:
         payload = await upstream.aread()
         await upstream.aclose()
+        if observe is not None:
+            observe(upstream.status_code, payload)
         return Response(
             content=payload,
             status_code=upstream.status_code,
@@ -347,10 +352,14 @@ async def proxy_stream(
     async def relay() -> AsyncIterator[bytes]:
         if resident.engine_model_name == resident.model_id:
             async for chunk in upstream.aiter_bytes():
+                if observe is not None:
+                    observe(200, chunk)
                 yield chunk
             return
         buffer = b""
         async for chunk in upstream.aiter_bytes():
+            if observe is not None:
+                observe(200, chunk)
             buffer += chunk
             while b"\n\n" in buffer:
                 frame, buffer = buffer.split(b"\n\n", 1)

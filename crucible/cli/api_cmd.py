@@ -410,6 +410,20 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_resolve(connection: Connection, args: argparse.Namespace) -> int:
+    params = [
+        (name, str(value))
+        for name, value in (
+            ("verb", args.verb), ("model", args.model), ("max_params_b", args.max_params_b),
+            ("form", args.form), ("images", args.images),
+        )
+        if value is not None
+    ]
+    query = "" if not params else "?" + urllib.parse.urlencode(params)
+    emit(call(connection, "GET", "/v1/resolve" + query))
+    return EXIT_OK
+
+
 def cmd_embed(connection: Connection, args: argparse.Namespace) -> int:
     texts = [read_text_argument(raw, "--input") for raw in args.inputs]
     if not texts:
@@ -1089,6 +1103,14 @@ DECIDE_ARGS = (
 
 API_VERBS = (
     *(Verb(name, help_text, cmd_get(path)) for name, path, help_text in READERS),
+    Verb("resolve", "which model a request would get, before it is sent", cmd_resolve, (
+        arg("--verb", default=None, help="the verb (generate, the default; decide, embed, image...)"),
+        arg("--model", default=None, help="as the request's model"),
+        arg("--max-params-b", dest="max_params_b", default=None, metavar="B",
+            help="as the request's max_params_b"),
+        arg("--form", default=None, help="as the request's form"),
+        arg("--images", default=None, metavar="N", help="decide: how many images it carries"),
+    )),
     Verb("capability", "what this host can hold, and why", cmd_capability, (
         arg(
             "--accelerator-probe", action="store_true",

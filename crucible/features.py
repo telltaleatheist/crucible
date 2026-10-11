@@ -49,6 +49,10 @@ FEATURES: dict[str, str] = {
     "the ticket's `model`) and on `load-model` (`params.verb`, `params.max_params_b`). "
     "GET /v1/info `verbs` lists each chat verb's registered model "
     "(docs/VERB-SIZING.md rule 8).",
+    "resolve": "GET /v1/resolve?verb=&model=&max_params_b=&form=: which model a request "
+    "would be served by, how it was chosen, whether it is installed and fits, and its "
+    "facts, or the refusal the door would send; nothing is loaded "
+    "(docs/VERB-SIZING.md section 11).",
     "decide": "POST /v1/decide with `questions`: answer distributions read off the "
     "resident model's next-token logprobs.",
     "decide.items": "POST /v1/decide with `items`: one choice answer per item, in one "

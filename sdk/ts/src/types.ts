@@ -1448,6 +1448,69 @@ export interface ModelRerankInfo {
   readonly source: string | null;
 }
 
+/**
+ * What {@link CrucibleClient.resolve} asks: the choosing fields of the request it previews, as
+ * that request would send them.
+ */
+export interface ResolveOptions {
+  /**
+   * The verb whose door is previewed: `generate` (the default: a chat), `clean`, `translate`,
+   * `simplify`, `analysis` (a chat naming that verb), `decide`, `embed`, `rerank` or `image`.
+   */
+  readonly verb?: string;
+  readonly model?: string;
+  /** As {@link ChatOptions.maxParamsB}; refused for `decide` and `image`, whose doors take none. */
+  readonly maxParamsB?: number;
+  readonly form?: string;
+  /** For `decide`: how many images the decision carries (it may switch to a vision form). */
+  readonly images?: number;
+}
+
+/** {@link ResolvePreview.fit}: the model against this card, for the verb's working context. */
+export interface ResolveFit {
+  readonly fits: boolean;
+  readonly needBytes: number;
+  readonly availableBytes: number;
+  /** The verb's working context it was sized at; null for a model with none (image). */
+  readonly contextTokens: number | null;
+  readonly concurrency: number | null;
+}
+
+/** {@link ResolvePreview.refused}: the refusal the door itself would send. */
+export interface ResolveRefusal {
+  readonly status: number;
+  readonly code: string;
+  readonly message: string;
+  readonly details: Readonly<Record<string, unknown>> | null;
+}
+
+/**
+ * `GET /v1/resolve` (1.0.142+): which model a request would be served by, chosen by the very
+ * function the door calls, with nothing loaded. When the door would refuse, `refused` says so in
+ * its own words and `model` is null.
+ */
+export interface ResolvePreview {
+  readonly verb: string;
+  /** The door previewed (`POST /v1/openai/chat/completions`, ...); null for an unknown verb. */
+  readonly door: string | null;
+  readonly model: string | null;
+  /** `model`, `max_params_b`, `settings` or `auto`; a newer server may name another. */
+  readonly source: string | null;
+  readonly paramsB: number | null;
+  readonly bits: number | null;
+  readonly engine: string | null;
+  readonly form: string | null;
+  readonly installed: boolean | null;
+  readonly resident: boolean | null;
+  readonly fit: ResolveFit | null;
+  /**
+   * The model's facts: a text model's `GET /v1/models` row, an image model's playground facts
+   * (`native_width`, `native_height`, `quality_min_side`, defaults, `negative_prompt`).
+   */
+  readonly facts: Readonly<Record<string, unknown>> | null;
+  readonly refused: ResolveRefusal | null;
+}
+
 /** `GET /v1/info`'s `verbs` entry: whether this server serves the verb now, and with what. */
 export interface VerbInfo {
   readonly route: string;

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -45,6 +46,7 @@ from ...structured import (
     with_llguidance_grammar,
 )
 from ..caller import client_agent, queue_session
+from ..chatlog import ChatLog
 from ..context import AppContext, Routers
 from ..proxy import (
     JSON_HEADERS,
@@ -206,25 +208,12 @@ def as_sent(
     return body
 
 
-def _chat_model(
-    ctx: AppContext,
-    named: str | None,
-    verb: str | None,
-    form: str | None,
-    ceiling: float | None,
-) -> verbmodel.VerbModel:
-    """The model a chat that addresses a verb is served by (docs/VERB-SIZING.md rule 8,
-    section 1a.3): its named `model` held to the verb's rules when it states a `verb`,
-    else what this server registered for the verb, capped by `max_params_b` when it sends
-    one. A chat that names a model and no verb never comes here: it is served as named."""
-    chosen_verb = DEFAULT_CHAT_VERB if verb is None else verb
-    verbmodel.refuse_unchattable_verb(chosen_verb)
-    resident = ctx.residency.resident_model
-    return verbmodel.resolve(
-        chosen_verb, ctx.config, ctx.backend,
-        model=named, form=form, max_params_b=ceiling,
-        resident=None if resident is None else resident.model_id,
-    )
+def refuse_unservable(requested: str, form: str | None, backend_kind: str) -> None:
+    """What the chat door refuses about the model a chat is served by, before anything
+    waits: a form it does not have, a model that only writes vectors. The door and the
+    preview (GET /v1/resolve) both call this."""
+    refuse_unknown_form(requested, form, backend_kind)
+    refuse_vectors_only(requested, "chat")
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
@@ -296,6 +285,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
         (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`,
         `params.max_params_b`).
         """
+        arrived = time.monotonic()
         raw = await request.body()
         body = chat_body(raw)
         named = body.get("model")
@@ -316,11 +306,19 @@ def register(routers: Routers, ctx: AppContext) -> None:
         prefill = take_prefill(body)
         form = take_form(body)
         json_whitespace = take_json_whitespace(body)
-        if named is None or verb is not None or ceiling is not None:
-            requested = _chat_model(ctx, named, verb, form, ceiling).model
-            body["model"] = requested
-        else:
-            requested = named
+        resident_now = residency.resident_model
+        chosen = verbmodel.chat_model(
+            ctx.config, ctx.backend, model=named, verb=verb, form=form,
+            max_params_b=ceiling,
+            resident=None if resident_now is None else resident_now.model_id,
+        )
+        requested = chosen.model
+        body["model"] = requested
+        log = ChatLog.of(
+            body, requested,
+            verbmodel.source_of(chosen, DEFAULT_CHAT_VERB if verb is None else verb, ctx.config),
+            client_agent(request), arrived,
+        )
         if (
             sent_choice
             or sent_queue
@@ -339,8 +337,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
-        refuse_unknown_form(requested, form, ctx.backend.kind)
-        refuse_vectors_only(requested, "chat")
+        refuse_unservable(requested, form, ctx.backend.kind)
         _refuse_before_waiting(body, requested, ctx.backend.kind, prefill, json_whitespace)
         inflight = ctx.inflight
         act = read_act(request.headers)
@@ -417,14 +414,24 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 await chat_over()
             raise
         try:
+            log.sent()
             if body.get("stream") is True:
+                relayed = after_the_stream(inflight, entry, chat_over)
+
+                async def when_relayed() -> None:
+                    try:
+                        log.report()
+                    finally:
+                        await relayed()
+
                 return await proxy_stream(
                     client,
                     url,
                     forwarded,
                     resident,
                     sampling_headers,
-                    when_relayed=after_the_stream(inflight, entry, chat_over),
+                    when_relayed=when_relayed,
+                    observe=log.chunk,
                 )
             try:
                 upstream = await sent_across_the_wire(
@@ -436,8 +443,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
             except httpx.HTTPError as exc:
                 raise engine_unreachable(resident, exc) from None
             if upstream is None:
+                log.report("the caller left before the answer")
                 response = caller_gone(resident)
             else:
+                log.completion(upstream.status_code, upstream.content)
+                log.report()
                 content = upstream.content
                 if upstream.status_code == 200:
                     content = restore_model_id(content, resident)

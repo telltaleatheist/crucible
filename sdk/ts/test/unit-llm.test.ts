@@ -561,6 +561,37 @@ test('a chat may name a verb and a ceiling instead of a model, and reads the mod
   );
 });
 
+test('resolve previews a request with its own choosing fields and reads the answer strictly', async () => {
+  const preview = {
+    verb: 'generate', door: 'POST /v1/openai/chat/completions', model: 'qwen3.5-4b',
+    source: 'max_params_b', params_b: 4, bits: 16, engine: 'vllm', form: null,
+    installed: true, resident: false,
+    fit: { fits: true, need_bytes: 13_000_000_000, available_bytes: 22_000_000_000,
+           context_tokens: 8192, concurrency: 1 },
+    facts: { id: 'qwen3.5-4b' }, refused: null,
+    request: { model: null, verb: null, max_params_b: '4', form: null, images: null },
+  };
+  handle = (_request, response) => json(response, 200, preview);
+  const answer = await client().resolve({ maxParamsB: 4 });
+  assert.equal(lastMethod, 'GET');
+  assert.equal(lastPath, '/v1/resolve?max_params_b=4');
+  assert.equal(answer.model, 'qwen3.5-4b');
+  assert.equal(answer.source, 'max_params_b');
+  assert.equal(answer.fit?.needBytes, 13_000_000_000);
+  assert.equal(answer.refused, null);
+
+  const refusal = { status: 409, code: 'nothing_fits_ceiling', message: 'nothing fits', details: null };
+  handle = (_request, response) =>
+    json(response, 200, { ...preview, model: null, source: null, params_b: null, bits: null,
+      engine: null, installed: null, resident: null, fit: null, facts: null, refused: refusal });
+  const refused = await client().resolve({ verb: 'image', model: 'qwen-image-2.1' });
+  assert.equal(lastPath, '/v1/resolve?verb=image&model=qwen-image-2.1');
+  assert.deepEqual(refused.refused, refusal);
+
+  handle = (_request, response) => json(response, 200, { ...preview, fit: undefined });
+  await assert.rejects(client().resolve(), /resolve has no field "fit"/);
+});
+
 test('loadModel with no model sends the verb and the ceiling as params, and needs one of them', async () => {
   handle = (_request, response) => json(response, 200, { job_id: 'job-load-4' });
   await client().loadModel(null, { verb: 'generate', maxParamsB: 4 });

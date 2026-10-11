@@ -500,6 +500,39 @@ use, so their ceilings changed with it (a ceiling at or above their 8B keeps it)
 - Discovery: feature `chat.verbs`; `GET /v1/info` `verbs` lists the five chat verbs beside
   embed and rerank, their route the chat door, with `registered` and `models`.
 
+**The preview: `GET /v1/resolve`** (Owen, 2026-10-11: *"we should have some way to tell
+which model will be used before crucible picks it"*). Read-only: nothing is loaded, reserved,
+pulled or queued. Its query is the request's own choosing fields, `verb` (default `generate`),
+`model`, `max_params_b`, `form`, and `images` for decide, and it chooses by calling the very
+function each door calls: the chat door's `verbmodel.chat_model` (and its `refuse_unservable`),
+embed's and rerank's `verbmodel.resolve` (and rerank's `refuse_unscorable`), decide's
+`decide_model`, the image job's `jobs.resolve_model`. The answer: `model`, `source` (`model`,
+`max_params_b`, `settings`, `auto`), `params_b`, `bits`, `engine`, `form`, `installed`,
+`resident`, `fit` (`need_bytes` against `available_bytes` at the verb's working context) and
+`facts` (a text model's `GET /v1/models` row; an image model's playground facts, so an app can
+size a picture to the model it will get: Qwen-Image paints well from 256, DreamShaper from
+768). A request the door would refuse while choosing answers 200 with `refused`: the door's own
+status, code, message and details. The tests send each lever to the door and to the preview
+and compare. What a door refuses later, about the body itself (a schema, a prefill), the
+preview does not read. `verb=decide` and `verb=image` refuse a ceiling, as their doors have no
+such field (`invalid_request`; `verb_not_sized` for image). A disabled image job previews as
+`job_type_disabled`, where a real submit may instead start an install (`installing`).
+
+```text
+GET /v1/resolve?max_params_b=4
+→ {"verb": "generate", "door": "POST /v1/openai/chat/completions", "model": "qwen3.5-4b",
+   "source": "max_params_b", "params_b": 4, "bits": 16, "engine": "vllm",
+   "fit": {"fits": true, "need_bytes": ..., "available_bytes": ..., "context_tokens": 8192,
+           "concurrency": 1}, "facts": {...the /v1/models row...}, "refused": null}
+```
+
+**Every chat says what served it.** The chat door prints one stderr line per completion,
+streamed or not, as decide, embed and rerank do: `crucible: chat on 'qwen3.5-4b' (ceiling) for
+b-sides: waited 3 ms, answered in 812 ms; 412 in (256 cached), 95 out; finish stop; max_tokens
+1024; response_format json_schema`, `; streamed` on a stream. How it was chosen is `named`,
+`ceiling`, `server pick, settings` or `server pick, auto`; a truncation reads `finish length`.
+Never the messages, the answer or the schema.
+
 **The B-Sides case** (`generate` at generate's 8192 tokens x 1; estimates, not measured):
 
 | host | budget | registered | at most 4B | why |

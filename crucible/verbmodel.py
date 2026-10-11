@@ -26,6 +26,7 @@ from .cardfacts import card_for
 from .classnames import CHAT_VERBS, DEFAULT_CHAT_VERB
 from .errors import ApiError
 from .fit import Candidate
+from .formrequest import refuse_unknown_form
 from .manifests import ManifestError, UnknownForm, load_manifest
 from .memorybudget import available_bytes, gib_text
 from .packages import package_not_installed
@@ -356,6 +357,7 @@ def resolve(
             {"model": model, "max_params_b": max_params_b},
         )
     if model is not None:
+        refuse_unknown_form(model, form, backend.kind)
         _refuse_foreign(entry, model, backend.kind)
         _refuse_uninstalled_package(entry, config, model)
         if model != resident:
@@ -382,17 +384,83 @@ def resolve(
     return VerbModel(model=picked, form=None, chosen_by=REGISTERED)
 
 
+def chat_model(
+    config: Any,
+    backend: Any,
+    *,
+    model: str | None,
+    verb: str | None,
+    form: str | None,
+    max_params_b: float | None,
+    resident: str | None,
+) -> VerbModel:
+    """The model a chat is served by (docs/VERB-SIZING.md rule 8). A chat that names a
+    model and neither a verb nor a ceiling is served as named, as it always was (its
+    model may be an upstream's, or one in no verb's lineup). Otherwise the verb (default
+    `generate`) chooses through `resolve`: a named model held to the verb's rules, else
+    what this server registered for it, capped by the ceiling. The chat door and the
+    preview (GET /v1/resolve) both call this."""
+    if model is not None and verb is None and max_params_b is None:
+        return VerbModel(model=model, form=form, chosen_by=MODEL)
+    chosen_verb = DEFAULT_CHAT_VERB if verb is None else verb
+    refuse_unchattable_verb(chosen_verb)
+    return resolve(
+        chosen_verb, config, backend,
+        model=model, form=form, max_params_b=max_params_b, resident=resident,
+    )
+
+
+SETTINGS = "settings"
+AUTO = "auto"
+
+
+def source_of(chosen: VerbModel, verb: str, config: Any) -> str:
+    """Which of section 1a.3's four rules chose the model, as a person says it: `model`
+    (the request named it), `max_params_b` (the request's ceiling replaced the server's
+    pick), `settings` (the verb's Settings choice) or `auto` (Crucible's own pick)."""
+    if chosen.chosen_by != REGISTERED:
+        return chosen.chosen_by
+    return SETTINGS if config.local_model(verb) == chosen.model else AUTO
+
+
+def fit_of(verb: str, config: Any, backend: Any, model: str, form: str | None) -> dict[str, Any] | None:
+    """Whether `model` fits this card for `verb`'s working context, with the numbers the
+    pick and `model_does_not_fit` use; None for a model this backend has no block for."""
+    entry = BY_NAME[verb]
+    try:
+        manifest = load_manifest(model)
+    except ManifestError:
+        return None
+    if not manifest.supports(backend.kind):
+        return None
+    candidate = Candidate.of(manifest, backend.kind, form)
+    budget = _budget(config, backend)
+    work = entry.work
+    return {
+        "fits": candidate.holds(work, budget),
+        "need_bytes": candidate.need_bytes(work),
+        "available_bytes": budget,
+        "context_tokens": None if work is None else work.tokens,
+        "concurrency": None if work is None else work.concurrency,
+    }
+
+
 __all__ = [
+    "AUTO",
     "CEILING",
     "MODEL",
     "REGISTERED",
+    "SETTINGS",
     "SIZED_VERBS",
     "VerbModel",
     "VERB_KEY",
+    "chat_model",
+    "fit_of",
     "refuse_unchattable_verb",
     "refuse_unsized_verb",
     "registered",
     "resolve",
+    "source_of",
     "take_ceiling",
     "take_verb",
 ]

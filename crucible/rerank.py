@@ -90,8 +90,9 @@ class RerankRequest(_Strict):
     form: _NonEmpty | None = None
     """Which form of `model`, for a model whose block here states more than one."""
     max_params_b: Annotated[float, Field(gt=0)] | None = None
-    """A ceiling in billions of parameters: the biggest model that fits this server at
-    or below it. Ignored when `model` names one."""
+    """A ceiling in billions of parameters on this server's own pick for rerank: kept when
+    it is at or below the ceiling, else the biggest that fits at or below it
+    (docs/VERB-SIZING.md section 11). Beside a `model`: `model_with_ceiling`."""
     queue: QueueChoice = queue_field()
     """Absent: while the model is not resident, or its engine is busy, the request waits
     in the server's line up to an hour and the model is loaded for it. `{"max_wait_s":

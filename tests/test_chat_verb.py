@@ -198,10 +198,22 @@ def served(
         def engine(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             seen.append(body)
+            usage = {"prompt_tokens": 12, "completion_tokens": 5,
+                     "prompt_tokens_details": {"cached_tokens": 8}}
+            if body.get("stream") is True:
+                frames = [
+                    {"choices": [{"index": 0, "delta": {"content": '{"a":'}, "finish_reason": None}]},
+                    {"choices": [{"index": 0, "delta": {"content": "1}"}, "finish_reason": "length"}]},
+                    {"choices": [], "usage": usage},
+                ]
+                text = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+                return httpx.Response(200, content=(text + "data: [DONE]\n\n").encode(),
+                                      headers={"content-type": "text/event-stream"})
             return httpx.Response(200, json={
                 "id": "c1", "object": "chat.completion", "model": body["model"],
                 "choices": [{"index": 0, "finish_reason": "stop",
                              "message": {"role": "assistant", "content": '{"a":1}'}}],
+                "usage": usage,
             })
 
         client.app.state.http = httpx.AsyncClient(transport=httpx.MockTransport(engine))
@@ -343,3 +355,146 @@ def test_a_load_names_a_verb_and_a_ceiling_in_place_of_a_model(
             loads.choose_model(model, params)
         assert caught.value.code == code, (model, params)
     assert resolve_model(loads, None, {"verb": "generate", "max_params_b": 4}) == "qwen3.5-4b"
+
+
+# --- the preview: GET /v1/resolve answers what the door would do ------------------------
+
+
+def _preview(client: TestClient, auth: dict[str, str], **query: Any) -> dict[str, Any]:
+    response = client.get("/v1/resolve", headers=auth,
+                          params={k: str(v) for k, v in query.items()})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_the_preview_and_the_chat_door_agree_on_every_lever(
+    served: Any, auth: dict[str, str]
+) -> None:
+    client, seen = served("qwen3.5-4b")
+    messages = [{"role": "user", "content": "hi"}]
+    for lever in (
+        {"max_params_b": 4},
+        {"model": "qwen3.5-4b"},
+        {"verb": "translate", "max_params_b": 4},
+        {"verb": "generate", "model": "qwen3.5-4b"},
+        {},
+        {"verb": "translate"},
+        {"model": "qwen3.5-4b", "max_params_b": 4},
+        {"verb": "lyrics"},
+        {"verb": "simplify", "max_params_b": 2},
+        {"max_params_b": 0.5},
+        {"max_params_b": "abc"},
+        {"form": "bf16", "max_params_b": 4},
+        {"model": "qwen3.5-4b-bside", "verb": "generate"},
+        {"model": "qwen3-embedding-8b"},
+        {"model": "qwen3.5-4b", "form": "nope"},
+    ):
+        door = client.post("/v1/openai/chat/completions", headers=auth,
+                           json={**lever, "messages": messages, "queue": False})
+        preview = _preview(client, auth, **lever)
+        if door.status_code == 200:
+            assert preview["refused"] is None and preview["model"] == door.json()["model"], lever
+            continue
+        error = door.json()["error"]
+        if error["code"] == "model_not_resident":
+            # Chosen, and not on the card: the door names what it would load.
+            assert preview["refused"] is None and preview["model"] in error["message"], lever
+            continue
+        refused = preview["refused"]
+        assert refused is not None and preview["model"] is None, (lever, preview)
+        assert (refused["status"], refused["code"], refused["message"]) == (
+            door.status_code, error["code"], error["message"]
+        ), lever
+
+
+def test_the_preview_names_the_source_the_fit_and_the_facts(
+    served: Any, auth: dict[str, str]
+) -> None:
+    client, _ = served("qwen3.5-4b")
+    capped = _preview(client, auth, max_params_b=4)
+    assert (capped["model"], capped["source"], capped["verb"]) == (
+        "qwen3.5-4b", "max_params_b", "generate"
+    )
+    assert (capped["params_b"], capped["bits"], capped["engine"]) == (4, 16, "vllm")
+    assert isinstance(capped["resident"], bool) and capped["fit"]["fits"] is True
+    assert capped["fit"]["context_tokens"] == 8192 and capped["fit"]["available_bytes"] > 0
+    assert capped["facts"]["id"] == "qwen3.5-4b" and "max_context" in capped["facts"]
+    assert capped["door"] == "POST /v1/openai/chat/completions"
+    auto = _preview(client, auth)
+    assert (auto["model"], auto["source"]) == ("qwen3.8-27b-4bit", "auto")
+    named = _preview(client, auth, model="qwen3.5-4b-bside")
+    assert (named["model"], named["source"]) == ("qwen3.5-4b-bside", "model")
+    decide = _preview(client, auth, verb="decide")
+    assert (decide["model"], decide["source"]) == ("qwen3.5-9b", "auto")
+    with_images = _preview(client, auth, verb="decide", images=1)
+    assert with_images["model"] == "qwen3.5-4b", "the PC's decide with images (section 8a)"
+    assert _preview(client, auth, verb="decide", max_params_b=4)["refused"]["code"] == (
+        "invalid_request"
+    )
+    assert _preview(client, auth, verb="tts")["refused"]["code"] == "verb_not_previewed"
+    embed = _preview(client, auth, verb="embed")
+    door = client.post("/v1/embed", headers=auth,
+                       json={"inputs": ["x"], "input_type": "query", "queue": False})
+    assert embed["refused"]["code"] == door.json()["error"]["code"] == "package_not_installed"
+    assert embed["refused"]["message"] == door.json()["error"]["message"]
+    rerank = _preview(client, auth, verb="rerank", max_params_b=4)
+    door = client.post("/v1/rerank", headers=auth, json={
+        "query": "q", "documents": ["d"], "max_params_b": 4, "queue": False,
+    })
+    if door.status_code == 200:
+        assert rerank["model"] == door.json()["model"]["id"]
+    else:
+        error = door.json()["error"]
+        assert rerank["refused"] is not None, (rerank, error)
+        assert (rerank["refused"]["code"], rerank["refused"]["message"]) == (
+            error["code"], error["message"]
+        )
+
+
+def test_the_preview_of_an_image_request_carries_the_playground_facts(
+    home: Path, fake_env: Path, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure_box(home, enable_llm=True, enable_image=True, capability=_record())
+    monkeypatch.setattr(Residency, "resident_model", property(lambda self: None))
+    with TestClient(create_app(load_config(home), FAKE_BACKEND)) as client:
+        preview = _preview(client, auth, verb="image")
+        assert preview["refused"] is None, preview
+        assert preview["model"] == "qwen-image-2.1" and preview["source"] == "auto"
+        facts = preview["facts"]
+        assert {"native_width", "native_height", "quality_min_side"} <= set(facts), facts
+        named = _preview(client, auth, verb="image", model="dreamshaper-xl-lightning")
+        assert (named["model"], named["source"]) == ("dreamshaper-xl-lightning", "model")
+        assert named["facts"]["quality_min_side"] == 768
+        assert _preview(client, auth, verb="image", max_params_b=4)["refused"]["code"] == (
+            "verb_not_sized"
+        )
+
+
+# --- the chat door's log line ------------------------------------------------------------
+
+
+def test_every_chat_logs_one_line_of_what_served_it_and_never_what_was_said(
+    served: Any, auth: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    client, _ = served("qwen3.5-4b")
+    capsys.readouterr()
+    secret = "the words of the prompt"
+    answered = client.post("/v1/openai/chat/completions", headers={**auth, "X-Crucible-Client": "b-sides"}, json={
+        "max_params_b": 4, "max_tokens": 64, "response_format": SCHEMA,
+        "messages": [{"role": "user", "content": secret}],
+    })
+    assert answered.status_code == 200
+    line = [x for x in capsys.readouterr().err.splitlines() if x.startswith("crucible: chat on")]
+    assert len(line) == 1, line
+    assert "chat on 'qwen3.5-4b' (ceiling) for b-sides: waited " in line[0]
+    assert "12 in (8 cached), 5 out; finish stop; max_tokens 64; response_format json_schema" in line[0]
+    assert secret not in line[0] and '{"a":1}' not in line[0]
+    streamed = client.post("/v1/openai/chat/completions", headers=auth, json={
+        "model": "qwen3.5-4b", "stream": True, "messages": [{"role": "user", "content": secret}],
+    })
+    assert streamed.status_code == 200
+    line = [x for x in capsys.readouterr().err.splitlines() if x.startswith("crucible: chat on")]
+    assert len(line) == 1, line
+    assert "(named)" in line[0] and "finish length" in line[0] and line[0].endswith("; streamed")
+    assert "12 in (8 cached), 5 out" in line[0] and "max_tokens unset; none" in line[0]
+    assert secret not in line[0]
