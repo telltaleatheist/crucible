@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 import sys
 import time
@@ -802,6 +803,48 @@ def test_a_module_stops_at_the_first_failure_and_keeps_what_finished(
     assert "step 1 of 3" in events[-1]["data"]["message"]
     assert steps(events) == ["install llm"]
     assert row["installed"] is False
+
+
+def test_the_checked_in_b_sides_module_is_accepted_and_pulls_its_separator(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # modules/b-sides.module.json as gen-modules.py wrote it, posted the way an app posts one:
+    # entries filtered on the generated `backends` and that key stripped (validate_module
+    # refuses it; commit c2f7a12). The `rvc` env is the one the `denoise` job type runs in
+    # (crucible/jobtypes.py DENOISE), so B-Sides installs `rvc` and pulls the vocals separator.
+    generated = json.loads(
+        (Path(REPO_ROOT) / "modules" / "b-sides.module.json").read_text(encoding="utf-8")
+    )
+
+    def here(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {key: value for key, value in row.items() if key != "backends"}
+            for row in rows
+            if FAKE_BACKEND.kind in row["backends"]
+        ]
+
+    module = {
+        **generated,
+        "job_types": here(generated["job_types"]),
+        "subjects": here(generated["subjects"]),
+    }
+    assert module["job_types"] == [{"type": "rvc"}]
+    assert module["subjects"] == [{"kind": "denoise", "id": "vocals-roformer"}]
+    pulled: list[tuple[str, str]] = []
+
+    async def fake_pull(self: Any, task: Any, subject: Any) -> None:
+        pulled.append((subject.kind, subject.id))
+
+    monkeypatch.setattr(tasks.TaskStore, "_pull", fake_pull)
+    monkeypatch.setattr(tasks, "env_installed", lambda *a, **k: True)
+    with make_client(enable_echo=True, enable_rvc=True) as client:
+        events = run(client, auth, {"type": "module", "module": module})
+    assert kinds(events)[-1] == "done", events
+    assert pulled == [("denoise", "vocals-roformer")]
+    skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
+    assert any("install rvc" in reason for reason in skipped), skipped
 
 
 def test_a_module_of_pure_pulls_is_not_gated_on_the_card(

@@ -282,8 +282,10 @@ class EventHub:
             if self._stopped:
                 return
             self._append(SERVER, STOPPING, {"reason": reason})
-            self._stopped = True
+            # The reason first: a stream reads `stopped` without the lock (api/sse.py) and
+            # then sends `stop_reason`, which must never be the null of the gap between them.
             self._reason = reason
+            self._stopped = True
             subscribers, self._subscribers = self._subscribers, []
             watchers, self._watchers = self._watchers, []
         for subscriber in subscribers:

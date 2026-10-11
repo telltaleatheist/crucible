@@ -21,6 +21,7 @@ import {
   CrucibleConfigError,
   CrucibleProtocolError,
   CrucibleRefused,
+  CrucibleServerError,
   CrucibleUnreachable,
   isLlmCapability,
   type JobEvent,
@@ -862,6 +863,72 @@ test('chatStream sends the act too, beside the Accept it adds', async () => {
   assert.deepEqual(seen, ['lit.']);
   assert.equal(lastHeaders['x-crucible-act'], 'translate');
   assert.equal(lastHeaders['accept'], 'text/event-stream');
+});
+
+test('a completion whose engine did not say why it stopped reads finishReason null', async () => {
+  // crucible/upstreams.py ollama_to_openai: an Ollama answer with no `done_reason` is relayed
+  // with `finish_reason: null`; the answer itself is whole and was refused before.
+  handle = (_request, response) =>
+    json(response, 200, {
+      ...COMPLETION,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'The forge is lit.' }, finish_reason: null }],
+    });
+  const answer = await client().chat({ model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(answer.content, 'The forge is lit.');
+  assert.equal(answer.finishReason, null);
+});
+
+test('a stream error frame, which has no choices, is thrown in the upstream\'s own words', async () => {
+  // crucible/upstreams.py writes `data: {"error": {...}}` mid-stream for an Ollama or Anthropic
+  // upstream; it was read as a chunk missing `choices` and the upstream's message was lost.
+  handle = (_request, response) => {
+    openSse(response);
+    response.write(contentChunk('par'));
+    response.write(
+      `data: ${JSON.stringify({
+        error: { message: "ollama's stream ended before it said done; the answer is truncated", upstream: 'ollama' },
+      })}\n\n`,
+    );
+    response.end();
+  };
+  const seen: string[] = [];
+  await assert.rejects(
+    (async () => {
+      for await (const delta of client().chatStream({
+        model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }],
+      })) {
+        seen.push(delta);
+      }
+    })(),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleServerError, `got ${String(error)}`);
+      assert.equal(error.code, 'stream_error');
+      assert.match(error.serverMessage, /ended before it said done/);
+      return true;
+    },
+  );
+  assert.deepEqual(seen, ['par']);
+
+  // Anthropic's error event names its own type, which is kept as the code.
+  handle = (_request, response) => {
+    openSse(response);
+    response.write(
+      `data: ${JSON.stringify({ error: { type: 'overloaded_error', message: 'Overloaded' } })}\n\n`,
+    );
+    response.end();
+  };
+  await assert.rejects(
+    (async () => {
+      for await (const _delta of client().chatStream({
+        model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }],
+      })) {
+        // nothing arrives before the error
+      }
+    })(),
+    (error: unknown) =>
+      error instanceof CrucibleServerError && error.code === 'overloaded_error' &&
+      /Overloaded/.test(error.serverMessage),
+  );
 });
 
 test('omitting act sends NO header, which is how the server records "did not say"', async () => {

@@ -3449,7 +3449,9 @@ function readWaitingFor(row: Json, where: string): QueueWaitingFor | null {
     message: str(found, 'message', at),
     details: nullableObject(found, 'details', at),
     since: str(found, 'since', at),
-    nextCheckAt: str(found, 'next_check_at', at),
+    // Null on purpose for `keeping_calls_together`: that wait ends when the calls ahead have
+    // run, not at a time (crucible/jobs/line.py KeepWait).
+    nextCheckAt: nullableStr(found, 'next_check_at', at),
   };
 }
 
@@ -4359,7 +4361,9 @@ function readChatResponse(body: Json): ChatResponse {
   const choice = asObject(first, 'chat.choices[0]');
   const message = objectField(choice, 'message', 'chat.choices[0]');
   const usage = optObject(body, 'usage', where);
-  const finishReason = str(choice, 'finish_reason', 'chat.choices[0]');
+  // Null when the engine did not say: crucible/upstreams.py ollama_to_openai writes null for an
+  // Ollama answer with no `done_reason`, and OpenAI's own schema allows it.
+  const finishReason = nullableStr(choice, 'finish_reason', 'chat.choices[0]');
   refuseReasoningWithoutContent(message, finishReason);
   return {
     id: optStr(body, 'id', where),
@@ -5053,7 +5057,7 @@ function sameKeys(got: readonly string[], want: readonly string[], where: string
   }
 }
 
-function refuseReasoningWithoutContent(message: Json, finishReason: string): void {
+function refuseReasoningWithoutContent(message: Json, finishReason: string | null): void {
   const content = 'content' in message ? message['content'] : null;
   if (typeof content === 'string') return;
   const reasoning = 'reasoning' in message ? message['reasoning'] : null;
@@ -5070,6 +5074,25 @@ function refuseReasoningWithoutContent(message: Json, finishReason: string): voi
   );
 }
 
+/** What a chat stream's error frame is read as when its error carries no code of its own. */
+const STREAM_ERROR = 'stream_error';
+
+/**
+ * A chat stream's `data: {"error": ...}` frame: the answer failed after the 200 was sent. The
+ * server writes these itself for an Ollama or Anthropic upstream (crucible/upstreams.py), and a
+ * relayed engine may too. Thrown with the upstream's own words rather than as a missing `choices`.
+ */
+function streamErrorFrame(error: unknown): CrucibleServerError {
+  const body = typeof error === 'object' && error !== null && !Array.isArray(error)
+    ? (error as Json)
+    : null;
+  const said = body === null ? error : body['message'];
+  const message = typeof said === 'string' ? said : JSON.stringify(error);
+  const named = body === null ? null : (body['code'] ?? body['type']);
+  const code = typeof named === 'string' ? named : STREAM_ERROR;
+  return new CrucibleServerError(200, code, `the chat stream failed mid-answer: ${message}`, error);
+}
+
 function readChatDelta(raw: string): string | null {
   let parsed: unknown;
   try {
@@ -5078,6 +5101,7 @@ function readChatDelta(raw: string): string | null {
     throw new CrucibleProtocolError(`a chat completion chunk is not JSON: ${excerpt(raw)}`);
   }
   const chunk = asObject(parsed, 'chat chunk');
+  if (!('choices' in chunk) && 'error' in chunk) throw streamErrorFrame(chunk['error']);
   const choices = asArray(field(chunk, 'choices', 'chat chunk'), 'chat chunk.choices');
   const first = choices[0];
   if (first === undefined) return null;

@@ -96,6 +96,21 @@ def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
     assert "dots-ocr" not in json.dumps(document)
 
 
+def test_b_sides_installs_the_env_its_separator_runs_in() -> None:
+    # The `denoise` job type has no env of its own: it runs in `rvc`'s
+    # (crucible/jobtypes.py DENOISE), so `rvc` is what a module installs for it.
+    document = json.loads(
+        (MODULES_DIR / "b-sides.module.json").read_text(encoding="utf-8")
+    )
+    assert document["job_types"] == [
+        {"type": "rvc", "backends": ["cuda-linux", "mlx-darwin"]}
+    ]
+    assert document["subjects"] == [
+        {"kind": "denoise", "id": "vocals-roformer", "backends": ["cuda-linux", "mlx-darwin"]}
+    ]
+    assert document["needs"] == []
+
+
 @pytest.mark.parametrize("path", declarations(), ids=lambda p: p.stem)
 def test_the_version_is_the_crucible_version_and_a_content_hash(path: Path) -> None:
     fresh = modules.build(modules.read_declaration(path), path.name)
