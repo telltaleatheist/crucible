@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import accelerator, jobenv, tasks, workers
+from crucible import accelerator, hosttools, jobenv, tasks, workers
 from crucible.cardkinds import KIND_DENOISE
 from crucible.denoisemodels import load_denoise_manifest, stamp_name
 from crucible.jobs import denoise as denoise_job
@@ -32,6 +32,17 @@ BLOCK = "block_00.wav"
 INPUTS = {
     BLOCK: {"inline_base64": base64.b64encode(b"44.1 kHz stereo, allegedly").decode()}
 }
+
+
+FFMPEG = "/opt/crucible/tools/bin/ffmpeg"
+FFPROBE = "/opt/crucible/tools/bin/ffprobe"
+
+
+@pytest.fixture(autouse=True)
+def ffmpeg_placed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crucible's own ffmpeg, as installing the rvc env places it."""
+    monkeypatch.setattr(hosttools, "ffmpeg_path", lambda: FFMPEG)
+    monkeypatch.setattr(hosttools, "ffprobe_path", lambda: FFPROBE)
 
 
 @pytest.fixture
@@ -434,7 +445,9 @@ def test_the_worker_is_told_the_native_rate_and_the_backend_decides_autocast(
     request = json.loads(lines[2])
     assert request["op"] == "separate"
     assert request["sample_rate"] == 44100
-    assert request["output_format"] == "WAV"
+    assert request["separator_format"] == "WAV"
+    assert request["output_format"] == "wav"
+    assert (request["ffmpeg"], request["ffprobe"]) == (FFMPEG, FFPROBE)
     environment = json.loads(lines[1])
     assert environment["KMP_DUPLICATE_LIB_OK"] == "TRUE"
     assert environment["OMP_NUM_THREADS"] == "1"
@@ -485,18 +498,94 @@ def test_autocast_is_off_on_the_mac(
     ] is False
 
 
-def test_an_input_at_the_wrong_rate_is_refused_and_nothing_is_resampled(
+def test_an_input_at_the_separator_s_rate_goes_as_sent_and_the_record_says_so(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    events = run_job(ready, auth)
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    assert data["format"] == "wav"
+    assert data["input"] == {
+        "codec": "pcm_s16le", "container": "wav",
+        "sample_rate": 44100, "frames": 441000, "channels": 2,
+    }
+    assert data["separated"] == {
+        "sample_rate": 44100, "frames": 441000, "decoded": False, "resampled": False,
+        "said": "the separator read the input as sent",
+    }
+
+
+def test_a_48k_mp3_is_decoded_resampled_and_its_stems_come_back_at_48k(
     ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A YuE2 song (48 kHz) goes in as it was rendered; each stem keeps its rate and
+    exactly its frames, so a client's sample offsets still mean what they meant."""
     monkeypatch.setenv(
         "CRUCIBLE_FAKE_DENOISE_INPUT",
-        json.dumps({"sample_rate": 24000, "frames": 240000, "channels": 1}),
+        json.dumps({
+            "sample_rate": 48000, "frames": 480000, "channels": 2,
+            "codec": "mp3", "container": "mp3",
+        }),
     )
-    events = run_job(ready, auth)
-    assert terminal(events)["event"] == "failed"
-    message = terminal(events)["data"]["error"]["message"]
-    assert "24000 Hz" in message and "44100 Hz" in message
-    assert "Nothing was resampled" in message
+    events = run_job(ready, auth, inputs={
+        "song.mp3": {"inline_base64": base64.b64encode(b"an mp3, allegedly").decode()}
+    })
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    assert (data["sample_rate"], data["frames"]) == (48000, 480000)
+    assert data["input"]["codec"] == "mp3"
+    assert data["separated"]["sample_rate"] == 44100
+    assert data["separated"]["frames"] == 441000
+    assert data["separated"]["decoded"] is True and data["separated"]["resampled"] is True
+    assert "resampled 48000 Hz -> 44100 Hz" in data["separated"]["said"]
+    assert "back to 48000 Hz and 480000 frames" in data["separated"]["said"]
+    warming = [e["data"]["message"] for e in events if e["event"] == "warming"]
+    assert any("48000 Hz -> 44100 Hz" in line for line in warming), warming
+
+
+def test_format_names_every_stem_s_container(
+    ready: TestClient, auth: dict[str, str], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    events = run_job(ready, auth, params={"stems": "all", "format": "mp3"})
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    assert data["format"] == "mp3"
+    assert [name.rsplit(".", 1)[1] for name in data["artifacts"]] == ["mp3", "mp3"]
+    request = json.loads(transcript.read_text(encoding="utf-8").splitlines()[2])
+    assert (request["separator_format"], request["output_format"]) == ("WAV", "mp3")
+
+
+def test_format_offers_what_an_audio_job_offers() -> None:
+    from typing import get_args
+
+    from crucible.jobs.audio.params import FORMATS
+
+    assert set(denoise_job.STEM_FORMATS) == set(FORMATS)
+    field = denoise_job.DenoiseParams.model_fields["format"]
+    assert set(get_args(field.annotation)) == set(FORMATS)
+    assert field.default == "wav"
+
+
+def test_an_unknown_format_is_refused(
+    denoise_client: TestClient, auth: dict[str, str]
+) -> None:
+    response = submit(denoise_client, auth, params={"format": "ogg"})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_params"
+
+
+def test_no_ffmpeg_is_refused_by_name_at_submit(
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hosttools, "ffprobe_path", lambda: None)
+    response = submit(ready, auth)
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["code"] == "ffmpeg_missing"
+    assert error["details"]["missing"] == ["ffprobe"]
 
 
 def test_no_primary_stem_fails_the_job(
@@ -529,28 +618,48 @@ def test_two_primary_stems_fail_the_job(
     )
 
 
+@pytest.mark.parametrize(
+    ("stem", "words"),
+    [
+        ({"separated_rate": 22050}, "came out of the separator at 22050 Hz"),
+        ({"sample_rate": 22050}, "not returned to the input's rate"),
+    ],
+)
 def test_a_resampled_stem_fails_the_job(
-    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    stem: dict, words: str,
 ) -> None:
     monkeypatch.setenv(
         "CRUCIBLE_FAKE_DENOISE_STEMS",
-        json.dumps([{"name": "block_00_(Dry)_a.wav", "sample_rate": 22050}]),
+        json.dumps([{"name": "block_00_(Dry)_a.wav", **stem}]),
     )
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
-    assert terminal(events)["data"]["error"]["code"] == "denoise_resampled"
+    error = terminal(events)["data"]["error"]
+    assert error["code"] == "denoise_resampled"
+    assert words in error["message"]
 
 
+@pytest.mark.parametrize(
+    ("stem", "words"),
+    [
+        ({"separated_frames": 440999}, "came out of the separator 440999 frames long"),
+        ({"frames": 440999}, "not returned to the input's length"),
+    ],
+)
 def test_a_stem_of_a_different_length_fails_the_job(
-    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch,
+    stem: dict, words: str,
 ) -> None:
     monkeypatch.setenv(
         "CRUCIBLE_FAKE_DENOISE_STEMS",
-        json.dumps([{"name": "block_00_(Dry)_a.wav", "frames": 440999}]),
+        json.dumps([{"name": "block_00_(Dry)_a.wav", **stem}]),
     )
     events = run_job(ready, auth)
     assert terminal(events)["event"] == "failed"
-    assert terminal(events)["data"]["error"]["code"] == "denoise_length_changed"
+    error = terminal(events)["data"]["error"]
+    assert error["code"] == "denoise_length_changed"
+    assert words in error["message"]
 
 
 def test_a_second_stem_of_another_length_is_reported_and_not_refused(
@@ -660,6 +769,11 @@ def test_check_reports_what_is_missing_in_order(
     )
     config = load_config(home)
     plugin = denoise_job.DenoiseJobType(config, FAKE_BACKEND, frozenset)
+    with monkeypatch.context() as no_tools:
+        no_tools.setattr(hosttools, "ffmpeg_path", lambda: None)
+        unplaced = plugin.check(FAKE_BACKEND)
+    assert unplaced.ready is False
+    assert "there is no ffmpeg" in unplaced.detail
     status = plugin.check(FAKE_BACKEND)
     assert status.ready is False
     assert "no separator checkpoint" in status.detail

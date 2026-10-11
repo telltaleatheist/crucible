@@ -256,6 +256,34 @@ def decode(ffmpeg: str, audio_path: str, on_progress=None):
     return numpy.frombuffer(buffer, dtype=numpy.float32)
 
 
+# How every worker writes the audio it hands back (an audio job's song, a denoise job's
+# stems): FLAC and WAV as 24-bit PCM, mp3 as 192 kbps CBR.
+FLAC_SUBTYPE = "PCM_24"
+
+WAV_SUBTYPE = "PCM_24"
+
+# libsndfile's MP3 writer (LAME, in libsndfile >= 1.1) takes a compression level, not a
+# bitrate. In CONSTANT mode 0.40-0.45 all give 192 kbps CBR - measured with ffprobe on
+# libsndfile 1.2.2, the one both audio envs carry (0.3 gives 224 kbps, 0.5 160 kbps).
+# 0.42 sits in the middle of that band.
+MP3_CBR_192_LEVEL = 0.42
+
+
+def write_audio(path: str, samples, sample_rate: int, audio_format: str) -> None:
+    import soundfile
+
+    if audio_format == "mp3":
+        soundfile.write(
+            path, samples, sample_rate, format="MP3", subtype="MPEG_LAYER_III",
+            bitrate_mode="CONSTANT", compression_level=MP3_CBR_192_LEVEL,
+        )
+        return
+    if audio_format not in ("flac", "wav"):
+        raise ValueError(f"no encoding for {audio_format!r}; flac, wav or mp3")
+    subtype = FLAC_SUBTYPE if audio_format == "flac" else WAV_SUBTYPE
+    soundfile.write(path, samples, sample_rate, format=audio_format.upper(), subtype=subtype)
+
+
 def cap_memory(torch, memory_cap_bytes):
     if memory_cap_bytes is None:
         return None
