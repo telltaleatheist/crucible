@@ -449,7 +449,9 @@ JOB_DOCS: dict[str, JobDoc] = {
         summary="Makes one picture from a prompt (text-to-image), redraws an input "
         "picture (image-to-image), or regenerates the masked region of one "
         "(inpainting and outpainting).",
-        model="An image model id (GET /v1/catalog): `qwen-image-2.1`.",
+        model="An image model id (GET /v1/catalog): `qwen-image-2.1`, or "
+        "`dreamshaper-xl-lightning` (CUDA, 8 GiB cards). Leave it out for the model this "
+        "server registered for the verb, the biggest its card holds.",
         params=ImageParams,
         inputs="None for text-to-image. Exactly one PNG, JPEG or WebP with "
         "`image_strength`. With `mask`, exactly two: the image and the mask, `mask` "
@@ -474,9 +476,13 @@ JOB_DOCS: dict[str, JobDoc] = {
         notes=(
             "Width and height are 256 to 2048 and multiples of 16 (32 on cuda-linux, "
             "`image_size_not_supported`), at most 1,048,576 pixels "
-            "(`image_too_large`).",
-            "`guidance` above 1.0 needs `negative_prompt`, and `negative_prompt` "
-            "needs it; `mask_blur` needs `mask`.",
+            "(`image_too_large`). Left out (both), the model's native size.",
+            "Steps, guidance and the negative prompt default to the model's "
+            "(GET /v1/playground, each image page's `facts`). Guidance above 1.0 needs a "
+            "negative prompt, sent or the model's default, and a negative prompt needs "
+            "guidance above 1.0; `mask_blur` needs `mask`.",
+            "`dreamshaper-xl-lightning` takes no input image or mask "
+            "(`image_to_image_unsupported`, `inpaint_unsupported`).",
             "Inputs that do not match the mode are `invalid_inputs`; a mask of a "
             "different size is `mask_size_mismatch`, one with no white `mask_empty`.",
             "The seed reproduces a picture on the same backend only.",
@@ -491,7 +497,8 @@ JOB_DOCS: dict[str, JobDoc] = {
         "load-image",
         LoadImageParams,
         "image model",
-        "An image model id (GET /v1/catalog): `qwen-image-2.1`.",
+        "An image model id (GET /v1/catalog): `qwen-image-2.1` or "
+        "`dreamshaper-xl-lightning`; left out, the one this server registered.",
         "qwen-image-2.1",
     ),
     "audio": JobDoc(

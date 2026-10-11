@@ -148,6 +148,7 @@ import {
   type Ping,
   type PlaygroundField,
   type PlaygroundPage,
+  type ImageFacts,
   type PlaygroundPreset,
   type ProgressData,
   type QueueChoice,
@@ -1872,7 +1873,7 @@ export class CrucibleClient {
   async image(options: ImageOptions): Promise<string> {
     const given = options as Partial<ImageOptions> | undefined;
     if (given === undefined || given === null) {
-      throw new CrucibleConfigError('options', 'image(...) needs {model, prompt}');
+      throw new CrucibleConfigError('options', 'image(...) needs {prompt}, and may name a model');
     }
     const strength = given.imageStrength ?? null;
     const picture = given.image ?? null;
@@ -1916,9 +1917,11 @@ export class CrucibleClient {
       params.mask = maskName;
       inputs[maskName] = mask;
     }
+    // No model: the server's own pick for the image verb, the biggest that fits its card.
+    const model = given.model === undefined || given.model === null ? undefined : requireText(given.model, 'model');
     return this.submit({
       type: 'image',
-      model: requireText(given.model, 'model'),
+      ...(model === undefined ? {} : { model }),
       params,
       inputs,
     });
@@ -3630,9 +3633,13 @@ export function readImageResult(done: DoneData): ImageResult {
     revision: str(image, 'revision', at),
     backend: str(image, 'backend', at),
     engine: str(image, 'engine', at),
+    pipeline: str(image, 'pipeline', at),
     dtype: str(image, 'dtype', at),
+    storageDtype: nullableStr(image, 'storage_dtype', at),
+    scheduler: nullableStr(image, 'scheduler', at),
     prompt: str(image, 'prompt', at),
     negativePrompt: nullableStr(image, 'negative_prompt', at),
+    negativePromptIsDefault: bool(image, 'negative_prompt_is_default', at),
     width: num(image, 'width', at),
     height: num(image, 'height', at),
     seed: num(image, 'seed', at),
@@ -3772,8 +3779,34 @@ function readPlaygroundPage(page: Json, where: string): PlaygroundPage {
     available: bool(page, 'available', where),
     reason: nullableStr(page, 'reason', where),
     downloadBytes: nullableNum(page, 'download_bytes', where),
+    registered: bool(page, 'registered', where),
     fields: arrayField(page, 'fields', where).map((value, index) =>
       readPlaygroundField(asObject(value, `${where}.fields[${index}]`), `${where}.fields[${index}]`)),
+    facts: readImageFacts(nullableObject(page, 'facts', where), `${where}.facts`),
+  };
+}
+
+function readImageFacts(facts: Json | null, where: string): ImageFacts | null {
+  if (facts === null) return null;
+  const negative = objectField(facts, 'negative_prompt', where);
+  const at = `${where}.negative_prompt`;
+  return {
+    nativeWidth: num(facts, 'native_width', where),
+    nativeHeight: num(facts, 'native_height', where),
+    qualityMinSide: num(facts, 'quality_min_side', where),
+    sizeNote: str(facts, 'size_note', where),
+    sizeMultiple: num(facts, 'size_multiple', where),
+    maxSide: num(facts, 'max_side', where),
+    maxPixels: num(facts, 'max_pixels', where),
+    defaultSteps: num(facts, 'default_steps', where),
+    defaultGuidance: num(facts, 'default_guidance', where),
+    negativePrompt: {
+      readWhenGuidanceAbove: num(negative, 'read_when_guidance_above', at),
+      costsExtraPass: bool(negative, 'costs_extra_pass', at),
+      default: nullableStr(negative, 'default', at),
+    },
+    imageToImage: bool(facts, 'image_to_image', where),
+    inpaint: bool(facts, 'inpaint', where),
   };
 }
 

@@ -385,7 +385,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     init.add_argument(
         "--enable-image",
         action="store_true",
-        help="register the image (Qwen-Image text-to-image), load-image and "
+        help="register the image (text-to-image: Qwen-Image, or DreamShaper XL "
+        "Lightning on an 8 GiB CUDA card), load-image and "
         "unload-image job types ([jobs] enable_image)",
     )
     init.add_argument(

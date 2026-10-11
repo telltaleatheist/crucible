@@ -56,9 +56,13 @@ const DONE_IMAGE = {
   revision: '790c92633540aa0cb11d9abf19eb46d861714758',
   backend: 'mlx-darwin',
   engine: 'mflux',
+  pipeline: 'qwen-image-2.1',
   dtype: 'bfloat16',
+  storage_dtype: null,
+  scheduler: null,
   prompt: 'a kitchen table with one red apple',
   negative_prompt: null,
+  negative_prompt_is_default: false,
   width: 1280,
   height: 720,
   seed: 1,
@@ -221,6 +225,43 @@ test('readImageResult reads the effective parameters a picture can be made again
   assert.equal(result.stagePeakBytes.encoding, 16_000_000_000);
   assert.equal(result.memoryBasis, 'measured');
   assert.deepEqual(result.artifacts, ['image.png']);
+});
+
+test('image() with no model leaves it out, for the server to use its own pick', async () => {
+  answer(200, { job_id: 'job-image-pick' });
+  await client().image({ prompt: 'album cover art, rolling green hills' });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'image',
+    params: { prompt: 'album cover art, rolling green hills' },
+    inputs: {},
+  });
+});
+
+test('readImageResult reads the small rung: its pipeline, fp8 storage, sampler and default negative prompt', () => {
+  const result = readImageResult({
+    artifacts: ['image.png'],
+    extra: {
+      image: {
+        ...DONE_IMAGE,
+        model: 'dreamshaper-xl-lightning',
+        engine: 'diffusers',
+        pipeline: 'sdxl',
+        dtype: 'float16',
+        storage_dtype: 'float8_e4m3fn',
+        scheduler: 'dpmpp-sde-karras',
+        negative_prompt: 'text, letters, words, watermark, signature, logo, blurry, deformed',
+        negative_prompt_is_default: true,
+        steps: 6,
+        guidance: 2.0,
+      },
+    },
+  });
+  assert.deepEqual(
+    [result.pipeline, result.storageDtype, result.scheduler, result.negativePromptIsDefault],
+    ['sdxl', 'float8_e4m3fn', 'dpmpp-sde-karras', true],
+  );
+  const qwen = readImageResult({ artifacts: ['image.png'], extra: { image: DONE_IMAGE } });
+  assert.deepEqual([qwen.pipeline, qwen.storageDtype, qwen.scheduler], ['qwen-image-2.1', null, null]);
 });
 
 test('readImageResult refuses a done frame with no image block', () => {

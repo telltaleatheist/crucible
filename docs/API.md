@@ -758,7 +758,7 @@ The pages the operator page's playground draws: one per image, video and audio m
 
 ### `GET /v1/playground`
 
-One page per image, video and audio model this build declares: the params its form shows, with defaults and limits from its manifest, and its `standing`: `ready`; `download`, which its first job fetches by itself (409 `installing` names the task; `download_bytes` when the size is known); or `unavailable`, with `reason` saying why.
+One page per image, video and audio model this build declares: the params its form shows, with defaults and limits from its manifest, and its `standing`: `ready`; `download`, which its first job fetches by itself (409 `installing` names the task; `download_bytes` when the size is known); or `unavailable`, with `reason` saying why. `registered` marks the model this server registered for the verb (its capability pick), listed first in its family. An image page's `facts` give the model's native size, the side below which it degrades, its default steps and guidance, and what it does with `negative_prompt` (docs/IMAGE.md); null on other pages.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1930,19 +1930,19 @@ Takes the resident separator off the card now, whichever job put it there (denoi
 
 Makes one picture from a prompt (text-to-image), redraws an input picture (image-to-image), or regenerates the masked region of one (inpainting and outpainting).
 
-*Model:* An image model id (GET /v1/catalog): `qwen-image-2.1`.
+*Model:* An image model id (GET /v1/catalog): `qwen-image-2.1`, or `dreamshaper-xl-lightning` (CUDA, 8 GiB cards). Leave it out for the model this server registered for the verb, the biggest its card holds.
 
 **Params**
 
 | field | type | required | default | what it is |
 | --- | --- | --- | --- | --- |
 | `prompt` | string | yes | — | The picture to make, described in full (docs/IMAGE.md); not blank. |
-| `negative_prompt` | string or null | no | `null` | What to guide away from; only read, and only allowed, with `guidance` above 1.0. |
-| `width` | integer | no | `1024` | Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); width x height at most 1,048,576. |
-| `height` | integer | no | `1024` | Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); width x height at most 1,048,576. |
+| `negative_prompt` | string or null | no | `null` | What to guide away from; only read, and only allowed, with guidance above 1.0. Null takes the model's default negative prompt where it has one (dreamshaper-xl-lightning's says no text). |
+| `width` | integer or null | no | `null` | Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); width x height at most 1,048,576. Null with height null is the model's native size (1024x1024 for both models today). |
+| `height` | integer or null | no | `null` | Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); width x height at most 1,048,576. Null with width null is the model's native size. |
 | `seed` | integer or null | no | `null` | 0 to 4294967295; null lets the server choose one and report it. The same seed and params give the same picture on the same backend. |
-| `steps` | integer | no | `40` | Denoising steps, 1 to 100; fewer is faster and rougher. |
-| `guidance` | number | no | `1.0` | 1.0 to 10.0. Above 1.0 runs true classifier-free guidance (two passes per step, twice the time) and needs `negative_prompt`. |
+| `steps` | integer or null | no | `null` | Denoising steps, 1 to 100; fewer is faster and rougher. Null is the model's default (qwen-image-2.1 40, dreamshaper-xl-lightning 6). |
+| `guidance` | number or null | no | `null` | 1.0 to 10.0. Above 1.0 runs classifier-free guidance (two passes per step) and needs a negative prompt, sent or the model's default. Null is the model's default (qwen-image-2.1 1.0, dreamshaper-xl-lightning 2.0). |
 | `image_strength` | number or null | no | `null` | Image-to-image: how much of the one input image survives, between 0 and 1 (useful range 0.03 to 0.3). With `mask` it is optional and applies to the masked region only. |
 | `mask` | string or null | no | `null` | Inpainting and outpainting: the name of the input that carries the mask (white, 128 and up, is regenerated). The job then carries exactly the image and the mask. |
 | `mask_blur` | integer or null | no | `null` | Pixels inside the mask's edge over which the new picture fades into the kept one, 0 to 256; only with `mask`, where null is 8. |
@@ -1951,8 +1951,9 @@ Makes one picture from a prompt (text-to-image), redraws an input picture (image
 
 *Returns:* `image.png`, and with a mask also `generated.png` (the model's picture before the paste-back). The `done` event gives `image`, every effective parameter (seed included) plus timings and memory, and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
 
-- Width and height are 256 to 2048 and multiples of 16 (32 on cuda-linux, `image_size_not_supported`), at most 1,048,576 pixels (`image_too_large`).
-- `guidance` above 1.0 needs `negative_prompt`, and `negative_prompt` needs it; `mask_blur` needs `mask`.
+- Width and height are 256 to 2048 and multiples of 16 (32 on cuda-linux, `image_size_not_supported`), at most 1,048,576 pixels (`image_too_large`). Left out (both), the model's native size.
+- Steps, guidance and the negative prompt default to the model's (GET /v1/playground, each image page's `facts`). Guidance above 1.0 needs a negative prompt, sent or the model's default, and a negative prompt needs guidance above 1.0; `mask_blur` needs `mask`.
+- `dreamshaper-xl-lightning` takes no input image or mask (`image_to_image_unsupported`, `inpaint_unsupported`).
 - Inputs that do not match the mode are `invalid_inputs`; a mask of a different size is `mask_size_mismatch`, one with no white `mask_empty`.
 - The seed reproduces a picture on the same backend only.
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
@@ -2000,7 +2001,7 @@ Takes the resident generator off the card now, whichever job put it there (image
 
 Puts an image model on the card and leaves it there, so the first job that uses it starts at once. Nothing is generated.
 
-*Model:* An image model id (GET /v1/catalog): `qwen-image-2.1`.
+*Model:* An image model id (GET /v1/catalog): `qwen-image-2.1` or `dreamshaper-xl-lightning`; left out, the one this server registered.
 
 *Params:* none (`{}`).
 
@@ -3261,6 +3262,8 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
+| `input` | Input | no | — |  |
+| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 

@@ -8,13 +8,17 @@ from typing import Any, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ... import weights, workers
+from ... import imageweights, verbmodel, weights, workers
 from ...backend import CUDA_LINUX, MLX_DARWIN
 from ...cardkinds import KIND_IMAGE
 from ...clock import utcnow
 from ...config import Config
 from ...errors import ApiError, JobCancelled, JobError
 from ...imagemodels import (
+    MAX_GUIDANCE,
+    MAX_STEPS,
+    MIN_SIDE,
+    VAE_COMPANION,
     ImageBackendSpec,
     ImageManifest,
     ImageManifestError,
@@ -58,19 +62,13 @@ JOB_TYPE = IMAGE_JOB.name
 
 SIDE_MULTIPLE = 16
 
-MIN_SIDE = 256
-
 MAX_SIDE = 2048
-
-MAX_STEPS = 100
-
-DEFAULT_STEPS = 40
-
-DEFAULT_SIDE = 1024
 
 MAX_SEED = 2**32 - 1
 
-MAX_GUIDANCE = 10.0
+# Each model's own size, steps, guidance and negative prompt are its manifest's
+# (native_width, native_height, default_steps, default_guidance, default_negative_prompt):
+# a request that leaves one out gets the chosen model's.
 
 ARTIFACT_NAME = "image.png"
 
@@ -115,21 +113,24 @@ class ImageParams(BaseModel):
     negative_prompt: str | None = Field(
         default=None,
         description="What to guide away from; only read, and only allowed, with "
-        "`guidance` above 1.0.",
+        "guidance above 1.0. Null takes the model's default negative prompt where it "
+        "has one (dreamshaper-xl-lightning's says no text).",
     )
-    width: int = Field(
-        default=DEFAULT_SIDE,
+    width: int | None = Field(
+        default=None,
         ge=MIN_SIDE,
         le=MAX_SIDE,
         description="Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); "
-        "width x height at most 1,048,576.",
+        "width x height at most 1,048,576. Null with height null is the model's "
+        "native size (1024x1024 for both models today).",
     )
-    height: int = Field(
-        default=DEFAULT_SIDE,
+    height: int | None = Field(
+        default=None,
         ge=MIN_SIDE,
         le=MAX_SIDE,
         description="Pixels, 256 to 2048, a multiple of 16 (32 on cuda-linux); "
-        "width x height at most 1,048,576.",
+        "width x height at most 1,048,576. Null with width null is the model's "
+        "native size.",
     )
     seed: int | None = Field(
         default=None,
@@ -138,18 +139,20 @@ class ImageParams(BaseModel):
         description="0 to 4294967295; null lets the server choose one and report it. "
         "The same seed and params give the same picture on the same backend.",
     )
-    steps: int = Field(
-        default=DEFAULT_STEPS,
+    steps: int | None = Field(
+        default=None,
         ge=1,
         le=MAX_STEPS,
-        description="Denoising steps, 1 to 100; fewer is faster and rougher.",
+        description="Denoising steps, 1 to 100; fewer is faster and rougher. Null is "
+        "the model's default (qwen-image-2.1 40, dreamshaper-xl-lightning 6).",
     )
-    guidance: float = Field(
-        default=1.0,
+    guidance: float | None = Field(
+        default=None,
         ge=1.0,
         le=MAX_GUIDANCE,
-        description="1.0 to 10.0. Above 1.0 runs true classifier-free guidance (two "
-        "passes per step, twice the time) and needs `negative_prompt`.",
+        description="1.0 to 10.0. Above 1.0 runs classifier-free guidance (two passes "
+        "per step) and needs a negative prompt, sent or the model's default. Null is "
+        "the model's default (qwen-image-2.1 1.0, dreamshaper-xl-lightning 2.0).",
     )
     image_strength: float | None = Field(
         default=None,
@@ -182,8 +185,8 @@ class ImageParams(BaseModel):
 
     @field_validator("width", "height")
     @classmethod
-    def whole_tiles(cls, value: int) -> int:
-        if value % SIDE_MULTIPLE:
+    def whole_tiles(cls, value: int | None) -> int | None:
+        if value is not None and value % SIDE_MULTIPLE:
             below = value - value % SIDE_MULTIPLE
             raise ValueError(
                 f"{value} is not a multiple of {SIDE_MULTIPLE}; the model works in "
@@ -217,62 +220,122 @@ class ImageParams(BaseModel):
         return inpaint.DEFAULT_MASK_BLUR if self.mask_blur is None else self.mask_blur
 
     @model_validator(mode="after")
-    def guidance_needs_a_negative(self) -> "ImageParams":
-        if self.negative_prompt is not None and self.guidance <= 1.0:
+    def both_sides_or_neither(self) -> "ImageParams":
+        if (self.width is None) != (self.height is None):
             raise ValueError(
-                "negative_prompt is only read when guidance is above 1.0 (true "
-                "classifier-free guidance, which runs the model twice per step); "
-                "send guidance, for example 4.0, or drop negative_prompt"
-            )
-        if self.negative_prompt is None and self.guidance > 1.0:
-            raise ValueError(
-                "guidance above 1.0 needs a negative_prompt to guide away from; "
-                "without one the engines ignore guidance. Send negative_prompt or "
-                "guidance 1.0"
+                "send width and height together, or neither for the model's native "
+                "size; one side alone would stretch the other"
             )
         return self
 
 
-def refuse_what_the_arm_cannot_make(params: ImageParams, spec: ImageBackendSpec, model: str) -> None:
-    details = {"model": model, "backend": spec.backend, "width": params.width, "height": params.height}
-    if params.width % spec.size_multiple or params.height % spec.size_multiple:
+@dataclass(frozen=True)
+class Settings:
+    """A request's params with the chosen model's defaults filled in: what the worker is
+    asked for and what `done.image` reports."""
+
+    width: int
+    height: int
+    steps: int
+    guidance: float
+    negative_prompt: str | None
+    negative_prompt_is_default: bool
+
+
+def settings_for(params: ImageParams, spec: ImageBackendSpec, model: str) -> Settings:
+    """The model's defaults (its manifest's) under what the request sent, and the one
+    negative-prompt rule every image model follows: a negative prompt is read only when
+    guidance is above 1.0, and guidance above 1.0 needs one, sent or the model's default.
+    Each refusal says what to send."""
+    width = spec.native_width if params.width is None else params.width
+    height = spec.native_height if params.height is None else params.height
+    steps = spec.default_steps if params.steps is None else params.steps
+    guidance = spec.default_guidance if params.guidance is None else params.guidance
+    details = {"model": model, "guidance": guidance, "default_guidance": spec.default_guidance}
+    if params.negative_prompt is not None and guidance <= 1.0:
+        raise ApiError(
+            400,
+            "invalid_params",
+            f"negative_prompt is only read when guidance is above 1.0 (classifier-free "
+            f"guidance, which runs the model twice per step), and {model}'s guidance "
+            f"here is {guidance:g}; send guidance, for example 4.0, or drop negative_prompt",
+            details,
+        )
+    negative, defaulted = params.negative_prompt, False
+    if negative is None and guidance > 1.0:
+        if spec.default_negative_prompt is None:
+            raise ApiError(
+                400,
+                "invalid_params",
+                f"guidance above 1.0 needs a negative_prompt to guide away from, and "
+                f"{model} has no default one; without one the engine ignores guidance. "
+                "Send negative_prompt or guidance 1.0",
+                details,
+            )
+        negative, defaulted = spec.default_negative_prompt, True
+    return Settings(width, height, steps, guidance, negative, defaulted)
+
+
+def refuse_what_the_arm_cannot_make(
+    params: ImageParams, settings: Settings, spec: ImageBackendSpec, model: str
+) -> None:
+    details = {"model": model, "backend": spec.backend, "width": settings.width, "height": settings.height}
+    if settings.width % spec.size_multiple or settings.height % spec.size_multiple:
         raise ApiError(
             400,
             "image_size_not_supported",
             f"{model} on {spec.backend} needs width and height in multiples of "
             f"{spec.size_multiple} ({spec.engine} works in {spec.size_multiple}-pixel "
-            f"blocks); {params.width}x{params.height} is not. Round each side to a "
+            f"blocks); {settings.width}x{settings.height} is not. Round each side to a "
             f"multiple of {spec.size_multiple}",
             {**details, "size_multiple": spec.size_multiple},
         )
-    pixels = params.width * params.height
-    if max(params.width, params.height) > spec.max_side or pixels > spec.max_pixels:
+    pixels = settings.width * settings.height
+    if max(settings.width, settings.height) > spec.max_side or pixels > spec.max_pixels:
         raise ApiError(
             400,
             "image_too_large",
-            f"{params.width}x{params.height} is {pixels:,} pixels; {model} on "
+            f"{settings.width}x{settings.height} is {pixels:,} pixels; {model} on "
             f"{spec.backend} makes at most {spec.max_pixels:,} pixels with no side "
             f"over {spec.max_side}, because its memory ({spec.memory_basis}: "
             f"{spec.memory_note}) was sized at that limit. Ask for a smaller image",
             {**details, "max_pixels": spec.max_pixels, "max_side": spec.max_side},
         )
     if params.image_strength is not None and not spec.image_to_image:
+        others = _models_that(spec.backend, "image_to_image")
         raise ApiError(
             400,
             "image_to_image_unsupported",
             f"{model} on {spec.backend} ({spec.engine}) does not start from an input "
-            "image yet; drop image_strength and the input, or send the job to a "
-            "server whose capability row says it does",
-            details,
+            "image; drop image_strength and the input, or name a model that does"
+            f"{_named(others)}",
+            {**details, "models": others},
         )
     if params.mask is not None and not spec.inpaint:
+        others = _models_that(spec.backend, "inpaint")
         raise ApiError(
             400,
             "inpaint_unsupported",
             f"{model} on {spec.backend} ({spec.engine}) does not regenerate a masked "
-            "region; drop mask and mask_blur, or send the job to a server that does",
-            details,
+            f"region; drop mask and mask_blur, or name a model that does{_named(others)}",
+            {**details, "models": others},
         )
+
+
+def _models_that(backend_kind: str, power: str) -> list[str]:
+    """The image models this build declares for `backend_kind` whose block can do `power`
+    (`image_to_image` or `inpaint`), whatever this card holds."""
+    return sorted(
+        manifest.id
+        for manifest in MANIFESTS.all().values()
+        if manifest.supports(backend_kind) and getattr(manifest.spec(backend_kind), power)
+    )
+
+
+def _named(models: list[str]) -> str:
+    if not models:
+        return " (none is declared for this backend)"
+    return f" ({', '.join(models)}, on a server whose card holds it)"
 
 
 @dataclass(frozen=True)
@@ -372,7 +435,12 @@ def start_image_session(
         {
             "op": "load",
             "engine": spec.engine,
+            "pipeline": spec.pipeline,
             "model_dir": str(weights_dir),
+            "vae_dir": imageweights.companion_dirs(weights_dir, spec).get(VAE_COMPANION),
+            "variant": spec.variant,
+            "scheduler": spec.scheduler,
+            "storage_dtype": spec.storage_dtype,
             "device": device_for(spec.backend),
             "dtype": spec.dtype,
             "mlx_cache_limit_bytes": spec.mlx_cache_limit_bytes,
@@ -446,7 +514,7 @@ MANIFESTS: ManifestCatalog[ImageManifest] = ManifestCatalog(
 def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
     return MANIFESTS.descriptors(
         config.backend_kind,
-        installed=lambda manifest, spec: weights.installed(config, manifest, spec)
+        installed=lambda manifest, spec: imageweights.installed(config, manifest, spec)
         is not None,
         resident=lambda model_id: residency.is_resident(KIND_IMAGE, model_id),
     )
@@ -514,9 +582,13 @@ class ImageJobType(ResidentWorker):
             manifests = MANIFESTS.all()
         except ApiError as exc:
             return JobTypeStatus(ready=False, detail=exc.message)
-        installed = worker_type.installed_ids(
-            self._config, manifests.values(), backend.kind
-        )
+        installed = [
+            manifest.id
+            for manifest in manifests.values()
+            if manifest.supports(backend.kind)
+            and imageweights.installed(self._config, manifest, manifest.spec(backend.kind))
+            is not None
+        ]
         if not installed:
             offered = sorted(
                 manifest.id for manifest in manifests.values() if manifest.supports(backend.kind)
@@ -531,32 +603,50 @@ class ImageJobType(ResidentWorker):
     def _resident_session(self) -> workers.WorkerSession | None:
         return self._residency.image_session
 
-    def requirements(self, model_id: str, params: ImageParams) -> Needs:
-        needs = self.loadable(model_id)
-        refuse_what_the_arm_cannot_make(params, needs.spec, model_id)
-        return needs
+    def registered_model(self) -> str:
+        """The model a request that names none is served by: what this server registered
+        for the `image` verb (its capability record's row: the Settings choice, else the
+        biggest that fits, docs/VERB-SIZING.md), refused by name when it registered none."""
+        return verbmodel.registered(JOB_TYPE, self._config)
+
+    def requirements(self, model_id: str, params: ImageParams) -> tuple[Needs, Settings]:
+        spec = self._block(model_id)[1]
+        settings = settings_for(params, spec, model_id)
+        refuse_what_the_arm_cannot_make(params, settings, spec, model_id)
+        return self.loadable(model_id), settings
+
+    def _block(self, model_id: str) -> tuple[ImageManifest, ImageBackendSpec]:
+        manifest = MANIFESTS.known(model_id)
+        spec = worker_type.require_block(manifest, model_id, self._backend.kind, "image model")
+        return manifest, spec
 
     def loadable(self, model_id: str) -> Needs:
         backend_kind = self._backend.kind
-        manifest = MANIFESTS.known(model_id)
-        spec = worker_type.require_block(manifest, model_id, backend_kind, "image model")
+        manifest, spec = self._block(model_id)
         worker_type.refuse_if_larger_than_host(
             self._backend, model_id, spec.memory_bytes_estimate
         )
         python = worker_type.require_worker_python(
             self._config, JOB_TYPE, backend_kind, model_id
         )
-        return Needs(
-            manifest,
-            spec,
-            python,
-            worker_type.require_weights(self._config, manifest, spec, model_id),
-        )
+        return Needs(manifest, spec, python, self._weights(manifest, spec, model_id))
+
+    def _weights(self, manifest: ImageManifest, spec: ImageBackendSpec, model_id: str) -> Path:
+        try:
+            return imageweights.require_installed(self._config, manifest, spec).path
+        except weights.WeightsError as exc:
+            raise ApiError(
+                409,
+                "model_not_installed",
+                str(exc),
+                {"model": model_id, "hf_repo": spec.hf_repo, "revision": spec.revision},
+            ) from None
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parsed = parse_params(ImageParams, params, self.name)
-        self._admit(model, self.requirements(model, parsed), "generating an image with")
+        needs, _ = self.requirements(model, parsed)
+        self._admit(model, needs, "generating an image with")
 
     def _admit(self, model: str, needs: Needs, doing: str) -> None:
         self._residency.refuse_if_claimed(f"{doing} {model!r}")
@@ -602,12 +692,12 @@ class ImageJobType(ResidentWorker):
     def run(self, job: Job, ctx: JobContext) -> None:
         params = ImageParams.model_validate(job.params)
         model = run_model(job.model, self.name)
-        needs = as_job_error(self.requirements, model, params)
+        needs, settings = as_job_error(self.requirements, model, params)
         pictures = input_pictures(ctx, params)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
         output = ctx.scratch / ARTIFACT_NAME
         session = self._worker(ctx, model, needs)
-        self._make(ctx, model, session, params, needs, pictures, seed, output)
+        self._make(ctx, model, session, params, settings, needs, pictures, seed, output)
 
     def _make(
         self,
@@ -615,6 +705,7 @@ class ImageJobType(ResidentWorker):
         model: str,
         session: workers.WorkerSession,
         params: ImageParams,
+        settings: Settings,
         needs: Needs,
         pictures: Pictures,
         seed: int,
@@ -624,12 +715,12 @@ class ImageJobType(ResidentWorker):
             "op": "generate",
             "request_id": uuid.uuid4().hex,
             "prompt": params.prompt,
-            "negative_prompt": params.negative_prompt,
-            "width": params.width,
-            "height": params.height,
+            "negative_prompt": settings.negative_prompt,
+            "width": settings.width,
+            "height": settings.height,
             "seed": seed,
-            "steps": params.steps,
-            "guidance": params.guidance,
+            "steps": settings.steps,
+            "guidance": settings.guidance,
             "image_path": None if pictures.image is None else str(pictures.image),
             "image_strength": params.image_strength,
             "mask_path": None if pictures.mask is None else str(pictures.mask),
@@ -638,7 +729,7 @@ class ImageJobType(ResidentWorker):
             "revision": needs.spec.revision,
             "backend": needs.spec.backend,
         }
-        outcome = self._generate(ctx, model, session, request, params.steps)
+        outcome = self._generate(ctx, model, session, request, settings.steps)
         try:
             (result,) = workers.require_positional_results(outcome, 1, "image")
         except workers.WorkerError as exc:
@@ -653,13 +744,18 @@ class ImageJobType(ResidentWorker):
             ctx.artifact(GENERATED_NAME, generated)
         ctx.progress(1.0, f"{result['width']}x{result['height']} image made", stage="done")
         ctx.done_extra(
-            image=effective_params(params, seed, needs, result, pictures),
+            image=effective_params(params, settings, seed, needs, result, pictures),
             resident=self._residency.resident_id,
         )
 
 
 def effective_params(
-    params: ImageParams, seed: int, needs: Needs, result: dict[str, Any], pictures: Pictures
+    params: ImageParams,
+    settings: Settings,
+    seed: int,
+    needs: Needs,
+    result: dict[str, Any],
+    pictures: Pictures,
 ) -> dict[str, Any]:
     return {
         "model": needs.manifest.id,
@@ -667,14 +763,18 @@ def effective_params(
         "revision": needs.spec.revision,
         "backend": needs.spec.backend,
         "engine": needs.spec.engine,
+        "pipeline": needs.spec.pipeline,
         "dtype": needs.spec.dtype,
+        "storage_dtype": needs.spec.storage_dtype,
+        "scheduler": needs.spec.scheduler,
         "prompt": params.prompt,
-        "negative_prompt": params.negative_prompt,
+        "negative_prompt": settings.negative_prompt,
+        "negative_prompt_is_default": settings.negative_prompt_is_default,
         "width": result["width"],
         "height": result["height"],
         "seed": seed,
-        "steps": params.steps,
-        "guidance": params.guidance,
+        "steps": settings.steps,
+        "guidance": settings.guidance,
         "image_strength": params.image_strength,
         "input": None if pictures.image is None else pictures.image.name,
         "mask": params.mask,

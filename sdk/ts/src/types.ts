@@ -1944,13 +1944,18 @@ export interface Alignment {
 
 /** What an `image` job makes; a field left out takes the server's default (1024x1024, 40 steps, a random seed). */
 export interface ImageOptions {
-  readonly model: string;
+  /** Left out, the server's own pick for the image verb: the biggest model its card holds (qwen-image-2.1 on a 24 GB card, dreamshaper-xl-lightning on 8 GiB). */
+  readonly model?: string;
   readonly prompt: string;
+  /** Left out, the model's default where it has one (dreamshaper-xl-lightning's says no text); read only at guidance above 1.0. */
   readonly negativePrompt?: string | null;
+  /** Width and height together, or neither for the model's native size ({@link ImageFacts}). */
   readonly width?: number;
   readonly height?: number;
   readonly seed?: number;
+  /** Left out, the model's default (qwen-image-2.1 40, dreamshaper-xl-lightning 6). */
   readonly steps?: number;
+  /** Left out, the model's default (qwen-image-2.1 1.0, dreamshaper-xl-lightning 2.0). */
   readonly guidance?: number;
   /** Image-to-image: how much of the input survives, 0 to 1 exclusive (higher keeps more). With `mask`, optional: left out, the masked region is regenerated from scratch. */
   readonly imageStrength?: number | null;
@@ -1972,9 +1977,17 @@ export interface ImageResult {
   readonly revision: string;
   readonly backend: string;
   readonly engine: string;
+  /** The pipeline the engine built: `qwen-image-2.1` or `sdxl`. */
+  readonly pipeline: string;
   readonly dtype: string;
+  /** How the denoiser's weights are stored on the card when that differs from `dtype` (`float8_e4m3fn` for dreamshaper-xl-lightning); null otherwise. */
+  readonly storageDtype: string | null;
+  /** The sampler a manifest names (`dpmpp-sde-karras`); null where the pipeline's own runs. */
+  readonly scheduler: string | null;
   readonly prompt: string;
   readonly negativePrompt: string | null;
+  /** The negative prompt is the model's default, because none was sent. */
+  readonly negativePromptIsDefault: boolean;
   readonly width: number;
   readonly height: number;
   readonly seed: number;
@@ -2205,7 +2218,36 @@ export interface PlaygroundPage {
   readonly available: boolean;
   readonly reason: string | null;
   readonly downloadBytes: number | null;
+  /** This server registered this model for its verb (its capability pick); such a page comes first in its family. */
+  readonly registered: boolean;
   readonly fields: readonly PlaygroundField[];
+  /** An image page's model facts (native size, quality floor, defaults, negative prompt); null on other pages. */
+  readonly facts: ImageFacts | null;
+}
+
+/** What a client needs to ask an image model for a picture without knowing it (docs/IMAGE.md). */
+export interface ImageFacts {
+  /** The size a request that sends no width and height gets: where the model draws best. Render at it and downscale in the app. */
+  readonly nativeWidth: number;
+  readonly nativeHeight: number;
+  /** Below this many pixels a side the picture degrades (qwen-image-2.1 256, dreamshaper-xl-lightning 768). */
+  readonly qualityMinSide: number;
+  readonly sizeNote: string;
+  readonly sizeMultiple: number;
+  readonly maxSide: number;
+  readonly maxPixels: number;
+  readonly defaultSteps: number;
+  readonly defaultGuidance: number;
+  readonly negativePrompt: {
+    /** A negative prompt is read only when guidance is above this (1.0). */
+    readonly readWhenGuidanceAbove: number;
+    /** True when the model's default guidance is 1.0, so a negative prompt needs guidance raised: a second pass per step, twice the time. */
+    readonly costsExtraPass: boolean;
+    /** What is guided away from when none is sent (at guidance above 1.0); null when the model has none. */
+    readonly default: string | null;
+  };
+  readonly imageToImage: boolean;
+  readonly inpaint: boolean;
 }
 
 /** A named preset of a playground form, kept on the server: the form's params, never a seed. */

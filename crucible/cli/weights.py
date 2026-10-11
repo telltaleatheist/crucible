@@ -6,7 +6,15 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
-from .. import audioweights, catalog, denoisemodels, rvcbase, videoweights, weights
+from .. import (
+    audioweights,
+    catalog,
+    denoisemodels,
+    imageweights,
+    rvcbase,
+    videoweights,
+    weights,
+)
 from ..alignmodels import AlignManifest, AlignManifestError, load_all_align_manifests
 from ..asrmodels import AsrManifest, AsrManifestError, load_all_asr_manifests
 from ..audiomodels import AudioManifest, AudioManifestError, load_all_audio_manifests
@@ -74,6 +82,8 @@ def _installed(config: Any, manifest: AnyManifest, spec: Any) -> weights.Install
         return audioweights.installed(config, manifest, spec)
     if isinstance(manifest, VideoManifest):
         return videoweights.installed(config, manifest, spec)
+    if isinstance(manifest, ImageManifest):
+        return imageweights.installed(config, manifest, spec)
     return weights.installed(config, manifest, spec)
 
 
@@ -288,6 +298,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
         pull = (
             audioweights.pull if isinstance(manifest, AudioManifest)
             else videoweights.pull if isinstance(manifest, VideoManifest)
+            else imageweights.pull if isinstance(manifest, ImageManifest)
             else weights.pull
         )
         result = pull(

@@ -20,7 +20,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
         form shows, with defaults and limits from its manifest, and its `standing`:
         `ready`; `download`, which its first job fetches by itself (409 `installing`
         names the task; `download_bytes` when the size is known); or `unavailable`,
-        with `reason` saying why.
+        with `reason` saying why. `registered` marks the model this server registered
+        for the verb (its capability pick), listed first in its family. An image page's
+        `facts` give the model's native size, the side below which it degrades, its
+        default steps and guidance, and what it does with `negative_prompt`
+        (docs/IMAGE.md); null on other pages.
         """
         return {"pages": playground.pages(ctx.config, ctx.backend, ctx.store.registry)}
 

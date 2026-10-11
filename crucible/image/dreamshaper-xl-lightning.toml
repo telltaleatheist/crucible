@@ -1,0 +1,72 @@
+[model]
+id = "dreamshaper-xl-lightning"
+family = "sdxl"
+display = "DreamShaper XL Lightning"
+
+# The small rung of the image verb (docs/internals/image.md, "The small rung"): an SDXL
+# fine-tune that an 8 GiB CUDA card holds whole. CUDA only; the Mac keeps qwen-image-2.1.
+[backends.cuda-linux]
+engine = "diffusers"
+pipeline = "sdxl"
+hf_repo = "Lykon/dreamshaper-xl-lightning"
+revision = "561086c22aba3925b1e8803a73857f061635c7c3"
+variant = "fp16"
+dtype = "float16"
+storage_dtype = "float8_e4m3fn"
+scheduler = "dpmpp-sde-karras"
+memory_bytes_estimate = 7300000000
+memory_basis = "measured"
+memory_note = "measured 2026-10-10 on owens-pc's RTX 3090 Ti held to an 8 GiB laptop card's room (a 6.8 GiB torch memory fraction, and a VRAM filler leaving 7.4 GiB on the card), in the image env (diffusers 0.41.0.dev0, torch 2.14 cu130) by a script beside Crucible, not yet through its worker: the whole pipeline resident with the UNet stored as fp8 and computed in fp16 (layerwise casting), 4.14 GiB resident, at most 4.99 GiB allocated and 6.15 GiB reserved at 1024x1024 with VAE tiling; 3.2 s a picture warm at 6 steps, 4.7 s to the card. 7.3 GB is the 6.8 GiB cap it ran under, which also covers the CUDA context"
+size_multiple = 32
+max_side = 2048
+max_pixels = 1048576
+native_width = 1024
+native_height = 1024
+quality_min_side = 768
+size_note = "SDXL is trained at about one megapixel, so 1024x1024 (or another shape near 1,048,576 pixels) is where it draws well. Below about 768 a side the picture is visibly worse and saves little: 512x512 was 1.6 s faster than 1024x1024 (2026-10-10). Render at 1024 and downscale in the app"
+default_steps = 6
+default_guidance = 2.0
+default_negative_prompt = "text, letters, words, watermark, signature, logo, blurry, deformed"
+image_to_image = false
+inpaint = false
+# The fp16 checkpoint, without the repo's own VAE (replaced by the vae companion below).
+# The commit pins every file; the LFS ones by these sha256s, from the Hub's API:
+#   text_encoder/model.fp16.safetensors               3dea4e3e892df8d0d41540f7bacfdec4d5c978d1aaf2375f0a56d41d814a640f
+#   text_encoder_2/model.fp16.safetensors             30b466dbbac35c5c63d0fc1893c17433f0d367886c1081d4a699ce728ed013af
+#   unet/diffusion_pytorch_model.fp16.safetensors     59e4108f8290c40450933c55a43deef77b0a5c3a55c7f68e87daef76f8703f5e
+files = [
+  "model_index.json",
+  "scheduler/scheduler_config.json",
+  "text_encoder/config.json",
+  "text_encoder/model.fp16.safetensors",
+  "text_encoder_2/config.json",
+  "text_encoder_2/model.fp16.safetensors",
+  "tokenizer/merges.txt",
+  "tokenizer/special_tokens_map.json",
+  "tokenizer/tokenizer_config.json",
+  "tokenizer/vocab.json",
+  "tokenizer_2/merges.txt",
+  "tokenizer_2/special_tokens_map.json",
+  "tokenizer_2/tokenizer_config.json",
+  "tokenizer_2/vocab.json",
+  "unet/config.json",
+  "unet/diffusion_pytorch_model.fp16.safetensors",
+]
+
+# SDXL's own VAE overflows in fp16 (NaN, a black picture); this one is retrained not to.
+[[backends.cuda-linux.companions]]
+name = "vae"
+hf_repo = "madebyollin/sdxl-vae-fp16-fix"
+revision = "207b116dae70ace3637169f1ddd2434b91b3a8cd"
+
+[[backends.cuda-linux.companions.files]]
+source = "config.json"
+target = "config.json"
+sha256 = "f18b16fa4381c90ab44a3d7abd2e90afd05a2c31b8ca69998bc93c6453aeb7b7"
+bytes = 631
+
+[[backends.cuda-linux.companions.files]]
+source = "diffusion_pytorch_model.safetensors"
+target = "diffusion_pytorch_model.safetensors"
+sha256 = "1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"
+bytes = 334643238

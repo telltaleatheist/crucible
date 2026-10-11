@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import audioweights, denoisemodels, llamacpp, rvcbase, videoweights, weights
+from . import (
+    audioweights,
+    denoisemodels,
+    imageweights,
+    llamacpp,
+    rvcbase,
+    videoweights,
+    weights,
+)
 from .alignmodels import load_all_align_manifests
 from .asrmodels import load_all_asr_manifests
 from .audiomodels import load_all_audio_manifests
@@ -98,13 +106,36 @@ def _model_subjects(config: Config, backend: Backend) -> list[Subject]:
         ("llm", load_all_manifests()),
         ("asr", load_all_asr_manifests()),
         ("align", load_all_align_manifests()),
-        ("image", load_all_image_manifests()),
         ("segment", load_all_segment_manifests()),
     ):
         for manifest in loaded.values():
             if manifest.supports(backend.kind):
                 found.append(_model_subject(config, backend, job_type, manifest))
+    found.extend(_image_subjects(config, backend))
     return found
+
+
+def _image_subjects(config: Config, backend: Backend) -> list[Subject]:
+    return [
+        _image_subject(config, manifest, manifest.spec(backend.kind))
+        for manifest in load_all_image_manifests().values()
+        if manifest.supports(backend.kind)
+    ]
+
+
+def _image_subject(config: Config, manifest: Any, spec: Any) -> Subject:
+    return Subject(
+        kind="model",
+        id=manifest.id,
+        name=manifest.display,
+        job_type="image",
+        expected_bytes=None,
+        source=f"hf:{spec.hf_repo}",
+        pull_command=manifest.pull_command,
+        installed=lambda: imageweights.installed(config, manifest, spec),
+        pull=lambda **kwargs: imageweights.pull(config, manifest, spec, **kwargs),
+        remove=lambda: imageweights.remove(config, manifest, spec),
+    )
 
 
 def _audio_subjects(config: Config, backend: Backend) -> list[Subject]:

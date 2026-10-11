@@ -189,16 +189,18 @@ def test_image_to_image_is_refused_on_an_arm_that_does_not_declare_it() -> None:
         load_image_manifest(MODEL).spec(FAKE_BACKEND.kind), image_to_image=False
     )
     params = image_job.ImageParams(prompt=PROMPT, width=512, height=512, image_strength=0.5)
+    settings = image_job.settings_for(params, spec, MODEL)
     with pytest.raises(ApiError) as refused:
-        image_job.refuse_what_the_arm_cannot_make(params, spec, MODEL)
+        image_job.refuse_what_the_arm_cannot_make(params, settings, spec, MODEL)
     assert refused.value.code == "image_to_image_unsupported"
 
 
 def test_inpainting_is_refused_on_an_arm_that_does_not_declare_it() -> None:
     spec = dataclasses.replace(load_image_manifest(MODEL).spec(FAKE_BACKEND.kind), inpaint=False)
     params = image_job.ImageParams(prompt=PROMPT, width=512, height=512, mask="mask.png")
+    settings = image_job.settings_for(params, spec, MODEL)
     with pytest.raises(ApiError) as refused:
-        image_job.refuse_what_the_arm_cannot_make(params, spec, MODEL)
+        image_job.refuse_what_the_arm_cannot_make(params, settings, spec, MODEL)
     assert refused.value.code == "inpaint_unsupported"
 
 
@@ -425,9 +427,10 @@ def test_the_capability_row_names_the_model_and_the_fit(
 def test_a_card_that_cannot_hold_one_stage_is_disabled_with_the_numbers() -> None:
     from crucible.capabilityclasses import BY_NAME
 
+    # 6 GiB holds neither rung: qwen-image-2.1 (19 GB) nor dreamshaper-xl-lightning (7.3 GB)
     decided = verdict.decide(
         BY_NAME["image"], "cuda-linux",
-        total_bytes=12 * GIB, desktop_allowance_bytes=3 * GIB,
+        total_bytes=6 * GIB, desktop_allowance_bytes=1 * GIB,
         gpu_vendor="nvidia", chosen=None,
         audio_low_vram=False,
     )

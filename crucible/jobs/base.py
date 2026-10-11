@@ -185,7 +185,7 @@ class Job:
         return self.busy().to_dict()
 
 
-OPTIONAL_JOB_TYPE_MEMBERS: frozenset[str] = frozenset({"journal_identity"})
+OPTIONAL_JOB_TYPE_MEMBERS: frozenset[str] = frozenset({"journal_identity", "registered_model"})
 
 
 @runtime_checkable
@@ -202,6 +202,11 @@ class JobType(Protocol):
         ...
 
     journal_identity: "Callable[[str | None, dict[str, Any]], Identity | None] | None" = None
+
+    # A type whose verb is sized to the card (docs/VERB-SIZING.md) serves a request that
+    # names no model with what this server registered for it; a type without this
+    # requires a model (`model_required`). `image` has it.
+    registered_model: "Callable[[], str] | None" = None
 
     def check(self, backend: "Backend") -> JobTypeStatus:
         ...

@@ -416,3 +416,28 @@ gets these models*. Built on the branch, not merged; nothing run on a card.
   choice), then `max_params_b` (the pick again with the goal lowered to it), then the
   registered row (the Settings choice or the automatic pick). It is the first door to do
   §1a.3 per request; chat's is still owed (§3 item 2).
+
+## 10. image: a small rung (2026-10-10, `feat/image-dreamshaper-rung`)
+
+Owen, 2026-10-10: album covers need no text, *"just something that generates artistic
+images"*, on Victoria's 8 GiB laptop too. Built on the branch, not merged; measured on the
+PC's card held to a laptop card's room, not yet through the worker on a card
+(docs/internals/image.md "The small rung").
+
+- **The lineup.** `image` stays a media class with no goal: its pick is the first that fits
+  in the catalog's order, largest need first. `qwen-image-2.1` (19 GB on CUDA, 17.2 on the
+  Mac) and now `dreamshaper-xl-lightning` (SDXL, CUDA only, 7.3 GB). The PC and the Mac
+  pick Qwen-Image; an 8 GiB CUDA card with its 1 GiB allowance (7 GiB for a model) picks
+  DreamShaper; a 6 GiB card has no image model.
+- **The request.** `model` is now optional on `image` and `load-image`: none is served by
+  the registered row (`verbmodel.registered`, the Settings choice or the pick), refused by
+  name when there is none (`capability_undecided`, `capability_disabled`). A named model is
+  served or refused as before (`insufficient_memory` before anything loads). No ceiling:
+  image models carry no parameter count.
+- **What a client reads.** `GET /v1/playground` marks the registered model `registered`
+  and lists it first among the image pages, so a client that takes the first ready image
+  page (B-Sides) takes the verb's pick; each image page's `facts` give the model's native
+  size, its quality floor, its defaults and what a negative prompt costs it.
+- **Install.** An 8 GiB host pulls only DreamShaper (`crucible models pull
+  dreamshaper-xl-lightning`, or install-on-submit for a job that names no model), never
+  the 33 GB Qwen-Image.
