@@ -7,6 +7,13 @@ notes.
 
 ## Unreleased
 
+- The SDK reads `waiting_for.next_check_at` as nullable (`QueueWaitingFor.nextCheckAt: string | null`): a call kept behind a resident model's calls (`keeping_calls_together`, since 1.0.125) has no time to be checked again and the server sends null, which made every `activity()` and `queue()` with such a call in the line throw `CrucibleProtocolError` (B-Sides on 1.0.140 against 2.0.2).
+- The SDK reads a chat's `finish_reason` as nullable (`ChatResponse.finishReason: string | null`): an Ollama upstream answer with no `done_reason` is relayed with null, and `chat()` refused a whole answer over it.
+- `chatStream()` throws a mid-stream `data: {"error": ...}` frame (the server writes them for an Ollama or Anthropic upstream) as `CrucibleServerError` with the upstream's own message and code (`stream_error` when it names none), where it threw a protocol error about a missing `choices`.
+- A server stopping can no longer send `server.stopping` with a null `reason`: `EventHub.stop` sets the reason before the flag a stream reads without the lock.
+- `tests/test_sdk_response_shapes.py` now also checks that every field a response model allows to be null (or absent) is read by the SDK with an accessor that tolerates it, and covers `QueueWaitingFor`.
+- `modules/b-sides.toml` and its generated `modules/b-sides.module.json`: the `rvc` env (which the `denoise` job type runs in) and the `vocals-roformer` separator.
+
 ## 2.0.3 — 2026-10-11
 
 - A queue session waiting with only an `act` (no model) now holds the model this server registered for that act, so closing the session before it no longer unloads the model it is about to run on. B-Sides opens its album sessions with `act: "generate"` and no model; on Victoria's laptop (2026-10-11, 20:59-21:06Z) each close unloaded qwen3.5-4b-8bit while the next three sessions waited for it, and every album reloaded it (~70 s each for ~1.5 s of chat). An act that is not a verb, or a verb with nothing registered, still holds nothing.

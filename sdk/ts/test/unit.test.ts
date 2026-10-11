@@ -593,6 +593,38 @@ test('a cancelled running job says Crucible is stopping it', async () => {
   await assert.rejects(client().activity(), /activity\.running\[0\]\.cancelling is present but is not a boolean/);
 });
 
+test('a call kept behind a resident model\'s calls has no time to be checked again', async () => {
+  // crucible/jobs/line.py KeepWait (since 1.0.125): it waits for the calls ahead of it to run,
+  // not for a time, so `next_check_at` is null by design. Found in the field: B-Sides against a
+  // 2.0.2 server, activity() refused the whole read on `queued[24].waiting_for.next_check_at`.
+  const call = {
+    job_id: 'c-24', type: 'chat', model: 'qwen3.5-4b', status: 'queued', position: 25,
+    progress: 0, message: null, created: '2026-10-11T12:00:02+00:00', started: null,
+    client: 'b-side/1.0', waited_s: 3, max_wait_s: 600, kind: 'call',
+    waiting_for: {
+      code: 'keeping_calls_together',
+      message: 'waiting behind 2 calls to qwen3.5-27b because qwen3.5-27b keeps its calls together',
+      details: { model: 'qwen3.5-27b', ahead: 2, ahead_ids: ['c-1', 'c-2'], turn_taken: false },
+      since: '2026-10-11T12:00:03+00:00',
+      next_check_at: null,
+    },
+  };
+  answer(200, { ...ACTIVITY_WITH_SESSION, queued: [call] });
+  const seen = await client().activity();
+  assert.deepEqual(seen.queued[0]?.waitingFor, {
+    code: 'keeping_calls_together',
+    message: 'waiting behind 2 calls to qwen3.5-27b because qwen3.5-27b keeps its calls together',
+    details: { model: 'qwen3.5-27b', ahead: 2, ahead_ids: ['c-1', 'c-2'], turn_taken: false },
+    since: '2026-10-11T12:00:03+00:00',
+    nextCheckAt: null,
+  });
+
+  // The key is still required: a row that drops it is not a server this SDK speaks to.
+  const { next_check_at: _dropped, ...withoutKey } = call.waiting_for;
+  answer(200, { ...ACTIVITY_WITH_SESSION, queued: [{ ...call, waiting_for: withoutKey }] });
+  await assert.rejects(client().activity(), /waiting_for has no field "next_check_at"/);
+});
+
 // ------------------------------------- what was told to go and has not gone
 
 /**

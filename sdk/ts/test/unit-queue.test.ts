@@ -287,6 +287,28 @@ test('queue() lists the waiting jobs in order, and removeFromQueue() removes one
   assert.deepEqual(seen, ['GET /v1/queue', 'DELETE /v1/queue/j1']);
 });
 
+test('queue() reads a keep-together wait, whose next_check_at is null', async () => {
+  // crucible/jobs/line.py KeepWait: it waits for the calls ahead of it, not for a time.
+  const wait = {
+    code: 'keeping_calls_together', message: 'waiting behind 1 call to qwen3.5-27b',
+    details: { model: 'qwen3.5-27b', ahead: 1, ahead_ids: ['c-1'], turn_taken: true },
+    since: '2026-10-11T12:00:03+00:00', next_check_at: null,
+  };
+  handler = (_request, _body, response) => {
+    json(response, 200, {
+      items: [{ ...ROW, kind: 'call', waiting_for: wait }],
+      depth: 1,
+      limits: {
+        per_client: 50, total: 200, max_wait_s: { default: 3600, min: 10, max: 86400 },
+        abandon_after_s: 300,
+      },
+    });
+  };
+  const listed = await client().queue();
+  assert.equal(listed.items[0]?.waitingFor?.code, 'keeping_calls_together');
+  assert.equal(listed.items[0]?.waitingFor?.nextCheckAt, null);
+});
+
 test('queueEvents() opens with a snapshot and then names every change', async () => {
   handler = (_request, _body, response) => {
     response.writeHead(200, { 'Content-Type': 'text/event-stream' });

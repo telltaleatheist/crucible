@@ -1,0 +1,9 @@
+[module]
+name = "b-sides"
+
+[[job_types]]
+type = "rvc"
+
+[[subjects]]
+kind = "denoise"
+id = "vocals-roformer"

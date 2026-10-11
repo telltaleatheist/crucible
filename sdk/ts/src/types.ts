@@ -809,12 +809,22 @@ export interface CardWaitData {
  * every minute while it does not (from 1.0.83), so a client watching for silence sees it is alive.
  */
 export interface QueueWaitingFor {
+  /** `accelerator_busy` or `keeping_calls_together`. */
   readonly code: string;
-  /** The guard's sentence naming the holder: pid, name and memory, or the unattributed bytes. */
+  /**
+   * The server's sentence: for `accelerator_busy` the guard naming the holder (pid, name and
+   * memory, or the unattributed bytes); for `keeping_calls_together` the resident model whose
+   * queued calls go first.
+   */
   readonly message: string;
+  /** For `keeping_calls_together`: `{model, ahead, ahead_ids, turn_taken}`. */
   readonly details: Readonly<Record<string, unknown>> | null;
   readonly since: string;
-  readonly nextCheckAt: string;
+  /**
+   * When the card is checked again (`accelerator_busy`); null for `keeping_calls_together`,
+   * which waits for the calls ahead of it to run, not for a time.
+   */
+  readonly nextCheckAt: string | null;
 }
 
 /** One job waiting in the server's queue, as `GET /v1/queue` lists it. */
@@ -1093,8 +1103,11 @@ export interface ChatResponse {
   /** Crucible's model id: the one you named, or the one your `verb` and `maxParamsB` chose. */
   readonly model: string | null;
   readonly content: string;
-  /** The engine's own word for why it stopped (`stop`, `length`, …); `length` means truncated. */
-  readonly finishReason: string;
+  /**
+   * The engine's own word for why it stopped (`stop`, `length`, …); `length` means truncated.
+   * Null when the engine did not say (an Ollama answer with no `done_reason`).
+   */
+  readonly finishReason: string | null;
   readonly usage: ChatUsage | null;
 }
 
