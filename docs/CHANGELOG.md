@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.4 — 2026-10-11
+
 - `denoise` takes any audio ffmpeg decodes at any rate (B-Sides' 48 kHz YuE2 songs, Owen 2026-10-11): an input that is not WAV/FLAC at the separator's 44.1 kHz is decoded with Crucible's ffmpeg and resampled with soxr, and every stem is resampled back to the input's rate and exact frame count; the `done` event's `input` and `separated` say what was done. A new `format` param (`wav` default, `flac`, `mp3`) encodes each stem as an audio job encodes a song (`workerio.write_audio`, now shared); the separator itself always works on lossless WAV. A stem audio-separator skips as near-silent (its writer logs the warning and writes nothing, as for a clean instrumental's vocals) is returned as digital silence and named in `separated.silent_stems`, instead of failing `denoise_primary_stem_missing`; a stem missing with no such warning still fails. Denoise now needs ffmpeg and ffprobe (`ffmpeg_missing`), which `crucible install rvc` places. docs/API-CLI.md shows the render → denoise chain by held-artifact reference.
 - The SDK reads `waiting_for.next_check_at` as nullable (`QueueWaitingFor.nextCheckAt: string | null`): a call kept behind a resident model's calls (`keeping_calls_together`, since 1.0.125) has no time to be checked again and the server sends null, which made every `activity()` and `queue()` with such a call in the line throw `CrucibleProtocolError` (B-Sides on 1.0.140 against 2.0.2).
 - The SDK reads a chat's `finish_reason` as nullable (`ChatResponse.finishReason: string | null`): an Ollama upstream answer with no `done_reason` is relayed with null, and `chat()` refused a whole answer over it.
