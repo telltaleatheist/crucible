@@ -61,6 +61,9 @@ def do_separate(results, request: dict) -> int:
         if not isinstance(request.get(key), str):
             send(results, "failed", message=f"the separate request has no {key!r}")
             return 1
+    if not isinstance(request.get("hop_s"), float):
+        send(results, "failed", message="the separate request's 'hop_s' must be float")
+        return 1
     source = {**DEFAULT_INPUT, **_env_json("CRUCIBLE_FAKE_DENOISE_INPUT", {})}
     separator_rate = request["sample_rate"]
     # What the real worker's stemaudio.prepare does to the input, said the same way: a
@@ -134,6 +137,7 @@ def do_separate(results, request: dict) -> int:
         stems=stems,
         silent_stems=_env_json("CRUCIBLE_FAKE_DENOISE_SILENT_STEMS", []),
         separate_seconds=8.25,
+        window_s=float(os.environ.get("CRUCIBLE_FAKE_DENOISE_WINDOW_S") or 11.0),
     )
 
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_NO_DONE") == "1":

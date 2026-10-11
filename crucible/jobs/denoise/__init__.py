@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
@@ -59,10 +60,18 @@ JOB_TYPE = DENOISE_JOB.name
 ENV_JOB_TYPE = RVC_ENV.name
 
 NO_PARAMS = (
-    "denoise takes two params, `stems` (\"primary\" or \"all\") and `format` "
-    "(\"wav\", \"flac\" or \"mp3\") — every separation knob is an engine default "
-    "this server does not put on the wire (docs/internals/asr-and-align.md)"
+    "denoise takes three params, `stems` (\"primary\" or \"all\"), `format` "
+    "(\"wav\", \"flac\" or \"mp3\") and `hop_s` (seconds between the starts of "
+    "two windows, 0.5 up to the separator's own default) — every other separation knob "
+    "is an engine default this server does not put on the wire "
+    "(docs/internals/asr-and-align.md)"
 )
+
+# The smallest hop a job may ask for. The cost is about inversely proportional to the hop
+# (8 s separated a 224 s song in about 8 s on the 3090 Ti), so 0.5 s is about 16 times the
+# default's work: every sample under 22 windows of an 11 s model. The largest is the
+# manifest's own hop_s, which is never past its window, so no sample goes uncovered.
+HOP_FLOOR_S = 0.5
 
 # Which stems a run publishes. "primary" is the manifest's answer (the dry voice, the
 # vocals) and is what a book's denoise wants; "all" also returns what was separated
@@ -133,7 +142,7 @@ def occupy_separator(
         )
         say(
             f"loading {manifest.id} ({manifest.model_filename}) with "
-            f"use_autocast={use_autocast}, a window every {manifest.hop_s} s; log {log_path}"
+            f"use_autocast={use_autocast}; log {log_path}"
         )
         outcome = session.start(
             {
@@ -141,7 +150,6 @@ def occupy_separator(
                 "model_file_dir": str(model_file_dir),
                 "model_filename": manifest.model_filename,
                 "use_autocast": use_autocast,
-                "hop_s": manifest.hop_s,
                 "memory_cap_bytes": workers.torch_memory_cap(
                     spec.backend, spec.memory_bytes_estimate
                 ),
@@ -193,6 +201,15 @@ class DenoiseParams(BaseModel):
         '16-bit WAV), "flac" (24-bit) or "mp3" (192 kbps CBR), as an audio job writes '
         "them. The separator always works on lossless audio; this is the one encode.",
     )
+    hop_s: float | None = Field(
+        default=None,
+        description="Seconds between the starts of two of the separator's windows (11 s "
+        "for most separators, 8 s for `denoise-roformer` and `bleed-suppressor-roformer`). "
+        "Smaller means more windows over every sample, so window seams and bleed are "
+        "averaged out, and proportionally more time. From 0.5 up to the separator's own "
+        "default, which is what a job that sends none runs at (8 for every separator "
+        "here); outside that is refused `denoise_hop_out_of_range`.",
+    )
 
 
 MANIFESTS: ManifestCatalog[DenoiseManifest] = ManifestCatalog(
@@ -230,6 +247,29 @@ def _require_ffmpeg() -> dict[str, str]:
             {"missing": absent, "path": hosttools.search_path()},
         )
     return {tool: str(path) for tool, path in found.items()}
+
+
+def resolve_hop(params: DenoiseParams, manifest: DenoiseManifest) -> float:
+    """The hop a job runs at: the one it asked for, or the separator's own default."""
+    if params.hop_s is None:
+        return float(manifest.hop_s)
+    if not HOP_FLOOR_S <= params.hop_s <= manifest.hop_s:
+        raise ApiError(
+            400,
+            "denoise_hop_out_of_range",
+            f"hop_s {params.hop_s} is outside what {manifest.id} takes: from "
+            f"{HOP_FLOOR_S} s up to its own default of {manifest.hop_s} s. A smaller "
+            "hop puts more windows over every sample and costs proportionally more "
+            f"time ({HOP_FLOOR_S} s is about {manifest.hop_s / HOP_FLOOR_S:.0f}x the "
+            "default's); a larger one than the default buys nothing this server offers",
+            {
+                "hop_s": params.hop_s,
+                "min": HOP_FLOOR_S,
+                "max": manifest.hop_s,
+                "model": manifest.id,
+            },
+        )
+    return float(params.hop_s)
 
 
 def _missing_files(config: Config, manifest: DenoiseManifest) -> list[str]:
@@ -364,8 +404,9 @@ class DenoiseJobType(ResidentWorker):
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
-        parse_params(DenoiseParams, params, self.name, lead=NO_PARAMS)
-        _manifest, spec, _python, _root, _tools = self.requirements(model)
+        parsed = parse_params(DenoiseParams, params, self.name, lead=NO_PARAMS)
+        manifest, spec, _python, _root, _tools = self.requirements(model)
+        resolve_hop(parsed, manifest)
         self._residency.refuse_if_claimed(f"denoising with {model!r}")
         if self._residency.is_resident(KIND_DENOISE, model):
             return
@@ -376,6 +417,7 @@ class DenoiseJobType(ResidentWorker):
         params = DenoiseParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         manifest, spec, python, root, tools = as_job_error(self.requirements, model)
+        hop_s = as_job_error(resolve_hop, params, manifest)
 
         source = self._input(ctx)
         output_dir = ctx.scratch / "stems"
@@ -395,6 +437,7 @@ class DenoiseJobType(ResidentWorker):
             "separator_format": SEPARATOR_FORMAT,
             "output_format": params.format,
             "sample_rate": manifest.sample_rate,
+            "hop_s": hop_s,
             "ffmpeg": tools["ffmpeg"],
             "ffprobe": tools["ffprobe"],
         }
@@ -403,8 +446,8 @@ class DenoiseJobType(ResidentWorker):
             ctx.warming(
                 f"{source.name}: {message['seconds']}s of "
                 f"{message['channels']}-channel {message['codec']} at "
-                f"{message['sample_rate']} Hz, through {manifest.display}; "
-                f"{_conversion(message, manifest.sample_rate)}"
+                f"{message['sample_rate']} Hz, through {manifest.display}, a window "
+                f"every {hop_s:g} s; {_conversion(message, manifest.sample_rate)}"
             )
 
         def on_progress(message: dict[str, Any]) -> None:
@@ -444,8 +487,11 @@ class DenoiseJobType(ResidentWorker):
             stage="separating",
         )
         ready = outcome.ready
+        result = results[0]
         ctx.done_extra(
             primary_stem=primary["name"],
+            primary_is=manifest.primary_is,
+            secondary_is=manifest.secondary_is,
             stems=[stem["name"] for stem in stems],
             sample_rate=primary["sample_rate"],
             frames=primary["frames"],
@@ -462,6 +508,10 @@ class DenoiseJobType(ResidentWorker):
                 "said": _conversion(ready, manifest.sample_rate),
                 "silent_stems": silent,
                 "silent_said": _silence(silent),
+                "hop_s": hop_s,
+                "hop_s_default": manifest.hop_s,
+                "window_s": result["window_s"],
+                "windows_said": _windows(hop_s, result["window_s"]),
             },
             separate_seconds=results[0]["separate_seconds"],
             load_seconds=self._loaded_seconds.pop(job.id, 0.0),
@@ -514,8 +564,9 @@ class DenoiseJobType(ResidentWorker):
         ready: dict[str, Any],
         stems: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        marker = f"({manifest.primary_stem})"
-        hits = [stem for stem in stems if marker in stem["name"].lower()]
+        wanted = manifest.primary_stem.lower()
+        marker = f"({wanted})"
+        hits = [stem for stem in stems if _stem_label(stem["name"]) == wanted]
         if len(hits) != 1:
             raise JobError(
                 "denoise_primary_stem_missing",
@@ -563,6 +614,27 @@ class DenoiseJobType(ResidentWorker):
                 f"{stem['name']} is {stem['frames']} frames and the input was "
                 f"{ready['frames']} — it was not returned to the input's length",
             )
+
+
+# audio-separator names a stem `<input name>_(<stem>)_<model name>.<ext>`, and no model name
+# here has a parenthesis in it, so the stem is the LAST parenthesised label. The input's own
+# name can carry one too: an instrumental chained into the bleed suppressor is
+# `song_(Instrumental)_mel_band_roformer_instrumental_becruily.wav`, and both of ITS stems
+# then contain "(instrumental)".
+_STEM_LABEL = re.compile(r"_\(([^()]*)\)_[^()]*$")
+
+
+def _stem_label(name: str) -> str | None:
+    found = _STEM_LABEL.search(name)
+    return None if found is None else found.group(1).lower()
+
+
+def _windows(hop_s: float, window_s: float) -> str:
+    """How the windows lay over the input, said for the record."""
+    return (
+        f"{window_s:g} s windows, one every {hop_s:g} s: every sample under about "
+        f"{window_s / hop_s:.1f} windows, averaged"
+    )
 
 
 def _conversion(ready: dict[str, Any], separator_rate: int) -> str:

@@ -138,7 +138,7 @@ Job types are submitted with `POST /v1/jobs` (`{"type", "model", "params", "inpu
 | `unload-aligner` | Takes the resident aligner off the card now, whichever job put it there (align). |
 | `align-longform` | Aligns a whole audiobook to its book text: a rough faster-whisper transcript places each sentence, then Qwen3-ForcedAligner places the words, and out comes a WebVTT with one cue per sentence. |
 | `rvc` | Voice conversion: re-voices every input through an RVC model, keeping each input's container, sample format and exact duration. |
-| `denoise` | Separates audio into stems with a source-separation model: `vocals-roformer` splits vocals from the instrumental, `denoise-roformer` splits dry speech from noise. |
+| `denoise` | Separates audio into stems with a source-separation model: `vocals-roformer` splits vocals from the instrumental, `instrumental-roformer-becruily` and `instrumental-roformer-unwa-v1e` split the instrumental from the vocals (the instrumental is their target), `bleed-suppressor-roformer` cleans the voice left in an instrumental, and `denoise-roformer` splits dry speech from noise. |
 | `unload-denoiser` | Takes the resident separator off the card now, whichever job put it there (denoise). |
 | `image` | Makes one picture from a prompt (text-to-image), redraws an input picture (image-to-image), or regenerates the masked region of one (inpainting and outpainting). |
 | `unload-image` | Takes the resident generator off the card now, whichever job put it there (image or load-image). |
@@ -165,7 +165,7 @@ What the server already runs together, and what a client sends to get it.
 | Chat (`/v1/chat/completions`) | Each resident LLM takes several chats at once and its engine batches them: `GET /v1/activity` gives `chat.max_in_flight` (16 for the shipped vLLM and mlx-lm models). Send independent chats concurrently, up to that many, not one after another. Past it a chat waits for a slot, or with `"queue": false` is refused 503 `chat_queue_full` at no cost. |
 | `asr` (Qwen3-ASR) | One job is one file, cut into pieces server-side; send a long recording whole rather than pre-cut. On cuda-linux (vLLM) the pieces decode `max_batch` (8) at a time; on a Mac one at a time. Every job starts its own ASR engine and aligner (about 30 s on the PC before the first piece), so many short files each pay it. On a Mac `qwen3-asr-1.7b-mlx` decodes about 2.5x faster than `qwen3-asr-1.7b` and hears slightly fewer fillers. |
 | `rvc` | One job takes many inputs: send a batch of files as one job, not one job per file. The server runs up to 96 pieces through each conversion process, so the voice loads once per batch rather than once per file. |
-| `denoise` (separators) | One input per job, and the separator stays loaded between jobs, so separate jobs cost no reload. There is nothing to gain from cutting a file into chunks: send it whole. The separator runs the model on one window at a time (11 s for `vocals-roformer`, 8 s for `denoise-roformer`), starting one every `hop_s` seconds (8 for both); time is about inversely proportional to the hop. It does not batch windows. |
+| `denoise` (separators) | One input per job, and the separator stays loaded between jobs, so separate jobs cost no reload. There is nothing to gain from cutting a file into chunks: send it whole. The separator runs the model on one window at a time (11 s for `vocals-roformer` and the two instrumental separators, 8 s for `denoise-roformer` and `bleed-suppressor-roformer`), starting one every `hop_s` seconds (8 unless the job sends `hop_s`, down to 0.5); time is about inversely proportional to the hop, so `hop_s: 2` takes about 4x as long as the default. It does not batch windows. |
 
 ## Discovery
 
@@ -1941,9 +1941,9 @@ Voice conversion: re-voices every input through an RVC model, keeping each input
 
 ### `denoise`
 
-Separates audio into stems with a source-separation model: `vocals-roformer` splits vocals from the instrumental, `denoise-roformer` splits dry speech from noise.
+Separates audio into stems with a source-separation model: `vocals-roformer` splits vocals from the instrumental, `instrumental-roformer-becruily` and `instrumental-roformer-unwa-v1e` split the instrumental from the vocals (the instrumental is their target), `bleed-suppressor-roformer` cleans the voice left in an instrumental, and `denoise-roformer` splits dry speech from noise.
 
-*Model:* A separator id: `vocals-roformer` or `denoise-roformer` (GET /v1/catalog lists them and whether each is installed).
+*Model:* A separator id: `vocals-roformer`, `instrumental-roformer-becruily`, `instrumental-roformer-unwa-v1e`, `bleed-suppressor-roformer` or `denoise-roformer` (GET /v1/catalog lists them and whether each is installed).
 
 **Params**
 
@@ -1951,16 +1951,20 @@ Separates audio into stems with a source-separation model: `vocals-roformer` spl
 | --- | --- | --- | --- | --- |
 | `stems` | `'primary'` or `'all'` | no | `'primary'` | "primary" returns only the separator's answer (the vocals, the dry voice); "all" also returns what was separated from it (the instrumental, the noise), the primary first. |
 | `format` | `'wav'` or `'flac'` or `'mp3'` | no | `'wav'` | Every stem's container: "wav" (the default, the separator's own 16-bit WAV), "flac" (24-bit) or "mp3" (192 kbps CBR), as an audio job writes them. The separator always works on lossless audio; this is the one encode. |
+| `hop_s` | number or null | no | `null` | Seconds between the starts of two of the separator's windows (11 s for most separators, 8 s for `denoise-roformer` and `bleed-suppressor-roformer`). Smaller means more windows over every sample, so window seams and bleed are averaged out, and proportionally more time. From 0.5 up to the separator's own default, which is what a job that sends none runs at (8 for every separator here); outside that is refused `denoise_hop_out_of_range`. |
 
 *Inputs:* Exactly one audio file in any format ffmpeg decodes (WAV, FLAC, mp3, m4a, a video's sound...) at any rate. A WAV or FLAC at the separator's own rate (44100 Hz) goes to it as sent; anything else is decoded with the server's ffmpeg and resampled to 44100 Hz first. Another job's held artifact is an input as it is: `{"artifact": {"job_id", "name"}}`.
 
-*Returns:* Stems at the input's own sample rate and exactly its frame count, so they line up sample for sample with what was sent (a 48 kHz song comes back 48 kHz). `stems: "primary"` (the default) returns only the primary stem (`<input>_(vocals)_….wav` or `<input>_(Dry)_….wav`); `stems: "all"` returns every stem, the primary first (`vocals-roformer`: `…_(vocals)_…` then `…_(other)_…`, the instrumental). `format` is every stem's container: `wav` (the default), `flac` or `mp3`, encoded as an audio job's are. The `done` event names `primary_stem`, lists `stems`, and gives `format`, `sample_rate`, `frames`, `input` (codec, container, rate, frames, channels), `separated` (the rate and frames the separator worked at, whether the input was decoded and resampled, and that said in a sentence), `separate_seconds` and `load_seconds`.
+*Returns:* Stems at the input's own sample rate and exactly its frame count, so they line up sample for sample with what was sent (a 48 kHz song comes back 48 kHz). `stems: "primary"` (the default) returns only the primary stem; `stems: "all"` returns every stem, the primary first. The stems by separator, primary then the other: `vocals-roformer` `…_(vocals)_…` (the vocals) then `…_(other)_…` (the instrumental); `instrumental-roformer-becruily` `…_(Instrumental)_…` then `…_(Vocals)_…`; `instrumental-roformer-unwa-v1e` `…_(other)_…` (the instrumental) then `…_(vocals)_…`; `bleed-suppressor-roformer` `…_(Instrumental)_…` (cleaned) then `…_(Bleed)_…` (what it took out); `denoise-roformer` `…_(dry)_…` then `…_(other)_…`. `format` is every stem's container: `wav` (the default), `flac` or `mp3`, encoded as an audio job's are. The `done` event names `primary_stem`, says what it and the other stem are (`primary_is`, `secondary_is`), lists `stems`, and gives `format`, `sample_rate`, `frames`, `input` (codec, container, rate, frames, channels), `separated` (the rate and frames the separator worked at, whether the input was decoded and resampled, and that said in a sentence; `hop_s` the run used, `hop_s_default`, the model's `window_s`, and `windows_said`), `separate_seconds` and `load_seconds`.
 
 - The separator always works on lossless audio at its own rate; the one lossy encode (`format: "mp3"`) is of the finished stem. A resampled input has every stem resampled back to its rate and frames.
 - Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`); `crucible install rvc` places them.
 - A stem the separator finds silent (a clean instrumental's vocals) comes back as digital silence, named in `separated.silent_stems`.
 - A model not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 - `vocals` means every voice in the track, singing included.
+- `hop_s` trades time for quality: the separator runs on one window at a time (11 s; 8 s for `denoise-roformer` and `bleed-suppressor-roformer`), one every `hop_s` seconds, and averages where they overlap. The default (8) puts about 1.4 windows over each sample of an 11 s model; 2 puts 5.5 and takes about 4x as long. From 0.5 to the separator's default; anything else is refused `denoise_hop_out_of_range`. It is the job's, so one loaded separator serves jobs at different hops with no reload.
+- `bleed-suppressor-roformer` is a second pass: send it an instrumental another separator made (by reference to a held denoise job's stem) and keep its `(Instrumental)`.
+- The instrumental separators and the bleed suppressor state no licence of their own; the mirror they are pinned from is MIT-tagged as a whole. Each manifest's `licence` says exactly that.
 - The separator stays loaded between jobs; send a file whole rather than in chunks. See Throughput.
 
 ```json

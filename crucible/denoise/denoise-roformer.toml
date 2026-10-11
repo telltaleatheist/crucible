@@ -4,9 +4,12 @@ display = "Mel-Band Roformer Denoise (aufr33, SDR 27.9959)"
 model_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt"
 config_filename = "denoise_mel_band_roformer_aufr33_sdr_27.9959_config.yaml"
 primary_stem = "dry"
+primary_is = "the dry speech: the voice with the noise and room taken out"
+secondary_is = "what was taken out of the speech (`other`)"
 sample_rate = 44100
 # An 8 s window every 8 s (the library's default): no overlap between windows.
 hop_s = 8
+licence = "not stated in this manifest's source: aufr33's own release was not checked; the mirror Politrees/UVR_resources is MIT-tagged as a whole"
 
 [backends.cuda-linux]
 engine = "audio-separator"

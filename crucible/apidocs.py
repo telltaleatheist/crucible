@@ -396,9 +396,11 @@ THROUGHPUT: tuple[tuple[str, str], ...] = (
         "One input per job, and the separator stays loaded between jobs, so separate jobs "
         "cost no reload. There is nothing to gain from cutting a file into chunks: send "
         "it whole. The separator runs the model on one window at a time (11 s for "
-        "`vocals-roformer`, 8 s for `denoise-roformer`), starting one every `hop_s` "
-        "seconds (8 for both); time is about inversely proportional to the hop. It does "
-        "not batch windows.",
+        "`vocals-roformer` and the two instrumental separators, 8 s for "
+        "`denoise-roformer` and `bleed-suppressor-roformer`), starting one every "
+        "`hop_s` seconds (8 unless the job sends `hop_s`, down to 0.5); time is about "
+        "inversely proportional to the hop, so `hop_s: 2` takes about 4x as long as the "
+        "default. It does not batch windows.",
     ),
 )
 

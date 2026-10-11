@@ -1,0 +1,49 @@
+[model]
+id = "instrumental-roformer-unwa-v1e"
+display = "Mel-Band Roformer Kim Inst V1e (unwa)"
+model_filename = "melband_roformer_inst_v1e.ckpt"
+# audio-separator's own name for the config (its models.json pairs it with the checkpoint),
+# which is not the mirror's.
+config_filename = "config_melbandroformer_inst.yaml"
+primary_stem = "other"
+primary_is = "the instrumental: the model's own target, which its config calls `other`"
+secondary_is = "the vocals: the input minus the instrumental (`vocals`)"
+sample_rate = 44100
+# An 11 s window (dim_t 1101 at hop_length 441)
+# every 8 s (the library's default). This is the default and the largest hop a job may ask for.
+hop_s = 8
+# pcunwa/Mel-Band-Roformer-Inst on HuggingFace (inst_v1e.ckpt) states no licence; the
+# mirror is MIT-tagged as a whole. The mirrored checkpoint is byte-identical to the
+# author's (same LFS sha256), and the config's git oid matches theirs.
+# Owen rules on use (docs/API-CLI.md).
+licence = "none stated by the author (pcunwa/Mel-Band-Roformer-Inst has no licence tag or card licence); the mirror Politrees/UVR_resources is MIT-tagged as a whole"
+
+[backends.cuda-linux]
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/melband_roformer_inst_v1e.ckpt"
+model_sha256 = "df2bcdb8838b88264f5381dbb0ccd84a9926c9775cf548c34d8846f5cd20fe96"
+model_bytes = 913102724
+config_path = "models/Roformer/MelBand/config_melband_roformer_inst.yaml"
+config_sha256 = "64c0cf23730f299c9c73470e4ba4b32120d8fec4fb1a0326dde1d61378cc6fc8"
+config_bytes = 906
+# memory_basis: declared. The checkpoint plus the 1.5 GiB every separator is given
+# (docs/internals/jobs-runtime.md); the same architecture as vocals-roformer (dim 384,
+# depth 6, 60 bands), never measured on a card.
+memory_bytes_estimate = 2523715460
+
+[backends.mlx-darwin]
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/melband_roformer_inst_v1e.ckpt"
+model_sha256 = "df2bcdb8838b88264f5381dbb0ccd84a9926c9775cf548c34d8846f5cd20fe96"
+model_bytes = 913102724
+config_path = "models/Roformer/MelBand/config_melband_roformer_inst.yaml"
+config_sha256 = "64c0cf23730f299c9c73470e4ba4b32120d8fec4fb1a0326dde1d61378cc6fc8"
+config_bytes = 906
+# memory_basis: declared. The checkpoint plus the 1.5 GiB every separator is given
+# (docs/internals/jobs-runtime.md); the same architecture as vocals-roformer (dim 384,
+# depth 6, 60 bands), never measured on a card.
+memory_bytes_estimate = 2523715460

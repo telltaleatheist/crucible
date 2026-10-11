@@ -36,8 +36,11 @@ _MODEL_REQUIRED: dict[str, type] = {
     "model_filename": str,
     "config_filename": str,
     "primary_stem": str,
+    "primary_is": str,
+    "secondary_is": str,
     "sample_rate": int,
     "hop_s": int,
+    "licence": str,
 }
 _BACKEND_REQUIRED: dict[str, type] = {
     "engine": str,
@@ -102,13 +105,24 @@ class DenoiseManifest:
     model_filename: str
     config_filename: str
     primary_stem: str
+    # What each of the two stems IS, said for a client: an instrumental model's primary is
+    # the instrumental and its secondary the vocals; a bleed suppressor's secondary is the
+    # bleed it took out. audio-separator names the stems by the model's config, and those
+    # names ("other", "Bleed") do not say it.
+    primary_is: str
+    secondary_is: str
     sample_rate: int
     # Seconds between the starts of two windows. audio-separator calls it `overlap`, but
     # for a Roformer its MDXC path steps by `overlap * sample_rate` samples, so it is a hop:
     # a SMALLER value means MORE windows and more time (4 took twice as long as 8 on the
     # Mac, 2026-10-06). The window itself is the model's (hop_length x (dim_t - 1)): 11 s
-    # for vocals-roformer, 8 s for denoise-roformer. The library's default is 8.
+    # for vocals-roformer, 8 s for denoise-roformer. The library's default is 8. This is
+    # the hop a job that asks for none runs at, and the LARGEST one a job may ask for
+    # (DenoiseParams.hop_s), so no sample is ever left outside every window.
     hop_s: int
+    # The weights' licence as far as it is known, said exactly: several separators state
+    # none upstream and are mirrored in a repo tagged MIT as a whole.
+    licence: str
     backends: dict[str, DenoiseBackendSpec]
     path: Path
 
@@ -138,8 +152,11 @@ class DenoiseManifest:
             "model_filename": self.model_filename,
             "config_filename": self.config_filename,
             "primary_stem": self.primary_stem,
+            "primary_is": self.primary_is,
+            "secondary_is": self.secondary_is,
             "sample_rate": self.sample_rate,
             "hop_s": self.hop_s,
+            "licence": self.licence,
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -203,11 +220,17 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
         )
     _filename(f"{path.name} [model]", "model_filename", model["model_filename"])
     _filename(f"{path.name} [model]", "config_filename", model["config_filename"])
-    if model["primary_stem"].strip() == "":
+    for key in ("primary_stem", "primary_is", "secondary_is"):
+        if model[key].strip() == "":
+            raise DenoiseManifestError(
+                f"{path.name}: model.{key} is empty; a separator model that does not "
+                "say which of its outputs is the answer, and what each one is, is a "
+                "model neither the job nor its client can check"
+            )
+    if model["licence"].strip() == "":
         raise DenoiseManifestError(
-            f"{path.name}: model.primary_stem is empty; a separator model that "
-            "does not say which of its outputs is the answer is a model the job "
-            "cannot check"
+            f"{path.name}: model.licence is empty; say what is known, including that "
+            "the author states none"
         )
     if model["sample_rate"] <= 0:
         raise DenoiseManifestError(
@@ -293,8 +316,11 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> DenoiseMan
         model_filename=model["model_filename"],
         config_filename=model["config_filename"],
         primary_stem=model["primary_stem"],
+        primary_is=model["primary_is"],
+        secondary_is=model["secondary_is"],
         sample_rate=model["sample_rate"],
         hop_s=model["hop_s"],
+        licence=model["licence"],
         backends=backends,
         path=path,
     )
