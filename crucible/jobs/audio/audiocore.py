@@ -153,6 +153,7 @@ class Job:
         self.prompt = nullable("prompt", str)
         self.tags = nullable("tags", str)
         self.lyrics = nullable("lyrics", str)
+        self.planning_lyrics = nullable("planning_lyrics", str)
         self.negative_prompt = nullable("negative_prompt", str)
         self.duration_s = nullable("duration_s", (int, float))
         self.seed = required("seed", int)

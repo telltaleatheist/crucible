@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 WORKER = HERE.parent / "crucible" / "jobs" / "audio" / "yue2_worker.py"
 SCORE = (HERE / "fixtures" / "yue2-score-ballad.abc").read_text(encoding="utf-8")
 TAGS = "Instrumental, slow somber piano ballad, strings, no vocals, 66 BPM"
+PLANNING = "[Verse]\nA lantern burning by the gate\nThe evening settles on the stone\n"
 
 
 def _check(model: str, **params: Any) -> AudioParams:
@@ -27,7 +28,8 @@ def _check(model: str, **params: Any) -> AudioParams:
 
 def test_an_instrumental_song_needs_no_lyrics_and_a_sung_one_still_does() -> None:
     parsed = _check("yue2-3b", tags=TAGS, instrumental=True)
-    assert settle(parsed, load_all_audio_manifests()["yue2-3b"].spec("cuda-linux"), 1).instrumental is True
+    settled = settle(parsed, load_all_audio_manifests()["yue2-3b"].spec("cuda-linux"), 1)
+    assert settled.instrumental is True and settled.planning_lyrics["source"] == "pool"
     with pytest.raises(ApiError) as caught:
         _check("yue2-3b", tags=TAGS)
     assert caught.value.code == "audio_param_missing" and "'lyrics'" in caught.value.message
@@ -72,12 +74,15 @@ def test_an_instrumental_moves_the_vocal_melody_and_renders_that_score_unsung(
     module = _load_worker(monkeypatch)
     engine = module.YuE2Engine.__new__(module.YuE2Engine)
     engine._pipe = FakePipe()
-    job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True)
-    first = engine._pipe.plan(job.tags, module.INSTRUMENTAL_SECTIONS, seed=7, cfg_scale=1.0)
+    job = SimpleNamespace(tags=TAGS, lyrics=None, planning_lyrics=PLANNING, seed=7, cfg=1.0,
+                          instrumental=True)
+    first = engine._pipe.plan(job.tags, module.planned_from(job), seed=7, cfg_scale=1.0)
     fixed = engine._instrumental_plan(job, first)
 
+    assert engine._pipe.calls[0]["lyrics"] == PLANNING, "the score is planned from the words"
     final_call = engine._pipe.calls[-1]
     assert final_call["lyrics"] == "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Outro]\n", "only section tags"
+    assert "lantern" not in final_call["lyrics"].lower(), "the planning words are never sung"
     assert final_call["cot"] == "full" and final_call["seed"] == 7
     sys.path.insert(0, str(WORKER.parent / "yue2music"))
     try:
@@ -117,8 +122,8 @@ def test_an_empty_or_truncated_plan_is_refused_by_name_and_kept(
     engine = module.YuE2Engine.__new__(module.YuE2Engine)
     engine._pipe = FakePipe()
     engine._pipe.generation_config = SimpleNamespace(abc=SimpleNamespace(max_tokens=4096))
-    job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True,
-                          output_path=str(tmp_path / "audio.flac"))
+    job = SimpleNamespace(tags=TAGS, lyrics=None, planning_lyrics=PLANNING, seed=7, cfg=1.0,
+                          instrumental=True, output_path=str(tmp_path / "audio.flac"))
     failed = FailedPlan(**plan)
     with pytest.raises(RuntimeError, match="another seed") as raised:
         engine._instrumental_plan(job, failed)

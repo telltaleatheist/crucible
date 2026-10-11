@@ -20,6 +20,8 @@ REQUIRED_TREES: tuple[tuple[str, str], ...] = (
     ("crucible/rvcbase", "ultimate-rvc.toml"),
     ("crucible/align", "qwen3-aligner.toml"),
     ("crucible/asr", "whisper-large-v3-turbo.toml"),
+    # The audio manifests, the song tag chips and YuE2's planning-lyrics pool.
+    ("crucible/audio", "planning/yue2.toml"),
     ("crucible/envs", "llm/cuda-linux.txt"),
     ("crucible/ui", "index.html"),
     ("crucible/desktop_app/assets", "crucible.icns"),

@@ -75,6 +75,7 @@ import {
   type ImageOptions,
   type ImageResult,
   type AudioDecodeStage,
+  type AudioPlanningLyrics,
   type AudioOptions,
   type AudioResult,
   type SegmentOptions,
@@ -1956,6 +1957,7 @@ export class CrucibleClient {
       ['cfg', 'cfg'],
       ['format', 'format'],
       ['instrumental', 'instrumental'],
+      ['planningLyrics', 'planning_lyrics'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
@@ -3667,6 +3669,7 @@ export function readAudioResult(done: DoneData): AudioResult {
     cfg: nullableNum(audio, 'cfg', at),
     format: oneOf(str(audio, 'format', at), ['flac', 'wav', 'mp3'] as const, `${at}.format`),
     instrumental: optBool(audio, 'instrumental', at),
+    planningLyrics: readPlanningLyrics(nullableObject(audio, 'planning_lyrics', at), `${at}.planning_lyrics`),
     artifact: str(audio, 'artifact', at),
     score: nullableStr(audio, 'score', at),
     audioSeconds: nullableNum(audio, 'audio_seconds', at),
@@ -3682,6 +3685,15 @@ export function readAudioResult(done: DoneData): AudioResult {
     decodeStages: readDecodeStages(nullableObject(audio, 'decode_stages', at), `${at}.decode_stages`),
     stagesAtCap: nullableStrArray(audio, 'stages_at_cap', at),
     artifacts: done.artifacts ?? [],
+  };
+}
+
+function readPlanningLyrics(planning: Json | null, where: string): AudioPlanningLyrics | null {
+  if (planning === null) return null;
+  return {
+    source: oneOf(str(planning, 'source', where), ['pool', 'request'] as const, `${where}.source`),
+    id: nullableStr(planning, 'id', where),
+    lyrics: str(planning, 'lyrics', where),
   };
 }
 

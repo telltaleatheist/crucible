@@ -44,6 +44,7 @@ from ..template import (
 )
 from ..unload import UnloadJobType
 from .params import MAX_SEED, AudioParams, Settled, refuse_what_the_model_cannot_take, settle
+from .planning import PlanningLyricsError
 
 __all__ = [
     "JOB_TYPES",
@@ -421,7 +422,11 @@ class AudioJobType(ResidentWorker):
         needs = as_job_error(self.requirements, model, params)
         refuse_input_files(ctx)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
-        settled = settle(params, needs.spec, seed)
+        try:
+            settled = settle(params, needs.spec, seed)
+        except PlanningLyricsError as exc:
+            # The pool this build ships is unreadable: nothing a client sent can fix it.
+            raise JobError("planning_lyrics_unavailable", str(exc)) from None
         ctx.keep_request(kept_request(job, model, params, needs, settled))
         session = self._worker(ctx, model, needs)
         self._make(ctx, model, session, params, needs, settled)
@@ -486,6 +491,11 @@ def generate_request(
         "prompt": params.prompt,
         "tags": params.tags,
         "lyrics": params.lyrics,
+        # The words an instrumental's score is planned from and never sung: the client's
+        # own or the pool's set for this seed (planning.py); null otherwise.
+        "planning_lyrics": (
+            None if settled.planning_lyrics is None else settled.planning_lyrics["lyrics"]
+        ),
         "negative_prompt": params.negative_prompt,
         "duration_s": settled.duration_s,
         "seed": settled.seed,
@@ -523,6 +533,7 @@ def kept_request(
             "cfg": settled.cfg,
             "instrumental": settled.instrumental,
             "seed": settled.seed,
+            "planning_lyrics": settled.planning_lyrics,
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
@@ -562,6 +573,9 @@ def effective_params(
         "steps": settled.steps,
         "cfg": settled.cfg,
         "instrumental": settled.instrumental,
+        # Where an instrumental's planning lyrics came from ("pool" or "request"), the
+        # pool set's id, and the text (planning.record); null when there were none.
+        "planning_lyrics": settled.planning_lyrics,
         "format": params.format,
         "artifact": artifact,
         "score": SCORE_ARTIFACT if wrote_score else None,

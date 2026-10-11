@@ -89,6 +89,7 @@ const DONE_SONG = {
     },
   },
   stages_at_cap: ['composing'],
+  planning_lyrics: null,
 };
 
 test('audio() posts one audio job with snake_case params and only what the caller set', async () => {
@@ -171,6 +172,34 @@ test('readAudioResult reads how each token stage ended, and which ran to its cap
     () => readAudioResult({
       artifacts: [],
       extra: { audio: { ...DONE_SONG, decode_stages: { composing: bad } } },
+    }),
+    CrucibleProtocolError,
+  );
+});
+
+test('an instrumental sends its planning lyrics, and the result says what the score was planned from', async () => {
+  answer(200, { job_id: 'job-instrumental' });
+  const words = '[Verse]' + String.fromCharCode(10) + 'Stone on stone the wall goes up' + String.fromCharCode(10);
+  await client().audio({ model: 'yue2-3b', tags: 'Instrumental, piano', instrumental: true, planningLyrics: words });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    tags: 'Instrumental, piano',
+    instrumental: true,
+    planning_lyrics: words,
+  });
+
+  const pooled = { source: 'pool', id: 'harbor', lyrics: words };
+  const result = readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, planning_lyrics: pooled } } });
+  assert.deepEqual(result.planningLyrics, { source: 'pool', id: 'harbor', lyrics: words });
+  const own = readAudioResult({
+    artifacts: [],
+    extra: { audio: { ...DONE_SONG, planning_lyrics: { source: 'request', id: null, lyrics: words } } },
+  });
+  assert.deepEqual([own.planningLyrics?.source, own.planningLyrics?.id], ['request', null]);
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).planningLyrics, null);
+  assert.throws(
+    () => readAudioResult({
+      artifacts: [],
+      extra: { audio: { ...DONE_SONG, planning_lyrics: { ...pooled, source: 'random' } } },
     }),
     CrucibleProtocolError,
   );

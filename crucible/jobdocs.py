@@ -521,6 +521,13 @@ JOB_DOCS: dict[str, JobDoc] = {
             "like `[Verse]`, optional with `instrumental: true`) and takes `cfg`. "
             "Anything else is refused `audio_param_unsupported` with the list it "
             "does take; a missing one `audio_param_missing`.",
+            "An instrumental sent without `lyrics` plans its score from words it never "
+            "sings, so its melody has a sung song's bounded phrases: the client's "
+            "`planning_lyrics`, or a set from YuE2's pool picked by the seed (set number "
+            "seed mod the pool's size), so the same params and seed plan the same song. "
+            "`audio.planning_lyrics` in the `done` event (and `settled.planning_lyrics` in "
+            "a kept request) says which: `{source: pool|request, id, lyrics}` "
+            "(docs/AUDIO.md).",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics.",
             "A host with `[audio] low_vram = true` in its config holds only half of YuE2 "

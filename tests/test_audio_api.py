@@ -538,6 +538,59 @@ def test_a_song_that_fails_keeps_what_reproduces_it(
     assert events[-1]["data"]["audio"]["seed"] == kept["seed"]
 
 
+def _generates(transcript: Path) -> list[dict]:
+    rows = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    return [row for row in rows if row.get("op") == "generate"]
+
+
+def test_an_instrumental_is_planned_from_the_pool_set_its_seed_picks_and_says_which(
+    ready: TestClient, auth: dict[str, str], transcript: Path, monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+) -> None:
+    """Victoria's laptop, 2026-10-10: 4 of 13 instrumentals planned from empty sections ran
+    the score to its cap. The server now hands the worker a pool set picked by the seed,
+    and the record names it, so the kept request and seed make the same song again."""
+    from crucible.jobs.audio import planning
+
+    pool = planning.load_pool("yue2")
+    params = {"tags": "Instrumental, piano, no vocals", "instrumental": True, "seed": 13}
+    _, events = run_job(ready, auth, model=SONG, params=params)
+    assert events[-1]["event"] == "done", events[-1]
+    chosen = pool[13 % len(pool)]
+    (generate,) = _generates(transcript)
+    assert (generate["planning_lyrics"], generate["lyrics"]) == (chosen.lyrics, None)
+    assert events[-1]["data"]["audio"]["planning_lyrics"] == {
+        "source": "pool", "id": chosen.id, "lyrics": chosen.lyrics,
+    }
+
+    own = "[Verse]\nStone on stone the wall goes up\nMoss along the northern side\n"
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL", "1")
+    job_id, events = run_job(ready, auth, model=SONG, params={**params, "planning_lyrics": own})
+    assert events[-1]["event"] == "failed"
+    assert _generates(transcript)[-1]["planning_lyrics"] == own
+    kept = json.loads(_kept_request(home, job_id).read_text(encoding="utf-8"))
+    assert kept["settled"]["planning_lyrics"] == {"source": "request", "id": None, "lyrics": own}
+
+    monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL", "0")
+    _, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 13})
+    assert events[-1]["event"] == "done" and events[-1]["data"]["audio"]["planning_lyrics"] is None
+    assert _generates(transcript)[-1]["planning_lyrics"] is None
+
+
+def test_planning_lyrics_are_refused_on_a_sung_song_before_anything_loads(
+    ready: TestClient, auth: dict[str, str], transcript: Path
+) -> None:
+    error = refusal(submit(ready, auth, model=SONG, params={
+        "tags": TAGS, "lyrics": LYRICS, "planning_lyrics": LYRICS,
+    }))
+    assert error["code"] == "audio_param_conflict" and "instrumental: true" in error["message"]
+    error = refusal(submit(ready, auth, model=SONG, params={
+        "tags": TAGS, "instrumental": True, "planning_lyrics": "[Hook]\nla la\n",
+    }))
+    assert error["code"] == "invalid_params" and "[Hook]" in error["message"]
+    assert loads(transcript) == []
+
+
 def test_a_cancelled_song_keeps_its_request(
     ready: TestClient, auth: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
