@@ -1,0 +1,48 @@
+[model]
+id = "bleed-suppressor-roformer"
+display = "Mel-Band Roformer Bleed Suppressor V1 (unwa, 97chris)"
+model_filename = "mel_band_roformer_bleed_suppressor_v1.ckpt"
+# audio-separator's own name for the config (its models.json pairs it with the checkpoint),
+# which is not the mirror's.
+config_filename = "config_mel_band_roformer_bleed_suppressor_v1.yaml"
+primary_stem = "instrumental"
+primary_is = "the instrumental, cleaned: a second pass over an instrumental another separator made"
+secondary_is = "the bleed: what was taken out of that instrumental, voice peeking through (`Bleed`)"
+sample_rate = 44100
+# An 8 s window (dim_t 801 at hop_length 441)
+# every 8 s (the library's default): no overlap between windows. This is the default and the largest hop a job may ask for.
+hop_s = 8
+# unwa and 97chris's release states no licence that this pin could find (no HuggingFace
+# repo of theirs carries it); the mirror is MIT-tagged as a whole.
+# Owen rules on use (docs/API-CLI.md).
+licence = "none stated by the authors (unwa, 97chris) that could be found; the mirror Politrees/UVR_resources is MIT-tagged as a whole"
+
+[backends.cuda-linux]
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/mel_band_roformer_bleed_suppressor_v1.ckpt"
+model_sha256 = "a9a9d10faa7f8997676a78e66d741d7acb9cc449334763f3c8f626d68ec6e575"
+model_bytes = 913102724
+config_path = "models/Roformer/MelBand/config_melband_roformer_bleed_suppressor_v1.yaml"
+config_sha256 = "bca5755de9946ded7fc37f36c1c9c213ed9f091fe0bc19c6fffaaa2ea7815972"
+config_bytes = 917
+# memory_basis: declared. The checkpoint plus the 1.5 GiB every separator is given
+# (docs/internals/jobs-runtime.md); the same architecture as vocals-roformer (dim 384,
+# depth 6, 60 bands), never measured on a card.
+memory_bytes_estimate = 2523715460
+
+[backends.mlx-darwin]
+engine = "audio-separator"
+hf_repo = "Politrees/UVR_resources"
+revision = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+model_path = "models/Roformer/MelBand/mel_band_roformer_bleed_suppressor_v1.ckpt"
+model_sha256 = "a9a9d10faa7f8997676a78e66d741d7acb9cc449334763f3c8f626d68ec6e575"
+model_bytes = 913102724
+config_path = "models/Roformer/MelBand/config_melband_roformer_bleed_suppressor_v1.yaml"
+config_sha256 = "bca5755de9946ded7fc37f36c1c9c213ed9f091fe0bc19c6fffaaa2ea7815972"
+config_bytes = 917
+# memory_basis: declared. The checkpoint plus the 1.5 GiB every separator is given
+# (docs/internals/jobs-runtime.md); the same architecture as vocals-roformer (dim 384,
+# depth 6, 60 bands), never measured on a card.
+memory_bytes_estimate = 2523715460

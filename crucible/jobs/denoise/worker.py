@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import os
 import sys
 
@@ -55,7 +54,6 @@ def load(request: dict) -> None:
     model_file_dir = require(request, "model_file_dir", str)
     model_filename = require(request, "model_filename", str)
     use_autocast = require(request, "use_autocast", bool)
-    hop_s = require(request, "hop_s", int)
     if "memory_cap_bytes" not in request:
         raise KeyError(
             "the denoise request has no 'memory_cap_bytes'; it is required, and "
@@ -75,22 +73,15 @@ def load(request: dict) -> None:
             f"({exc}). Build it with `crucible install rvc`."
         ) from None
 
-    # The library's own MDXC settings with only `overlap` replaced, so its other defaults
-    # stay whatever this version of audio-separator says they are. For a Roformer that key
-    # is the hop in seconds between windows (step = overlap * sample_rate), not a count.
-    mdxc_params = dict(inspect.signature(Separator.__init__).parameters["mdxc_params"].default)
-    if "overlap" not in mdxc_params:
-        raise RuntimeError(
-            f"audio-separator's default mdxc_params {sorted(mdxc_params)} has no "
-            "'overlap'; this worker cannot set the manifest's hop_s on this version"
-        )
-    mdxc_params["overlap"] = hop_s
+    # The library's own MDXC settings, untouched. Its `overlap` is set on the model instance
+    # for each separate request (the job's hop_s), not here: for a Roformer it is the hop in
+    # seconds between windows (step = int(overlap * sample_rate)), and the instance reads it
+    # afresh every time it demixes.
     separator = Separator(
         model_file_dir=model_file_dir,
         output_dir=os.path.join(model_file_dir, ".crucible-separator-unset"),
         output_format="flac",
         use_autocast=use_autocast,
-        mdxc_params=mdxc_params,
     )
     separator.load_model(model_filename=model_filename)
 
@@ -99,6 +90,17 @@ def load(request: dict) -> None:
         raise RuntimeError(
             "audio-separator loaded no model_instance — this worker cannot "
             "separate, and cannot re-point a per-request output directory"
+        )
+    if not getattr(model_instance, "is_roformer", False):
+        raise RuntimeError(
+            f"audio-separator did not load {model_filename} as a Roformer; this worker "
+            "sets each job's hop_s as a Roformer's hop in seconds, and any other MDXC "
+            "model reads the same `overlap` as a count of overlaps"
+        )
+    if not hasattr(model_instance, "overlap"):
+        raise RuntimeError(
+            "audio-separator's model instance has no overlap attribute — this worker "
+            "cannot set a job's hop_s on this version"
         )
     if not hasattr(model_instance, "output_dir"):
         raise RuntimeError(
@@ -140,6 +142,7 @@ def separate(request: dict) -> None:
     separator_format = require(request, "separator_format", str)
     output_format = require(request, "output_format", str)
     separator_rate = require(request, "sample_rate", int)
+    hop_s = require(request, "hop_s", float)
     ffmpeg = require(request, "ffmpeg", str)
     ffprobe = require(request, "ffprobe", str)
 
@@ -174,6 +177,9 @@ def separate(request: dict) -> None:
     model_instance.output_dir = separated_dir
     separator.output_format = separator_format
     model_instance.output_format = separator_format
+    # This job's hop, on the resident instance: demix steps by int(overlap * sample_rate).
+    model_instance.overlap = hop_s
+    window_s = _window_seconds(model_instance)
 
     send("progress", stage="separating", processed=0, total=1)
     # The logger the library's stem writer reports to; a stem it skips as near-silent is
@@ -232,8 +238,23 @@ def separate(request: dict) -> None:
         stems=stems,
         silent_stems=silent_stems,
         separate_seconds=round(separate_seconds, 2),
+        window_s=window_s,
     )
     send("done")
+
+
+def _window_seconds(model_instance) -> float:
+    """The window a Roformer demixes in, as audio-separator 0.31.1 computes it:
+    hop_length x (dim_t - 1) samples, dim_t the model's inference default unless the
+    segment size is overridden (this worker never does)."""
+    config = model_instance.model_data_cfgdict
+    if model_instance.override_model_segment_size:
+        raise RuntimeError(
+            "audio-separator's override_model_segment_size is on; this worker leaves "
+            "every Roformer at its own window"
+        )
+    samples = config.audio.hop_length * (config.inference.dim_t - 1)
+    return round(samples / float(config.audio.sample_rate), 3)
 
 
 OPS = {"load": load, "separate": separate}

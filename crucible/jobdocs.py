@@ -415,10 +415,14 @@ JOB_DOCS: dict[str, JobDoc] = {
     ),
     "denoise": JobDoc(
         summary="Separates audio into stems with a source-separation model: "
-        "`vocals-roformer` splits vocals from the instrumental, `denoise-roformer` "
-        "splits dry speech from noise.",
-        model="A separator id: `vocals-roformer` or `denoise-roformer` "
-        "(GET /v1/catalog lists them and whether each is installed).",
+        "`vocals-roformer` splits vocals from the instrumental, "
+        "`instrumental-roformer-becruily` and `instrumental-roformer-unwa-v1e` split the "
+        "instrumental from the vocals (the instrumental is their target), "
+        "`bleed-suppressor-roformer` cleans the voice left in an instrumental, and "
+        "`denoise-roformer` splits dry speech from noise.",
+        model="A separator id: `vocals-roformer`, `instrumental-roformer-becruily`, "
+        "`instrumental-roformer-unwa-v1e`, `bleed-suppressor-roformer` or "
+        "`denoise-roformer` (GET /v1/catalog lists them and whether each is installed).",
         params=DenoiseParams,
         inputs="Exactly one audio file in any format ffmpeg decodes (WAV, FLAC, mp3, m4a, "
         "a video's sound...) at any rate. A WAV or FLAC at the separator's own rate "
@@ -427,15 +431,22 @@ JOB_DOCS: dict[str, JobDoc] = {
         "is: `{\"artifact\": {\"job_id\", \"name\"}}`.",
         returns="Stems at the input's own sample rate and exactly its frame count, so "
         "they line up sample for sample with what was sent (a 48 kHz song comes back "
-        "48 kHz). `stems: \"primary\"` (the default) returns only the primary stem "
-        "(`<input>_(vocals)_….wav` or `<input>_(Dry)_….wav`); `stems: \"all\"` returns "
-        "every stem, the primary first (`vocals-roformer`: `…_(vocals)_…` then "
-        "`…_(other)_…`, the instrumental). `format` is every stem's container: `wav` (the "
-        "default), `flac` or `mp3`, encoded as an audio job's are. The `done` event names "
-        "`primary_stem`, lists `stems`, and gives `format`, `sample_rate`, `frames`, "
-        "`input` (codec, container, rate, frames, channels), `separated` (the rate and "
-        "frames the separator worked at, whether the input was decoded and resampled, "
-        "and that said in a sentence), `separate_seconds` and `load_seconds`.",
+        "48 kHz). `stems: \"primary\"` (the default) returns only the primary stem; "
+        "`stems: \"all\"` returns every stem, the primary first. The stems by separator, "
+        "primary then the other: `vocals-roformer` `…_(vocals)_…` (the vocals) then "
+        "`…_(other)_…` (the instrumental); `instrumental-roformer-becruily` "
+        "`…_(Instrumental)_…` then `…_(Vocals)_…`; `instrumental-roformer-unwa-v1e` "
+        "`…_(other)_…` (the instrumental) then `…_(vocals)_…`; "
+        "`bleed-suppressor-roformer` `…_(Instrumental)_…` (cleaned) then `…_(Bleed)_…` "
+        "(what it took out); `denoise-roformer` `…_(dry)_…` then `…_(other)_…`. `format` "
+        "is every stem's container: `wav` (the default), `flac` or `mp3`, encoded as an "
+        "audio job's are. The `done` event names `primary_stem`, says what it and the "
+        "other stem are (`primary_is`, `secondary_is`), lists `stems`, and gives "
+        "`format`, `sample_rate`, `frames`, `input` (codec, container, rate, frames, "
+        "channels), `separated` (the rate and frames the separator worked at, whether the "
+        "input was decoded and resampled, and that said in a sentence; `hop_s` the run "
+        "used, `hop_s_default`, the model's `window_s`, and `windows_said`), "
+        "`separate_seconds` and `load_seconds`.",
         example={
             "type": "denoise",
             "model": "vocals-roformer",
@@ -454,6 +465,19 @@ JOB_DOCS: dict[str, JobDoc] = {
             "A model not installed yet is installed on submit where the server allows "
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",
+            "`hop_s` trades time for quality: the separator runs on one window at a time "
+            "(11 s; 8 s for `denoise-roformer` and `bleed-suppressor-roformer`), one every "
+            "`hop_s` seconds, and averages where they overlap. The default (8) puts about "
+            "1.4 windows over each sample of an 11 s model; 2 puts 5.5 and takes about 4x "
+            "as long. From 0.5 to the separator's default; anything else is refused "
+            "`denoise_hop_out_of_range`. It is the job's, so one loaded separator serves "
+            "jobs at different hops with no reload.",
+            "`bleed-suppressor-roformer` is a second pass: send it an instrumental another "
+            "separator made (by reference to a held denoise job's stem) and keep its "
+            "`(Instrumental)`.",
+            "The instrumental separators and the bleed suppressor state no licence of "
+            "their own; the mirror they are pinned from is MIT-tagged as a whole. Each "
+            "manifest's `licence` says exactly that.",
             "The separator stays loaded between jobs; send a file whole rather than "
             "in chunks. See Throughput.",
         ),

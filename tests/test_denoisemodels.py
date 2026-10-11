@@ -28,8 +28,11 @@ display = "Demo Denoiser"
 model_filename = "demo_denoise.ckpt"
 config_filename = "demo_denoise_config.yaml"
 primary_stem = "dry"
+primary_is = "the dry speech"
+secondary_is = "what was taken out"
 sample_rate = 44100
 hop_s = 8
+licence = "MIT"
 
 [backends.cuda-linux]
 engine = "audio-separator"
@@ -80,7 +83,100 @@ def test_the_shipped_manifest_names_both_filenames_and_a_real_pin() -> None:
 
 def test_every_shipped_manifest_loads() -> None:
     manifests = load_all_denoise_manifests()
-    assert sorted(manifests) == ["denoise-roformer", "vocals-roformer"]
+    assert sorted(manifests) == [
+        "bleed-suppressor-roformer",
+        "denoise-roformer",
+        "instrumental-roformer-becruily",
+        "instrumental-roformer-unwa-v1e",
+        "vocals-roformer",
+    ]
+    for manifest in manifests.values():
+        assert manifest.primary_is and manifest.secondary_is and manifest.licence
+        assert manifest.primary_stem == manifest.primary_stem.lower()
+
+
+MIRROR_REVISION = "929e057b81aa49bc2e6490bef8671f47b2c120f6"
+
+# The three separators an instrumental is made or cleaned with (Owen, 2026-10-11: "i can
+# still hear the voice peeking through"). Every sha256 and size is the HuggingFace API's for
+# Politrees/UVR_resources at the pin (the yaml digests hashed from the files fetched there);
+# the config names are audio-separator 0.31.1's own (models.json), which it looks for
+# beside the checkpoint, and the primary stem is the first of the config's instruments.
+SEPARATORS = {
+    "instrumental-roformer-becruily": {
+        "model_filename": "mel_band_roformer_instrumental_becruily.ckpt",
+        "config_filename": "config_mel_band_roformer_instrumental_becruily.yaml",
+        "primary_stem": "instrumental",
+        "model_path": "models/Roformer/MelBand/mel_band_roformer_instrumental_becruily.ckpt",
+        "model_sha256": "a8da6632a1c25efb1c9be783ce9ea367d226d4b918cd6c3717c8b1d7a396041d",
+        "model_bytes": 913_106_900,
+        "config_path": (
+            "models/Roformer/MelBand/config_melband_roformer_instrumental_becruily.yaml"
+        ),
+        "config_sha256": "a222235643d329817a1123d82d8eb38392d919e90ed597e053de49c092d3b442",
+        "config_bytes": 1_736,
+    },
+    "instrumental-roformer-unwa-v1e": {
+        "model_filename": "melband_roformer_inst_v1e.ckpt",
+        "config_filename": "config_melbandroformer_inst.yaml",
+        "primary_stem": "other",
+        "model_path": "models/Roformer/MelBand/melband_roformer_inst_v1e.ckpt",
+        "model_sha256": "df2bcdb8838b88264f5381dbb0ccd84a9926c9775cf548c34d8846f5cd20fe96",
+        "model_bytes": 913_102_724,
+        "config_path": "models/Roformer/MelBand/config_melband_roformer_inst.yaml",
+        "config_sha256": "64c0cf23730f299c9c73470e4ba4b32120d8fec4fb1a0326dde1d61378cc6fc8",
+        "config_bytes": 906,
+    },
+    "bleed-suppressor-roformer": {
+        "model_filename": "mel_band_roformer_bleed_suppressor_v1.ckpt",
+        "config_filename": "config_mel_band_roformer_bleed_suppressor_v1.yaml",
+        "primary_stem": "instrumental",
+        "model_path": "models/Roformer/MelBand/mel_band_roformer_bleed_suppressor_v1.ckpt",
+        "model_sha256": "a9a9d10faa7f8997676a78e66d741d7acb9cc449334763f3c8f626d68ec6e575",
+        "model_bytes": 913_102_724,
+        "config_path": (
+            "models/Roformer/MelBand/config_melband_roformer_bleed_suppressor_v1.yaml"
+        ),
+        "config_sha256": "bca5755de9946ded7fc37f36c1c9c213ed9f091fe0bc19c6fffaaa2ea7815972",
+        "config_bytes": 917,
+    },
+}
+
+
+@pytest.mark.parametrize("model_id", sorted(SEPARATORS))
+def test_the_instrumental_separators_are_pinned_to_the_mirror(model_id: str) -> None:
+    want = SEPARATORS[model_id]
+    manifest = load_denoise_manifest(model_id)
+    assert manifest.model_filename == want["model_filename"]
+    assert manifest.config_filename == want["config_filename"]
+    assert manifest.primary_stem == want["primary_stem"]
+    assert manifest.primary_is.startswith("the instrumental")
+    assert manifest.sample_rate == 44100
+    assert manifest.hop_s == 8
+    # No author states a licence; the mirror is MIT-tagged as a whole. Said as such.
+    assert manifest.licence.startswith("none stated by the author")
+    assert "MIT-tagged as a whole" in manifest.licence
+    for kind in ("cuda-linux", "mlx-darwin"):
+        spec = manifest.spec(kind)
+        assert spec.engine == "audio-separator"
+        assert spec.hf_repo == "Politrees/UVR_resources"
+        assert spec.revision == MIRROR_REVISION
+        for key in (
+            "model_path", "model_sha256", "model_bytes",
+            "config_path", "config_sha256", "config_bytes",
+        ):
+            assert getattr(spec, key) == want[key], key
+        # Declared, as vocals-roformer's: the checkpoint plus the 1.5 GiB.
+        assert spec.memory_bytes_estimate == want["model_bytes"] + 1_610_612_736
+
+
+def test_no_two_separators_share_a_file_name() -> None:
+    names = [
+        name
+        for manifest in load_all_denoise_manifests().values()
+        for name in (manifest.model_filename, manifest.config_filename)
+    ]
+    assert len(names) == len(set(names))
 
 
 def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
@@ -131,6 +227,10 @@ def test_the_vocals_manifest_keeps_the_vocals_stem_from_the_mirror() -> None:
          "config_bytes"),
         (GOOD.replace("sample_rate = 44100", "sample_rate = 0"), "sample_rate"),
         (GOOD.replace("hop_s = 8", "hop_s = 0"), "hop_s"),
+        (GOOD.replace('licence = "MIT"', 'licence = " "'), "licence"),
+        (GOOD.replace('licence = "MIT"\n', ""), "licence"),
+        (GOOD.replace('secondary_is = "what was taken out"', 'secondary_is = ""'),
+         "secondary_is"),
         (GOOD.replace('engine = "audio-separator"', 'engine = "vllm"'),
          "does not denoise"),
         (GOOD.replace("[backends.cuda-linux]", "[backends.windows]"),
@@ -192,8 +292,11 @@ def shipped_with_test_digests(model_id: str = "denoise-roformer"):
         model_filename=manifest.model_filename,
         config_filename=manifest.config_filename,
         primary_stem=manifest.primary_stem,
+        primary_is=manifest.primary_is,
+        secondary_is=manifest.secondary_is,
         sample_rate=manifest.sample_rate,
         hop_s=manifest.hop_s,
+        licence=manifest.licence,
         backends=backends,
         path=manifest.path,
     )
@@ -369,10 +472,17 @@ def test_denoise_list_says_what_is_here_and_what_is_not(
 ) -> None:
     assert cli_backend.main(["denoise", "list", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
-    assert [row["id"] for row in rows] == ["denoise-roformer", "vocals-roformer"]
-    assert rows[0]["installed"] is False
-    assert rows[0]["present"] is False
-    assert denoisemodels.PULL_COMMAND in rows[0]["detail"]
+    assert [row["id"] for row in rows] == [
+        "bleed-suppressor-roformer",
+        "denoise-roformer",
+        "instrumental-roformer-becruily",
+        "instrumental-roformer-unwa-v1e",
+        "vocals-roformer",
+    ]
+    for row in rows:
+        assert row["installed"] is False
+        assert row["present"] is False
+        assert f"{denoisemodels.PULL_COMMAND} {row['id']}" in row["detail"]
 
     manifest = shipped_with_test_digests()
     spec = manifest.spec(FAKE_BACKEND.kind)
@@ -418,8 +528,11 @@ def test_denoise_pull_refuses_a_backend_with_no_block(
         model_filename=manifest.model_filename,
         config_filename=manifest.config_filename,
         primary_stem=manifest.primary_stem,
+        primary_is=manifest.primary_is,
+        secondary_is=manifest.secondary_is,
         sample_rate=manifest.sample_rate,
         hop_s=manifest.hop_s,
+        licence=manifest.licence,
         backends={"mlx-darwin": manifest.backends["mlx-darwin"]},
         path=manifest.path,
     )

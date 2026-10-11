@@ -447,7 +447,7 @@ BookForge's `crucible` provider follows).
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
-| `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary, and `"format"`: `"wav"` (default), `"flac"` or `"mp3"` for every stem — no separation knob is on the wire | exactly one audio file in anything ffmpeg decodes, at any rate (resampled to the separator's 44.1 kHz and back); a held job's artifact by reference works |
+| `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary, `"format"`: `"wav"` (default), `"flac"` or `"mp3"` for every stem, and `"hop_s"`: seconds between the separator's windows, 0.5 up to its default of 8 (smaller is slower and smoother; `denoise_hop_out_of_range` outside) — every other separation knob is the engine's | exactly one audio file in anything ffmpeg decodes, at any rate (resampled to the separator's 44.1 kHz and back); a held job's artifact by reference works |
 | `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
 | `load-image` | image model id | `{}` — warms the model up before the first prompt | none |
 | `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs), or `"tags","instrumental": true[, "planning_lyrics"]` (an instrumental song, planned from words it never sings: the client's, or a pool set picked by the seed), or a cover: `"tags","score","instrumental": true` or `"tags","score","lyrics"` (YuE2 renders the given score: played, or sung with the client's words)`[, "chords","duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md "Covers" | none, except a cover: exactly the one input `score` names — uploaded, or `{"artifact": {"job_id","name"}}` of a held job (e.g. the `score` job's `score.abc`) |
@@ -494,6 +494,63 @@ primary) and `song_(other)_vocals_mel_band_roformer.mp3` (the instrumental). The
 `DELETE /v1/jobs/<the audio job>/hold`. Without the hold, fetching every one of the song's
 artifacts lets it go, and a reference after that is `409 artifact_expired`
 (`tests/test_denoise_chain.py`).
+
+**`hop_s`: the windows, and what they cost (2026-10-11).** A separator runs its model on one
+window at a time (11 s; 8 s for `denoise-roformer` and `bleed-suppressor-roformer`) and starts
+one every `hop_s` seconds, averaging the overlaps with a Hamming weight. At the default 8 an
+11 s model covers each sample about 1.4 times, so a seam or a burst of bleed lands every 8 s
+and is heard there. A smaller hop averages more windows over every sample: `hop_s: 2` covers
+it 5.5 times and takes about 4x as long (8 s of separating for a 224 s song at the default on
+the 3090 Ti; 98 s against 50 s at 4 against 8 on the Mac). It runs from 0.5 to the
+separator's own default, which is the largest because nothing past it is offered; outside
+that range it is `400 denoise_hop_out_of_range` with `details` `{hop_s, min, max, model}`. The
+hop is the job's, not the load's: one resident separator takes jobs at different hops with
+no reload. The `done` event's `separated` carries `hop_s` (what ran), `hop_s_default`,
+`window_s` (the model's, from its config) and `windows_said`. There is no test-time
+augmentation for these models in audio-separator 0.31.1, so the hop is the knob.
+
+**The separators and their stems.** `primary_is` and `secondary_is` in the `done` event say
+what each stem is, from the manifest; the names are audio-separator's, from each model's
+config (`<input>_(<stem>)_<checkpoint>.<ext>`):
+
+| separator | primary (kept by `"stems": "primary"`) | the other stem | window |
+|---|---|---|---|
+| `vocals-roformer` (Kimberley Jensen) | `(vocals)`, the vocals | `(other)`, the instrumental | 11 s |
+| `instrumental-roformer-becruily` | `(Instrumental)`, the instrumental (its target) | `(Vocals)`, the mix minus the instrumental | 11 s |
+| `instrumental-roformer-unwa-v1e` | `(other)`, the instrumental (its target, which its config calls `other`) | `(vocals)`, the mix minus the instrumental | 11 s |
+| `bleed-suppressor-roformer` (unwa, 97chris) | `(Instrumental)`, the instrumental cleaned | `(Bleed)`, the voice it took out | 8 s |
+| `denoise-roformer` (aufr33) | `(dry)`, the dry speech | `(other)`, what was taken out | 8 s |
+
+An instrumental-target model is the one to use when the instrumental is what is kept: its
+model was trained on the instrumental, where `vocals-roformer`'s instrumental is the mix minus
+its vocals estimate. The bleed suppressor is a second pass: send it the instrumental another
+separator made, by reference to that denoise job's stem (`"hold": true` on the first job), and
+keep its `(Instrumental)`. Which stem is primary is checked on the LAST parenthesised label of
+each name, so an input already named `song_(Instrumental)_…` does not count twice. Mixing two
+separators' instrumentals, or gating a stem back against the mix, is the client's.
+
+```json
+{"type": "denoise", "model": "instrumental-roformer-becruily", "hold": true,
+ "params": {"hop_s": 2, "format": "flac"},
+ "inputs": {"song.flac": {"artifact": {"job_id": "<the audio job>", "name": "audio.flac"}}}}
+
+{"type": "denoise", "model": "bleed-suppressor-roformer",
+ "params": {"hop_s": 2, "format": "flac"},
+ "inputs": {"song.flac": {"artifact": {"job_id": "<the becruily job>",
+   "name": "song_(Instrumental)_mel_band_roformer_instrumental_becruily.flac"}}}}
+```
+
+**Licences: Owen must rule before an app ships these.** The three separators added 2026-10-11
+(`instrumental-roformer-becruily`, `instrumental-roformer-unwa-v1e`,
+`bleed-suppressor-roformer`) are pinned from `Politrees/UVR_resources` at `929e057b`, the
+mirror `vocals-roformer` and `denoise-roformer` come from. Their authors' own repos
+(`becruily/mel-band-roformer-instrumental`, `pcunwa/Mel-Band-Roformer-Inst`; no HuggingFace
+repo of the bleed suppressor's authors was found) state NO licence; the mirror is MIT-tagged
+as a whole, which is not the authors granting one. Each manifest's `licence` says exactly
+that, and `crucible denoise list --json` shows it. The becruily and v1e checkpoints are
+byte-identical to their authors' (the same LFS sha256), and their configs have the same git
+object id. `vocals-roformer`'s author repo is tagged MIT; `denoise-roformer`'s upstream was not
+checked.
 
 `protect_rate`'s scale is **inverted**: lower protects more and 0.5 turns
 protection off. The tuned deathstalker→Sigma recipe is `index_rate 0.3`,

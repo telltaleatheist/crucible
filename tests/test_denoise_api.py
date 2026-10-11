@@ -172,13 +172,20 @@ def test_info_advertises_denoise(
     info = denoise_client.get("/v1/info", headers=auth).json()
     assert "denoise" in info["job_types"]
     by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
-    rows = by_type["denoise"]["models"]
-    assert [row["id"] for row in rows] == [MODEL, VOCALS_MODEL]
-    spec = load_denoise_manifest(MODEL).spec(FAKE_BACKEND.kind)
-    assert rows[0]["source"] == f"{spec.hf_repo}:{spec.model_path}"
-    assert rows[0]["revision"] == spec.revision
-    assert rows[0]["installed"] is False
-    assert rows[0]["resident"] is False
+    rows = {row["id"]: row for row in by_type["denoise"]["models"]}
+    assert sorted(rows) == [
+        "bleed-suppressor-roformer",
+        MODEL,
+        "instrumental-roformer-becruily",
+        "instrumental-roformer-unwa-v1e",
+        VOCALS_MODEL,
+    ]
+    for model_id, row in rows.items():
+        spec = load_denoise_manifest(model_id).spec(FAKE_BACKEND.kind)
+        assert row["source"] == f"{spec.hf_repo}:{spec.model_path}"
+        assert row["revision"] == spec.revision
+        assert row["installed"] is False
+        assert row["resident"] is False
 
 
 def test_info_says_installed_only_for_the_puller_s_own_stamp(
@@ -186,7 +193,8 @@ def test_info_says_installed_only_for_the_puller_s_own_stamp(
 ) -> None:
     info = denoise_client.get("/v1/info", headers=auth).json()
     by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
-    assert by_type["denoise"]["models"][0]["installed"] is False
+    rows = {row["id"]: row for row in by_type["denoise"]["models"]}
+    assert rows[MODEL]["installed"] is False
 
 
 def test_info_says_installed_once_the_separator_is_pulled(
@@ -194,9 +202,10 @@ def test_info_says_installed_once_the_separator_is_pulled(
 ) -> None:
     info = denoise_client.get("/v1/info", headers=auth).json()
     by_type = {entry["job_type"]: entry for entry in info["capabilities"]}
-    row = by_type["denoise"]["models"][0]
-    assert row["installed"] is True
-    assert row["resident"] is False
+    rows = {row["id"]: row for row in by_type["denoise"]["models"]}
+    assert rows[MODEL]["installed"] is True
+    assert rows[MODEL]["resident"] is False
+    assert [model_id for model_id, row in rows.items() if row["installed"]] == [MODEL]
 
 
 def test_denoise_is_off_unless_the_config_says_otherwise(
@@ -513,6 +522,10 @@ def test_an_input_at_the_separator_s_rate_goes_as_sent_and_the_record_says_so(
         "sample_rate": 44100, "frames": 441000, "decoded": False, "resampled": False,
         "said": "the separator read the input as sent",
         "silent_stems": [], "silent_said": None,
+        "hop_s": 8.0, "hop_s_default": 8, "window_s": 11.0,
+        "windows_said": (
+            "11 s windows, one every 8 s: every sample under about 1.4 windows, averaged"
+        ),
     }
 
 
@@ -570,6 +583,143 @@ def test_format_names_every_stem_s_container(
     assert [name.rsplit(".", 1)[1] for name in data["artifacts"]] == ["mp3", "mp3"]
     request = json.loads(transcript.read_text(encoding="utf-8").splitlines()[2])
     assert (request["separator_format"], request["output_format"]) == ("WAV", "mp3")
+
+
+def test_a_job_that_sends_no_hop_runs_at_the_separator_s_own_and_says_so(
+    ready: TestClient, auth: dict[str, str], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_WINDOW_S", "8.0")
+    events = run_job(ready, auth)
+    assert terminal(events)["event"] == "done", terminal(events)
+    lines = transcript.read_text(encoding="utf-8").splitlines()
+    assert "hop_s" not in json.loads(lines[0])
+    request = json.loads(lines[2])
+    assert request["hop_s"] == 8.0 and isinstance(request["hop_s"], float)
+    separated = terminal(events)["data"]["separated"]
+    assert separated["hop_s"] == 8.0
+    assert separated["hop_s_default"] == load_denoise_manifest(MODEL).hop_s == 8
+    assert separated["window_s"] == 8.0
+    assert separated["windows_said"] == (
+        "8 s windows, one every 8 s: every sample under about 1.0 windows, averaged"
+    )
+
+
+@pytest.mark.parametrize("hop", [0.5, 2, 2.75, 8])
+def test_a_job_s_hop_reaches_the_separator_and_the_record(
+    ready: TestClient, auth: dict[str, str], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, hop: float,
+) -> None:
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    events = run_job(ready, auth, params={"hop_s": hop})
+    assert terminal(events)["event"] == "done", terminal(events)
+    request = json.loads(transcript.read_text(encoding="utf-8").splitlines()[2])
+    assert request["hop_s"] == float(hop)
+    separated = terminal(events)["data"]["separated"]
+    assert separated["hop_s"] == float(hop)
+    assert separated["window_s"] == 11.0
+    warming = [e["data"]["message"] for e in events if e["event"] == "warming"]
+    assert any(f"a window every {float(hop):g} s" in line for line in warming), warming
+
+
+def test_one_resident_separator_takes_each_job_s_own_hop(
+    ready: TestClient, auth: dict[str, str], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hop is the job's, not the load's: a second job at another hop pays no load."""
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    session_id = open_queue_session(ready, auth, act="denoise")
+    for hop in (8, 1.5):
+        events = run_job(ready, auth, params={"hop_s": hop})
+        assert terminal(events)["event"] == "done", terminal(events)
+    assert terminal(events)["data"]["load_seconds"] == 0.0
+    close_queue_session(ready, auth, session_id)
+    sent = [
+        json.loads(line)
+        for line in transcript.read_text(encoding="utf-8").splitlines()
+        if line.startswith("{") and '"op"' in line
+    ]
+    assert [message["op"] for message in sent] == ["load", "separate", "separate"]
+    assert [message["hop_s"] for message in sent[1:]] == [8.0, 1.5]
+
+
+@pytest.mark.parametrize("hop", [0.49, 0, -1, 8.01, 11])
+def test_a_hop_outside_the_separator_s_range_is_refused_by_name(
+    ready: TestClient, auth: dict[str, str], hop: float
+) -> None:
+    response = submit(ready, auth, params={"hop_s": hop})
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == "denoise_hop_out_of_range"
+    assert error["details"] == {"hop_s": hop, "min": 0.5, "max": 8, "model": MODEL}
+    assert "denoise-roformer" in error["message"]
+
+
+def test_a_hop_that_is_not_a_number_is_invalid_params(
+    ready: TestClient, auth: dict[str, str]
+) -> None:
+    response = submit(ready, auth, params={"hop_s": "fast"})
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_params"
+    assert "hop_s" in error["message"] and "`hop_s`" in error["message"]
+
+
+INSTRUMENTAL_CASES = {
+    # model: (its stems as audio-separator 0.31.1 names them, by the config's instruments)
+    "instrumental-roformer-becruily": (
+        "{base}_(Instrumental)_mel_band_roformer_instrumental_becruily.{ext}",
+        "{base}_(Vocals)_mel_band_roformer_instrumental_becruily.{ext}",
+    ),
+    "instrumental-roformer-unwa-v1e": (
+        "{base}_(other)_melband_roformer_inst_v1e.{ext}",
+        "{base}_(vocals)_melband_roformer_inst_v1e.{ext}",
+    ),
+    "bleed-suppressor-roformer": (
+        "{base}_(Instrumental)_mel_band_roformer_bleed_suppressor_v1.{ext}",
+        "{base}_(Bleed)_mel_band_roformer_bleed_suppressor_v1.{ext}",
+    ),
+}
+
+
+@pytest.mark.parametrize("model", sorted(INSTRUMENTAL_CASES))
+def test_an_instrumental_separator_keeps_the_instrumental_as_its_primary(
+    ready: TestClient, auth: dict[str, str], home: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, model: str,
+) -> None:
+    _place_files(home, model)
+    transcript = tmp_path / "sent.jsonl"
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_TRANSCRIPT", str(transcript))
+    primary, secondary = INSTRUMENTAL_CASES[model]
+    monkeypatch.setenv(
+        "CRUCIBLE_FAKE_DENOISE_STEMS",
+        json.dumps([{"name": secondary}, {"name": primary}]),
+    )
+    # B-Sides' chain: the input is already another separator's instrumental, its name
+    # carrying that separator's own "(Instrumental)".
+    name = "song_(Instrumental)_mel_band_roformer_instrumental_becruily.wav"
+    events = run_job(
+        ready, auth, model=model, params={"stems": "all", "hop_s": 4},
+        inputs={name: INPUTS[BLOCK]},
+    )
+    assert terminal(events)["event"] == "done", terminal(events)
+    data = terminal(events)["data"]
+    base = name.rsplit(".", 1)[0]
+    assert data["primary_stem"] == primary.format(base=base, ext="wav")
+    assert data["artifacts"] == [
+        primary.format(base=base, ext="wav"), secondary.format(base=base, ext="wav")
+    ]
+    manifest = load_denoise_manifest(model)
+    assert data["primary_is"] == manifest.primary_is
+    assert data["primary_is"].startswith("the instrumental")
+    assert data["secondary_is"] == manifest.secondary_is
+    assert data["separated"]["hop_s"] == 4.0
+    load = json.loads(transcript.read_text(encoding="utf-8").splitlines()[0])
+    assert load["model_filename"] == manifest.model_filename
 
 
 def test_format_offers_what_an_audio_job_offers() -> None:

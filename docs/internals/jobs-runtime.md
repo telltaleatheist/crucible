@@ -90,7 +90,7 @@ which imports `residency` and every job package. A table there could be read by 
   that patches the loader on the type's module still reaches it.
 - `parse_params(model, params, job_type, lead=None)` is the one `400 invalid_params`
   sentence: `"<job_type> params are not valid: <loc>: <msg>; ..."`, or `"<lead>: ..."` where a
-  type has more to say (denoise explains why it takes no params).
+  type has more to say (denoise names the three params it takes and says every other knob is the engine's).
 - Each type has a `requirements(model, params)` step: everything preflight refuses, ending in
   the accelerator guard (`card_guard`). `preflight` calls it directly; `run` calls it through
   `as_job_error(...)`, which turns the same `ApiError` into a `JobError` with the same code and
