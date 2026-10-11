@@ -19,6 +19,9 @@ audiocore = workerio.load_sibling("audiocore", str(JOBS_DIR / "audio" / "audioco
 
 FAKE_SCORE = "X:1\nT:fake song\nM:4/4\nK:C\n\"C\"CDEF|\"G\"GABc|\n"
 
+# The nominal length the fake says its score has (a song's `audio.length.score_seconds`).
+FAKE_SCORE_SECONDS = 150.0
+
 SPANS = (("encoding", 0.1), ("denoising", 0.7), ("decoding", 0.1), ("saving", 0.1))
 
 
@@ -105,6 +108,7 @@ class FakeEngine:
         self.device = request["device"]
         self.versions = {"fake": "1.0", "engine": request["engine"]}
         self.notes = None
+        self.length = None
         self.decode_stages = None
         self.host_homes = None
 
@@ -128,7 +132,29 @@ class FakeEngine:
     def generate(self, job, progress):
         _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "kind": job.kind,
                      "instrumental": job.instrumental, "lyrics": job.lyrics,
-                     "planning_lyrics": job.planning_lyrics})
+                     "planning_lyrics": job.planning_lyrics,
+                     "min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
+                     "longest_s": job.longest_s, "planning_resizable": job.planning_resizable})
+        if job.kind == "song":
+            # yue2_worker.length_record's shape, for a score of FAKE_SCORE_SECONDS.
+            seconds = FAKE_SCORE_SECONDS
+            asked = job.min_duration_s is not None or job.max_duration_s is not None
+            holds = (job.min_duration_s is None or seconds >= job.min_duration_s) and (
+                job.max_duration_s is None or seconds <= job.max_duration_s)
+            attempt = {"attempt": 1, "body_sections": None, "structure": None, "lines": None,
+                       "score_seconds": seconds, "score": None, "unread": None,
+                       "score_tokens": 1180, "score_ended": "eos",
+                       "in_range": holds if asked else None}
+            if asked and not holds:
+                raise audiocore.Refused(
+                    "song_length_out_of_range", f"the fake score lasts {seconds} s",
+                    {"min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
+                     "score_seconds": seconds, "attempts": [attempt]},
+                )
+            self.length = {"min_duration_s": job.min_duration_s,
+                           "max_duration_s": job.max_duration_s, "score_seconds": seconds,
+                           "in_range": attempt["in_range"], "attempts": [attempt],
+                           "resized_planning_lyrics": None}
         pause = float(os.environ.get("CRUCIBLE_FAKE_AUDIO_STEP_S") or 0)
         steps = job.steps or 4
         progress.enter("encoding")

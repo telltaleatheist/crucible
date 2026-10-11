@@ -94,6 +94,12 @@ class JobFailure(_Open):
 
     code: str
     message: str
+    details: dict[str, Any] | None = Field(
+        default=None,
+        description="Facts a client acts on beside the sentence, for the failures that "
+        "have some (a song refused for its length: `song_length_out_of_range`). Absent "
+        "otherwise.",
+    )
 
 
 class JobRemoval(_Open):

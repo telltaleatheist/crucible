@@ -90,6 +90,16 @@ const DONE_SONG = {
   },
   stages_at_cap: ['composing'],
   planning_lyrics: null,
+  length: {
+    min_duration_s: 120, max_duration_s: 180, score_seconds: 144.0, in_range: true,
+    attempts: [
+      {
+        attempt: 1, body_sections: null, structure: null, lines: null, score_seconds: 144.0,
+        score: { seconds: 144.0, bars: 48, quarters: 192.0, bpm: 80.0, meter: '4/4' },
+        unread: null, score_tokens: 1180, score_ended: 'eos', in_range: true,
+      },
+    ],
+  },
 };
 
 test('audio() posts one audio job with snake_case params and only what the caller set', async () => {
@@ -187,12 +197,19 @@ test('an instrumental sends its planning lyrics, and the result says what the sc
     planning_lyrics: words,
   });
 
-  const pooled = { source: 'pool', id: 'harbor', lyrics: words };
+  const pooled = { source: 'pool', id: 'harbor', requested: false, resized: false, lyrics: words };
   const result = readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, planning_lyrics: pooled } } });
-  assert.deepEqual(result.planningLyrics, { source: 'pool', id: 'harbor', lyrics: words });
+  assert.deepEqual(result.planningLyrics, {
+    source: 'pool', id: 'harbor', requested: false, resized: false, lyrics: words,
+  });
   const own = readAudioResult({
     artifacts: [],
-    extra: { audio: { ...DONE_SONG, planning_lyrics: { source: 'request', id: null, lyrics: words } } },
+    extra: {
+      audio: {
+        ...DONE_SONG,
+        planning_lyrics: { source: 'request', id: null, requested: null, resized: false, lyrics: words },
+      },
+    },
   });
   assert.deepEqual([own.planningLyrics?.source, own.planningLyrics?.id], ['request', null]);
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).planningLyrics, null);
@@ -211,4 +228,26 @@ test('readAudioResult refuses a missing audio block and a kind it does not know'
     () => readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, kind: 'speech' } } }),
     CrucibleProtocolError,
   );
+});
+
+test('a song asks a length range and a planning set, and reads back what its score measured', async () => {
+  answer(200, { job_id: 'job-ranged' });
+  await client().audio({
+    model: 'yue2-3b', tags: 'Instrumental, piano', instrumental: true, planningSet: 'harbor',
+    minDurationS: 120, maxDurationS: 180,
+  });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    tags: 'Instrumental, piano', instrumental: true, planning_set: 'harbor',
+    min_duration_s: 120, max_duration_s: 180,
+  });
+  const length = readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).length;
+  assert.deepEqual(
+    [length?.minDurationS, length?.maxDurationS, length?.scoreSeconds, length?.inRange],
+    [120, 180, 144.0, true],
+  );
+  assert.deepEqual(length?.attempts[0], {
+    attempt: 1, bodySections: null, structure: null, lines: null, scoreSeconds: 144.0,
+    unread: null, scoreTokens: 1180, scoreEnded: 'eos', inRange: true,
+  });
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, length: null } } }).length, null);
 });

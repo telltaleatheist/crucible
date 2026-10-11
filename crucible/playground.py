@@ -18,7 +18,7 @@ from .jobs import audio as audio_job
 from .jobs import disabled_error
 from .jobs import image as image_job
 from .jobs import video as video_job
-from .jobs.audio.params import FORMATS
+from .jobs.audio.params import FORMATS, MIN_SONG_SECONDS, planning_pool
 from .jobs.template import ManifestCatalog
 from .jobtypes import spec_of
 from .tasks import env_installed
@@ -196,6 +196,16 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     if "instrumental" in spec.takes:
         fields.append(field("instrumental", "Instrumental (no vocals)", BOOLEAN, default=False,
                             hint="YuE2 writes the melody, then plays it on an instrument instead of singing it"))
+        # The pool's set ids: where a client finds what `planning_set` may name.
+        fields.append(field("planning_set", "Planning set (instrumental)", CHOICE, default=None,
+                            options=["", *(entry.id for entry in planning_pool(spec))],
+                            hint="the structure an instrumental is planned from; blank lets the seed pick"))
+    for name, label in (("min_duration_s", "Shortest (seconds)"),
+                        ("max_duration_s", "Longest (seconds)")):
+        if name in spec.takes:
+            fields.append(field(name, label, NUMBER, min=MIN_SONG_SECONDS,
+                                max=spec.max_duration_s, step=1,
+                                hint="a range the song's score must land in before it is composed"))
     if "duration_s" in spec.takes:
         fields.append(field("duration_s", "Length (seconds)", NUMBER,
                             default=spec.default_duration_s, min=1,

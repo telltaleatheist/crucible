@@ -1095,7 +1095,7 @@ class JobStore:
         except JobCancelled:
             status = CANCELLED
         except JobError as exc:
-            status, error = FAILED, JobFailure(exc.code, exc.message)
+            status, error = FAILED, JobFailure(exc.code, exc.message, exc.details)
         except Exception as exc:
             status = FAILED
             error = JobFailure("job_failed", f"{type(exc).__name__}: {exc}")

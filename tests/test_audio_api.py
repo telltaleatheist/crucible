@@ -560,7 +560,8 @@ def test_an_instrumental_is_planned_from_the_pool_set_its_seed_picks_and_says_wh
     (generate,) = _generates(transcript)
     assert (generate["planning_lyrics"], generate["lyrics"]) == (chosen.lyrics, None)
     assert events[-1]["data"]["audio"]["planning_lyrics"] == {
-        "source": "pool", "id": chosen.id, "lyrics": chosen.lyrics,
+        "source": "pool", "id": chosen.id, "requested": False, "lyrics": chosen.lyrics,
+        "resized": False,
     }
 
     own = "[Verse]\nStone on stone the wall goes up\nMoss along the northern side\n"
@@ -569,7 +570,8 @@ def test_an_instrumental_is_planned_from_the_pool_set_its_seed_picks_and_says_wh
     assert events[-1]["event"] == "failed"
     assert _generates(transcript)[-1]["planning_lyrics"] == own
     kept = json.loads(_kept_request(home, job_id).read_text(encoding="utf-8"))
-    assert kept["settled"]["planning_lyrics"] == {"source": "request", "id": None, "lyrics": own}
+    assert kept["settled"]["planning_lyrics"] == {
+        "source": "request", "id": None, "requested": None, "lyrics": own}
 
     monkeypatch.setenv("CRUCIBLE_FAKE_AUDIO_GENERATE_FAIL", "0")
     _, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": LYRICS, "seed": 13})

@@ -130,14 +130,16 @@ def test_an_instrumental_without_lyrics_plans_from_the_pool_set_its_seed_picks()
     for seed in (0, 7, 2_771_032_915):
         settled = settle(parsed, spec, seed)
         chosen = pool[seed % len(pool)]
-        assert settled.planning_lyrics == {"source": "pool", "id": chosen.id, "lyrics": chosen.lyrics}
+        assert settled.planning_lyrics == {"source": "pool", "id": chosen.id, "requested": False,
+                                           "lyrics": chosen.lyrics}
         assert settle(parsed, spec, seed) == settled, "the same seed, the same set"
 
 
 def test_a_clients_own_planning_lyrics_are_used_and_recorded_as_theirs() -> None:
     _, spec = _spec()
     parsed = _check(tags=TAGS, instrumental=True, planning_lyrics=OWN)
-    assert settle(parsed, spec, 5).planning_lyrics == {"source": "request", "id": None, "lyrics": OWN}
+    assert settle(parsed, spec, 5).planning_lyrics == {
+        "source": "request", "id": None, "requested": None, "lyrics": OWN}
 
 
 def test_no_planning_lyrics_for_a_sung_song_or_an_instrumental_shaped_by_its_tags() -> None:

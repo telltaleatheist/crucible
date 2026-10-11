@@ -662,7 +662,8 @@
         var option = String(field.options[index]);
         select.appendChild(el('option', { value: option, text: option }));
       }
-      select.value = String(field.default);
+      // A null default is the blank option (the param left out), where a field offers one.
+      select.value = field.default === null ? '' : String(field.default);
       return select;
     }
     return el('input', {

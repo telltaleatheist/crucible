@@ -13,6 +13,8 @@ import contextlib
 import gc
 
 audiocore = workerio.load_sibling("audiocore", __file__)
+planning = workerio.load_sibling("planning", __file__)
+scorelength = workerio.load_sibling("scorelength", __file__)
 
 LABEL = "yue2"
 
@@ -459,11 +461,86 @@ def planned_from(job) -> str:
     return job.lyrics
 
 
+def length_record(wanted, attempts: list, resized) -> dict:
+    """A song's `audio.length`: the range asked (null ends when not sent), the nominal
+    seconds of the score it was composed from, and every score planned to get there.
+    `resized_planning_lyrics` is the text of a pool set grown or cut to land in the range
+    (the server folds it into `audio.planning_lyrics`); null when the set was not
+    resized."""
+    last = attempts[-1]
+    return {
+        "min_duration_s": None if wanted is None else wanted.minimum,
+        "max_duration_s": None if wanted is None else wanted.maximum,
+        "score_seconds": last["score_seconds"],
+        "in_range": last["in_range"],
+        "attempts": attempts,
+        "resized_planning_lyrics": resized,
+    }
+
+
+def range_words(wanted) -> str:
+    if wanted.minimum is not None and wanted.maximum is not None:
+        return f"{wanted.minimum:g}-{wanted.maximum:g} s"
+    if wanted.minimum is not None:
+        return f"at least {wanted.minimum:g} s"
+    return f"at most {wanted.maximum:g} s"
+
+
+def ratio_needed(wanted, seconds: float) -> float:
+    """What the song's length must be multiplied by to reach the nearer end of the range."""
+    bound = wanted.minimum if wanted.minimum is not None and seconds < wanted.minimum else wanted.maximum
+    return round(bound / seconds, 3)
+
+
+def out_of_range_details(wanted, attempts: list) -> dict:
+    seconds = attempts[-1]["score_seconds"]
+    middle = None
+    if wanted.minimum is not None and wanted.maximum is not None:
+        middle = round((wanted.minimum + wanted.maximum) / 2 / seconds, 3)
+    return {
+        **wanted.to_dict(),
+        "score_seconds": seconds,
+        "direction": "longer" if wanted.minimum is not None and seconds < wanted.minimum else "shorter",
+        "ratio_needed": ratio_needed(wanted, seconds),
+        "ratio_to_middle": middle,
+        "score": attempts[-1]["score"],
+        "attempts": attempts,
+    }
+
+
+def out_of_range_words(wanted, seconds: float) -> str:
+    longer = wanted.minimum is not None and seconds < wanted.minimum
+    return (
+        f"the score YuE2 wrote for these words lasts {seconds:.1f} s (its bars at its tempo), "
+        f"outside the {range_words(wanted)} asked, so nothing was composed. The words are "
+        f"the client's and Crucible never changes them: make them "
+        f"{'longer' if longer else 'shorter'}, to about {ratio_needed(wanted, seconds):g}x "
+        "(more or fewer sections or lines), and send the song again. The plan is kept in "
+        f"the job's {FAILED_PLAN_DIR}/"
+    )
+
+
+def not_reached_words(wanted, attempts: list, sizing) -> str:
+    tried = "; ".join(
+        f"{a['lines']} lines -> {a['score_seconds']} s" for a in attempts
+    )
+    return (
+        f"{len(attempts)} score(s) planned for this instrumental, none inside the "
+        f"{range_words(wanted)} asked ({tried}); the budget is "
+        f"{planning.MAX_LENGTH_ATTEMPTS} and this pool set comes in "
+        f"{len(sizing.sizes)} sizes. Nothing was composed. Send it again with another "
+        "seed or planning_set, or a wider range. The plans are kept in the job's "
+        f"{FAILED_PLAN_DIR}/"
+    )
+
+
 class YuE2Engine:
     name = "yue2"
     spans = SPANS
     notes = None
     decode_stages = None
+    # The score's length against the range asked (length_record); set by every song.
+    length = None
     # The host bytes each part's HostHomes hold, by part ("model", "vae"), filled as each
     # loads; None on Apple silicon, where yue2-infer's own moves stay.
     host_homes = None
@@ -592,27 +669,154 @@ class YuE2Engine:
         self.notes = {"instrumental_transfer": transfer, "planned_score": planned.abc}
         return fixed
 
+    def _score(self, job, progress):
+        """Plan the song's score, and see that it lands in the length range asked.
+
+        Every score planned is an attempt with its structure, its nominal seconds
+        (scorelength.read: its bars at its tempo, read as written) and whether it holds.
+        With no range asked there is one attempt and nothing is checked. A song planned
+        from words the client owns - sung lyrics, its own planning_lyrics, section-tag
+        lyrics - is never altered: outside the range it is refused
+        `song_length_out_of_range` before anything is composed, with the ratio the words
+        need, and the worker stays loaded for the client's next try. An instrumental
+        planned from the server's pool set is re-planned, the SCORE only, with the set
+        grown or cut by whole sections (planning.Sizing, planning.aim) - the first size
+        aimed at with the pool's measured seconds a line, every later one with this
+        request's own - up to planning.MAX_LENGTH_ATTEMPTS scores, then refused
+        `instrumental_length_not_reached` with every attempt's numbers. The same seed
+        and params plan the same attempts, so a kept request reproduces the song.
+
+        Returns the plan to compose from, and sets self.length (the done record's
+        `audio.length`) and self.decode_stages["scoring"] (the last score's decode)."""
+        pipe = self._pipe
+        caps = pipe.generation_config
+        stop = lambda: progress.asked_to_stop
+        wanted = None
+        if job.min_duration_s is not None or job.max_duration_s is not None:
+            wanted = planning.LengthRange(
+                None if job.min_duration_s is None else float(job.min_duration_s),
+                None if job.max_duration_s is None else float(job.max_duration_s),
+                float(job.longest_s),
+            )
+        words = planned_from(job)
+        sizing = None
+        count = None
+        if wanted is not None and job.planning_resizable:
+            sizing = planning.Sizing.of(words)
+            count = planning.aim(sizing, wanted, planning.PRIOR_SECONDS_PER_LINE, set())
+        attempts: list = []
+        plans: list = []
+        progress.enter("scoring", caps.abc.max_tokens)
+        if sizing is not None and count != sizing.written:
+            progress.note(
+                f"the planning set is sized for the {range_words(wanted)} asked: "
+                f"{sizing.lines(count)} lines ({', '.join(sizing.structure(count))})"
+            )
+        while True:
+            text = words if sizing is None else sizing.text(count)
+            ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
+            plan = pipe.plan(
+                job.tags,
+                text,
+                seed=job.seed,
+                cfg_scale=job.cfg,
+                cancelled=stop,
+                on_token=lambda *_: ticks.tick(),
+            )
+            plans.append(plan)
+            # The score YuE2 decoded. An instrumental then re-plans from a fixed score,
+            # which decodes nothing, so the last attempt's is the stage's decode.
+            self.decode_stages["scoring"] = decode_facts(
+                plan.timing, plan.truncated, caps.abc.max_tokens, self.low_vram
+            )
+            attempt = self._attempt(len(attempts) + 1, plan, sizing, count, wanted)
+            attempts.append(attempt)
+            resized = None if sizing is None or count == sizing.written else text
+            self.length = length_record(wanted, attempts, resized)
+            if job.instrumental and (plan.truncated or not plan.abc):
+                # No melody to move to the instrument: _instrumental_plan refuses it by
+                # name and keeps the plan, as for any instrumental.
+                return plan
+            if wanted is None or attempt["in_range"]:
+                return plan
+            if attempt["score_seconds"] is None:
+                self._keep_plans(job, plans)
+                raise audiocore.Refused(
+                    "score_length_unreadable",
+                    f"YuE2's score for this song cannot be measured ({attempt['unread']}), so "
+                    f"it cannot be held to the {range_words(wanted)} asked; nothing was "
+                    f"composed. The plan is kept in the job's {FAILED_PLAN_DIR}/",
+                    {**wanted.to_dict(), "attempts": attempts},
+                )
+            if sizing is None:
+                self._keep_plans(job, plans)
+                raise audiocore.Refused(
+                    "song_length_out_of_range",
+                    out_of_range_words(wanted, attempt["score_seconds"]),
+                    out_of_range_details(wanted, attempts),
+                )
+            tried = {entry["body_sections"] for entry in attempts}
+            measured = sum(entry["score_seconds"] / entry["lines"] for entry in attempts) / len(attempts)
+            count = None
+            if len(attempts) < planning.MAX_LENGTH_ATTEMPTS:
+                count = planning.aim(sizing, wanted, measured, tried)
+            if count is None:
+                self._keep_plans(job, plans)
+                raise audiocore.Refused(
+                    "instrumental_length_not_reached",
+                    not_reached_words(wanted, attempts, sizing),
+                    {**wanted.to_dict(), "attempts": attempts,
+                     "max_attempts": planning.MAX_LENGTH_ATTEMPTS},
+                )
+            progress.note(
+                f"score {len(attempts)} is {attempt['score_seconds']:.1f} s, outside the "
+                f"{range_words(wanted)} asked; planning it again with "
+                f"{sizing.lines(count)} lines ({', '.join(sizing.structure(count))})"
+            )
+
+    def _attempt(self, number, plan, sizing, count, wanted) -> dict:
+        """One score's record: its structure (null for words not resized), how its decode
+        ended, and its nominal length as written, or why it could not be read."""
+        reading, unread = None, None
+        if plan.abc:
+            try:
+                reading = scorelength.read(plan.abc)
+            except scorelength.ScoreLengthError as exc:
+                unread = str(exc)
+        else:
+            unread = "the model wrote no score"
+        seconds = None if reading is None else round(reading.seconds, 2)
+        return {
+            "attempt": number,
+            "body_sections": count,
+            "structure": None if sizing is None else sizing.structure(count),
+            "lines": None if sizing is None else sizing.lines(count),
+            "score_seconds": seconds,
+            "score": None if reading is None else reading.to_dict(),
+            "unread": unread,
+            "score_tokens": plan.timing["output_tokens"],
+            "score_ended": "cap" if plan.truncated else "eos",
+            "in_range": None if wanted is None or seconds is None else wanted.holds(seconds),
+        }
+
+    def _keep_plans(self, job, plans) -> None:
+        """A song stopped for its length keeps every score it planned, as evidence, in the
+        job's failed-plan/ (one directory, or attempt-1/, attempt-2/... for several)."""
+        kept = os.path.join(os.path.dirname(job.output_path), FAILED_PLAN_DIR)
+        if len(plans) == 1:
+            plans[0].save(kept)
+            return
+        for number, plan in enumerate(plans, start=1):
+            plan.save(os.path.join(kept, f"attempt-{number}"))
+
     def _stages(self, job, progress, peaks):
         pipe = self._pipe
         caps = pipe.generation_config
         stop = lambda: progress.asked_to_stop
         self.notes = None
+        self.length = None
         self.decode_stages = {}
-        progress.enter("scoring", caps.abc.max_tokens)
-        ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
-        plan = pipe.plan(
-            job.tags,
-            planned_from(job),
-            seed=job.seed,
-            cfg_scale=job.cfg,
-            cancelled=stop,
-            on_token=lambda *_: ticks.tick(),
-        )
-        # The score YuE2 decoded. An instrumental then re-plans from a fixed score, which
-        # decodes nothing, so this is the scoring stage's one decode either way.
-        self.decode_stages["scoring"] = decode_facts(
-            plan.timing, plan.truncated, caps.abc.max_tokens, self.low_vram
-        )
+        plan = self._score(job, progress)
         if job.instrumental:
             plan = self._instrumental_plan(job, plan)
         self._close_stage(peaks, "scoring")

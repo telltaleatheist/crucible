@@ -197,10 +197,15 @@ An instrumental is planned from, in order:
    client wants to set the form itself. Empty sections bound nothing, so this is the old
    behaviour and can run the score to its cap; prefer `planning_lyrics`.
 3. Otherwise **a set from the server's pool**: ten original planning songs in
-   `crucible/audio/planning/yue2.toml`, picked **from the seed**: set number
-   `seed mod 10`, in file order. The same params and seed plan the same song; a different
-   seed usually plans from a different set, so an album of instrumentals does not share
-   one phrase structure.
+   `crucible/audio/planning/yue2.toml`, the one named by **`planning_set`** when the client
+   sends it, else picked **from the seed**: set number `seed mod 10`, in file order. The
+   same params and seed plan the same song; a different seed usually plans from a different
+   set. Seeds can still collide (two seeds 10 apart pick the same set), so a client making
+   an album names the set per track instead (B-Sides: track index to set). The set ids are
+   the `planning_set` field's options on the model's page of `GET /v1/playground`, and an
+   unknown id is refused `planning_set_unknown` with every id in the message and in
+   `details.planning_sets`. `planning_set` goes only with `instrumental: true` and never
+   beside `planning_lyrics` or `lyrics` (`audio_param_conflict`).
 
 The ten sets differ in structure, not only in words (verse/chorus, verse/chorus/bridge,
 AABA, through-composed, chorus-first; with and without an intro, interlude or outro; 4 to
@@ -215,11 +220,17 @@ The `done` event's `audio.planning_lyrics` (and a kept request's `settled.planni
 says what the score was planned from:
 
 ```json
-"planning_lyrics": {"source": "pool", "id": "harbor", "lyrics": "[Intro]\n\n[Verse]\nBoats along the shore\n…"}
+"planning_lyrics": {"source": "pool", "id": "harbor", "requested": true, "resized": false,
+                    "lyrics": "[Intro]\n\n[Verse]\nBoats along the shore\n…"}
 ```
 
-`source` is `pool` or `request` (`id` is null for the client's own); the field is null for a
-sung song, a sound without a score, and an instrumental shaped by section tags in `lyrics`.
+`source` is `pool` or `request` (`id` is null for the client's own); `requested` is true when
+the client named the set (`planning_set`), false when the seed picked it, null for the
+client's own words. In the `done` event, `resized` is true when the set was grown or cut to
+land in a length range ("Song length" below) and `lyrics` is then the text the score was
+actually planned from, so sent back as `planning_lyrics` it plans the same song. The field is
+null for a sung song, a sound without a score, and an instrumental shaped by section tags in
+`lyrics`.
 
 `planning_lyrics` rules, each refused by name: only with `instrumental: true`
 (`audio_param_conflict`; send the words as `lyrics` to sing them), never beside `lyrics`
@@ -237,6 +248,95 @@ caps bound them); planning lyrics exist to keep the score inside its 4096 tokens
 server and reports each one's set, score tokens, how the score and the song ended and its
 seconds of audio, passing when every score is in the sung range with no cap hit.
 
+### Song length: `min_duration_s`, `max_duration_s`
+
+YuE2 has no length input: a song lasts what its score says. It writes the score (ABC) first,
+in 10 to 30 s, then composes and synthesizes the song from it, which is the expensive part.
+A client asks for a **range to shoot for** with `min_duration_s` and `max_duration_s` (either
+alone; each 30 to 360 s, the model's longest; the minimum below the maximum). With neither,
+nothing below happens and the song is made exactly as before.
+
+**The check.** After the score and before anything is composed, Crucible reads the score's
+nominal length - its bars at its tempo - and holds it against the range. The reader
+(`crucible/jobs/audio/scorelength.py`) reads the score as written: each bar lasts what its
+notes and rests add up to at the unit length (`L:`) and tempo (`Q:`) in force there, a
+whole-bar rest (`Z`) lasts a bar of the meter (`M:`), and the score lasts as long as its
+longest voice. It does not use the yue2-music skill's strict parser, which refuses scores
+YuE2 really writes (a 4-quarter bar in 3/4, the first planning-lyrics song on the PC); on a
+score the strict parser accepts, the two give exactly the same seconds. What it cannot time it
+refuses by name (repeats, tuplets, a score with no tempo); none is in YuE2's dialect.
+
+**How close the nominal length is** (the PC's first nine planning-lyrics instrumentals,
+2026-10-10, one per pool set, kept as `tests/fixtures/yue2-scores/`): the audio ran **0.943
+to 1.069** of the score's nominal length, **median 0.987** (113.7 s of score made 113.3 s,
+213.6 made 212.2, 154.3 made 165.0). So a score inside the range makes a song within about
+7% of it; aim the range that much wide of a hard limit.
+
+**An instrumental planned from the server's pool** (no `planning_lyrics`, no `lyrics`) is
+sized to land in the range, deterministically from the seed:
+
+1. Its set (the seed's, or `planning_set`'s) comes in sizes counted in **body sections** -
+   everything between a leading `[Intro]` and a trailing `[Outro]`. A smaller size cuts
+   sections from the body's end; a larger one carries the body on from its start (never the
+   same section twice in a row), so a longer song repeats the set's own verses and choruses
+   in its own order. Every size passes the planning-lyrics rules (at most 36 lines).
+2. The first score is aimed with the pool's measured rate, **8.6 s of score per planning
+   line** (the median of the nine above; they ran 5.7 to 12.0, since the tempo the model
+   picks and the bars it gives a line both move it). The size chosen is the one whose
+   estimate lands at least 10% inside each end of the range (the middle of a range too
+   narrow for that), the fewest sections from the set as written first, so a set that
+   already fits is planned from verbatim.
+3. If the score lands outside, the **score only** is planned again, at a size not yet tried,
+   aimed with this request's own measured seconds a line. At most **3 scores** in all (a
+   score is 10 to 30 s of the card; composing never repeats).
+4. If none lands, the job fails **`instrumental_length_not_reached`**: the message and
+   `error.details.attempts` give every score's lines and seconds, and every plan is kept in
+   the job's `failed-plan/attempt-1/`, `attempt-2/`... Send it again with another seed or
+   `planning_set`, or a wider range.
+
+The same params and seed plan the same attempts, so a kept request reproduces the song. Each
+re-plan is a `note` event ("score 1 is 192.0 s, outside the 120-180 s asked; planning it
+again with 12 lines (verse, chorus, verse)").
+
+**A song planned from the client's words** - sung `lyrics`, an instrumental's own
+`planning_lyrics`, or section-tag `lyrics` - is never altered. If its score lands outside the
+range, nothing is composed and the job fails **`song_length_out_of_range`**, with the plan
+kept in `failed-plan/`; the worker answers the refusal and lives on (held by a queue session, YuE2 stays on the card), so the client can resize the words and
+send it again:
+
+```json
+{"code": "song_length_out_of_range",
+ "message": "the score YuE2 wrote for these words lasts 212.4 s (its bars at its tempo), outside the 120-180 s asked, so nothing was composed. …",
+ "details": {"min_duration_s": 120, "max_duration_s": 180, "score_seconds": 212.4,
+             "direction": "shorter", "ratio_needed": 0.847, "ratio_to_middle": 0.706,
+             "score": {"seconds": 212.4, "bars": 104, "quarters": 417.7, "bpm": 118.0, "meter": "4/4"},
+             "attempts": [{"attempt": 1, "score_seconds": 212.4, "in_range": false, …}]}}
+```
+
+`ratio_needed` is what the length must be multiplied by to reach the nearer end of the range;
+`ratio_to_middle` (both ends sent) to reach its middle, the safer target. A job refused for
+its length also keeps the refusal in its kept request (`request.refused` on
+`GET /v1/jobs/{id}`, beside the params and seed). A score whose length
+cannot be read at all, with a range asked, is `score_length_unreadable` (never seen yet).
+
+**Every finished song** carries `audio.length` in its `done` event, whether a range was asked
+or not, so a client can calibrate how it sizes lyrics:
+
+```json
+"length": {"min_duration_s": 120, "max_duration_s": 180, "score_seconds": 144.0, "in_range": true,
+           "attempts": [
+             {"attempt": 1, "body_sections": 4, "structure": ["verse", "chorus", "verse", "chorus"],
+              "lines": 16, "score_seconds": 192.0, "score": {"seconds": 192.0, "bars": 64, "quarters": 256.0, "bpm": 80.0, "meter": "4/4"},
+              "unread": null, "score_tokens": 1326, "score_ended": "eos", "in_range": false},
+             {"attempt": 2, "body_sections": 3, "structure": ["verse", "chorus", "verse"],
+              "lines": 12, "score_seconds": 144.0, "…": "…", "in_range": true}]}
+```
+
+`body_sections`, `structure` and `lines` are null for words that were not resized; `in_range`
+is null when no range was asked; `score_seconds` is null (with `unread` saying why) only for
+a score the reader could not time. Stable Audio's `length` is null, and it refuses both
+params (`audio_param_unsupported`): it makes exactly `duration_s` seconds, so send that.
+
 | param | who takes it | default | rule |
 | --- | --- | --- | --- |
 | `prompt` | sfx, music | required | not blank; a song model refuses it by name (send `tags`) |
@@ -244,7 +344,9 @@ seconds of audio, passing when every score is in the sung range with no cap hit.
 | `instrumental` | song | false | true renders the planned melody on an instrument instead of a voice (above) |
 | `lyrics` | song | required (optional when `instrumental`) | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. With `instrumental`, section tags only. Refused by name on sfx and music |
 | `planning_lyrics` | song, with `instrumental` | a pool set picked by the seed | words the instrumental's score is planned from and never sung ("Planning lyrics" above); at most 36 lines and 2000 characters |
-| `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
+| `planning_set` | song, with `instrumental` | picked by the seed | a pool set's id (`GET /v1/playground` lists them); never beside `planning_lyrics` or `lyrics`; unknown: `planning_set_unknown` |
+| `min_duration_s`, `max_duration_s` | song | none | the range the song's score must land in before it is composed ("Song length" above); each 30 to 360, the minimum below the maximum. Stable Audio refuses them: send `duration_s` |
+| `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics (ask a range instead) |
 | `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
 | `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
 | `negative_prompt` | nobody yet | | refused by name: the post-trained Stable Audio checkpoints ignore it (only Stability's `-base` checkpoints read it) and YuE2 has none |
@@ -270,6 +372,8 @@ effective parameter, so a sound can be made again:
            "prompt": null, "tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…",
            "duration_s": null, "seed": 3, "steps": null, "cfg": 1.0, "format": "flac",
            "instrumental": false, "planning_lyrics": null,
+           "length": {"min_duration_s": null, "max_duration_s": null, "score_seconds": 183.0,
+                      "in_range": null, "attempts": [{"attempt": 1, "score_seconds": 183.0, "…": "…"}]},
            "artifact": "audio.flac", "score": "score.abc",
            "audio_seconds": 182.4, "sample_rate": 48000, "channels": 2,
            "seconds": 71.2,
@@ -357,7 +461,7 @@ one the server chose when the client sent none), what the server settled around 
  "params": {"tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…", "seed": 2771032915},
  "seed": 2771032915, "seed_chosen_by": "server",
  "settled": {"duration_s": null, "steps": null, "cfg": 1.0, "instrumental": false, "seed": 2771032915,
-             "planning_lyrics": null},
+             "planning_lyrics": null, "length_range": null},
  "low_vram": true, "revision": "c044757a…", "backend": "cuda-linux",
  "recorded": "2026-10-10T07:12:03+00:00",
  "reproduce": "POST /v1/jobs with this record's `type`, `model` and `params` (the seed is in them) runs this again with seed 2771032915; it ran on revision c044757a… (cuda-linux, [audio] low_vram on)"}

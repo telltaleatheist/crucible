@@ -1,0 +1,82 @@
+{
+  "tidewater-1004.abc": {
+    "job_id": "4b60493bfd39489f88e641599c72176d",
+    "set": "tidewater",
+    "seed": 1004,
+    "tags": "Instrumental, slow somber piano and strings, no vocals, no singing, no choir, 66 BPM",
+    "audio_seconds": 164.999,
+    "score_tokens": 961
+  },
+  "orchard-1006.abc": {
+    "job_id": "4f5cacab2fc1424a9cf89acea2a5f6f6",
+    "set": "orchard",
+    "seed": 1006,
+    "tags": "Instrumental, synthwave, analog synth lead, driving bass, no vocals, no singing, 112 BPM",
+    "audio_seconds": 202.639,
+    "score_tokens": 2297
+  },
+  "harbor-1001.abc": {
+    "job_id": "763a966139b945e289d7a1f8a249ad70",
+    "set": "harbor",
+    "seed": 1001,
+    "tags": "Instrumental, warm acoustic guitar folk, light drums, no vocals, no singing, 96 BPM",
+    "audio_seconds": 113.279,
+    "score_tokens": 1191
+  },
+  "crossing-1007.abc": {
+    "job_id": "a1245c2fc1034063b16fc96a0feaec0d",
+    "set": "crossing",
+    "seed": 1007,
+    "tags": "Instrumental, lo-fi jazz, electric piano, brushed drums, no vocals, no singing, 78 BPM",
+    "audio_seconds": 180.159,
+    "score_tokens": 1405
+  },
+  "ember-1005.abc": {
+    "job_id": "a2f80d6e384147148c59898fe29ece99",
+    "set": "ember",
+    "seed": 1005,
+    "tags": "Instrumental, warm acoustic guitar folk, light drums, no vocals, no singing, 96 BPM",
+    "audio_seconds": 109.479,
+    "score_tokens": 1407
+  },
+  "stairwell-1003.abc": {
+    "job_id": "bf8a4adbb2244da1b11551bc4eaad7ea",
+    "set": "stairwell",
+    "seed": 1003,
+    "tags": "Instrumental, lo-fi jazz, electric piano, brushed drums, no vocals, no singing, 78 BPM",
+    "audio_seconds": 108.679,
+    "score_tokens": 758
+  },
+  "market-1008.abc": {
+    "job_id": "c313301272844c3e9ba43650a843e5cf",
+    "set": "market",
+    "seed": 1008,
+    "tags": "Instrumental, slow somber piano and strings, no vocals, no singing, no choir, 66 BPM",
+    "audio_seconds": 153.519,
+    "score_tokens": 916
+  },
+  "northlight-1009.abc": {
+    "job_id": "c825b34014b44ff38fc20f0fc285e47a",
+    "set": "northlight",
+    "seed": 1009,
+    "tags": "Instrumental, warm acoustic guitar folk, light drums, no vocals, no singing, 96 BPM",
+    "audio_seconds": 118.359,
+    "score_tokens": 1160
+  },
+  "meadow-1002.abc": {
+    "job_id": "edd6cf08a8704ae88d52cdd956bbf71d",
+    "set": "meadow",
+    "seed": 1002,
+    "tags": "Instrumental, synthwave, analog synth lead, driving bass, no vocals, no singing, 112 BPM",
+    "audio_seconds": 212.199,
+    "score_tokens": 2173
+  },
+  "lantern-1000-refused.abc": {
+    "job_id": "7326ecf003f74e609fa598e67f1a4b12",
+    "set": "lantern",
+    "seed": 1000,
+    "tags": null,
+    "audio_seconds": null,
+    "score_tokens": 1326
+  }
+}

@@ -43,6 +43,7 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
+from . import planning
 from .params import MAX_SEED, AudioParams, Settled, refuse_what_the_model_cannot_take, settle
 from .planning import PlanningLyricsError
 
@@ -280,6 +281,9 @@ class _Generation:
         stage = str(message.get("stage"))
         if stage == "cancelled":
             return
+        note = message.get("note")
+        if note is not None:
+            self._ctx.note(str(note))
         step, steps = message.get("step"), message.get("steps")
         fraction = min(1.0, max(0.0, float(message.get("fraction") or 0.0)))
         words = f"{stage}: {step} of {steps}" if steps else stage
@@ -444,6 +448,16 @@ class AudioJobType(ResidentWorker):
         score = ctx.scratch / SCORE_ARTIFACT
         request = generate_request(params, needs, settled, output, score)
         result = self._generate(ctx, model, session, request)
+        refused = result.get("refused")
+        if refused is not None:
+            # The engine stopped the song on purpose before composing it (its score's
+            # length outside the range asked). The kept request carries the attempts too,
+            # so the job's directory says what was tried beside failed-plan/.
+            ctx.keep_request({
+                **kept_request(ctx.job, model, params, needs, settled),
+                "refused": refused,
+            })
+            raise JobError(refused["code"], refused["message"], refused["details"])
         check_audio_file(output, params.format)
         ctx.artifact(output.name, output)
         wrote_score = bool(result.get("score_path")) and score.is_file()
@@ -502,6 +516,15 @@ def generate_request(
         "steps": settled.steps,
         "cfg": settled.cfg,
         "instrumental": settled.instrumental,
+        # The length range the song's score is checked against before composing
+        # (docs/AUDIO.md "Song length"); the model's longest song is the far end when no
+        # maximum was sent. Only the server's own pool set may be resized to land in it.
+        "min_duration_s": None if settled.length_range is None else settled.length_range.minimum,
+        "max_duration_s": None if settled.length_range is None else settled.length_range.maximum,
+        "longest_s": needs.spec.max_duration_s,
+        "planning_resizable": (
+            settled.planning_lyrics is not None and settled.planning_lyrics["source"] == planning.POOL
+        ),
         "sample_rate": needs.spec.sample_rate,
         "channels": needs.spec.channels,
         "format": params.format,
@@ -534,6 +557,9 @@ def kept_request(
             "instrumental": settled.instrumental,
             "seed": settled.seed,
             "planning_lyrics": settled.planning_lyrics,
+            "length_range": (
+                None if settled.length_range is None else settled.length_range.to_dict()
+            ),
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
@@ -557,6 +583,20 @@ def effective_params(
     wrote_score: bool,
 ) -> dict[str, Any]:
     spec = needs.spec
+    length = result.get("length")
+    planning_lyrics = settled.planning_lyrics
+    if length is not None:
+        length = dict(length)
+        resized = length.pop("resized_planning_lyrics")
+        if planning_lyrics is not None:
+            # What the score was actually planned from: the pool set as written, or grown
+            # or cut by whole sections to land in the range (`resized`), so the text sent
+            # back as `planning_lyrics` plans the same song.
+            planning_lyrics = {
+                **planning_lyrics,
+                "lyrics": planning_lyrics["lyrics"] if resized is None else resized,
+                "resized": resized is not None,
+            }
     return {
         "model": needs.manifest.id,
         "kind": needs.manifest.kind,
@@ -575,7 +615,11 @@ def effective_params(
         "instrumental": settled.instrumental,
         # Where an instrumental's planning lyrics came from ("pool" or "request"), the
         # pool set's id, and the text (planning.record); null when there were none.
-        "planning_lyrics": settled.planning_lyrics,
+        "planning_lyrics": planning_lyrics,
+        # The score's nominal length against the range asked (`min_duration_s`,
+        # `max_duration_s`, null when not sent), with every score planned to land in it;
+        # null for a model that writes no score (docs/AUDIO.md "Song length").
+        "length": length,
         "format": params.format,
         "artifact": artifact,
         "score": SCORE_ARTIFACT if wrote_score else None,

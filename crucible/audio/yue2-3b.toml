@@ -34,7 +34,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s"]
 default_cfg = 1.0
 max_cfg = 20.0
 # With `[audio] low_vram = true` in a host's config (for a card too small to hold YuE2
@@ -47,7 +47,7 @@ host_memory_bytes_estimate = 10_500_000_000
 host_memory_note = "measured 2026-10-10 on the RTX 3090 Ti (WSL guest of 13 GB) through crucible/jobs/audio/yue2_worker.py, six songs of 38 to 62 s back to back on one worker, low_vram on and off alike: peak resident 9.90 GB, of it 7.72 GB the mapped safetensors pages and host copies the worker keeps for the life of the model (backbone 7.26 GB, VAE 0.27 GB; yue2_worker.HostHomes) and 1.95 to 1.98 GB anonymous, flat from song to song. 10.5 GB adds room for a 6-minute song's float32 audio copies (about 0.14 GB each), which was not reached"
 
 [backends.cuda-linux.not_taken]
-duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); add or remove sections of lyrics to change the length"
+duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); ask a range with min_duration_s and max_duration_s, or add or remove sections of lyrics"
 negative_prompt = "YuE2 has no negative prompt; with cfg above 1 it guides away from its instruction alone"
 steps = "YuE2 writes a score and codec tokens one at a time and then runs a fixed 32-step flow-matching stage; there is no step count to choose"
 
@@ -97,12 +97,12 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s"]
 default_cfg = 1.0
 max_cfg = 20.0
 
 [backends.mlx-darwin.not_taken]
-duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); add or remove sections of lyrics to change the length"
+duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); ask a range with min_duration_s and max_duration_s, or add or remove sections of lyrics"
 negative_prompt = "YuE2 has no negative prompt; with cfg above 1 it guides away from its instruction alone"
 steps = "YuE2 writes a score and codec tokens one at a time and then runs a fixed 32-step flow-matching stage; there is no step count to choose"
 
