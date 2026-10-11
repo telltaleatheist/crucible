@@ -123,7 +123,7 @@ build, another machine), re-embed the corpus.
 One measured caveat: **the same text is not bit-identical across batches on the Mac.**
 Embedded beside another text it read up to ~1.4e-3 off the same text alone (bf16 over padded
 rows, 2026-10-10); alone twice it was identical. That is far below anything cosine search
-notices (the cosine stays above 0.9999), and the fingerprint is the same: it names the
+notices (cosine 0.99989 for a short text beside a much longer one, 1.0 beside one of its own length), and the fingerprint is the same: it names the
 model and the engine, not the batch.
 
 ### OpenAI-compatible

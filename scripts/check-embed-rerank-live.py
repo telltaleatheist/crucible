@@ -134,8 +134,13 @@ def embed_checks(args: argparse.Namespace) -> None:
           len(f32) == len(f16) == len(alone) and off32 < 1e-6 and off16 < 2e-3,
           f"float32 off by {off32:.1e}, float16 by {off16:.1e}")
     batched = max(abs(a - b) for a, b in zip(alone, d[0]))
+    # Measured on the Mac (1.0.134, 2026-10-10): a short text beside a much longer one is
+    # padded, and bf16 moves it to cosine 0.99989 of itself alone (1.0 beside a text of
+    # its own length). Search margins are tenths (the card's 0.75 against 0.08), so a
+    # drift past 0.9995 is a fault, not padding.
+    same = cosine(alone, d[0])
     check("4 a text alone and beside another is the same vector to cosine search",
-          cosine(alone, d[0]) > 0.9999, f"largest component difference {batched:.1e}")
+          same > 0.9995, f"cosine {same:.6f}, largest component difference {batched:.1e}")
 
 
 def logit(p: float) -> float:

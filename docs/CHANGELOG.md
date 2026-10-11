@@ -7,6 +7,7 @@ notes.
 
 ## Unreleased
 
+- `scripts/check-embed-rerank-live.py`: the batch check holds the measured tolerance (a short text padded beside a long one reads cosine 0.99989 of itself alone on the Mac), and docs/RETRIEVAL.md states the measured figure.
 ## 1.0.134 — 2026-10-10
 
 - Rerank's token counts are honest on the Mac. `tokens.total` is every document's prompt with its query, as llama-server is sent it, and `tokens.cached` is what no pass read again, so `total - cached` is what the engine read. On the Mac (1.0.133) a rerank reported its query once per document and 0 cached, although it read the query once (a ~2,500-token query: 1 document ran 3.8 s, 20 documents 6.9 s). The Mac's items route says per question what its passes read (`read_tokens`, `ITEMS_VERSION` 7; the engine re-patches its env at start). A likelihood decision on the Mac now counts each candidate's prompt to its boundary, as on llama-server, and its `cached_tokens` the same way.
