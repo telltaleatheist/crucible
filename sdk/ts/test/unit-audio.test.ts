@@ -91,14 +91,10 @@ const DONE_SONG = {
   stages_at_cap: ['composing'],
   planning_lyrics: null,
   length: {
-    min_duration_s: 120, max_duration_s: 180, score_seconds: 144.0, in_range: true,
-    attempts: [
-      {
-        attempt: 1, body_sections: null, structure: null, lines: null, score_seconds: 144.0,
-        score: { seconds: 144.0, bars: 48, quarters: 192.0, bpm: 80.0, meter: '4/4' },
-        unread: null, score_tokens: 1180, score_ended: 'eos', in_range: true,
-      },
-    ],
+    min_duration_s: 120, max_duration_s: 180, sized: true, body_sections: 3,
+    structure: ['verse', 'chorus', 'verse'], lines: 12, score_seconds: 144.0,
+    score: { seconds: 144.0, bars: 48, quarters: 192.0, bpm: 80.0, meter: '4/4' },
+    unread: null, in_range: true,
   },
 };
 
@@ -241,13 +237,10 @@ test('a song asks a length range and a planning set, and reads back what its sco
     min_duration_s: 120, max_duration_s: 180,
   });
   const length = readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).length;
-  assert.deepEqual(
-    [length?.minDurationS, length?.maxDurationS, length?.scoreSeconds, length?.inRange],
-    [120, 180, 144.0, true],
-  );
-  assert.deepEqual(length?.attempts[0], {
-    attempt: 1, bodySections: null, structure: null, lines: null, scoreSeconds: 144.0,
-    unread: null, scoreTokens: 1180, scoreEnded: 'eos', inRange: true,
+  assert.deepEqual(length, {
+    minDurationS: 120, maxDurationS: 180, sized: true, bodySections: 3,
+    structure: ['verse', 'chorus', 'verse'], lines: 12, scoreSeconds: 144.0, unread: null,
+    inRange: true,
   });
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, length: null } } }).length, null);
 });

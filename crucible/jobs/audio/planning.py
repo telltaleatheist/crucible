@@ -165,29 +165,26 @@ def record(source: str, lyrics: str, set_id: str | None, requested: bool | None 
     return {"source": source, "id": set_id, "requested": requested, "lyrics": lyrics}
 
 
-# --- sizing a planning structure to a length (docs/AUDIO.md "Song length") -------------
+# --- sizing a planning structure toward a length (docs/AUDIO.md "Song length") ---------
 #
-# An instrumental asked for a length range is planned from its pool set made longer or
-# shorter by whole sections: the set's body (every section between a leading [Intro] and a
+# An instrumental asked for a length range is planned, once, from its pool set made longer
+# or shorter by whole sections: the set's body (every section between a leading [Intro] and a
 # trailing [Outro]) is cut short from its end, or carried on past it by starting the body
 # over, so a longer song repeats the set's own verses and choruses in its own order. Each
 # size is a count of body sections, so sizes are few, ordered and the same every time.
 
-# Seconds of score a planning line makes, before this request has scored anything:
-# the median of the PC's first nine pool instrumentals (2026-10-10, one per set, tags at
-# 66 to 112 BPM), whose scores ran 5.7 to 12.0 s a line. The tempo the model picks and how
-# many bars it gives a line both move it, so the first score is aimed with it and every
-# later one with what this request's own scores measured.
+# Seconds of score a planning line makes: the median of the PC's first nine pool
+# instrumentals (2026-10-10, one per set, tags at 66 to 112 BPM), whose scores ran 5.7 to
+# 12.0 s a line. The 1.0.137 card check's twelve scores (6 songs, sizes 11 to 35 lines) put
+# the median of all 21 at 8.9 and the spread at 4.7 to 14.4 s a line - one set (ember) made
+# 158.7, 158.7 and 165.3 s from 24, 31 and 35 lines - so the tempo the model picks and the
+# bars it gives a line move a score far more than the prior's last decimal; 8.6 stays. It
+# aims the one score of a pool instrumental; nothing re-plans (Owen: "strictly one pass").
 PRIOR_SECONDS_PER_LINE = 8.6
 
-# How far inside the range a size is aimed: a score lands within about 7% of where its
-# lines put it once a request's own rate is known (the nine scores' audio ran 0.943 to
-# 1.069 of their nominal length), so aiming 10% in from each end leaves room for that.
+# How far inside the range a size is aimed: 10% in from each end, so a score that runs a
+# little long or short of its estimate still has room to land.
 AIM_MARGIN = 0.10
-
-# Scores an instrumental may plan to land in its range: the first, and two re-plans. A
-# score is 10 to 30 s of the card; composing is the expensive part and never repeats.
-MAX_LENGTH_ATTEMPTS = 3
 
 FRAME_OPENING = "intro"
 FRAME_CLOSING = "outro"
@@ -298,7 +295,7 @@ class Sizing:
         return sum(len(part.lines) for part in self._parts(count))
 
     def structure(self, count: int) -> list[str]:
-        """The section labels of size `count`, in order (what a job's attempts record)."""
+        """The section labels of size `count`, in order (what a job's `audio.length` records)."""
         return [part.label for part in self._parts(count)]
 
 
@@ -331,27 +328,23 @@ class LengthRange:
         return {"min_duration_s": self.minimum, "max_duration_s": self.maximum}
 
 
-def aim(sizing: Sizing, wanted: LengthRange, seconds_per_line: float, tried: set[int]) -> int | None:
-    """The body-section count to plan next: of the sizes not yet tried, the one whose
-    estimate (its lines at `seconds_per_line`) lands in the range's window, the fewest
-    sections from the text as written first (a set that already fits is left as it is);
-    if none lands there, the one nearest the window. None when every size was tried."""
+def aim(sizing: Sizing, wanted: LengthRange, seconds_per_line: float) -> int:
+    """The body-section count to plan the one score from: the size whose estimate (its
+    lines at `seconds_per_line`) lands in the range's window, the fewest sections from the
+    text as written first (a set that already fits is left as it is); if none lands there,
+    the one nearest the window."""
     low, high = wanted.window()
 
     def miss(count: int) -> float:
         estimate = sizing.lines(count) * seconds_per_line
         return max(low - estimate, estimate - high, 0.0)
 
-    left = [count for count in sizing.sizes if count not in tried]
-    if not left:
-        return None
-    return min(left, key=lambda count: (miss(count), abs(count - sizing.written), count))
+    return min(sizing.sizes, key=lambda count: (miss(count), abs(count - sizing.written), count))
 
 
 __all__ = [
     "AIM_MARGIN",
     "MAX_CHARS",
-    "MAX_LENGTH_ATTEMPTS",
     "MAX_LINES",
     "POOL",
     "PRIOR_SECONDS_PER_LINE",

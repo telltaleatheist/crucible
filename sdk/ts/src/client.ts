@@ -3316,12 +3316,7 @@ function readModel(entry: Json, where: string): ModelDescriptor {
 
 function readFailure(value: unknown, where: string): JobFailure {
   const entry = asObject(value, where);
-  const details = optObject(entry, 'details', where);
-  return {
-    code: str(entry, 'code', where),
-    message: str(entry, 'message', where),
-    ...(details === null ? {} : { details }),
-  };
+  return { code: str(entry, 'code', where), message: str(entry, 'message', where) };
 }
 
 function readFailureOrNull(value: unknown, where: string): JobFailure | null {
@@ -3714,23 +3709,13 @@ function readAudioLength(length: Json | null, where: string): AudioLength | null
   return {
     minDurationS: nullableNum(length, 'min_duration_s', where),
     maxDurationS: nullableNum(length, 'max_duration_s', where),
+    sized: bool(length, 'sized', where),
+    bodySections: nullableNum(length, 'body_sections', where),
+    structure: nullableStrArray(length, 'structure', where),
+    lines: nullableNum(length, 'lines', where),
     scoreSeconds: nullableNum(length, 'score_seconds', where),
+    unread: nullableStr(length, 'unread', where),
     inRange: nullableBool(length, 'in_range', where),
-    attempts: asArray(field(length, 'attempts', where), `${where}.attempts`).map((value, index) => {
-      const at = `${where}.attempts[${index}]`;
-      const attempt = asObject(value, at);
-      return {
-        attempt: num(attempt, 'attempt', at),
-        bodySections: nullableNum(attempt, 'body_sections', at),
-        structure: nullableStrArray(attempt, 'structure', at),
-        lines: nullableNum(attempt, 'lines', at),
-        scoreSeconds: nullableNum(attempt, 'score_seconds', at),
-        unread: nullableStr(attempt, 'unread', at),
-        scoreTokens: num(attempt, 'score_tokens', at),
-        scoreEnded: oneOf(str(attempt, 'score_ended', at), ['eos', 'cap'] as const, `${at}.score_ended`),
-        inRange: nullableBool(attempt, 'in_range', at),
-      };
-    }),
   };
 }
 

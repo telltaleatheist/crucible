@@ -142,7 +142,6 @@ export type {
   ImageResult,
   AudioDecodeStage,
   AudioLength,
-  AudioLengthAttempt,
   AudioPlanningLyrics,
   AudioOptions,
   AudioResult,

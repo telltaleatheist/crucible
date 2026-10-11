@@ -1,11 +1,11 @@
 """A song's length range (docs/AUDIO.md "Song length").
 
-YuE2 has no length input; a song lasts what its score says. Owen (2026-10-10): B-Sides sends
-a range to shoot for, `min_duration_s` and `max_duration_s`; Crucible reads the score's
-nominal length after the score stage and before composing. An instrumental planned from the
-server's pool is re-planned (the score only) with its set grown or cut by whole sections; a
-song planned from the client's words is refused `song_length_out_of_range` with the ratio
-the words need. Every finished song records `score_seconds` and the range asked."""
+YuE2 has no length input; a song lasts what its score says. B-Sides sends a range to shoot
+for, `min_duration_s` and `max_duration_s`. Owen (2026-10-10): "dont rely on lyrics to
+determine length ... if its close, thats good enough", and "strictly one pass": one score
+and one render, always. The range sizes a pool-planned instrumental's set before its one
+score; every other song is made from its words as sent. Every YuE2 song records its score's
+nominal seconds, and the range and whether the score landed in it when one was sent."""
 
 from __future__ import annotations
 
@@ -22,9 +22,7 @@ from crucible.audiomodels import load_all_audio_manifests
 from crucible.errors import ApiError
 from crucible.jobs.audio import planning, scorelength
 from crucible.jobs.audio.params import AudioParams, refuse_what_the_model_cannot_take, settle
-from crucible.jobs.base import JobFailure
 
-from .conftest import close_queue_session, open_queue_session
 from .test_audio_api import SONG, TAGS, idle_card, ready, run_job, transcript
 from .test_audio_instrumental import _load_worker
 
@@ -164,22 +162,22 @@ def test_a_set_grows_by_starting_its_body_over_and_shrinks_from_its_end_keeping_
 def test_the_first_aim_leaves_a_set_that_fits_as_it_is() -> None:
     sizing = planning.Sizing.of(_set("lantern").lyrics)  # 16 lines, about 138 s at 8.6 s a line
     wanted = planning.LengthRange(100.0, 200.0, 360.0)
-    assert planning.aim(sizing, wanted, planning.PRIOR_SECONDS_PER_LINE, set()) == sizing.written
+    assert planning.aim(sizing, wanted, planning.PRIOR_SECONDS_PER_LINE) == sizing.written
     assert planning.aim(sizing, planning.LengthRange(None, 300.0, 360.0),
-                        planning.PRIOR_SECONDS_PER_LINE, set()) == sizing.written
+                        planning.PRIOR_SECONDS_PER_LINE) == sizing.written
 
 
-def test_the_aim_grows_or_cuts_the_set_into_the_window_and_never_repeats_a_size() -> None:
+def test_the_aim_grows_or_cuts_the_set_into_the_window() -> None:
     sizing = planning.Sizing.of(_set("lantern").lyrics)
     long = planning.LengthRange(180.0, 270.0, 360.0)
-    grown = planning.aim(sizing, long, planning.PRIOR_SECONDS_PER_LINE, set())
+    grown = planning.aim(sizing, long, planning.PRIOR_SECONDS_PER_LINE)
     low, high = long.window()
     assert grown > sizing.written and low <= sizing.lines(grown) * 8.6 <= high
     short = planning.LengthRange(None, 90.0, 360.0)
-    cut = planning.aim(sizing, short, planning.PRIOR_SECONDS_PER_LINE, set())
+    cut = planning.aim(sizing, short, planning.PRIOR_SECONDS_PER_LINE)
     assert cut < sizing.written and sizing.lines(cut) * 8.6 <= 81.0
-    assert planning.aim(sizing, long, 8.6, {grown}) != grown
-    assert planning.aim(sizing, long, 8.6, set(sizing.sizes)) is None
+    # Out of reach: the nearest size, never a refusal.
+    assert planning.aim(sizing, planning.LengthRange(355.0, 360.0, 360.0), 1.0) == sizing.sizes[-1]
 
 
 def test_a_range_too_narrow_for_the_margin_is_aimed_at_its_middle() -> None:
@@ -314,9 +312,7 @@ class LinePipe:
 
 
 class Plan(SimpleNamespace):
-    def save(self, directory) -> None:
-        Path(directory).mkdir(parents=True)
-        (Path(directory) / "score.abc").write_text(self.abc, encoding="utf-8")
+    """yue2-infer's SymbolicPlan, as far as the scoring stage reads it."""
 
 
 class Progress:
@@ -354,70 +350,61 @@ def test_with_no_range_the_song_plans_once_and_records_its_score_seconds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _, engine = _engine(monkeypatch, LinePipe(10.0))
-    job = _job(tmp_path, lyrics=SUNG)
-    engine._score(job, Progress())
+    engine._score(_job(tmp_path, lyrics=SUNG), Progress())
     assert engine._pipe.planned == [SUNG]
-    assert engine.length["score_seconds"] == 30.0
-    assert (engine.length["min_duration_s"], engine.length["max_duration_s"]) == (None, None)
-    assert engine.length["attempts"][0]["in_range"] is None
-    assert engine.length["resized_planning_lyrics"] is None
+    length = engine.length
+    assert length["score_seconds"] == 30.0 and length["score"]["bpm"] == 120.0
+    assert (length["min_duration_s"], length["max_duration_s"], length["in_range"]) == (None, None, None)
+    assert (length["sized"], length["structure"], length["resized_planning_lyrics"]) == (False, None, None)
 
 
-def test_a_sung_song_outside_its_range_stops_before_composing_and_its_words_are_untouched(
+def test_a_sung_song_outside_its_range_is_made_as_written_and_the_miss_recorded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    module, engine = _engine(monkeypatch, LinePipe(10.0))
-    job = _job(tmp_path, lyrics=SUNG, min_duration_s=60.0, max_duration_s=90.0)
-    with pytest.raises(Exception) as caught:
-        engine._score(job, Progress())
-    refused = caught.value
-    assert refused.code == "song_length_out_of_range"
-    assert engine._pipe.planned == [SUNG], "planned once, from the client's words as sent"
-    details = refused.details
-    assert (details["score_seconds"], details["min_duration_s"], details["max_duration_s"]) == (30.0, 60.0, 90.0)
-    assert (details["direction"], details["ratio_needed"], details["ratio_to_middle"]) == ("longer", 2.0, 2.5)
-    assert "longer" in refused.message and "2x" in refused.message
-    assert (tmp_path / module.FAILED_PLAN_DIR / "score.abc").is_file()
+    """Owen: never touch the lyrics, never refuse; the range is a record for a sung song."""
+    _, engine = _engine(monkeypatch, LinePipe(10.0))
+    progress = Progress()
+    plan = engine._score(_job(tmp_path, lyrics=SUNG, min_duration_s=60.0, max_duration_s=90.0), progress)
+    assert plan is not None and engine._pipe.planned == [SUNG], "one score, from the words as sent"
+    length = engine.length
+    assert (length["score_seconds"], length["in_range"], length["sized"]) == (30.0, False, False)
+    assert (length["min_duration_s"], length["max_duration_s"]) == (60.0, 90.0)
+    assert any("does not change a song planned from the client's own words" in n for n in progress.notes)
 
 
-def test_an_instrumental_from_the_client_s_planning_lyrics_is_refused_like_a_sung_song(
+def test_an_instrumental_from_the_client_s_planning_lyrics_is_used_as_sent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _, engine = _engine(monkeypatch, LinePipe(10.0))
-    job = _job(tmp_path, instrumental=True, planning_lyrics=SUNG, max_duration_s=31.0,
-               min_duration_s=None)
-    engine._score(job, Progress())  # 30 s: in range
     job = _job(tmp_path, instrumental=True, planning_lyrics=SUNG, max_duration_s=29.0)
-    with pytest.raises(Exception) as caught:
-        engine._score(job, Progress())
-    assert caught.value.code == "song_length_out_of_range"
-    assert caught.value.details["direction"] == "shorter"
+    engine._score(job, Progress())
+    assert engine._pipe.planned == [SUNG]
+    assert (engine.length["in_range"], engine.length["sized"]) == (False, False)
 
 
-def test_a_pool_instrumental_is_re_planned_until_its_score_lands_and_the_same_seed_plans_the_same(
+def test_a_pool_instrumental_is_sized_once_toward_its_range_and_never_planned_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The model gives this request 12 s a line where the pool's prior says 8.6: the first
-    size aimed at overshoots, the second is aimed with the measured rate and lands."""
+    """The model gives this request 12 s a line where the prior says 8.6: the one score
+    misses, and that is recorded, not retried (Owen: "strictly one pass")."""
     lantern = _set("lantern").lyrics
     runs = []
     for _ in range(2):
         _, engine = _engine(monkeypatch, LinePipe(12.0))
         job = _job(tmp_path, instrumental=True, planning_lyrics=lantern, planning_resizable=True,
-                   min_duration_s=120.0, max_duration_s=180.0)
+                   min_duration_s=180.0, max_duration_s=270.0)
         progress = Progress()
         engine._score(job, progress)
         runs.append((engine.length, list(engine._pipe.planned), progress.notes))
     length, planned, notes = runs[0]
-    assert runs[0] == runs[1], "deterministic: the same request plans the same attempts"
-    attempts = length["attempts"]
-    assert [a["in_range"] for a in attempts] == [False, True]
-    assert attempts[0]["score_seconds"] == 16 * 12.0 and attempts[0]["lines"] == 16
-    assert 120.0 <= attempts[1]["score_seconds"] <= 180.0
-    assert attempts[1]["structure"] == planning.Sizing.of(lantern).structure(attempts[1]["body_sections"])
-    assert length["score_seconds"] == attempts[1]["score_seconds"]
-    assert length["resized_planning_lyrics"] == planned[-1] != lantern
-    assert any("planning it again" in note for note in notes)
+    assert runs[0] == runs[1], "deterministic: the same request plans the same structure"
+    sizing = planning.Sizing.of(lantern)
+    assert len(planned) == 1 and planned[0] == sizing.text(length["body_sections"]) != lantern
+    assert length["sized"] is True and length["body_sections"] > sizing.written
+    assert length["structure"] == sizing.structure(length["body_sections"])
+    assert length["score_seconds"] == length["lines"] * 12.0 and length["in_range"] is False
+    assert length["resized_planning_lyrics"] == planned[0]
+    assert any("sized toward the 180-270 s asked" in note for note in notes)
 
 
 def test_a_pool_instrumental_that_fits_is_planned_from_its_set_verbatim(
@@ -429,34 +416,26 @@ def test_a_pool_instrumental_that_fits_is_planned_from_its_set_verbatim(
                min_duration_s=100.0, max_duration_s=200.0)
     engine._score(job, Progress())
     assert engine._pipe.planned == [lantern]
-    assert engine.length["resized_planning_lyrics"] is None
+    assert (engine.length["sized"], engine.length["resized_planning_lyrics"]) == (True, None)
+    assert engine.length["in_range"] is True
 
 
-def test_a_pool_instrumental_that_never_lands_is_refused_with_every_attempt_kept(
+def test_a_score_the_reader_cannot_time_still_makes_the_song(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A rate that swings each score (what a model can do) never settles inside a narrow
-    range: three scores, then a refusal naming them, every plan kept."""
-    module, engine = _engine(monkeypatch, LinePipe(8.6))
-    swings = iter([4.0, 20.0, 4.0, 20.0])
+    _, engine = _engine(monkeypatch, LinePipe(10.0))
     plan = engine._pipe.plan
 
-    def swinging(tags, lyrics, **kwargs):
-        engine._pipe.seconds_per_line = next(swings)
-        return plan(tags, lyrics, **kwargs)
+    def repeating(tags, lyrics, **kwargs):
+        made = plan(tags, lyrics, **kwargs)
+        made.abc = made.abc.replace("z32|", "z32:|", 1)
+        return made
 
-    engine._pipe.plan = swinging
-    job = _job(tmp_path, instrumental=True, planning_lyrics=_set("lantern").lyrics,
-               planning_resizable=True, min_duration_s=150.0, max_duration_s=170.0)
-    with pytest.raises(Exception) as caught:
-        engine._score(job, Progress())
-    refused = caught.value
-    assert refused.code == "instrumental_length_not_reached"
-    assert len(refused.details["attempts"]) == planning.MAX_LENGTH_ATTEMPTS == 3
-    assert refused.details["max_attempts"] == 3
-    for number in (1, 2, 3):
-        assert (tmp_path / module.FAILED_PLAN_DIR / f"attempt-{number}" / "score.abc").is_file()
-    assert all(f"{a['score_seconds']} s" in refused.message for a in refused.details["attempts"])
+    engine._pipe.plan = repeating
+    assert engine._score(_job(tmp_path, lyrics=SUNG, max_duration_s=90.0), Progress()) is not None
+    length = engine.length
+    assert (length["score_seconds"], length["in_range"]) == (None, None)
+    assert "repeats" in length["unread"]
 
 
 # --- the wire ------------------------------------------------------------------------------
@@ -467,13 +446,6 @@ def test_the_card_check_script_is_valid_python() -> None:
     compile(script.read_text(encoding="utf-8"), str(script), "exec")
 
 
-def test_a_failure_carries_its_details_only_when_it_has_some() -> None:
-    plain = JobFailure("worker_failed", "it broke")
-    assert plain.to_dict() == {"code": "worker_failed", "message": "it broke"}
-    detailed = JobFailure("song_length_out_of_range", "too long", {"score_seconds": 212.4})
-    assert JobFailure.from_dict(detailed.to_dict()) == detailed
-
-
 def test_a_song_s_done_record_carries_its_score_seconds_and_the_range(
     ready, auth: dict[str, str], transcript: Path
 ) -> None:
@@ -482,6 +454,7 @@ def test_a_song_s_done_record_carries_its_score_seconds_and_the_range(
     assert events[-1]["event"] == "done", events[-1]
     length = events[-1]["data"]["audio"]["length"]
     assert (length["min_duration_s"], length["max_duration_s"], length["score_seconds"]) == (120, 180, 150.0)
+    assert (length["in_range"], length["sized"]) == (True, False)
     assert "resized_planning_lyrics" not in length
     sent = [row for row in map(json.loads, transcript.read_text(encoding="utf-8").splitlines())
             if row.get("op") == "generate"][-1]
@@ -489,27 +462,14 @@ def test_a_song_s_done_record_carries_its_score_seconds_and_the_range(
     assert sent["planning_resizable"] is False
 
 
-def test_a_song_refused_for_its_length_fails_by_name_with_details_and_the_worker_stays(
-    ready, auth: dict[str, str], transcript: Path
+def test_a_song_whose_score_misses_its_range_is_still_done(
+    ready, auth: dict[str, str]
 ) -> None:
-    # Held by a queue session, as B-Sides holds an album, so the model stays between songs.
-    session_id = open_queue_session(ready, auth, act="song")
-    job_id, events = run_job(ready, auth, model=SONG, params={
+    _, events = run_job(ready, auth, model=SONG, params={
         "tags": TAGS, "lyrics": SUNG, "seed": 3, "min_duration_s": 60, "max_duration_s": 90})
-    assert events[-1]["event"] == "failed", events[-1]
-    error = events[-1]["data"]["error"]
-    assert error["code"] == "song_length_out_of_range"
-    assert (error["details"]["score_seconds"], error["details"]["max_duration_s"]) == (150.0, 90)
-    record = ready.get(f"/v1/jobs/{job_id}", headers=auth).json()
-    assert record["error"]["details"]["score_seconds"] == 150.0
-    assert record["request"]["refused"]["code"] == "song_length_out_of_range"
-    # The next song runs on the same worker: a refusal is an answer, not a crash.
-    _, events = run_job(ready, auth, model=SONG, params={"tags": TAGS, "lyrics": SUNG, "seed": 4})
     assert events[-1]["event"] == "done", events[-1]
-    loads = [row for row in map(json.loads, transcript.read_text(encoding="utf-8").splitlines())
-             if row.get("op") == "load"]
-    assert len(loads) == 1
-    close_queue_session(ready, auth, session_id)
+    length = events[-1]["data"]["audio"]["length"]
+    assert (length["score_seconds"], length["in_range"]) == (150.0, False)
 
 
 def test_a_pool_instrumental_is_sent_as_resizable_and_a_named_set_is_recorded(
@@ -522,6 +482,7 @@ def test_a_pool_instrumental_is_sent_as_resizable_and_a_named_set_is_recorded(
     planned = events[-1]["data"]["audio"]["planning_lyrics"]
     assert (planned["source"], planned["id"], planned["requested"], planned["resized"]) == (
         "pool", "meadow", True, False)
+    assert events[-1]["data"]["audio"]["length"]["sized"] is True
     sent = [row for row in map(json.loads, transcript.read_text(encoding="utf-8").splitlines())
             if row.get("op") == "generate"][-1]
     assert sent["planning_resizable"] is True and sent["planning_lyrics"] == _set("meadow").lyrics

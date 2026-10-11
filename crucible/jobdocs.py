@@ -532,14 +532,14 @@ JOB_DOCS: dict[str, JobDoc] = {
             "`planning_set_unknown` with the ids).",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics; "
-            "`min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) ask a "
-            "range, checked against the score's nominal length (its bars at its tempo) "
-            "after scoring and before composing. An instrumental planned from the pool is "
-            "grown or cut by whole sections and its score re-planned, at most 3 scores, then "
-            "`instrumental_length_not_reached`; a song planned from the client's words is "
-            "refused `song_length_out_of_range` with `error.details` (`score_seconds`, the "
-            "range, `ratio_needed`). Every song's `done` event carries `audio.length` "
-            "(`score_seconds`, the range, every attempt) (docs/AUDIO.md \"Song length\").",
+            "`min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) are a "
+            "length to aim at, never a guarantee: an instrumental planned from the pool has "
+            "its set grown or cut by whole sections toward the range before its one score; "
+            "any other song is made from its words as sent and the range only recorded. A "
+            "song is always made in one pass and a range never fails it. Every YuE2 song's "
+            "`done` event carries `audio.length` (`score_seconds`, its score's bars at its "
+            "tempo; the range; `sized`; the structure; `in_range`) (docs/AUDIO.md "
+            "\"Song length\").",
             "A host with `[audio] low_vram = true` in its config holds only half of YuE2 "
             "on the card at a time; Crucible turns it on by itself on a card too small "
             "to hold YuE2 whole (an 8 GiB card), and `audio.low_vram` in the `done` "

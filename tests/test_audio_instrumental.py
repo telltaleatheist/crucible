@@ -41,16 +41,6 @@ def test_stable_audio_has_no_instrumental_switch() -> None:
     assert caught.value.code == "audio_param_unsupported"
 
 
-class _Refused(Exception):
-    """audiocore.Refused as the worker raises it: a code, a sentence and the details."""
-
-    def __init__(self, code: str, message: str, details: dict) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-        self.message = message
-        self.details = details
-
-
 def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     import types
 
@@ -63,7 +53,6 @@ def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     siblings = {"planning": planning, "scorelength": scorelength}
     workerio.load_sibling = lambda name, _file: siblings.get(name) or types.SimpleNamespace(
         Throttled=lambda progress, every: SimpleNamespace(tick=lambda: None),
-        Refused=_Refused,
     )
     monkeypatch.setitem(sys.modules, "workerio", workerio)
     spec = importlib.util.spec_from_file_location("yue2_worker_under_test", WORKER)

@@ -54,18 +54,6 @@ class Cancelled(Exception):
         self.step = step
 
 
-class Refused(Exception):
-    """A song the engine stopped on purpose before composing it, by name: its score's
-    length fell outside the range the client asked (yue2_worker). It is an answer, not a
-    fault: the worker reports it as its result and stays loaded for the next song."""
-
-    def __init__(self, code: str, message: str, details: dict) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-        self.message = message
-        self.details = details
-
-
 class CancelBox:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -125,7 +113,7 @@ class Progress:
 
     def note(self, text: str) -> None:
         """A sentence for the job's events beside its progress (the server makes it a
-        `note`): what a stage decided, such as a score re-planned for its length."""
+        `note`): what a stage decided, such as a planning set sized toward a length."""
         send("progress", stage=self.stage, step=self.step, steps=self.steps,
              fraction=self._fraction(), note=text)
 
@@ -282,8 +270,8 @@ class Worker:
             # path it ran on, its speed (yue2_worker.decode_facts); None for an engine
             # that decodes no tokens.
             "decode_stages": self.engine.decode_stages,
-            # The score's length against the range asked, with every score planned to
-            # land in it (yue2_worker); None for an engine that writes no score.
+            # The score's nominal length, and the range asked and what it did
+            # (yue2_worker.length_record); None for an engine that writes no score.
             "length": self.engine.length,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
@@ -309,12 +297,6 @@ class Worker:
             result = self._run(job)
         except Cancelled as stopped:
             send("progress", stage="cancelled", step=stopped.step, during=stopped.stage)
-            send("done")
-            return
-        except Refused as refused:
-            send("result", refused={
-                "code": refused.code, "message": refused.message, "details": refused.details,
-            })
             send("done")
             return
         finally:
