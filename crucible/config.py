@@ -53,6 +53,8 @@ DEFAULT_ENABLE_AUDIO = False
 DEFAULT_ENABLE_SEGMENT = False
 DEFAULT_ENABLE_VIDEO = False
 
+DEFAULT_ENABLE_SCORE = False
+
 DEFAULT_MAX_SESSION_HOLD_S = 0
 
 DEFAULT_PORT = 7100
@@ -156,6 +158,7 @@ class Config:
     enable_audio: bool = DEFAULT_ENABLE_AUDIO
     enable_segment: bool = DEFAULT_ENABLE_SEGMENT
     enable_video: bool = DEFAULT_ENABLE_VIDEO
+    enable_score: bool = DEFAULT_ENABLE_SCORE
     advertise: tuple[str, ...] = ()
     tailscale_advertise: tuple[str, ...] = ()
     lan_advertise: tuple[str, ...] = ()
@@ -658,6 +661,7 @@ CAPABILITY_FLAGS: tuple[str, ...] = (
     "enable_audio",
     "enable_segment",
     "enable_video",
+    "enable_score",
 )
 
 
@@ -1126,6 +1130,7 @@ def load_config(
         enable_audio=_optional_jobs_flag(table, "enable_audio", DEFAULT_ENABLE_AUDIO),
         enable_segment=_optional_jobs_flag(table, "enable_segment", DEFAULT_ENABLE_SEGMENT),
         enable_video=_optional_jobs_flag(table, "enable_video", DEFAULT_ENABLE_VIDEO),
+        enable_score=_optional_jobs_flag(table, "enable_score", DEFAULT_ENABLE_SCORE),
         install_on_submit=_install_on_submit(table),
         retention_days=_retention_days(table),
         desktop_allowance_bytes=_require(
@@ -1208,6 +1213,7 @@ def write_config(
     enable_audio: bool | None = None,
     enable_segment: bool | None = None,
     enable_video: bool | None = None,
+    enable_score: bool | None = None,
     capability: CapabilityRecord | None = None,
     routes: tuple[RouteRecord, ...] = (),
     local_models: tuple[LocalModelRecord, ...] = (),
@@ -1258,6 +1264,11 @@ def write_config(
                 _kept_jobs_flag(home, "enable_video", DEFAULT_ENABLE_VIDEO)
                 if enable_video is None
                 else enable_video
+            ),
+            "enable_score": (
+                _kept_jobs_flag(home, "enable_score", DEFAULT_ENABLE_SCORE)
+                if enable_score is None
+                else enable_score
             ),
             "install_on_submit": (
                 _kept_jobs_flag(home, "install_on_submit", DEFAULT_INSTALL_ON_SUBMIT)

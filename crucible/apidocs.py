@@ -69,7 +69,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
         "the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; "
         "the `segment` job's (subject cutouts and point-and-box selections, as masks) "
         "are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a "
-        "start picture) are in docs/VIDEO.md.",
+        "start picture) are in docs/VIDEO.md; the `score` job's (a recorded song "
+        "transcribed into a YuE2-native ABC score) are in docs/SCORE.md.",
     ),
     (
         "/queue",

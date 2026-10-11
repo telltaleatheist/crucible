@@ -8,6 +8,7 @@ KIND_IMAGE = "image"
 KIND_AUDIO = "audio"
 KIND_SEGMENT = "segment"
 KIND_VIDEO = "video"
+KIND_SCORE = "score"
 
 KIND_NOUNS: dict[str, str] = {
     KIND_LLM: "model",
@@ -18,6 +19,7 @@ KIND_NOUNS: dict[str, str] = {
     KIND_AUDIO: "audio generator",
     KIND_SEGMENT: "segmenter",
     KIND_VIDEO: "video generator",
+    KIND_SCORE: "score transcriber",
 }
 
 __all__ = [
@@ -27,6 +29,7 @@ __all__ = [
     "KIND_IMAGE",
     "KIND_LLM",
     "KIND_NOUNS",
+    "KIND_SCORE",
     "KIND_SEGMENT",
     "KIND_TTS",
     "KIND_VIDEO",

@@ -92,6 +92,8 @@ FEATURES: dict[str, str] = {
     "masks (docs/SEGMENT.md).",
     "video": "The `video` job: clips with sound from words or a start picture "
     "(docs/VIDEO.md).",
+    "score": "The `score` job: a recorded song transcribed into a YuE2-native ABC "
+    "score with SheetSage2 (docs/SCORE.md).",
 }
 
 

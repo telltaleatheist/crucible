@@ -80,9 +80,19 @@ WORKER_HEADLINE_PACKAGE: dict[tuple[str, str], str] = {
     ("image", MLX_DARWIN): "mflux",
     ("segment", CUDA_LINUX): "transformers",
     ("segment", MLX_DARWIN): "transformers",
+    ("score", CUDA_LINUX): "transformers",
+    ("score", MLX_DARWIN): "transformers",
 }
 
 SEGMENT_SMOKE_IMPORT = "transformers.models.sam2, timm, kornia, einops, torchvision"
+
+# What SheetSage2's remote code imports beyond the standard library (its modeling, export
+# and MIDI files at the pinned revision): the BART decoder, torchaudio's mel frontend, and
+# the chord and MIDI libraries its exports use.
+SCORE_SMOKE_IMPORT = (
+    "transformers.models.bart.modeling_bart, torchaudio.transforms, safetensors.torch, "
+    "scipy, mir_eval.chord, pretty_midi, mido"
+)
 
 JOB_TYPES_SERVED_BY_ENV: dict[str, tuple[str, ...]] = {
     env.name: tuple(family.name for family in FAMILIES if family.env == env)
@@ -119,6 +129,10 @@ SMOKE_IMPORT: dict[str, dict[str, str]] = {
     "segment": {
         CUDA_LINUX: SEGMENT_SMOKE_IMPORT,
         MLX_DARWIN: SEGMENT_SMOKE_IMPORT,
+    },
+    "score": {
+        CUDA_LINUX: SCORE_SMOKE_IMPORT,
+        MLX_DARWIN: SCORE_SMOKE_IMPORT,
     },
     "tts-higgs-v3": {CUDA_LINUX: NARRATOR_PACKAGE},
     "tts": {MLX_DARWIN: NARRATOR_PACKAGE},

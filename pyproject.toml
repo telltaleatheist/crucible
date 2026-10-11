@@ -55,6 +55,7 @@ crucible = [
   "audio/planning/*.toml",
   "segment/*.toml",
   "video/*.toml",
+  "score/*.toml",
   "envs/**/*",
   "desktop_app/assets/*",
 ]

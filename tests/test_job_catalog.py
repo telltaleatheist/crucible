@@ -17,6 +17,7 @@ from crucible.cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SCORE,
     KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
@@ -72,6 +73,9 @@ THE_JOB_TYPES = {
     "video": "video",
     "unload-video": "video",
     "load-video": "video",
+    "score": "score",
+    "unload-score": "score",
+    "load-score": "score",
 }
 
 
@@ -104,6 +108,9 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
         "video": effect(makes_resident=KIND_VIDEO),
         "unload-video": effect(takes_off=KIND_VIDEO),
         "load-video": effect(makes_resident=KIND_VIDEO),
+        "score": effect(makes_resident=KIND_SCORE),
+        "unload-score": effect(takes_off=KIND_SCORE),
+        "load-score": effect(makes_resident=KIND_SCORE),
         "echo": effect(),
         "asr": effect(),
         "rvc": effect(),
@@ -113,7 +120,10 @@ def test_the_card_effects_are_derived_from_the_specs_and_unchanged() -> None:
 
 def test_the_settlement_leaves_resident_only_what_a_load_put_there() -> None:
     assert settle.LEAVES_IT_RESIDENT == frozenset(
-        {"load-model", "load-voice", "load-image", "load-audio", "load-segment", "load-video"}
+        {
+            "load-model", "load-voice", "load-image", "load-audio", "load-segment",
+            "load-video", "load-score",
+        }
     )
 
 
@@ -128,7 +138,7 @@ def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
         }
     )
     assert installonsubmit.CATALOG_IS_COMPLETE == frozenset(
-        {"rvc", "denoise", "asr", "align", "image", "audio", "segment", "video"}
+        {"rvc", "denoise", "asr", "align", "image", "audio", "segment", "video", "score"}
     )
     installable = {
         name for name in ALL_JOB_TYPES if installonsubmit.InstallOnSubmit.installable(name)
@@ -150,14 +160,16 @@ def test_install_on_submit_tables_are_derived_and_unchanged() -> None:
         "load-segment",
         "video",
         "load-video",
+        "score",
+        "load-score",
     }
     assert not installonsubmit.InstallOnSubmit.installable("sorcery")
 
 
 def test_the_installer_tables_are_derived_and_unchanged() -> None:
-    assert jobenv.WORKER_JOB_TYPES == ("align", "asr", "rvc", "image", "segment")
+    assert jobenv.WORKER_JOB_TYPES == ("align", "asr", "rvc", "image", "segment", "score")
     assert jobenv.INSTALLABLE_JOB_TYPES == (
-        "llm", "tts", "align", "asr", "rvc", "image", "audio", "segment", "video",
+        "llm", "tts", "align", "asr", "rvc", "image", "audio", "segment", "video", "score",
     )
     assert jobenv.JOB_TYPES_SERVED_BY_ENV == {
         "align": ("align",),
@@ -165,6 +177,7 @@ def test_the_installer_tables_are_derived_and_unchanged() -> None:
         "rvc": ("rvc", "denoise"),
         "image": ("image",),
         "segment": ("segment",),
+        "score": ("score",),
     }
     assert jobenv.INSTALLER_FOR == {
         "llm": "llm",
@@ -177,6 +190,7 @@ def test_the_installer_tables_are_derived_and_unchanged() -> None:
         "audio": "audio",
         "segment": "segment",
         "video": "video",
+        "score": "score",
         "pages": "llm",
     }
 
@@ -210,6 +224,7 @@ def _config(home: Path, **flags: bool) -> Any:
         enable_audio=flags.get("audio", False),
         enable_segment=flags.get("segment", False),
         enable_video=flags.get("video", False),
+        enable_score=flags.get("score", False),
         desktop_allowance_bytes=3 * 1024**3,
         retention_days=7,
         desktop_allowance_basis="stated",
@@ -641,6 +656,7 @@ def test_each_one_shot_worker_reads_its_request_through_workerio(
         ("audio/stable_audio_worker.py", "stable audio", ["generate", "load"]),
         ("audio/yue2_worker.py", "yue2", ["generate", "load"]),
         ("segment/worker.py", "segment", ["load", "segment"]),
+        ("score/worker.py", "score", ["load", "score"]),
         ("video/ltx_worker.py", "video", ["generate", "load"]),
         ("asr/qwen_worker.py", "qwen asr", ["load", "split", "transcribe"]),
     ],

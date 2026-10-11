@@ -20,6 +20,7 @@ from .imagemodels import image_manifests_dir, load_all_image_manifests
 from .manifests import BACKEND_ENGINES, load_all_manifests, manifests_dir
 from .pages import PAGE_CONCURRENCY
 from .rvcmodels import load_all_rvc_manifests, rvc_manifests_dir
+from .scoremodels import load_all_score_manifests, score_manifests_dir
 from .segmentmodels import (
     load_cutout_manifests,
     load_select_manifests,
@@ -41,6 +42,7 @@ CATALOG_DIRECTORY: dict[Callable[..., dict[str, Any]], Callable[[], Path]] = {
     load_cutout_manifests: segment_manifests_dir,
     load_select_manifests: segment_manifests_dir,
     load_all_video_manifests: video_manifests_dir,
+    load_all_score_manifests: score_manifests_dir,
 }
 
 
@@ -475,6 +477,14 @@ CLASSES: tuple[CapabilityClass, ...] = (
         plainly="make video",
         noun="video models",
         candidates=_from_catalog(load_all_video_manifests),
+    ),
+    CapabilityClass(
+        name="score",
+        job_type="score",
+        purpose="a YuE2-native ABC score transcribed from a recorded song",
+        plainly="transcribe a song into a score",
+        noun="score transcribers",
+        candidates=_from_catalog(load_all_score_manifests),
     ),
 )
 

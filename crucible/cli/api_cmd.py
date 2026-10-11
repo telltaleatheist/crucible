@@ -897,14 +897,15 @@ JOB_VERBS = (
         arg(
             "--type", required=True,
             help="tts, asr, align, align-longform, rvc, denoise, image, audio, segment, video, "
-                 "echo, load-model, unload-model, load-voice, unload-voice, unload-aligner, "
-                 "unload-denoiser, load-image, unload-image, load-audio, unload-audio, "
-                 "load-segment, unload-segment, load-video, unload-video — "
+                 "score, echo, load-model, unload-model, load-voice, unload-voice, "
+                 "unload-aligner, unload-denoiser, load-image, unload-image, load-audio, "
+                 "unload-audio, load-segment, unload-segment, load-video, unload-video, "
+                 "load-score, unload-score — "
                  "`crucible api info` says which this server offers",
         ),
         arg(
             "--model", default=None,
-            help="the model, voice, aligner, image, audio, segment or video model id this "
+            help="the model, voice, aligner, image, audio, segment, video or score model id this "
                  "type serves",
         ),
         arg("--params", default=None, help="the type's params object, as JSON or @file"),

@@ -69,7 +69,8 @@ caller imports it from there (the older locations no longer answer; `tests/test_
   (`_kept_jobs_flag`), so an older rewriter cannot turn an operator's `false` back to
   true, nor a rewriter written before `image` existed turn the image type off. A config
   with no `enable_image` key (every config before 2026-09-28) reads it as false.
-  `enable_audio`, `enable_segment` and `enable_video` (all 2026-09-29) follow the same rule.
+  `enable_audio`, `enable_segment` and `enable_video` (all 2026-09-29) and `enable_score`
+  (2026-10-11) follow the same rule.
 - **`rewrite_config(config, flags=, audio_low_vram=AudioLowVram, ...)`** writes a loaded
   config back with only the named settings changed: every keyword left None (`name`,
   `host`, `port`, `token`, `open_pairing`, the advertise lists, `cors_origins`,
@@ -478,6 +479,11 @@ install.
   transformers 5.17.0, timm, kornia, einops): see [segment.md](segment.md), "Envs". `uv pip
   compile` locks for Python 3.11 on each platform, not yet freezes of a working env; the
   headers are the wheels summed from PyPI (3.08 GB cuda-linux, 0.19 GB mlx-darwin).
+- **score** (`envs/score`, one worker env for SheetSage2: SheetSage2's own requirements.txt at
+  its pinned revision - torch 2.8.0, torchaudio 2.8.0, transformers 4.45.2, numpy 1.24.3 - older
+  than every other env's and so its own): see [../SCORE.md](../SCORE.md), "The env". `uv pip
+  compile` locks for Python 3.11 on each platform, not yet freezes of a working env; the headers
+  are the wheels summed from PyPI (4.00 GB cuda-linux, 0.15 GB mlx-darwin).
 - **video**: see [video.md](video.md), "Env". cuda-linux is `ltx-cuda-linux.txt` (env key
   `video-ltx`): the image recipe's resolution plus `gguf`, `torchao` and `av`. mlx-darwin is
   `ltx-2-mlx-mlx-darwin.txt` (env key `video-ltx-2-mlx`): ltx-2-mlx's two workspace packages

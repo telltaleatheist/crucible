@@ -25,12 +25,13 @@ import { BOOTSTRAP_VERSION } from './version.js';
 /** The job types `crucible init --enable-<type>` knows, in the order the CLI lists them. */
 export const JOB_TYPES = [
   'echo', 'llm', 'asr', 'tts', 'align', 'rvc', 'denoise', 'image', 'audio', 'segment', 'video',
+  'score',
 ] as const;
 export type JobType = (typeof JOB_TYPES)[number];
 
 /** The job types `crucible install <type>` has an installer for (`cli.INSTALLABLE_JOB_TYPES`). */
 export const INSTALLABLE_JOB_TYPES: readonly JobType[] = [
-  'llm', 'tts', 'asr', 'align', 'rvc', 'image', 'audio', 'segment', 'video',
+  'llm', 'tts', 'asr', 'align', 'rvc', 'image', 'audio', 'segment', 'video', 'score',
 ];
 
 /** One job type to enable; `tts` must name its narrator engine. */

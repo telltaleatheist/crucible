@@ -34,6 +34,7 @@ SELECTABLE_CLASSES: tuple[str, ...] = (
     *AUDIO_CLASSES,
     *SEGMENT_CLASSES,
     "video",
+    "score",
 )
 
 CLASS_NAMES: tuple[str, ...] = ("echo", *SELECTABLE_CLASSES)
