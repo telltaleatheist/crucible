@@ -77,8 +77,8 @@ def _engine(monkeypatch: pytest.MonkeyPatch, pipe: Pipe, *, low_vram: bool) -> A
 
 
 def _job(**overrides: Any) -> SimpleNamespace:
-    return SimpleNamespace(**{"tags": TAGS, "lyrics": LYRICS, "seed": 7, "cfg": 1.0,
-                              "instrumental": False, **overrides})
+    return SimpleNamespace(**{"tags": TAGS, "lyrics": LYRICS, "planning_lyrics": None, "seed": 7,
+                              "cfg": 1.0, "instrumental": False, **overrides})
 
 
 def test_each_token_stage_says_how_it_ended_from_yue2s_own_account(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +115,7 @@ def test_an_instrumental_reports_the_score_yue2_decoded_not_the_fixed_one(
 ) -> None:
     pipe = Pipe(score_tokens=1500, score_capped=False, song_tokens=9000, song_capped=True)
     _, engine = _engine(monkeypatch, pipe, low_vram=False)
-    engine._stages(_job(lyrics=None, instrumental=True), Progress(), {})
+    engine._stages(_job(lyrics=None, planning_lyrics=LYRICS, instrumental=True), Progress(), {})
     assert engine.decode_stages["scoring"]["tokens"] == 1500
     assert engine.decode_stages["composing"]["ended"] == "cap"
     assert engine.notes["planned_score"] == SCORE

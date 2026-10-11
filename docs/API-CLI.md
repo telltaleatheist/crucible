@@ -408,7 +408,7 @@ BookForge's `crucible` provider follows).
 | `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary — no separation knob is on the wire | exactly one audio file, at the separator's own rate (44.1 kHz); nothing is resampled |
 | `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
 | `load-image` | image model id | `{}` — warms the model up before the first prompt | none |
-| `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs)`[, "duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
+| `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs), or `"tags","instrumental": true[, "planning_lyrics"]` (an instrumental song, planned from words it never sings: the client's, or a pool set picked by the seed)`[, "duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
 | `load-audio` | audio model id | `{}` — warms the model up | none |
 | `segment` | segment model id | `{}` for `birefnet` (the subject, by itself); `{"points": [{"x","y","label"}], "box": [x0,y0,x1,y1]}` (either or both) for `sam2.1-hiera-large` — see docs/SEGMENT.md | exactly one PNG, JPEG or WebP; out come `mask.png` and `cutout.png` at its size |
 | `load-segment` | segment model id | `{}` — warms the model up | none |

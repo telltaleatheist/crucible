@@ -175,22 +175,75 @@ yue2-music workflow, vendored in `crucible/jobs/audio/yue2music/`):
             "seed": 3}}
 ```
 
-`lyrics` is optional for an instrumental: send section tags (`[Intro]
+The render's `effective_params.notes` carries YuE2's transfer report (how many notes moved)
+and the score it first planned.
 
-[Verse]
+### Planning lyrics: what an instrumental is planned from
 
-[Chorus]
-...`)
-to shape its form; without them YuE2 plans `[Intro] [Verse] [Chorus] [Outro]`. The render's
-`effective_params.notes` carries YuE2's transfer report (how many notes moved) and the score it
-first planned.
+YuE2 plans an instrumental's score the way it plans a sung song's: from lyrics. It then
+moves the vocal melody to the instrument and re-plans from that fixed score with section
+tags only, so **the words are never sung** (the yue2-music skill's own design, its
+`--planning-lyrics-file`). The words are there to give the melody a sung song's bounded
+phrase structure. Planned from empty sections (`[Intro] [Verse] [Chorus] [Outro]` with no
+lines), nothing bounded how many bars YuE2 wrote: on Victoria's 8 GiB laptop (2026-10-10)
+4 of 13 instrumentals ran the score to its 4096-token cap and failed, and the rest scored
+anywhere from 1023 to 3911 tokens (137 to 360 s of audio), where sung songs score 1800 to
+2600.
+
+An instrumental is planned from, in order:
+
+1. **`planning_lyrics`**, when the client sends them: its own words, never sung.
+2. **`lyrics`** holding only section tags (`[Intro]\n\n[Verse]\n\n[Chorus]\n`), when the
+   client wants to set the form itself. Empty sections bound nothing, so this is the old
+   behaviour and can run the score to its cap; prefer `planning_lyrics`.
+3. Otherwise **a set from the server's pool**: ten original planning songs in
+   `crucible/audio/planning/yue2.toml`, picked **from the seed**: set number
+   `seed mod 10`, in file order. The same params and seed plan the same song; a different
+   seed usually plans from a different set, so an album of instrumentals does not share
+   one phrase structure.
+
+The ten sets differ in structure, not only in words (verse/chorus, verse/chorus/bridge,
+AABA, through-composed, chorus-first; with and without an intro, interlude or outro; 4 to
+8 sections; 3 to 6 lines a section; lines of 4-6 or 8-11 syllables), and each is sized
+like B-Sides' sung songs (`[Verse] [Chorus] [Verse] [Chorus]`, four lines of 6 to 9
+syllables, which score 1800 to 2600 tokens): about 95 to 140 syllables. The words are
+deliberately generic, since words colour the melody. Adding or reordering sets changes
+which set a seed picks; the record below carries the text, which sent back as
+`planning_lyrics` plans the same song whatever the pool says by then.
+
+The `done` event's `audio.planning_lyrics` (and a kept request's `settled.planning_lyrics`)
+says what the score was planned from:
+
+```json
+"planning_lyrics": {"source": "pool", "id": "harbor", "lyrics": "[Intro]\n\n[Verse]\nBoats along the shore\n…"}
+```
+
+`source` is `pool` or `request` (`id` is null for the client's own); the field is null for a
+sung song, a sound without a score, and an instrumental shaped by section tags in `lyrics`.
+
+`planning_lyrics` rules, each refused by name: only with `instrumental: true`
+(`audio_param_conflict`; send the words as `lyrics` to sing them), never beside `lyrics`
+(`audio_param_conflict`: plan from one or the other), and refused by a model that makes no
+instrumentals (`audio_param_unsupported`). The text itself (`invalid_params`, saying why):
+starts with a section tag; tags only from YuE2's own vocabulary (`[Intro] [Verse]
+[Pre-Chorus] [Chorus] [Bridge] [Interlude] [Outro] [Instrumental]`, any case), each on a line
+of its own and never the same tag twice in a row (the skill refuses a score whose section
+labels repeat back to back); at least one line of words (tags alone go in `lyrics`); at most
+36 lines of words and 2000 characters. Sung `lyrics` have no limit of Crucible's own (YuE2's
+caps bound them); planning lyrics exist to keep the score inside its 4096 tokens, and a
+16-line sung song already uses 1800 to 2600 of them, so 36 lines is past what any score holds.
+
+`scripts/check-instrumental-planning.py` renders N instrumentals from the pool on a running
+server and reports each one's set, score tokens, how the score and the song ended and its
+seconds of audio, passing when every score is in the sung range with no cap hit.
 
 | param | who takes it | default | rule |
 | --- | --- | --- | --- |
 | `prompt` | sfx, music | required | not blank; a song model refuses it by name (send `tags`) |
 | `tags` | song | required | the style: comma-separated genre, instruments, voice, language, tempo. The playground shows it as chips (type a phrase and a comma, or click a suggestion from `crucible/audio/tags/song.toml`) |
 | `instrumental` | song | false | true renders the planned melody on an instrument instead of a voice (above) |
-| `lyrics` | song | required (optional when `instrumental`) | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. Refused by name on sfx and music |
+| `lyrics` | song | required (optional when `instrumental`) | sections tagged `[Intro] [Verse] [Pre-Chorus] [Chorus] [Interlude] [Bridge] [Outro]`, separated by blank lines; English or Chinese. With `instrumental`, section tags only. Refused by name on sfx and music |
+| `planning_lyrics` | song, with `instrumental` | a pool set picked by the seed | words the instrumental's score is planned from and never sung ("Planning lyrics" above); at most 36 lines and 2000 characters |
 | `duration_s` | sfx, music | sfx 10, music 60 | above 0, at most 120 (sfx) or 380 (music): `audio_too_long`. A song refuses it: its length follows its lyrics |
 | `steps` | sfx, music | 8 | 1 to 50. Stability: 8 is what the post-trained models were made for, and more does not necessarily sound better |
 | `cfg` | song | 1.0 | 0 to 20; above 1 guides harder towards the tags and lyrics and runs the model twice per token (YuE2 suggests trying 1.2). Stable Audio refuses it: its post-trained checkpoints ignore guidance |
@@ -216,6 +269,7 @@ effective parameter, so a sound can be made again:
            "backend": "cuda-linux", "engine": "yue2", "dtype": "bfloat16",
            "prompt": null, "tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…",
            "duration_s": null, "seed": 3, "steps": null, "cfg": 1.0, "format": "flac",
+           "instrumental": false, "planning_lyrics": null,
            "artifact": "audio.flac", "score": "score.abc",
            "audio_seconds": 182.4, "sample_rate": 48000, "channels": 2,
            "seconds": 71.2,
@@ -302,7 +356,8 @@ one the server chose when the client sent none), what the server settled around 
 {"job_id": "1f3da14c…", "type": "audio", "model": "yue2-3b",
  "params": {"tags": "English, warm piano pop, …", "lyrics": "[Verse]\n…", "seed": 2771032915},
  "seed": 2771032915, "seed_chosen_by": "server",
- "settled": {"duration_s": null, "steps": null, "cfg": 1.0, "instrumental": false, "seed": 2771032915},
+ "settled": {"duration_s": null, "steps": null, "cfg": 1.0, "instrumental": false, "seed": 2771032915,
+             "planning_lyrics": null},
  "low_vram": true, "revision": "c044757a…", "backend": "cuda-linux",
  "recorded": "2026-10-10T07:12:03+00:00",
  "reproduce": "POST /v1/jobs with this record's `type`, `model` and `params` (the seed is in them) runs this again with seed 2771032915; it ran on revision c044757a… (cuda-linux, [audio] low_vram on)"}

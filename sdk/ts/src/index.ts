@@ -141,6 +141,7 @@ export type {
   ImageOptions,
   ImageResult,
   AudioDecodeStage,
+  AudioPlanningLyrics,
   AudioOptions,
   AudioResult,
   PlaygroundField,

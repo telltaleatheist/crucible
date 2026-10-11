@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ...audiomodels import KIND_WORDS, OPTIONAL_PARAMS, AudioBackendSpec, AudioManifest
 from ...errors import ApiError
+from . import planning
 
 MAX_SEED = 2**32 - 1
 
@@ -15,7 +16,7 @@ MAX_SEED = 2**32 - 1
 # players and phones that want small files (B-Side, Owen 2026-10-04).
 FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 
-TEXT_FIELDS: tuple[str, ...] = ("prompt", "tags", "lyrics", "negative_prompt")
+TEXT_FIELDS: tuple[str, ...] = ("prompt", "tags", "lyrics", "planning_lyrics", "negative_prompt")
 
 # A lyrics line that is only a section tag ([Verse], [Chorus], ...): all an instrumental's
 # lyrics may hold, since it sings nothing (a sung word there was silently dropped, 2026-10-03).
@@ -42,6 +43,14 @@ class AudioParams(BaseModel):
         description="Songs (YuE2): sections tagged [Verse], [Chorus] and so on, "
         "separated by blank lines; required unless `instrumental`, where only "
         "section tags are allowed.",
+    )
+    planning_lyrics: str | None = Field(
+        default=None,
+        description="Songs (YuE2), with `instrumental` only: lyrics the score is planned "
+        "from and never sung, so the melody has a sung song's bounded phrases; then it "
+        "moves to the instrument. Sections tagged [Verse], [Chorus] and so on, at most "
+        f"{planning.MAX_LINES} lines and {planning.MAX_CHARS} characters. Null picks a set "
+        "from the server's pool by the seed.",
     )
     negative_prompt: str | None = Field(
         default=None,
@@ -90,6 +99,16 @@ class AudioParams(BaseModel):
     def says_something(cls, value: str | None) -> str | None:
         if value is not None and value.strip() == "":
             raise ValueError("is empty; send words, or leave the param out")
+        return value
+
+    @field_validator("planning_lyrics")
+    @classmethod
+    def plans_something(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                planning.check(value)
+            except planning.PlanningLyricsError as exc:
+                raise ValueError(str(exc)) from None
         return value
 
 
@@ -151,6 +170,8 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
                 spec,
                 param="lyrics",
             )
+    if params.planning_lyrics is not None:
+        _refuse_planning_lyrics(params, manifest, spec)
     # An instrumental song sings nothing: lyrics, if sent, only shape the score YuE2 plans
     # (its sections), so they are not required.
     sung = manifest.takes_lyrics and not params.instrumental
@@ -167,6 +188,31 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
             manifest,
             spec,
             missing=missing,
+        )
+
+
+def _refuse_planning_lyrics(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    if "instrumental" not in spec.takes:
+        raise _not_taken("planning_lyrics", manifest, spec)
+    if not params.instrumental:
+        raise _refusal(
+            "audio_param_conflict",
+            "planning_lyrics plan an instrumental and are never sung, but this song is not "
+            "instrumental. Send `instrumental: true` with them, or send the words as "
+            "`lyrics` to sing them",
+            manifest,
+            spec,
+            param="planning_lyrics",
+        )
+    if params.lyrics is not None:
+        raise _refusal(
+            "audio_param_conflict",
+            "an instrumental is planned from its planning_lyrics or from its lyrics' section "
+            "tags, not both. Drop `lyrics` to plan from the planning lyrics, or drop "
+            "`planning_lyrics` to plan from the section tags alone",
+            manifest,
+            spec,
+            param="planning_lyrics",
         )
 
 
@@ -213,6 +259,10 @@ class Settled:
     cfg: float | None
     instrumental: bool
     seed: int
+    # What an instrumental is planned from (planning.record): the client's
+    # planning_lyrics, or the pool's set for this seed. None for a sung song, a sound
+    # without a score, and an instrumental shaped by the section tags in its `lyrics`.
+    planning_lyrics: dict[str, Any] | None
 
 
 def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
@@ -229,7 +279,17 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
         cfg=None if "cfg" not in spec.takes else float(chosen(params.cfg, spec.default_cfg)),
         instrumental=bool(params.instrumental),
         seed=seed,
+        planning_lyrics=_planning_lyrics(params, spec, seed),
     )
+
+
+def _planning_lyrics(params: AudioParams, spec: AudioBackendSpec, seed: int) -> dict[str, Any] | None:
+    if params.planning_lyrics is not None:
+        return planning.record(planning.REQUEST, params.planning_lyrics, None)
+    if not params.instrumental or params.lyrics is not None:
+        return None
+    chosen = planning.pick(planning.load_pool(spec.engine), seed)
+    return planning.record(planning.POOL, chosen.lyrics, chosen.id)
 
 
 __all__ = [

@@ -16,10 +16,6 @@ audiocore = workerio.load_sibling("audiocore", __file__)
 
 LABEL = "yue2"
 
-# The sections an instrumental is planned with when the job sends no lyrics: the yue2-music
-# skill's own default (skills/yue2-music/instrumental/scripts/instrumental.py).
-INSTRUMENTAL_SECTIONS = "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Outro]\n"
-
 # Where an instrumental whose score came back empty or truncated keeps the plan YuE2 wrote
 # (SymbolicPlan.save: its tokens, timing and how it ended), in the job's own directory.
 FAILED_PLAN_DIR = "failed-plan"
@@ -440,6 +436,29 @@ def _version_of(distribution: str):
         return None
 
 
+def planned_from(job) -> str:
+    """What YuE2 plans the score from. A sung song: its lyrics. An instrumental: its
+    planning lyrics - the client's, or the pool's set for its seed, which the server
+    settles for every instrumental sent without `lyrics` (crucible/jobs/audio/planning.py),
+    so the melody has a sung song's bounded phrases - or, when the client shaped it with
+    section tags in `lyrics`, those tags. Empty sections alone bounded nothing: 4 of 13
+    instrumentals ran the score to its 4096-token cap (Victoria's laptop, 2026-10-10)."""
+    if job.planning_lyrics is not None:
+        if not job.instrumental or job.lyrics is not None:
+            raise RuntimeError(
+                "planning lyrics plan an instrumental that has no lyrics; this request has "
+                f"instrumental={job.instrumental} and lyrics "
+                f"{'set' if job.lyrics is not None else 'unset'}, which the server refuses"
+            )
+        return job.planning_lyrics
+    if job.lyrics is None:
+        raise RuntimeError(
+            "this song has neither lyrics nor planning lyrics to plan its score from; the "
+            "server settles planning lyrics for every instrumental sent without lyrics"
+        )
+    return job.lyrics
+
+
 class YuE2Engine:
     name = "yue2"
     spans = SPANS
@@ -523,7 +542,8 @@ class YuE2Engine:
         score YuE2 just wrote has its vocal melody moved, note for note, into the
         instrumental voice - the skill's own checks refuse any change of pitch, onset,
         duration, meter, tempo or harmony - and YuE2 then renders THAT fixed score with
-        lyrics that are only its section tags, so nothing is sung."""
+        lyrics that are only its section tags, so nothing is sung. The words the score was
+        planned from (`planning_lyrics`) never reach this second plan."""
         tools = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yue2music")
         if tools not in sys.path:
             sys.path.insert(0, tools)
@@ -571,7 +591,7 @@ class YuE2Engine:
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
         plan = pipe.plan(
             job.tags,
-            job.lyrics if job.lyrics is not None else INSTRUMENTAL_SECTIONS,
+            planned_from(job),
             seed=job.seed,
             cfg_scale=job.cfg,
             cancelled=stop,

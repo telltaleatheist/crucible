@@ -126,7 +126,9 @@ class FakeEngine:
         return stages
 
     def generate(self, job, progress):
-        _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "kind": job.kind})
+        _transcribe({"op": "generate", "request_id": job.request_id, "seed": job.seed, "kind": job.kind,
+                     "instrumental": job.instrumental, "lyrics": job.lyrics,
+                     "planning_lyrics": job.planning_lyrics})
         pause = float(os.environ.get("CRUCIBLE_FAKE_AUDIO_STEP_S") or 0)
         steps = job.steps or 4
         progress.enter("encoding")

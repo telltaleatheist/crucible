@@ -1,0 +1,376 @@
+# Planning lyrics for YuE2 instrumentals (crucible/jobs/audio/planning.py reads this file).
+#
+# An instrumental is planned like a sung song: YuE2 first writes a score for these words,
+# so its vocal melody has the bounded phrase structure a sung song has. The worker then
+# moves that melody note for note to the instrument and YuE2 re-plans from the fixed score
+# with section tags only, so the words are NEVER sung (the yue2-music skill's own design,
+# `--planning-lyrics-file`: "planner-only lyrics/section tags; never sung in the final
+# request"; vendored in crucible/jobs/audio/yue2music/).
+#
+# Why (Victoria's 8 GiB laptop, 2026-10-10): planned from empty sections
+# ("[Intro] [Verse] [Chorus] [Outro]"), nothing bounded how many bars YuE2 wrote; 4 of 13
+# instrumentals ran the score to its 4096-token cap, and the rest scored 1023 to 3911
+# tokens. Sung songs score 1800 to 2600 tokens. Every set below is sized against B-Sides'
+# sung shape - [Verse] [Chorus] [Verse] [Chorus], four lines each, 6 to 9 syllables, about
+# 100 to 140 sung syllables - which scores in that range.
+#
+# A POOL, not one set: one planning song for every instrumental would give scores that
+# sound alike (Owen, 2026-10-10). The sets differ in STRUCTURE: section order, section
+# count, intro/outro, lines per section (3 to 6) and line length (4-6 or 8-11 syllables).
+# The words are original and deliberately generic, since words colour the melody.
+#
+# The server picks a set from the job's seed: set number (seed mod the number of sets), in
+# file order. So a kept request and its seed plan the same song again. Adding, removing or
+# reordering sets changes which set a seed picks; the job's record carries the set's id
+# and its text (`planning_lyrics`), and sending that text back as `planning_lyrics`
+# reproduces it whatever this file says by then.
+#
+# Rules every set must pass (checked when the file is read, and by
+# tests/test_audio_planning_lyrics.py): section tags only from YuE2's own vocabulary
+# (yue2music/compile_score.py SECTIONS), never the same tag twice in a row (the skill
+# refuses a score whose section labels repeat back to back), sections separated by a blank
+# line, at least one line of words.
+
+[[set]]
+id = "lantern"
+shape = "verse, chorus, verse, chorus; 4 lines each; 7-9 syllables (B-Sides' sung shape)"
+lyrics = """
+[Verse]
+A lantern burning by the gate
+The evening settles on the stone
+A quiet road goes winding down
+And every window holds a glow
+
+[Chorus]
+Carry the light a little way
+Over the hill and through the rain
+Somewhere the morning waits for us
+Carry the light a little way
+
+[Verse]
+The river talks beneath the bridge
+The swallows circle once and go
+A cart wheel turning in the dust
+The hours fall like gentle snow
+
+[Chorus]
+Carry the light a little way
+Over the hill and through the rain
+Somewhere the morning waits for us
+Carry the light a little way
+"""
+
+[[set]]
+id = "harbor"
+shape = "intro, verse, pre-chorus, chorus, verse, pre-chorus, chorus, outro; verses and pre-choruses 3 lines, choruses 4; 5-6 syllables"
+lyrics = """
+[Intro]
+
+[Verse]
+Boats along the shore
+Ropes against the rail
+Gulls above the sand
+
+[Pre-Chorus]
+Wait now for the tide
+Hold until it turns
+Hear the water call
+
+[Chorus]
+Out past the harbor wall
+Into the open blue
+Sails full of morning air
+Out past the harbor wall
+
+[Verse]
+Nets laid out to dry
+Salt upon the boards
+Bells across the bay
+
+[Pre-Chorus]
+Wait now for the tide
+Hold until it turns
+Hear the water call
+
+[Chorus]
+Out past the harbor wall
+Into the open blue
+Sails full of morning air
+Out past the harbor wall
+
+[Outro]
+"""
+
+[[set]]
+id = "meadow"
+shape = "verse, chorus, verse, chorus, bridge, chorus; verses 4 lines, choruses and bridge 3; 4-6 syllables"
+lyrics = """
+[Verse]
+Grass in the wind
+Seeds on the air
+Clouds drifting slow
+Over the field
+
+[Chorus]
+Turning with the sun
+Leaning with the light
+All the meadow sways
+
+[Verse]
+Bees in the clover
+Rain on the hill
+Fence posts and thistle
+Shade by the well
+
+[Chorus]
+Turning with the sun
+Leaning with the light
+All the meadow sways
+
+[Bridge]
+Far from the road
+Nothing to hurry for
+Only the green and gold
+
+[Chorus]
+Turning with the sun
+Leaning with the light
+All the meadow sways
+"""
+
+[[set]]
+id = "stairwell"
+shape = "AABA: verse, interlude, verse, bridge, verse; 4, 3, 3 and 3 lines; 10-11 syllables"
+lyrics = """
+[Verse]
+The stairway climbs in circles past the doors
+Each landing keeps a different kind of air
+A song drifts down from somewhere up above
+And footsteps answer softly on the floor
+
+[Interlude]
+
+[Verse]
+The windows catch the colour of the day
+A curtain lifts and settles like a breath
+The railing warm beneath an open hand
+
+[Bridge]
+Up past the roof the evening opens wide
+A thousand lights are coming on below
+And nothing that we left has gone away
+
+[Verse]
+So down the stairs and out into the street
+The doors all closing gently one by one
+The stairway keeps its circles for tomorrow
+"""
+
+[[set]]
+id = "tidewater"
+shape = "through-composed, nothing repeats: verse, pre-chorus, chorus, bridge; 5, 4, 5 and 4 lines; 7-8 syllables"
+lyrics = """
+[Verse]
+Morning comes in grey and slow
+Fog lies low along the reeds
+Herons standing in the shallows
+Water moving out to sea
+Every channel finds its way
+
+[Pre-Chorus]
+Something gathers in the distance
+Something turning with the hour
+Hold the oar and feel it pulling
+Let the current carry on
+
+[Chorus]
+Wide and silver goes the river
+Past the marsh and past the mill
+All the land is leaning seaward
+All the sky is open still
+Wide and silver goes the river
+
+[Bridge]
+Evening comes in gold and low
+Lamps along the water's edge
+Every channel finds the sea
+Every tide returns again
+"""
+
+[[set]]
+id = "ember"
+shape = "chorus first: chorus, verse, chorus, verse, chorus; choruses 3 lines, verses 4; 7 syllables"
+lyrics = """
+[Chorus]
+Keep the fire burning low
+Keep the embers glowing bright
+Warm until the morning comes
+
+[Verse]
+Snow is resting on the eaves
+Wind is leaning on the pane
+Kettle hanging on the hook
+Shadows dancing on the wall
+
+[Chorus]
+Keep the fire burning low
+Keep the embers glowing bright
+Warm until the morning comes
+
+[Verse]
+Stories told beside the hearth
+Blankets folded on the chair
+Candles burning slowly down
+Nobody has far to go
+
+[Chorus]
+Keep the fire burning low
+Keep the embers glowing bright
+Warm until the morning comes
+"""
+
+[[set]]
+id = "orchard"
+shape = "verse, chorus, bridge, verse, chorus; long verses (4 lines, 10 syllables), short choruses (3 lines, 4-5), bridge 3 lines of 7"
+lyrics = """
+[Verse]
+The orchard rows run down to meet the stream
+And every branch is bending with its fruit
+The ladders lean against the oldest trees
+And baskets wait in shadow by the gate
+
+[Chorus]
+Gather it in
+Gather it all
+Before the first frost
+
+[Bridge]
+Seasons turning round the hill
+Leaves of copper, leaves of rust
+Seed and blossom, fruit and fall
+
+[Verse]
+The cider press is turning in the barn
+The wasps are drowsy in the amber light
+The carts go rolling heavy down the lane
+And swallows gather on the wire to leave
+
+[Chorus]
+Gather it in
+Gather it all
+Before the first frost
+"""
+
+[[set]]
+id = "crossing"
+shape = "verse, pre-chorus, chorus, interlude, verse, pre-chorus, chorus, outro; verses and pre-choruses 3 lines, choruses 4; 5-8 syllables"
+lyrics = """
+[Verse]
+Trains are calling through the valley
+Lights are moving on the line
+Station clocks above the platform
+
+[Pre-Chorus]
+Doors are opening
+Steam is rising high
+Here it comes again
+
+[Chorus]
+All along the crossing
+Every road meets every other
+All along the crossing
+Someone waves and travels on
+
+[Interlude]
+
+[Verse]
+Fields go flying past the window
+Towns go by without a name
+Rivers shining under bridges
+
+[Pre-Chorus]
+Doors are opening
+Steam is rising high
+Here it comes again
+
+[Chorus]
+All along the crossing
+Every road meets every other
+All along the crossing
+Someone waves and travels on
+
+[Outro]
+"""
+
+[[set]]
+id = "market"
+shape = "verse, chorus, verse, chorus, outro; verses 6 short lines (5 syllables), choruses 4 lines of 7"
+lyrics = """
+[Verse]
+Awnings in the square
+Apples piled in rows
+Bread upon the boards
+Coins in open palms
+Voices rising high
+Pigeons on the tiles
+
+[Chorus]
+Come and see what morning brought
+Come and stay a little while
+Every stall a different shade
+Every face a different smile
+
+[Verse]
+Flowers by the well
+Ribbons on a line
+Copper pots that shine
+Baskets on the arm
+Shadows growing short
+Church bells ringing noon
+
+[Chorus]
+Come and see what morning brought
+Come and stay a little while
+Every stall a different shade
+Every face a different smile
+
+[Outro]
+"""
+
+[[set]]
+id = "northlight"
+shape = "intro, verse, chorus, verse, chorus, bridge, chorus; verses 3 long lines (10 syllables), choruses 3 lines of 6, bridge 4 short lines of 5"
+lyrics = """
+[Intro]
+
+[Verse]
+The northern sky is shimmering in green
+The frozen lake is still as polished glass
+We stand outside with breath like drifting smoke
+
+[Chorus]
+Look up and see it turn
+Ribbons across the dark
+Older than any name
+
+[Verse]
+The pines are standing silent in the snow
+The cabin lamp is small against the night
+And every star is sharper than before
+
+[Chorus]
+Look up and see it turn
+Ribbons across the dark
+Older than any name
+
+[Bridge]
+Cold and clear and wide
+Light on light on light
+Turning slow and high
+Gone before the dawn
+
+[Chorus]
+Look up and see it turn
+Ribbons across the dark
+Older than any name
+"""

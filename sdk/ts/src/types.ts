@@ -2013,6 +2013,24 @@ export interface AudioOptions {
    * cannot do it refuses by name.
    */
   readonly instrumental?: boolean;
+  /**
+   * With `instrumental` only, and never beside `lyrics`: words the score is planned from and
+   * never sung, so the melody has a sung song's bounded phrases (sections tagged `[Verse]`,
+   * `[Chorus]` and so on; at most 36 lines and 2000 characters). Left out, the server plans
+   * from a set of its own pool picked by the seed, so the same params and seed plan the same
+   * song. {@link AudioResult.planningLyrics} says which.
+   */
+  readonly planningLyrics?: string;
+}
+
+/** What an instrumental's score was planned from (never sung): the client's words or a pool set. */
+export interface AudioPlanningLyrics {
+  /** `request`: the client's `planningLyrics`. `pool`: the set the seed picked from the server's pool. */
+  readonly source: 'pool' | 'request';
+  /** The pool set's id; null for the client's own. */
+  readonly id: string | null;
+  /** The text, which sent back as `planningLyrics` plans the same song whatever the pool says later. */
+  readonly lyrics: string;
 }
 
 /** An `audio` job's effective parameters and measurements, read by {@link readAudioResult}. */
@@ -2034,6 +2052,11 @@ export interface AudioResult {
   readonly format: 'flac' | 'wav' | 'mp3';
   /** Whether the song was made instrumental; null from a server older than `instrumental`. */
   readonly instrumental: boolean | null;
+  /**
+   * What an instrumental's score was planned from; null for a sung song, a sound without a
+   * score, and an instrumental shaped by section tags in its `lyrics`.
+   */
+  readonly planningLyrics: AudioPlanningLyrics | null;
   /** The audio artifact's name: `audio.flac`, `audio.wav` or `audio.mp3`. */
   readonly artifact: string;
   /** `score.abc`, the song's ABC score, when the model wrote one; else null. */
