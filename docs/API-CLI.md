@@ -234,6 +234,21 @@ keep up with.
 > `POST /v1/chat/completions`** on this server — checked against `crucible/api.py`
 > and against the live engine on 2026-09-16.
 
+### Embed and rerank — the retrieval verbs
+
+```
+crucible api embed --input "The capital of China is Beijing." --input @notes.txt [--input-type document]
+crucible api embed --input-type query --input "What is the capital of China?"   [--instruction "Given a question, find passages that answer it"] [--dimensions 1024]   [--encoding-format base64_float16] [--fingerprint <a stored fingerprint>]
+crucible api rerank --query "What is the capital of China?"   --document "The capital of China is Beijing." --document "Gravity pulls." [--model qwen3.5-9b]
+```
+
+`POST /v1/embed` and `POST /v1/rerank`, the optional retrieval package's verbs
+(`crucible install retrieval`; docs/RETRIEVAL.md is the guide for app authors). `--input` and
+`--document` repeat and take text or `@file`. `rerank --model <a decide model>` reranks with
+Crucible's general template and needs no package. The OpenAI- and Cohere-shaped twins
+(`/v1/openai/embeddings`, `/v1/openai/rerank`) answer the same handlers for existing client
+libraries; this CLI sends the native routes.
+
 ### Decide — the decision door
 
 ```

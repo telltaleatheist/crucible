@@ -406,6 +406,36 @@ def cmd_decide(connection: Connection, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_embed(connection: Connection, args: argparse.Namespace) -> int:
+    texts = [read_text_argument(raw, "--input") for raw in args.inputs]
+    if not texts:
+        raise ClientRefusal("embed_needs_input: pass --input <text|@file>, repeatable")
+    body: dict[str, Any] = {"inputs": texts, "input_type": args.input_type}
+    for key in ("model", "instruction", "dimensions", "encoding_format", "fingerprint"):
+        value = getattr(args, key)
+        if value is not None:
+            body[key] = value
+    with_queue(body, args)
+    emit(call(connection, "POST", "/v1/embed", json_body=body))
+    return EXIT_OK
+
+
+def cmd_rerank(connection: Connection, args: argparse.Namespace) -> int:
+    documents = [read_text_argument(raw, "--document") for raw in args.documents]
+    if not documents:
+        raise ClientRefusal("rerank_needs_documents: pass --document <text|@file>, repeatable")
+    body: dict[str, Any] = {
+        "query": read_text_argument(args.query, "--query"), "documents": documents,
+    }
+    for key in ("model", "instruction"):
+        value = getattr(args, key)
+        if value is not None:
+            body[key] = value
+    with_queue(body, args)
+    emit(call(connection, "POST", "/v1/rerank", json_body=body))
+    return EXIT_OK
+
+
 def _window(
     connection: Connection, raw: list[str], inputs: dict[str, dict[str, str]]
 ) -> dict[str, Any]:
@@ -1127,6 +1157,27 @@ API_VERBS = (
         arg("--message", default=None, help="shorthand: the user message"),
         arg("--stream", action="store_true", help="send stream:true and print each frame"),
         BENCH_ACT,
+        *QUEUE_ARGS,
+    )),
+    Verb("embed", "vectors for texts: search by meaning (the retrieval package)", cmd_embed, (
+        arg("--input", dest="inputs", action="append", default=[], metavar="TEXT",
+            help="a text to embed, or @file; repeatable, at most 256"),
+        arg("--input-type", choices=("query", "document"), default="document",
+            help="a query gets the model's instruction prefix; a document none"),
+        arg("--instruction", default=None, help="the task a query is embedded for"),
+        arg("--model", default=None, help="omitted: the one this server picks for embed"),
+        arg("--dimensions", type=int, default=None, help="a Matryoshka prefix length"),
+        arg("--encoding-format", choices=("float", "base64", "base64_float16"), default=None),
+        arg("--fingerprint", default=None, help="refuse unless this server writes this identity"),
+        *QUEUE_ARGS,
+    )),
+    Verb("rerank", "a relevance probability per document for one query", cmd_rerank, (
+        arg("--query", required=True, help="the query, or @file"),
+        arg("--document", dest="documents", action="append", default=[], metavar="TEXT",
+            help="a document, or @file; repeatable"),
+        arg("--instruction", default=None, help="what relevant means here"),
+        arg("--model", default=None,
+            help="omitted: the dedicated reranker; a decide model by name reranks too"),
         *QUEUE_ARGS,
     )),
     Verb(

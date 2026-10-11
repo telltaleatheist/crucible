@@ -764,6 +764,8 @@ COVERED: dict[str, str] = {
     "POST /v1/openai/chat/completions": "api chat",
     "POST /openai/v1/chat/completions": "api chat (the same handler, OpenAI's path)",
     "POST /v1/decide": "api decide",
+    "POST /v1/embed": "api embed",
+    "POST /v1/rerank": "api rerank",
     "POST /v1/uploads": "api upload",
     "POST /v1/jobs": "api job submit",
     "GET /v1/jobs/{job_id}": "api job get",
@@ -827,6 +829,10 @@ EXCLUDED: dict[str, str] = {
     "POST /v1/server/updating": "scripts/deploy.sh takes the update hold before it installs",
     "DELETE /v1/server/updating": "scripts/deploy.sh releases the update hold after a failed install",
     "GET /v1/docs": "the reference itself, for an app or an agent; `/docs` serves the page",
+    "POST /v1/openai/embeddings": "OpenAI's shape of POST /v1/embed; `api embed` sends the native route",
+    "POST /openai/v1/embeddings": "OpenAI's shape of POST /v1/embed; `api embed` sends the native route",
+    "POST /v1/openai/rerank": "Cohere's shape of POST /v1/rerank; `api rerank` sends the native route",
+    "POST /openai/v1/rerank": "Cohere's shape of POST /v1/rerank; `api rerank` sends the native route",
     "GET /v1/docs.md": "the reference itself, for an app or an agent; `/docs` serves the page",
 }
 
