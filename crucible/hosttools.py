@@ -689,7 +689,8 @@ LLAMA_SERVER_STAMP_NAME = "llama-server.json"
 
 # A new pin is a NEW asset name on the release (the old one stays for hosts not yet
 # updated): a host whose stamp names another sha256 is not placed (llama_server_placed), so
-# its next `crucible install llm`, or install-on-submit for a GGUF load, replaces the binary.
+# the update's `crucible env tools` step (or `crucible install llm`, or install-on-submit for
+# a GGUF load) replaces the binary.
 LLAMA_SERVER_BUILDS: dict[str, ToolBuild] = {
     "linux-x86_64": ToolBuild(
         version="b10970-llg1.7.6-cuda13.0",

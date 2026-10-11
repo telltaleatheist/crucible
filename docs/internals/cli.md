@@ -25,7 +25,7 @@ usage (argparse's own).
 | `orchestrator` | `orchestrator`, `guest` |
 | `serve` | `serve` |
 | `service_cmd` | `service install/uninstall/start/stop/restart/status` |
-| `doctor` | `doctor`, `env patch` |
+| `doctor` | `doctor`, `env patch`, and the parser of `env tools` (`install.cmd_env_tools`) |
 | `uninstall_cmd` | `uninstall` |
 | `token` | `token`, and the pairing-file helpers `init`, `serve` and `service install` share |
 | `api_cmd` | `api` and every verb under it: argument and output helpers, the handlers, the verb table |
@@ -364,6 +364,21 @@ only when every row is `applied` or `not_applicable`. No env installed is not a 
 `env patch tts` walks every narrator engine's tts env on this backend (one on the Mac);
 the installer does not need it, because narrator applies the stall-guard patch itself
 before it starts the server.
+
+## `env tools`
+
+The installer's `env-tools` step, after `env-patch-llm`. An upgrade runs no `crucible
+install`, and an install was the only thing that placed host tools, so a pin that moved
+(llama-server in 1.0.132) left the old binary in `tools/bin` through every later update:
+Victoria's laptop, 1.0.124 → 2.0.0, where doctor said llama.cpp was not placed and the
+installer said ready. It places what `crucible install` of the envs already in the home
+would, through the same `_ensure_tools` (ffmpeg, the C compiler when an env runs Triton,
+the speech detector) and `_place_llama_server` (cuda-linux with the llm env installed).
+Every `ensure_*` keeps a tool whose stamp names the pin and says so, so a current host
+fetches nothing. A tool that cannot be placed exits non-zero by name and the update is not
+ready; the speech detector stays a sentence, as in `install`. No env installed, or the
+llama-windows backend, places nothing and exits 0. Whether the llm env itself is current
+is the env's question (doctor, install-on-submit), not this step's.
 
 ## `uninstall`
 

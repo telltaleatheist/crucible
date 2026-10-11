@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- An update now re-places every pinned host tool an installed job type uses whose stamp differs from the release's pin (llama-server for an installed llm env on cuda-linux; ffmpeg, the C compiler and the speech detector as `crucible install` places them), through a new `crucible env tools` and the installers' `env-tools` step after `env-patch-llm`; a tool that cannot be placed fails the update by name. Before, only `crucible install` placed them, so the llama-server pin moved in 1.0.132 never reached Victoria's laptop through any update up to 2.0.0, whose installer said ready while `crucible doctor` said llama.cpp was not placed.
+
 ## 2.0.0 — 2026-10-11
 
 - An install a queue session's item is waiting on now holds the session: an item refused `409 installing` (an environment install, a model pull, or another task ahead of it) is in the session's `in_flight` (`kind: "install"`) from that refusal until the task ends, done or failed, and the session's `idle_s` then runs from the task's end. Before, B-Sides' 180 s session could close `idle` partway through a multi-GB pull on Victoria's laptop; no touch is needed (docs/QUEUE.md "How a session ends").

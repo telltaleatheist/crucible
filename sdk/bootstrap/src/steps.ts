@@ -338,6 +338,18 @@ export function installSteps(plan: StepPlan): StepDef[] {
     skip: null,
     timeout: 'quickMs',
   });
+  // An upgrade runs no `crucible install`, which was the only thing that placed host tools:
+  // a moved pin (llama-server, 1.0.132) left the old binary under tools/bin through every
+  // later update. This places each tool an installed job type uses at this release's pin.
+  const toolsWords: Word[] = [crucible, 'env', 'tools'];
+  steps.push({
+    name: 'env-tools',
+    what: "place the pinned host tools the installed job types use at this release's pin",
+    words: toolsWords,
+    sh: `${renderSh(toolsWords)} || die "step_failed: env-tools"\n`,
+    skip: null,
+    timeout: 'runtimeMs',
+  });
   const serviceWords: Word[] = [crucible, 'service', 'install'];
   steps.push({
     name: 'service-install',
