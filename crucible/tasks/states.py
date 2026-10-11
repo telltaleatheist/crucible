@@ -6,7 +6,6 @@ from typing import Any, Callable
 
 from ..errors import CrucibleError
 from ..jobs.base import CANCELLED, DONE, FAILED, RUNNING
-from ..settle import Held
 
 TERMINAL_STATES = frozenset({DONE, FAILED, CANCELLED})
 
@@ -31,13 +30,6 @@ class TaskFailedByHost(CrucibleError):
         super().__init__(f"task {task.id} failed on the host")
 
 
-class ReloadRefused(CrucibleError):
-
-    def __init__(self, held: Held) -> None:
-        super().__init__(str(held))
-        self.held = held
-
-
 @dataclass
 class Task:
 
@@ -54,7 +46,6 @@ class Task:
     events_final: bool = False
     unmet: list[dict[str, str]] = field(default_factory=list)
     cancel_requested: bool = False
-    on_submit: bool = False
     reason: str | None = None
     describe: Callable[["Task"], str | None] | None = None
     process: subprocess.Popen[str] | None = None
@@ -89,7 +80,6 @@ __all__ = [
     "RUNNING",
     "TASK_TYPES",
     "TERMINAL_STATES",
-    "ReloadRefused",
     "Task",
     "TaskCancelled",
     "TaskFailedByHost",

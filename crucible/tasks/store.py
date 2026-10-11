@@ -3,25 +3,25 @@ from __future__ import annotations
 import asyncio
 import sys
 import uuid
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from .. import catalog, tasks, voicecatalog
+from .. import catalog, jobflags, tasks, voicecatalog
 from ..backend import Backend
 from ..clock import utcnow
-from ..config import Config
+from ..config import Config, load_config
 from ..errors import ApiError
 from ..events import TASK, EventHub
-from ..settle import Held
 from ..updating import UpdateHold
 from ..weights import PullCancelled, WeightsError
 from . import hostdoor, runner
+from .modulefit import ModuleFit, Unfit, enables, unmet_row
 from .states import (
     CANCELLED,
     DONE,
     FAILED,
     HISTORY,
     TERMINAL_STATES,
-    ReloadRefused,
     Task,
     TaskCancelled,
     TaskFailedByHost,
@@ -29,7 +29,6 @@ from .states import (
 from .validate import (
     ModuleEntry,
     install_label,
-    touches_the_registry,
     validate_module,
     validate_request,
 )
@@ -40,6 +39,17 @@ ALREADY_TRUE = (
 )
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """What one module entry left on this server: `present` when what it asks for is
+    there now (installed by it or already), `built` when it built an env, and the `unmet`
+    rows it adds when it is not."""
+
+    present: bool
+    built: bool = False
+    unmet: tuple[dict[str, str], ...] = ()
+
+
 class TaskStore:
 
     def __init__(
@@ -47,15 +57,11 @@ class TaskStore:
         config: Config,
         backend: Backend,
         *,
-        reload: Callable[[], list[str]],
-        holder: Callable[[], Held | None],
-        take_up: Callable[[], list[str]] | None = None,
+        take_up: Callable[[], list[str]],
         in_use: Callable[[catalog.Subject], dict[str, Any] | None] | None = None,
     ) -> None:
         self._config = config
         self._backend = backend
-        self._reload = reload
-        self._holder = holder
         self._take_up = take_up
         self._in_use = in_use
         self._tasks: dict[str, Task] = {}
@@ -115,25 +121,15 @@ class TaskStore:
             {"task_id": running.id, "type": running.type, "since": running.started},
         )
 
-    def refuse_if_the_card_is_held(self) -> None:
-        held = self._holder()
-        if held is None:
-            return
-        raise ApiError(
-            409,
-            "server_busy",
-            f"this server cannot install anything right now: {held}. An install "
-            "rewrites config.toml and reloads this server's job registry, so it "
-            "waits until nothing holds the card",
-            {"fact": held.fact, "who": held.who, **held.details, "door": "operator"},
-        )
-
-    def submit(self, request: dict[str, Any], *, on_submit: bool = False) -> Task:
+    def submit(self, request: dict[str, Any]) -> Task:
+        """Start a task. What holds the card does not stop one: an install builds an env
+        (disk, network, CPU) and ends in the additive take-up (`_reload_step`), which
+        adds the types it turned on and replaces no plugin a job is running on, so it
+        runs beside whatever the card is doing (Victoria's laptop, 2026-10-11: B-Sides'
+        module was refused `server_busy` for as long as her albums rendered)."""
         validate_request(self._config, self._backend, request)
         self.updating.refuse_if_holding(f"a {request['type']} task")
         self.refuse_if_busy()
-        if touches_the_registry(request) and not on_submit:
-            self.refuse_if_the_card_is_held()
 
         now = utcnow()
         task = Task(
@@ -142,7 +138,6 @@ class TaskStore:
             request=request,
             created=now,
             started=now,
-            on_submit=on_submit,
         )
         self._tasks[task.id] = task
         self._order.append(task.id)
@@ -256,20 +251,6 @@ class TaskStore:
             self._finish(task, CANCELLED, None)
         except TaskFailedByHost:
             self._finish(task, FAILED, None)
-        except ReloadRefused as exc:
-            self._finish(
-                task,
-                FAILED,
-                {
-                    "code": "reload_refused",
-                    "message": (
-                        f"the env is installed, but this server would not swap "
-                        f"its job registry while {exc.held}. Nothing was undone "
-                        f"(R6); run the install again and it will find the env "
-                        f"built and reach the reload in seconds"
-                    ),
-                },
-            )
         except ApiError as exc:
             self._finish(task, FAILED, {"code": exc.code, "message": exc.message})
         except asyncio.CancelledError:
@@ -418,60 +399,67 @@ class TaskStore:
         self._reload_step(task, index=2, total=2)
 
     def _reload_step(self, task: Task, *, index: int, total: int) -> None:
-        job_types = (
-            self._take_up()
-            if task.on_submit and self._take_up is not None
-            else self._reload()
-        )
-        self._step(task, "reload", index, total, job_types=job_types)
+        self._step(task, "reload", index, total, job_types=self._take_up())
 
     async def _run_module(self, task: Task) -> None:
         entries = validate_module(self._config, self._backend, task.request["module"])
-        installs = any(entry.job_type is not None for entry in entries)
-        total = len(entries) + (1 if installs else 0)
-        installed_anything = False
-        unmet: list[dict[str, str]] = []
+        fit = await asyncio.to_thread(ModuleFit, self._config, self._backend)
+        wanted = enables(self._config, self._backend, entries)
+        total = len(entries) + len(wanted) + 1
+        outcomes: list[Outcome] = []
         for index, entry in enumerate(entries, start=1):
             task.raise_if_cancelled()
             if entry.capability_class is not None:
-                row = await self._need_step(task, entry, index, total)
-                if row is not None:
-                    unmet.append(row)
+                outcome = await self._need_step(task, entry, index, total)
             elif entry.job_type is not None:
-                installed_anything |= await self._install_entry_step(task, entry, index, total)
+                outcome = await self._install_entry_step(task, entry, fit, index, total)
             else:
-                await self._subject_step(task, entry, index, total)
-        if installs:
-            self._module_reload(task, installed_anything, index=total, total=total)
+                outcome = await self._subject_step(task, entry, fit, index, total)
+            outcomes.append(outcome)
+        unmet = [row for outcome in outcomes for row in outcome.unmet]
+        turned_on = False
+        for offset, (job_type, asking) in enumerate(wanted.items(), start=1):
+            task.raise_if_cancelled()
+            present = [entries[at] for at in asking if outcomes[at].present]
+            on, rows = await self._enable_step(
+                task, job_type, present, fit, index=len(entries) + offset, total=total
+            )
+            turned_on |= on
+            unmet.extend(rows)
+        built = any(outcome.built for outcome in outcomes)
+        self._module_reload(task, built or turned_on, index=total, total=total)
         task.unmet = unmet
 
     async def _need_step(
         self, task: Task, entry: ModuleEntry, index: int, total: int
-    ) -> dict[str, str] | None:
+    ) -> Outcome:
         assert entry.capability_class is not None
         resolved = self._resolve_need(task, entry, index, total)
         if resolved is None:
-            return self._unmet_row(entry.capability_class)
+            return Outcome(present=False, unmet=(self._unmet_row(entry),))
         if resolved.installed() is not None:
             self._skip(
                 task,
                 f"{entry.name}: this card selected {resolved.id!r} and it is "
                 "already installed",
             )
-            return None
+            return Outcome(present=True)
         await self._pull(task, resolved)
-        return None
+        return Outcome(present=True)
 
     async def _install_entry_step(
-        self, task: Task, entry: ModuleEntry, index: int, total: int
-    ) -> bool:
+        self, task: Task, entry: ModuleEntry, fit: ModuleFit, index: int, total: int
+    ) -> Outcome:
         assert entry.job_type is not None
         self._step(task, entry.name, index, total)
         if tasks.env_installed(
             self._config, self._backend, entry.job_type, entry.narrator_engine
         ):
             self._skip(task, f"{entry.name}: this server already has that env. {ALREADY_TRUE}")
-            return False
+            return Outcome(present=True)
+        unfit = fit.install(entry)
+        if unfit is not None:
+            return self._unfit(task, entry, unfit)
         argv = runner.install_argv(entry.job_type, entry.narrator_engine)
         code = await self._install_process(task, argv)
         if code != 0:
@@ -484,31 +472,87 @@ class TaskStore:
                 "and weights are on disk (R6). Re-posting the module skips what "
                 "is already installed and resumes at this step",
             )
-        return True
+        return Outcome(present=True, built=True)
 
     async def _subject_step(
-        self, task: Task, entry: ModuleEntry, index: int, total: int
-    ) -> None:
+        self, task: Task, entry: ModuleEntry, fit: ModuleFit, index: int, total: int
+    ) -> Outcome:
         assert entry.kind is not None and entry.subject_id is not None
         subject = catalog.find(self._config, self._backend, entry.kind, entry.subject_id)
         assert subject is not None
         self._step(task, entry.name, index, total)
         if subject.installed() is not None:
             self._skip(task, f"{entry.name}: already installed. {ALREADY_TRUE}")
-            return
+            return Outcome(present=True)
+        unfit = fit.subject(entry, subject)
+        if unfit is not None:
+            return self._unfit(task, entry, unfit)
         await self._pull(task, subject)
+        return Outcome(present=True)
+
+    def _unfit(self, task: Task, entry: ModuleEntry, unfit: Unfit) -> Outcome:
+        """An entry this card cannot run: skipped by name, the rest of the module goes on
+        (Owen, 2026-10-11: "crucible should intelligently know which things will fit on
+        the gpu and which wont")."""
+        self._skip(task, f"{entry.name}: {unfit.words}")
+        return Outcome(present=False, unmet=unfit.rows)
+
+    async def _enable_step(
+        self,
+        task: Task,
+        job_type: str,
+        present: list[ModuleEntry],
+        fit: ModuleFit,
+        *,
+        index: int,
+        total: int,
+    ) -> tuple[bool, list[dict[str, str]]]:
+        """Turn on the job type that serves what the module put here, through the door
+        `PUT /v1/settings/jobs/{type}` and `crucible jobs enable` share, so a module POST
+        leaves the server ready to serve: a `denoise` separator pulled into an `rvc` env
+        that was already built is served by `denoise`, which no install was asked to turn
+        on (Victoria's laptop, 2026-10-11: B-Sides had to turn it on itself)."""
+        name = f"enable {job_type}"
+        flag = jobflags.flag(job_type)
+        self._step(task, name, index, total)
+        if not present:
+            self._skip(
+                task,
+                f"{name}: nothing this module asks of it is on this server (see "
+                "the steps before), so there is nothing for it to serve",
+            )
+            return False, []
+        self._config.adopt(await asyncio.to_thread(load_config, self._config.home))
+        if getattr(self._config, flag):
+            self._skip(task, f"{name}: [jobs] {flag} is already on. {ALREADY_TRUE}")
+            return False, []
+        try:
+            await asyncio.to_thread(
+                jobflags.set_enabled, self._config, self._backend, job_type, True
+            )
+        except jobflags.EnableRefused as exc:
+            self._skip(task, f"{name}: {exc.code}: {exc.sentence}")
+            rows = {
+                capability_class: unmet_row(capability_class, exc.sentence, name)
+                for entry in present
+                for capability_class in fit.classes_for(entry, job_type)
+            }
+            return False, list(rows.values())
+        self.append_event(task, "progress", {"line": f"[jobs] {flag} = true"})
+        return True, []
 
     def _module_reload(
-        self, task: Task, installed_anything: bool, *, index: int, total: int
+        self, task: Task, changed: bool, *, index: int, total: int
     ) -> None:
-        if installed_anything:
+        if changed:
             self._reload_step(task, index=index, total=total)
             return
         self._step(task, "reload", index, total)
         self._skip(
             task,
-            "reload: every job type this module names was already installed, so "
-            "this server's registry is already what the module asks for",
+            "reload: nothing this module asks for changed what this server offers "
+            "(every env was already built and every job type already on), so its "
+            "registry is already what the module asks for",
         )
 
     def _resolve_need(
@@ -533,24 +577,23 @@ class TaskStore:
         record = self._config.capability
         return None if record is None else record.row(capability_class)
 
-    def _unmet_row(self, capability_class: str) -> dict[str, str]:
+    def _unmet_row(self, entry: ModuleEntry) -> dict[str, str]:
+        capability_class = entry.capability_class
+        assert capability_class is not None
         row = self._capability_row(capability_class)
         if row is None:
-            return {
-                "class": capability_class,
-                "reason": (
-                    "this server has no capability record, so it cannot say "
-                    "which model serves this class. Run `crucible capability "
-                    "--write` on it"
-                ),
-            }
+            return unmet_row(
+                capability_class,
+                "this server has no capability record, so it cannot say which "
+                "model serves this class. Run `crucible capability --write` on it",
+                entry.name,
+            )
         if row.selected != "" and row.enabled:
-            return {
-                "class": capability_class,
-                "reason": (
-                    f"this card selected {row.selected!r} and this backend has "
-                    "no block for it; the capability record is stale. Run "
-                    "`crucible capability --write`"
-                ),
-            }
-        return {"class": capability_class, "reason": row.reason}
+            return unmet_row(
+                capability_class,
+                f"this card selected {row.selected!r} and this backend has no block "
+                "for it; the capability record is stale. Run `crucible capability "
+                "--write`",
+                entry.name,
+            )
+        return unmet_row(capability_class, row.reason, entry.name)

@@ -48,19 +48,21 @@ the `/ui` static mount goes last so nothing it serves can shadow a route.
 - `Config.adopt()` replaces the fields of the ONE `Config` object. Every route,
   the residency, the store and every plugin hold a reference to it; never build
   and hand out a second one.
-- The registry dict's contents are replaced (`clear` + `update`), never the dict:
-  `JobStore` holds it by reference.
+- The registry dict is never replaced: `JobStore` holds it by reference, and it
+  only grows while the server runs.
 - `follow_the_config_file` runs before every HTTP request (one stat, a re-read
   only when the file moved). A job type the new file turns on is built and ADDED
   (`take_up_enabled_types`); an existing plugin instance is never replaced, so a
   running job is untouched. A flag turned off is honoured by the doors at once.
   An unreadable config.toml is logged once per distinct error and the last good
   document keeps serving; `/v1/ping` must not go down over it.
-- `reload_registry` (after an install task) swaps the whole registry and
-  refuses with `ReloadRefused` while anything holds the card. It must run on the
-  event loop with no await between the holder check and the swap.
-- `take_up_installed` (after install-on-submit) is additive only, because a job
-  may be running.
+- `take_up_installed` ends every task that installs or turns a type on (an
+  install, a module, install-on-submit): the config as the task left it, and the
+  types it turned on ADDED. It is additive only, so a task never waits for the
+  card. There was a whole-registry swap after an operator install that refused
+  (`409 server_busy`, then `reload_refused`) while anything held the card; it
+  replaced nothing a running job needed that the take-up does not, and it kept
+  B-Sides' module out for as long as Victoria's albums rendered (2026-10-11).
 - `decide_here`: a server with no capability record decides this card and
   records it when a job is submitted, the way `crucible capability --write`
   does; it turns nothing on. Owen, 2026-09-27: *"Yes, it should automatically

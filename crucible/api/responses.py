@@ -56,14 +56,6 @@ class JobBusyDetails(_Open):
     message: str | None
 
 
-class CardHeldDetails(_Open):
-    """`server_busy` from the operator door: what holds the card, in the server's words."""
-
-    door: Literal["operator"]
-    fact: str
-    who: str
-
-
 class SessionBusyDetails(_Open):
     """`server_busy` (or `session_open`) because a queue session holds the server: nothing
     but its own items runs until it closes."""
@@ -79,7 +71,7 @@ class SessionBusyDetails(_Open):
 
 
 ServerBusyDetails = Annotated[
-    Union[JobBusyDetails, CardHeldDetails, SessionBusyDetails], Field(discriminator="door")
+    Union[JobBusyDetails, SessionBusyDetails], Field(discriminator="door")
 ]
 
 
@@ -505,4 +497,14 @@ NOT_FOUND: dict[int | str, dict[str, Any]] = {
 
 BUSY_RESPONSES: dict[int | str, dict[str, Any]] = {
     409: {"model": ServerBusy, "description": "The lane or the card is held."},
+}
+
+TASK_BUSY_RESPONSES: dict[int | str, dict[str, Any]] = {
+    409: {
+        "model": ErrorEnvelope,
+        "description": (
+            "Refused by name: another task is running (`task_busy`), or the task asks "
+            "for what is already true (`already_installed`, `job_type_installed`)."
+        ),
+    },
 }

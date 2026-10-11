@@ -96,17 +96,22 @@ def test_foundry_asks_for_the_classes_owens_ruling_names() -> None:
     assert "dots-ocr" not in json.dumps(document)
 
 
-def test_b_sides_installs_the_env_its_separator_runs_in() -> None:
+def test_b_sides_installs_the_envs_its_separator_and_its_songs_run_in() -> None:
     # The `denoise` job type has no env of its own: it runs in `rvc`'s
-    # (crucible/jobtypes.py DENOISE), so `rvc` is what a module installs for it.
+    # (crucible/jobtypes.py DENOISE), so `rvc` is what a module installs for it. YuE2 is
+    # an `audio` model (kind `model` in the catalog). Owen, 2026-10-11: "it should ask the
+    # crucible server to install the rvc and the yue packages".
     document = json.loads(
         (MODULES_DIR / "b-sides.module.json").read_text(encoding="utf-8")
     )
+    both = ["cuda-linux", "mlx-darwin"]
     assert document["job_types"] == [
-        {"type": "rvc", "backends": ["cuda-linux", "mlx-darwin"]}
+        {"type": "rvc", "backends": both},
+        {"type": "audio", "backends": both},
     ]
     assert document["subjects"] == [
-        {"kind": "denoise", "id": "vocals-roformer", "backends": ["cuda-linux", "mlx-darwin"]}
+        {"kind": "denoise", "id": "vocals-roformer", "backends": both},
+        {"kind": "model", "id": "yue2-3b", "backends": both},
     ]
     assert document["needs"] == []
 

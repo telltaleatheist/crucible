@@ -655,7 +655,7 @@ The last few tasks, newest first. In memory; a restart forgets them.
 
 ### `POST /v1/tasks`
 
-Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name.
+Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name. One task at a time (`409 task_busy` names the one running). Nothing on the card stops a task: an install ends by adding the job types it turned on, never by replacing one a job is running on. A module judges each of its job types and subjects against this card first and skips what cannot run here (a `skipped` event, and rows in the task's `unmet`), then turns on the job type that serves each entry (`enable <type>` steps), so one module leaves the server ready to serve what it asked for.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -671,7 +671,7 @@ Admit one operator task (pull, install, module, engine or engine-restart), or re
 | `module` | object or null | no | — |  |
 | `target` | string or null | no | — |  |
 
-*Answers:* `202`, `409` ServerBusy, `422` HTTPValidationError
+*Answers:* `202`, `409` ErrorEnvelope, `422` HTTPValidationError
 
 ### `GET /v1/tasks/{task_id}`
 
@@ -2696,16 +2696,6 @@ One candidate's reading.
 | `mean_logprob` | number | yes | — | `logprob` / `tokens`. |
 | `probability` | number | yes | — | By the question's `normalize`. `softmax`: a softmax over the candidates' `logprob` totals, the model's probability of this reply renormalised over the replies offered (they sum to 1). `none`: exp(`logprob`), this reply's own probability, independent of the others. Always from the total, whatever `rank_by` says, because that is the quantity with a meaning. |
 
-### `CardHeldDetails`
-
-`server_busy` from the operator door: what holds the card, in the server's words.
-
-| field | type | required | default | what it is |
-| --- | --- | --- | --- | --- |
-| `door` | `'operator'` | yes | — |  |
-| `fact` | string | yes | — |  |
-| `who` | string | yes | — |  |
-
 ### `ChoiceAnswer`
 
 A choice question's distribution.
@@ -3298,7 +3288,7 @@ A `409 server_busy` refusal; `details.door` says which door refused.
 | --- | --- | --- | --- | --- |
 | `code` | `'server_busy'` | yes | — |  |
 | `message` | string | yes | — |  |
-| `details` | JobBusyDetails or CardHeldDetails or SessionBusyDetails | yes | — |  |
+| `details` | JobBusyDetails or SessionBusyDetails | yes | — |  |
 
 ### `ServiceCommand`
 

@@ -7,17 +7,23 @@ from fastapi.responses import StreamingResponse
 
 from .. import sse
 from ..context import AppContext, Routers
-from ..responses import BUSY_RESPONSES
+from ..responses import TASK_BUSY_RESPONSES
 from ..schemas import TaskCreate
 
 
 def register(routers: Routers, ctx: AppContext) -> None:
     private = routers.private
 
-    @private.post("/tasks", status_code=202, responses=BUSY_RESPONSES)
+    @private.post("/tasks", status_code=202, responses=TASK_BUSY_RESPONSES)
     async def create_task(body: TaskCreate) -> dict[str, str]:
         """Admit one operator task (pull, install, module, engine or engine-restart), or
-        refuse by name.
+        refuse by name. One task at a time (`409 task_busy` names the one running).
+        Nothing on the card stops a task: an install ends by adding the job types it
+        turned on, never by replacing one a job is running on. A module judges each of
+        its job types and subjects against this card first and skips what cannot run
+        here (a `skipped` event, and rows in the task's `unmet`), then turns on the job
+        type that serves each entry (`enable <type>` steps), so one module leaves the
+        server ready to serve what it asked for.
         """
         return {"task_id": ctx.tasks.submit(body.request()).id}
 
