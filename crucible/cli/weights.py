@@ -285,8 +285,8 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
     except UnknownForm as exc:
         return _fail(f"{exc.code}: {exc}")
     print(f"{manifest.id}: {spec.hf_repo}@{spec.revision[:12]} for {backend.kind}")
-    if spec.form is not None:
-        assert isinstance(manifest, ModelManifest)
+    # Forms are a chat model's alone; an audio, video or image spec has no `form` at all.
+    if isinstance(manifest, ModelManifest) and spec.form is not None:
         pick = manifest.form_pick(backend.kind, host)
         assert pick is not None
         if args.form is None:
