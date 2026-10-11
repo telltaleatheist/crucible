@@ -2698,11 +2698,16 @@ export interface CrucibleModule {
   }[];
 }
 
-/** One class a `module` named that this engine does not serve. */
+/**
+ * One class a `module` asked for that this server does not serve: a need it cannot resolve, an
+ * entry this card cannot run (skipped, never installed), or a job type it would not turn on.
+ */
 export interface UnmetNeed {
   readonly class: string;
-  /** The capability row's OWN sentence, verbatim. */
+  /** The server's OWN sentence, verbatim: the capability row's, the fit plan's, or the refusal's. */
   readonly reason: string;
+  /** The module step it came from: `resolve clean`, `install video`, `pull model …`, `enable denoise`. */
+  readonly entry: string;
 }
 
 /** One `module`: an ordered list of installs and pulls, validated whole. */
@@ -2746,7 +2751,10 @@ export interface TaskStatus {
   readonly created: string;
   readonly started: string;
   readonly finished: string | null;
-  /** Classes a `module` named that this engine does not serve (5.3a). */
+  /**
+   * What a `module` asked for that this server does not serve (5.3a): classes it cannot resolve,
+   * entries this card cannot run, job types it would not turn on. The module is still `done`.
+   */
   readonly unmet: readonly UnmetNeed[];
   /**
    * What a task started by `POST /v1/jobs` is doing, in words; `null` for every other task and once
@@ -2777,6 +2785,10 @@ export interface InstallingDetails {
 
 /** One step of a task. */
 export interface TaskStepData {
+  /**
+   * `install <type>`, `pull <kind> <id>`, `resolve <class>`, `enable <type>` (a module turning on the
+   * job type that serves what it put here) or `reload`.
+   */
   readonly name: string;
   /** The step's 1-based position. */
   readonly index: number;

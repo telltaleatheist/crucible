@@ -126,7 +126,7 @@ def test_a_class_resolves_to_what_THIS_card_selected_and_pulls_it(
 
     monkeypatch.setattr("crucible.tasks.TaskStore._pull", fake_pull)
     with make_client(
-        capability=record(row("clean", selected="qwen3.5-9b"))
+        enable_llm=True, capability=record(row("clean", selected="qwen3.5-9b"))
     ) as server:
         accepted = post_module(server, auth, a_module(needs=[{"class": "clean"}]))
         assert accepted.status_code == 202, accepted.text
@@ -164,6 +164,7 @@ def test_a_class_this_ENGINE_does_not_serve_is_unmet_and_the_module_is_DONE(
                 "disabled: mlx-vlm's own server does not put the image into "
                 "the prompt for dots.ocr"
             ),
+            "entry": "resolve pages",
         }
     ]
 
@@ -216,22 +217,40 @@ def test_an_explicit_subject_this_backend_cannot_hold_is_STILL_unknown_subject(
 
 
 def test_unmet_is_an_EMPTY_LIST_on_every_other_task(
-    client: TestClient, auth: dict[str, str], fake_weights
+    make_client: Callable[..., TestClient], auth: dict[str, str], fake_weights
 ) -> None:
     fake_weights("qwen3.5-9b")
-    listed = client.get("/v1/tasks", headers=auth).json()["tasks"]
-    assert listed == []
-    accepted = post_module(client, auth, a_module(needs=[]))
-    assert accepted.status_code == 400
+    with make_client(enable_llm=True) as client:
+        listed = client.get("/v1/tasks", headers=auth).json()["tasks"]
+        assert listed == []
+        accepted = post_module(client, auth, a_module(needs=[]))
+        assert accepted.status_code == 400
 
-    with_subject = post_module(
-        client,
-        auth,
-        a_module(subjects=[{"kind": "model", "id": "qwen3.5-9b"}]),
-    )
-    assert with_subject.status_code == 202
-    finished = wait_for(client, auth, with_subject.json()["task_id"])
+        with_subject = post_module(
+            client,
+            auth,
+            a_module(subjects=[{"kind": "model", "id": "qwen3.5-9b"}]),
+        )
+        assert with_subject.status_code == 202
+        finished = wait_for(client, auth, with_subject.json()["task_id"])
     assert finished["unmet"] == []
+
+
+def test_a_subject_whose_type_this_server_cannot_turn_on_says_so_per_class(
+    make_client: Callable[..., TestClient], auth: dict[str, str], fake_weights
+) -> None:
+    # The model is on disk, but llm is off and nothing records whether this card holds
+    # it: the module cannot leave it ready to serve, and says which classes go unserved.
+    fake_weights("qwen3.5-9b")
+    with make_client(enable_llm=False, capability=None) as client:
+        accepted = post_module(
+            client, auth, a_module(subjects=[{"kind": "model", "id": "qwen3.5-9b"}])
+        )
+        finished = wait_for(client, auth, accepted.json()["task_id"])
+    assert finished["state"] == "done"
+    assert {row["entry"] for row in finished["unmet"]} == {"enable llm"}
+    assert "clean" in {row["class"] for row in finished["unmet"]}
+    assert all("crucible capability --write" in row["reason"] for row in finished["unmet"])
 
 
 def test_the_done_event_carries_unmet_so_a_stream_reader_need_not_re_read(
@@ -246,4 +265,4 @@ def test_the_done_event_carries_unmet_so_a_stream_reader_need_not_re_read(
         stream = server.get(f"/v1/tasks/{task_id}/events", headers=auth).text
     lines = [line for line in stream.splitlines() if line.startswith("data: ")]
     done = json.loads(lines[-1][len("data: ") :])
-    assert done["unmet"] == [{"class": "pages", "reason": "no card"}]
+    assert done["unmet"] == [{"class": "pages", "reason": "no card", "entry": "resolve pages"}]

@@ -182,19 +182,6 @@ def validate_request(config: Config, backend: Backend, request: dict[str, Any]) 
     validator(config, backend, request)
 
 
-def touches_the_registry(request: dict[str, Any]) -> bool:
-    task_type = request["type"]
-    if task_type == "install":
-        return True
-    if task_type != "module":
-        return False
-    module = request.get("module")
-    if not isinstance(module, dict):
-        return False
-    declared = module.get("job_types")
-    return isinstance(declared, list) and len(declared) > 0
-
-
 EntryOrProblem = ModuleEntry | str
 
 

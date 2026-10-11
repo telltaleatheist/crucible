@@ -7,8 +7,6 @@ from typing import Any
 
 from . import capabilitywords, catalog, installplan, jobenv, verdict
 from .backend import Backend
-from .capabilitystore import decide_for
-from .cardfacts import card_for
 from .config import Config
 from .errors import ApiError
 from .jobenv import INSTALLABLE_JOB_TYPES, INSTALLER_FOR
@@ -16,6 +14,7 @@ from .jobs import ALL_JOB_TYPES
 from .jobtypes import FAMILIES, spec_of
 from .narratorengines import NARRATOR_ENGINE_SAMPLING
 from .tasks import Task, TaskStore, env_installed
+from .installplan import live_decisions
 from .tasks.states import CANCELLED, FAILED, TERMINAL_STATES
 from .voicecatalog import load_all_voices
 
@@ -326,7 +325,7 @@ class InstallOnSubmit:
             "subjects": [{"kind": pull.kind, "id": pull.id} for pull in need.pulls],
         }
         try:
-            task = self._tasks.submit({"type": "module", "module": module}, on_submit=True)
+            task = self._tasks.submit({"type": "module", "module": module})
         except ApiError as exc:
             return exc
         self._task_needs[task.id] = need
@@ -429,7 +428,7 @@ class InstallOnSubmit:
             at = names.index(current)
             rest = [phrases[name] for name in names[at + 1:]]
             return phrases[current] + pace + (f", then {_joined(rest)}" if rest else "")
-        if current == "reload":
+        if current == "reload" or str(current).startswith("enable "):
             return f"turning {need.job_type} on"
         return _then(list(phrases.values()))
 
@@ -486,12 +485,6 @@ class InstallOnSubmit:
             return ", under a minute left"
         minutes = round(seconds / 60)
         return f", about {minutes} minute{'s' if minutes != 1 else ''} left"
-
-
-def live_decisions(config: Config, backend: Backend) -> tuple[Any, Any, str]:
-    card = card_for(config.home, backend.gpu)
-    decisions = decide_for(config, backend, card=card)
-    return decisions, card, verdict.pool_name(backend.kind, backend.gpu.vendor)
 
 
 def _offered(subjects: list[catalog.Subject], capability: str) -> list[str]:

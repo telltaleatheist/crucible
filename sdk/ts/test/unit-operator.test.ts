@@ -20,8 +20,6 @@ import { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
 
 import {
-  CrucibleBusy,
-  CrucibleCardHeld,
   CrucibleClient,
   CrucibleProtocolError,
   CrucibleRefused,
@@ -301,45 +299,6 @@ test('task_busy is a refusal the caller can act on, and it travels', async () =>
   assert.equal(isServerSpecificRefusal('invalid_module'), false);
 });
 
-test('an install refused server_busy for a session names the holder verbatim', async () => {
-  answer(409, {
-    error: {
-      code: 'server_busy',
-      message: 'this server cannot install anything right now',
-      details: {
-        door: 'operator',
-        fact: 'a session',
-        who: "session ses-1 of 'foundry/owens-pc' for 'translate'",
-        holder: 'foundry/owens-pc',
-        session_id: 'ses-1',
-        type: 'session',
-        act: 'translate',
-        model: 'qwen3.8-27b-4bit',
-        status: 'open',
-        since: '2026-09-14T03:00:00+00:00',
-      },
-    },
-  });
-  try {
-    await client().submitTask({ type: 'install', jobType: 'llm' });
-    assert.fail('the client accepted a 409');
-  } catch (error) {
-    // NOT a CrucibleBusy: that type reads a JOB's eight fields and the holder
-    // here is a session, so a client that read it as one would report a protocol
-    // error about a body that is exactly the contract. `details.fact` is the
-    // discriminator and CrucibleCardHeld is what it produces.
-    assert.ok(error instanceof CrucibleCardHeld);
-    assert.equal(error instanceof CrucibleBusy, false);
-    assert.equal(error.fact, 'a session');
-    assert.match(error.heldLine, /^held by a session: /);
-    const details = error.details as Record<string, unknown>;
-    assert.equal(details['fact'], 'a session');
-    assert.equal(details['holder'], 'foundry/owens-pc');
-    assert.equal(details['act'], 'translate');
-    assert.equal(details['model'], 'qwen3.8-27b-4bit');
-  }
-});
-
 // -------------------------------------------------------------- reading one
 
 const TASK = {
@@ -373,22 +332,31 @@ test('task reads the record and keeps the echoed request verbatim', async () => 
   });
 });
 
-test("unmet travels with the class and the capability row's own reason", async () => {
+test("unmet travels with the class, the server's own reason and the module step", async () => {
   answer(200, {
     ...TASK,
     type: 'module',
-    unmet: [{ class: 'pages', reason: 'disabled: mlx-vlm serves no image here' }],
+    unmet: [
+      { class: 'pages', reason: 'disabled: mlx-vlm serves no image here', entry: 'resolve pages' },
+      { class: 'video', reason: 'Cannot make video: it needs 14.1 GiB.', entry: 'install video' },
+    ],
   });
   const task = await client().task('t1');
   assert.deepEqual(task.unmet, [
-    { class: 'pages', reason: 'disabled: mlx-vlm serves no image here' },
+    { class: 'pages', reason: 'disabled: mlx-vlm serves no image here', entry: 'resolve pages' },
+    { class: 'video', reason: 'Cannot make video: it needs 14.1 GiB.', entry: 'install video' },
   ]);
 });
 
 test('an unmet row missing its reason is a protocol error, not a blank', async () => {
   // A window drawing "not on this engine" needs the reason, and there is
   // nothing to fall back to.
-  answer(200, { ...TASK, unmet: [{ class: 'pages' }] });
+  answer(200, { ...TASK, unmet: [{ class: 'pages', entry: 'resolve pages' }] });
+  await assert.rejects(() => client().task('t1'), CrucibleProtocolError);
+});
+
+test('an unmet row missing the step it came from is a protocol error', async () => {
+  answer(200, { ...TASK, unmet: [{ class: 'pages', reason: 'no card' }] });
   await assert.rejects(() => client().task('t1'), CrucibleProtocolError);
 });
 

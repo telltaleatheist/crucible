@@ -1,9 +1,16 @@
 {
   "name": "b-sides",
-  "version": "2.0.4+085acd33d0c6",
+  "version": "2.0.4+1e1458912f77",
   "job_types": [
     {
       "type": "rvc",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "type": "audio",
       "backends": [
         "cuda-linux",
         "mlx-darwin"
@@ -15,6 +22,14 @@
     {
       "kind": "denoise",
       "id": "vocals-roformer",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "yue2-3b",
       "backends": [
         "cuda-linux",
         "mlx-darwin"

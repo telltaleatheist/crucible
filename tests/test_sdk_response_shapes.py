@@ -150,10 +150,7 @@ CASES: list[tuple[str, str, str, type[BaseModel], dict[str, str]]] = [
     ("function", "readRemoval", "entry", responses.JobRemoval, {}),
     ("method", "#failure", "envelope", responses.ErrorBody, {}),
     ("function", "busyRefusal", "body", responses.JobBusyDetails, {
-        "door": "read by heldAtTheOperatorDoor to choose the error class",
-    }),
-    ("function", "heldRefusal", "body", responses.CardHeldDetails, {
-        "door": "read by heldAtTheOperatorDoor to choose the error class",
+        "door": "read by heldBySession to choose the error class",
     }),
 ]
 
@@ -239,11 +236,11 @@ def test_the_sdk_tolerates_every_null_and_absence_the_model_allows(
 
 
 def test_the_door_discriminator_is_the_one_the_sdk_branches_on() -> None:
-    _, branch = function_body(SOURCE, "heldAtTheOperatorDoor")
+    _, branch = function_body(SOURCE, "heldBySession")
     assert "['door']" in branch
-    constant = re.search(r"const OPERATOR_DOOR = '(\w+)';", SOURCE)
+    constant = re.search(r"const SESSION_DOOR = '(\w+)';", SOURCE)
     assert constant is not None
-    door = responses.CardHeldDetails.model_fields["door"].annotation
+    door = responses.SessionBusyDetails.model_fields["door"].annotation
     assert constant.group(1) in door.__args__
     assert "job" in responses.JobBusyDetails.model_fields["door"].annotation.__args__
 

@@ -13,7 +13,6 @@ import {
   CrucibleNotACrucible,
   CrucibleProtocolError,
   CrucibleBusy,
-  CrucibleCardHeld,
   CrucibleRefused,
   CrucibleSessionClosed,
   CrucibleSessionHeld,
@@ -2316,7 +2315,6 @@ export class CrucibleClient {
     }
     if (response.status >= 400) {
       if (code === SERVER_BUSY) {
-        if (heldAtTheOperatorDoor(details)) return heldRefusal(response.status, code, message, details);
         if (heldBySession(details)) return sessionRefusal(response.status, code, message, details);
         return busyRefusal(response.status, code, message, details);
       }
@@ -5452,33 +5450,6 @@ function busyRefusal(
   }
 }
 
-const OPERATOR_DOOR = 'operator';
-
-function heldAtTheOperatorDoor(details: unknown): boolean {
-  if (typeof details !== 'object' || details === null) return false;
-  const door = (details as Record<string, unknown>)['door'];
-  if (typeof door === 'string') return door === OPERATOR_DOOR;
-  return 'fact' in details;
-}
-
-function heldRefusal(
-  status: number,
-  code: string,
-  message: string,
-  details: unknown,
-): CrucibleError {
-  try {
-    const body = asObject(details, 'error.details');
-    return new CrucibleCardHeld(status, code, message, details, {
-      fact: str(body, 'fact', 'error.details'),
-      who: str(body, 'who', 'error.details'),
-    });
-  } catch (cause) {
-    if (cause instanceof CrucibleProtocolError) return cause;
-    throw cause;
-  }
-}
-
 const SESSION_DOOR = 'session';
 
 /** `server_busy` because another client's queue session holds the server. */
@@ -5759,7 +5730,7 @@ function readUnmet(body: Json, where: string): UnmetNeed[] {
   return arrayField(body, 'unmet', where).map((entry, index) => {
     const at = `${where}.unmet[${index}]`;
     const row = asObject(entry, at);
-    return { class: str(row, 'class', at), reason: str(row, 'reason', at) };
+    return { class: str(row, 'class', at), reason: str(row, 'reason', at), entry: str(row, 'entry', at) };
   });
 }
 

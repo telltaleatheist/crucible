@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from . import asrplan
-from .backend import CardFacts
+from .backend import Backend, CardFacts
 from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass, classes_for_job_type
 from .capabilityrecord import desktop_reserve_words
+from .capabilitystore import decide_for
+from .cardfacts import card_for
 from .capabilitywords import (
     api_key_advice,
     describe_card,
@@ -16,10 +18,30 @@ from .capabilitywords import (
     shown_precision,
     spell_floor,
 )
+from .config import Config
 from .errors import ApiError
 from .fit import Candidate, WorkingContext
 from .memorybudget import available_bytes, gib_text
-from .verdict import Decision
+from .verdict import Decision, pool_name
+
+
+def live_decisions(config: Config, backend: Backend) -> tuple[tuple[Decision, ...], Any, str]:
+    """This card decided now, as every fit question asks it: the decisions, the card's
+    facts and the pool's name (install-on-submit, `GET /v1/capability/plan` and a
+    module's fit, crucible/tasks/modulefit.py)."""
+    card = card_for(config.home, backend.gpu)
+    decisions = decide_for(config, backend, card=card)
+    return decisions, card, pool_name(backend.kind, backend.gpu.vendor)
+
+
+def offering_classes(subject_id: str, decisions: tuple[Decision, ...]) -> list[str]:
+    """The classes whose candidates include `subject_id`; empty for a subject no class
+    weighs (rvc's base assets, the llama.cpp engine, a model in a family of its own)."""
+    return [
+        decision.capability
+        for decision in decisions
+        if any(c.id == subject_id for c in decision.candidates)
+    ]
 
 
 def _why_not_best(
@@ -226,6 +248,7 @@ def subject_plan(
 ) -> dict[str, Any]:
     card_words = describe_card(card, total_bytes, pool)
     lines: list[str] = []
+    rows: list[dict[str, Any]] = []
     runs = False
     for decision in decisions:
         entry = BY_NAME.get(decision.capability)
@@ -234,6 +257,7 @@ def subject_plan(
             continue
         line, can = _subject_line(entry, decision, candidate, subject_id, card)
         lines.append(line)
+        rows.append({"capability": entry.name, "usable": can, "line": line})
         runs = runs or can
     if not lines:
         raise ApiError(
@@ -249,8 +273,15 @@ def subject_plan(
         "card_words": card_words,
         "usable": runs,
         "lines": lines,
+        "classes": rows,
         "confirm": f"Download {subject_id}.\n\nYour card ({card_words}):\n{body}\n\n{closing}",
     }
 
 
-__all__ = ["describe_card", "install_plan", "subject_plan"]
+__all__ = [
+    "describe_card",
+    "install_plan",
+    "live_decisions",
+    "offering_classes",
+    "subject_plan",
+]

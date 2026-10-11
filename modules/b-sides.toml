@@ -1,9 +1,27 @@
 [module]
 name = "b-sides"
 
+# The vocal separator: the `denoise` verb runs in the `rvc` env (crucible/jobtypes.py
+# DENOISE). First, because it is the smaller install and B-Sides' voice check waits on it.
 [[job_types]]
 type = "rvc"
+
+# Songs: YuE2 runs in the `audio` env. On an 8 GB card it is held under [audio] low_vram
+# (crucible/lowvram.py decides that from the card), and a card that cannot hold it even so
+# skips it by name (crucible/tasks/modulefit.py) rather than download weights it cannot run.
+[[job_types]]
+type = "audio"
 
 [[subjects]]
 kind = "denoise"
 id = "vocals-roformer"
+
+[[subjects]]
+kind = "model"
+id = "yue2-3b"
+
+# The tag model is not here. B-Sides names it itself (TAG_MODELS, chooseTagModel: the
+# best 4B that fits) and installs it on its first chat (`409 installing`). A
+# `[[needs]] class = "generate"` resolves the SERVER's generate pick, which a ceiling caps
+# but never raises (crucible/verbmodel.py): on an 8 GB card with a 3 GiB desktop that is
+# qwen3.5-0.8b, a model B-Sides never calls.

@@ -11,7 +11,7 @@ from ...cardfacts import card_for
 from ...config import load_config
 from ...errors import ApiError
 from ...inflight import read_act
-from ...installonsubmit import live_decisions
+from ...installplan import live_decisions
 from ...jobenv import INSTALLER_FOR
 from ...narratorengines import NARRATOR_ENGINE_SAMPLING
 from ..caller import client_agent

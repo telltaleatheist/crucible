@@ -39,7 +39,6 @@ from ..sessionqueue import SessionCloser
 from ..settle import Settlement
 from ..tasks import TaskStore
 from ..tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
-from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
 from ..updating import UpdateHold
 from ..voicecatalog import seed_unresolved
@@ -177,17 +176,11 @@ class RegistryKeeper:
         if added:
             _say(f"took up newly enabled job type(s) {added}")
 
-    def reload(self, holder: Callable[[], Any]) -> list[str]:
-        held = holder()
-        if held is not None:
-            raise ReloadRefused(held)
-        self._config.adopt(load_config(self._config.home))
-        rebuilt = self._built(self._config)
-        self.registry.clear()
-        self.registry.update(rebuilt)
-        return sorted(self.registry)
-
     def take_up_installed(self) -> list[str]:
+        """After a task installs or turns a type on: the config as the task left it, and
+        each type it turned on built and ADDED. Nothing is replaced, so a job running on
+        a plugin keeps it, and a task never waits for the card (a flag turned off is
+        honoured by the doors at once, `jobs.resolve`)."""
         self._config.adopt(load_config(self._config.home))
         self.take_up_enabled_types(self._config)
         return sorted(self.registry)
@@ -270,8 +263,6 @@ def _services(
     task_store = TaskStore(
         config,
         backend,
-        reload=lambda: keeper.reload(settlement.holder),
-        holder=settlement.holder,
         take_up=keeper.take_up_installed,
         in_use=lambda subject: catalog_routes.held_on_card(residency, subject),
     )

@@ -161,6 +161,10 @@ export class CrucibleBusy extends CrucibleRefused {
 
 /**
  * 409 `server_busy` from the OPERATOR door: something holds the card and an install may not start.
+ *
+ * @deprecated The server no longer sends it and the client no longer produces it: an install or
+ * module task runs beside whatever holds the card (it adds the job types it turned on and replaces
+ * none). Kept only so an app that still names it compiles; drop its handling.
  */
 export class CrucibleCardHeld extends CrucibleRefused {
   /** `a job`, `a session`, `the claim` or `a chat`. */

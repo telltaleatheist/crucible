@@ -12,7 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from crucible import jobenv, tasks
-from crucible.tasks.states import ReloadRefused
+from crucible.backend import Backend, Gpu
+from crucible.capabilitystore import decide_on, record_of
+from crucible.config import load_config
+from crucible.memorybudget import GIB
+from crucible.tasks import validate as validate_module
 
 from .conftest import FAKE_BACKEND, holding_the_card, parse_sse
 from .fake_hub import CHUNK, FakeHub
@@ -39,7 +43,7 @@ def fake_installer(
 import os, sys, time
 from pathlib import Path
 sys.path.insert(0, {REPO_ROOT!r})
-from crucible.config import CAPABILITY_FLAGS, load_config, write_config
+from crucible.config import load_config, rewrite_config
 
 argv = sys.argv[1:]
 assert argv[0] == "install", argv
@@ -68,21 +72,11 @@ if os.environ.get("FAKE_INSTALL_FAIL") == "1":
     raise SystemExit(3)
 
 config = load_config()
-values = {{flag: getattr(config, flag) for flag in CAPABILITY_FLAGS}}
-values["enable_" + job_type] = True
-write_config(
-    config.home,
-    name=config.name,
-    host=config.host,
-    port=config.port,
-    token=config.token,
-    backend_kind=config.backend_kind,
-    desktop_allowance_bytes=config.desktop_allowance_bytes,
-    retention_days=config.retention_days,
-    desktop_allowance_basis=config.desktop_allowance_basis,
-    desktop_allowance_note=config.desktop_allowance_note,
-    **values,
-)
+# Only the named type's flag, and everything else (the capability record) as it was read.
+rewrite_config(config, flags={{"enable_" + job_type: True}})
+# What a test that reads envs through `built_envs` sees as built.
+(config.home / "fake-built").mkdir(parents=True, exist_ok=True)
+(config.home / "fake-built" / job_type).write_text("1", encoding="utf-8")
 print("fake installer: recorded in " + str(config.path), flush=True)
 """,
         encoding="utf-8",
@@ -568,38 +562,33 @@ def test_an_install_that_fails_says_so_and_leaves_the_registry_alone(
     assert "load-model" not in info["job_types"]
 
 
-def test_an_install_is_refused_while_any_of_the_four_facts_holds_the_card(
+def test_an_install_runs_while_a_chat_holds_the_card(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    with make_client(enable_echo=True) as client:
+    # Victoria's laptop, 2026-10-11: B-Sides' module was refused `server_busy` for as long
+    # as her albums rendered. An install builds an env and ADDS the types it turned on, so
+    # nothing on the card is in its way.
+    with make_client(enable_echo=True, enable_llm=False) as client:
         with holding_the_card(client):
-            response = post(client, auth, {"type": "install", "job_type": "llm"})
-        assert response.status_code == 409
-        body = response.json()["error"]
-        assert body["code"] == "server_busy"
-        assert body["details"]["door"] == "operator"
-        assert body["details"]["fact"] == "a chat"
-        assert body["details"]["in_flight"] == 1
+            events = run(client, auth, {"type": "install", "job_type": "llm"})
+        info = client.get("/v1/info", headers=auth).json()
+    assert kinds(events)[-1] == "done", events
+    assert steps(events) == ["install llm", "reload"]
+    assert "load-model" in info["job_types"]
 
 
-def test_a_session_refusal_carries_the_session_s_own_fields(
+def test_an_install_runs_while_a_queue_session_holds_the_server(
     make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
-    with make_client(enable_echo=True) as client:
+    with make_client(enable_echo=True, enable_llm=False) as client:
         opened = client.post(
             "/v1/queue/sessions",
-            headers={**auth, "X-Crucible-Client": "foundry/owens-pc"},
+            headers={**auth, "X-Crucible-Client": "b-sides/victoria"},
             json={"act": "translate"},
         )
         assert opened.status_code == 202, opened.text
-        response = post(client, auth, {"type": "install", "job_type": "llm"})
-    assert response.status_code == 409
-    details = response.json()["error"]["details"]
-    assert details["door"] == "operator"
-    assert details["fact"] == "a session"
-    assert details["holder"] == "foundry/owens-pc"
-    assert details["act"] == "translate"
-    assert details["session_id"] == opened.json()["session_id"]
+        events = run(client, auth, {"type": "install", "job_type": "llm"})
+    assert kinds(events)[-1] == "done", events
 
 
 def test_the_install_command_is_named_when_there_is_none(
@@ -614,23 +603,14 @@ def test_the_install_command_is_named_when_there_is_none(
     assert "/bin" in str(caught.value)
 
 
-def reload_of(client: TestClient) -> Callable[[], list[str]]:
-    return client.app.state.tasks._reload
-
-
-def test_the_swap_happens_when_nothing_holds_the_card(
-    make_client: Callable[..., TestClient], auth: dict[str, str]
-) -> None:
-    with make_client(enable_echo=True) as client:
-        assert reload_of(client)() == ["echo"]
-
-
-def test_the_swap_refuses_while_a_job_is_on_the_lane(
-    make_client: Callable[..., TestClient], auth: dict[str, str]
+def test_the_take_up_adds_a_type_and_replaces_no_plugin_a_job_runs_on(
+    make_client: Callable[..., TestClient], auth: dict[str, str], fake_installer: Path
 ) -> None:
     import base64
 
-    with make_client(enable_echo=True) as client:
+    with make_client(enable_echo=True, enable_llm=False) as client:
+        registry = client.app.state.store.registry
+        echo = registry["echo"]
         response = client.post(
             "/v1/jobs",
             headers=auth,
@@ -643,46 +623,18 @@ def test_the_swap_refuses_while_a_job_is_on_the_lane(
             },
         )
         assert response.status_code == 202
-        with pytest.raises(ReloadRefused) as caught:
-            reload_of(client)()
-        assert caught.value.held.fact == "a job"
+        events = run(client, auth, {"type": "install", "job_type": "llm"})
+        assert registry["echo"] is echo
+        assert "load-model" in registry
         with client.stream(
             "GET", f"/v1/jobs/{response.json()['job_id']}/events", headers=auth
         ) as stream:
-            parse_sse(line for line in stream.iter_lines())
+            job_events = parse_sse(line for line in stream.iter_lines())
+    assert kinds(events)[-1] == "done", events
+    assert job_events[-1]["event"] == "done", job_events
 
 
-def test_the_swap_refuses_while_a_session_is_open(
-    make_client: Callable[..., TestClient], auth: dict[str, str]
-) -> None:
-    with make_client(enable_echo=True) as client:
-        opened = client.post("/v1/queue/sessions", headers=auth, json={"act": "clean"})
-        assert opened.status_code == 202, opened.text
-        with pytest.raises(ReloadRefused) as caught:
-            reload_of(client)()
-        assert caught.value.held.fact == "a session"
-
-
-def test_the_swap_refuses_while_a_stream_claims_the_card(
-    make_client: Callable[..., TestClient],
-) -> None:
-    with make_client(enable_echo=True) as client:
-        client.app.state.residency.claim("tts stream abc", may_mutate=False)
-        with pytest.raises(ReloadRefused) as caught:
-            reload_of(client)()
-        assert caught.value.held.fact == "the claim"
-
-
-def test_the_swap_refuses_while_a_chat_is_in_flight(
-    make_client: Callable[..., TestClient],
-) -> None:
-    with make_client(enable_echo=True) as client, holding_the_card(client):
-        with pytest.raises(ReloadRefused) as caught:
-            reload_of(client)()
-        assert caught.value.held.fact == "a chat"
-
-
-def test_a_holder_that_arrives_during_the_install_fails_the_task_by_name(
+def test_a_holder_that_arrives_during_the_install_does_not_fail_it(
     make_client: Callable[..., TestClient],
     auth: dict[str, str],
     fake_installer: Path,
@@ -703,15 +655,10 @@ def test_a_holder_that_arrives_during_the_install_fails_the_task_by_name(
         with holding_the_card(client):
             block.unlink()
             events = watch(client, auth, task_id)
-        info = client.get("/v1/info", headers=auth).json()
+            info = client.get("/v1/info", headers=auth).json()
 
-    assert events[-1]["event"] == "failed"
-    assert events[-1]["data"]["code"] == "reload_refused"
-    assert "a chat" in events[-1]["data"]["message"]
-    assert "load-model" in info["job_types"], (
-        "the install wrote the flag; once the card is free the server follows the "
-        "config file and takes the type up"
-    )
+    assert events[-1]["event"] == "done", events
+    assert "load-model" in info["job_types"]
 
 
 def test_a_module_runs_its_entries_in_order_and_ends_done(
@@ -736,7 +683,7 @@ def test_a_module_runs_its_entries_in_order_and_ends_done(
         )
         info = client.get("/v1/info", headers=auth).json()
     assert kinds(events)[-1] == "done"
-    assert steps(events) == ["install llm", f"pull model {MODEL}", "reload"]
+    assert steps(events) == ["install llm", f"pull model {MODEL}", "enable llm", "reload"]
     assert "load-model" in info["job_types"]
 
 
@@ -765,9 +712,10 @@ def test_a_module_skips_what_is_already_true(
         )
     assert kinds(events)[-1] == "done"
     skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
-    assert len(skipped) == 3, skipped
+    assert len(skipped) == 4, skipped
     assert any("install llm" in reason for reason in skipped)
     assert any(MODEL in reason for reason in skipped)
+    assert any("enable llm" in reason and "already on" in reason for reason in skipped)
     assert any("reload" in reason for reason in skipped)
     assert not [e for e in events if e["event"] == "progress"]
 
@@ -800,51 +748,240 @@ def test_a_module_stops_at_the_first_failure_and_keeps_what_finished(
         )
     assert events[-1]["event"] == "failed"
     assert events[-1]["data"]["code"] == "install_failed"
-    assert "step 1 of 3" in events[-1]["data"]["message"]
+    assert "step 1 of 4" in events[-1]["data"]["message"]
     assert steps(events) == ["install llm"]
     assert row["installed"] is False
 
 
-def test_the_checked_in_b_sides_module_is_accepted_and_pulls_its_separator(
-    make_client: Callable[..., TestClient],
-    auth: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # modules/b-sides.module.json as gen-modules.py wrote it, posted the way an app posts one:
-    # entries filtered on the generated `backends` and that key stripped (validate_module
-    # refuses it; commit c2f7a12). The `rvc` env is the one the `denoise` job type runs in
-    # (crucible/jobtypes.py DENOISE), so B-Sides installs `rvc` and pulls the vocals separator.
+# Victoria's laptop: an RTX 3070 Laptop GPU, 8 GiB, its desktop on the integrated GPU. At a
+# 1 GiB allowance this card holds rvc, the separator and YuE2 (under [audio] low_vram,
+# which crucible/lowvram.py turns on for it), and not video or the bf16 qwen3.5-4b.
+EIGHT_GB = Backend(
+    kind="cuda-linux",
+    platform="linux",
+    arch="x86_64",
+    gpu=Gpu(vendor="nvidia", name="NVIDIA GeForce RTX 3070 Laptop GPU", vram_bytes=8 * GIB),
+    detail="test double",
+)
+LAPTOP_DESKTOP = 1 * GIB
+
+
+def card_record(backend: Backend, desktop: int) -> Any:
+    """The capability record `crucible capability --write` leaves on this card."""
+    decisions = decide_on(
+        backend.kind,
+        total_bytes=backend.gpu.vram_bytes,
+        desktop_allowance_bytes=desktop,
+        gpu_vendor=backend.gpu.vendor,
+        card=None,
+        chosen={},
+        audio_low_vram=True,
+        packages=frozenset(),
+    )
+    return record_of(
+        backend.kind,
+        total_bytes=backend.gpu.vram_bytes,
+        desktop_allowance_bytes=desktop,
+        decisions=decisions,
+        routes={},
+    )
+
+
+@pytest.fixture
+def built_envs(home: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Envs read from the markers the fake installer writes, by every reader (the task's
+    install step, the enable door's env check); `built_envs("rvc")` marks one built."""
+
+    def built(config: Any, backend: Any, job_type: str, engine: Any = None) -> bool:
+        return (home / "fake-built" / job_type).is_file()
+
+    monkeypatch.setattr(tasks, "env_installed", built)
+    monkeypatch.setattr(validate_module, "env_installed", built)
+
+    def mark(*job_types: str) -> None:
+        for job_type in job_types:
+            (home / "fake-built").mkdir(parents=True, exist_ok=True)
+            (home / "fake-built" / job_type).write_text("1", encoding="utf-8")
+
+    return mark
+
+
+@pytest.fixture
+def pulled(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    seen: list[tuple[str, str]] = []
+
+    async def fake_pull(self: Any, task: Any, subject: Any) -> None:
+        seen.append((subject.kind, subject.id))
+
+    monkeypatch.setattr(tasks.TaskStore, "_pull", fake_pull)
+    return seen
+
+
+def generated_for(app: str, backend: str) -> dict[str, Any]:
+    """modules/<app>.module.json as gen-modules.py wrote it, posted the way an app posts
+    one: entries filtered on the generated `backends` and that key stripped (validate_module
+    refuses it; commit c2f7a12)."""
     generated = json.loads(
-        (Path(REPO_ROOT) / "modules" / "b-sides.module.json").read_text(encoding="utf-8")
+        (Path(REPO_ROOT) / "modules" / f"{app}.module.json").read_text(encoding="utf-8")
     )
 
     def here(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {key: value for key, value in row.items() if key != "backends"}
             for row in rows
-            if FAKE_BACKEND.kind in row["backends"]
+            if backend in row["backends"]
         ]
 
-    module = {
+    return {
         **generated,
         "job_types": here(generated["job_types"]),
         "subjects": here(generated["subjects"]),
     }
-    assert module["job_types"] == [{"type": "rvc"}]
-    assert module["subjects"] == [{"kind": "denoise", "id": "vocals-roformer"}]
-    pulled: list[tuple[str, str]] = []
 
-    async def fake_pull(self: Any, task: Any, subject: Any) -> None:
-        pulled.append((subject.kind, subject.id))
 
-    monkeypatch.setattr(tasks.TaskStore, "_pull", fake_pull)
-    monkeypatch.setattr(tasks, "env_installed", lambda *a, **k: True)
-    with make_client(enable_echo=True, enable_rvc=True) as client:
+def test_the_b_sides_module_on_an_8_gb_card_leaves_rvc_denoise_and_yue2_ready(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    fake_installer: Path,
+    built_envs: Callable[..., None],
+    pulled: list[tuple[str, str]],
+) -> None:
+    module = generated_for("b-sides", EIGHT_GB.kind)
+    assert module["job_types"] == [{"type": "rvc"}, {"type": "audio"}]
+    assert module["subjects"] == [
+        {"kind": "denoise", "id": "vocals-roformer"},
+        {"kind": "model", "id": "yue2-3b"},
+    ]
+    with make_client(
+        backend=EIGHT_GB, enable_echo=True, capability=card_record(EIGHT_GB, LAPTOP_DESKTOP)
+    ) as client:
         events = run(client, auth, {"type": "module", "module": module})
+        task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
+        info = client.get("/v1/info", headers=auth).json()
+    assert kinds(events)[-1] == "done", events
+    assert steps(events) == [
+        "install rvc",
+        "install audio",
+        "pull denoise vocals-roformer",
+        "pull model yue2-3b",
+        "enable rvc",
+        "enable audio",
+        "enable denoise",
+        "reload",
+    ]
+    assert pulled == [("denoise", "vocals-roformer"), ("model", "yue2-3b")]
+    lines = [e["data"].get("line") for e in events if e["event"] == "progress"]
+    assert "[jobs] enable_denoise = true" in lines
+    assert task["unmet"] == []
+    config = load_config(home)
+    assert (config.enable_rvc, config.enable_denoise, config.enable_audio) == (True, True, True)
+    assert {"rvc", "denoise", "audio"} <= set(info["job_types"])
+
+
+def test_what_this_card_cannot_hold_is_skipped_by_name_and_the_rest_installs(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    fake_installer: Path,
+    built_envs: Callable[..., None],
+    pulled: list[tuple[str, str]],
+) -> None:
+    module = {
+        "name": "too-big-for-a-laptop",
+        "version": "1",
+        "job_types": [{"type": "rvc"}, {"type": "video"}],
+        "subjects": [
+            {"kind": "denoise", "id": "vocals-roformer"},
+            {"kind": "model", "id": "qwen3.5-4b"},
+        ],
+    }
+    with make_client(
+        backend=EIGHT_GB, enable_echo=True, capability=card_record(EIGHT_GB, LAPTOP_DESKTOP)
+    ) as client:
+        events = run(client, auth, {"type": "module", "module": module})
+        task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
+    assert kinds(events)[-1] == "done", events
+    skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
+    assert any(
+        reason.startswith("install video: nothing it serves can run on this card")
+        for reason in skipped
+    ), skipped
+    assert any(
+        reason.startswith("pull model qwen3.5-4b: it cannot run on this card")
+        for reason in skipped
+    ), skipped
+    assert not (home / "fake-built" / "video").exists(), "an env this card cannot run was built"
+    assert pulled == [("denoise", "vocals-roformer")]
+    by_entry: dict[str, list[str]] = {}
+    for row in task["unmet"]:
+        by_entry.setdefault(row["entry"], []).append(row["class"])
+    assert by_entry["install video"] == ["video"]
+    assert "generate" in by_entry["pull model qwen3.5-4b"]
+    assert set(by_entry) == {"install video", "pull model qwen3.5-4b"}
+    video_row = next(row for row in task["unmet"] if row["class"] == "video")
+    assert "GiB" in video_row["reason"]
+    config = load_config(home)
+    assert (config.enable_rvc, config.enable_denoise, config.enable_video) == (True, True, False)
+
+
+def test_a_module_turns_on_the_type_that_serves_a_subject_whose_env_was_already_there(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    built_envs: Callable[..., None],
+    pulled: list[tuple[str, str]],
+) -> None:
+    # Victoria's laptop, 2026-10-11: the rvc env was there, so the module skipped its install,
+    # pulled the separator, and nothing turned `denoise` on; B-Sides had to PUT it on itself.
+    built_envs("rvc")
+    module = {
+        "name": "b-sides",
+        "version": "2.0.4",
+        "job_types": [{"type": "rvc"}],
+        "subjects": [{"kind": "denoise", "id": "vocals-roformer"}],
+    }
+    with make_client(
+        enable_echo=True,
+        enable_rvc=True,
+        enable_denoise=False,
+        capability=card_record(FAKE_BACKEND, 3 * GIB),
+    ) as client:
+        events = run(client, auth, {"type": "module", "module": module})
+        info = client.get("/v1/info", headers=auth).json()
+    assert kinds(events)[-1] == "done", events
+    assert steps(events) == [
+        "install rvc", "pull denoise vocals-roformer", "enable rvc", "enable denoise", "reload",
+    ]
+    lines = [e["data"].get("line") for e in events if e["event"] == "progress"]
+    assert lines == ["[jobs] enable_denoise = true"]
+    assert load_config(home).enable_denoise is True
+    assert "denoise" in info["job_types"]
+
+
+def test_an_enable_the_server_refuses_is_unmet_by_name_and_the_module_is_done(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    built_envs: Callable[..., None],
+    pulled: list[tuple[str, str]],
+) -> None:
+    module = {
+        "name": "separator-only",
+        "version": "1",
+        "job_types": [],
+        "subjects": [{"kind": "denoise", "id": "vocals-roformer"}],
+    }
+    with make_client(enable_echo=True, capability=card_record(FAKE_BACKEND, 3 * GIB)) as client:
+        events = run(client, auth, {"type": "module", "module": module})
+        task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
     assert kinds(events)[-1] == "done", events
     assert pulled == [("denoise", "vocals-roformer")]
+    assert [(row["class"], row["entry"]) for row in task["unmet"]] == [
+        ("denoise", "enable denoise")
+    ]
+    assert "the env it runs in is not built here" in task["unmet"][0]["reason"]
     skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
-    assert any("install rvc" in reason for reason in skipped), skipped
+    assert any(reason.startswith("enable denoise: env_not_built: ") for reason in skipped)
 
 
 def test_a_module_of_pure_pulls_is_not_gated_on_the_card(
@@ -865,7 +1002,7 @@ def test_a_module_of_pure_pulls_is_not_gated_on_the_card(
             },
         )
     assert kinds(events)[-1] == "done"
-    assert steps(events) == [f"pull model {MODEL}"]
+    assert steps(events) == [f"pull model {MODEL}", "enable llm", "reload"]
 
 
 def test_every_task_route_needs_the_token(client: TestClient) -> None:

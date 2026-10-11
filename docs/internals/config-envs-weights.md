@@ -878,11 +878,12 @@ and structured output (`mlx-lm-structured-output` on `server.py`,
 
 - A task is work done to the server (`pull`, `install`, `module`, `engine`,
   `engine-restart`), not with its card. Tasks run one at a time, are not persisted,
-  have no queued state, and are kept in memory (`HISTORY` = 50). A pull may run
-  alongside jobs. An install may not start while any of the four facts
-  (`settle.py`) hold the card, because it ends by swapping the registry. The
-  exception is an install started by `POST /v1/jobs`, which adds plugins without
-  replacing any.
+  have no queued state, and are kept in memory (`HISTORY` = 50). Every task runs
+  beside whatever holds the card: a pull is disk and network, an env build is
+  disk, network and CPU, and an install or module ends in the additive take-up
+  (`take_up_installed`), which adds the types it turned on and replaces no
+  plugin a job is running on. A second task while one runs is still refused
+  `task_busy`.
 - **Pull cancel** is cooperative: `DELETE` sets a flag, and the progress hook raises
   `PullCancelled` on its next call. The cancel check is not throttled; progress
   events are (0.5 s). **Install cancel** sends SIGTERM to the subprocess, with a
@@ -896,6 +897,21 @@ and structured output (`mlx-lm-structured-output` on `server.py`,
 - A module is validated as a whole before anything runs. Class needs are resolved
   per server from its capability record. A class this server cannot serve becomes
   an `unmet` row with the capability row's own reason; it does not fail the module.
+- A module's job types and subjects are judged against THIS card before anything
+  is installed (`tasks/modulefit.py`, reading `installplan.live_decisions`, the
+  same decisions install-on-submit and `GET /v1/capability/plan` read). An env
+  nothing of which runs here is not built; a subject that cannot run here is not
+  downloaded. Each is a `skipped` event and `unmet` rows with the plan's own
+  lines; the rest of the module goes on. A subject no class weighs (rvc's base
+  assets, the llama.cpp engine, a model in a family of its own) is not judged.
+- After its entries, a module turns on the job type each one is for (the named
+  type for an install, the class's type for a need, the subject's own type for a
+  subject: a `denoise` separator is for `denoise`), one `enable <type>` step each,
+  through `jobflags.set_enabled`, the door `PUT /v1/settings/jobs/{type}` uses.
+  A type already on is skipped; a type nothing of the module left here is
+  skipped; a refusal (`job_type_cannot_hold`, `env_not_built`,
+  `job_type_undecided`) is a `skipped` event and `unmet` rows, one per class the
+  entry is for. Every `unmet` row carries `entry`, the step it came from.
 - Engine move and restart are relayed from the host or orchestrator door (NDJSON)
   line by line, with no read deadline. Unreadable lines are forwarded as events.
   Endings:
