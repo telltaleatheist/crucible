@@ -120,9 +120,10 @@ def test_the_controller_info_payload_keeps_its_shape() -> None:
     lines: list[str] = []
     body = controller_info("c@pc", Owner.WSL_UNIT, engine_url="http://127.0.0.1:7100",
                            token=lambda: None, log=lines.append)
-    assert list(body) == ["server", "host", "role", "local_lifecycle_version", "job_types", "engine", "capabilities"]
+    assert list(body) == ["server", "host", "role", "local_lifecycle_version", "job_types", "features", "engine", "capabilities"]
     assert body["engine"] == {"name": None, "url": "http://127.0.0.1:7100", "backend": None, "owner": "wsl-unit"}
     assert body["capabilities"] == [] and body["role"] == "orchestrator"
+    assert body["features"] == []
     assert controller_info("c@pc", Owner.NONE, engine_url="u", token=lambda: "t", log=lines.append)["engine"] is None
 
 

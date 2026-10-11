@@ -69,6 +69,10 @@ def controller_info(
         "role": peer_module.ROLE_ORCHESTRATOR,
         "local_lifecycle_version": LOCAL_LIFECYCLE_VERSION,
         "job_types": [],
+        # The door serves none of the API's features (crucible/features.py); it installs
+        # and starts the engine. Said empty rather than left out: every reader of
+        # /v1/info requires the key (the SDK's info() threw against this door).
+        "features": [],
         "engine": engine,
         "capabilities": capabilities,
     }

@@ -116,7 +116,7 @@ function orchestratorDocument(engine: unknown): Record<string, unknown> {
     },
     role: 'orchestrator',
     job_types: [],
-    features: ['queue.sessions', 'events'],
+    features: [],
     engine,
     capabilities: [],
   };
