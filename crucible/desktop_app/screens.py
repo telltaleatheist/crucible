@@ -30,6 +30,7 @@ JOB_TYPE_WORDS = {
     "audio": ("Audio generation", "Make sound effects, music and songs from words"),
     "segment": ("Cutouts and selections", "Cut a subject out of a picture, or select what you click"),
     "video": ("Video generation", "Make video clips with sound from words or a picture"),
+    "score": ("Song transcription", "Turn a recorded song into a score YuE2 can play"),
 }
 
 HIDDEN_JOB_TYPES = frozenset({"echo"})

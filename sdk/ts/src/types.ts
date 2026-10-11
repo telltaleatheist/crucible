@@ -3067,7 +3067,7 @@ export interface CardEvent {
   readonly at: string;
   /** The model, voice or other subject id. */
   readonly subject: string;
-  /** `llm`, `tts`, `align`, `denoise`, `image`, `audio`, `segment` or `video`. */
+  /** `llm`, `tts`, `align`, `denoise`, `image`, `audio`, `segment`, `video` or `score`. */
   readonly kind: string | null;
   /** The engine's name; null while warming, and for an aligner or a separator. */
   readonly engine: string | null;

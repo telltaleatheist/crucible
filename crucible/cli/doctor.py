@@ -224,6 +224,7 @@ def check_config(host: Host) -> Section:
                 "echo", "llm", "asr", "tts", "align", "rvc", "denoise", "image", "audio",
                 "segment",
                 "video",
+                "score",
             )
         },
         "desktop_allowance_bytes": config.desktop_allowance_bytes,

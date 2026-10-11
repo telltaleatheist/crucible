@@ -1016,6 +1016,27 @@ crucible models pull ltx-2.5-distilled        # gated: accept the licence on Hug
  "params": {"prompt": "A red fox trots through fresh snow at dawn, the camera tracking alongside; low golden light, snow crunching underfoot, a crow calling", "duration_s": 5}}
 ```
 
+### `score`
+
+A recorded song transcribed into a YuE2-native ABC score, for covers (`docs/SCORE.md`):
+SheetSage2 on the MERT-v2-FullSong encoder, on a CUDA card (and, unverified, the Mac). One
+recording in, at most 360 s; `score.abc` (YuE2's section labels, the Vocal voice singing),
+`instrumental.abc` (the form YuE2's validator passed), `sheetsage2.abc` (SheetSage2's own),
+`transcription.mid` and `score.json` out, and `done.score` carries the report. CC BY-NC 4.0.
+
+```bash
+crucible init --enable-score
+crucible install score                  # SheetSage2's own env
+crucible models pull sheetsage2         # SheetSage2 and its encoder, hash-verified
+```
+
+```json
+{"type": "score",
+ "model": "sheetsage2",
+ "params": {"keep_harmony": false},
+ "inputs": {"song.mp3": {"blob_id": "…"}}}
+```
+
 ## The client
 
 `sdk/ts/` is `@crucible/client`, the TypeScript client for this API: ESM and CommonJS

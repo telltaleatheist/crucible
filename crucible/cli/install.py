@@ -505,7 +505,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "this backend runs (Stable Audio 3; YuE2 on cuda-linux). 'segment' "
             "builds one env that runs both segment models (BiRefNet and SAM 2.1). "
             "'video' builds the LTX-2.5 env (diffusers on cuda-linux, ltx-2-mlx on "
-            "mlx-darwin) and places the ffmpeg that muxes its clips"
+            "mlx-darwin) and places the ffmpeg that muxes its clips. 'score' builds "
+            "SheetSage2's own env (its pinned torch 2.8 and transformers 4.45) and places "
+            "the ffmpeg that decodes every recording"
         ),
     )
     install.add_argument(

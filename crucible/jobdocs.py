@@ -27,6 +27,8 @@ from .jobs.echo import EchoParams
 from .jobs.image import ImageParams, LoadImageParams
 from .jobs.llm import LoadParams
 from .jobs.rvc import RvcParams
+from .jobs.score import LoadScoreParams
+from .jobs.score.params import ScoreParams
 from .jobs.segment import LoadSegmentParams
 from .jobs.segment.params import SegmentParams
 from .jobs.tts import LoadVoiceParams
@@ -689,6 +691,59 @@ JOB_DOCS: dict[str, JobDoc] = {
         "video model",
         "A video model id (GET /v1/catalog): `ltx-2.5-distilled`.",
         "ltx-2.5-distilled",
+    ),
+    "score": JobDoc(
+        summary="Transcribes a recorded song into a YuE2-native ABC score with "
+        "SheetSage2: the melodies (and, with `keep_harmony`, the chords), YuE2's section "
+        "labels, and the form YuE2 plays an instrumental cover from.",
+        model="A score model id (GET /v1/catalog): `sheetsage2`.",
+        params=ScoreParams,
+        inputs="Exactly one recording in any format ffmpeg decodes (WAV, FLAC, MP3, "
+        "M4A, OGG, a video's audio track), at most 360 s after `start_s` and "
+        "`max_seconds` crop it.",
+        returns="`score.abc` (the YuE2-native score, its Vocal voice singing), "
+        "`instrumental.abc` (the same with the sung melody moved to the instrument "
+        "voice; the form YuE2's validator passed), `sheetsage2.abc` (SheetSage2's score "
+        "as it came out), `transcription.mid` (SheetSage2's playback MIDI) and "
+        "`score.json` (the report). The `done` event gives `score`, the same report: "
+        "SheetSage2's warnings, each window's tokens and whether it reached its "
+        "5,120-token limit, every label decision, the checks, each score's nominal "
+        "seconds, bars and characters, peak memory and seconds; and `resident` "
+        + RESIDENT_AFTER_A_JOB + ".",
+        example={
+            "type": "score",
+            "model": "sheetsage2",
+            "params": {"keep_harmony": False},
+            "inputs": {"song.mp3": BLOB},
+        },
+        notes=(
+            "Refused by name before the model loads: `invalid_inputs` (not exactly one "
+            "input), `audio_undecodable` (ffmpeg cannot read it), `audio_too_short` "
+            "(less than SheetSage2's 1,025 samples, e.g. `start_s` past the end), "
+            "`audio_too_long` (past 360 s, the longest song YuE2 composes; also "
+            "`max_seconds` above it). Needs ffmpeg on the server (`ffmpeg_missing`).",
+            "SheetSage2's section labels (`silence`, `post-chorus`, `rap`, `solo`, ...) "
+            "are mapped onto YuE2's eight and repeats merged; every decision is in "
+            "`score.yue2_native.labels`. A score that cannot be made native fails "
+            "`score_label_unknown` or `score_not_yue2_native`, and one SheetSage2 could "
+            "not write fails `score_not_transcribed`; `sheetsage2.abc` (when there is "
+            "one) and `score.json` stay with the failed job.",
+            "Loading it takes whatever is resident off the card, a YuE2 included.",
+            "SheetSage2 and its encoder are CC BY-NC 4.0: non-commercial use only "
+            "(docs/SCORE.md).",
+            UNHELD_AFTER_THE_JOB,
+            INSTALLS_ON_SUBMIT,
+        ),
+    ),
+    "unload-score": _unload(
+        "unload-score", "score transcriber", "score or load-score", "sheetsage2"
+    ),
+    "load-score": _load(
+        "load-score",
+        LoadScoreParams,
+        "score model",
+        "A score model id (GET /v1/catalog): `sheetsage2`.",
+        "sheetsage2",
     ),
 }
 

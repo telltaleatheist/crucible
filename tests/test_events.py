@@ -386,7 +386,7 @@ def test_features_are_listed_in_info(client: TestClient, auth: dict[str, str]) -
     info = client.get("/v1/info", headers=auth).json()
     assert info["features"] == sorted(features.FEATURES)
     for name in ("events", "events.topics", "queue.jobs", "queue.calls", "playground",
-                 "decide.items", "tts.stream", "align", "segment", "video",
+                 "decide.items", "tts.stream", "align", "segment", "video", "score",
                  "image.inpaint"):
         assert name in info["features"], name
     assert not any("lease" in name for name in info["features"])

@@ -30,6 +30,7 @@ from .cardkinds import (
     KIND_IMAGE,
     KIND_LLM,
     KIND_NOUNS,
+    KIND_SCORE,
     KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
@@ -60,6 +61,7 @@ __all__ = [
     "ResidentAudio",
     "ResidentImage",
     "ResidentModel",
+    "ResidentScorer",
     "ResidentSegmenter",
     "ResidentSeparator",
     "ResidentVideo",
@@ -408,6 +410,43 @@ class ResidentVideo:
         }
 
 
+@dataclass(frozen=True)
+class ResidentScorer:
+    kind = KIND_SCORE
+
+    model_id: str
+    backend: str
+    engine: str
+    revision: str
+    fingerprint: str
+    device: str
+    dtype: str
+    versions: dict[str, Any]
+    memory_bytes_estimate: int
+    log_path: Path
+    loaded_at: str
+    keeps_calls_together: bool = False
+
+    @property
+    def id(self) -> str:
+        return self.model_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score_model": self.model_id,
+            "backend": self.backend,
+            "engine": self.engine,
+            "revision": self.revision,
+            "fingerprint": self.fingerprint,
+            "device": self.device,
+            "dtype": self.dtype,
+            "versions": dict(self.versions),
+            "memory_bytes_estimate": self.memory_bytes_estimate,
+            "log_path": str(self.log_path),
+            "loaded_at": self.loaded_at,
+        }
+
+
 # Every resident carries `keeps_calls_together`: what its manifest declared
 # (`keep_calls_together` in [model]; only audio manifests declare it so far). The queue
 # reads it to run the queued calls on it back to back before anything that would take it
@@ -421,6 +460,7 @@ Resident = (
     | ResidentAudio
     | ResidentSegmenter
     | ResidentVideo
+    | ResidentScorer
 )
 
 
@@ -844,6 +884,14 @@ class Residency:
     @property
     def video_session(self) -> "WorkerSession | None":
         return None if self.resident_video is None else self._session
+
+    @property
+    def resident_scorer(self) -> ResidentScorer | None:
+        return self._resident if isinstance(self._resident, ResidentScorer) else None
+
+    @property
+    def score_session(self) -> "WorkerSession | None":
+        return None if self.resident_scorer is None else self._session
 
     @property
     def warming(self) -> str | None:

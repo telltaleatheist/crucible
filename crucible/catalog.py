@@ -11,6 +11,7 @@ from . import (
     imageweights,
     llamacpp,
     rvcbase,
+    scoreweights,
     videoweights,
     weights,
 )
@@ -24,6 +25,7 @@ from .cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SCORE,
     KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
@@ -35,6 +37,7 @@ from .imagemodels import load_all_image_manifests
 from .manifests import BACKEND_ENGINES, ModelManifest, host_fit_of, load_all_manifests
 from .residency import Residency
 from .rvcmodels import load_all_rvc_manifests
+from .scoremodels import load_all_score_manifests
 from .segmentmodels import load_all_segment_manifests
 from .videomodels import load_all_video_manifests
 from .voicecatalog import (
@@ -59,6 +62,7 @@ _RESIDENT_KIND_FOR_JOB_TYPE: dict[str, str] = {
     "audio": KIND_AUDIO,
     "segment": KIND_SEGMENT,
     "video": KIND_VIDEO,
+    "score": KIND_SCORE,
 }
 
 
@@ -92,6 +96,7 @@ def subjects(config: Config, backend: Backend) -> list[Subject]:
         *_model_subjects(config, backend),
         *_audio_subjects(config, backend),
         *_video_subjects(config, backend),
+        *_score_subjects(config, backend),
         *_voice_subjects(config, backend),
         *_rvc_subjects(config, backend),
         _rvc_base_subject(config),
@@ -181,6 +186,29 @@ def _video_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         installed=lambda: videoweights.installed(config, manifest, spec),
         pull=lambda **kwargs: videoweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: videoweights.remove(config, manifest, spec),
+    )
+
+
+def _score_subjects(config: Config, backend: Backend) -> list[Subject]:
+    return [
+        _score_subject(config, manifest, manifest.spec(backend.kind))
+        for manifest in load_all_score_manifests().values()
+        if manifest.supports(backend.kind)
+    ]
+
+
+def _score_subject(config: Config, manifest: Any, spec: Any) -> Subject:
+    return Subject(
+        kind="model",
+        id=manifest.id,
+        name=manifest.display,
+        job_type="score",
+        expected_bytes=None,
+        source=f"hf:{spec.hf_repo}",
+        pull_command=manifest.pull_command,
+        installed=lambda: scoreweights.installed(config, manifest, spec),
+        pull=lambda **kwargs: scoreweights.pull(config, manifest, spec, **kwargs),
+        remove=lambda: scoreweights.remove(config, manifest, spec),
     )
 
 
@@ -452,6 +480,7 @@ def declared_ids() -> dict[str, list[str]]:
                 *load_all_audio_manifests(),
                 *load_all_segment_manifests(),
                 *load_all_video_manifests(),
+                *load_all_score_manifests(),
             }
         ),
         "voice": sorted(declared_voice_ids()),
@@ -484,6 +513,7 @@ def backends_declaring(kind: str, subject_id: str) -> list[str]:
             load_all_audio_manifests,
             load_all_segment_manifests,
             load_all_video_manifests,
+            load_all_score_manifests,
         )
     if kind == "voice":
         return declared_voice_backends(subject_id)

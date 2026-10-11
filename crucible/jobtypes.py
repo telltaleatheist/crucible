@@ -8,6 +8,7 @@ from .cardkinds import (
     KIND_DENOISE,
     KIND_IMAGE,
     KIND_LLM,
+    KIND_SCORE,
     KIND_SEGMENT,
     KIND_TTS,
     KIND_VIDEO,
@@ -36,6 +37,7 @@ IMAGE_ENV = Env("image", worker=True)
 AUDIO_ENV = Env("audio", worker=False)
 SEGMENT_ENV = Env("segment", worker=True)
 VIDEO_ENV = Env("video", worker=False)
+SCORE_ENV = Env("score", worker=True)
 
 ENVS: tuple[Env, ...] = (
     LLM_ENV,
@@ -47,6 +49,7 @@ ENVS: tuple[Env, ...] = (
     AUDIO_ENV,
     SEGMENT_ENV,
     VIDEO_ENV,
+    SCORE_ENV,
 )
 
 
@@ -122,6 +125,13 @@ VIDEO = Family(
     "video",
     VIDEO_ENV,
     ("video",),
+    frozenset({"model_not_installed"}),
+    catalog_is_complete=True,
+)
+SCORE = Family(
+    "score",
+    SCORE_ENV,
+    ("score",),
     frozenset({"model_not_installed"}),
     catalog_is_complete=True,
 )
@@ -213,6 +223,16 @@ LOAD_VIDEO = JobTypeSpec(
     CardEffect(makes_resident=KIND_VIDEO),
     leaves_it_resident=True,
 )
+SCORE_JOB = JobTypeSpec(
+    "score", SCORE, CardEffect(makes_resident=KIND_SCORE)
+)
+UNLOAD_SCORE = JobTypeSpec("unload-score", SCORE, CardEffect(takes_off=KIND_SCORE))
+LOAD_SCORE = JobTypeSpec(
+    "load-score",
+    SCORE,
+    CardEffect(makes_resident=KIND_SCORE),
+    leaves_it_resident=True,
+)
 
 JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     ECHO_JOB,
@@ -240,6 +260,9 @@ JOB_TYPE_SPECS: tuple[JobTypeSpec, ...] = (
     VIDEO_JOB,
     UNLOAD_VIDEO,
     LOAD_VIDEO,
+    SCORE_JOB,
+    UNLOAD_SCORE,
+    LOAD_SCORE,
 )
 
 BY_NAME: dict[str, JobTypeSpec] = {spec.name: spec for spec in JOB_TYPE_SPECS}
@@ -300,11 +323,15 @@ __all__ = [
     "LOAD_AUDIO",
     "LOAD_IMAGE",
     "LOAD_MODEL",
+    "LOAD_SCORE",
     "LOAD_SEGMENT",
     "LOAD_VOICE",
     "RVC",
     "RVC_ENV",
     "RVC_JOB",
+    "SCORE",
+    "SCORE_ENV",
+    "SCORE_JOB",
     "SEGMENT",
     "SEGMENT_ENV",
     "SEGMENT_JOB",
@@ -316,6 +343,7 @@ __all__ = [
     "UNLOAD_DENOISER",
     "UNLOAD_IMAGE",
     "UNLOAD_MODEL",
+    "UNLOAD_SCORE",
     "UNLOAD_SEGMENT",
     "UNLOAD_VIDEO",
     "UNLOAD_VOICE",

@@ -50,6 +50,7 @@ def build_app() -> Any:
         enable_audio=True,
         enable_segment=True,
         enable_video=True,
+        enable_score=True,
         desktop_allowance_bytes=3 * 1024 ** 3,
         retention_days=7,
         desktop_allowance_basis="stated",

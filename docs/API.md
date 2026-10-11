@@ -152,6 +152,9 @@ Job types are submitted with `POST /v1/jobs` (`{"type", "model", "params", "inpu
 | `video` | Makes a video clip with its own sound from a prompt (text-to-video), or brings a start picture to life (image-to-video), with LTX-2.5. |
 | `unload-video` | Takes the resident video generator off the card now, whichever job put it there (video or load-video). |
 | `load-video` | Puts a video model on the card and leaves it there, so the first job that uses it starts at once. |
+| `score` | Transcribes a recorded song into a YuE2-native ABC score with SheetSage2: the melodies (and, with `keep_harmony`, the chords), YuE2's section labels, and the form YuE2 plays an instrumental cover from. |
+| `unload-score` | Takes the resident score transcriber off the card now, whichever job put it there (score or load-score). |
+| `load-score` | Puts a score model on the card and leaves it there, so the first job that uses it starts at once. |
 
 ## Throughput
 
@@ -418,7 +421,7 @@ Every model this build has a manifest for, and where it stands here.
 
 ## Jobs
 
-The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md.
+The work. Every job type is created, polled and cancelled through the same routes. The `image` job's params, its result and how to prompt it are in docs/IMAGE.md; the `audio` job's (sound effects, music and songs) are in docs/AUDIO.md; the `segment` job's (subject cutouts and point-and-box selections, as masks) are in docs/SEGMENT.md; the `video` job's (clips with sound from words or a start picture) are in docs/VIDEO.md; the `score` job's (a recorded song transcribed into a YuE2-native ABC score) are in docs/SCORE.md.
 
 ### `POST /v1/jobs`
 
@@ -2382,6 +2385,94 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 }
 ```
 
+### `score`
+
+Transcribes a recorded song into a YuE2-native ABC score with SheetSage2: the melodies (and, with `keep_harmony`, the chords), YuE2's section labels, and the form YuE2 plays an instrumental cover from.
+
+*Model:* A score model id (GET /v1/catalog): `sheetsage2`.
+
+**Params**
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `keep_harmony` | boolean | no | `False` | True keeps the chords: SheetSage2's `full` task, chord symbols in the score's Vocal voice. False (the default, as YuE's cover skill does it) is the `melody-full` task: both melodies, no chords, and YuE2 harmonises the cover itself. |
+| `start_s` | number | no | `0.0` | Seconds into the recording to start at; 0 is its start. |
+| `max_seconds` | number or null | no | `null` | Transcribe at most this many seconds from `start_s`; null is to the end. At most the model's ceiling (360 s for sheetsage2), which also bounds a recording sent whole. |
+
+*Inputs:* Exactly one recording in any format ffmpeg decodes (WAV, FLAC, MP3, M4A, OGG, a video's audio track), at most 360 s after `start_s` and `max_seconds` crop it.
+
+*Returns:* `score.abc` (the YuE2-native score, its Vocal voice singing), `instrumental.abc` (the same with the sung melody moved to the instrument voice; the form YuE2's validator passed), `sheetsage2.abc` (SheetSage2's score as it came out), `transcription.mid` (SheetSage2's playback MIDI) and `score.json` (the report). The `done` event gives `score`, the same report: SheetSage2's warnings, each window's tokens and whether it reached its 5,120-token limit, every label decision, the checks, each score's nominal seconds, bars and characters, peak memory and seconds; and `resident` (what is on the card as the job ends: the model while a session, a claim, a chat or a waiting call holds the card, otherwise null, because the server took it off first and said so in a `note`).
+
+- Refused by name before the model loads: `invalid_inputs` (not exactly one input), `audio_undecodable` (ffmpeg cannot read it), `audio_too_short` (less than SheetSage2's 1,025 samples, e.g. `start_s` past the end), `audio_too_long` (past 360 s, the longest song YuE2 composes; also `max_seconds` above it). Needs ffmpeg on the server (`ffmpeg_missing`).
+- SheetSage2's section labels (`silence`, `post-chorus`, `rap`, `solo`, ...) are mapped onto YuE2's eight and repeats merged; every decision is in `score.yue2_native.labels`. A score that cannot be made native fails `score_label_unknown` or `score_not_yue2_native`, and one SheetSage2 could not write fails `score_not_transcribed`; `sheetsage2.abc` (when there is one) and `score.json` stay with the failed job.
+- Loading it takes whatever is resident off the card, a YuE2 included.
+- SheetSage2 and its encoder are CC BY-NC 4.0: non-commercial use only (docs/SCORE.md).
+- The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
+- A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
+
+```json
+{
+  "type": "score",
+  "model": "sheetsage2",
+  "params": {
+    "keep_harmony": false
+  },
+  "inputs": {
+    "song.mp3": {
+      "blob_id": "<from POST /v1/uploads>"
+    }
+  }
+}
+```
+
+### `unload-score`
+
+Takes the resident score transcriber off the card now, whichever job put it there (score or load-score).
+
+*Model:* The id of the score transcriber that is resident (GET /v1/activity's `resident`, or the resident rows of GET /v1/catalog).
+
+*Params:* none (`{}`).
+
+*Inputs:* None.
+
+*Returns:* No artifacts. The `done` event gives `resident`: what is on the card afterwards, normally null.
+
+- Refused 409 `score_transcriber_not_resident` when that id is not the resident score transcriber; the refusal says what is resident instead.
+- Refused 409 `engine_in_use` while something holds the card (a TTS stream session); the refusal names the holder.
+- An unload of the subject the server is already clearing is admitted and ends `done`.
+
+```json
+{
+  "type": "unload-score",
+  "model": "sheetsage2",
+  "params": {}
+}
+```
+
+### `load-score`
+
+Puts a score model on the card and leaves it there, so the first job that uses it starts at once. Nothing is generated.
+
+*Model:* A score model id (GET /v1/catalog): `sheetsage2`.
+
+*Params:* none (`{}`).
+
+*Inputs:* None.
+
+*Returns:* No artifacts. The `done` event gives `resident`, the score model now on the card.
+
+- A load that ends `done` leaves the subject resident and held by nothing: the next job to end, a queue session closing or the last chat returning takes it off unless something holds it. Load inside a queue session to keep it for the session.
+- A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
+- Refused 409 `engine_in_use` while something holds the card (a TTS stream session); the refusal names the holder.
+
+```json
+{
+  "type": "load-score",
+  "model": "sheetsage2",
+  "params": {}
+}
+```
+
 ## Features
 
 `GET /v1/info` answers `features`, the names below, so an app checks for what it needs instead of comparing versions. A name says the routes and fields exist in this build; whether a job type is enabled on this host is `job_types`. Defined in `crucible/features.py`.
@@ -2421,6 +2512,7 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `rerank.compat` | POST /v1/openai/rerank and /openai/v1/rerank: the same, Cohere/Jina-shaped (`results` with `index` and `relevance_score`, `top_n`). |
 | `resolve` | GET /v1/resolve?verb=&model=&max_params_b=&form=: which model a request would be served by, how it was chosen, whether it is installed and fits, and its facts, or the refusal the door would send; nothing is loaded (docs/VERB-SIZING.md section 11). |
 | `rvc` | The `rvc` job: voice conversion. |
+| `score` | The `score` job: a recorded song transcribed into a YuE2-native ABC score with SheetSage2 (docs/SCORE.md). |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
 | `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
 | `tasks` | POST /v1/tasks: operator tasks (pull, install, module, engine, engine-restart) with their own SSE stream. |

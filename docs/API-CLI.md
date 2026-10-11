@@ -441,7 +441,7 @@ BookForge's `crucible` provider follows).
 | `echo` | — | `{"delay_ms": 25}` | any; each is copied to an artifact of the same name |
 | `tts` | voice id | `{"language","take","chunks":[{"index","text"}]}` | none |
 | `load-voice` | voice id | `{"timeout_s": …}`, plus `reference` for a `zeroshot` voice | none |
-| `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` / `unload-image` / `unload-audio` / `unload-segment` / `unload-video` | id | `{}` | none |
+| `unload-voice` / `unload-model` / `unload-aligner` / `unload-denoiser` / `unload-image` / `unload-audio` / `unload-segment` / `unload-video` / `unload-score` | id | `{}` | none |
 | `load-model` | model id | `{"timeout_s": …, "context": …}` — every key optional; `context` is refused above this host's ceiling (`context_over_limit`) | none |
 | `asr` | asr id | `{"language","vad_filter","word_timestamps"[, "initial_prompt","context","piece_s","overlap_s","speech_only","speech_threshold","speech_pad_s","speech_min_gap_s"]}` | exactly one audio file; `"auto"` is a language (whisper only); `initial_prompt` is whisper's, `context`/`piece_s`/`overlap_s` Qwen3-ASR's; `speech_only` (default false, 2026-09-27) takes stretches without speech out first and lists them in the transcript's `removed`; its three knobs default to 0.3 / 0.3 s / 2 s and are refused without it |
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
@@ -456,6 +456,8 @@ BookForge's `crucible` provider follows).
 | `load-segment` | segment model id | `{}` — warms the model up | none |
 | `video` | video model id | `{"prompt"[, "width","height","duration_s" or "num_frames","fps","seed","steps","audio"]}` — every limit is refused by name; see docs/VIDEO.md | none (text-to-video) or exactly one PNG/JPEG/WebP (image-to-video, its first frame) |
 | `load-video` | video model id | `{}` — warms the model up | none |
+| `score` | score model id (`sheetsage2`) | `{}`, or any of `{"keep_harmony": true, "start_s": …, "max_seconds": …}` — `keep_harmony` keeps the chords (SheetSage2's `full` task; default `melody-full`); `start_s`/`max_seconds` crop; see docs/SCORE.md | exactly one recording in any format ffmpeg decodes, at most 360 s after the crop; out come `score.abc` (YuE2-native), `instrumental.abc`, `sheetsage2.abc` (SheetSage2's own), `transcription.mid` and `score.json` |
+| `load-score` | score model id | `{}` — puts SheetSage2 on the card | none |
 
 **`denoise` keeps the input's timeline.** A stem has the input's sample rate and exactly its
 frame count, whatever was sent, because a client slices the stem at the input's sample offsets.

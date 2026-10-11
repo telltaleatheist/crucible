@@ -158,6 +158,12 @@ test('planJobTypes: video enables its type and builds its own env', () => {
   assert.deepEqual(plan.installs, [{ type: 'video', argv: ['install', 'video', '--verbose'] }]);
 });
 
+test('planJobTypes: score enables its type and builds its own env', () => {
+  const plan = planJobTypes(['score']);
+  assert.deepEqual(plan.enableFlags, ['--enable-score']);
+  assert.deepEqual(plan.installs, [{ type: 'score', argv: ['install', 'score', '--verbose'] }]);
+});
+
 test('planJobTypes: image enables its type and builds its own env', () => {
   const plan = planJobTypes(['image']);
   assert.deepEqual(plan.enableFlags, ['--enable-image']);

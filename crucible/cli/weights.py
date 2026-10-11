@@ -12,6 +12,7 @@ from .. import (
     denoisemodels,
     imageweights,
     rvcbase,
+    scoreweights,
     videoweights,
     weights,
 )
@@ -30,6 +31,7 @@ from ..manifests import (
     load_all_manifests,
 )
 from ..rvcmodels import RvcManifestError, load_all_rvc_manifests, load_rvc_manifest
+from ..scoremodels import ScoreManifest, ScoreManifestError, load_all_score_manifests
 from ..segmentmodels import SegmentManifest, SegmentManifestError, load_all_segment_manifests
 from ..videomodels import VideoManifest, VideoManifestError, load_all_video_manifests
 from . import common
@@ -44,6 +46,7 @@ AnyManifest = (
     | AudioManifest
     | SegmentManifest
     | VideoManifest
+    | ScoreManifest
 )
 
 MANIFEST_ERRORS = (
@@ -54,6 +57,7 @@ MANIFEST_ERRORS = (
     AudioManifestError,
     SegmentManifestError,
     VideoManifestError,
+    ScoreManifestError,
 )
 
 
@@ -66,6 +70,7 @@ def _all_manifests() -> dict[str, AnyManifest]:
         load_all_audio_manifests(),
         load_all_segment_manifests(),
         load_all_video_manifests(),
+        load_all_score_manifests(),
     ):
         for model_id, manifest in extra.items():
             if model_id in merged:
@@ -84,6 +89,8 @@ def _installed(config: Any, manifest: AnyManifest, spec: Any) -> weights.Install
         return videoweights.installed(config, manifest, spec)
     if isinstance(manifest, ImageManifest):
         return imageweights.installed(config, manifest, spec)
+    if isinstance(manifest, ScoreManifest):
+        return scoreweights.installed(config, manifest, spec)
     return weights.installed(config, manifest, spec)
 
 
@@ -299,6 +306,7 @@ def cmd_models_pull(args: argparse.Namespace) -> int:
             audioweights.pull if isinstance(manifest, AudioManifest)
             else videoweights.pull if isinstance(manifest, VideoManifest)
             else imageweights.pull if isinstance(manifest, ImageManifest)
+            else scoreweights.pull if isinstance(manifest, ScoreManifest)
             else weights.pull
         )
         result = pull(

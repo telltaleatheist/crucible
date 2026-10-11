@@ -1,0 +1,191 @@
+[model]
+id = "sheetsage2"
+family = "sheetsage2"
+display = "SheetSage2"
+licence = "CC BY-NC 4.0: the SheetSage2 weights (m-a-p/SheetSage2, model card `license: cc-by-nc-4.0`, LICENSE in the repo) and the MERT-v2-FullSong encoder it is an adapter on (m-a-p/MERT-v2-FullSong, the same licence; its THIRD_PARTY_NOTICES.md says the encoder's weight terms remain CC BY-NC 4.0)"
+licence_url = "https://huggingface.co/m-a-p/SheetSage2/blob/32c7c7473e7b59e1ed36bd8a8fefbd11ae8d468a/LICENSE"
+commercial_use = "non-commercial only: CC BY-NC 4.0 grants no commercial use of the weights or of what they make, and neither repo carries a creator addendum like YuE2's. A commercial use needs the authors' licence"
+code_licence = "unstated: SheetSage2 loads its own Python (trust_remote_code: modeling_sheetsage2.py and the files it imports, and the encoder's modeling_mert2.py) from the same repos, and neither repo states a licence for that code apart from the weights' CC BY-NC 4.0. The THIRD_PARTY_NOTICES.md names only what it builds on (Transformers, Apache 2.0; PyTorch, BSD-style). Crucible pins the code by revision and runs it unmodified; it does not vendor or redistribute it"
+
+[backends.cuda-linux]
+engine = "sheetsage2"
+hf_repo = "m-a-p/SheetSage2"
+# 2026-10-06, "Link SheetSage2 arXiv paper and public code". The weights (model.safetensors,
+# sha256 b235f68091a5f5b644000f2b5acb57d1e70432aca2b34ab1b9cf27236e1f4274, 228,738,564 bytes
+# per the Hugging Face API) are unchanged since eab522a8, the revision YuE's cover skill pins;
+# this one carries the later chord-spelling and key-label fixes in the code.
+revision = "32c7c7473e7b59e1ed36bd8a8fefbd11ae8d468a"
+gated = false
+dtype = "float32"
+autocast = "bfloat16"
+memory_bytes_estimate = 6000000000
+memory_basis = "declared"
+memory_note = "declared 2026-10-11 from the files and the code, not measured through Crucible: the merged model is float32 on the card, the MERT-v2-FullSong encoder 2.53 GB (632,295,808 parameters, its weights_manifest.json) and SheetSage2's six-layer BART decoder about 0.17 GB once the LoRA adapters are folded into the encoder (on the CPU, by SheetSage2's own loader). Each 300 s window is encoded once under a bfloat16 autocast (7,500 frames of 1,024 at 25 Hz through 24 conformer layers with SDPA attention) and decoded token by token to at most 5,120 tokens, with the decoder's KV cache and its cross-attention over those frames. 6 GB is the weights twice over: room for one window's activations, the CUDA context and allocator slack, and it is also this worker's hard cap on the card. SheetSage2 reports its own peak (`peak_gpu_mib`, torch's max_memory_allocated) in every job's report; replace this with the measured figure after the first runs"
+files = [
+  "__init__.py",
+  "config.json",
+  "processor_config.json",
+  "model.safetensors",
+  "audio_sheetsage2.py",
+  "chord_spelling_sheetsage2.py",
+  "configuration_mert2.py",
+  "configuration_sheetsage2.py",
+  "durations_sheetsage2.py",
+  "exports_sheetsage2.py",
+  "generation_sheetsage2.py",
+  "io_sheetsage2.py",
+  "labels_sheetsage2.py",
+  "midi_sheetsage2.py",
+  "modeling_mert2.py",
+  "modeling_sheetsage2.py",
+  "notation_sheetsage2.py",
+  "pipeline_sheetsage2.py",
+  "processing_sheetsage2.py",
+  "rendering_sheetsage2.py",
+  "schema_sheetsage2.py",
+  "tensors_sheetsage2.py",
+  "tokenization_sheetsage2.py",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+]
+max_audio_s = 360
+max_audio_note = "the longest song YuE2 composes (yue2-3b's max_duration_s: about 6 minutes, 9,000 codec tokens at 25 a second), because the score is for YuE2 and a longer one is a song it cannot make whole. SheetSage2 reads 300 s windows overlapping by 200 s, so a recording up to 360 s is at most two windows (0 to 300 s and its last 300 s), each decoded to at most 5,120 tokens. A longer recording is refused `audio_too_long` before anything loads; `start_s` and `max_seconds` transcribe a part of it"
+verified = false
+unverified_note = "no real transcription has run through Crucible yet (Owen has not given card time for it): the memory figure, the seconds per window, the offline load from the pulled files and the share of SheetSage2 scores that pass YuE2's validator are all unmeasured. scripts/check-score-live.py is the first run"
+
+[[backends.cuda-linux.companions]]
+name = "mert"
+hf_repo = "m-a-p/MERT-v2-FullSong"
+# "Release MERT-v2-FullSong", the revision SheetSage2's config names (base_model_revision);
+# its loader refuses any other encoder by these hashes.
+revision = "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42"
+
+[[backends.cuda-linux.companions.files]]
+source = "config.json"
+target = "config.json"
+sha256 = "f2e194895f58be3ddba327255db129ff0e3bee550cc0ecf08e4d22d79ce3bca3"
+bytes = 882
+
+[[backends.cuda-linux.companions.files]]
+source = "configuration_mert2.py"
+target = "configuration_mert2.py"
+sha256 = "77b53ec9d7ee31a599d744fb006e812c7eeaf7390deb46e2f460cf8c17b00bd6"
+bytes = 3860
+
+[[backends.cuda-linux.companions.files]]
+source = "modeling_mert2.py"
+target = "modeling_mert2.py"
+sha256 = "b1a3174e5649c4b26b0c90d8626f0adacfbbba111a58ed3bb72ad651945a2f5c"
+bytes = 17081
+
+[[backends.cuda-linux.companions.files]]
+source = "preprocessor_config.json"
+target = "preprocessor_config.json"
+sha256 = "fc7337f113b71062b8efd03f8a43a07aa769ce85c6a53fdc0b3bb90c299fe63f"
+bytes = 215
+
+[[backends.cuda-linux.companions.files]]
+source = "weights_manifest.json"
+target = "weights_manifest.json"
+sha256 = "413e2ddfa71ae5bb364bfd15364e221249111e14c2f0843ea6162afb776a8300"
+bytes = 241
+
+[[backends.cuda-linux.companions.files]]
+source = "model.safetensors"
+target = "model.safetensors"
+sha256 = "e6dd2ab187d6dd62b6521cd7d8f932e237acf0c5757745a7232082e28391350d"
+bytes = 2529812848
+
+[[backends.cuda-linux.companions.files]]
+source = "LICENSE"
+target = "LICENSE"
+sha256 = "73593d6cad4ca80f3ab1448a4908f92ab802dfffe029561e3b12fa7d07c8b87c"
+bytes = 20000
+
+[backends.mlx-darwin]
+engine = "sheetsage2"
+hf_repo = "m-a-p/SheetSage2"
+revision = "32c7c7473e7b59e1ed36bd8a8fefbd11ae8d468a"
+gated = false
+dtype = "float32"
+memory_bytes_estimate = 8000000000
+memory_basis = "declared"
+memory_note = "declared 2026-10-11 from the files and the code, not measured anywhere: SheetSage2 autocasts on CUDA alone, so on Metal (MPS) the whole window runs in float32 - the same 2.7 GB of merged float32 weights, a 300 s window's encoder activations at twice the CUDA width, the decoder's caches, the torch process and the CPU fallback's copies (PYTORCH_ENABLE_MPS_FALLBACK=1), all in the one unified pool. 8 GB is the CUDA figure and the float32 activations' difference, with the Metal driver's own slack"
+files = [
+  "__init__.py",
+  "config.json",
+  "processor_config.json",
+  "model.safetensors",
+  "audio_sheetsage2.py",
+  "chord_spelling_sheetsage2.py",
+  "configuration_mert2.py",
+  "configuration_sheetsage2.py",
+  "durations_sheetsage2.py",
+  "exports_sheetsage2.py",
+  "generation_sheetsage2.py",
+  "io_sheetsage2.py",
+  "labels_sheetsage2.py",
+  "midi_sheetsage2.py",
+  "modeling_mert2.py",
+  "modeling_sheetsage2.py",
+  "notation_sheetsage2.py",
+  "pipeline_sheetsage2.py",
+  "processing_sheetsage2.py",
+  "rendering_sheetsage2.py",
+  "schema_sheetsage2.py",
+  "tensors_sheetsage2.py",
+  "tokenization_sheetsage2.py",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+]
+max_audio_s = 360
+max_audio_note = "the longest song YuE2 composes (yue2-3b's max_duration_s: about 6 minutes, 9,000 codec tokens at 25 a second), because the score is for YuE2 and a longer one is a song it cannot make whole. SheetSage2 reads 300 s windows overlapping by 200 s, so a recording up to 360 s is at most two windows (0 to 300 s and its last 300 s), each decoded to at most 5,120 tokens. A longer recording is refused `audio_too_long` before anything loads; `start_s` and `max_seconds` transcribe a part of it"
+verified = false
+unverified_note = "MPS is unverified: SheetSage2's authors run it on CUDA (and name the CPU as the fallback), and nothing here has run it on Metal. Whether every MERT-v2 conformer op has an MPS kernel, whether float32 decoding there agrees with CUDA's bfloat16 autocast, the memory figure and the speed are all unknown until a run on the Mac. PYTORCH_ENABLE_MPS_FALLBACK=1 sends an op without a Metal kernel to the CPU rather than failing"
+
+[[backends.mlx-darwin.companions]]
+name = "mert"
+hf_repo = "m-a-p/MERT-v2-FullSong"
+revision = "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42"
+
+[[backends.mlx-darwin.companions.files]]
+source = "config.json"
+target = "config.json"
+sha256 = "f2e194895f58be3ddba327255db129ff0e3bee550cc0ecf08e4d22d79ce3bca3"
+bytes = 882
+
+[[backends.mlx-darwin.companions.files]]
+source = "configuration_mert2.py"
+target = "configuration_mert2.py"
+sha256 = "77b53ec9d7ee31a599d744fb006e812c7eeaf7390deb46e2f460cf8c17b00bd6"
+bytes = 3860
+
+[[backends.mlx-darwin.companions.files]]
+source = "modeling_mert2.py"
+target = "modeling_mert2.py"
+sha256 = "b1a3174e5649c4b26b0c90d8626f0adacfbbba111a58ed3bb72ad651945a2f5c"
+bytes = 17081
+
+[[backends.mlx-darwin.companions.files]]
+source = "preprocessor_config.json"
+target = "preprocessor_config.json"
+sha256 = "fc7337f113b71062b8efd03f8a43a07aa769ce85c6a53fdc0b3bb90c299fe63f"
+bytes = 215
+
+[[backends.mlx-darwin.companions.files]]
+source = "weights_manifest.json"
+target = "weights_manifest.json"
+sha256 = "413e2ddfa71ae5bb364bfd15364e221249111e14c2f0843ea6162afb776a8300"
+bytes = 241
+
+[[backends.mlx-darwin.companions.files]]
+source = "model.safetensors"
+target = "model.safetensors"
+sha256 = "e6dd2ab187d6dd62b6521cd7d8f932e237acf0c5757745a7232082e28391350d"
+bytes = 2529812848
+
+[[backends.mlx-darwin.companions.files]]
+source = "LICENSE"
+target = "LICENSE"
+sha256 = "73593d6cad4ca80f3ab1448a4908f92ab802dfffe029561e3b12fa7d07c8b87c"
+bytes = 20000

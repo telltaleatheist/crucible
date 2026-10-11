@@ -269,6 +269,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         enable_audio=args.enable_audio,
         enable_segment=args.enable_segment,
         enable_video=args.enable_video,
+        enable_score=args.enable_score,
         desktop_allowance_bytes=desktop_allowance_bytes,
         retention_days=DEFAULT_RETENTION_DAYS,
         desktop_allowance_basis=desktop_basis,
@@ -291,6 +292,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"audio:    {'enabled' if args.enable_audio else 'disabled'}")
     print(f"segment:  {'enabled' if args.enable_segment else 'disabled'}")
     print(f"video:    {'enabled' if args.enable_video else 'disabled'}")
+    print(f"score:    {'enabled' if args.enable_score else 'disabled'}")
     for footprint in declared_tts_footprints(backend.kind):
         print(
             f"tts {footprint.engine}: "
@@ -457,6 +459,13 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
         help="register the video (LTX-2.5 text- and image-to-video with sound; a "
         "24 GB CUDA card, or a Mac with 48 GB or more), load-video and unload-video "
         "job types ([jobs] enable_video)",
+    )
+    init.add_argument(
+        "--enable-score",
+        action="store_true",
+        help="register the score (a recorded song transcribed into a YuE2-native ABC "
+        "score with SheetSage2), load-score and unload-score job types "
+        "([jobs] enable_score)",
     )
     init.add_argument(
         "--desktop-allowance-bytes",
