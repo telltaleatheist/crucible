@@ -279,10 +279,11 @@ def cmd_pairing_decide(connection: Connection, args: argparse.Namespace) -> int:
 
 
 def chat_body(args: argparse.Namespace) -> dict[str, Any]:
-    if args.body is not None and (args.model is not None or args.message is not None):
+    shorthand = (args.model, args.message, args.verb, args.max_params_b)
+    if args.body is not None and any(value is not None for value in shorthand):
         raise ClientRefusal(
             "chat_overspecified: --body is the whole request, so it cannot be "
-            "combined with --model or --message"
+            "combined with --model, --message, --verb or --max-params-b"
         )
     if args.body is not None:
         body = read_json_argument(args.body, "--body")
@@ -292,15 +293,18 @@ def chat_body(args: argparse.Namespace) -> dict[str, Any]:
                 f"{type(body).__name__}"
             )
         return body
-    if args.model is None or args.message is None:
+    chooses = args.model is not None or args.verb is not None or args.max_params_b is not None
+    if not chooses or args.message is None:
         raise ClientRefusal(
-            "chat_underspecified: pass --body with the whole request, or "
-            "both --model and --message for a one-shot question"
+            "chat_underspecified: pass --body with the whole request, or --message "
+            "with --model (or --verb and/or --max-params-b) for a one-shot question"
         )
-    return {
-        "model": args.model,
-        "messages": [{"role": "user", "content": args.message}],
-    }
+    body: dict[str, Any] = {"messages": [{"role": "user", "content": args.message}]}
+    for key in ("model", "verb", "max_params_b"):
+        value = getattr(args, key)
+        if value is not None:
+            body[key] = value
+    return body
 
 
 CHAT_PATH = "/v1/openai/chat/completions"
@@ -735,7 +739,7 @@ def cmd_stream_events(connection: Connection, args: argparse.Namespace) -> int:
 
 def cmd_session_open(connection: Connection, args: argparse.Namespace) -> int:
     body: dict[str, Any] = {"act": args.act}
-    for key in ("model", "idle_s", "max_wait_s"):
+    for key in ("model", "max_params_b", "idle_s", "max_wait_s"):
         value = getattr(args, key)
         if value is not None:
             body[key] = value
@@ -1017,6 +1021,11 @@ SESSION_VERBS = (
         arg("--act", required=True, help="the capability class this run is"),
         arg("--model", default=None, help="a model to have resident when it opens"),
         arg(
+            "--max-params-b", dest="max_params_b", type=float, default=None, metavar="B",
+            help="instead of --model: the server's model for --act, capped at B billion "
+                 "parameters",
+        ),
+        arg(
             "--idle", dest="idle_s", type=int, default=None, metavar="SECONDS",
             help="close it after this long with nothing in flight and no item or touch",
         ),
@@ -1154,6 +1163,10 @@ API_VERBS = (
                  "verbatim except `model`",
         ),
         arg("--model", default=None, help="shorthand: the model for a one-shot question"),
+        arg("--verb", default=None,
+            help="shorthand, instead of --model: the verb whose model answers (generate)"),
+        arg("--max-params-b", dest="max_params_b", type=float, default=None, metavar="B",
+            help="shorthand, instead of --model: cap the verb's model at B billion parameters"),
         arg("--message", default=None, help="shorthand: the user message"),
         arg("--stream", action="store_true", help="send stream:true and print each frame"),
         BENCH_ACT,

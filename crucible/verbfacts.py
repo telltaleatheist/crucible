@@ -1,16 +1,20 @@
-"""What an app's picker reads about the embed and rerank verbs: which models serve them,
-what each model's vectors or scores are, and the per-call limits, on `GET /v1/models`
-(each row's `verbs`, `embed`, `rerank`, `package`) and `GET /v1/info` (`verbs`)."""
+"""What an app's picker reads about the verbs a request may address instead of a model
+(embed, rerank, and the chat verbs): which models serve them, what each model's vectors
+or scores are, and the per-call limits, on `GET /v1/models` (each row's `verbs`, `embed`,
+`rerank`, `package`) and `GET /v1/info` (`verbs`)."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from .capabilityclasses import BY_NAME, models_by_class
+from .classnames import CHAT_VERBS
 from .embed import MAX_EMBED_INPUTS
 from .rerank import GENERAL_INSTRUCTION, GENERAL_TEMPLATE, MAX_DOCUMENTS
 
-VERBS: tuple[str, ...] = ("embed", "rerank")
+VERBS: tuple[str, ...] = ("embed", "rerank", *CHAT_VERBS)
+
+CHAT_ROUTE = "POST /v1/openai/chat/completions"
 
 
 def model_facts(
@@ -58,7 +62,9 @@ def _lineup(entry: Any, backend_kind: str) -> list[str]:
 
 def info(config: Any, backend_kind: str) -> dict[str, Any]:
     """`GET /v1/info`'s `verbs`: per verb, whether this server serves it now and with
-    what, its package, the models a request may name, and the per-call limits."""
+    what, its package, the models a request may name, and the per-call limits. A chat
+    verb's route is the chat door, which takes it as `verb` (with `max_params_b`) on a
+    chat that names no model; it has no per-call limits of its own."""
     record = config.capability
     found: dict[str, Any] = {}
     for verb in VERBS:
@@ -66,20 +72,24 @@ def info(config: Any, backend_kind: str) -> dict[str, Any]:
         assert entry.candidates is not None
         row = None if record is None else record.row(verb)
         found[verb] = {
-            "route": f"POST /v1/{verb}",
+            "route": CHAT_ROUTE if verb in CHAT_VERBS else f"POST /v1/{verb}",
             "available": bool(row is not None and row.enabled),
             "registered": row.selected if row is not None and row.enabled else None,
             "reason": None if row is None else row.reason,
             "package": entry.package,
             "package_installed": entry.package is None or entry.package in config.packages,
             "models": _lineup(entry, backend_kind),
-            "limits": (
-                {"max_inputs": MAX_EMBED_INPUTS}
-                if verb == "embed"
-                else {"max_documents": MAX_DOCUMENTS}
-            ),
+            "limits": _limits(verb),
         }
     return found
+
+
+def _limits(verb: str) -> dict[str, int]:
+    if verb == "embed":
+        return {"max_inputs": MAX_EMBED_INPUTS}
+    if verb == "rerank":
+        return {"max_documents": MAX_DOCUMENTS}
+    return {}
 
 
 def served_by_class() -> dict[str, set[str]]:

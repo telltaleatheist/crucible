@@ -315,6 +315,11 @@ class SessionTicket(_Open):
     session_id: str
     status: Literal["queued", "open", "closed"]
     position: int | None
+    model: str | None = Field(
+        description="The model the session opens with resident: the one it named, or the "
+        "one its `max_params_b` chose; null when it named neither (it opens on whatever "
+        "is resident)."
+    )
 
 
 class SessionState(_Open):

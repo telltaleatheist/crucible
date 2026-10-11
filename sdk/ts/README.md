@@ -408,6 +408,19 @@ for await (const delta of crucible.chatStream({ model: 'qwen3.5-9b', messages: [
 await crucible.unloadModel('qwen3.5-9b');   // a job too; watch it the same way
 ```
 
+Or name no model and let each server choose (1.0.142+): `verb` (default `generate`) and
+`maxParamsB`, a ceiling on the server's own pick for the verb that never raises it. The reply's
+`model` says which model answered: on a 24 GiB PC `qwen3.5-4b` (bf16), on an 8 GiB laptop the
+`qwen3.5-4b-8bit` that server already uses.
+
+```ts
+const tags = await crucible.chat({ maxParamsB: 4, messages, responseFormat });
+console.log(tags.model);
+const session = await crucible.session({ act: 'generate', maxParamsB: 4 });
+console.log(session.model);   // the model the session holds
+await crucible.loadModel(null, { verb: 'generate', maxParamsB: 4 });
+```
+
 ### `models()`
 
 `ModelInfo` carries four booleans that are four different facts, and none of them implies

@@ -145,7 +145,7 @@ class Fake {
       } else {
         this.say('opened', { opened_at: '2026-10-01T10:00:01+00:00', model: null, load_job: null });
       }
-      json(response, 202, { session_id: this.sessionId, ...this.ticket });
+      json(response, 202, { session_id: this.sessionId, model: null, ...this.ticket });
       return;
     }
     if (method === 'GET' && path === `${own}/events`) {

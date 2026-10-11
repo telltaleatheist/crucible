@@ -540,6 +540,42 @@ test('unloadModel submits an unload-model job the same way', async () => {
   });
 });
 
+test('a chat may name a verb and a ceiling instead of a model, and reads the model chosen', async () => {
+  handle = (_request, response) => json(response, 200, { ...COMPLETION, model: 'qwen3.5-4b' });
+  const answer = await client().chat({ maxParamsB: 4, messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(JSON.parse(lastBody), {
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    max_params_b: 4,
+  });
+  assert.equal(answer.model, 'qwen3.5-4b');
+  await client().chat({ verb: 'translate', messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(JSON.parse(lastBody), {
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    verb: 'translate',
+  });
+  await assert.rejects(
+    client().chat({ maxParamsB: 0, messages: [{ role: 'user', content: 'hi' }] }),
+    (error: unknown) => error instanceof CrucibleConfigError && error.option === 'maxParamsB',
+  );
+});
+
+test('loadModel with no model sends the verb and the ceiling as params, and needs one of them', async () => {
+  handle = (_request, response) => json(response, 200, { job_id: 'job-load-4' });
+  await client().loadModel(null, { verb: 'generate', maxParamsB: 4 });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'load-model',
+    params: { verb: 'generate', max_params_b: 4 },
+    inputs: {},
+  });
+  await assert.rejects(client().loadModel(null), (error: unknown) => {
+    assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+    assert.equal(error.option, 'model');
+    return true;
+  });
+});
+
 test('loadModel refuses an empty model id by name rather than posting it', async () => {
   handle = (_request, response) => json(response, 200, { job_id: 'never' });
   await assert.rejects(client().loadModel(''), (error: unknown) => {
@@ -1073,10 +1109,11 @@ test('a completion with no content and no reasoning is still the plain missing-f
   );
 });
 
-test('chat requires model and messages, and names the one that is missing', async () => {
+test('chat requires messages and a well-formed model, and names what is wrong', async () => {
   handle = (_request, response) => json(response, 200, COMPLETION);
   const cases: Array<[Record<string, unknown>, string]> = [
-    [{ messages: [{ role: 'user', content: 'hi' }] }, 'model'],
+    [{ model: '', messages: [{ role: 'user', content: 'hi' }] }, 'model'],
+    [{ verb: '', messages: [{ role: 'user', content: 'hi' }] }, 'verb'],
     [{ model: 'qwen3.5-9b' }, 'messages'],
     [{ model: 'qwen3.5-9b', messages: [] }, 'messages'],
     [{ model: 'qwen3.5-9b', messages: [{ role: 'oracle', content: 'hi' }] }, 'messages[0].role'],

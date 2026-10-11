@@ -172,6 +172,17 @@ class SessionOpen(BaseModel):
         description="A model to have resident when the session opens; it is loaded for "
         "the session (a load-model job attributed to it) when it is not.",
     )
+    max_params_b: float | None = Field(
+        default=None,
+        gt=0,
+        description="In place of `model`: open with the model this server registered "
+        "for `act`, capped at this many billions of parameters (docs/VERB-SIZING.md rule "
+        "8). This server's own pick for the verb is kept when it is at or below the "
+        "ceiling, and a pick above it is replaced by the biggest that fits this card at "
+        "or below it; the ticket's `model` names the one chosen. Refused for an `act` "
+        "with no size goal (`verb_not_sized`), beside a `model` (`model_with_ceiling`), "
+        "and when nothing fits (`nothing_fits_ceiling`).",
+    )
     idle_s: int = Field(
         default=DEFAULT_IDLE_S,
         ge=MIN_IDLE_S,

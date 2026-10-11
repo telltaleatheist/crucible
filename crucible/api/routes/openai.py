@@ -7,10 +7,12 @@ from typing import Any
 
 import httpx
 from fastapi import Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
-from ... import upstreamrecord
+from ... import upstreamrecord, verbmodel
 from ...callqueue import take_a_turn
+from ...classnames import DEFAULT_CHAT_VERB
 from ...embed import refuse_vectors_only
 from ...engines import (
     chat_admission,
@@ -27,7 +29,7 @@ from ...prefill import (
     take_prefill,
     with_prefill,
 )
-from ...queuerequest import queue_of
+from ...queuerequest import QueueChoice, queue_field, queue_of
 from ...residency import serves_model
 from ...sampling import SAMPLING_HEADER, apply_defaults
 from ...structured import (
@@ -61,6 +63,63 @@ from ..proxy import (
     settle_after_chat,
 )
 from ..upstream import forward_to_upstream, routed_upstream_rows
+
+
+class ChatCompletionBody(BaseModel):
+    """The chat door's body as the API reference shows it. The door reads the raw JSON
+    (every member OpenAI's API has is forwarded to the engine as sent), so this model is
+    never validated against a request: it documents the members the door itself reads,
+    and the ones Crucible adds."""
+
+    model_config = ConfigDict(extra="allow", use_attribute_docstrings=True)
+
+    model: str | None = None
+    """A Crucible model id, or `<upstream>/<id>` for a routed upstream. Left out (or
+    null), the chat is served by the model this server registered for `verb`, capped by
+    `max_params_b`, and the reply's `model` names the one chosen."""
+    messages: list[dict[str, Any]]
+    """OpenAI's messages, forwarded as sent."""
+    verb: str | None = None
+    """Crucible's: which verb's model serves a chat that names no model, one of
+    `generate` (the default: open-ended chat), `clean`, `translate`, `simplify`,
+    `analysis`. Beside a `model`, that model is held to the verb's rules (it must be in
+    the verb's lineup here, `model_not_for_verb`, and fit the card unless it is the verb's
+    Settings choice, `model_does_not_fit`). Another verb is refused `verb_not_for_chat`,
+    an unknown name `unknown_verb`."""
+    max_params_b: float | None = Field(default=None, gt=0)
+    """Crucible's: a ceiling, in billions of parameters, on the verb's model: this
+    server's own pick (its Settings choice, else the biggest that fits up to the verb's
+    goal) is kept when it is at or below the ceiling, and a pick above it is replaced by
+    the biggest model that fits this card at or below the ceiling, the most parameters
+    first, then the highest precision. Never raises the pick. Nothing at or below it:
+    `nothing_fits_ceiling`; beside a `model`: `model_with_ceiling`."""
+    stream: bool = False
+    """OpenAI's: answer as server-sent events."""
+    response_format: dict[str, Any] | None = None
+    """OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or
+    refused `structured_output_not_served` before anything is sent."""
+    json_whitespace: str | None = None
+    """Crucible's: `compact` or `flexible` (the default), beside a JSON
+    `response_format`."""
+    prefill: str | None = None
+    """Crucible's: the start of the answer; the reply's content is what the model wrote
+    after it."""
+    form: str | None = None
+    """Crucible's: which form of the named `model` serves the chat. Without a `model` it
+    is refused `form_without_model`."""
+    queue: QueueChoice = queue_field(
+        "Crucible's: absent, a chat whose model is not resident or whose engine is full "
+        "waits in the server's line (up to an hour); `{\"max_wait_s\": N}` changes the "
+        "wait; `false` refuses at once."
+    )
+
+
+def _documented_body() -> dict[str, Any]:
+    """ChatCompletionBody's schema for the route's OpenAPI entry, its nested models
+    referred to the document's own components (QueueRequest is one already)."""
+    schema = ChatCompletionBody.model_json_schema(ref_template="#/components/schemas/{model}")
+    schema.pop("$defs", None)
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
 
 
 def _refuse_before_waiting(
@@ -147,6 +206,27 @@ def as_sent(
     return body
 
 
+def _chat_model(
+    ctx: AppContext,
+    named: str | None,
+    verb: str | None,
+    form: str | None,
+    ceiling: float | None,
+) -> verbmodel.VerbModel:
+    """The model a chat that addresses a verb is served by (docs/VERB-SIZING.md rule 8,
+    section 1a.3): its named `model` held to the verb's rules when it states a `verb`,
+    else what this server registered for the verb, capped by `max_params_b` when it sends
+    one. A chat that names a model and no verb never comes here: it is served as named."""
+    chosen_verb = DEFAULT_CHAT_VERB if verb is None else verb
+    verbmodel.refuse_unchattable_verb(chosen_verb)
+    resident = ctx.residency.resident_model
+    return verbmodel.resolve(
+        chosen_verb, ctx.config, ctx.backend,
+        model=named, form=form, max_params_b=ceiling,
+        resident=None if resident is None else resident.model_id,
+    )
+
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private, openai = routers.private, routers.openai
     config, residency = ctx.config, ctx.residency
@@ -182,8 +262,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
             ],
         }
 
-    @private.post("/openai/chat/completions")
-    @openai.post("/chat/completions")
+    @private.post("/openai/chat/completions", openapi_extra=_documented_body())
+    @openai.post("/chat/completions", openapi_extra=_documented_body())
     async def openai_chat_completions(request: Request) -> Response:
         """An OpenAI chat completion, proxied to the resident engine or, for a
         `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not
@@ -209,23 +289,45 @@ def register(routers: Routers, ctx: AppContext) -> None:
         /v1/models, the row's `forms`); without it the resident form answers, and a load
         made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused
         `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
+        A chat may leave `model` out and be served by a verb's model instead: `verb`
+        (default `generate`) and `max_params_b`, a ceiling on this server's own pick for
+        the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model`
+        names the model chosen. The same choice opens a queue session
+        (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`,
+        `params.max_params_b`).
         """
         raw = await request.body()
         body = chat_body(raw)
-        requested = body.get("model")
-        if not isinstance(requested, str) or requested == "":
+        named = body.get("model")
+        if named is not None and (not isinstance(named, str) or named == ""):
             raise ApiError(
                 400,
                 "model_required",
-                "a chat request must name a model; this server proxies only to the "
-                "model that is resident",
+                f"a chat's `model` is a model id, or left out (or null) to be served by "
+                f"the model this server registered for a verb (`verb`, default "
+                f"{DEFAULT_CHAT_VERB!r}, capped by `max_params_b`); got {named!r}",
+                {"model": named},
             )
+        sent_choice = "verb" in body or verbmodel.CEILING in body or named is None
+        verb = verbmodel.take_verb(body)
+        ceiling = verbmodel.take_ceiling(body)
         sent_queue = "queue" in body
         queued = queue_of(body)
         prefill = take_prefill(body)
         form = take_form(body)
         json_whitespace = take_json_whitespace(body)
-        if sent_queue or prefill is not None or form is not None or json_whitespace is not None:
+        if named is None or verb is not None or ceiling is not None:
+            requested = _chat_model(ctx, named, verb, form, ceiling).model
+            body["model"] = requested
+        else:
+            requested = named
+        if (
+            sent_choice
+            or sent_queue
+            or prefill is not None
+            or form is not None
+            or json_whitespace is not None
+        ):
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
             if form is not None:

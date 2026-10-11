@@ -8,6 +8,13 @@ ROUTABLE_CLASSES: tuple[str, ...] = (
     "generate",
 )
 
+# The verbs a chat may name instead of a model (POST /v1/openai/chat/completions `verb`,
+# docs/VERB-SIZING.md rule 8): the text verbs whose work is a chat. A chat that names no
+# verb is `generate`'s, the open-ended chat (rule 2's table: "`generate` (chat)").
+CHAT_VERBS: tuple[str, ...] = ROUTABLE_CLASSES
+
+DEFAULT_CHAT_VERB = "generate"
+
 AUDIO_CLASSES: tuple[str, ...] = ("sfx", "music", "song")
 
 SEGMENT_CLASSES: tuple[str, ...] = ("cutout", "select")
