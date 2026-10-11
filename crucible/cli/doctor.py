@@ -38,6 +38,7 @@ from ..narratorengines import NARRATOR_ENGINE_SAMPLING
 from . import common
 from .capability import _card_facts, _card_line
 from .common import EXIT_OK, EXIT_REFUSED, _env_spec, _fail
+from .install import cmd_env_tools
 
 CAPABILITY_WRITE = "crucible capability --write"
 DOCTOR_JSON = "crucible doctor --json"
@@ -1262,3 +1263,15 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     env_patch.add_argument("job_type", choices=sorted(envpatches.patched_job_types()))
     env_patch.set_defaults(func=cmd_env_patch)
+    env_tools = env_commands.add_parser(
+        "tools",
+        help=(
+            "place every pinned host tool (ffmpeg, the C compiler, llama-server) an "
+            "installed job type uses at this release's pin; a current one is kept. "
+            "Exits non-zero by name when one cannot be placed (a deploy runs it)"
+        ),
+    )
+    env_tools.add_argument(
+        "--verbose", action="store_true", help="say each download as it starts"
+    )
+    env_tools.set_defaults(func=cmd_env_tools)

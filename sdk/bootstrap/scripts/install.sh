@@ -327,6 +327,9 @@ fi
 say "env-patch-llm"
 "$CRUCIBLE" 'env' 'patch' 'llm' || die "step_failed: env-patch-llm"
 
+say "env-tools"
+"$CRUCIBLE" 'env' 'tools' || die "step_failed: env-tools"
+
 say "service-install"
 "$CRUCIBLE" 'service' 'install' || die "step_failed: service-install"
 

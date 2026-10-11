@@ -243,6 +243,18 @@ def _ensure_llama_server(config: Config, args: argparse.Namespace) -> str | None
     runs on (crucible/llamacpp.py, cuda_linux_engine). The env is built first because
     the binary loads its CUDA libraries out of it. A platform Crucible builds no
     llama-server for has nothing to place; a GGUF model there is refused at its load."""
+    refusal = _place_llama_server(config, args)
+    if refusal is not None:
+        return refusal
+    found = llamacpp.cuda_linux_engine(config.home)
+    if not found.installed:
+        return f"llama-server was placed and still cannot start: {found.detail}"
+    return None
+
+
+def _place_llama_server(config: Config, args: argparse.Namespace) -> str | None:
+    """The pinned llama-server under tools/bin, or why not. `ensure_llama_server` keeps a
+    binary whose stamp names the pin, so this is what an update re-runs."""
     if hosttools.llama_server_build() is None:
         print(
             f"llama-server: no pinned build for {hosttools.host_platform()} "
@@ -262,9 +274,6 @@ def _ensure_llama_server(config: Config, args: argparse.Namespace) -> str | None
             f"the llm env is installed, but llama-server is not: {exc}. Installing "
             "again keeps the env and retries only the llama-server"
         )
-    found = llamacpp.cuda_linux_engine(config.home)
-    if not found.installed:
-        return f"llama-server was placed and still cannot start: {found.detail}"
     return None
 
 
@@ -395,6 +404,48 @@ def _ensure_tools(config: Config, args: argparse.Namespace) -> str | None:
             "speech_only will fetch it"
         )
     return None
+
+
+def cmd_env_tools(args: argparse.Namespace) -> int:
+    """`crucible env tools`: every pinned host tool an installed job type uses, placed at
+    THIS release's pin. The installer's `env-tools` step.
+
+    An upgrade installs a new wheel and runs no `crucible install`, and only an install
+    placed host tools, so a pin that moved (llama-server in 1.0.132) left the old binary
+    under tools/bin through every later update: Victoria's laptop went 1.0.124 → 2.0.0
+    and its doctor said llama-server was not placed while the installer said ready. This
+    places exactly what `crucible install` of the job types already here would, through
+    the same `_ensure_tools` and `_place_llama_server`; each `ensure_*` keeps a tool whose
+    stamp names the pin and says so, and a tool that cannot be placed is a refusal. Whether
+    the llm env itself is current is the env's question (`doctor`, install-on-submit), not
+    this step's: it answers for the binaries."""
+    config, backend = common.here()
+    if backend.kind == LLAMA_WINDOWS:
+        print(
+            f"host tools: {LLAMA_WINDOWS} places none; its llama.cpp is "
+            "`crucible install llm`'s"
+        )
+        return common.EXIT_OK
+    installed = [
+        spec
+        for spec in jobenv.every_env(backend.kind)
+        if jobenv.env_python(config.home, spec).is_file()
+    ]
+    if not installed:
+        print(
+            f"host tools: no job type's env is installed under {config.home / 'envs'}, "
+            "so there is none to place (`crucible install <type>` places them)"
+        )
+        return common.EXIT_OK
+    print(f"host tools: for the envs installed here, {[spec.key for spec in installed]}")
+    refusal = _ensure_tools(config, args)
+    if refusal is not None:
+        return _fail(refusal)
+    if backend.kind == CUDA_LINUX and any(spec.job_type == "llm" for spec in installed):
+        refusal = _place_llama_server(config, args)
+        if refusal is not None:
+            return _fail(refusal)
+    return common.EXIT_OK
 
 
 def _install_llama_windows(

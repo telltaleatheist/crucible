@@ -113,6 +113,12 @@ the code does not say by itself.
   an upgrade installs a new wheel without rebuilding an unchanged env and so skips
   `install_env`'s own patch step. It reports `not_applicable` where there is
   nothing to patch.
+- `env-tools` runs `crucible env tools` after it, for the same reason: an upgrade runs no
+  `crucible install`, which was the only thing that placed host tools, so a moved pin
+  (llama-server, 1.0.132) never reached an updated host. It re-places each pinned tool an
+  installed job type uses whose stamp differs from the release's pin, keeps a current one,
+  and fails the install by name when one cannot be placed. It gets the `runtimeMs` budget:
+  a re-place is a download (llama-server is 108 MB).
 - A start request accepted by launchd/systemd does not prove the API is up; the
   final `local-start` step waits for the authenticated identity before success.
 - The token is minted on the client unless the operator brought one (the droplet
