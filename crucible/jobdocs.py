@@ -418,23 +418,37 @@ JOB_DOCS: dict[str, JobDoc] = {
         model="A separator id: `vocals-roformer` or `denoise-roformer` "
         "(GET /v1/catalog lists them and whether each is installed).",
         params=DenoiseParams,
-        inputs="Exactly one audio file libsndfile reads (WAV, FLAC), at the separator's "
-        "own rate, 44100 Hz. Convert a video's audio first, e.g. "
-        "`ffmpeg -i in.mp4 -vn -ar 44100 -c:a pcm_s16le in.wav`.",
-        returns="WAV stems at 44100 Hz with the input's channel count and exactly its "
-        "frame count, so they line up sample for sample. `stems: \"primary\"` (the "
-        "default) returns only the primary stem (`…_(Vocals)_….wav` or `…_(Dry)_….wav`); "
-        "`stems: \"all\"` returns every stem, the primary first. The `done` event names "
-        "`primary_stem`, lists `stems`, and gives `sample_rate`, `frames`, "
-        "`separate_seconds` and `load_seconds`.",
+        inputs="Exactly one audio file in any format ffmpeg decodes (WAV, FLAC, mp3, m4a, "
+        "a video's sound...) at any rate. A WAV or FLAC at the separator's own rate "
+        "(44100 Hz) goes to it as sent; anything else is decoded with the server's ffmpeg "
+        "and resampled to 44100 Hz first. Another job's held artifact is an input as it "
+        "is: `{\"artifact\": {\"job_id\", \"name\"}}`.",
+        returns="Stems at the input's own sample rate and exactly its frame count, so "
+        "they line up sample for sample with what was sent (a 48 kHz song comes back "
+        "48 kHz). `stems: \"primary\"` (the default) returns only the primary stem "
+        "(`<input>_(vocals)_….wav` or `<input>_(Dry)_….wav`); `stems: \"all\"` returns "
+        "every stem, the primary first (`vocals-roformer`: `…_(vocals)_…` then "
+        "`…_(other)_…`, the instrumental). `format` is every stem's container: `wav` (the "
+        "default), `flac` or `mp3`, encoded as an audio job's are. The `done` event names "
+        "`primary_stem`, lists `stems`, and gives `format`, `sample_rate`, `frames`, "
+        "`input` (codec, container, rate, frames, channels), `separated` (the rate and "
+        "frames the separator worked at, whether the input was decoded and resampled, "
+        "and that said in a sentence), `separate_seconds` and `load_seconds`.",
         example={
             "type": "denoise",
             "model": "vocals-roformer",
-            "params": {"stems": "all"},
-            "inputs": {"song.wav": {"blob_id": "<from POST /v1/uploads>"}},
+            "params": {"stems": "all", "format": "mp3"},
+            "inputs": {"song.flac": {"artifact": {"job_id": "<a held audio job>",
+                                                  "name": "audio.flac"}}},
         },
         notes=(
-            "Nothing is resampled: another sample rate is refused by name.",
+            "The separator always works on lossless audio at its own rate; the one "
+            "lossy encode (`format: \"mp3\"`) is of the finished stem. A resampled input "
+            "has every stem resampled back to its rate and frames.",
+            "Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`); `crucible install "
+            "rvc` places them.",
+            "A stem the separator finds silent (a clean instrumental's vocals) comes back "
+            "as digital silence, named in `separated.silent_stems`.",
             "A model not installed yet is installed on submit where the server allows "
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",

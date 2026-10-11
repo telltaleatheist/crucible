@@ -6,7 +6,7 @@ from typing import Any, Callable, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ... import workers
+from ... import hosttools, workers
 from ...backend import CUDA_LINUX
 from ...cardkinds import KIND_DENOISE
 from ...clock import utcnow
@@ -59,9 +59,9 @@ JOB_TYPE = DENOISE_JOB.name
 ENV_JOB_TYPE = RVC_ENV.name
 
 NO_PARAMS = (
-    "denoise takes one param, `stems` (\"primary\" or \"all\") — every separation "
-    "knob is an engine default this server does not put on the wire "
-    "(docs/internals/asr-and-align.md)"
+    "denoise takes two params, `stems` (\"primary\" or \"all\") and `format` "
+    "(\"wav\", \"flac\" or \"mp3\") — every separation knob is an engine default "
+    "this server does not put on the wire (docs/internals/asr-and-align.md)"
 )
 
 # Which stems a run publishes. "primary" is the manifest's answer (the dry voice, the
@@ -72,7 +72,19 @@ NO_PARAMS = (
 PRIMARY_STEM_ONLY = "primary"
 EVERY_STEM = "all"
 
-OUTPUT_FORMAT = "WAV"
+# What the separator itself writes, always: lossless, so the one encode a client's
+# `format` asks for happens once, after separation (stemaudio.finish).
+SEPARATOR_FORMAT = "WAV"
+
+# A stem's container: the same three an audio job offers (jobs/audio/params.FORMATS),
+# written with the same encodings (workerio.write_audio: 24-bit FLAC, 192 kbps CBR mp3).
+# wav is the default and is the separator's own file, untouched, as before formats.
+STEM_FORMATS: tuple[str, ...] = ("wav", "flac", "mp3")
+
+FFMPEG_WHY = (
+    "decodes every input that is not WAV or FLAC at the separator's own rate with ffmpeg "
+    "and probes it with ffprobe — `crucible install rvc` places Crucible's pinned build"
+)
 
 READY_SILENCE_TIMEOUT_SECONDS = 900.0
 
@@ -175,6 +187,12 @@ class DenoiseParams(BaseModel):
         'voice); "all" also returns what was separated from it (the instrumental, the '
         "noise), the primary first.",
     )
+    format: Literal["wav", "flac", "mp3"] = Field(
+        default="wav",
+        description='Every stem\'s container: "wav" (the default, the separator\'s own '
+        '16-bit WAV), "flac" (24-bit) or "mp3" (192 kbps CBR), as an audio job writes '
+        "them. The separator always works on lossless audio; this is the one encode.",
+    )
 
 
 MANIFESTS: ManifestCatalog[DenoiseManifest] = ManifestCatalog(
@@ -194,6 +212,24 @@ def _descriptors(config: Config, residency: Residency) -> list[ModelDescriptor]:
         resident=lambda model_id: residency.is_resident(KIND_DENOISE, model_id),
         source=lambda spec: f"{spec.hf_repo}:{spec.model_path}",
     )
+
+
+def ffmpeg_tools() -> dict[str, str | None]:
+    return {"ffmpeg": hosttools.ffmpeg_path(), "ffprobe": hosttools.ffprobe_path()}
+
+
+def _require_ffmpeg() -> dict[str, str]:
+    found = ffmpeg_tools()
+    absent = [tool for tool, path in found.items() if path is None]
+    if absent:
+        raise ApiError(
+            409,
+            "ffmpeg_missing",
+            f"this server has no {' and no '.join(absent)}; denoise {FFMPEG_WHY}. "
+            + hosttools.searched_note(),
+            {"missing": absent, "path": hosttools.search_path()},
+        )
+    return {tool: str(path) for tool, path in found.items()}
 
 
 def _missing_files(config: Config, manifest: DenoiseManifest) -> list[str]:
@@ -267,6 +303,15 @@ class DenoiseJobType(ResidentWorker):
         )
         if isinstance(env, JobTypeStatus):
             return env
+        absent_tools = [tool for tool, path in ffmpeg_tools().items() if path is None]
+        if absent_tools:
+            return JobTypeStatus(
+                ready=False,
+                detail=(
+                    f"{env.detail}; but there is no {' and no '.join(absent_tools)}: "
+                    f"denoise {FFMPEG_WHY}"
+                ),
+            )
         try:
             manifests = MANIFESTS.all()
         except ApiError as exc:
@@ -304,7 +349,7 @@ class DenoiseJobType(ResidentWorker):
 
     def requirements(
         self, model_id: str
-    ) -> tuple[DenoiseManifest, DenoiseBackendSpec, Path, Path]:
+    ) -> tuple[DenoiseManifest, DenoiseBackendSpec, Path, Path, dict[str, str]]:
         backend_kind = self._backend.kind
         manifest = MANIFESTS.known(model_id)
         spec = worker_type.require_block(manifest, model_id, backend_kind, "denoise model")
@@ -315,12 +360,12 @@ class DenoiseJobType(ResidentWorker):
             self._config, ENV_JOB_TYPE, backend_kind, model_id, note=" (denoise shares the rvc env)"
         )
         root = _require_model_files(self._config, manifest)
-        return manifest, spec, python, root
+        return manifest, spec, python, root, _require_ffmpeg()
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
         parse_params(DenoiseParams, params, self.name, lead=NO_PARAMS)
-        _manifest, spec, _python, _root = self.requirements(model)
+        _manifest, spec, _python, _root, _tools = self.requirements(model)
         self._residency.refuse_if_claimed(f"denoising with {model!r}")
         if self._residency.is_resident(KIND_DENOISE, model):
             return
@@ -330,10 +375,11 @@ class DenoiseJobType(ResidentWorker):
     def run(self, job: Job, ctx: JobContext) -> None:
         params = DenoiseParams.model_validate(job.params)
         model = run_model(job.model, self.name)
-        manifest, spec, python, root = as_job_error(self.requirements, model)
+        manifest, spec, python, root, tools = as_job_error(self.requirements, model)
 
         source = self._input(ctx)
         output_dir = ctx.scratch / "stems"
+        work_dir = ctx.scratch / "separating"
         session = self._session(
             ctx,
             model,
@@ -345,15 +391,20 @@ class DenoiseJobType(ResidentWorker):
             "op": "separate",
             "input": str(source),
             "output_dir": str(output_dir),
-            "output_format": OUTPUT_FORMAT,
+            "work_dir": str(work_dir),
+            "separator_format": SEPARATOR_FORMAT,
+            "output_format": params.format,
             "sample_rate": manifest.sample_rate,
+            "ffmpeg": tools["ffmpeg"],
+            "ffprobe": tools["ffprobe"],
         }
 
         def on_ready(message: dict[str, Any]) -> None:
             ctx.warming(
                 f"{source.name}: {message['seconds']}s of "
-                f"{message['channels']}-channel audio at {message['sample_rate']} Hz, "
-                f"through {manifest.display}"
+                f"{message['channels']}-channel {message['codec']} at "
+                f"{message['sample_rate']} Hz, through {manifest.display}; "
+                f"{_conversion(message, manifest.sample_rate)}"
             )
 
         def on_progress(message: dict[str, Any]) -> None:
@@ -379,6 +430,7 @@ class DenoiseJobType(ResidentWorker):
             raise JobError("worker_failed", str(exc)) from None
 
         stems = results[0]["stems"]
+        silent = results[0]["silent_stems"]
         primary = self._check(manifest, outcome.ready, stems)
         published = [primary]
         if params.stems == EVERY_STEM:
@@ -391,11 +443,26 @@ class DenoiseJobType(ResidentWorker):
             f"{len(stems)} stem(s) from {source.name} through {manifest.display}",
             stage="separating",
         )
+        ready = outcome.ready
         ctx.done_extra(
             primary_stem=primary["name"],
             stems=[stem["name"] for stem in stems],
             sample_rate=primary["sample_rate"],
             frames=primary["frames"],
+            format=params.format,
+            input={
+                key: ready[key]
+                for key in ("codec", "container", "sample_rate", "frames", "channels")
+            },
+            separated={
+                "sample_rate": primary["separated_rate"],
+                "frames": primary["separated_frames"],
+                "decoded": ready["decoded"],
+                "resampled": ready["resampled"],
+                "said": _conversion(ready, manifest.sample_rate),
+                "silent_stems": silent,
+                "silent_said": _silence(silent),
+            },
             separate_seconds=results[0]["separate_seconds"],
             load_seconds=self._loaded_seconds.pop(job.id, 0.0),
             resident=self._residency.resident_id,
@@ -465,22 +532,62 @@ class DenoiseJobType(ResidentWorker):
     def _same_timeline(
         manifest: DenoiseManifest, ready: dict[str, Any], stem: dict[str, Any]
     ) -> None:
-        """A published stem lines up sample for sample with the input it came from."""
-        if stem["sample_rate"] != manifest.sample_rate:
+        """A published stem lines up sample for sample with the input it came from: the
+        separator kept the rate and length it was given, and the stem went back to the
+        client's own rate and length after it."""
+        if stem["separated_rate"] != manifest.sample_rate:
             raise JobError(
                 "denoise_resampled",
-                f"{stem['name']} came back at {stem['sample_rate']} Hz and "
-                f"the input was {manifest.sample_rate} Hz — the model resampled "
-                "it, which invalidates every sample offset the caller sliced by",
+                f"{stem['name']} came out of the separator at "
+                f"{stem['separated_rate']} Hz and it was given "
+                f"{manifest.sample_rate} Hz — the model resampled it, which "
+                "invalidates every sample offset the caller sliced by",
+            )
+        if stem["separated_frames"] != ready["separator_frames"]:
+            raise JobError(
+                "denoise_length_changed",
+                f"{stem['name']} came out of the separator {stem['separated_frames']} "
+                f"frames long and it was given {ready['separator_frames']} — the model "
+                "changed the length. Slicing a stem back at the input's offsets is only "
+                "safe because it does not",
+            )
+        if stem["sample_rate"] != ready["sample_rate"]:
+            raise JobError(
+                "denoise_resampled",
+                f"{stem['name']} is {stem['sample_rate']} Hz and the input was "
+                f"{ready['sample_rate']} Hz — it was not returned to the input's rate",
             )
         if stem["frames"] != ready["frames"]:
             raise JobError(
                 "denoise_length_changed",
-                f"{stem['name']} is {stem['frames']} frames and the input "
-                f"was {ready['frames']} — the model changed the length. Slicing "
-                "a stem back at the input's offsets is only safe because it does "
-                "not",
+                f"{stem['name']} is {stem['frames']} frames and the input was "
+                f"{ready['frames']} — it was not returned to the input's length",
             )
+
+
+def _conversion(ready: dict[str, Any], separator_rate: int) -> str:
+    """What was done to the input on its way to the separator, said for the record."""
+    if not ready["decoded"]:
+        return "the separator read the input as sent"
+    if not ready["resampled"]:
+        return f"decoded with ffmpeg to {separator_rate} Hz WAV for the separator"
+    return (
+        f"decoded with ffmpeg and resampled {ready['sample_rate']} Hz -> "
+        f"{separator_rate} Hz for the separator, every stem resampled back to "
+        f"{ready['sample_rate']} Hz and {ready['frames']} frames"
+    )
+
+
+def _silence(silent: list[str]) -> str | None:
+    """The stems the separator found silent and did not write, said for the record."""
+    if not silent:
+        return None
+    return (
+        f"the separator found {', '.join(silent)} silent and wrote no file for "
+        f"{'it' if len(silent) == 1 else 'them'} (audio-separator skips a stem whose peak "
+        "is under 1e-6); returned as digital silence on the input's timeline, as a clean "
+        "instrumental's vocals are"
+    )
 
 
 class UnloadDenoiserJobType(UnloadJobType):

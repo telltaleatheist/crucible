@@ -5,19 +5,9 @@ import threading
 import time
 
 import workerio
-from workerio import send
+from workerio import send, write_audio
 
 WHY_REQUIRED = "every parameter is required because each one changes the sound"
-
-FLAC_SUBTYPE = "PCM_24"
-
-WAV_SUBTYPE = "PCM_24"
-
-# libsndfile's MP3 writer (LAME, in libsndfile >= 1.1) takes a compression level, not a
-# bitrate. In CONSTANT mode 0.40-0.45 all give 192 kbps CBR - measured with ffprobe on
-# libsndfile 1.2.2, the one both audio envs carry (0.3 gives 224 kbps, 0.5 160 kbps).
-# 0.42 sits in the middle of that band.
-MP3_CBR_192_LEVEL = 0.42
 
 
 # /proc/self/status fields a song's host memory is read from (Linux; bytes once read).
@@ -196,16 +186,7 @@ class ArrayAudio:
         return 1 if self.samples.ndim == 1 else int(self.samples.shape[1])
 
     def save(self, path: str, audio_format: str) -> None:
-        import soundfile
-
-        if audio_format == "mp3":
-            soundfile.write(
-                path, self.samples, self.sample_rate, format="MP3", subtype="MPEG_LAYER_III",
-                bitrate_mode="CONSTANT", compression_level=MP3_CBR_192_LEVEL,
-            )
-            return
-        subtype = FLAC_SUBTYPE if audio_format == "flac" else WAV_SUBTYPE
-        soundfile.write(path, self.samples, self.sample_rate, format=audio_format.upper(), subtype=subtype)
+        write_audio(path, self.samples, self.sample_rate, audio_format)
 
 
 class Worker:

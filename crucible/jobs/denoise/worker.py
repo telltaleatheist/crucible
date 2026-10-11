@@ -15,6 +15,8 @@ import time
 
 from workerio import cap_memory, memory_line, send
 
+stemaudio = workerio.load_sibling("stemaudio", __file__)
+
 _STATE: dict = {"separator": None, "model_instance": None, "model_filename": None}
 
 HEARTBEAT_SECONDS = 30.0
@@ -131,101 +133,106 @@ def separate(request: dict) -> None:
             "first exchange loads the model"
         )
     model_instance = _STATE["model_instance"]
-    model_filename = _STATE["model_filename"]
 
     source = require(request, "input", str)
     output_dir = require(request, "output_dir", str)
+    work_dir = require(request, "work_dir", str)
+    separator_format = require(request, "separator_format", str)
     output_format = require(request, "output_format", str)
-    expected_rate = require(request, "sample_rate", int)
+    separator_rate = require(request, "sample_rate", int)
+    ffmpeg = require(request, "ffmpeg", str)
+    ffprobe = require(request, "ffprobe", str)
 
-    import soundfile
+    for directory in (work_dir, output_dir):
+        os.makedirs(directory, exist_ok=True)
+        if os.listdir(directory):
+            raise RuntimeError(
+                f"{directory} is not empty; this worker identifies the separator's "
+                "outputs by what appears in it, so it must start empty"
+            )
+    separated_dir = os.path.join(work_dir, "separated")
+    os.makedirs(separated_dir)
 
-    try:
-        info = soundfile.info(source)
-    except Exception as exc:
-        raise RuntimeError(
-            f"{os.path.basename(source)} could not be read as audio: "
-            f"{type(exc).__name__}: {exc}"
-        ) from None
-
+    plan = stemaudio.prepare(ffmpeg, ffprobe, source, work_dir, separator_rate)
     send(
         "ready",
-        sample_rate=int(info.samplerate),
-        frames=int(info.frames),
-        seconds=round(float(info.frames) / float(info.samplerate), 3)
-        if info.samplerate
-        else 0.0,
-        channels=int(info.channels),
+        sample_rate=plan["sample_rate"],
+        frames=plan["frames"],
+        seconds=round(plan["frames"] / float(plan["sample_rate"]), 3),
+        channels=plan["channels"],
+        codec=plan["codec"],
+        container=plan["container"],
+        decoded=plan["decoded"],
+        resampled=plan["resampled"],
+        separator_rate=plan["separator_rate"],
+        separator_frames=plan["separator_frames"],
     )
 
-    if int(info.samplerate) != expected_rate:
-        raise RuntimeError(
-            f"this input is {info.samplerate} Hz and {model_filename} is "
-            f"{expected_rate} Hz native. Nothing was resampled: a stem returned "
-            "at a rate the caller did not send is a stem whose sample offsets no "
-            "longer mean anything. Resample before sending"
-        )
-
-    os.makedirs(output_dir, exist_ok=True)
-    if os.listdir(output_dir):
-        raise RuntimeError(
-            f"{output_dir} is not empty; this worker identifies the separator's "
-            "outputs by what appears in it, so it must start empty"
-        )
-
-    separator.output_dir = output_dir
-    model_instance.output_dir = output_dir
-    separator.output_format = output_format
-    model_instance.output_format = output_format
+    # The separator always writes lossless WAV: the one lossy encode a client may ask for
+    # (mp3) happens once, after, in stemaudio.finish.
+    separator.output_dir = separated_dir
+    model_instance.output_dir = separated_dir
+    separator.output_format = separator_format
+    model_instance.output_format = separator_format
 
     send("progress", stage="separating", processed=0, total=1)
+    # The logger the library's stem writer reports to; a stem it skips as near-silent is
+    # filled in as silence below rather than lost (stemaudio.NearSilentWatch).
+    watch = stemaudio.NearSilentWatch()
+    library_logger = model_instance.logger
+    library_logger.addHandler(watch)
     began = time.perf_counter()
     try:
         with _Heartbeat(began):
-            separator.separate(source)
+            separator.separate(plan["separator_input"])
     except Exception as exc:
         raise RuntimeError(
             f"audio-separator failed on {os.path.basename(source)}: "
             f"{type(exc).__name__}: {exc}"
         ) from None
+    finally:
+        library_logger.removeHandler(watch)
     separate_seconds = time.perf_counter() - began
+    silent_stems = stemaudio.fill_silent(separated_dir, watch.silent, plan)
 
-    stems = []
-    for name in sorted(os.listdir(output_dir)):
-        produced = os.path.join(output_dir, name)
-        if not os.path.isfile(produced):
-            continue
-        try:
-            stem_info = soundfile.info(produced)
-        except Exception as exc:
-            raise RuntimeError(
-                f"{name} came out of the separator but could not be read back as "
-                f"audio: {type(exc).__name__}: {exc}"
-            ) from None
-        stems.append(
-            {
-                "name": name,
-                "sample_rate": int(stem_info.samplerate),
-                "frames": int(stem_info.frames),
-                "channels": int(stem_info.channels),
-                "bytes": os.path.getsize(produced),
-            }
-        )
-    if not stems:
+    produced = sorted(
+        name for name in os.listdir(separated_dir)
+        if os.path.isfile(os.path.join(separated_dir, name))
+    )
+    if not produced:
         raise RuntimeError(
-            f"audio-separator finished and wrote nothing into {output_dir}"
+            f"audio-separator finished and wrote nothing into {separated_dir}"
         )
-    wrong = [s["name"] for s in stems if not s["name"].lower().endswith("." + output_format.lower())]
+    wrong = [name for name in produced if not name.lower().endswith("." + separator_format.lower())]
     if wrong:
         raise RuntimeError(
-            f"the separator was asked for {output_format} and wrote {wrong}; the "
+            f"the separator was asked for {separator_format} and wrote {wrong}; the "
             "stem container is part of the contract and is not substituted"
         )
+
+    stems = []
+    for name in produced:
+        try:
+            stems.append(
+                stemaudio.finish(
+                    os.path.join(separated_dir, name), output_dir, plan, output_format
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"{name} came out of the separator but could not be made into a "
+                f"{output_format} stem: {type(exc).__name__}: {exc}"
+            ) from None
 
     import torch
 
     memory_line(torch, os.path.basename(source))
-    send("result", stems=stems, separate_seconds=round(separate_seconds, 2))
+    send(
+        "result",
+        stems=stems,
+        silent_stems=silent_stems,
+        separate_seconds=round(separate_seconds, 2),
+    )
     send("done")
 
 

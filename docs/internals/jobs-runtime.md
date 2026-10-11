@@ -821,21 +821,26 @@ Everything else belongs to the server.
   `done.extra.load_seconds` is non-zero only on the block that loaded. A pass where every block
   reports a load has lost residency. There is no `load-denoiser`, because the load always
   precedes its block; `unload-denoiser` exists.
-- `params` is empty with `extra="forbid"`. Every separation parameter is an audio-separator
-  default, byte-identical to BookForge's.
+- `params` is `stems` and `format` only, with `extra="forbid"`. Every separation parameter is
+  an audio-separator default, byte-identical to BookForge's.
 - `use_autocast` is on for CUDA only, decided from the backend and sent on the LOAD. It was
   measured at 20.1x→29.2x realtime, with the output delta below the 16-bit noise floor.
 - **Invariants**, all refusals:
-  - The input must already be at the model's native rate (44.1 kHz). The librosa front-end
-    crashes on other rates, and the server never resamples.
-  - The primary stem comes back the same length, sample for sample. This is checked on the
-    primary stem only, the one it was measured on.
+  - The separator is only ever given its native rate (44.1 kHz). A WAV or FLAC already there
+    goes as sent; anything else is decoded with the server's ffmpeg and resampled with soxr
+    VHQ (`denoise/stemaudio.py`, since 2026-10-11 for B-Sides' 48 kHz songs), and every stem
+    is resampled back to the input's rate and fitted to its frames (rounding only, at most
+    `LENGTH_SLACK_FRAMES`).
+  - Each published stem comes out of the separator at the rate and length it was given, and
+    is returned at the input's rate and length (`_same_timeline`, four checks).
   - Exactly one output names the primary stem.
 - Only the primary stem is PUBLISHED. The others are measured and reported. Publishing them used
-  to cost about 10 GB of downloaded noise per book. Output is WAV, because the client slices at
-  sample offsets.
+  to cost about 10 GB of downloaded noise per book. The separator writes WAV, always; the
+  client's `format` (wav, flac, mp3; `workerio.write_audio`, an audio job's encodings) is the
+  one encode, after it.
 - Worker (`denoise/worker.py`), a `WorkerSession` with ops `load` and `separate`:
-  - `output_format` and `sample_rate` ride on `separate`, not `load`.
+  - `separator_format`, `output_format`, `sample_rate`, `ffmpeg` and `ffprobe` ride on
+    `separate`, not `load`.
   - The per-request output directory is set by re-pointing `output_dir` AND `output_format` on
     both the `Separator` and its model instance. The model instance copies both at load and
     writes stems with its own copy. Setting only the separator's copy once returned FLAC where

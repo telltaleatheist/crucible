@@ -18,7 +18,7 @@ MAX_SEED = 2**32 - 1
 # no planning structure can land, so asking is refused rather than run to its budget.
 MIN_SONG_SECONDS = 30.0
 
-# flac first: it is the default. mp3 is 192 kbps CBR (audiocore.MP3_CBR_192_LEVEL), for
+# flac first: it is the default. mp3 is 192 kbps CBR (workerio.MP3_CBR_192_LEVEL), for
 # players and phones that want small files (B-Side, Owen 2026-10-04).
 FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 

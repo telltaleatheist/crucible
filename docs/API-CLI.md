@@ -447,7 +447,7 @@ BookForge's `crucible` provider follows).
 | `align` | aligner id | `{"language","chunks":[{"index","text"}]}` | one per chunk, named `<index>.<ext>` |
 | `align-longform` | aligner id | `{"language","sentences":[{"index","text","kind"}],"rough_model","chunk_s",…}` | exactly one audio file — the whole audiobook |
 | `rvc` | rvc voice id | `{"index_rate","protect_rate","n_semitones"[, "f0_method","hop_length","piece_s","overlap_s","crossfade_s","output_rate","output_channels"]}` | many, of any length and format; names need no extension |
-| `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary — no separation knob is on the wire | exactly one audio file, at the separator's own rate (44.1 kHz); nothing is resampled |
+| `denoise` | separator id | `{}`, or `{"stems": "all"}` to get every stem back (`vocals-roformer`: the vocals AND the instrumental) instead of only the primary, and `"format"`: `"wav"` (default), `"flac"` or `"mp3"` for every stem — no separation knob is on the wire | exactly one audio file in anything ffmpeg decodes, at any rate (resampled to the separator's 44.1 kHz and back); a held job's artifact by reference works |
 | `image` | image model id | `{"prompt"[, "negative_prompt","width","height","seed","steps","guidance","image_strength","mask","mask_blur"]}` — see docs/IMAGE.md | none; one image with `image_strength`; or, for inpainting and outpainting, the image and a mask, `mask` naming the mask input |
 | `load-image` | image model id | `{}` — warms the model up before the first prompt | none |
 | `audio` | audio model id | `{"prompt"` (sound effects, music) or `"tags","lyrics"` (songs), or `"tags","instrumental": true[, "planning_lyrics"]` (an instrumental song, planned from words it never sings: the client's, or a pool set picked by the seed)`[, "duration_s","steps","cfg","seed","format"]}` — which optional params a model takes is in its manifest; see docs/AUDIO.md | none |
@@ -457,13 +457,41 @@ BookForge's `crucible` provider follows).
 | `video` | video model id | `{"prompt"[, "width","height","duration_s" or "num_frames","fps","seed","steps","audio"]}` — every limit is refused by name; see docs/VIDEO.md | none (text-to-video) or exactly one PNG/JPEG/WebP (image-to-video, its first frame) |
 | `load-video` | video model id | `{}` — warms the model up | none |
 
-**`denoise` returns WAV, always.** Every stem is a `.wav`, fixed by this server for every separator
-and not chosen per manifest, because a client slices the stem at sample offsets and a lossy
-container would put an encode in the middle of that (`crucible/jobs/denoise`, `OUTPUT_FORMAT`).
-The worker checks every stem's extension and fails by name on anything else. (Through 1.0.38 a
-freshly loaded separator could write FLAC despite the request, because audio-separator's model
-instance kept its load-time format; fixed 2026-09-25.) The stem keeps the input's sample rate
-and frame count.
+**`denoise` keeps the input's timeline.** A stem has the input's sample rate and exactly its
+frame count, whatever was sent, because a client slices the stem at the input's sample offsets.
+A WAV or FLAC at the separator's own rate (44.1 kHz, every book block) goes to it as sent and its
+stems are the separator's own WAV, untouched. Anything else (a YuE2 song at 48 kHz in FLAC or mp3,
+an m4a, a video's sound) is decoded with the server's ffmpeg, resampled to 44.1 kHz with soxr
+(VHQ), separated, and every stem resampled back to the input's rate and trimmed or padded by the
+resampler's rounding (a frame or two) to the input's frames. The `done` event's `input` and
+`separated` say which happened (`separated.said` in a sentence). The separator always writes
+lossless WAV (`crucible/jobs/denoise`, `SEPARATOR_FORMAT`) and the worker checks its extension;
+`format` then encodes each stem once, as an audio job encodes a song: `wav` (the default, so
+every client that sends no `format` gets what it always got), `flac` (24-bit) or `mp3` (192 kbps
+CBR). A stem the separator finds silent (a clean instrumental's vocals: audio-separator logs
+"near-silent" and writes no file) comes back as digital silence on the input's timeline and is
+named in `separated.silent_stems`; a stem missing for any other reason still fails the job by
+name (`denoise_primary_stem_missing`). (Through 1.0.38 a freshly loaded separator could write FLAC despite the request, because
+audio-separator's model instance kept its load-time format; fixed 2026-09-25.)
+
+**Chaining a song into denoise (B-Sides).** Render with `"hold": true`, then name the song as
+denoise's input by reference — the bytes never leave the server — and release the hold when
+the stems are fetched:
+
+```json
+{"type": "audio", "model": "yue2-3b", "hold": true,
+ "params": {"tags": "...", "lyrics": "...", "instrumental": true, "format": "flac"}}
+
+{"type": "denoise", "model": "vocals-roformer",
+ "params": {"stems": "all", "format": "mp3"},
+ "inputs": {"song.flac": {"artifact": {"job_id": "<the audio job>", "name": "audio.flac"}}}}
+```
+
+The stems are named after the input's name: `song_(vocals)_vocals_mel_band_roformer.mp3` (the
+primary) and `song_(other)_vocals_mel_band_roformer.mp3` (the instrumental). Then
+`DELETE /v1/jobs/<the audio job>/hold`. Without the hold, fetching every one of the song's
+artifacts lets it go, and a reference after that is `409 artifact_expired`
+(`tests/test_denoise_chain.py`).
 
 `protect_rate`'s scale is **inverted**: lower protects more and 0.5 turns
 protection off. The tuned deathstalker→Sigma recipe is `index_rate 0.3`,

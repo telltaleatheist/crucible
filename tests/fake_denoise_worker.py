@@ -7,7 +7,10 @@ import time
 
 ENGINE_KEYS = ("KMP_DUPLICATE_LIB_OK", "OMP_NUM_THREADS", "PYTHONUNBUFFERED")
 
-DEFAULT_INPUT = {"sample_rate": 44100, "frames": 441000, "channels": 2}
+DEFAULT_INPUT = {
+    "sample_rate": 44100, "frames": 441000, "channels": 2,
+    "codec": "pcm_s16le", "container": "wav",
+}
 MARKER = b"[a stem written by the fake denoise worker]\n"
 
 
@@ -54,7 +57,22 @@ def do_load(results, request: dict) -> int:
 
 
 def do_separate(results, request: dict) -> int:
-    source = _env_json("CRUCIBLE_FAKE_DENOISE_INPUT", DEFAULT_INPUT)
+    for key in ("ffmpeg", "ffprobe", "work_dir", "separator_format"):
+        if not isinstance(request.get(key), str):
+            send(results, "failed", message=f"the separate request has no {key!r}")
+            return 1
+    source = {**DEFAULT_INPUT, **_env_json("CRUCIBLE_FAKE_DENOISE_INPUT", {})}
+    separator_rate = request["sample_rate"]
+    # What the real worker's stemaudio.prepare does to the input, said the same way: a
+    # WAV or FLAC at the separator's rate goes as sent, anything else is decoded, and
+    # another rate is resampled (soxr rounds the length to the nearest frame).
+    native = source["container"] in ("wav", "flac")
+    resampled = source["sample_rate"] != separator_rate
+    separator_frames = (
+        round(source["frames"] * separator_rate / source["sample_rate"])
+        if resampled
+        else source["frames"]
+    )
     send(
         results,
         "ready",
@@ -62,18 +80,13 @@ def do_separate(results, request: dict) -> int:
         frames=source["frames"],
         seconds=round(source["frames"] / source["sample_rate"], 3),
         channels=source["channels"],
+        codec=source["codec"],
+        container=source["container"],
+        decoded=resampled or not native,
+        resampled=resampled,
+        separator_rate=separator_rate,
+        separator_frames=separator_frames,
     )
-
-    if source["sample_rate"] != request["sample_rate"]:
-        send(
-            results,
-            "failed",
-            message=(
-                f"this input is {source['sample_rate']} Hz and the model is "
-                f"{request['sample_rate']} Hz native. Nothing was resampled"
-            ),
-        )
-        return 1
 
     send(results, "progress", stage="separating", processed=0, total=1)
 
@@ -82,11 +95,14 @@ def do_separate(results, request: dict) -> int:
         time.sleep(float(slow))
 
     base = os.path.splitext(os.path.basename(request["input"]))[0]
+    extension = request["output_format"]
     default_stems = [
-        {"name": f"{base}_(Dry)_denoise_mel_band_roformer.wav"},
-        {"name": f"{base}_(Other)_denoise_mel_band_roformer.wav"},
+        {"name": f"{base}_(Dry)_denoise_mel_band_roformer.{extension}"},
+        {"name": f"{base}_(Other)_denoise_mel_band_roformer.{extension}"},
     ]
     wanted = _env_json("CRUCIBLE_FAKE_DENOISE_STEMS", default_stems)
+    for stem in wanted:
+        stem["name"] = stem["name"].replace("{base}", base).replace("{ext}", extension)
 
     output_dir = request["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
@@ -102,6 +118,8 @@ def do_separate(results, request: dict) -> int:
                 "frames": stem.get("frames", source["frames"]),
                 "channels": stem.get("channels", source["channels"]),
                 "bytes": os.path.getsize(produced),
+                "separated_rate": stem.get("separated_rate", separator_rate),
+                "separated_frames": stem.get("separated_frames", separator_frames),
             }
         )
 
@@ -110,7 +128,13 @@ def do_separate(results, request: dict) -> int:
         results.write(junk + "\n")
         results.flush()
 
-    send(results, "result", stems=stems, separate_seconds=8.25)
+    send(
+        results,
+        "result",
+        stems=stems,
+        silent_stems=_env_json("CRUCIBLE_FAKE_DENOISE_SILENT_STEMS", []),
+        separate_seconds=8.25,
+    )
 
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_NO_DONE") == "1":
         raise SystemExit(0)
