@@ -7,7 +7,10 @@ notes.
 
 ## Unreleased
 
+## 1.0.136 — 2026-10-10
+
 - An instrumental whose score ended but which the instrument transfer refuses (the skill's checks: a bar longer than its meter, the first planning-lyrics song on the PC) now keeps the plan in `failed-plan/` too and says the skill's own error; `scripts/check-instrumental-planning.py` prints a failed song instead of stopping.
+
 ## 1.0.135 — 2026-10-10
 
 - `scripts/check-embed-rerank-live.py`: the batch check holds the measured tolerance (a short text padded beside a long one reads cosine 0.99989 of itself alone on the Mac), and docs/RETRIEVAL.md states the measured figure.
