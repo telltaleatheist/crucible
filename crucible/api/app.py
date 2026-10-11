@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 
-from .. import VERSION, catalog, manifests, upstreams
+from .. import VERSION, catalog, manifests, upstreams, verbmodel
 from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
@@ -228,6 +228,19 @@ def _decider(config: Config, backend: Backend) -> Callable[[str], ApiError]:
     return decide_here
 
 
+def _model_for_act(act: str, config: Config) -> str | None:
+    """The model a session that names only its `act` will run on: the one this server
+    registered for that verb (verbmodel.registered), or None for an act that is no verb,
+    or a verb this server has nothing registered for - a session waiting on nothing in
+    particular holds no model."""
+    if act not in verbmodel.SIZED_VERBS:
+        return None
+    try:
+        return verbmodel.registered(act, config)
+    except ApiError:
+        return None
+
+
 def _services(
     config: Config,
     backend: Backend,
@@ -250,7 +263,7 @@ def _services(
     )
     settlement = Settlement(
         residency=residency, store=store, sessions=sessions, inflight=inflight,
-        waiting_calls=line.calls_waiting,
+        waiting_calls=lambda: line.calls_waiting(lambda act: _model_for_act(act, config)),
         kept_together=line.kept_on_card,
     )
     store.attach_settlement(settlement)

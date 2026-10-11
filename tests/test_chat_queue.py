@@ -334,7 +334,7 @@ async def _calls_in_the_line() -> None:
     first = line.join_call(Call(type="chat", model=MODEL, client="a"), 60)
     line.join_call(Call(type="decide", model=MODEL, client="b"), 60)
     line.join_call(Call(type="chat", model="other", client="c"), 60)
-    assert line.calls_waiting() == {MODEL: 2, "other": 1}
+    assert line.calls_waiting(lambda act: None) == {MODEL: 2, "other": 1}
     rows = line.rows()
     assert [row["kind"] for row in rows] == ["call", "call", "call"]
     assert [row["position"] for row in rows] == [1, 2, 3]
@@ -370,3 +370,20 @@ def test_a_queued_job_that_changes_the_card_waits_for_chats_in_flight(
             .json()["status"] == "done",
             "the unload run once the chat was answered",
         )
+
+
+def test_a_waiting_session_that_names_only_its_act_waits_for_that_acts_model() -> None:
+    asyncio.run(_sessions_count_by_their_acts_model())
+
+
+async def _sessions_count_by_their_acts_model() -> None:
+    # Victoria's laptop, 2026-10-11: B-Sides' album sessions open with act "generate" and
+    # no model; three waited while the open one closed, and the 4B was unloaded under them.
+    sessions = QueueSessions()
+    line = WaitingLine(_Store(), sessions)  # type: ignore[arg-type]
+    for act, model in (("generate", None), ("generate", None), ("album", None), ("chat", "x")):
+        line.join_session(
+            sessions.create(act=act, client="b-sides", model=model, idle_s=300, max_wait_s=60)
+        )
+    registered = {"generate": MODEL}
+    assert line.calls_waiting(registered.get) == {MODEL: 2, "x": 1}

@@ -308,12 +308,23 @@ class WaitingLine:
     def items_of(self, session_id: str) -> list[Waiting]:
         return [item for item in self._items if item.session == session_id]
 
-    def calls_waiting(self) -> dict[str, int]:
-        """How many calls, and sessions that open on a model, wait for each model."""
+    def calls_waiting(self, model_for_act: Callable[[str], str | None]) -> dict[str, int]:
+        """How many calls, and sessions that open on a model, wait for each model. A
+        session that names only its `act` waits for the model this server registered for
+        that act (`model_for_act`), the one it will run on: B-Sides opens its album
+        sessions with `act: "generate"` and no model, and on Victoria's laptop
+        (2026-10-11, 20:59-21:06Z) each close unloaded qwen3.5-4b-8bit while the next
+        three such sessions waited for it, so every album reloaded it (~70 s each for
+        ~1.5 s of chat)."""
         counts: dict[str, int] = {}
         for item in self._items:
-            if (item.is_call or item.is_session) and item.job.model is not None:
-                counts[item.job.model] = counts.get(item.job.model, 0) + 1
+            if not (item.is_call or item.is_session):
+                continue
+            model = item.job.model
+            if model is None and item.is_session:
+                model = model_for_act(item.job.act)
+            if model is not None:
+                counts[model] = counts.get(model, 0) + 1
         return counts
 
     def get(self, job_id: str) -> Waiting | None:
