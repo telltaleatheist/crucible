@@ -214,7 +214,7 @@ try {
   item of it, header or not (the server matches on `clientName`). So an app's standalone calls
   beside its own long run never wait behind it.
 - **`closed` resolves by itself** with `{reason, message, itemsRun, heldS}` when the session
-  ends — `close()`, `idle`, `operator`, `max_hold`, `server_restart` — from a cheap background
+  ends — `close()`, `unused`, `idle`, `operator`, `max_hold`, `server_restart` — from a cheap background
   follow of the session's stream, reconnected with `Last-Event-ID` after a drop. `ended` is
   the same answer, or `null` while open. After the end every method of the session throws
   `CrucibleSessionClosed` (`code: 'session_closed'`) without asking the server; fetch what its
@@ -224,6 +224,12 @@ try {
   row being said all count as activity, so a day-long job never idles a session out. Work on
   the app's own side does not — a cloud model call, a NAS copy — so call `session.touch()`
   across such a gap (it is a timestamp on the server; every 30 s is fine).
+- **Send the first item at once.** `idleS` applies from the session's first item on: a session
+  that sends no work within 90 s of opening closes `unused`, whatever its `idleS` (so an app
+  that crashed or restarted does not hold the server for up to a day). Any item counts, a
+  `loadModel()` too, even one the server refuses or makes wait; a `touch()` does not. Its own
+  `model` loads before `session()` resolves, so that load never runs the window out.
+  `state().firstWorkDeadline` says when, until the first item arrives.
 - `session.state()` reads `GET /v1/queue/sessions/{id}`: `itemsRun`, `inFlight`,
   `idleDeadline`, and how it ended once it has. `close()` is safe to call twice.
 - `await using` is not offered: this package's TypeScript target does not declare

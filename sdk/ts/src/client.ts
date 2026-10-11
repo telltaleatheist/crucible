@@ -2753,6 +2753,7 @@ function readQueueSession(data: Json, where: string): QueueSessionState {
     created: str(data, 'created', where),
     openedAt: nullableStr(data, 'opened_at', where),
     idleDeadline: nullableStr(data, 'idle_deadline', where),
+    firstWorkDeadline: nullableStr(data, 'first_work_deadline', where),
     maxHoldDeadline: nullableStr(data, 'max_hold_deadline', where),
     itemsRun: num(data, 'items_run', where),
     inFlight: arrayField(data, 'in_flight', where).map((entry, index) =>

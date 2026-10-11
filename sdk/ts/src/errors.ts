@@ -252,7 +252,7 @@ export class CrucibleSessionHeld extends CrucibleRefused {
  */
 export class CrucibleSessionClosed extends CrucibleRefused {
   readonly sessionId: string;
-  /** Why it ended: `client`, `idle`, `operator`, `max_hold`, `server_restart`, `expired`, `load_failed`, … */
+  /** Why it ended: `client`, `unused`, `idle`, `operator`, `max_hold`, `server_restart`, `expired`, `load_failed`, … */
   readonly reason: string;
 
   constructor(

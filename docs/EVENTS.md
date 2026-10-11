@@ -104,7 +104,7 @@ Every change to a queue session (docs/QUEUE.md), the same events its own
 | `session.queued` | `position`, `of`: it waits for its turn. |
 | `session.moved` | `position`, `of`. |
 | `session.opened` | The session holds the machine. |
-| `session.closed` | `reason` (`client`, `idle`, `operator`, `max_hold`, `server_restart`), `message`, `items_run`, `held_s`. |
+| `session.closed` | `reason` (`client`, `unused`, `idle`, `operator`, `max_hold`, `server_restart`), `message`, `items_run`, `held_s`. `unused`: it sent no work within 90 s of opening (docs/QUEUE.md). |
 | `session.removed` | `reason`, `message`, `error`: it left the line without opening. |
 
 ### The card

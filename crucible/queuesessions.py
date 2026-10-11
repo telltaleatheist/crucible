@@ -14,10 +14,12 @@ queue pump opens it, loading its ``model`` first when it names one that is not r
   refused by name;
 - the settlement treats it as a holder, so what its items leave on the card stays there.
 
-It closes when its client deletes it (``client``), when ``idle_s`` passes with nothing in
-flight and no item or touch (``idle``), when an operator removes it (``operator``), when
-the configured maximum hold passes (``max_hold``; none by default), or when the server
-stops (``server_restart``). One session is open at a time.
+It closes when its client deletes it (``client``), when it sends no work within
+``FIRST_WORK_S`` of opening (``unused``: an app that asked and then crashed or restarted
+never holds the card for the ``idle_s`` it asked for), when ``idle_s`` passes with nothing
+in flight and no item or touch (``idle``), when an operator removes it (``operator``),
+when the configured maximum hold passes (``max_hold``; none by default), or when the
+server stops (``server_restart``). One session is open at a time.
 
 Every change of a session's state goes through ``QueueSessions._say``: it records the event on the
 session's own stream and wakes its followers.
@@ -43,6 +45,17 @@ STREAM_IDLE_S = 900
 STREAM_CLAIM_S = 60
 MIN_IDLE_S = 10
 MAX_IDLE_S = 86_400
+# How long an open session may go without its first piece of work before it closes
+# ``unused``, whatever ``idle_s`` it asked for (Owen, 2026-10-11, after an orphaned
+# B-Sides session held Victoria's only slot for its whole idle_s). The window starts
+# when the session opens, which is after the load of the ``model`` it asked for, so all
+# it has to cover is the app hearing ``opened`` (its events stream, or a poll) and
+# sending its first request: under a second for a live app. 90 s, the top of Owen's
+# 60-90 s, leaves room for a client that polls slowly or a host that is busy, and caps
+# what a crashed app costs everyone else at a minute and a half instead of up to a day.
+# No client may ask for longer: no app needs a gap between opening and its first
+# request, and one that has work of its own to do first does it before it asks.
+FIRST_WORK_S = 90
 REMEMBERED = 200
 
 QUEUED = "queued"
@@ -51,6 +64,7 @@ CLOSED = "closed"
 
 CLIENT = "client"
 IDLE = "idle"
+UNUSED = "unused"
 MAX_HOLD = "max_hold"
 OPERATOR = "operator"
 SERVER_RESTART = "server_restart"
@@ -94,6 +108,9 @@ class QueueSession:
     error: dict[str, Any] | None = None
     seen: datetime | None = None
     items_run: int = 0
+    # When the first piece of work arrived under it (an item named or implied, a TTS
+    # stream opened in it, or anything of its seen in flight); None until then.
+    first_work_at: datetime | None = None
     load_job: str | None = None
     jobs: list[str] = field(default_factory=list)
     stream_sessions: set[str] = field(default_factory=set)
@@ -244,6 +261,17 @@ class QueueSessions:
     def item_arrived(self, session: QueueSession) -> None:
         session.items_run += 1
         session.seen = self._now()
+        self.work_sent(session)
+
+    def work_sent(self, session: QueueSession) -> None:
+        """A request of the session's own reached the server: the first one ends its
+        ``FIRST_WORK_S`` window, and from then on only ``idle_s`` decides. Called the
+        moment an item is known to be the session's (crucible/api/caller.py), before any
+        admission, so an item that is refused or waits (a model being installed or loaded
+        for it) still counts: the app is plainly using the session. A touch does not
+        count: it says the client is alive, not that it is using the card."""
+        if session.status == OPEN and session.first_work_at is None:
+            session.first_work_at = self._now()
 
     def adopt_job(self, session_id: str, job_id: str) -> None:
         session = self._sessions.get(session_id)
@@ -256,6 +284,7 @@ class QueueSessions:
         """A TTS stream session runs inside this queue session. ``opened_for_it``: the
         queue session was opened by the stream's own open, so it ends with the stream."""
         session.stream_sessions.add(stream_session_id)
+        self.work_sent(session)
         if opened_for_it:
             session.opened_for_stream = stream_session_id
 
@@ -386,6 +415,16 @@ class QueueSessions:
             return None
         return session.seen + timedelta(seconds=session.idle_s)
 
+    def first_work_deadline(self, session: QueueSession) -> datetime | None:
+        """When an open session that has sent no work closes ``unused``; None once it has
+        (or while anything of its is in flight), and for a session that is not open."""
+        if (
+            session.status != OPEN or session.opened_at is None
+            or session.first_work_at is not None or self.in_flight(session)
+        ):
+            return None
+        return session.opened_at + timedelta(seconds=FIRST_WORK_S)
+
     def max_hold_deadline(self, session: QueueSession) -> datetime | None:
         limit = self._max_hold_s()
         if session.opened_at is None or limit <= 0:
@@ -420,9 +459,22 @@ class QueueSessions:
             )
         if self.in_flight(session):
             session.seen = now
+            self.work_sent(session)
             return None
-        assert session.seen is not None
-        if (now - session.seen).total_seconds() >= session.idle_s:
+        assert session.seen is not None and session.opened_at is not None
+        idle_at = session.seen + timedelta(seconds=session.idle_s)
+        unused_at = (
+            None if session.first_work_at is not None
+            else session.opened_at + timedelta(seconds=FIRST_WORK_S)
+        )
+        if unused_at is not None and now >= unused_at and unused_at <= idle_at:
+            return session, UNUSED, (
+                f"it sent no work within {FIRST_WORK_S} s of opening, so it was taken "
+                f"to be abandoned (its client crashed or restarted) whatever idle_s "
+                f"({session.idle_s} s) it asked for; send the first item as soon as "
+                "`opened` arrives"
+            )
+        if now >= idle_at:
             return session, IDLE, (
                 f"nothing arrived, ran or was in flight for its idle_s ({session.idle_s} s), "
                 "and nothing touched it"
@@ -432,6 +484,7 @@ class QueueSessions:
 
     def state(self, session: QueueSession) -> dict[str, Any]:
         idle = self.idle_deadline(session)
+        unused = self.first_work_deadline(session)
         hold = self.max_hold_deadline(session)
         return {
             "session_id": session.id,
@@ -445,6 +498,7 @@ class QueueSessions:
             "created": session.created.isoformat(),
             "opened_at": None if session.opened_at is None else session.opened_at.isoformat(),
             "idle_deadline": None if idle is None else idle.isoformat(),
+            "first_work_deadline": None if unused is None else unused.isoformat(),
             "max_hold_deadline": None if hold is None else hold.isoformat(),
             "items_run": session.items_run,
             "in_flight": self.in_flight(session) if session.status == OPEN else [],
@@ -481,7 +535,8 @@ class QueueSessions:
 
 
 __all__ = [
-    "CLIENT", "CLOSED", "DEFAULT_IDLE_S", "ENDING_EVENTS", "EXPIRED", "SESSION_PREFIX",
+    "CLIENT", "CLOSED", "DEFAULT_IDLE_S", "ENDING_EVENTS", "EXPIRED", "FIRST_WORK_S",
+    "SESSION_PREFIX", "UNUSED",
     "QueueSession", "QueueSessions", "IDLE", "STREAM_CLAIM_S", "LOAD_FAILED", "MAX_HOLD", "MAX_IDLE_S", "MIN_IDLE_S",
     "OPEN", "OPERATOR", "QUEUED", "REFUSED", "SERVER_RESTART", "is_session_id", "who",
 ]

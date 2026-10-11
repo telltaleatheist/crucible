@@ -23,6 +23,11 @@ def client_agent(request: Request) -> str | None:
 def queue_session(request: Request, sessions: "QueueSessions") -> "QueueSession | None":
     """The open queue session this request is an item of: the one its
     session header names (refused by name when that session is not open or not
-    the caller's), else the open session when the caller is the client holding it."""
+    the caller's), else the open session when the caller is the client holding it.
+    Every item route asks this first, so it is where a session hears its first work
+    (``QueueSessions.work_sent``), whether or not the item is then admitted."""
     named = (request.headers.get(SESSION_HEADER) or "").strip() or None
-    return sessions.member(named, client_agent(request))
+    session = sessions.member(named, client_agent(request))
+    if session is not None:
+        sessions.work_sent(session)
+    return session
