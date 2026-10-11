@@ -34,7 +34,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords"]
 default_cfg = 1.0
 max_cfg = 20.0
 # With `[audio] low_vram = true` in a host's config (for a card too small to hold YuE2
@@ -97,7 +97,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords"]
 default_cfg = 1.0
 max_cfg = 20.0
 

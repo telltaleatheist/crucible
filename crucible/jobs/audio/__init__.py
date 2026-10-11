@@ -43,7 +43,7 @@ from ..template import (
     run_model,
 )
 from ..unload import UnloadJobType
-from . import planning
+from . import cover, planning
 from .params import MAX_SEED, AudioParams, Settled, refuse_what_the_model_cannot_take, settle
 from .planning import PlanningLyricsError
 
@@ -132,14 +132,53 @@ def require_audio_weights(
         raise ApiError(409, "model_not_installed", str(exc), details) from None
 
 
-def refuse_input_files(ctx: JobContext) -> None:
+def score_input(ctx: JobContext, params: AudioParams) -> Path | None:
+    """The input a cover's `score` names, and the only one the job may carry; an audio job
+    that is not a cover reads no files."""
     inputs = ctx.inputs()
-    if inputs:
+    if params.score is None:
+        if inputs:
+            raise JobError(
+                "invalid_inputs",
+                f"this job carries input(s) {sorted(inputs)}; an audio job makes sound "
+                "from words alone and reads no files unless `score` names one to cover. "
+                "Send it without inputs",
+            )
+        return None
+    if sorted(inputs) != [params.score]:
         raise JobError(
             "invalid_inputs",
-            f"this job carries input(s) {sorted(inputs)}; an audio job makes sound "
-            "from words alone and reads no files. Send it without inputs",
+            f"score names the input {params.score!r} and this job carries "
+            f"{sorted(inputs)}; a cover carries exactly that one input, the score",
         )
+    return inputs[params.score]
+
+
+@dataclass(frozen=True)
+class Given:
+    """A cover's score: what is rendered (cover.Cover), where it came from (`source`, the
+    done record's), and the input file as sent, kept as the `given-score.abc` artifact."""
+
+    cover: cover.Cover
+    source: dict[str, Any]
+    path: Path
+
+
+def prepare_cover(ctx: JobContext, params: AudioParams, needs: "Needs") -> Given | None:
+    """A cover's score, checked and made ready to render before the worker is asked for
+    anything (cover.prepare); None for a song YuE2 plans."""
+    path = score_input(ctx, params)
+    if path is None:
+        return None
+    prepared = cover.prepare(
+        cover.read_text(path),
+        path.name,
+        instrumental=bool(params.instrumental),
+        lyrics=params.lyrics,
+        chords=params.chords,
+        longest_s=float(needs.spec.max_duration_s),
+    )
+    return Given(prepared, cover.source_of(path.name, ctx.input_sources()), path)
 
 
 def check_audio_file(path: Path, audio_format: str) -> None:
@@ -424,16 +463,17 @@ class AudioJobType(ResidentWorker):
         params = AudioParams.model_validate(job.params)
         model = run_model(job.model, self.name)
         needs = as_job_error(self.requirements, model, params)
-        refuse_input_files(ctx)
+        # A cover's score is refused here, by name, before YuE2 is loaded for it.
+        given = prepare_cover(ctx, params, needs)
         seed = params.seed if params.seed is not None else secrets.randbelow(MAX_SEED + 1)
         try:
             settled = settle(params, needs.spec, seed)
         except PlanningLyricsError as exc:
             # The pool this build ships is unreadable: nothing a client sent can fix it.
             raise JobError("planning_lyrics_unavailable", str(exc)) from None
-        ctx.keep_request(kept_request(job, model, params, needs, settled))
+        ctx.keep_request(kept_request(job, model, params, needs, settled, given))
         session = self._worker(ctx, model, needs)
-        self._make(ctx, model, session, params, needs, settled)
+        self._make(ctx, model, session, params, needs, settled, given)
 
     def _make(
         self,
@@ -443,19 +483,27 @@ class AudioJobType(ResidentWorker):
         params: AudioParams,
         needs: Needs,
         settled: Settled,
+        given: Given | None,
     ) -> None:
         output = ctx.scratch / artifact_name(params.format)
         score = ctx.scratch / SCORE_ARTIFACT
-        request = generate_request(params, needs, settled, output, score)
+        request = generate_request(params, needs, settled, output, score, given)
         result = self._generate(ctx, model, session, request)
+        refused = result.get("refused")
+        if refused is not None:
+            # The worker's own refusal of a given score (yue2_worker._given_plan): it
+            # rendered nothing and is still resident.
+            raise JobError(refused["code"], refused["message"])
         check_audio_file(output, params.format)
         ctx.artifact(output.name, output)
         wrote_score = bool(result.get("score_path")) and score.is_file()
         if wrote_score:
             ctx.artifact(SCORE_ARTIFACT, score)
+        if given is not None:
+            ctx.artifact(cover.GIVEN_ARTIFACT, given.path)
         ctx.progress(1.0, made_words(result.get("audio_seconds"), result["decode_stages"]), stage="done")
         ctx.done_extra(
-            audio=effective_params(params, needs, settled, result, output.name, wrote_score),
+            audio=effective_params(params, needs, settled, result, output.name, wrote_score, given),
             resident=self._residency.resident_id,
         )
 
@@ -486,7 +534,12 @@ def made_words(audio_seconds: Any, decode_stages: dict[str, Any] | None) -> str:
 
 
 def generate_request(
-    params: AudioParams, needs: Needs, settled: Settled, output: Path, score: Path
+    params: AudioParams,
+    needs: Needs,
+    settled: Settled,
+    output: Path,
+    score: Path,
+    given: Given | None = None,
 ) -> dict[str, Any]:
     return {
         "op": "generate",
@@ -515,6 +568,10 @@ def generate_request(
         "planning_resizable": (
             settled.planning_lyrics is not None and settled.planning_lyrics["source"] == planning.POOL
         ),
+        # A cover's score, ready to render: the ABC (after any transfer or chord removal),
+        # its cot and the [Lyrics] it is planned with (cover.Cover.request); null for a
+        # song YuE2 plans itself.
+        "cover": None if given is None else given.cover.request(),
         "sample_rate": needs.spec.sample_rate,
         "channels": needs.spec.channels,
         "format": params.format,
@@ -526,7 +583,12 @@ def generate_request(
 
 
 def kept_request(
-    job: Job, model: str, params: AudioParams, needs: Needs, settled: Settled
+    job: Job,
+    model: str,
+    params: AudioParams,
+    needs: Needs,
+    settled: Settled,
+    given: Given | None = None,
 ) -> dict[str, Any]:
     """What an audio job keeps on disk from the moment it starts until it ends `done`
     (JobStore.keep_request): the params as sent with the seed this run uses written in, so
@@ -550,6 +612,9 @@ def kept_request(
             "length_range": (
                 None if settled.length_range is None else settled.length_range.to_dict()
             ),
+            # A cover's score as checked before it rendered (cover.Cover.record, without
+            # the token count only the worker knows); null for a song YuE2 plans.
+            "cover": None if given is None else given.cover.record(given.source, None),
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
@@ -571,8 +636,20 @@ def effective_params(
     result: dict[str, Any],
     artifact: str,
     wrote_score: bool,
+    given: Given | None = None,
 ) -> dict[str, Any]:
     spec = needs.spec
+    notes = result.get("notes")
+    covered = None
+    if given is not None:
+        covered = given.cover.record(given.source, result["score_tokens"])
+        if given.cover.transfer is not None:
+            # The instrumental cover's transfer, recorded as a planned instrumental's is
+            # (yue2_worker._instrumental_plan), but made here on the server.
+            notes = {
+                "instrumental_transfer": given.cover.transfer,
+                "score_before_transfer": given.cover.given,
+            }
     length = result.get("length")
     planning_lyrics = settled.planning_lyrics
     if length is not None:
@@ -624,7 +701,11 @@ def effective_params(
         "memory_basis": spec.memory_basis,
         "low_vram": needs.low_vram,
         "versions": result.get("versions"),
-        "notes": result.get("notes"),
+        "notes": notes,
+        # A cover (docs/AUDIO.md "Covers"): instrumental or sung, where its score came
+        # from (upload or another job's artifact), the cot it rendered with, its chords
+        # kept or stripped, its tokens and nominal seconds; null for a song YuE2 planned.
+        "cover": covered,
         "decode_stages": result["decode_stages"],
         "stages_at_cap": stages_at_cap(result["decode_stages"]),
         # The worker's host memory as the song began, once it was saved, and its peak

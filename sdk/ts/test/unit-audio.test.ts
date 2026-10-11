@@ -244,3 +244,147 @@ test('a song asks a length range and a planning set, and reads back what its sco
   });
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, length: null } } }).length, null);
 });
+
+const NL = String.fromCharCode(10);
+const ABC = ['X:1', 'T:', 'M:4/4', 'L:1/32', 'Q:1/4=66', 'V:Vocal', '% verse', 'C8D8E8F8|', ''].join(NL);
+
+test('an instrumental cover uploads its score: the input carries it and params.score names it', async () => {
+  answer(200, { job_id: 'job-cover-a' });
+  const crucible = client();
+  await crucible.audio({
+    model: 'yue2-3b',
+    tags: 'Instrumental, warm piano and strings, no vocals, no singing, 72 BPM',
+    instrumental: true,
+    score: { blobId: 'blob-abc' },
+    seed: 3,
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'audio',
+    model: 'yue2-3b',
+    params: {
+      tags: 'Instrumental, warm piano and strings, no vocals, no singing, 72 BPM',
+      instrumental: true,
+      score: 'score.abc',
+      seed: 3,
+    },
+    inputs: { 'score.abc': { blob_id: 'blob-abc' } },
+  });
+
+  answer(200, { job_id: 'job-cover-a-inline' });
+  await crucible.audio({
+    model: 'yue2-3b',
+    tags: 'Instrumental, piano',
+    instrumental: true,
+    score: { inline: new TextEncoder().encode(ABC) },
+    chords: 'strip',
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'audio',
+    model: 'yue2-3b',
+    params: { tags: 'Instrumental, piano', instrumental: true, chords: 'strip', score: 'score.abc' },
+    inputs: { 'score.abc': { inline_base64: Buffer.from(ABC, 'utf8').toString('base64') } },
+  });
+});
+
+test('a sung cover takes a held job\'s score by reference, under the name it chose', async () => {
+  answer(200, { job_id: 'job-cover-b' });
+  const crucible = client();
+  const lyrics = '[Verse]' + NL + 'The lantern by the harbour wall' + NL;
+  await crucible.audio({
+    model: 'yue2-3b',
+    tags: 'English, intimate acoustic folk, warm male voice, 72 BPM',
+    lyrics,
+    score: crucible.artifactRef('job-score-1', 'score.abc'),
+    scoreName: 'melody.abc',
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'audio',
+    model: 'yue2-3b',
+    params: {
+      tags: 'English, intimate acoustic folk, warm male voice, 72 BPM',
+      lyrics,
+      score: 'melody.abc',
+    },
+    inputs: { 'melody.abc': { artifact: { job_id: 'job-score-1', name: 'score.abc' } } },
+  });
+
+  answer(200, { job_id: 'job-cover-b-upload' });
+  await crucible.audio({
+    model: 'yue2-3b', tags: 'English, folk', lyrics, score: { blobId: 'blob-melody' }, scoreName: 'melody.abc',
+    chords: 'keep',
+  });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'audio',
+    model: 'yue2-3b',
+    params: { tags: 'English, folk', lyrics, chords: 'keep', score: 'melody.abc' },
+    inputs: { 'melody.abc': { blob_id: 'blob-melody' } },
+  });
+});
+
+test('chords and scoreName without a score are refused before sending', async () => {
+  lastBody = '';
+  await assert.rejects(
+    client().audio({ model: 'yue2-3b', tags: 'Instrumental', instrumental: true, chords: 'keep' }),
+    CrucibleConfigError,
+  );
+  await assert.rejects(
+    client().audio({ model: 'yue2-3b', tags: 'Instrumental', instrumental: true, scoreName: 'melody.abc' }),
+    CrucibleConfigError,
+  );
+  assert.equal(lastBody, '');
+});
+
+const COVER_REFERENCE = {
+  kind: 'sung', source: 'reference', input: 'melody.abc',
+  reference: { job_id: 'job-score-1', name: 'score.abc' },
+  given: 'given-score.abc', cot: 'melody', chords: 'stripped', chords_chosen_by: 'default',
+  score_tokens: 1180, score_seconds: 95.0,
+  score: { seconds: 95.0, bars: 26, quarters: 104.0, bpm: 66, meter: '4/4' },
+};
+
+test('readAudioResult reads how a cover was made, and null for a song that is not one', () => {
+  const sung = readAudioResult({
+    artifacts: ['audio.flac', 'score.abc', 'given-score.abc'],
+    extra: { audio: { ...DONE_SONG, cover: COVER_REFERENCE } },
+  });
+  assert.deepEqual(sung.cover, {
+    kind: 'sung', source: 'reference', input: 'melody.abc',
+    reference: { jobId: 'job-score-1', name: 'score.abc' },
+    given: 'given-score.abc', cot: 'melody', chords: 'stripped', chordsChosenBy: 'default',
+    scoreTokens: 1180, scoreSeconds: 95.0,
+    score: { seconds: 95.0, bars: 26, quarters: 104.0, bpm: 66, meter: '4/4' },
+  });
+  assert.deepEqual(sung.artifacts, ['audio.flac', 'score.abc', 'given-score.abc']);
+
+  const uploaded = readAudioResult({
+    artifacts: [],
+    extra: {
+      audio: {
+        ...DONE_SONG,
+        cover: {
+          ...COVER_REFERENCE, kind: 'instrumental', source: 'upload', input: 'score.abc', reference: null,
+          cot: 'full', chords: 'kept', chords_chosen_by: 'request',
+        },
+      },
+    },
+  });
+  assert.deepEqual(
+    [uploaded.cover?.kind, uploaded.cover?.source, uploaded.cover?.reference, uploaded.cover?.cot, uploaded.cover?.chordsChosenBy],
+    ['instrumental', 'upload', null, 'full', 'request'],
+  );
+
+  // A planned song on a current server says null; an older server sends no key at all.
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, cover: null } } }).cover, null);
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).cover, null);
+});
+
+test('readAudioResult refuses a cover record that is missing a field or contradicts itself', () => {
+  const read = (cover: unknown) => () => readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, cover } } });
+  const { score_seconds: _seconds, ...noSeconds } = COVER_REFERENCE;
+  assert.throws(read(noSeconds), CrucibleProtocolError);
+  assert.throws(read({ ...COVER_REFERENCE, kind: 'remix' }), CrucibleProtocolError);
+  assert.throws(read({ ...COVER_REFERENCE, reference: null }), CrucibleProtocolError);
+  assert.throws(read({ ...COVER_REFERENCE, source: 'upload' }), CrucibleProtocolError);
+  assert.throws(read({ ...COVER_REFERENCE, score: { ...COVER_REFERENCE.score, meter: undefined } }), CrucibleProtocolError);
+  assert.throws(read('given-score.abc'), CrucibleProtocolError);
+});

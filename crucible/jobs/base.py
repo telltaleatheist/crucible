@@ -148,6 +148,12 @@ class Job:
         return self.dir / "inputs"
 
     @property
+    def input_sources_path(self) -> Path:
+        """Where each input came from, written as the job takes them (inputs.py
+        materialise_inputs): beside `inputs/`, never in it, so it is not an input."""
+        return self.dir / "input-sources.json"
+
+    @property
     def artifacts_dir(self) -> Path:
         return self.dir / "artifacts"
 
@@ -230,6 +236,15 @@ class JobContext:
         if not directory.is_dir():
             return {}
         return {p.name: p for p in sorted(directory.iterdir()) if p.is_file()}
+
+    def input_sources(self) -> dict[str, dict[str, Any]]:
+        """Each input's source as the server took it: `{"from": "blob"}`, `{"from":
+        "inline"}` or `{"from": "artifact", "job_id": ..., "name": ...}`; {} for a job
+        with no inputs."""
+        path = self._job.input_sources_path
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8"))
 
     @property
     def journal(self) -> Any | None:

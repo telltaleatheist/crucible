@@ -60,6 +60,10 @@ OPTIONAL_PARAMS: tuple[str, ...] = (
     # before anything is composed.
     "min_duration_s",
     "max_duration_s",
+    # A cover (docs/AUDIO.md "Covers"): the input carrying a score to render instead of
+    # planning one, and whether its chord symbols are kept.
+    "score",
+    "chords",
 )
 
 MEMORY_BASES = frozenset({"measured", "declared"})
