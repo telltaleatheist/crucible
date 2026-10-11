@@ -103,6 +103,7 @@ const SETUP = {
   backend: 'mlx-darwin',
   bind: 'http://0.0.0.0:7100',
   urls: ['http://192.168.68.20:7100', 'http://100.64.0.3:7100'],
+  auth: 'token',
   token: 's3cret-t0ken_x',
   pairing: [
     'crucible://crucible%40mac-studio@192.168.68.20:7100/#s3cret-t0ken_x',
@@ -122,6 +123,7 @@ test('setup reads every field of section 3.1', async () => {
     backend: 'mlx-darwin',
     bind: 'http://0.0.0.0:7100',
     urls: SETUP.urls,
+    auth: 'token',
     token: 's3cret-t0ken_x',
     pairing: SETUP.pairing,
     jobTypes: ['llm', 'tts'],

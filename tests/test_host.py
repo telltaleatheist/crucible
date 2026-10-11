@@ -2477,6 +2477,7 @@ def test_the_door_answers_ping_WITHOUT_a_bearer_and_info_WITH_one(
             "name": fake.name,
             "api_version": 1,
             "role": "orchestrator",
+            "auth": "token",
         }
         with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/info", timeout=10)

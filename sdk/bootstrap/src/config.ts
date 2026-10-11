@@ -74,7 +74,7 @@ export function parseLocalConfig(text: string, configPath: string, via: 'file' |
   if (token.trim() === '') {
     throw new BootstrapRefusal(
       'config_missing_key',
-      `${configPath}: auth.token is empty. A Crucible has no anonymous mode.`,
+      `${configPath}: auth.token is empty. Every Crucible config holds a token, even one whose [auth] mode is "none".`,
       { command: REINIT },
     );
   }

@@ -79,7 +79,7 @@ def test_token_url_prints_the_same_line_the_file_holds(
             "tests.conftest", fromlist=["FAKE_BACKEND"]
         ).FAKE_BACKEND
     )
-    cli.main(["init", "--token", "firsttoken"])
+    cli.main(["init", "--auth", "token", "--token", "firsttoken"])
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.splitlines()

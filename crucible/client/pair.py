@@ -88,7 +88,7 @@ def pair_call(origin: str, path: str, body: dict[str, Any] | None = None,
     return value
 
 
-def _crucible_name(origin: str) -> str:
+def _crucible_ping(origin: str) -> dict[str, Any]:
     ping = pair_call(origin, "/v1/ping")
     name = ping.get("name")
     if ping.get("crucible") is not True or not isinstance(name, str) or not name:
@@ -104,7 +104,12 @@ def _crucible_name(origin: str) -> str:
             f"pairing_unavailable: {name} is too old to connect by address; "
             "update Crucible on that computer"
         )
-    return name
+    if ping.get("auth") not in ("token", "none"):
+        raise ClientRefusal(
+            f"pair_not_crucible: {name} did not say whether it asks for a token "
+            f"(`auth` in /v1/ping is {ping.get('auth')!r}); update Crucible on that computer"
+        )
+    return ping
 
 
 def _start(origin: str, name: str, client_name: str) -> dict[str, Any]:
@@ -138,10 +143,16 @@ def _approved_token(origin: str, name: str, answer: dict[str, Any]) -> str:
 
 
 def pair(address: str, *, client_name: str, sleep: Callable[[float], None] | None = None,
-         notify: Callable[[str], None] | None = None) -> tuple[str, str, str]:
+         notify: Callable[[str], None] | None = None) -> tuple[str, str, str | None]:
+    """(name, url, token) for the Crucible at `address`. A server that asks for no token
+    (`auth: "none"` in its /v1/ping) is paired at once with no token and no approval:
+    there is nothing to hand over, and its line is just where it is."""
     sleep = time.sleep if sleep is None else sleep
     origin = pair_origin(address)
-    name = _crucible_name(origin)
+    ping = _crucible_ping(origin)
+    name = ping["name"]
+    if ping["auth"] == "none":
+        return name, origin, None
     start = _start(origin, name, client_name)
     if start.get("approval_required") is not False and notify is not None:
         notify(

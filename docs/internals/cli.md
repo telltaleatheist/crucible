@@ -163,6 +163,23 @@ It never chooses a backend. `crucible orchestrator` passes `--backend llama-wind
   otherwise get whichever interface the OS listed first.
 - `_pairing_permission` says "ACL: this user only" on win32. A Windows file has no POSIX
   mode, and `stat` reports 0o666 whatever the ACL says.
+- The pairing FILE always carries the token, whatever `[auth] mode` says: the Windows host
+  reads a guest's token from it to call the peer door and its own install door, and the
+  file is this machine's only. What goes over the network follows the mode: with `none`,
+  `crucible token --url`, `GET /v1/setup` and an approved pairing give lines with no
+  `#<token>` (`pairing.handed_out_token`), and a parsed line with no fragment has
+  `token = None`, which the client sends as no header at all.
+
+## `auth`
+
+- `crucible auth` prints `[auth] mode`; `crucible auth none|token` rewrites it through
+  `rewrite_config` (token and every other key kept) and restarts nothing: the server's
+  config follower adopts the file before its next request, and `api/deps.py` reads the
+  mode from the live config. `init --auth` sets it on a new config (default `none`);
+  `init --config-from` carries the moved file's mode, `token` when it has none, because a
+  file without the key is a server that asked for its token (docs/DESIGN.md section 9).
+- `write_config` keeps the mode on disk when no caller names one, and a file that never
+  had the key keeps not having it, so an upgrade or a `crucible install` never changes it.
 
 ## `serve`
 

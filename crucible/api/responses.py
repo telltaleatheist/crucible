@@ -20,6 +20,12 @@ class Ping(_Open):
     name: str
     api_version: int
     pairing_version: int
+    auth: Literal["token", "none"] = Field(
+        description="Whether every other route needs `Authorization: Bearer <token>` "
+        "(`token`) or nothing (`none`, like Ollama: a bearer sent anyway is ignored). "
+        "Answered here, without a token, so a client or an agent can tell before it asks "
+        "anyone for one ([auth] mode, docs/DESIGN.md section 9)."
+    )
 
 
 class ErrorBody(_Open):

@@ -120,14 +120,16 @@ what the *server* must implement, not what the *client* must send.
 
 ## 4. API v1
 
-Base: `http://<host>:<port>/v1`. Auth: `Authorization: Bearer <token>` on every route
-except `ping`. Clients send `X-Crucible-Api: 1`; a major mismatch is refused with **426**
-and a body naming both versions. The contract is the **API version**, separate from the
+Base: `http://<host>:<port>/v1`. Auth (section 9): on a server with `[auth] mode =
+"token"`, `Authorization: Bearer <token>` on every route except `ping`; on one with
+`"none"`, nothing, and the "Auth: yes" rows below mean nothing there. Clients send
+`X-Crucible-Api: 1` either way; a missing header is refused with **426** naming it, and a
+major mismatch with **426** and a body naming both versions. The contract is the **API version**, separate from the
 build version.
 
 | Route | Auth | Returns |
 |---|---|---|
-| `GET /ping` | no | `{crucible: true, name, api_version}`. Lets a client tell "wrong token" from "not a Crucible". |
+| `GET /ping` | no | `{crucible: true, name, api_version, pairing_version, auth}`. Lets a client tell "wrong token" from "not a Crucible", and `auth` (`token` or `none`) says whether it needs a token at all. |
 | `GET /info` | yes | server `{name, version, api_version}`, host `{platform, arch, backend, gpu: {vendor, name, vram_bytes}}`, `job_types: [...]` (what this server accepts in `POST /jobs`), `capabilities: [{job_type, models}]` — **one row per capability, not one per postable type**: `llm` is operated through `load-model` and `unload-model`, neither of which is a capability, and listing them as such made one model appear three times in two shapes. A capability's model rows are `{id, revision, source, installed, resident, vram_bytes}` — `installed` is the puller's stamp at the pinned revision (the weights are on disk), `resident` is an engine serving them now, and neither implies the other — **except `llm`**, whose rows are `GET /v1/models`' rows verbatim (PHASE2-LLM.md section 5), and `tts`, whose rows are `GET /v1/voices`' (PHASE3-TTS.md section 8). One model, one description: a client reads a model's standing in one shape wherever it finds it, and never reconciles two. |
 | `GET /health` | yes | `{status: ok / warming / busy, queue_depth, resident_models}` |
 | `POST /uploads` | yes | multipart → `{blob_id, bytes, sha256}`. For inputs too big to inline. |
@@ -138,7 +140,7 @@ build version.
 | `DELETE /jobs/{id}` | yes | cancel: 200 `{status: "cancelling"}` on a running job (cooperative), 200 `{status: "cancelled"}` on a queued one, 409 `job_not_cancellable` on a terminal one. |
 | `/openai/*` | yes | OpenAI-compatible passthrough for `llm` (phase 2). |
 | `POST /decide` | yes | `{model?, state, images?, questions}` (no `model`: the model registered for decide, or with images its `with_images`, docs/VERB-SIZING.md section 8) → `{model: {id, revision, fingerprint}, engine, answers, timing_ms, tokens}` — a distribution over each question's fixed answers from one forward pass at the resident model (history/PHASE22-DECIDE.md). Synchronous, like a chat: `409 model_not_resident` (never a load), `503 chat_queue_full` at the engine's admission, `400 invalid_request` / `too_many_options` / `too_many_images` / `model_text_only` / `decide_needs_logprobs`, `503 decide_not_served`, `502 engine_error` / `label_not_in_probs`. |
-| `GET /setup` | yes | **The operator door** (PHASE13-OPERATOR.md section 3.1). `{name, version, backend, bind, urls, token, pairing, job_types, config_path}` — everything an app needs to be pointed here, in one read. `urls` is the bind address made reachable (a wildcard bind becomes one entry per non-loopback IPv4 interface, read from `getifaddrs(3)`; never a hostname lookup), and `pairing` is one `crucible://<name>@<host>:<port>/#<token>` line per url. It returns the token and reveals nothing: only a caller who already has it can reach the route. |
+| `GET /setup` | yes | **The operator door** (PHASE13-OPERATOR.md section 3.1). `{name, version, backend, bind, urls, token, pairing, job_types, config_path}` — everything an app needs to be pointed here, in one read. `urls` is the bind address made reachable (a wildcard bind becomes one entry per non-loopback IPv4 interface, read from `getifaddrs(3)`; never a hostname lookup), and `pairing` is one `crucible://<name>@<host>:<port>/#<token>` line per url. It returns the token and reveals nothing: only a caller who already has it can reach the route. With `[auth] mode = "none"` it also says `auth: "none"`, its `token` is null and its lines carry no `#<token>` (section 9). |
 | `GET /catalog` | yes | `{rows: [{kind, id, name, job_type, installed, installed_bytes, expected_bytes, shares_weights_of, missing_files, floors, license, source, resident}]}` — every pullable subject this BACKEND can hold, installed or not. `kind` is one of `catalog.KINDS` (`crucible/catalog.py`), which today includes `engine`, the pinned llama.cpp build on `llama-windows`. Every field is derived from something the server already owns; a subject with no block for this backend is absent rather than listed as unsupported. `shares_weights_of` names the base whose download an alias model's weights are (history/PHASE22-DECIDE.md section 2.9) and `missing_files` which of the alias's own files are absent; both null on every other row, and the download's bytes are counted once, on the base. `floors` is always `[]`: the class floors were retired on 2026-10-09 and the key is still sent for SDKs that read it. |
 | `POST /tasks` | yes | One operator operation on the server itself: `{type: "pull", kind, id}`, `{type: "install", job_type, narrator_engine?}` or `{type: "module", module}` → `{task_id}` (202). **One task at a time** (`409 task_busy`); an `install` additionally waits for the card (`409 server_busy`, whose `details.fact` names which of the four holders it is). Refusals by name at POST: `unknown_subject`, `already_installed`, `unknown_job_type`, `job_type_installed`, `narrator_engine_required`, `narrator_engine_refused`, `invalid_module`. |
 | `GET /tasks` | yes | `{tasks: [...]}` — the last 50, newest first, in memory. A restart forgets them. |
@@ -236,9 +238,48 @@ and, since `fingerprint` (`<id>@<revision>`, docs/history/PHASE2-LLM.md section 
 
 ## 9. Auth and transport
 
-Bearer token, always. `crucible init` mints it; the client stores it per server entry.
-The transport is expected to be Owen's headscale tailnet (droplets join it too), so no
-port is public; the token is the lock even if one is.
+**A token is optional, like Ollama's API, which has none.** Owen, 2026-10-11:
+
+> "lets make it so b sides and any other claude agent is capable of making calls to
+> crucible without requiring the access token. claude doesnt like handling access tokens
+> and it isnt necessary anyway since we're behind a firewall. ollama doesnt require access
+> tokens for calling its api"
+
+Crucible's role is Ollama's: serve models and configure them. The servers sit behind a
+firewall and on Owen's headscale tailnet, so the network is the lock. `[auth] mode` in
+config.toml says which a server is:
+
+- `mode = "none"`: no route asks for a token. A request with no `Authorization` header is
+  served; a request that sends one is served too and the header is not read, right or wrong
+  (Ollama ignores it the same way), so a client that stored a token keeps working. The
+  peer door follows the same mode. The token is still in the file, so `token` can be turned
+  back on without a new one, and the server never hands it out over HTTP while it is off:
+  `GET /v1/setup` answers `token: null` and pairing lines with no `#<token>`, an approved
+  pairing answers `token: null` (and needs no approval, since it grants nothing), and
+  `POST /v1/settings/token/rotate` is refused `auth_off`. Saying it would give it to anyone
+  on the network, and the moment the server was switched back it would let them in.
+- `mode = "token"`: `Authorization: Bearer <token>` on every route but `GET /v1/ping` and
+  the operator page, refused `401 unauthorized` without it.
+
+A new `crucible init` writes `"none"` (`--auth token` for the lock). A config written
+before the key existed has no `mode` and keeps meaning `"token"`, so nothing opens on an
+upgrade; each server is switched on purpose. `crucible auth` prints the mode, `crucible auth
+none` and `crucible auth token` set it, and so does `auth` in `PUT /v1/settings` (the
+operator page's Settings). A running server follows its config file on every request, so a
+switch applies from the next request with no restart. `crucible init --config-from` keeps
+the moved server's mode.
+
+`GET /v1/ping` says `auth` without a token, and `GET /v1/info` repeats it under `server`,
+so a client or an agent knows before it asks anybody for one. Every client takes a server
+with no token: the CLI (`crucible api --url <url>` alone sends no `Authorization` header),
+the SDK (`token` is optional), the operator page (it reads `ping` and does not ask), and a
+pairing line with no `#<token>` (`crucible pair <address>` against such a server saves one
+at once). `X-Crucible-Api: 1` is still required on every `/v1` and `/openai/v1` route but
+`ping`, whichever the mode.
+
+The one door that always takes the token is the Windows host's loopback install door
+(`crucible/host/controller_door.py`), which installs software and is not part of the API;
+its own `ping` says `auth: "token"`.
 
 ## 10. Non-goals
 

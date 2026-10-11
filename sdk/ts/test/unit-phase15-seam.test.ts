@@ -228,7 +228,7 @@ test('capability() takes a timeoutMs and abandons a server that is asleep', asyn
 });
 
 test('ping() and info() take the same clock', async () => {
-  answers(200, { crucible: true, name: 'x', api_version: 1 });
+  answers(200, { crucible: true, name: 'x', api_version: 1, auth: 'token' });
   stall = 5000;
   await assert.rejects(client().ping({ timeoutMs: 120 }), (error: unknown) => {
     assert.equal((error as Error).name, 'TimeoutError');

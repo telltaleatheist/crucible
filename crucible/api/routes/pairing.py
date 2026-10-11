@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import Depends, Request, Response
 
 from ...connect import DecidePairing, PollPairing, StartPairing
+from ...pairing import handed_out_token
 from ...protocol import API_VERSION
 from ..context import AppContext, Routers
 from ..deps import require_api_version
@@ -17,9 +18,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
 
     @public.get("/ping", response_model=Ping, response_model_exclude_unset=True)
     async def ping() -> dict[str, Any]:
-        """Unauthenticated. Lets a client tell "wrong token" from "not a Crucible"."""
+        """Unauthenticated. Lets a client tell "wrong token" from "not a Crucible", and
+        says in `auth` whether this server asks for a token at all (`token` or `none`)."""
         return {"crucible": True, "name": config.name, "api_version": API_VERSION,
-                "pairing_version": 1}
+                "pairing_version": 1, "auth": config.auth}
 
     @public.post("/pairing/start", dependencies=[Depends(require_api_version)])
     async def start_pairing(body: StartPairing, request: Request, response: Response) -> dict:
@@ -35,13 +37,15 @@ def register(routers: Routers, ctx: AppContext) -> None:
     async def poll_pairing(body: PollPairing, response: Response) -> dict:
         """How a pairing request stands: `pending`, `approved` (the answer then carries the
         server's `name` and its `token`), `denied` or `expired`. Poll with the `id` and
-        `device_code` from `POST /v1/pairing/start`.
+        `device_code` from `POST /v1/pairing/start`. On a server with `[auth] mode =
+        "none"` an approved `token` is null: there is nothing to hold, and the stored
+        token is never handed out while nothing asks for it.
         """
         response.headers["Cache-Control"] = "no-store"
         status = ctx.pairing_requests.poll(body.id, body.device_code)
         result = {"status": status}
         if status == "approved":
-            result.update(name=config.name, token=config.token)
+            result.update(name=config.name, token=handed_out_token(config))
         return result
 
     @private.get("/pairing/requests")

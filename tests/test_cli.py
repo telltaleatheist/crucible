@@ -128,10 +128,34 @@ def test_token_needs_show_or_url(home: Path, viable: None) -> None:
     assert cli.main(["token"]) == 1
 
 
-def test_token_url_prints_one_pairing_line_per_address(
+def test_a_new_init_asks_for_no_token_and_still_mints_one(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Owen, 2026-10-11: Ollama's behaviour by default (docs/DESIGN.md section 9).
+    assert cli.main(["init"]) == 0
+    assert '[auth] mode = "none"' in capsys.readouterr().out
+    config = load_config(home)
+    assert config.auth == "none"
+    assert config.token
+    assert cli.main(["init", "--force", "--auth", "token"]) == 0
+    assert load_config(home).auth == "token"
+
+
+def test_token_url_on_a_new_init_carries_no_token(
     home: Path, viable: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert cli.main(["init", "--host", "127.0.0.1", "--port", "7100"]) == 0
+    capsys.readouterr()
+    assert cli.main(["token", "--url"]) == 0
+    printed = capsys.readouterr().out.strip().splitlines()
+    config = load_config(home)
+    assert printed == [f"crucible://{quote(config.name, safe='')}@127.0.0.1:7100/"]
+
+
+def test_token_url_prints_one_pairing_line_per_address(
+    home: Path, viable: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["init", "--auth", "token", "--host", "127.0.0.1", "--port", "7100"]) == 0
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.strip().splitlines()
@@ -148,7 +172,7 @@ def test_token_url_lists_every_interface_of_a_wildcard_bind(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(pairing, "ipv4_addresses", lambda: ["10.0.0.4", "100.64.0.3"])
-    assert cli.main(["init", "--host", "0.0.0.0"]) == 0
+    assert cli.main(["init", "--auth", "token", "--host", "0.0.0.0"]) == 0
     capsys.readouterr()
     assert cli.main(["token", "--url"]) == 0
     printed = capsys.readouterr().out.strip().splitlines()

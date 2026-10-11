@@ -36,10 +36,12 @@ def _namespace(**overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def test_a_url_without_a_token_is_refused_and_never_borrows_the_local_one() -> None:
-    with pytest.raises(ClientRefusal) as refusal:
-        api_cmd.resolve(_namespace(url="http://192.168.68.20:7100"))
-    assert "token_required" in str(refusal.value)
+def test_a_url_without_a_token_sends_none_and_never_borrows_the_local_one() -> None:
+    # A server with [auth] mode = "none" needs only its address (docs/DESIGN.md section 9).
+    resolved = api_cmd.resolve(_namespace(url="http://192.168.68.20:7100/"))
+    assert resolved.url == "http://192.168.68.20:7100"
+    assert resolved.token is None
+    assert resolved.source == "--url"
 
 
 def test_a_token_without_a_url_is_refused_by_name() -> None:

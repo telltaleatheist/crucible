@@ -71,6 +71,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 "name": config.name,
                 "version": VERSION,
                 "api_version": API_VERSION,
+                # `[auth] mode`, as GET /v1/ping says it without a token.
+                "auth": config.auth,
             },
             "role": peer_module.ROLE_ENGINE,
             "managed_by": ctx.peer.managed_by(),
@@ -170,6 +172,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         its token and pairing lines, and `network`: whether other devices can reach it
         (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open
         it, the one `command` that does (when one exists) and what that `changes`.
+        `auth` is `[auth] mode`. On a server with `auth: "none"` the `token` is null and
+        the pairing lines carry no `#<token>`: nothing asks for one, and the stored token
+        is not handed out, because it would let its reader in the moment `token` was
+        turned back on.
         """
         host, port = ctx.bind_host, ctx.bind_port
         try:
@@ -188,8 +194,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
             "backend": backend.kind,
             "bind": f"http://{host}:{port}",
             "urls": urls,
-            "token": config.token,
-            "pairing": pairing.pairing_lines(config.name, urls, config.token),
+            "auth": config.auth,
+            "token": pairing.handed_out_token(config),
+            "pairing": pairing.pairing_lines(
+                config.name, urls, pairing.handed_out_token(config)
+            ),
             "job_types": sorted(ctx.store.registry),
             "config_path": str(config.path),
             "network": network.to_dict(),

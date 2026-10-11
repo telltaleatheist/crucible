@@ -6,6 +6,9 @@
   var CLIENT_HEADER = 'X-Crucible-Client';
   var CLIENT_NAME = 'crucible-playground';
   var TOKEN_KEY = 'crucible.token';
+  // Signed in to a server that asks for no token ([auth] mode = "none", which GET /v1/ping
+  // says): no Authorization header is sent. `state.token === null` still means signed out.
+  var NO_TOKEN = '';
   var TICK_MS = 1000;
   var RECONNECT_MS = 2000;
   var INSTALL_ROUNDS = 5;
@@ -78,7 +81,10 @@
   }
 
   function headers(extra) {
-    var built = { Authorization: 'Bearer ' + state.token };
+    var built = {};
+    if (state.token !== null && state.token !== NO_TOKEN) {
+      built.Authorization = 'Bearer ' + state.token;
+    }
     built[API_HEADER] = API_VERSION;
     built[CLIENT_HEADER] = CLIENT_NAME;
     if (extra) {
@@ -1832,12 +1838,29 @@
     if (state.token === null) {
       return;
     }
-    storeToken(token);
+    if (token !== NO_TOKEN) {
+      storeToken(token);
+    }
     showPlayground();
     render();
   }
 
-  function start() {
+  // GET /v1/ping answers without a token and says whether the server asks for one. Null when
+  // it cannot be read: the page then signs in the way it always has.
+  async function authMode() {
+    try {
+      var response = await fetch('/v1/ping');
+      if (!response.ok) {
+        return null;
+      }
+      var ping = await response.json();
+      return ping && typeof ping.auth === 'string' ? ping.auth : null;
+    } catch (unreachable) {
+      return null;
+    }
+  }
+
+  async function start() {
     document.getElementById('gate-form').addEventListener('submit', function (event) {
       event.preventDefault();
       var field = document.getElementById('gate-token');
@@ -1850,6 +1873,10 @@
     });
 
     var fragment = tokenFromFragment();
+    if ((await authMode()) === 'none') {
+      signIn(NO_TOKEN);
+      return;
+    }
     if (fragment !== null) {
       storeToken(fragment);
       signIn(fragment);

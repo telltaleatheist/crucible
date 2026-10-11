@@ -2,11 +2,25 @@
 export const API_VERSION = 1;
 
 /** `GET /v1/ping` — the only unauthenticated route. */
+/**
+ * `[auth] mode`: `token` asks every call but `ping` for `Authorization: Bearer <token>`; `none`
+ * asks for nothing, like Ollama, and ignores a bearer that is sent anyway.
+ */
+export type AuthMode = 'token' | 'none';
+
+/** Every {@link AuthMode}, in the order the server's docs list them. */
+export const AUTH_MODES: readonly AuthMode[] = ['token', 'none'];
+
 export interface Ping {
   /** Always `true`; anything else is a {@link CrucibleNotACrucible}. */
   readonly crucible: true;
   readonly name: string;
   readonly apiVersion: number;
+  /**
+   * Whether this server asks for a token. Answered without one, so a client can tell before it
+   * asks anybody: with `none`, a `CrucibleClient` made with no `token` reaches every route.
+   */
+  readonly auth: AuthMode;
 }
 
 /**
@@ -2498,8 +2512,17 @@ export interface ServerSetup {
    * bind.
    */
   readonly urls: readonly string[];
-  readonly token: string;
-  /** One `crucible://` line per {@link ServerSetup.urls} entry, in order. */
+  /** `[auth] mode`: whether a client needs {@link ServerSetup.token} at all. */
+  readonly auth: AuthMode;
+  /**
+   * The bearer token, or `null` on a server with `auth: 'none'`: nothing asks for one there,
+   * and the stored token is not handed out (it would let its reader in once `token` is back on).
+   */
+  readonly token: string | null;
+  /**
+   * One `crucible://` line per {@link ServerSetup.urls} entry, in order; with no `#<token>` on a
+   * server with `auth: 'none'`.
+   */
   readonly pairing: readonly string[];
   /** `/v1/info`'s list, repeated so a page draws from one read. */
   readonly jobTypes: readonly string[];

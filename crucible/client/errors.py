@@ -64,6 +64,12 @@ def next_step(error: ServerError, connection: Connection | None) -> str | None:
                 f"{host} ({error.message}); the engine and the config disagree. "
                 "Run `crucible doctor` here"
             )
+        if connection is not None and connection.token is None:
+            return (
+                f"{error.code}: {host} asks for a token ({error.message}) and none "
+                "was sent. Pass --token with --url, pair with `crucible pair "
+                f"<address>`, or on {host} run `crucible auth none` to stop asking"
+            )
         return (
             f"{error.code}: this pairing is not accepted by {host} "
             f"({error.message}); re-run `crucible pair <address>` for it"

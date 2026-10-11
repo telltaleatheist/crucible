@@ -325,6 +325,9 @@ def _ping(request: DoorRequest) -> None:
             "name": request.door.name,
             "api_version": API_VERSION,
             "role": ROLE_ORCHESTRATOR,
+            # This door installs software and always takes the engine's token, whatever
+            # the engine's own [auth] mode is (docs/DESIGN.md section 9).
+            "auth": "token",
         }
     )
 

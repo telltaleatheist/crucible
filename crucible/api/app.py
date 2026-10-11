@@ -21,7 +21,7 @@ from .. import peer as peer_module
 from .. import settings as settings_module
 from ..backend import Backend
 from ..capabilitystore import decide_for, write_capability
-from ..config import Config, load_config
+from ..config import AUTH_NONE, Config, load_config
 from ..connect import PairingRequests
 from ..errors import ApiError, ConfigError
 from ..events import SESSION, EventHub
@@ -281,7 +281,11 @@ def _services(
         settings_history=settings_history,
         removals=catalog.Removals(),
         peer=peer_module.PeerState(),
-        pairing_requests=PairingRequests(open_pairing=lambda: config.open_pairing),
+        # With [auth] mode = "none" an approval would hand over nothing (the answer's
+        # token is null), so there is nothing for an operator to approve.
+        pairing_requests=PairingRequests(
+            open_pairing=lambda: config.open_pairing or config.auth == AUTH_NONE
+        ),
         settlement=settlement,
         tasks=task_store,
         installs=InstallOnSubmit(config, backend, task_store),

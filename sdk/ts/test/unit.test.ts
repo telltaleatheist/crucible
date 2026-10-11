@@ -201,10 +201,12 @@ test('an error body that is not the crucible envelope is a protocol error', asyn
 
 // ------------------------------------------------------------------- config
 
-test('every constructor option is required and is named when missing', () => {
+test('every required constructor option is named when missing', () => {
+  // `token` is not among them: a server with [auth] mode = "none" takes none
+  // (unit-auth-none.test.ts). A token that IS given must still be text.
   const cases: Array<[Record<string, unknown>, string]> = [
     [{ token: 't', clientName: 'c' }, 'url'],
-    [{ url: 'http://127.0.0.1:7100', clientName: 'c' }, 'token'],
+    [{ url: 'http://127.0.0.1:7100', token: '', clientName: 'c' }, 'token'],
     [{ url: 'http://127.0.0.1:7100', token: 't' }, 'clientName'],
     [{ url: '', token: 't', clientName: 'c' }, 'url'],
   ];
@@ -239,7 +241,7 @@ test('authed calls carry the token, the api header and the client name', async (
 });
 
 test('ping carries neither the token nor the api header', async () => {
-  answer(200, { crucible: true, name: 'crucible@fixture', api_version: 1 });
+  answer(200, { crucible: true, name: 'crucible@fixture', api_version: 1, auth: 'token' });
   const ping = await client().ping();
   assert.equal(ping.name, 'crucible@fixture');
   assert.equal(lastHeaders['authorization'], undefined);

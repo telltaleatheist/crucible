@@ -28,6 +28,20 @@ DEFAULT_HOST = "127.0.0.1"
 
 DEFAULT_OPEN_PAIRING = True
 
+# `[auth] mode`: whether a caller must present this server's bearer token. Owen, 2026-10-11:
+# "lets make it so b sides and any other claude agent is capable of making calls to crucible
+# without requiring the access token. claude doesnt like handling access tokens and it isnt
+# necessary anyway since we're behind a firewall. ollama doesnt require access tokens for
+# calling its api". `none` is Ollama's behaviour: every route answers without a header, and a
+# bearer that IS sent is ignored, right or wrong, so a client that stored a token keeps working.
+AUTH_TOKEN = "token"
+AUTH_NONE = "none"
+AUTH_MODES = (AUTH_TOKEN, AUTH_NONE)
+# A config written before the key existed keeps today's lock, so nothing opens on an upgrade.
+DEFAULT_AUTH_MODE = AUTH_TOKEN
+# What a NEW `crucible init` writes: Ollama's behaviour, by Owen's ruling above.
+INIT_AUTH_MODE = AUTH_NONE
+
 DEFAULT_RETENTION_DAYS = 7
 
 DEFAULT_INSTALL_ON_SUBMIT = True
@@ -149,6 +163,9 @@ class Config:
     # `scheme://host[:port]`, empty unless configured.
     cors_origins: tuple[str, ...] = ()
     open_pairing: bool = True
+    # `[auth] mode` (AUTH_MODES). The token above is kept either way: `none` stops asking
+    # for it, and turning `token` back on needs no new one.
+    auth: str = DEFAULT_AUTH_MODE
     retention_days: int = DEFAULT_RETENTION_DAYS
     desktop_allowance_note: str = ""
     install_on_submit: bool = DEFAULT_INSTALL_ON_SUBMIT
@@ -268,6 +285,36 @@ def _open_pairing(table: dict[str, Any]) -> bool:
             "door you meant to close"
         )
     return value
+
+
+def check_auth_mode(value: Any, where: str = "config [auth] mode") -> str:
+    if value not in AUTH_MODES:
+        raise ConfigError(
+            f"{where}: {value!r} is not one of {list(AUTH_MODES)}. \"token\" asks every "
+            "caller for this server's bearer token; \"none\" asks for nothing, like Ollama"
+        )
+    return value
+
+
+def _auth_mode(table: dict[str, Any]) -> str:
+    auth = table.get("auth")
+    if not isinstance(auth, dict) or "mode" not in auth:
+        return DEFAULT_AUTH_MODE
+    return check_auth_mode(auth["mode"])
+
+
+def _kept_auth_mode(home: Path) -> str | None:
+    """`[auth] mode` as the file on disk has it, or None when it has none: a rewrite that
+    was not asked to change it writes it back exactly, and a file without the key stays
+    without it (so it keeps meaning DEFAULT_AUTH_MODE)."""
+    try:
+        with open(config_path(home), "rb") as handle:
+            auth = tomllib.load(handle).get("auth")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(auth, dict) or "mode" not in auth:
+        return None
+    return check_auth_mode(auth["mode"])
 
 
 def _retention_days(table: dict[str, Any]) -> int:
@@ -1066,6 +1113,7 @@ def load_config(
         cors_origins=_cors_origins(table),
         token=_require(table, "auth", "token", str),
         open_pairing=_open_pairing(table),
+        auth=_auth_mode(table),
         backend_kind=_require(table, "backend", "kind", str),
         enable_echo=_require(table, "jobs", "enable_echo", bool),
         enable_llm=_require(table, "jobs", "enable_llm", bool),
@@ -1169,6 +1217,7 @@ def write_config(
     lan_advertise: tuple[str, ...] = (),
     cors_origins: tuple[str, ...] | None = None,
     open_pairing: bool = DEFAULT_OPEN_PAIRING,
+    auth: str | None = None,
     tts_engines: tuple[EngineFootprint, ...] = (),
     carried_tables: dict[str, Any] | None = None,
     audio_low_vram: AudioLowVram | None = None,
@@ -1222,6 +1271,11 @@ def write_config(
             "desktop_allowance_basis": desktop_allowance_basis,
         },
     }
+    # [auth] is this writer's table: a mode nobody asked to change is the one on disk, and
+    # a file that never had the key keeps not having it.
+    mode = _kept_auth_mode(home) if auth is None else check_auth_mode(auth)
+    if mode is not None:
+        document["auth"]["mode"] = mode
     if desktop_allowance_basis not in DESKTOP_BASES:
         raise ConfigError(
             f"desktop_allowance_basis {desktop_allowance_basis!r} is not one of "
@@ -1358,6 +1412,7 @@ def rewrite_config(
     port: int | None = None,
     token: str | None = None,
     open_pairing: bool | None = None,
+    auth: str | None = None,
     advertise: tuple[str, ...] | None = None,
     tailscale_advertise: tuple[str, ...] | None = None,
     lan_advertise: tuple[str, ...] | None = None,
@@ -1409,6 +1464,7 @@ def rewrite_config(
         lan_advertise=kept(lan_advertise, "lan_advertise"),
         cors_origins=kept(cors_origins, "cors_origins"),
         open_pairing=kept(open_pairing, "open_pairing"),
+        auth=auth,
         tts_engines=kept(tts_engines, "tts_engines"),
         audio_low_vram=audio_low_vram,
         llm_concurrency=llm_concurrency,

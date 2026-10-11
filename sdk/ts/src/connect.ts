@@ -166,8 +166,11 @@ export async function pollPairing(request: PairingRequest, options: PairingOptio
   const value = await read(request.url, '/v1/pairing/poll', options, { id: request.id, device_code: request.deviceCode });
   const status = value['status'];
   if (status === 'pending' || status === 'denied' || status === 'expired') return { status };
-  if (status !== 'approved' || value['name'] !== request.name || typeof value['token'] !== 'string' || !value['token']) {
+  // A null token is a server with [auth] mode = "none": approved at once, nothing to hold.
+  const token = value['token'];
+  if (status !== 'approved' || value['name'] !== request.name
+    || !(token === null || (typeof token === 'string' && token !== ''))) {
     throw new CrucibleConnectionError('invalid_response', 'Crucible returned an incompatible pairing decision');
   }
-  return { status, pairing: { name: request.name, url: request.url, token: value['token'] } };
+  return { status, pairing: { name: request.name, url: request.url, token } };
 }

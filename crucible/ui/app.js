@@ -4,6 +4,9 @@
   var API_HEADER = 'X-Crucible-Api';
   var API_VERSION = '1';
   var TOKEN_KEY = 'crucible.token';
+  // Signed in to a server that asks for no token ([auth] mode = "none", which GET /v1/ping
+  // says): no Authorization header is sent. `state.token === null` still means signed out.
+  var NO_TOKEN = '';
   // GET /v1/events (docs/EVENTS.md) says when anything changes, so nothing here is read on
   // a timer except what no event covers: an app's pairing request.
   var EVENTS_PATH = '/v1/events';
@@ -108,7 +111,10 @@
   }
 
   function headers(extra) {
-    var built = { Authorization: 'Bearer ' + state.token };
+    var built = {};
+    if (state.token !== null && state.token !== NO_TOKEN) {
+      built.Authorization = 'Bearer ' + state.token;
+    }
     built[API_HEADER] = API_VERSION;
     if (extra) {
       for (var key in extra) {
@@ -2259,7 +2265,8 @@
       return;
     }
     if (after.origin !== window.location.origin) {
-      state.restart.link = after.origin + '/ui/#token=' + encodeURIComponent(state.token);
+      state.restart.link = after.origin + '/ui/' + (state.token === NO_TOKEN
+        ? '' : '#token=' + encodeURIComponent(state.token));
       restartSaid('It stopped and is starting again at ' + after.origin + '/. Open it there ' +
         'in a few seconds:');
       return;
@@ -2286,7 +2293,15 @@
         [true, 'Let it connect']
       ], doc.open_pairing
         ? 'An app that asks is let in at once.'
-        : 'An app that asks waits until you approve its code under Connect an app.')
+        : 'An app that asks waits until you approve its code under Connect an app.'),
+      toggleRow('auth', 'An app or agent calling Crucible', doc.auth, [
+        ['token', 'Needs the token'],
+        ['none', 'Needs nothing']
+      ], doc.auth === 'none'
+        ? 'Every route answers without a token, like Ollama; a token sent anyway is ignored. ' +
+          'Turning the token back on keeps the one this server already has: `crucible token ' +
+          '--show` on this server prints it, and this page asks for it.'
+        : 'Every route but /v1/ping asks for `Authorization: Bearer <token>`.')
     ]);
   }
 
@@ -3844,9 +3859,12 @@
 
     body.appendChild(
       el('p', { class: 'lead' }, [
-        'You can also paste a connection line below into BookForge or Foundry → Settings → Crucible ' +
-          'Servers → Add. It carries the name, the address and the token, so ' +
-          'nobody types a secret twice.'
+        setup.token === null
+          ? 'This server asks for no token, so an app or an agent needs only an address below. ' +
+            'The connection lines carry the name and the address.'
+          : 'You can also paste a connection line below into BookForge or Foundry → Settings → Crucible ' +
+            'Servers → Add. It carries the name, the address and the token, so ' +
+            'nobody types a secret twice.'
       ])
     );
 
@@ -3857,6 +3875,19 @@
       );
     }
     body.appendChild(lines);
+
+    if (setup.token === null) {
+      body.appendChild(el('div', { class: 'block' }, [
+        el('p', { class: 'subhead', text: 'By hand' }),
+        facts([
+          ['Name', mono(setup.name)],
+          ['Addresses', el('span', null, [setup.urls.join('  ·  ')])],
+          ['Token', el('span', null, ['none needed ([auth] mode = "none")'])]
+        ])
+      ]));
+      body.appendChild(renderModuleBox());
+      return;
+    }
 
     var masked = el('span', {
       class: 'line-text',
@@ -4173,7 +4204,9 @@
     if (state.token === null) {
       return;
     }
-    storeToken(token);
+    if (token !== NO_TOKEN) {
+      storeToken(token);
+    }
     showConsole();
     if (new URLSearchParams(window.location.search).get('section') === 'connect') {
       document.getElementById('panel-connect').scrollIntoView();
@@ -4194,7 +4227,22 @@
     }
   }
 
-  function start() {
+  // GET /v1/ping answers without a token and says whether the server asks for one. Null when
+  // it cannot be read: the page then signs in the way it always has.
+  async function authMode() {
+    try {
+      var response = await fetch('/v1/ping');
+      if (!response.ok) {
+        return null;
+      }
+      var ping = await response.json();
+      return ping && typeof ping.auth === 'string' ? ping.auth : null;
+    } catch (unreachable) {
+      return null;
+    }
+  }
+
+  async function start() {
     document.getElementById('gate-form').addEventListener('submit', function (event) {
       event.preventDefault();
       var field = document.getElementById('gate-token');
@@ -4210,6 +4258,10 @@
     });
 
     var fragment = tokenFromFragment();
+    if ((await authMode()) === 'none') {
+      signIn(NO_TOKEN);
+      return;
+    }
     if (fragment !== null) {
       storeToken(fragment);
       signIn(fragment);
