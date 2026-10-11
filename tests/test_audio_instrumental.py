@@ -35,43 +35,6 @@ def test_an_instrumental_song_needs_no_lyrics_and_a_sung_one_still_does() -> Non
     assert caught.value.code == "audio_param_missing" and "'lyrics'" in caught.value.message
 
 
-@pytest.mark.parametrize(
-    "tags, style",
-    [
-        # Siege of the Gilded Gates (B-Sides, 2026-10-11): already in form but for the stop.
-        (
-            "Instrumental, heavy metal, 140 BPM, no vocals, no singing, no choir, no spoken words",
-            "Instrumental, heavy metal, 140 BPM, no vocals, no singing, no choir, no spoken words.",
-        ),
-        # The same album the night before: no "Instrumental", no conditions.
-        (
-            "heavy metal, dark, epic, distorted guitar",
-            "Instrumental, heavy metal, dark, epic, distorted guitar, no vocals, no singing, "
-            "no choir, no spoken words.",
-        ),
-        ("instrumental lo-fi, no vocals.", "instrumental lo-fi, no vocals, no singing, no choir, "
-         "no spoken words."),
-        # "Instrumentals" is not the word YuE2's rule looks for.
-        ("Instrumentals of the night", "Instrumental, Instrumentals of the night, no vocals, "
-         "no singing, no choir, no spoken words."),
-        (None, "Instrumental, Expressive instrumental music, no vocals, no singing, no choir, "
-         "no spoken words."),
-    ],
-)
-def test_an_instrumental_style_is_put_in_yue2s_instrumental_form(tags, style) -> None:
-    parsed = _check("yue2-3b", tags=tags, instrumental=True) if tags else AudioParams(
-        instrumental=True
-    )
-    settled = settle(parsed, load_all_audio_manifests()["yue2-3b"].spec("cuda-linux"), 1)
-    assert settled.tags == style
-
-
-def test_a_sung_songs_style_is_sent_as_written() -> None:
-    parsed = _check("yue2-3b", tags=TAGS, lyrics="[Verse]\nA line to sing\n")
-    settled = settle(parsed, load_all_audio_manifests()["yue2-3b"].spec("cuda-linux"), 1)
-    assert settled.tags == TAGS
-
-
 def test_stable_audio_has_no_instrumental_switch() -> None:
     with pytest.raises(ApiError) as caught:
         _check("stable-audio-3-medium", prompt="a sad piano piece", instrumental=True)

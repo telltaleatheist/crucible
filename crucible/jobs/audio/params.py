@@ -371,28 +371,6 @@ class Settled:
     # The range a song's length is checked against after its score, before composing
     # (planning.LengthRange); None when the client sent neither end.
     length_range: planning.LengthRange | None = None
-    # The style the model is given: the client's `tags`, and for an instrumental those
-    # tags in YuE2's instrumental form (instrumental_style).
-    tags: str | None = None
-
-
-# YuE2's instrumental style rule, as its own instrumental workflow writes every request
-# (skills/yue2-music/instrumental/scripts/instrumental.py, YuE repo 18a07bb6): the style
-# opens with "Instrumental", carries each of these conditions, and ends with a full stop.
-# Clients wrote these by hand and some sent none (B-Sides' heavy-metal album, 2026-10-11).
-INSTRUMENTAL_CONDITIONS = ("no vocals", "no singing", "no choir", "no spoken words")
-INSTRUMENTAL_EMPTY_STYLE = "Expressive instrumental music"
-
-
-def instrumental_style(tags: str | None) -> str:
-    style = (tags or "").strip() or INSTRUMENTAL_EMPTY_STYLE
-    style = style.rstrip(".,").strip()
-    if not re.match(r"^instrumental\b", style, re.I):
-        style = "Instrumental, " + style
-    for condition in INSTRUMENTAL_CONDITIONS:
-        if condition not in style.lower():
-            style += ", " + condition
-    return style + "."
 
 
 def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
@@ -417,7 +395,6 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
                 params.min_duration_s, params.max_duration_s, float(spec.max_duration_s)
             )
         ),
-        tags=instrumental_style(params.tags) if params.instrumental else params.tags,
     )
 
 
@@ -442,7 +419,6 @@ __all__ = [
     "MAX_SEED",
     "MIN_SONG_SECONDS",
     "Settled",
-    "instrumental_style",
     "refuse_what_the_model_cannot_take",
     "settle",
 ]
