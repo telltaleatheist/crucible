@@ -172,3 +172,20 @@ def test_tag_conflicts_are_symmetric_and_name_only_offered_tags() -> None:
     assert {r["tag"] for r in conflicts["light drums"]} == {"double-kick drums"}
     assert "male vocal" in {r["tag"] for r in conflicts["instrumental"]}
     assert "jazz" not in conflicts, "genre blends are allowed"
+
+
+def test_a_score_the_transfer_refuses_is_kept_and_said(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A score that ended but has a bar longer than its meter (the first planning-lyrics
+    song on the PC, 2026-10-10): the refusal names the skill's own error and keeps the plan."""
+    module = _load_worker(monkeypatch)
+    engine = module.YuE2Engine.__new__(module.YuE2Engine)
+    engine._pipe = FakePipe()
+    job = SimpleNamespace(tags=TAGS, lyrics=None, seed=7, cfg=1.0, instrumental=True,
+                          output_path=str(tmp_path / "audio.flac"))
+    broken = FailedPlan(abc="not a score", truncated=False, timing={"output_tokens": 2000})
+    with pytest.raises(RuntimeError, match="cannot be moved to the instrument") as raised:
+        engine._instrumental_plan(job, broken)
+    assert "another seed" in str(raised.value)
+    assert broken.saved_to == tmp_path / module.FAILED_PLAN_DIR

@@ -569,8 +569,19 @@ class YuE2Engine:
                 "melody to move to the instrument; send it again with another seed. The "
                 f"plan it wrote is kept in the job's {FAILED_PLAN_DIR}/"
             )
-        converted, transfer = convert_score(planned.abc)
-        validate_score(converted)
+        try:
+            converted, transfer = convert_score(planned.abc)
+            validate_score(converted)
+        except Exception as exc:
+            # The score ended but the skill's checks refuse it (a bar longer than its
+            # meter: the first planning-lyrics song on the PC, 2026-10-10). The plan is the
+            # evidence, kept as for a truncated score; the refusal itself goes on unchanged.
+            planned.save(os.path.join(os.path.dirname(job.output_path), FAILED_PLAN_DIR))
+            raise RuntimeError(
+                f"YuE2's score for this instrumental cannot be moved to the instrument "
+                f"({type(exc).__name__}: {exc}); send it again with another seed. The plan "
+                f"it wrote is kept in the job's {FAILED_PLAN_DIR}/"
+            ) from exc
         cot = "full" if parse_abc(converted).voices["Vocal"].chords else "melody"
         fixed = self._pipe.plan(
             job.tags, lyric_tags(converted), abc=converted, cot=cot,

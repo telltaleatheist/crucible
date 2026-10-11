@@ -122,9 +122,10 @@ def misses(row: dict[str, Any], band: tuple[int, int]) -> list[str]:
 
 
 def line(row: dict[str, Any], missed: list[str]) -> str:
-    if row.get("score_tokens") is None and row["status"] != "done":
+    if row["status"] != "done" or row.get("score_tokens") is None:
         error = row.get("error") or {}
         return (f"FAIL seed {row['seed']} set {row.get('set')}: {row['status']} "
+                f"score {row.get('score_tokens')} {row.get('score_ended')} "
                 f"{error.get('code', '')} {error.get('message', '')}".rstrip())
     return (
         f"{'ok  ' if not missed else 'MISS'} seed {row['seed']:>10} set {str(row['set']):<10} "
