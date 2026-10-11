@@ -97,14 +97,36 @@ def summary(home: Path, gpu: Gpu) -> dict[str, Any]:
 
 
 class Watch:
+    """Samples the card once a second while a rung runs and names any process that came
+    onto it which is not the rung's own.
+
+    The rung's own processes are what ``owned`` returns (the pids the rung spawned) and
+    every process in the sessions they lead - the attribution the load guard makes
+    (accelerator.expand_owned_pids). vLLM v1 does its CUDA work in an EngineCore child
+    (vLLM 0.28: multiprocessing ``Process``, no setsid) that the rung never spawned
+    itself, so a check against ``engine.pids`` alone called the rung's own engine
+    foreign on every run (1.0.140, Victoria's 3070: a new pid each run). The sessions
+    are remembered once seen: ``engine.pids`` goes empty the moment the API server
+    exits, while its EngineCore may still be letting go of the card under the sid its
+    leader gave it.
+
+    Under WSL2 (/usr/lib/wsl/lib/nvidia-smi) the list holds the guest's own CUDA
+    processes by their guest pid, but names each one ``[Not Found]`` and reports no
+    memory for it, and it never lists a Windows process at all (measured on the PC,
+    driver as of 2026-10-11). So under WSL a foreign process INSIDE the VM is still
+    caught by pid; one on the Windows side is not seen by this watch."""
+
     def __init__(self, owned: Callable[[], frozenset[int]]) -> None:
         self._owned = owned
+        self._spawned: frozenset[int] = frozenset()
+        self._led: frozenset[int] = frozenset()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self.max_used_bytes = 0
         self.max_utilization = 0
         self.foreign: dict[int, str] = {}
         self.samples = 0
+        self.unread: dict[str, int] = {}
 
     def __enter__(self) -> "Watch":
         self._thread.start()
@@ -114,36 +136,49 @@ class Watch:
         self._stop.set()
         self._thread.join(timeout=5)
 
+    def sample(self) -> None:
+        lines = accelerator._nvidia_smi(
+            "--query-gpu=memory.used,utilization.gpu", "the watch"
+        )
+        used_mib, utilization = (int(p.strip()) for p in lines[0].split(","))
+        self.max_used_bytes = max(self.max_used_bytes, used_mib * 1024 * 1024)
+        self.max_utilization = max(self.max_utilization, utilization)
+        self._spawned |= self._owned()
+        apps = accelerator.probe_compute_apps()
+        ours = self._spawned
+        if any(app.pid not in ours for app in apps):
+            table = accelerator.probe_process_table()
+            self._led |= accelerator.leaders_among(self._spawned, table)
+            ours = ours | accelerator.members_of(self._led, table)
+        for app in apps:
+            if app.pid in ours:
+                continue
+            if (
+                app.used_bytes is None
+                or app.used_bytes > accelerator.FOREIGN_PROCESS_FLOOR_BYTES
+            ):
+                self.foreign[app.pid] = app.describe()
+        self.samples += 1
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                lines = accelerator._nvidia_smi(
-                    "--query-gpu=memory.used,utilization.gpu", "the watch"
-                )
-                used_mib, utilization = (int(p.strip()) for p in lines[0].split(","))
-                self.max_used_bytes = max(self.max_used_bytes, used_mib * 1024 * 1024)
-                self.max_utilization = max(self.max_utilization, utilization)
-                owned = self._owned()
-                for app in accelerator.probe_compute_apps():
-                    if app.pid in owned:
-                        continue
-                    if (
-                        app.used_bytes is None
-                        or app.used_bytes > accelerator.FOREIGN_PROCESS_FLOOR_BYTES
-                    ):
-                        self.foreign[app.pid] = app.describe()
-                self.samples += 1
-            except (accelerator.ProbeError, ValueError):
-                pass
+                self.sample()
+            except (accelerator.ProbeError, ValueError) as exc:
+                said = str(exc)
+                self.unread[said] = self.unread.get(said, 0) + 1
             self._stop.wait(1.0)
 
     def summary(self) -> dict[str, Any]:
+        under_wsl = os.path.exists(WSL_NVIDIA_SMI)
         return {
             "samples": self.samples,
             "max_used_bytes": self.max_used_bytes,
             "max_utilization_percent": self.max_utilization,
             "foreign": sorted(self.foreign.values()),
-            "compute_apps_visible": not os.path.exists(WSL_NVIDIA_SMI),
+            "unread_samples": dict(self.unread),
+            "process_memory_reported": not under_wsl,
+            "windows_side_unseen": under_wsl,
         }
 
 

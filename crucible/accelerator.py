@@ -381,18 +381,32 @@ def _left_behind(
     )
 
 
+def leaders_among(
+    owned_pids: "frozenset[int] | set[int]", table: dict[int, tuple[int, int]]
+) -> frozenset[int]:
+    """The owned pids that lead their process group or session in ``table`` (pid ->
+    (pgid, sid)). Every engine and smoke script is started with
+    procgroup.own_group, so it leads both, and whatever it forks - vLLM v1's
+    EngineCore, SGLang's scheduler - carries its pid as pgid and sid."""
+    return frozenset(pid for pid in owned_pids if pid in table.get(pid, (0, 0)))
+
+
+def members_of(led: frozenset[int], table: dict[int, tuple[int, int]]) -> frozenset[int]:
+    """Every process in ``table`` whose group or session one of ``led`` leads. A leader
+    that has since exited still names its members: Linux does not hand its pid to a new
+    process while any process still carries it as a pgid or sid."""
+    return frozenset(
+        pid for pid, (group, session) in table.items() if group in led or session in led
+    )
+
+
 def expand_owned_pids(
     owned_pids: frozenset[int], table: dict[int, tuple[int, int]]
 ) -> frozenset[int]:
-    sessions = {pid for pid in owned_pids if table.get(pid, (0, 0))[1] == pid}
-    groups = {pid for pid in owned_pids if table.get(pid, (0, 0))[0] == pid}
-    if not sessions and not groups:
+    led = leaders_among(owned_pids, table)
+    if not led:
         return owned_pids
-    return owned_pids | {
-        pid
-        for pid, (group, session) in table.items()
-        if session in sessions or group in groups
-    }
+    return owned_pids | members_of(led, table)
 
 
 def probe_vram() -> tuple[int, int]:
