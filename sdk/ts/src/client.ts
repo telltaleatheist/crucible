@@ -76,6 +76,7 @@ import {
   type AlignOptions,
   type ImageOptions,
   type ImageResult,
+  type AudioCover,
   type AudioDecodeStage,
   type AudioLength,
   type AudioPlanningLyrics,
@@ -2006,6 +2007,15 @@ export class CrucibleClient {
         'audio(...) needs a prompt (sound effects, music) or tags and lyrics (songs)',
       );
     }
+    const score = given.score ?? null;
+    if (score === null) {
+      if (given.scoreName !== undefined) {
+        throw new CrucibleConfigError('scoreName', 'scoreName names the score a cover is made from; send score too');
+      }
+      if (given.chords !== undefined) {
+        throw new CrucibleConfigError('chords', "chords keeps or strips a cover's score; send score too");
+      }
+    }
     const params: Record<string, unknown> = {};
     const optional: [keyof AudioOptions, string][] = [
       ['prompt', 'prompt'],
@@ -2022,16 +2032,23 @@ export class CrucibleClient {
       ['planningSet', 'planning_set'],
       ['minDurationS', 'min_duration_s'],
       ['maxDurationS', 'max_duration_s'],
+      ['chords', 'chords'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
       if (value !== undefined && value !== null) params[wire] = value;
     }
+    const inputs: Record<string, JobInput> = {};
+    if (score !== null) {
+      const scoreName = requireText(given.scoreName ?? 'score.abc', 'scoreName');
+      params.score = scoreName;
+      inputs[scoreName] = score;
+    }
     return this.submit({
       type: 'audio',
       model: requireText(given.model, 'model'),
       params,
-      inputs: {},
+      inputs,
     });
   }
 
@@ -3755,6 +3772,8 @@ export function readAudioResult(done: DoneData): AudioResult {
     length: readAudioLength(nullableObject(audio, 'length', at), `${at}.length`),
     artifact: str(audio, 'artifact', at),
     score: nullableStr(audio, 'score', at),
+    // Absent from a server older than covers; null on a newer one for any song not a cover.
+    cover: readAudioCover(optObject(audio, 'cover', at), `${at}.cover`),
     audioSeconds: nullableNum(audio, 'audio_seconds', at),
     sampleRate: nullableNum(audio, 'sample_rate', at),
     channels: nullableNum(audio, 'channels', at),
@@ -3779,6 +3798,44 @@ function readPlanningLyrics(planning: Json | null, where: string): AudioPlanning
     requested: nullableBool(planning, 'requested', where),
     resized: bool(planning, 'resized', where),
     lyrics: str(planning, 'lyrics', where),
+  };
+}
+
+function readAudioCover(cover: Json | null, where: string): AudioCover | null {
+  if (cover === null) return null;
+  const source = oneOf(str(cover, 'source', where), ['upload', 'reference'] as const, `${where}.source`);
+  const reference = nullableObject(cover, 'reference', where);
+  if ((source === 'reference') !== (reference !== null)) {
+    throw new CrucibleProtocolError(
+      `${where}.reference is ${reference === null ? 'null' : 'an object'} for source ${JSON.stringify(source)}`,
+    );
+  }
+  const score = objectField(cover, 'score', where);
+  const at = `${where}.score`;
+  return {
+    kind: oneOf(str(cover, 'kind', where), ['instrumental', 'sung'] as const, `${where}.kind`),
+    source,
+    input: str(cover, 'input', where),
+    reference: reference === null
+      ? null
+      : { jobId: str(reference, 'job_id', `${where}.reference`), name: str(reference, 'name', `${where}.reference`) },
+    given: str(cover, 'given', where),
+    cot: oneOf(str(cover, 'cot', where), ['full', 'melody'] as const, `${where}.cot`),
+    chords: oneOf(str(cover, 'chords', where), ['kept', 'stripped'] as const, `${where}.chords`),
+    chordsChosenBy: oneOf(
+      str(cover, 'chords_chosen_by', where),
+      ['request', 'default'] as const,
+      `${where}.chords_chosen_by`,
+    ),
+    scoreTokens: nullableNum(cover, 'score_tokens', where),
+    scoreSeconds: num(cover, 'score_seconds', where),
+    score: {
+      seconds: num(score, 'seconds', at),
+      bars: num(score, 'bars', at),
+      quarters: num(score, 'quarters', at),
+      bpm: num(score, 'bpm', at),
+      meter: str(score, 'meter', at),
+    },
   };
 }
 

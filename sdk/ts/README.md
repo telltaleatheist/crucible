@@ -121,6 +121,7 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `accelerator()` | `GET /v1/accelerator` | `AcceleratorState` |
 | `asr(options)` | `POST /v1/jobs {type: "asr"}` | the job id |
 | `align(options)` | `POST /v1/jobs {type: "align"}` | the job id; `readAlignment(bytes)` reads its `alignment.json` |
+| `audio(options)` | `POST /v1/jobs {type: "audio"}` | the job id; `readAudioResult(done)` reads its `done` record, a cover's `cover` included |
 | `setup()` | `GET /v1/setup` | `ServerSetup` — urls, token, one pairing line per url, and `network` (who can reach it, and what opens it) |
 | `catalog()` | `GET /v1/catalog` | `CatalogRow[]` — every subject this backend can hold |
 | `submitTask(request)` | `POST /v1/tasks` | the task id |
@@ -1169,6 +1170,61 @@ await crucible.releaseArtifacts(renderJobId);         // removes the render job'
   published. The answer is to upload the bytes.
 - A referenced file is hard-linked into the new job, so releasing the held job never takes a
   running job's inputs with it.
+
+## `audio()`
+
+Sound effects and music (`prompt`) or a song (`tags` and `lyrics`, YuE2). Returns a job id;
+`readAudioResult(done)` reads the `done` event's `audio` record (the server's docs/AUDIO.md has
+every param and every field).
+
+```ts
+const jobId = await crucible.audio({ model: 'yue2-3b', tags: 'English, piano pop, 88 BPM', lyrics });
+```
+
+### Covers: a song from a given score
+
+`score` hands YuE2 a score to render instead of planning one: YuE2's own two-voice ABC (no
+`w:` lines), as a song's `score.abc` or the `score` job writes it. It is the job's one input;
+the client sends it under `scoreName` (default `score.abc`) and sets `params.score` to that
+name. Any `JobInput` works: `{ blobId }` from `upload()`, `{ inline }`, or `artifactRef()` to a
+held job's artifact.
+
+```ts
+// An instrumental cover: the score's melody played on the instrument; no lyrics.
+const { blobId } = await crucible.upload(abcBytes, { filename: 'score.abc' });
+await crucible.audio({
+  model: 'yue2-3b',
+  tags: 'Instrumental, warm piano and strings, no vocals, no singing, 72 BPM',
+  instrumental: true,
+  score: { blobId },
+  seed: 3,
+});
+
+// A sung cover: the melody sung with your lyrics, taken from a held job by reference.
+await crucible.audio({
+  model: 'yue2-3b',
+  tags: 'English, intimate acoustic folk, warm male voice, 72 BPM',
+  lyrics: '[Verse]
+The lantern by the harbour wall
+...',
+  score: crucible.artifactRef(scoreJobId, 'score.abc'),
+  scoreName: 'melody.abc',
+});
+```
+
+- **`chords: 'keep' | 'strip'`** keeps the score's chord symbols (cot `full`) or strips them
+  (cot `melody`). Left out, an instrumental cover keeps them and a sung cover strips them.
+  `chords` or `scoreName` without `score` is refused before sending.
+- **The lyrics are yours.** A sung cover needs words written to the score's phrases; the
+  server sends them to YuE2 as given and refuses a sung cover without any. An instrumental
+  cover refuses `lyrics`, and every cover refuses `planningLyrics`, `planningSet` and a length
+  range: the score is the plan.
+- **The result** adds `given-score.abc` (the score as sent) beside `score.abc` (as rendered),
+  and `readAudioResult(done).cover` says how it was made: `kind`, `source` (`upload` or
+  `reference`, with `reference: {jobId, name}`), `input`, `cot`, `chords`, `chordsChosenBy`,
+  `scoreTokens`, `scoreSeconds` and the server's reading of the `score` (seconds, bars,
+  quarters, bpm, meter). It is `null` for a song YuE2 planned itself, a sound, and a server
+  older than covers.
 
 ## Reading the wire
 

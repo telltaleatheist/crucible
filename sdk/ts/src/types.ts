@@ -2180,6 +2180,57 @@ export interface AudioOptions {
    */
   readonly minDurationS?: number;
   readonly maxDurationS?: number;
+  /**
+   * A song model only (YuE2): a cover - a given score rendered instead of a planned one
+   * (docs/AUDIO.md "Covers"). YuE2's two-voice ABC, with no `w:` lines: uploaded
+   * (`{blobId}`), inline (`{inline}`), or another held job's artifact
+   * ({@link CrucibleClient.artifactRef}, e.g. a `score` job's `score.abc`). With
+   * `instrumental` its melody is played on the instrument and `lyrics` are refused; without it
+   * the melody is sung with `lyrics`, which are required. Never beside `planningLyrics`,
+   * `planningSet` or a length range: the score is the plan.
+   */
+  readonly score?: JobInput | null;
+  /** The input name the score is sent under (it becomes `params.score`); default `score.abc`. Only with `score`. */
+  readonly scoreName?: string;
+  /**
+   * Only with `score`: `keep` the score's chord symbols (cot `full`, the harmony fixed) or
+   * `strip` them (cot `melody`, the accompaniment free). Left out, an instrumental cover
+   * keeps them and a sung cover strips them.
+   */
+  readonly chords?: 'keep' | 'strip';
+}
+
+/** A cover's score as the server read it (`scorelength.read`): its bars at its tempo. */
+export interface AudioCoverScore {
+  readonly seconds: number;
+  readonly bars: number;
+  readonly quarters: number;
+  readonly bpm: number;
+  readonly meter: string;
+}
+
+/** How a YuE2 cover was made from its given score (`audio.cover`, docs/AUDIO.md "Covers"). */
+export interface AudioCover {
+  /** `instrumental`: the score's melody played on the instrument. `sung`: sung with the request's lyrics. */
+  readonly kind: 'instrumental' | 'sung';
+  /** `upload`: a blob or inline bytes. `reference`: another job's artifact. */
+  readonly source: 'upload' | 'reference';
+  /** The input name the score arrived under (`params.score`). */
+  readonly input: string;
+  /** The job and artifact the score was taken from; null for an upload. */
+  readonly reference: { readonly jobId: string; readonly name: string } | null;
+  /** The artifact holding the score as it was sent: `given-score.abc`. */
+  readonly given: string;
+  /** The cot YuE2 rendered with: `full` (chords kept) or `melody` (chords stripped). */
+  readonly cot: 'full' | 'melody';
+  readonly chords: 'kept' | 'stripped';
+  /** `request`: the client sent `chords`. `default`: the kind's default picked it. */
+  readonly chordsChosenBy: 'request' | 'default';
+  /** The score's length in YuE2's tokens, as the worker counted it; null in a record kept before it rendered. */
+  readonly scoreTokens: number | null;
+  /** The given score's nominal seconds (`score.seconds`, rounded). */
+  readonly scoreSeconds: number;
+  readonly score: AudioCoverScore;
 }
 
 /** A YuE2 song's one score against the range asked (docs/AUDIO.md "Song length"). */
@@ -2242,8 +2293,13 @@ export interface AudioResult {
   readonly length: AudioLength | null;
   /** The audio artifact's name: `audio.flac`, `audio.wav` or `audio.mp3`. */
   readonly artifact: string;
-  /** `score.abc`, the song's ABC score, when the model wrote one; else null. */
+  /** `score.abc`, the song's ABC score, when the model wrote one; else null. For a cover, the score as rendered. */
   readonly score: string | null;
+  /**
+   * How a cover was made from its given score; null for a song YuE2 planned itself, a sound
+   * without a score, and a server older than covers.
+   */
+  readonly cover: AudioCover | null;
   readonly audioSeconds: number | null;
   readonly sampleRate: number | null;
   readonly channels: number | null;

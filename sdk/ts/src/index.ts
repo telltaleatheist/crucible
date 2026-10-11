@@ -141,6 +141,8 @@ export type {
   AlignOptions,
   ImageOptions,
   ImageResult,
+  AudioCover,
+  AudioCoverScore,
   AudioDecodeStage,
   AudioLength,
   AudioPlanningLyrics,
