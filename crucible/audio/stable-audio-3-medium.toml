@@ -39,6 +39,8 @@ default_steps = 8
 max_steps = 50
 
 [backends.cuda-linux.not_taken]
+min_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
+max_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
 negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"
 
@@ -74,5 +76,7 @@ default_steps = 8
 max_steps = 50
 
 [backends.mlx-darwin.not_taken]
+min_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
+max_duration_s = "Stable Audio makes exactly the seconds asked for; send the length you want as duration_s"
 negative_prompt = "Stability's inference guide says negative_prompt has no effect on the post-trained Medium checkpoint (only the -base checkpoints read it); describe what you want instead"
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Medium checkpoint (it samples at cfg 1.0 in 8 steps)"

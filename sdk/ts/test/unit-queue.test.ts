@@ -235,6 +235,21 @@ test('a failed song reads with the request that reproduces it', async () => {
   assert.equal((await client().job('j1')).request, null);
 });
 
+test('a song refused for its length carries the details to resize it, and other failures none', async () => {
+  const details = { min_duration_s: 120, max_duration_s: 180, score_seconds: 212.4, ratio_needed: 0.847 };
+  handler = (_request, _body, response) =>
+    json(response, 200, jobBody({
+      type: 'audio', status: 'failed',
+      error: { code: 'song_length_out_of_range', message: 'outside the range', details },
+    }));
+  assert.deepEqual((await client().job('j1')).error, {
+    code: 'song_length_out_of_range', message: 'outside the range', details,
+  });
+  handler = (_request, _body, response) =>
+    json(response, 200, jobBody({ status: 'failed', error: { code: 'worker_failed', message: 'OOM' } }));
+  assert.deepEqual((await client().job('j1')).error, { code: 'worker_failed', message: 'OOM' });
+});
+
 test('cancelling a waiting job answers removed', async () => {
   handler = (_request, _body, response) => json(response, 200, { job_id: 'j1', status: 'removed' });
   assert.deepEqual(await client().cancel('j1'), { jobId: 'j1', status: 'removed' });

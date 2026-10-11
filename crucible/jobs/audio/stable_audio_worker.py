@@ -67,6 +67,8 @@ class StableAudio3Engine:
     decode_stages = None
     # Nothing is kept in host memory on purpose (yue2_worker.HostHomes is YuE2's).
     host_homes = None
+    # No score, so no score length to read (yue2_worker's `length`).
+    length = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:

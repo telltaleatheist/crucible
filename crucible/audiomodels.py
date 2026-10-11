@@ -50,7 +50,17 @@ TEXT_PARAM: dict[str, str] = {SFX: "prompt", MUSIC: "prompt", SONG: "tags"}
 
 LYRICS_KINDS: frozenset[str] = frozenset({SONG})
 
-OPTIONAL_PARAMS: tuple[str, ...] = ("negative_prompt", "duration_s", "steps", "cfg", "instrumental")
+OPTIONAL_PARAMS: tuple[str, ...] = (
+    "negative_prompt",
+    "duration_s",
+    "steps",
+    "cfg",
+    "instrumental",
+    # A song's length range (docs/AUDIO.md "Song length"): checked against its score
+    # before anything is composed.
+    "min_duration_s",
+    "max_duration_s",
+)
 
 MEMORY_BASES = frozenset({"measured", "declared"})
 

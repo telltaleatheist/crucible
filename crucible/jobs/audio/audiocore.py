@@ -54,6 +54,18 @@ class Cancelled(Exception):
         self.step = step
 
 
+class Refused(Exception):
+    """A song the engine stopped on purpose before composing it, by name: its score's
+    length fell outside the range the client asked (yue2_worker). It is an answer, not a
+    fault: the worker reports it as its result and stays loaded for the next song."""
+
+    def __init__(self, code: str, message: str, details: dict) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.details = details
+
+
 class CancelBox:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -111,6 +123,12 @@ class Progress:
         self.stage, self.step, self.steps, self._started = stage, 0, steps, now
         self._say()
 
+    def note(self, text: str) -> None:
+        """A sentence for the job's events beside its progress (the server makes it a
+        `note`): what a stage decided, such as a score re-planned for its length."""
+        send("progress", stage=self.stage, step=self.step, steps=self.steps,
+             fraction=self._fraction(), note=text)
+
     def reached(self, step: int, steps=None) -> None:
         self.step = step
         if steps is not None:
@@ -160,6 +178,13 @@ class Job:
         self.steps = nullable("steps", int)
         self.cfg = nullable("cfg", (int, float))
         self.instrumental = required("instrumental", bool)
+        # The range a song's score is checked against before composing (seconds; either
+        # may be null), the model's longest song, and whether the planning lyrics are
+        # the server's pool set, which the engine may resize to land in the range.
+        self.min_duration_s = nullable("min_duration_s", (int, float))
+        self.max_duration_s = nullable("max_duration_s", (int, float))
+        self.longest_s = required("longest_s", (int, float))
+        self.planning_resizable = required("planning_resizable", bool)
         self.sample_rate = required("sample_rate", int)
         self.channels = required("channels", int)
         self.format = required("format", str)
@@ -257,6 +282,9 @@ class Worker:
             # path it ran on, its speed (yue2_worker.decode_facts); None for an engine
             # that decodes no tokens.
             "decode_stages": self.engine.decode_stages,
+            # The score's length against the range asked, with every score planned to
+            # land in it (yue2_worker); None for an engine that writes no score.
+            "length": self.engine.length,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
             # keeps in host memory on purpose (yue2_worker.HostHomes), None for an engine
@@ -281,6 +309,12 @@ class Worker:
             result = self._run(job)
         except Cancelled as stopped:
             send("progress", stage="cancelled", step=stopped.step, during=stopped.stage)
+            send("done")
+            return
+        except Refused as refused:
+            send("result", refused={
+                "code": refused.code, "message": refused.message, "details": refused.details,
+            })
             send("done")
             return
         finally:

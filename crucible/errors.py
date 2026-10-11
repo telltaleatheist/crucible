@@ -45,11 +45,15 @@ class ApiError(CrucibleError):
 
 
 class JobError(CrucibleError):
+    """A job's named failure. `details`, when given, are the facts a client acts on beside
+    the sentence (a song refused for its length carries its score's seconds and the
+    range); they reach the job's `error` as `error.details`."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+        self.details = details
 
 
 class JobCancelled(CrucibleError):

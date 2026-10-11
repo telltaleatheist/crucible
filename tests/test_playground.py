@@ -123,7 +123,8 @@ def test_an_installed_model_is_ready_and_a_missing_one_downloads_its_weights(
     assert sfx["seed"]["default"] is None and not sfx["seed"]["required"]
 
     song = _fields(pages[SONG])
-    assert list(song) == ["tags", "lyrics", "instrumental", "cfg", "format", "seed"]
+    assert list(song) == ["tags", "lyrics", "instrumental", "planning_set", "min_duration_s",
+                          "max_duration_s", "cfg", "format", "seed"]
     assert not song["lyrics"]["required"], "an instrumental needs none; the server refuses a sung song without"
     assert song["instrumental"]["kind"] == "boolean" and song["instrumental"]["default"] is False
 

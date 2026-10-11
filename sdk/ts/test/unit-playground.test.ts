@@ -127,6 +127,7 @@ test('audio() sends instrumental; readAudioResult reads it, and null from a serv
     audio_seconds: 30, sample_rate: 44100, channels: 2, seconds: 60, stage_seconds: null,
     peak_bytes: null, stage_peak_bytes: null, memory_bytes_estimate: 16e9, memory_basis: 'declared',
     low_vram: false, decode_stages: null, stages_at_cap: null, planning_lyrics: null,
+    length: null,
   };
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...done, instrumental: true } } }).instrumental, true);
   assert.equal(readAudioResult({ artifacts: [], extra: { audio: done } }).instrumental, null);

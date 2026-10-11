@@ -12,11 +12,19 @@ from . import planning
 
 MAX_SEED = 2**32 - 1
 
+# The shortest song a length range may ask for. The shortest songs measured through
+# Crucible ran 38 to 62 s (six on the 3090 Ti, 2026-10-10), and an instrumental's
+# smallest structure is one section of a pool set with its intro and outro; below 30 s
+# no planning structure can land, so asking is refused rather than run to its budget.
+MIN_SONG_SECONDS = 30.0
+
 # flac first: it is the default. mp3 is 192 kbps CBR (audiocore.MP3_CBR_192_LEVEL), for
 # players and phones that want small files (B-Side, Owen 2026-10-04).
 FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 
-TEXT_FIELDS: tuple[str, ...] = ("prompt", "tags", "lyrics", "planning_lyrics", "negative_prompt")
+TEXT_FIELDS: tuple[str, ...] = (
+    "prompt", "tags", "lyrics", "planning_lyrics", "planning_set", "negative_prompt"
+)
 
 # A lyrics line that is only a section tag ([Verse], [Chorus], ...): all an instrumental's
 # lyrics may hold, since it sings nothing (a sung word there was silently dropped, 2026-10-03).
@@ -52,6 +60,13 @@ class AudioParams(BaseModel):
         f"{planning.MAX_LINES} lines and {planning.MAX_CHARS} characters. Null picks a set "
         "from the server's pool by the seed.",
     )
+    planning_set: str | None = Field(
+        default=None,
+        description="Songs (YuE2), with `instrumental` only and never beside "
+        "`planning_lyrics` or `lyrics`: the id of the server's pool set to plan the "
+        "score from (GET /v1/playground lists the ids), so an album can give each track "
+        "its own structure. Null picks a set by the seed.",
+    )
     negative_prompt: str | None = Field(
         default=None,
         description="Taken only by a model whose manifest lists it; the shipped "
@@ -62,7 +77,23 @@ class AudioParams(BaseModel):
         gt=0,
         description="Seconds of sound, for models that take it (Stable Audio: at "
         "most 120 sfx, 380 music); null is the model's default. A song's length "
-        "follows its lyrics.",
+        "follows its lyrics; ask a range with `min_duration_s` and `max_duration_s`.",
+    )
+    min_duration_s: float | None = Field(
+        default=None,
+        gt=0,
+        description="Songs (YuE2): the shortest the song may be, in seconds "
+        f"({MIN_SONG_SECONDS:g} up to the model's longest). Checked against the score "
+        "before anything is composed: an instrumental planned from the server's pool is "
+        "re-planned to land in the range, a song from the client's words is refused "
+        "`song_length_out_of_range` (docs/AUDIO.md \"Song length\"). Null: no minimum.",
+    )
+    max_duration_s: float | None = Field(
+        default=None,
+        gt=0,
+        description="Songs (YuE2): the longest the song may be, in seconds, above "
+        "`min_duration_s` when both are sent; as `min_duration_s`. Null: no maximum "
+        "beyond the model's own.",
     )
     seed: int | None = Field(
         default=None,
@@ -172,6 +203,8 @@ def _refuse_text(params: AudioParams, manifest: AudioManifest, spec: AudioBacken
             )
     if params.planning_lyrics is not None:
         _refuse_planning_lyrics(params, manifest, spec)
+    if params.planning_set is not None:
+        _refuse_planning_set(params, manifest, spec)
     # An instrumental song sings nothing: lyrics, if sent, only shape the score YuE2 plans
     # (its sections), so they are not required.
     sung = manifest.takes_lyrics and not params.instrumental
@@ -216,7 +249,78 @@ def _refuse_planning_lyrics(params: AudioParams, manifest: AudioManifest, spec: 
         )
 
 
+def _refuse_planning_set(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    if "instrumental" not in spec.takes:
+        raise _not_taken("planning_set", manifest, spec)
+    if not params.instrumental:
+        raise _refusal(
+            "audio_param_conflict",
+            "planning_set names the pool set an instrumental's score is planned from, but "
+            "this song is not instrumental. Send `instrumental: true` with it, or drop it",
+            manifest,
+            spec,
+            param="planning_set",
+        )
+    for other in ("planning_lyrics", "lyrics"):
+        if getattr(params, other) is not None:
+            raise _refusal(
+                "audio_param_conflict",
+                f"an instrumental is planned from one thing: planning_set names a pool set, "
+                f"and {other} would plan it instead. Drop one of `planning_set` and `{other}`",
+                manifest,
+                spec,
+                param="planning_set",
+            )
+    pool = planning_pool(spec)
+    try:
+        planning.named(pool, params.planning_set)
+    except planning.PlanningLyricsError as exc:
+        raise _refusal(
+            "planning_set_unknown",
+            str(exc),
+            manifest,
+            spec,
+            param="planning_set",
+            planning_sets=[entry.id for entry in pool],
+        ) from None
+
+
+def planning_pool(spec: AudioBackendSpec) -> list[planning.PlanningSet]:
+    """The engine's pool; an unreadable one is this build's fault, never the request's."""
+    try:
+        return planning.load_pool(spec.engine)
+    except planning.PlanningLyricsError as exc:
+        raise ApiError(500, "planning_lyrics_unavailable", str(exc), {"engine": spec.engine}) from None
+
+
+def _refuse_length_range(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    for name in ("min_duration_s", "max_duration_s"):
+        value = getattr(params, name)
+        if value is not None and not MIN_SONG_SECONDS <= value <= spec.max_duration_s:
+            raise _refusal(
+                "audio_param_out_of_range",
+                f"{name} {value:g} is outside what {manifest.id} can aim a song at: "
+                f"{MIN_SONG_SECONDS:g} to {spec.max_duration_s} s",
+                manifest,
+                spec,
+                param=name,
+                minimum=MIN_SONG_SECONDS,
+                maximum=spec.max_duration_s,
+            )
+    low, high = params.min_duration_s, params.max_duration_s
+    if low is not None and high is not None and low >= high:
+        raise _refusal(
+            "audio_param_conflict",
+            f"min_duration_s {low:g} is not below max_duration_s {high:g}; send a range "
+            "with the shorter end first",
+            manifest,
+            spec,
+            param="min_duration_s",
+        )
+
+
 def _refuse_ranges(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    _refuse_length_range(params, manifest, spec)
     if params.duration_s is not None and params.duration_s > spec.max_duration_s:
         raise _refusal(
             "audio_too_long",
@@ -263,6 +367,9 @@ class Settled:
     # planning_lyrics, or the pool's set for this seed. None for a sung song, a sound
     # without a score, and an instrumental shaped by the section tags in its `lyrics`.
     planning_lyrics: dict[str, Any] | None
+    # The range a song's length is checked against after its score, before composing
+    # (planning.LengthRange); None when the client sent neither end.
+    length_range: planning.LengthRange | None = None
 
 
 def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
@@ -280,6 +387,13 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
         instrumental=bool(params.instrumental),
         seed=seed,
         planning_lyrics=_planning_lyrics(params, spec, seed),
+        length_range=(
+            None
+            if params.min_duration_s is None and params.max_duration_s is None
+            else planning.LengthRange(
+                params.min_duration_s, params.max_duration_s, float(spec.max_duration_s)
+            )
+        ),
     )
 
 
@@ -288,14 +402,21 @@ def _planning_lyrics(params: AudioParams, spec: AudioBackendSpec, seed: int) -> 
         return planning.record(planning.REQUEST, params.planning_lyrics, None)
     if not params.instrumental or params.lyrics is not None:
         return None
-    chosen = planning.pick(planning.load_pool(spec.engine), seed)
-    return planning.record(planning.POOL, chosen.lyrics, chosen.id)
+    pool = planning.load_pool(spec.engine)
+    if params.planning_set is not None:
+        chosen = planning.named(pool, params.planning_set)
+    else:
+        chosen = planning.pick(pool, seed)
+    return planning.record(
+        planning.POOL, chosen.lyrics, chosen.id, requested=params.planning_set is not None
+    )
 
 
 __all__ = [
     "AudioParams",
     "FORMATS",
     "MAX_SEED",
+    "MIN_SONG_SECONDS",
     "Settled",
     "refuse_what_the_model_cannot_take",
     "settle",
