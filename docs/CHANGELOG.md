@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- An instrumental YuE2 song's style is sent in YuE2's own instrumental form, the one its instrumental workflow writes for every request (skills/yue2-music/instrumental, YuE repo 18a07bb6): it opens with "Instrumental", carries "no vocals", "no singing", "no choir" and "no spoken words", and ends with a full stop. Clients wrote this by hand and some sent none of it (B-Sides' heavy-metal album the night before, 2026-10-11). `audio.tags` in the done record is the style the model was given. The record's `notes.planned_score` is renamed `notes.score_before_transfer`: it is what YuE2 first wrote, before the vocal melody moved to the instrument, and a reader took its Vocal notes for what was rendered (Mac job 65c4d936, whose rendered score.abc has none).
+
 ## 2.0.0 — 2026-10-11
 
 - An install a queue session's item is waiting on now holds the session: an item refused `409 installing` (an environment install, a model pull, or another task ahead of it) is in the session's `in_flight` (`kind: "install"`) from that refusal until the task ends, done or failed, and the session's `idle_s` then runs from the task's end. Before, B-Sides' 180 s session could close `idle` partway through a multi-GB pull on Victoria's laptop; no touch is needed (docs/QUEUE.md "How a session ends").
