@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 1.0.141 — 2026-10-11
+
 - `crucible ladder`'s vllm rung no longer calls its own engine "another process": the card watch checked the compute-app list against the API server's pid only, and vLLM v1 does its CUDA work in an EngineCore child (a multiprocessing `Process`, no setsid), so every run was `interrupted` with a new pid (Victoria's 3070, 1.0.140). The watch now counts every process in the sessions the rung's own processes lead, the attribution the load guard already makes, and keeps those sessions after the API server exits while its EngineCore lets go. A process in another session is still foreign. Under WSL2 the guest's nvidia-smi lists the VM's own CUDA processes by guest pid as `[Not Found]` with no memory (measured on the PC) and never lists Windows processes, so a foreign process inside the VM is still caught and one on the Windows side is not; the watch's `contention` record says so (`process_memory_reported`, `windows_side_unseen`, replacing `compute_apps_visible`) and counts samples it could not read (`unread_samples`).
 
 ## 1.0.140 — 2026-10-10
