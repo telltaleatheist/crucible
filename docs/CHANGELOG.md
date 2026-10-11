@@ -7,6 +7,7 @@ notes.
 
 ## Unreleased
 
+- docs/RETRIEVAL.md says which reranker suits which job, measured: the dedicated reranker for query-to-passage retrieval; a decide model (qwen3.5-9b) for short items such as tags judged against a long description, where the dedicated reranker could not separate good from junk (Content Studio, 2026-10-10).
 ## 1.0.136 — 2026-10-10
 
 - An instrumental whose score ended but which the instrument transfer refuses (the skill's checks: a bar longer than its meter, the first planning-lyrics song on the PC) now keeps the plan in `failed-plan/` too and says the skill's own error; `scripts/check-instrumental-planning.py` prints a failed song instead of stopping.

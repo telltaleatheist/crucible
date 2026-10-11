@@ -193,6 +193,21 @@ no package:
 The automatic pick is always the dedicated reranker: a decide model's scores are on another
 scale, so it is used only when named (or chosen in Settings).
 
+**Which one to use — measured (Content Studio, Mac, 2026-10-10).** The dedicated reranker is
+trained for *query → passage* retrieval: a question against paragraphs that might answer it.
+Asked to judge **short, tag-like items against a long description** (60–72 candidate tags
+against a title plus a 3–4k-token summary), it could not separate good from junk: good tags
+averaged 0.68 and junk 0.64, and "ridiculous nonsense" (0.73) outscored a clearly relevant
+name (0.22). `qwen3.5-9b` through the same route separated them cleanly: good 0.87 against
+junk 0.50, 12 of 14 good tags in the top 20 and no junk. So:
+
+- passages that might answer a query (search, retrieval, "find the moment where…"): the
+  dedicated reranker;
+- short items judged against a long description (tags, labels, categories): a decide model
+  by name — and if it is already resident for your other calls, it costs no extra load.
+
+Measure on your own items before fixing a cutoff; either model's scores are its own scale.
+
 ### Cohere/Jina-compatible
 
 `POST /v1/openai/rerank` takes `query`, `documents` (strings or `{"text"}`), `top_n` and

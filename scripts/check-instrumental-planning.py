@@ -83,7 +83,7 @@ def render(args: argparse.Namespace, seed: int, tags: str) -> dict[str, Any]:
         if time.monotonic() - started > args.timeout:
             return {"seed": seed, "job_id": job_id, "status": "timed out", "error": None}
         time.sleep(args.poll)
-    audio = (job.get("done_extra") or {}).get("audio") or {}
+    audio = job.get("audio") or {}
     kept = job.get("request") or {}
     planning = audio.get("planning_lyrics") or (kept.get("settled") or {}).get("planning_lyrics") or {}
     stages = audio.get("decode_stages") or {}
