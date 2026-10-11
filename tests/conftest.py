@@ -270,6 +270,13 @@ def unmeasured_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Residency, "_card_used_bytes", lambda self, say: None)
 
 
+@pytest.fixture(autouse=True)
+def settled_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A load reads the card until its free memory stops rising (crucible/accelerator.py
+    read_settled_state); a test's card is read again without the half-second between."""
+    monkeypatch.setattr(accelerator, "CARD_SETTLE_INTERVAL_SECONDS", 0.0)
+
+
 @pytest.fixture
 def idle_card(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])

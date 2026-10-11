@@ -339,8 +339,17 @@ the next night.
 - Crucible passes `--kv-cache-memory-bytes`, which bypasses the utilisation
   fraction and the profiling window, and derives `--gpu-memory-utilization`
   only as vLLM's startup gate.
-- Budget = **min(nvidia-smi free + reclaimable, total − allowance)**. There is
-  no third term. The pool is capped at
+- Budget = **min(nvidia-smi free − vLLM's CUDA context, total − allowance)**,
+  where free is read AFTER the eviction, once it has stopped rising
+  (`accelerator.read_settled_state`), with nothing left to reclaim
+  (`LoadModelJobType.plan_on_the_card`). vLLM refuses to start when the budget
+  exceeds the free memory it sees, so the free term is a reading, never a
+  forecast. Before the eviction the same arithmetic with `free + reclaimable`
+  (reclaimable capped at what the card has in use) is only the forecast that
+  refuses `insufficient_kv_cache` without evicting anything: reclaimable is the
+  resident's estimate or load-time measurement, not what it holds now, and on
+  an 8 GiB card free plus it passed the idle card (Victoria's 3070,
+  2026-10-11, yue2-3b resident: 0.875 planned, 6.95 GiB seen). The pool is capped at
   `kv_bytes_per_token × context × max_num_seqs`, because bytes beyond that
   cannot be used. `max_num_seqs` reads the flag with `enginespec.flag_value`,
   so the last one given wins, as it does in vLLM. A value that is not a whole
