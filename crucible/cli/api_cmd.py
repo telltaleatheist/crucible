@@ -826,20 +826,23 @@ CONNECTION_ARGS = (
     arg(
         "--url",
         default=None,
-        help="the server's base URL, e.g. http://192.168.68.20:7100. Requires "
-             "--token. Omit both to use this machine's installed engine",
+        help="the server's base URL, e.g. http://192.168.68.20:7100. Alone it "
+             "sends no token, which is all a server with [auth] mode = \"none\" "
+             "needs; add --token for one that asks. Omit both to use this "
+             "machine's installed engine",
     ),
     arg(
         "--token",
         default=None,
-        help="the bearer token for --url. Never taken from the local "
-             "installation for a URL typed here",
+        help="the bearer token for --url, for a server that asks for one. Never "
+             "taken from the local installation for a URL typed here",
     ),
     arg(
         "--pairing",
         default=None,
         help="a `crucible://name@host:port/#token` line, as `crucible token "
-             "--url` prints it. Carries the address and the token together. It "
+             "--url` prints it (no #token for a server that asks for none). "
+             "Carries the address and the token together. It "
              "is visible in any process listing: a runner should use "
              f"--pairing-file or ${PAIRING_ENV}",
     ),

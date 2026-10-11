@@ -13,8 +13,11 @@ export interface Pairing {
   readonly name: string;
   /** The base URL, with no trailing slash and no `/v1` — `CrucibleClient`'s shape. */
   readonly url: string;
-  /** The bearer token, percent-decoded. */
-  readonly token: string;
+  /**
+   * The bearer token, percent-decoded, or `null` for a line with no `#<token>`: a server with
+   * `[auth] mode = "none"`, which asks for none. `CrucibleClient` takes either as its `token`.
+   */
+  readonly token: string | null;
 }
 
 function elide(line: string): string {
@@ -53,17 +56,15 @@ export function parsePairing(line: string): Pairing {
 
   const rest = raw.slice(PREFIX.length);
   const hash = rest.indexOf('#');
-  if (hash < 0) {
-    refuse(raw, 'a pairing line carries its token in a #fragment, and there is none');
-  }
-  const address = rest.slice(0, hash);
-  const fragment = rest.slice(hash + 1);
+  // No #fragment (or an empty one) is a line for a server that asks for no token.
+  const address = hash < 0 ? rest : rest.slice(0, hash);
+  const fragment = hash < 0 ? '' : rest.slice(hash + 1);
 
   if (!address.endsWith('/')) {
     refuse(
       raw,
-      'a pairing line ends its address with / before the #; without it the ' +
-        'fragment runs into the port',
+      'a pairing line ends its address with /, before the # when it carries a token; ' +
+        'without it the fragment runs into the port',
     );
   }
   const authority = address.slice(0, -1);
@@ -99,5 +100,9 @@ export function parsePairing(line: string): Pairing {
     refuse(raw, `port ${port} is not a port`);
   }
 
-  return { name, url: `http://${hostPort}`, token: decode(fragment, 'token', raw) };
+  return {
+    name,
+    url: `http://${hostPort}`,
+    token: fragment === '' ? null : decode(fragment, 'token', raw),
+  };
 }

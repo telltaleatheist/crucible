@@ -75,7 +75,7 @@ export function hostToken(runner: Runner): string {
     throw new BootstrapRefusal(
       'host_no_token',
       `${path} has no [auth] token, so there is nothing to authorise the host's door with. `
-        + 'A Crucible has no anonymous mode.',
+        + "The host's door always takes the engine token, whatever the engine's own [auth] mode is.",
     );
   }
   return token;

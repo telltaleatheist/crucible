@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .. import peer as peer_module
-from ..config import Config
+from ..config import AUTH_NONE, Config
 from ..errors import ApiError
 from ..jobs import disabled_error
 from ..protocol import API_HEADER, API_VERSION
@@ -39,6 +39,12 @@ def tts_enabled(config: Config) -> Any:
 
 def _bearer_problem(request: Request) -> str | None:
     config: Config = request.app.state.config
+    if config.auth == AUTH_NONE:
+        # `[auth] mode = "none"`: nothing is asked, and a bearer that IS sent is not read
+        # at all, right or wrong, so a client that stored a token keeps working (Ollama
+        # ignores one the same way). Read from the live config: the file is followed on
+        # every request, so a switch applies without a restart.
+        return None
     header = request.headers.get("authorization")
     if header is None:
         return "missing Authorization header; send `Authorization: Bearer <token>`"
@@ -72,8 +78,10 @@ def require_api_version(request: Request) -> None:
         raise ApiError(
             426,
             "api_version_required",
-            f"send `{API_HEADER}: {API_VERSION}`; this server speaks API version "
-            f"{API_VERSION}",
+            f"missing the {API_HEADER} header: send `{API_HEADER}: {API_VERSION}` "
+            f"with every /v1 and /openai/v1 call (curl: -H '{API_HEADER}: "
+            f"{API_VERSION}'). It is the API version this client speaks; this server "
+            f"speaks {API_VERSION}",
             {"server_api_version": API_VERSION, "client_api_version": None},
         )
     if major is None:

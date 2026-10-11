@@ -19,7 +19,7 @@ from ... import (
 from ... import settings as settings_module
 from ...capabilitystore import low_vram_not_offered, set_low_vram
 from ...cardfacts import card_for
-from ...config import Config, load_config, mint_token, rewrite_config
+from ...config import AUTH_NONE, Config, load_config, mint_token, rewrite_config
 from ...errors import ApiError, ConfigError
 from ...inflight import read_act
 from ...interfaces import InterfaceError
@@ -82,7 +82,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
         refused `port_fixed_by_windows_host` on a PC, whose Windows host reaches its
         engine on 7100. `hf_token` is write-only (null removes it); `video_desktop` sets
         `[video_desktop]` keys on mlx-darwin (null: the default) and refuses a value out
-        of range by name. Answers the full settings document after the write.
+        of range by name. `auth` (`"token"` or `"none"`, `[auth] mode`) applies from
+        the next request: on `none` no route asks for a token. Answers the full settings
+        document after the write.
         """
         act = read_act(request.headers)
         try:
@@ -288,8 +290,20 @@ def register(routers: Routers, ctx: AppContext) -> None:
         with the old token, and the page that asked, is refused from the next request:
         the answer is the only place the new `token` is said, with the `pairing` lines
         that carry it. The local pairing file is rewritten with it
-        (`pairing_file_error` says when it could not be).
+        (`pairing_file_error` says when it could not be). Refused `auth_off` on a server
+        with `[auth] mode = "none"`: no caller presents a token there, and the answer
+        would hand the new one to whoever asked.
         """
+        if config.auth == AUTH_NONE:
+            raise ApiError(
+                409,
+                "auth_off",
+                "this server asks for no token ([auth] mode = \"none\"), so there is no "
+                "token in use to replace, and saying a new one here would hand it to "
+                "whoever asked. Turn the token on first (`crucible auth token` on the "
+                "server, or `auth` in PUT /v1/settings), then replace it",
+                {"auth": config.auth},
+            )
         act = read_act(request.headers)
         token = mint_token()
         await asyncio.to_thread(lambda: rewrite_config(config, token=token))

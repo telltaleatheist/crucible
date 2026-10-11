@@ -8,8 +8,24 @@ Every running server serves this same reference, for itself: `GET /docs` (a page
 `GET /v1/docs.md` (this markdown), `GET /v1/docs` (the index as JSON, with each job
 type's params schema) and `GET /v1/openapi.json`. None of them needs a token.
 
-Every route is under `/v1` unless it says otherwise. Protected routes need
-`Authorization: Bearer <token>` **and** `X-Crucible-Api: 1`, checked in that order.
+Every route is under `/v1` unless it says otherwise. A server's `[auth] mode`
+(`GET /v1/ping` says it as `auth`, docs/DESIGN.md section 9) decides the token:
+with `token`, protected routes need `Authorization: Bearer <token>` **and**
+`X-Crucible-Api: 1`, checked in that order; with `none`, like Ollama, they need
+only `X-Crucible-Api: 1`, and a bearer sent anyway is ignored. A request without
+the version header is refused `426 api_version_required` naming it. A whole call
+against a server with `auth: none`:
+
+```
+curl -s http://127.0.0.1:7100/v1/ping
+curl -s -H 'X-Crucible-Api: 1' http://127.0.0.1:7100/v1/health
+curl -s -H 'X-Crucible-Api: 1' -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Say hi"}]}' \
+  http://127.0.0.1:7100/v1/openai/chat/completions
+```
+
+Against a server with `auth: token`, add `-H 'Authorization: Bearer <token>'`.
+
 An error is always a JSON body under an `error` key holding `code`, `message` and
 sometimes `details`. Crucible refuses by name and with numbers: branch on `code`,
 show a person the `message`.
@@ -150,11 +166,11 @@ What the server already runs together, and what a client sends to get it.
 
 ## Discovery
 
-Answered without a token. How a client finds a server and learns its api version.
+Answered without a token. How a client finds a server, learns its api version, and learns from `auth` whether it needs a token at all.
 
 ### `GET /v1/ping`
 
-Unauthenticated. Lets a client tell "wrong token" from "not a Crucible".
+Unauthenticated. Lets a client tell "wrong token" from "not a Crucible", and says in `auth` whether this server asks for a token at all (`token` or `none`).
 
 *Door:* open
 
@@ -168,6 +184,7 @@ Unauthenticated. Lets a client tell "wrong token" from "not a Crucible".
 | `name` | string | yes | — |  |
 | `api_version` | integer | yes | — |  |
 | `pairing_version` | integer | yes | — |  |
+| `auth` | `'token'` or `'none'` | yes | — | Whether every other route needs `Authorization: Bearer <token>` (`token`) or nothing (`none`, like Ollama: a bearer sent anyway is ignored). Answered here, without a token, so a client or an agent can tell before it asks anyone for one ([auth] mode, docs/DESIGN.md section 9). |
 
 ## Pairing
 
@@ -191,7 +208,7 @@ Approve (`allow: true`) or deny a pairing request, naming its `id` and the `user
 
 ### `POST /v1/pairing/poll`
 
-How a pairing request stands: `pending`, `approved` (the answer then carries the server's `name` and its `token`), `denied` or `expired`. Poll with the `id` and `device_code` from `POST /v1/pairing/start`.
+How a pairing request stands: `pending`, `approved` (the answer then carries the server's `name` and its `token`), `denied` or `expired`. Poll with the `id` and `device_code` from `POST /v1/pairing/start`. On a server with `[auth] mode = "none"` an approved `token` is null: there is nothing to hold, and the stored token is never handed out while nothing asks for it.
 
 *Door:* `X-Crucible-Api: 1` only
 
@@ -228,11 +245,11 @@ Ask this server for a token. Answers an `id`, a `device_code` to poll with and a
 
 ## Setup
 
-The operator page's own door: it hands out a token and the pairing line.
+The operator page's own door: it hands out a token and the pairing line (no token on a server with `[auth] mode = "none"`).
 
 ### `GET /v1/setup`
 
-Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`.
+Everything an app needs to be pointed at this server in one read, including its token and pairing lines, and `network`: whether other devices can reach it (`reachable`, `urls`), said as a `sentence`, and when they cannot, `how` to open it, the one `command` that does (when one exists) and what that `changes`. `auth` is `[auth] mode`. On a server with `auth: "none"` the `token` is null and the pairing lines carry no `#<token>`: nothing asks for one, and the stored token is not handed out, because it would let its reader in the moment `token` was turned back on.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -321,7 +338,7 @@ Every setting in config.toml this server reads, and what the running server is d
 
 ### `PUT /v1/settings`
 
-Apply a partial settings patch, whole or not at all. Live without a restart, except `host` and `port`: those are written and listed in `restart_pending` until the server starts again (`POST /v1/server/restart`). A `port` change is refused `port_fixed_by_windows_host` on a PC, whose Windows host reaches its engine on 7100. `hf_token` is write-only (null removes it); `video_desktop` sets `[video_desktop]` keys on mlx-darwin (null: the default) and refuses a value out of range by name. Answers the full settings document after the write.
+Apply a partial settings patch, whole or not at all. Live without a restart, except `host` and `port`: those are written and listed in `restart_pending` until the server starts again (`POST /v1/server/restart`). A `port` change is refused `port_fixed_by_windows_host` on a PC, whose Windows host reaches its engine on 7100. `hf_token` is write-only (null removes it); `video_desktop` sets `[video_desktop]` keys on mlx-darwin (null: the default) and refuses a value out of range by name. `auth` (`"token"` or `"none"`, `[auth] mode`) applies from the next request: on `none` no route asks for a token. Answers the full settings document after the write.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -357,7 +374,7 @@ Set how many requests one chat model runs at once on this server, with `{"model"
 
 ### `POST /v1/settings/token/rotate`
 
-Replace this server's bearer token with a new one, at once. Every app paired with the old token, and the page that asked, is refused from the next request: the answer is the only place the new `token` is said, with the `pairing` lines that carry it. The local pairing file is rewritten with it (`pairing_file_error` says when it could not be).
+Replace this server's bearer token with a new one, at once. Every app paired with the old token, and the page that asked, is refused from the next request: the answer is the only place the new `token` is said, with the `pairing` lines that carry it. The local pairing file is rewritten with it (`pairing_file_error` says when it could not be). Refused `auth_off` on a server with `[auth] mode = "none"`: no caller presents a token there, and the answer would hand the new one to whoever asked.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -3004,6 +3021,7 @@ The weights that made the decision, as an artifact sidecar names them.
 | `name` | string | yes | — |  |
 | `api_version` | integer | yes | — |  |
 | `pairing_version` | integer | yes | — |  |
+| `auth` | `'token'` or `'none'` | yes | — | Whether every other route needs `Authorization: Bearer <token>` (`token`) or nothing (`none`, like Ollama: a bearer sent anyway is ignored). Answered here, without a token, so a client or an agent can tell before it asks anyone for one ([auth] mode, docs/DESIGN.md section 9). |
 
 ### `PollPairing`
 

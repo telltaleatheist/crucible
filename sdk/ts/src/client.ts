@@ -60,12 +60,14 @@ import { readSseFrames, type SseFrame } from './sse.js';
 import { openTtsStream, type StreamOptions, type TtsStreamSession } from './stream.js';
 import {
   API_VERSION,
+  AUTH_MODES,
   TASK_TERMINAL_STATES,
   TERMINAL_EVENTS,
   type AcceleratorHolder,
   type AcceleratorResident,
   type AcceleratorState,
   type Activity,
+  type AuthMode,
   type ActivityChat,
   type ActivityJob,
   type ActivityStreaming,
@@ -241,8 +243,12 @@ const DEFAULT_ARTIFACT_CONCURRENCY = 4;
 export interface CrucibleClientOptions {
   /** The server's base URL **without** `/v1`, e.g. `http://127.0.0.1:7100`. */
   url: string;
-  /** The bearer token `crucible init` minted. */
-  token: string;
+  /**
+   * The bearer token `crucible init` minted, for a server that asks for one. Leave it out (or
+   * pass `null`) for a server with `[auth] mode = "none"`, which answers without one, like
+   * Ollama: no `Authorization` header is sent at all. `ping()` says which a server is (`auth`).
+   */
+  token?: string | null;
   /** Who is calling. */
   clientName: string;
   /** A deadline on every call, in milliseconds; a per-call `signal` replaces it. */
@@ -304,7 +310,8 @@ export class CrucibleClient {
   /** This SDK's build version, as it appears in `User-Agent`. */
   readonly sdkVersion = SDK_VERSION;
 
-  readonly #token: string;
+  /** null: no `Authorization` header is sent (a server with `[auth] mode = "none"`). */
+  readonly #token: string | null;
   readonly #userAgent: string;
   readonly #clientName: string;
   readonly #timeoutMs: number | null;
@@ -320,10 +327,10 @@ export class CrucibleClient {
   constructor(options: CrucibleClientOptions) {
     const given = options as Partial<CrucibleClientOptions> | undefined;
     if (given === undefined || given === null) {
-      throw new CrucibleConfigError('options', 'new CrucibleClient(...) needs {url, token, clientName}');
+      throw new CrucibleConfigError('options', 'new CrucibleClient(...) needs {url, clientName}, and token for a server that asks for one');
     }
     this.url = normaliseUrl(requireText(given.url, 'url'));
-    this.#token = requireText(given.token, 'token');
+    this.#token = given.token === undefined || given.token === null ? null : requireText(given.token, 'token');
     const clientName = requireText(given.clientName, 'clientName');
     this.#userAgent = `${clientName} crucible-client/${SDK_VERSION}`;
     this.#clientName = clientName;
@@ -344,7 +351,7 @@ export class CrucibleClient {
     }
     this.#options = {
       url: this.url,
-      token: this.#token,
+      ...(this.#token === null ? {} : { token: this.#token }),
       clientName,
       ...(this.#queue === undefined ? {} : { queue: this.#queue }),
       ...(this.#timeoutMs === null ? {} : { timeoutMs: this.#timeoutMs }),
@@ -375,6 +382,7 @@ export class CrucibleClient {
       crucible: true,
       name: str(body, 'name', 'ping'),
       apiVersion: num(body, 'api_version', 'ping'),
+      auth: readAuthMode(body, 'ping'),
     };
   }
 
@@ -2235,7 +2243,7 @@ export class CrucibleClient {
     headers.set(CLIENT_NAME_HEADER, this.#clientName);
     if (bound !== null) headers.set(SESSION_HEADER, bound.id);
     if (authenticated) {
-      headers.set('Authorization', `Bearer ${this.#token}`);
+      if (this.#token !== null) headers.set('Authorization', `Bearer ${this.#token}`);
       headers.set(API_HEADER, String(API_VERSION));
     }
     const target = `${this.url}${path}`;
@@ -2349,7 +2357,8 @@ export class CrucibleClient {
       backend: str(body, 'backend', 'setup'),
       bind: str(body, 'bind', 'setup'),
       urls: strArray(body, 'urls', 'setup'),
-      token: str(body, 'token', 'setup'),
+      auth: readAuthMode(body, 'setup'),
+      token: nullableStr(body, 'token', 'setup'),
       pairing: strArray(body, 'pairing', 'setup'),
       jobTypes: strArray(body, 'job_types', 'setup'),
       configPath: str(body, 'config_path', 'setup'),
@@ -3045,6 +3054,11 @@ function readResumable(body: Json): Resumable {
     lastJobId: str(body, 'last_job_id', where),
     state: str(body, 'state', where),
   };
+}
+
+/** `auth` in `/v1/ping` and `/v1/setup`: `[auth] mode`, whether the server asks for a token. */
+function readAuthMode(body: Json, where: string): AuthMode {
+  return oneOf(str(body, 'auth', where), AUTH_MODES, `${where}.auth`);
 }
 
 function readRole(body: Json): Pick<ServerInfo, 'role' | 'managedBy' | 'engine'> {

@@ -38,7 +38,7 @@ function reset(): Error {
 
 /** A `GET /v1/ping` answer the client accepts. */
 function pong(): Response {
-  return new Response(JSON.stringify({ crucible: true, name: 'crucible@test', api_version: 1 }), {
+  return new Response(JSON.stringify({ crucible: true, name: 'crucible@test', api_version: 1, auth: 'token' }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });

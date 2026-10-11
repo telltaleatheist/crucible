@@ -13,7 +13,7 @@ lives in `crucible/apiclient.py`.
 | | operator verbs | `crucible api …` |
 |---|---|---|
 | subject | **this machine's installation** | **a server**, anywhere |
-| reads | `config.toml`, units, env packs, the disk | HTTP, with a bearer token |
+| reads | `config.toml`, units, env packs, the disk | HTTP, with a bearer token when the server asks for one |
 | address | there is nothing to point them at | `--url`, `--token`, `--pairing` |
 | examples | `crucible install tts`, `crucible service start` | `crucible api job submit …` |
 
@@ -38,16 +38,37 @@ Exactly one of three, and never a fallback chain:
 # 1. this machine's installed engine — nothing to pass
 crucible api info
 
-# 2. a server anywhere. BOTH flags or neither.
+# 2. a server anywhere: its address, and --token only if it asks for one
+crucible api info --url http://192.168.68.20:7100
 crucible api info --url http://192.168.68.20:7100 --token <token>
 
-# 3. one pairing line, which carries the address AND the token
+# 3. one pairing line, which carries the address AND the token (if any)
 crucible api info --pairing "$(crucible token --url | head -1)"
 ```
 
-`--url` without `--token` is **refused by name** (`token_required`) and never
-borrows the local engine's bearer: sending this machine's credential to an
-address somebody typed is a leak with a one-character typo as its cause.
+A server with `[auth] mode = "none"` (docs/DESIGN.md section 9; what a new `crucible
+init` writes) asks for no token, like Ollama, so `--url` alone reaches every verb.
+`crucible api ping --url <url>` says which kind a server is (`auth`). `--url` without
+`--token` sends **no** `Authorization` header and never borrows the local engine's
+bearer: sending this machine's credential to an address somebody typed is a leak with a
+one-character typo as its cause. Against a server that does ask, that is
+`unauthorized`, and the message says to pass `--token`, pair, or run `crucible auth none`
+on it.
+
+Without the CLI, the same calls are plain curl. `X-Crucible-Api: 1` is the one header
+every `/v1` route but `ping` needs, whatever the mode (without it: `426
+api_version_required`, which names it):
+
+```bash
+curl -s http://192.168.68.20:7100/v1/ping            # {"crucible": true, ..., "auth": "none"}
+curl -s -H 'X-Crucible-Api: 1' http://192.168.68.20:7100/v1/info
+curl -s -H 'X-Crucible-Api: 1' -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Say hi"}]}' \
+  http://192.168.68.20:7100/v1/openai/chat/completions
+```
+
+`crucible auth` prints this machine's mode; `crucible auth none` and `crucible auth token`
+set it, and the running server takes it up on its next request.
 
 There is no new config file and no new environment variable. The local case goes
 through `crucible/local.py:connection`, which already owns "where is the engine

@@ -15,11 +15,15 @@ from ..capabilityrecord import (
     DESKTOP_BASIS_STATED,
 )
 from ..config import (
+    AUTH_MODES,
+    AUTH_NONE,
     CARD_DESKTOP_ALLOWANCE_FRACTION,
+    DEFAULT_AUTH_MODE,
     DEFAULT_DESKTOP_ALLOWANCE_BYTES,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_RETENTION_DAYS,
+    INIT_AUTH_MODE,
     MLX_DESKTOP_ALLOWANCE_FRACTION,
     Config,
     config_mode,
@@ -27,6 +31,7 @@ from ..config import (
     crucible_home,
     default_desktop_allowance_bytes,
     default_server_name,
+    check_auth_mode,
     mint_token,
     write_config,
 )
@@ -83,6 +88,22 @@ def carried_from(path: Path) -> tuple[str, dict[str, Any]]:
         if isinstance(value, dict):
             carried[section] = value
     return token, carried
+
+
+def carried_auth(path: Path) -> str:
+    """`[auth] mode` from a --config-from file: a server that moves keeps its lock. A
+    file without the key is a server from before it, which asked for its token, so that
+    is what it keeps (DEFAULT_AUTH_MODE), not what a new init would choose."""
+    import tomllib
+
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"config_from_unreadable: {path}: {exc}")
+    auth = document.get("auth")
+    if not isinstance(auth, dict) or "mode" not in auth:
+        return DEFAULT_AUTH_MODE
+    return check_auth_mode(auth["mode"], f"{path} [auth] mode")
 
 
 def carried_reserve(path: Path) -> tuple[int, str, str]:
@@ -215,6 +236,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             )
         try:
             token, carried = carried_from(Path(args.config_from))
+            carried_mode = carried_auth(Path(args.config_from))
         except ConfigError as exc:
             return _fail(str(exc))
     elif given is not None:
@@ -223,6 +245,12 @@ def cmd_init(args: argparse.Namespace) -> int:
             return _fail("--token must be a non-empty string with no whitespace")
     else:
         token = mint_token()
+    if args.auth is not None:
+        auth_mode = args.auth
+    elif args.config_from is not None:
+        auth_mode = carried_mode
+    else:
+        auth_mode = INIT_AUTH_MODE
     written = write_config(
         home,
         name=args.name if args.name is not None else default_server_name(),
@@ -247,6 +275,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         desktop_allowance_note=desktop_note,
         tts_engines=declared_tts_footprints(backend.kind),
         carried_tables=carried or None,
+        auth=auth_mode,
     )
     print(f"backend:  {backend.kind} ({backend.gpu.name}, {backend.detail})")
     print(f"config:   {written} (mode {config_mode(written)})")
@@ -291,6 +320,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
         + "print it with `crucible token --show`"
     )
+    print(
+        f"auth:     [auth] mode = \"{auth_mode}\": "
+        + (
+            "no route asks for the token, like Ollama; `crucible auth token` turns it on"
+            if auth_mode == AUTH_NONE
+            else "every route asks for the token; `crucible auth none` turns that off"
+        )
+    )
     paired = _write_pairing_file(
         home,
         name=args.name if args.name is not None else default_server_name(),
@@ -329,6 +366,18 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:
             "use this bearer token instead of minting one. It is on this "
             "command's line, which every user of the machine can read (`ps aux`) "
             "while it runs; an installer passes --token-env instead"
+        ),
+    )
+    init.add_argument(
+        "--auth",
+        choices=list(AUTH_MODES),
+        default=None,
+        help=(
+            f"[auth] mode: \"none\" lets every route answer without a token, like "
+            f"Ollama; \"token\" asks for `Authorization: Bearer <token>`. A new "
+            f"config is \"{INIT_AUTH_MODE}\"; --config-from keeps the moved file's "
+            f"(\"{DEFAULT_AUTH_MODE}\" when it has none). The token is minted either way, "
+            "so `crucible auth token` can turn it on later"
         ),
     )
     init.add_argument(

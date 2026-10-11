@@ -16,13 +16,16 @@ SERVERS_DIR = "servers"
 
 SOURCE_LOCAL = "local"
 SOURCE_URL_TOKEN = "--url/--token"
+SOURCE_URL = "--url"
 
 
 @dataclass(frozen=True)
 class Connection:
 
     url: str
-    token: str
+    # None: no Authorization header is sent, which is all a server with
+    # `[auth] mode = "none"` needs (docs/DESIGN.md section 9).
+    token: str | None
     name: str | None
     source: str
 
@@ -86,11 +89,10 @@ def _from_pairing(line: str, source: str) -> Connection:
 
 def _from_url_and_token(url: str | None, token: str | None) -> Connection | None:
     if url is not None and token is None:
-        raise ClientRefusal(
-            "token_required: --url names a server this machine may not be, so it "
-            "must come with --token. This command will not send the local "
-            "engine's bearer to an address that was typed on the command line"
-        )
+        # A typed address on its own: nothing is sent with it, never the local engine's
+        # bearer. A server that asks for no token answers; one that does refuses
+        # `unauthorized`, and next_step says to pass --token or pair.
+        return Connection(url=url.rstrip("/"), token=None, name=None, source=SOURCE_URL)
     if token is not None and url is None:
         raise ClientRefusal(
             "url_required: --token is for a server elsewhere, so it must come "

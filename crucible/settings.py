@@ -24,6 +24,7 @@ from .config import (
     RouteRecord,
     _advertised,
     _cors_origins,
+    check_auth_mode,
     check_bind_host,
     check_max_session_hold_s,
     check_port,
@@ -184,6 +185,7 @@ def server_entries(config: Config) -> dict[str, Any]:
         "advertise": list(config.advertise),
         "cors_origins": list(config.cors_origins),
         "open_pairing": config.open_pairing,
+        "auth": config.auth,
         "install_on_submit": config.install_on_submit,
         "retention_days": config.retention_days,
         "max_session_hold_s": config.max_session_hold_s,
@@ -297,6 +299,7 @@ class ServerKeys:
     advertise: tuple[str, ...]
     cors_origins: tuple[str, ...]
     open_pairing: bool
+    auth: str
     install_on_submit: bool
     retention_days: int
 
@@ -309,6 +312,7 @@ class ServerKeys:
             advertise=config.advertise,
             cors_origins=config.cors_origins,
             open_pairing=config.open_pairing,
+            auth=config.auth,
             install_on_submit=config.install_on_submit,
             retention_days=config.retention_days,
         )
@@ -728,6 +732,13 @@ def _resolve_open_pairing(config: Config, resolved: Resolved, value: Any) -> Non
           f"[auth] open_pairing = {str(value).lower()}")
 
 
+def _resolve_auth(config: Config, resolved: Resolved, value: Any) -> None:
+    # Live from the next request: the server follows its file, and the bearer check reads
+    # the mode it has just adopted (crucible/api/deps.py), so nothing waits for a restart.
+    resolved.server.auth = _checked(check_auth_mode, value, "auth")
+    _note(resolved, config.auth, value, f"[auth] mode = \"{value}\"")
+
+
 def _resolve_install_on_submit(config: Config, resolved: Resolved, value: Any) -> None:
     resolved.server.install_on_submit = _require_bool(value, "install_on_submit")
     _note(resolved, config.install_on_submit, value,
@@ -805,6 +816,7 @@ SECTION_RESOLVERS: tuple[tuple[str, SectionResolver], ...] = (
     ("advertise", _resolve_advertise),
     ("cors_origins", _resolve_cors_origins),
     ("open_pairing", _resolve_open_pairing),
+    ("auth", _resolve_auth),
     ("install_on_submit", _resolve_install_on_submit),
     ("retention_days", _resolve_retention_days),
     ("max_session_hold_s", _resolve_max_session_hold_s),
@@ -914,6 +926,8 @@ def _written_server_keys(config: Config, resolved: Resolved) -> dict[str, Any]:
         "advertise": server.advertise,
         "cors_origins": server.cors_origins,
         "open_pairing": server.open_pairing,
+        # None keeps the mode on disk (and a file without the key without it).
+        "auth": server.auth if server.auth != config.auth else None,
         "install_on_submit": server.install_on_submit,
         "retention_days": server.retention_days,
         "tailscale_advertise": resolved.tailscale_advertise,

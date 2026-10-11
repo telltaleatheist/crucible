@@ -18,7 +18,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/ping",
         "Discovery",
-        "Answered without a token. How a client finds a server and learns its api version.",
+        "Answered without a token. How a client finds a server, learns its api version, and "
+        "learns from `auth` whether it needs a token at all.",
     ),
     (
         "/pair",
@@ -29,7 +30,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     (
         "/setup",
         "Setup",
-        "The operator page's own door: it hands out a token and the pairing line.",
+        "The operator page's own door: it hands out a token and the pairing line (no token "
+        "on a server with `[auth] mode = \"none\"`).",
     ),
     (
         "/info",
@@ -528,8 +530,24 @@ def render(app: Any, enabled: frozenset[str] | None = None) -> str:
         "`GET /v1/docs.md` (this markdown), `GET /v1/docs` (the index as JSON, with each job",
         "type's params schema) and `GET /v1/openapi.json`. None of them needs a token.",
         "",
-        "Every route is under `/v1` unless it says otherwise. Protected routes need",
-        f"`Authorization: Bearer <token>` **and** {VERSION_HEADER_LINE}, checked in that order.",
+        "Every route is under `/v1` unless it says otherwise. A server's `[auth] mode`",
+        "(`GET /v1/ping` says it as `auth`, docs/DESIGN.md section 9) decides the token:",
+        "with `token`, protected routes need `Authorization: Bearer <token>` **and**",
+        f"{VERSION_HEADER_LINE}, checked in that order; with `none`, like Ollama, they need",
+        f"only {VERSION_HEADER_LINE}, and a bearer sent anyway is ignored. A request without",
+        f"the version header is refused `426 api_version_required` naming it. A whole call",
+        "against a server with `auth: none`:",
+        "",
+        "```",
+        "curl -s http://127.0.0.1:7100/v1/ping",
+        f"curl -s -H '{API_HEADER}: {API_VERSION}' http://127.0.0.1:7100/v1/health",
+        f"curl -s -H '{API_HEADER}: {API_VERSION}' -H 'Content-Type: application/json' \\",
+        "  -d '{\"messages\": [{\"role\": \"user\", \"content\": \"Say hi\"}]}' \\",
+        "  http://127.0.0.1:7100/v1/openai/chat/completions",
+        "```",
+        "",
+        "Against a server with `auth: token`, add `-H 'Authorization: Bearer <token>'`.",
+        "",
         "An error is always a JSON body under an `error` key holding `code`, `message` and",
         "sometimes `details`. Crucible refuses by name and with numbers: branch on `code`,",
         "show a person the `message`.",

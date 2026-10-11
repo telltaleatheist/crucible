@@ -97,12 +97,19 @@ test('another scheme is refused', () => {
   refused('http://crucible%40x@10.0.0.5:7100/#t', new RegExp(PAIRING_SCHEME));
 });
 
-test('a line with no token is refused', () => {
-  refused('crucible://n@10.0.0.5:7100/', /#fragment/);
+test('a line with no token is a server that asks for none: token null, never a blank one', () => {
+  // `[auth] mode = "none"` (docs/DESIGN.md section 9): the server's lines carry no #<token>.
+  // Identical to the token-less literal in `tests/test_auth_mode.py`.
+  assert.deepEqual(parsePairing('crucible://n@10.0.0.5:7100/'), {
+    name: 'n',
+    url: 'http://10.0.0.5:7100',
+    token: null,
+  });
+  assert.equal(parsePairing('crucible://n@10.0.0.5:7100/#').token, null);
 });
 
-test('an empty token is refused, not accepted as a blank one', () => {
-  refused('crucible://n@10.0.0.5:7100/#', /token is empty/);
+test('a token-less line still needs the / that ends its address', () => {
+  refused('crucible://n@10.0.0.5:7100', /ends its address with/);
 });
 
 test('an empty name is refused', () => {

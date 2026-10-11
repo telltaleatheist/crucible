@@ -38,7 +38,8 @@ s.close()')"
 
 echo "keeper: home=$CRUCIBLE_HOME port=$PORT"
 
-crucible init --enable-echo --host 127.0.0.1 --port "$PORT" --name "crucible@keeper" >"$WORK/init.txt"
+# --auth token: this keeper checks the lock itself (a wrong token is 401).
+crucible init --auth token --enable-echo --host 127.0.0.1 --port "$PORT" --name "crucible@keeper" >"$WORK/init.txt"
 log "$(head -n 2 "$WORK/init.txt" | tr '\n' ' ')"
 TOKEN="$(crucible token --show)"
 [ -n "$TOKEN" ] || { echo "keeper: token is empty" >&2; exit 2; }

@@ -6,6 +6,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from .errors import CrucibleError
@@ -46,27 +47,41 @@ def _has_port(authority: str) -> bool:
     return head != "" or authority.startswith("[")
 
 
-def pairing_line(name: str, url: str, token: str) -> str:
+def pairing_line(name: str, url: str, token: str | None) -> str:
+    """`crucible://<name>@<host>:<port>/#<token>`, or with no `#<token>` at all for a
+    server that takes none (`[auth] mode = "none"`): the line is then just where it is."""
     authority = urlsplit(url).netloc
     if authority == "":
         raise ValueError(
             f"{url!r} has no authority to build a pairing line from; a URL here "
             "is one of `reachable_urls`' entries, e.g. http://192.168.68.20:7100"
         )
-    return (
-        f"{SCHEME}://{quote(name, safe='')}@{authority}/#{quote(token, safe='')}"
-    )
+    line = f"{SCHEME}://{quote(name, safe='')}@{authority}/"
+    return line if token is None else f"{line}#{quote(token, safe='')}"
 
 
-def pairing_lines(name: str, urls: list[str], token: str) -> list[str]:
+def pairing_lines(name: str, urls: list[str], token: str | None) -> list[str]:
     return [pairing_line(name, url, token) for url in urls]
+
+
+def handed_out_token(config: Any) -> str | None:
+    """The token this server gives a client that asks over HTTP (`/v1/setup`, an approved
+    pairing, a rotation's answer), or None on a server with `[auth] mode = "none"`. The
+    stored token is kept there so `token` can be turned back on without a new one; handing
+    it out while nothing asks for it would give it to anyone on the network, and the moment
+    the server was switched back it would let them in.
+    """
+    from .config import AUTH_NONE
+
+    return None if config.auth == AUTH_NONE else config.token
 
 
 @dataclass(frozen=True)
 class Pairing:
     name: str
     url: str
-    token: str
+    # None: the line carries no token, which is a line for a server that asks for none.
+    token: str | None
 
 
 def parse_pairing_line(line: str) -> Pairing:
@@ -78,13 +93,14 @@ def parse_pairing_line(line: str) -> Pairing:
     name, _, authority = parts.netloc.rpartition("@")
     if name == "" or authority == "":
         raise ValueError(
-            "a pairing line is `crucible://<name>@<host>:<port>/#<token>`; "
-            f"{parts.netloc!r} has no name or no authority"
+            "a pairing line is `crucible://<name>@<host>:<port>/#<token>`, or with no "
+            f"`#<token>` for a server that takes none; {parts.netloc!r} has no name or "
+            "no authority"
         )
+    # No fragment (or an empty one) is a line for a server with `[auth] mode = "none"`:
+    # a client holding it sends no Authorization header at all.
     token = unquote(parts.fragment)
-    if token == "":
-        raise ValueError("a pairing line's fragment is its token, and this one is empty")
-    return Pairing(name=unquote(name), url=f"http://{authority}", token=token)
+    return Pairing(name=unquote(name), url=f"http://{authority}", token=token or None)
 
 
 PAIRING_FILENAME = "pairing"
@@ -216,6 +232,7 @@ __all__ = [
     "Pairing",
     "SCHEME",
     "PairingFileError",
+    "handed_out_token",
     "icacls_argv",
     "local_pairing_line",
     "pairing_file_path",

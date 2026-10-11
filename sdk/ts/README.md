@@ -38,6 +38,8 @@ seconds and stop on expiry, denial, cancellation, or approval. A previously
 trusted app lists requests with `client.listPairingRequests()` and approves a
 matching code with `client.decidePairing(id, userCode, true)`. Only after approval
 does the requester receive the pairing credential to persist in trusted storage.
+A server with `[auth] mode = "none"` needs no approval (`approvalRequired: false`) and its
+pairing carries `token: null`: there is no credential, only the address.
 The optional Crucible console supports the same approval API.
 
 When nothing answers, `startPairing` throws `CrucibleConnectionError` with code
@@ -62,11 +64,11 @@ import { CrucibleClient } from '@crucible/client';
 
 const crucible = new CrucibleClient({
   url: 'http://127.0.0.1:7100',   // the server's base URL, without /v1
-  token: process.env.CRUCIBLE_TOKEN!,  // what `crucible token --show` prints
   clientName: 'bookforge',        // lands in User-Agent, so the server log names you
+  // token: process.env.CRUCIBLE_TOKEN,  // only for a server with [auth] mode = "token"
 });
 
-console.log(await crucible.ping());          // { crucible: true, name, apiVersion }
+console.log(await crucible.ping());          // { crucible: true, name, apiVersion, auth }
 
 const jobId = await crucible.submit({
   type: 'echo',
@@ -131,11 +133,25 @@ console.log(new TextDecoder().decode(bytes), provenance.server, provenance.backe
 | `closeSession(id)` | `DELETE /v1/queue/sessions/{id}` | `QueueSessionState` (reason `client`; for an app that restarted holding a recorded id) |
 | `queueHeartbeat(id)` | `POST /v1/queue/{id}/heartbeat` | `{position, expiresAt}` |
 | `queueEvents()` | `GET /v1/queue/events` | `AsyncIterable<QueueEvent>`: a snapshot, then every change |
-| `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` |
+| `parsePairing(line)` | *(pure — no server)* | `{name, url, token}` (`token: null` for a line with no `#<token>`) |
 | `fleetSession(clients, {act, model?, idleS?, maxWaitS?, onQueue?, signal?, probeTimeoutMs?})` | `POST /v1/queue/sessions` on every capable server | `{session, client, index, dropouts}` — the first session to open |
 
-Every authenticated call sends `Authorization: Bearer <token>` and `X-Crucible-Api: 1`.
-`ping()` deliberately sends neither, so it can tell "wrong token" from "not a Crucible".
+**A token is optional** (Crucible docs/DESIGN.md section 9). A server with `[auth] mode =
+"none"`, which is what a new `crucible init` writes, asks for none, like Ollama: make the client
+with no `token` (or `token: null`) and no `Authorization` header is sent at all. A client that
+holds a token can keep sending it; such a server ignores it. `ping()` answers without a token and
+says which a server is in `auth` (`'token'` or `'none'`); `setup()` says it too, with `token:
+null` and token-less pairing lines on a `none` server, and a pairing approved by one carries
+`token: null`.
+
+Every other call sends `X-Crucible-Api: 1`, and `Authorization: Bearer <token>` when the client
+has a token. `ping()` deliberately sends neither, so it can tell "wrong token" from "not a
+Crucible". The same calls by hand, against a `none` server:
+
+```bash
+curl -s http://127.0.0.1:7100/v1/ping
+curl -s -H 'X-Crucible-Api: 1' http://127.0.0.1:7100/v1/health
+```
 
 Each job input is either `{ blobId }` (from `upload`) or `{ inline: Uint8Array }` (the
 client base64-encodes it for the wire). Use `upload` for anything large.

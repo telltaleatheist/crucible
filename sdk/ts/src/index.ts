@@ -115,6 +115,7 @@ export type {
 
 export {
   API_VERSION,
+  AUTH_MODES,
   TASK_TERMINAL_STATES,
   TERMINAL_EVENTS,
   isLlmCapability,
@@ -248,6 +249,7 @@ export type {
   ModuleTaskRequest,
   PageRequest,
   PagesEngine,
+  AuthMode,
   Ping,
   PullTaskRequest,
   ProgressData,
