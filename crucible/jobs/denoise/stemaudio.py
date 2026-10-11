@@ -14,7 +14,9 @@ worker.py, loaded through workerio.load_sibling.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
 
 import workerio
@@ -32,6 +34,10 @@ RESAMPLE_QUALITY = "VHQ"
 LENGTH_SLACK_FRAMES = 2
 
 TOOL_TIMEOUT_SECONDS = 600
+
+# audio-separator's pydub writer interleaves exactly two channels for every stem it
+# writes (a mono input is made stereo first), so a silent stem filled in has two as well.
+LIBRARY_STEM_CHANNELS = 2
 
 
 def _tail(raw: bytes) -> str:
@@ -149,6 +155,56 @@ def prepare(ffmpeg: str, ffprobe: str, source: str, work_dir: str, separator_rat
         "decoded": True,
         "resampled": resampled,
     }
+
+
+class NearSilentWatch(logging.Handler):
+    """Which stems audio-separator chose not to write because they were silent.
+
+    audio-separator 0.31.1's pydub writer (common_separator.write_audio_pydub) normalises a
+    stem and, when its peak is under 1e-6, logs "stem_source array is near-silent or empty"
+    and returns without writing the file. A clean instrumental's vocals stem is exactly
+    that, so a missing stem is B-Sides' success case, not a failure. The library logs
+    "Saving <stem> stem to <file>..." just before each write, on the separator's logger;
+    a near-silent warning is pinned to the stem whose save it interrupted. A stem missing
+    with no such warning is still missing, and the job still refuses it by name.
+    """
+
+    SAVING = re.compile(r"^Saving (?P<stem>.+) stem to (?P<file>.+?)\.\.\.$")
+    NEAR_SILENT = "near-silent"
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.silent: list[dict] = []
+        self._saving: dict | None = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        saving = self.SAVING.match(message)
+        if saving is not None:
+            self._saving = {"stem": saving["stem"], "file": os.path.basename(saving["file"])}
+            return
+        if record.levelno >= logging.WARNING and self.NEAR_SILENT in message:
+            if self._saving is not None:
+                self.silent.append(self._saving)
+            self._saving = None
+
+
+def fill_silent(separated_dir: str, silent: list[dict], plan: dict) -> list[str]:
+    """Each stem the library skipped as near-silent, written as digital silence at the
+    separator's rate and the separator input's length (16-bit WAV, as the library writes
+    its stems), so it takes the same road back as every other stem. Answers their names."""
+    import numpy
+    import soundfile
+
+    filled = []
+    for skipped in silent:
+        path = os.path.join(separated_dir, skipped["file"])
+        if os.path.exists(path):
+            continue
+        silence = numpy.zeros((plan["separator_frames"], LIBRARY_STEM_CHANNELS), dtype="float32")
+        soundfile.write(path, silence, plan["separator_rate"], format="WAV", subtype="PCM_16")
+        filled.append(skipped["stem"])
+    return filled
 
 
 def fit(samples, frames: int):

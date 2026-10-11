@@ -119,3 +119,104 @@ def test_something_that_is_not_audio_is_refused_by_name(tmp_path: Path) -> None:
     # ffprobe or ffmpeg, whichever gives up first, says so naming the file.
     with pytest.raises(RuntimeError, match=r"could not (be read as audio|decode song\.flac)"):
         stemaudio.prepare(_tool("ffmpeg"), _tool("ffprobe"), str(source), str(tmp_path), SEPARATOR_RATE)
+
+
+class _StandInSeparator:
+    """What audio-separator 0.31.1's MDXC separate does around each stem, on its logger:
+    "Saving <stem> stem to <file>..." and then the write, which for a near-silent stem is
+    a warning and no file (common_separator.write_audio_pydub)."""
+
+    def __init__(self, logger, directory: Path, frames: int, near_silent_warns: bool) -> None:
+        self.logger, self.directory, self.frames = logger, directory, frames
+        self.near_silent_warns = near_silent_warns
+
+    def separate(self, base: str) -> None:
+        for stem, silent in (("other", False), ("vocals", True)):
+            name = f"{base}_({stem})_vocals_mel_band_roformer.wav"
+            self.logger.info(f"Saving {stem} stem to {name}...")
+            if not silent:
+                soundfile.write(
+                    self.directory / name, _tone(SEPARATOR_RATE, self.frames),
+                    SEPARATOR_RATE, subtype="PCM_16",
+                )
+            elif self.near_silent_warns:
+                self.logger.warning("Warning: stem_source array is near-silent or empty.")
+
+
+def _separate_instrumental(tmp_path: Path, near_silent_warns: bool):
+    import logging
+
+    frames = 48000 * 5
+    source = tmp_path / "song.flac"
+    workerio.write_audio(str(source), _tone(48000, frames), 48000, "flac")
+    work = tmp_path / "work"
+    out = tmp_path / "stems"
+    work.mkdir()
+    out.mkdir()
+    plan = stemaudio.prepare(_tool("ffmpeg"), _tool("ffprobe"), str(source), str(work), SEPARATOR_RATE)
+    separated = work / "separated"
+    separated.mkdir()
+    logger = logging.getLogger(f"stand-in-separator-{near_silent_warns}")
+    logger.setLevel(logging.INFO)
+    watch = stemaudio.NearSilentWatch()
+    logger.addHandler(watch)
+    try:
+        _StandInSeparator(logger, separated, plan["separator_frames"], near_silent_warns).separate("song")
+    finally:
+        logger.removeHandler(watch)
+    filled = stemaudio.fill_silent(str(separated), watch.silent, plan)
+    stems = [
+        stemaudio.finish(str(separated / name), str(out), plan, "mp3")
+        for name in sorted(os.listdir(separated))
+    ]
+    return plan, filled, stems, out
+
+
+def test_a_stem_the_library_skipped_as_near_silent_comes_back_as_silence(tmp_path: Path) -> None:
+    plan, filled, stems, out = _separate_instrumental(tmp_path, near_silent_warns=True)
+    assert filled == ["vocals"]
+    names = [stem["name"] for stem in stems]
+    assert names == [
+        "song_(other)_vocals_mel_band_roformer.mp3",
+        "song_(vocals)_vocals_mel_band_roformer.mp3",
+    ]
+    vocals = stems[1]
+    assert (vocals["sample_rate"], vocals["frames"]) == (48000, plan["frames"])
+    assert (vocals["separated_rate"], vocals["separated_frames"]) == (
+        SEPARATOR_RATE, plan["separator_frames"]
+    )
+    samples, _ = soundfile.read(str(out / vocals["name"]), dtype="float32")
+    assert float(np.abs(samples).max()) == 0.0
+
+
+def test_a_stem_missing_with_no_near_silent_warning_is_not_filled(tmp_path: Path) -> None:
+    _plan, filled, stems, _out = _separate_instrumental(tmp_path, near_silent_warns=False)
+    assert filled == []
+    assert [stem["name"] for stem in stems] == ["song_(other)_vocals_mel_band_roformer.mp3"]
+
+
+def test_the_real_library_writer_warns_as_the_watch_reads_it(tmp_path: Path) -> None:
+    """audio-separator's own pydub writer, given a silent stem: it warns and writes
+    nothing, and the watch pins that to the stem being saved."""
+    import logging
+    from types import SimpleNamespace
+
+    common = pytest.importorskip("audio_separator.separator.common_separator")
+    logger = logging.getLogger("stand-in-library")
+    logger.setLevel(logging.INFO)
+    watch = stemaudio.NearSilentWatch()
+    logger.addHandler(watch)
+    instance = SimpleNamespace(
+        logger=logger, normalization_threshold=0.9, amplification_threshold=0.0,
+        output_dir=str(tmp_path), sample_rate=SEPARATOR_RATE, output_bitrate=None,
+    )
+    name = "song_(vocals)_vocals_mel_band_roformer.wav"
+    try:
+        logger.info(f"Saving vocals stem to {name}...")
+        common.CommonSeparator.write_audio_pydub(
+            instance, name, np.zeros((SEPARATOR_RATE, 2), dtype="float32")
+        )
+    finally:
+        logger.removeHandler(watch)
+    assert not (tmp_path / name).exists()
+    assert watch.silent == [{"stem": "vocals", "file": name}]

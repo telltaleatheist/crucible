@@ -468,7 +468,10 @@ resampler's rounding (a frame or two) to the input's frames. The `done` event's 
 lossless WAV (`crucible/jobs/denoise`, `SEPARATOR_FORMAT`) and the worker checks its extension;
 `format` then encodes each stem once, as an audio job encodes a song: `wav` (the default, so
 every client that sends no `format` gets what it always got), `flac` (24-bit) or `mp3` (192 kbps
-CBR). (Through 1.0.38 a freshly loaded separator could write FLAC despite the request, because
+CBR). A stem the separator finds silent (a clean instrumental's vocals: audio-separator logs
+"near-silent" and writes no file) comes back as digital silence on the input's timeline and is
+named in `separated.silent_stems`; a stem missing for any other reason still fails the job by
+name (`denoise_primary_stem_missing`). (Through 1.0.38 a freshly loaded separator could write FLAC despite the request, because
 audio-separator's model instance kept its load-time format; fixed 2026-09-25.)
 
 **Chaining a song into denoise (B-Sides).** Render with `"hold": true`, then name the song as

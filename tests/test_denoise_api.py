@@ -512,7 +512,21 @@ def test_an_input_at_the_separator_s_rate_goes_as_sent_and_the_record_says_so(
     assert data["separated"] == {
         "sample_rate": 44100, "frames": 441000, "decoded": False, "resampled": False,
         "said": "the separator read the input as sent",
+        "silent_stems": [], "silent_said": None,
     }
+
+
+def test_a_stem_the_separator_found_silent_is_returned_and_said(
+    ready: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean instrumental: the worker filled the vocals in as silence (stemaudio), and
+    the record says so."""
+    monkeypatch.setenv("CRUCIBLE_FAKE_DENOISE_SILENT_STEMS", json.dumps(["Dry"]))
+    events = run_job(ready, auth, params={"stems": "all"})
+    assert terminal(events)["event"] == "done", terminal(events)
+    separated = terminal(events)["data"]["separated"]
+    assert separated["silent_stems"] == ["Dry"]
+    assert "found Dry silent" in separated["silent_said"]
 
 
 def test_a_48k_mp3_is_decoded_resampled_and_its_stems_come_back_at_48k(

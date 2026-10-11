@@ -1955,6 +1955,7 @@ Separates audio into stems with a source-separation model: `vocals-roformer` spl
 
 - The separator always works on lossless audio at its own rate; the one lossy encode (`format: "mp3"`) is of the finished stem. A resampled input has every stem resampled back to its rate and frames.
 - Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`); `crucible install rvc` places them.
+- A stem the separator finds silent (a clean instrumental's vocals) comes back as digital silence, named in `separated.silent_stems`.
 - A model not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.
 - `vocals` means every voice in the track, singing included.
 - The separator stays loaded between jobs; send a file whole rather than in chunks. See Throughput.

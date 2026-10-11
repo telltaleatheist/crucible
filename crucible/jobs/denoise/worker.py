@@ -176,6 +176,11 @@ def separate(request: dict) -> None:
     model_instance.output_format = separator_format
 
     send("progress", stage="separating", processed=0, total=1)
+    # The logger the library's stem writer reports to; a stem it skips as near-silent is
+    # filled in as silence below rather than lost (stemaudio.NearSilentWatch).
+    watch = stemaudio.NearSilentWatch()
+    library_logger = model_instance.logger
+    library_logger.addHandler(watch)
     began = time.perf_counter()
     try:
         with _Heartbeat(began):
@@ -185,7 +190,10 @@ def separate(request: dict) -> None:
             f"audio-separator failed on {os.path.basename(source)}: "
             f"{type(exc).__name__}: {exc}"
         ) from None
+    finally:
+        library_logger.removeHandler(watch)
     separate_seconds = time.perf_counter() - began
+    silent_stems = stemaudio.fill_silent(separated_dir, watch.silent, plan)
 
     produced = sorted(
         name for name in os.listdir(separated_dir)
@@ -219,7 +227,12 @@ def separate(request: dict) -> None:
     import torch
 
     memory_line(torch, os.path.basename(source))
-    send("result", stems=stems, separate_seconds=round(separate_seconds, 2))
+    send(
+        "result",
+        stems=stems,
+        silent_stems=silent_stems,
+        separate_seconds=round(separate_seconds, 2),
+    )
     send("done")
 
 

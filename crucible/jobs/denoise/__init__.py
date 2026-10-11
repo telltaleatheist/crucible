@@ -430,6 +430,7 @@ class DenoiseJobType(ResidentWorker):
             raise JobError("worker_failed", str(exc)) from None
 
         stems = results[0]["stems"]
+        silent = results[0]["silent_stems"]
         primary = self._check(manifest, outcome.ready, stems)
         published = [primary]
         if params.stems == EVERY_STEM:
@@ -459,6 +460,8 @@ class DenoiseJobType(ResidentWorker):
                 "decoded": ready["decoded"],
                 "resampled": ready["resampled"],
                 "said": _conversion(ready, manifest.sample_rate),
+                "silent_stems": silent,
+                "silent_said": _silence(silent),
             },
             separate_seconds=results[0]["separate_seconds"],
             load_seconds=self._loaded_seconds.pop(job.id, 0.0),
@@ -572,6 +575,18 @@ def _conversion(ready: dict[str, Any], separator_rate: int) -> str:
         f"decoded with ffmpeg and resampled {ready['sample_rate']} Hz -> "
         f"{separator_rate} Hz for the separator, every stem resampled back to "
         f"{ready['sample_rate']} Hz and {ready['frames']} frames"
+    )
+
+
+def _silence(silent: list[str]) -> str | None:
+    """The stems the separator found silent and did not write, said for the record."""
+    if not silent:
+        return None
+    return (
+        f"the separator found {', '.join(silent)} silent and wrote no file for "
+        f"{'it' if len(silent) == 1 else 'them'} (audio-separator skips a stem whose peak "
+        "is under 1e-6); returned as digital silence on the input's timeline, as a clean "
+        "instrumental's vocals are"
     )
 
 

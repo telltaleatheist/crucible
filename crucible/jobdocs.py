@@ -447,6 +447,8 @@ JOB_DOCS: dict[str, JobDoc] = {
             "has every stem resampled back to its rate and frames.",
             "Needs ffmpeg and ffprobe on the server (`ffmpeg_missing`); `crucible install "
             "rvc` places them.",
+            "A stem the separator finds silent (a clean instrumental's vocals) comes back "
+            "as digital silence, named in `separated.silent_stems`.",
             "A model not installed yet is installed on submit where the server allows "
             "it: the submit answers 409 `installing`; submit again when it is done.",
             "`vocals` means every voice in the track, singing included.",

@@ -128,7 +128,13 @@ def do_separate(results, request: dict) -> int:
         results.write(junk + "\n")
         results.flush()
 
-    send(results, "result", stems=stems, separate_seconds=8.25)
+    send(
+        results,
+        "result",
+        stems=stems,
+        silent_stems=_env_json("CRUCIBLE_FAKE_DENOISE_SILENT_STEMS", []),
+        separate_seconds=8.25,
+    )
 
     if os.environ.get("CRUCIBLE_FAKE_DENOISE_NO_DONE") == "1":
         raise SystemExit(0)
