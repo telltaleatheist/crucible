@@ -1945,11 +1945,18 @@ def test_loading_the_resident_model_at_a_new_context_is_a_reload(
     monkeypatch.setattr(accelerator, "probe_compute_apps", lambda: [])
     total = FAKE_BACKEND.gpu.vram_bytes
     resident_estimate = load_manifest(MODEL).spec(FAKE_BACKEND.kind).memory_bytes_estimate
-    free = {"bytes": total}
-    monkeypatch.setattr(accelerator, "probe_vram", lambda: (free["bytes"], total))
+    # The card holds what a running engine holds, and has it back once the engine stops:
+    # the reload's budget is planned from the card read after the eviction.
+    monkeypatch.setattr(
+        accelerator,
+        "probe_vram",
+        lambda: (
+            total - (resident_estimate if any(not e.stopped for e in engines) else 0),
+            total,
+        ),
+    )
     fake_weights(MODEL)
     run_job(llm_client, auth, type="load-model", model=MODEL)
-    free["bytes"] = total - resident_estimate
 
     events = run_job(
         llm_client, auth, type="load-model", model=MODEL, params={"context": 32768}

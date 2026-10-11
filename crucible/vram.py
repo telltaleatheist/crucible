@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .accelerator import AcceleratorState
 from .enginespec import VLLM_ENGINE, flag_value
-from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError, MemoryTerms
+from .manifests import MODELS_DIR_ENV, BackendSpec, ManifestError
 from .memorybudget import engine_budget_bytes, gib_text
 
 MAX_NUM_SEQS_FLAG = "--max-num-seqs"
@@ -105,6 +105,10 @@ class KvPlan:
         ]
 
 
+def plans_memory(spec: BackendSpec) -> bool:
+    return spec.engine == VLLM_ENGINE and spec.memory is not None
+
+
 def plan_vllm_memory(
     *,
     model_id: str,
@@ -114,13 +118,25 @@ def plan_vllm_memory(
     desktop_allowance_bytes: int,
     reclaimable_bytes: int,
 ) -> KvPlan | None:
-    if spec.engine != VLLM_ENGINE:
-        return None
-    terms: MemoryTerms | None = spec.memory
-    if terms is None:
-        return None
+    """The engine's budget and KV pool on ``card``.
 
-    free_after_eviction = card.free_bytes + reclaimable_bytes
+    The plan vLLM is STARTED with is made from a card read after the eviction, with
+    ``reclaimable_bytes=0`` (crucible/jobs/llm ``plan_on_the_card``): vLLM refuses to start
+    when its budget exceeds the free memory it sees, so the free term must be what the card
+    has, not a forecast. ``reclaimable_bytes`` is for the forecast a load makes before it
+    evicts (whether the model can have a KV cache at this context at all): it is the
+    resident's estimate or load-time measurement, not what it holds now, so free plus it can
+    exceed what the card will have. Victoria's RTX 3070, 2026-10-11: qwen3.5-4b-8bit planned
+    with the evicted resident's figure added got the whole 7.0 GiB the allowance leaves
+    (0.875) and vLLM, seeing 6.95 GiB, refused to start."""
+    if not plans_memory(spec):
+        return None
+    terms = spec.memory
+    assert terms is not None
+
+    # The resident cannot hand back more than the card has in use: a reclaimable figure
+    # past that (an estimate larger than what a staged engine holds) is not memory.
+    free_after_eviction = card.free_bytes + min(reclaimable_bytes, card.used_bytes)
     budget = engine_budget_bytes(
         card.total_bytes,
         desktop_allowance_bytes,

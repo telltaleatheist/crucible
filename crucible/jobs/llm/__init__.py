@@ -589,7 +589,7 @@ class LoadNeeds:
     installed: Any
     context: int
     state: Any
-    plan: Any
+    forecast: Any
 
 
 class LoadModelJobType:
@@ -650,7 +650,11 @@ class LoadModelJobType:
             owned_pids=self._residency.owned_pids(),
             reclaimable_bytes=self._reclaimable(),
         )
-        plan = vram.plan_vllm_memory(
+        # A forecast, made before the eviction: whether this model can have a KV cache at
+        # this context once the resident has gone, so a load that cannot is refused before
+        # anything is taken off the card. The budget vLLM is started with is planned again
+        # from the card read after the eviction (plan_on_the_card).
+        forecast = vram.plan_vllm_memory(
             model_id=model,
             spec=spec,
             context=context,
@@ -658,9 +662,45 @@ class LoadModelJobType:
             desktop_allowance_bytes=self._config.desktop_allowance_bytes,
             reclaimable_bytes=self._reclaimable(),
         )
-        if plan is not None and not plan.fits:
-            raise ApiError(409, "insufficient_kv_cache", plan.sentence())
-        return LoadNeeds(manifest, spec, launch, installed, context, state, plan)
+        if forecast is not None and not forecast.fits:
+            raise ApiError(409, "insufficient_kv_cache", forecast.sentence())
+        return LoadNeeds(manifest, spec, launch, installed, context, state, forecast)
+
+    def plan_on_the_card(
+        self, model: str, spec: BackendSpec, context: int, say: Callable[[str], None]
+    ) -> "vram.KvPlan | None":
+        """The budget vLLM is started with, from the card as it is once the resident has
+        been evicted and what it held has been handed back: what vLLM will find free when it
+        checks, with nothing left to reclaim. A forecast's free-plus-reclaimable is not that:
+        the reclaimable figure is the resident's estimate or its load-time measurement, not
+        what it holds now (a staged or sleeping engine holds less), and an 8 GiB card given
+        a budget past what it has refuses to start."""
+        if not vram.plans_memory(spec):
+            return None
+        try:
+            card = accelerator.read_settled_state(
+                self._config.backend_kind,
+                self._config.desktop_allowance_bytes,
+                say=say,
+            )
+        except accelerator.ProbeError as exc:
+            raise JobError(
+                "accelerator_unreadable",
+                f"cannot load {model!r}: could not read the card after the eviction: {exc}",
+            ) from None
+        plan = vram.plan_vllm_memory(
+            model_id=model,
+            spec=spec,
+            context=context,
+            card=card,
+            desktop_allowance_bytes=self._config.desktop_allowance_bytes,
+            reclaimable_bytes=0,
+        )
+        assert plan is not None
+        if not plan.fits:
+            raise JobError("insufficient_kv_cache", plan.sentence())
+        say(plan.detail())
+        return plan
 
     def preflight(self, model: str | None, params: dict[str, Any]) -> None:
         model = require_model(model, self.name)
@@ -686,8 +726,6 @@ class LoadModelJobType:
         ctx.warming(f"checking the accelerator for {model}")
         needs = as_job_error(self.requirements, model, params)
         ctx.warming(needs.state.detail)
-        if needs.plan is not None:
-            ctx.warming(needs.plan.detail())
 
         if needs.spec.form is not None:
             ctx.warming(
@@ -707,7 +745,9 @@ class LoadModelJobType:
                 needs.spec,
                 needs.installed.path,
                 needs.launch.executable,
-                plan=needs.plan,
+                plan_on_the_card=lambda say: self.plan_on_the_card(
+                    model, needs.spec, needs.context, say
+                ),
                 context=needs.context,
                 timeout=params.timeout_s,
                 on_progress=ctx.warming,
@@ -748,7 +788,7 @@ def occupy_model(
     weights_dir: Path,
     python: Path,
     *,
-    plan: "vram.KvPlan | None",
+    plan_on_the_card: Callable[[Callable[[str], None]], "vram.KvPlan | None"],
     context: int,
     timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
     on_progress: Callable[[str], None] | None = None,
@@ -760,6 +800,7 @@ def occupy_model(
     say = say_to(on_progress)
 
     def start() -> Occupant:
+        plan = plan_on_the_card(say)
         log_path = residency.log_path_for(manifest.id)
         engine = engines.build_engine(
             spec.engine, python, log_path, library_dirs=library_dirs

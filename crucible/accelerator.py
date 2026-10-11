@@ -6,9 +6,10 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .backend import (
     BACKEND_KINDS,
@@ -537,6 +538,49 @@ def read_state(backend_kind: str, desktop_allowance_bytes: int) -> AcceleratorSt
         f"{backend_kind!r} is not a Crucible backend; the backends are "
         f"{', '.join(repr(kind) for kind in BACKEND_KINDS)}"
     )
+
+
+# How a load reads the card once an eviction has run: the reading is settled when the card's
+# free memory did not rise between two readings this far apart. Stopping an engine waits for
+# its leader process; what its process group and the driver hand back can still be arriving
+# when the next engine is planned, and a figure read mid-release is low (never high), so the
+# wait is for the plan's accuracy, not its safety. The 30 s is a ceiling on that wait, not a
+# measured release time (none has been measured): a card still rising after it is planned
+# from its latest reading, which is said, and that plan can only be smaller than the card.
+CARD_SETTLE_INTERVAL_SECONDS = 0.5
+CARD_SETTLE_BUDGET_SECONDS = 30.0
+
+
+def read_settled_state(
+    backend_kind: str,
+    desktop_allowance_bytes: int,
+    *,
+    say: Callable[[str], None],
+    interval_seconds: float | None = None,
+    budget_seconds: float | None = None,
+) -> AcceleratorState:
+    """The card as an engine started now will find it: read until its free memory stops
+    rising (an engine just stopped is still being handed back), then the latest reading."""
+    interval = (
+        CARD_SETTLE_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
+    )
+    budget = CARD_SETTLE_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    deadline = time.monotonic() + budget
+    state = read_state(backend_kind, desktop_allowance_bytes)
+    while True:
+        time.sleep(interval)
+        latest = read_state(backend_kind, desktop_allowance_bytes)
+        if latest.free_bytes <= state.free_bytes:
+            return latest
+        if time.monotonic() >= deadline:
+            say(
+                f"the card's free memory was still rising after {budget:.0f}s "
+                f"({gib_text(state.free_bytes, 2)} then {gib_text(latest.free_bytes, 2)}); "
+                "planning from the latest reading, which is no more than what will "
+                "be free"
+            )
+            return latest
+        state = latest
 
 
 def unattributed_bytes(
