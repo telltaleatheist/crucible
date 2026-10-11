@@ -48,8 +48,11 @@ them.
 
 `api/app.py:_session_in_flight` reads it fresh every time: the session's jobs that have not
 ended (queued in the line or on the lane), chats and decisions answering for it
-(`InFlight` entries carry `session`), its calls waiting in the line, and rows its TTS stream
-is saying. An open stream with nothing being said is *not* in flight, so the session's
+(`InFlight` entries carry `session`), its calls waiting in the line, rows its TTS stream
+is saying, and installs its items wait on: `admission.admit` hands a session item's
+`installing` refusal's task to `QueueSessions.adopt_install`, and the session holds the
+`Task` until it ends (any terminal state); then `_session_in_flight` drops it and moves
+`seen` to the task's `finished`, so `idle_s` runs from the install's end. An open stream with nothing being said is *not* in flight, so the session's
 `idle_s` still runs out and the stream closes with it.
 
 ### Opening

@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -37,6 +38,7 @@ from ..residency import Residency
 from ..sessionqueue import SessionCloser
 from ..settle import Settlement
 from ..tasks import TaskStore
+from ..tasks.states import TERMINAL_STATES as TASK_TERMINAL_STATES
 from ..tasks.states import ReloadRefused
 from ..ttsstream import StreamManager
 from ..updating import UpdateHold
@@ -305,6 +307,19 @@ def _session_in_flight(
             rows.append({"kind": "job", "id": job.id, "type": job.type,
                          "model": job.model, "status": job.status})
         session.jobs[:] = live
+        waiting_on: list[Any] = []
+        for task in session.installs:
+            if task.state in TASK_TERMINAL_STATES:
+                # Its idle_s runs from the install's end, not from the last tick or
+                # item before it (an install can take longer than idle_s).
+                ended = datetime.fromisoformat(task.finished)
+                if session.seen is None or ended > session.seen:
+                    session.seen = ended
+                continue
+            waiting_on.append(task)
+            rows.append({"kind": "install", "id": task.id, "type": task.type,
+                         "status": task.state})
+        session.installs[:] = waiting_on
         for entry in inflight.of_session(session.id):
             rows.append({"kind": "chat", "id": str(entry.id), "model": entry.model,
                          "act": entry.act, "since": entry.since})

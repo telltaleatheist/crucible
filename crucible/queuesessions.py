@@ -113,6 +113,9 @@ class QueueSession:
     first_work_at: datetime | None = None
     load_job: str | None = None
     jobs: list[str] = field(default_factory=list)
+    # Installs its items are waiting on (crucible/tasks Task objects): an item refused
+    # `installing` names the task, and the session holds it until the task ends.
+    installs: list[Any] = field(default_factory=list)
     stream_sessions: set[str] = field(default_factory=set)
     opened_for_stream: str | None = None
     awaits_stream: bool = False
@@ -277,6 +280,16 @@ class QueueSessions:
         session = self._sessions.get(session_id)
         if session is not None:
             session.jobs.append(job_id)
+
+    def adopt_install(self, session_id: str, task: Any) -> None:
+        """An item of this session was refused ``installing``: the install (or the task
+        ahead of it) is work the session waits on, in flight until it ends, success or
+        failure, so a long download never idles the session out. Its client asks again
+        once it ends; from then on its ``idle_s`` runs from the task's end."""
+        session = self._sessions.get(session_id)
+        if session is None or any(held.id == task.id for held in session.installs):
+            return
+        session.installs.append(task)
 
     def adopt_stream_session(
         self, session: QueueSession, stream_session_id: str, *, opened_for_it: bool

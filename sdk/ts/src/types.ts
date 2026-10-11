@@ -337,7 +337,10 @@ export interface QueueSessionState {
   /** When it closes `max_hold`; null unless the server sets a maximum. */
   readonly maxHoldDeadline: string | null;
   readonly itemsRun: number;
-  /** What it has running or waiting: jobs, chats, queued calls, stream rows being said. */
+  /**
+   * What it has running or waiting: jobs, chats, queued calls, stream rows being said, and
+   * installs its items wait on (`kind: 'install'`, from a `409 installing` until the task ends).
+   */
   readonly inFlight: readonly Readonly<Record<string, unknown>>[];
   /** The TTS stream open in it, or null. */
   readonly streamSession: Readonly<Record<string, unknown>> | null;
