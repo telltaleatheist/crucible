@@ -191,6 +191,20 @@ def _registered_model(config: Config, n_images: int) -> str:
     return row.with_images
 
 
+def decide_model(
+    config: Config, backend_kind: str, model: str | None, form: str | None, n_images: int
+) -> str:
+    """The model a decision is served by, and what the door refuses about it before
+    anything waits: the named one, else the registered one (with images, the one
+    registered for a decision with images). The door and the preview (GET /v1/resolve)
+    both call this."""
+    chosen = model if model is not None else _registered_model(config, n_images)
+    _refuse_an_upstream(chosen)
+    refuse_unknown_form(chosen, form, backend_kind)
+    refuse_vectors_only(chosen, "decide")
+    return chosen
+
+
 def _refuse_an_upstream(model: str) -> None:
     if upstreamrecord.split_model(model) is None:
         return
@@ -316,14 +330,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """
         arrived = time.monotonic()
         act = read_act(request.headers)
-        model = (
-            body.model
-            if body.model is not None
-            else _registered_model(ctx.config, decide_core.check_image_count(body.images))
+        model = decide_model(
+            ctx.config, backend.kind, body.model, body.form,
+            decide_core.check_image_count(body.images),
         )
-        _refuse_an_upstream(model)
-        refuse_unknown_form(model, body.form, backend.kind)
-        refuse_vectors_only(model, "decide")
         inflight = ctx.inflight
         chat_over = settle_after_chat(ctx.settlement)
         session = queue_session(request, ctx.sessions)

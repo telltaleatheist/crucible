@@ -237,20 +237,20 @@ def resolve(registry: dict[str, JobType], job_type: str, config: Any) -> JobType
     )
 
 
-def resolve_model(plugin: JobType, model: str | None) -> str | None:
+def resolve_model(plugin: JobType, model: str | None, params: dict[str, Any]) -> str | None:
     offered = plugin.describe_models()
     ids = [descriptor.id for descriptor in offered]
-    if model is None:
-        if not ids:
-            return None
-        registered = getattr(plugin, "registered_model", None)
-        if registered is None:
-            raise ApiError(
-                400,
-                "model_required",
-                f"job type {plugin.name!r} requires a model; it offers {ids}",
-            )
-        model = registered()
+    if model is None and not ids:
+        return None
+    choose = getattr(plugin, "choose_model", None)
+    if choose is not None:
+        model = choose(model, params)
+    elif model is None:
+        raise ApiError(
+            400,
+            "model_required",
+            f"job type {plugin.name!r} requires a model; it offers {ids}",
+        )
     if model not in ids:
         raise ApiError(
             400,

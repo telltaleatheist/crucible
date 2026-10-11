@@ -745,6 +745,7 @@ COVERED: dict[str, str] = {
     "GET /v1/info": "api info",
     "GET /v1/setup": "api setup",
     "GET /v1/capability": "api capability",
+    "GET /v1/resolve": "api resolve",
     "GET /v1/accelerator": "api accelerator",
     "GET /v1/activity": "api activity",
     "GET /v1/models": "api models",

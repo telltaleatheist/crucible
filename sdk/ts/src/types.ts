@@ -379,6 +379,14 @@ export interface SessionOptions {
   /** A model to have resident when the session opens; the server loads it for the session. */
   readonly model?: string;
   /**
+   * In place of `model`: open with the model this server registered for `act`, capped at this many
+   * billions of parameters, as {@link ChatOptions.maxParamsB} caps a chat's; the session's
+   * {@link CrucibleSession.model} names the model chosen. Refused `verb_not_sized` for an `act`
+   * with no size goal, `model_with_ceiling` beside a `model`, `nothing_fits_ceiling` when nothing
+   * fits.
+   */
+  readonly maxParamsB?: number;
+  /**
    * Close the session after this many seconds with nothing in flight, no item and no touch:
    * 10..86400, the server's default 300. It applies from the session's first item on: until
    * then the server closes it `unused` 90 s after it opens, so send the first item as soon as
@@ -974,8 +982,28 @@ export interface ChatMessage {
 
 /** What {@link CrucibleClient.chat} and {@link CrucibleClient.chatStream} take. */
 export interface ChatOptions {
-  /** The model to talk to. */
-  readonly model: string;
+  /**
+   * The model to talk to. Omitted: the model this server registered for `verb`, capped by
+   * `maxParamsB` (1.0.142+); the reply's `model` says which.
+   */
+  readonly model?: string;
+  /**
+   * In place of `model`: the verb whose model this server registered answers, one of `generate`
+   * (the server's default: open-ended chat), `clean`, `translate`, `simplify`, `analysis`. Beside a
+   * `model`, the model is held to that verb's lineup and fit (`model_not_for_verb`,
+   * `model_does_not_fit`). Sent as `verb`; refused `unknown_verb` or `verb_not_for_chat`.
+   */
+  readonly verb?: string;
+  /**
+   * In place of `model`: a ceiling, in billions of parameters, on the verb's model. The server's
+   * own pick for the verb (its Settings choice, else the biggest that fits up to the verb's goal)
+   * is kept when it is at or below the ceiling; a pick above it is replaced by the biggest that
+   * fits the card at or below it, the most parameters first, then the highest precision. It never
+   * raises the pick. Sent as `max_params_b`; beside a `model` it is refused `model_with_ceiling`,
+   * and with nothing at or below it `nothing_fits_ceiling`. The reply's `model` names the model
+   * chosen.
+   */
+  readonly maxParamsB?: number;
   readonly messages: readonly ChatMessage[];
   readonly temperature?: number;
   readonly topP?: number;
@@ -1048,7 +1076,7 @@ export interface ChatUsage {
  */
 export interface ChatResponse {
   readonly id: string | null;
-  /** Crucible's model id — the one you asked for. */
+  /** Crucible's model id: the one you named, or the one your `verb` and `maxParamsB` chose. */
   readonly model: string | null;
   readonly content: string;
   /** The engine's own word for why it stopped (`stop`, `length`, …); `length` means truncated. */
@@ -1433,6 +1461,69 @@ export interface ModelRerankInfo {
   readonly source: string | null;
 }
 
+/**
+ * What {@link CrucibleClient.resolve} asks: the choosing fields of the request it previews, as
+ * that request would send them.
+ */
+export interface ResolveOptions {
+  /**
+   * The verb whose door is previewed: `generate` (the default: a chat), `clean`, `translate`,
+   * `simplify`, `analysis` (a chat naming that verb), `decide`, `embed`, `rerank` or `image`.
+   */
+  readonly verb?: string;
+  readonly model?: string;
+  /** As {@link ChatOptions.maxParamsB}; refused for `decide` and `image`, whose doors take none. */
+  readonly maxParamsB?: number;
+  readonly form?: string;
+  /** For `decide`: how many images the decision carries (it may switch to a vision form). */
+  readonly images?: number;
+}
+
+/** {@link ResolvePreview.fit}: the model against this card, for the verb's working context. */
+export interface ResolveFit {
+  readonly fits: boolean;
+  readonly needBytes: number;
+  readonly availableBytes: number;
+  /** The verb's working context it was sized at; null for a model with none (image). */
+  readonly contextTokens: number | null;
+  readonly concurrency: number | null;
+}
+
+/** {@link ResolvePreview.refused}: the refusal the door itself would send. */
+export interface ResolveRefusal {
+  readonly status: number;
+  readonly code: string;
+  readonly message: string;
+  readonly details: Readonly<Record<string, unknown>> | null;
+}
+
+/**
+ * `GET /v1/resolve` (1.0.142+): which model a request would be served by, chosen by the very
+ * function the door calls, with nothing loaded. When the door would refuse, `refused` says so in
+ * its own words and `model` is null.
+ */
+export interface ResolvePreview {
+  readonly verb: string;
+  /** The door previewed (`POST /v1/openai/chat/completions`, ...); null for an unknown verb. */
+  readonly door: string | null;
+  readonly model: string | null;
+  /** `model`, `max_params_b`, `settings` or `auto`; a newer server may name another. */
+  readonly source: string | null;
+  readonly paramsB: number | null;
+  readonly bits: number | null;
+  readonly engine: string | null;
+  readonly form: string | null;
+  readonly installed: boolean | null;
+  readonly resident: boolean | null;
+  readonly fit: ResolveFit | null;
+  /**
+   * The model's facts: a text model's `GET /v1/models` row, an image model's playground facts
+   * (`native_width`, `native_height`, `quality_min_side`, defaults, `negative_prompt`).
+   */
+  readonly facts: Readonly<Record<string, unknown>> | null;
+  readonly refused: ResolveRefusal | null;
+}
+
 /** `GET /v1/info`'s `verbs` entry: whether this server serves the verb now, and with what. */
 export interface VerbInfo {
   readonly route: string;
@@ -1628,6 +1719,17 @@ export interface LoadVoiceOptions {
 export interface LoadModelOptions {
   /** Tokens: the context to start the engine with (`params.context`). */
   readonly context?: number;
+  /**
+   * With no model: load the model this server registered for this verb (`params.verb`), one with a
+   * size goal (generate, clean, translate, simplify, analysis, decide, embed, rerank). The job's
+   * `model` names the one chosen.
+   */
+  readonly verb?: string;
+  /**
+   * With no model: a ceiling on the verb's model (`params.max_params_b`; the verb defaults to
+   * `generate`), as {@link ChatOptions.maxParamsB} caps a chat's.
+   */
+  readonly maxParamsB?: number;
   /**
    * The form to load (`params.form`), for a model with more than one (`ModelInfo.forms`).
    * Omitted: the form the server's card takes.

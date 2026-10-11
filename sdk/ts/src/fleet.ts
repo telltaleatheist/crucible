@@ -26,6 +26,11 @@ export interface FleetSessionOptions {
    * supported on their backend and installed, are asked.
    */
   readonly model?: string;
+  /**
+   * In place of `model`: each server opens with its own model for `act`, capped at this many
+   * billions of parameters ({@link SessionOptions.maxParamsB}); every server is asked with it.
+   */
+  readonly maxParamsB?: number;
   /** The session's idle close, as {@link SessionOptions.idleS}; every server is asked with it. */
   readonly idleS?: number;
   /**
@@ -146,6 +151,7 @@ export async function fleetSession(
   const ask: SessionOptions = {
     act: given.act,
     ...(given.model === undefined ? {} : { model: given.model }),
+    ...(given.maxParamsB === undefined ? {} : { maxParamsB: given.maxParamsB }),
     ...(given.idleS === undefined ? {} : { idleS: given.idleS }),
     ...(maxWaitS === undefined ? {} : { maxWaitS }),
   };

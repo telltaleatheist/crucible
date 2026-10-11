@@ -3,7 +3,9 @@
 Owen, 2026-10-09. Phase 1 (§3 item 1) BUILT and merged (§7). Decide's image form, the
 9B marker's removal and the API-key recommendation BUILT on `feat/decide-vision-and-api-hint`,
 not merged (§8). The embed and rerank verbs, with the request-level model and ceiling at their
-doors, BUILT on `feat/embed-rerank`, not merged (§9). The rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
+doors, BUILT on `feat/embed-rerank`, not merged (§9). Phase 2's door, verb-addressed chat with a
+size ceiling, BUILT on `feat/chat-verb-ceiling`, not merged (§11); the `lyrics` verb is not. The
+rest NOT BUILT. This extends `MODEL-CHOICE.md` and `FITS-AND-THE-CARD.md`;
 where it disagrees with them, it says so (§6).
 
 ## 0. The ruling, in his words
@@ -101,7 +103,8 @@ Five holes raised in review; Owen's answers, verbatim, then what they mean.
    per-request maximum (rule 8) is how a person or an app chooses speed or context over size.
 3. **Who wins when settings disagree.** *"i agree with your fix."* Precedence, first that
    applies: an exact model in the request, then a ceiling in the request, then the user's
-   per-verb setting, then Crucible's own pick.
+   per-verb setting, then Crucible's own pick. Refined by Owen, 2026-10-11 (§11): the ceiling
+   caps the server's own pick (the per-verb setting, else Crucible's) and never raises it.
 4. **"Try it" hurting what's running.** *"only try this if the user directly configures a model
    in crucible settings. this is a kind of "dont stop the user from hitting themselves in the
    face" type of thing. but yes, we can put sensible guards/protections on it."* This narrows
@@ -162,6 +165,7 @@ Missing:
    - mlx-darwin: mlx-community's 4- and 8-bit conversions.
 3. The **`lyrics`** verb.
 4. **Verb-addressed chat**: a request naming a verb, resolved to the registered model, optionally narrowed by a model or a size ceiling (rule 8).
+   **Built 2026-10-11 on `feat/chat-verb-ceiling` (§11).**
 5. The **ladder for every verb**: measure the largest fitting variant per lineup, record it.
 6. **`[routes]` for every verb**, and a Settings page in the app.
 7. **Named loads that try** instead of being refused upfront, with an error that says why when
@@ -173,6 +177,7 @@ Missing:
    moves to the 9B on the PC and the Mac. **BUILT 2026-10-09 on `feat/verb-goals` (§7); not
    yet measured on a card.**
 2. The `lyrics` verb and verb-addressed chat; B-Side calls `lyrics`, its chooser comes out.
+   **Verb-addressed chat BUILT 2026-10-11 on `feat/chat-verb-ceiling` (§11); `lyrics` not built.**
 3. Small variants: build, upload (private HF, like the bside 4-bit), measure, ship.
 4. The ladder for every verb, so picks come from measurement.
 5. `[routes]` for every verb and the Settings page.
@@ -415,7 +420,7 @@ gets these models*. Built on the branch, not merged; nothing run on a card.
   (refused `model_does_not_fit` with the verb's pick named, unless it is the Settings
   choice), then `max_params_b` (the pick again with the goal lowered to it), then the
   registered row (the Settings choice or the automatic pick). It is the first door to do
-  §1a.3 per request; chat's is still owed (§3 item 2).
+  §1a.3 per request; chat's followed (§11), and changed what a ceiling does here too.
 
 ## 10. image: a small rung (2026-10-10, `feat/image-dreamshaper-rung`)
 
@@ -441,3 +446,109 @@ PC's card held to a laptop card's room, not yet through the worker on a card
 - **Install.** An 8 GiB host pulls only DreamShaper (`crucible models pull
   dreamshaper-xl-lightning`, or install-on-submit for a job that names no model), never
   the 33 GB Qwen-Image.
+
+## 11. Verb-addressed chat with a size ceiling (2026-10-11, `feat/chat-verb-ceiling`)
+
+Phase 2's door (§3 item 2), without the `lyrics` verb. The case, Owen 2026-10-11: B-Sides
+wants "the biggest chat model this server can run, at most 4B parameters", with a JSON schema.
+Then, the same day, what a ceiling means:
+
+> *"crucible servers will likely have designated 'biggest' chat models already configured.
+> like victoria's is 8 bit 4b … that's the one chat will always use. the local crucible
+> server (pc) has 27b … b sides doesnt need it that big, so itll call the maximum of 4b 16
+> bit here."*
+
+**The ceiling caps the server's own pick and never raises it.** The verb's registered model
+(the Settings choice, else Crucible's pick: the capability record's row) is kept when its
+`params_b` is at or below the ceiling. Only a pick above it is replaced, by rule 3 run with
+the goal lowered to the ceiling: at or below it, the most parameters, then the most bits,
+that fit this card. So no precision is ever asked for: 16-bit wins wherever it fits,
+because bits are the second key of the pick order, and the 8-bit is reached only where the
+16-bit does not fit. A server whose record is missing has no pick to cap
+(`capability_undecided`); one whose row is off (rerank without the retrieval package) gets
+the ceiling's pick. One owner: `crucible/verbmodel.py`, the same `resolve` embed and rerank
+use, so their ceilings changed with it (a ceiling at or above their 8B keeps it).
+
+**The wire.**
+
+- Chat (`POST /v1/openai/chat/completions`, `/openai/v1/chat/completions`): `model` left out
+  or null, with `verb` (default `generate`; `clean`, `translate`, `simplify`, `analysis`:
+  `classnames.CHAT_VERBS`) and/or `max_params_b`. Both are taken off the body; the engine is
+  sent exactly the body a chat naming the chosen model would send, and the reply's `model`
+  is the chosen id. Residency is the chat door's own: it waits in the line and its model is
+  loaded, or `"queue": false` is `409 model_not_resident` naming it. `verb` beside a `model`
+  holds that model to the verb (`model_not_for_verb`, `model_does_not_fit` unless it is
+  the Settings choice); a `model` with no verb is served as named, as before. The door has no
+  identity block of its own to add to; `model` is the identity.
+
+  ```json
+  {"max_params_b": 4, "messages": [...],
+   "response_format": {"type": "json_schema", "json_schema": {...}},
+   "json_whitespace": "compact"}
+  → 200 {"model": "qwen3.5-4b", "choices": [...]}
+  ```
+- Queue session (`POST /v1/queue/sessions`): `{"act": "generate", "max_params_b": 4}`; the
+  verb is `act` (any class with a goal); the ticket's new `model` names the model it opens
+  with, so an app learns which model to hold.
+- `load-model`: `{"type": "load-model", "params": {"verb": "generate", "max_params_b": 4}}`
+  (verb default `generate`, any class with a goal); the job's `model` is the chosen id. The
+  job-type hook is now `choose_model(model, params)` (image's `registered_model()` folded in).
+- Refused by name: `model_with_ceiling` (a model and a ceiling, at every door),
+  `unknown_verb`, `verb_not_for_chat`, `verb_not_sized` (a class with no goal),
+  `nothing_fits_ceiling`, `form_without_model`, `invalid_request` (a ceiling that is not a
+  number above 0).
+- Discovery: feature `chat.verbs`; `GET /v1/info` `verbs` lists the five chat verbs beside
+  embed and rerank, their route the chat door, with `registered` and `models`.
+
+**The preview: `GET /v1/resolve`** (Owen, 2026-10-11: *"we should have some way to tell
+which model will be used before crucible picks it"*). Read-only: nothing is loaded, reserved,
+pulled or queued. Its query is the request's own choosing fields, `verb` (default `generate`),
+`model`, `max_params_b`, `form`, and `images` for decide, and it chooses by calling the very
+function each door calls: the chat door's `verbmodel.chat_model` (and its `refuse_unservable`),
+embed's and rerank's `verbmodel.resolve` (and rerank's `refuse_unscorable`), decide's
+`decide_model`, the image job's `jobs.resolve_model`. The answer: `model`, `source` (`model`,
+`max_params_b`, `settings`, `auto`), `params_b`, `bits`, `engine`, `form`, `installed`,
+`resident`, `fit` (`need_bytes` against `available_bytes` at the verb's working context) and
+`facts` (a text model's `GET /v1/models` row; an image model's playground facts, so an app can
+size a picture to the model it will get: Qwen-Image paints well from 256, DreamShaper from
+768). A request the door would refuse while choosing answers 200 with `refused`: the door's own
+status, code, message and details. The tests send each lever to the door and to the preview
+and compare. What a door refuses later, about the body itself (a schema, a prefill), the
+preview does not read. `verb=decide` and `verb=image` refuse a ceiling, as their doors have no
+such field (`invalid_request`; `verb_not_sized` for image). A disabled image job previews as
+`job_type_disabled`, where a real submit may instead start an install (`installing`).
+
+```text
+GET /v1/resolve?max_params_b=4
+→ {"verb": "generate", "door": "POST /v1/openai/chat/completions", "model": "qwen3.5-4b",
+   "source": "max_params_b", "params_b": 4, "bits": 16, "engine": "vllm",
+   "fit": {"fits": true, "need_bytes": ..., "available_bytes": ..., "context_tokens": 8192,
+           "concurrency": 1}, "facts": {...the /v1/models row...}, "refused": null}
+```
+
+**Every chat says what served it.** The chat door prints one stderr line per completion,
+streamed or not, as decide, embed and rerank do: `crucible: chat on 'qwen3.5-4b' (ceiling) for
+b-sides: waited 3 ms, answered in 812 ms; 412 in (256 cached), 95 out; finish stop; max_tokens
+1024; response_format json_schema`, `; streamed` on a stream. How it was chosen is `named`,
+`ceiling`, `server pick, settings` or `server pick, auto`; a truncation reads `finish length`.
+Never the messages, the answer or the schema.
+
+**The B-Sides case** (`generate` at generate's 8192 tokens x 1; estimates, not measured):
+
+| host | budget | registered | at most 4B | why |
+|---|---|---|---|---|
+| PC, 24 GiB cuda-linux, 3 GiB reserve | 21.0 GiB | qwen3.8-27b-4bit | **qwen3.5-4b** (vLLM bf16, 12.2 GiB) | 27B is above 4; the bf16 4B fits |
+| Mac Studio, 64 GiB, 25% reserve | 48.0 GiB | qwen3.8-27b-8bit | **qwen3.5-4b** (mlx bf16, 10.0 GiB) | the same; the 8-bit 4B has no mlx block |
+| Victoria, 8 GiB cuda-linux, 1 GiB reserve | 7.0 GiB | qwen3.5-4b-8bit | **qwen3.5-4b-8bit** (W8A16, 5.9 GiB) | its own pick is already 4B: kept |
+
+**Not done here.**
+- `decide` takes no ceiling: its door also picks a vision form for a request with images
+  (§8a), and a ceiling would need its own image pick; a decide request names a model or
+  takes the registered one, as before.
+- `[routes]` is not read by the chat door: a verb-addressed chat is served locally, never
+  sent upstream by a route (the door has never consulted `[routes]`; an app that wants an
+  upstream names `<upstream>/<id>`).
+- A request's own context (`?context_tokens=`, §1a.2) does not yet narrow the pick; the
+  verb's working context does.
+- A session opened with `act` alone still opens on whatever is resident; only
+  `max_params_b` asks the server to choose.

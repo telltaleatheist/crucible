@@ -75,6 +75,7 @@ Every route this server answers and every job type it runs, one line each. The s
 | `DELETE /v1/queue/{job_id}` | Take a waiting job, call or queue session out of the queue (reason `operator`), or end the open queue session; a job that has started is cancelled with DELETE /v1/jobs/{id}. |
 | `POST /v1/queue/{job_id}/heartbeat` | Say the client that queued this job is still there. |
 | `POST /v1/rerank` | A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. |
+| `GET /v1/resolve` | Which model a request would be served by, without sending it: nothing is loaded, reserved or queued. |
 | `GET /v1/resumable` | Every resume journal this server keeps, newest first, with progress, inputs and expiry. |
 | `GET /v1/resumable/{resume_id}` | One journal, as `GET /v1/resumable` lists it. |
 | `DELETE /v1/resumable/{resume_id}` | Discard a journal now; refused `resume_in_use` while a job writes it. |
@@ -1021,7 +1022,7 @@ One client holding the server for a run of requests it cannot know in advance: i
 
 ### `POST /v1/queue/sessions`
 
-Ask for the server for a run of requests you cannot know in advance. It waits in the line like any queued item and answers at once with a ticket; follow `GET /v1/queue/sessions/{id}/events` for `opened`. While it is open, nothing from any other client runs.
+Ask for the server for a run of requests you cannot know in advance. It waits in the line like any queued item and answers at once with a ticket; follow `GET /v1/queue/sessions/{id}/events` for `opened`. While it is open, nothing from any other client runs. `max_params_b` in place of `model` opens with the model this server registered for `act`, capped at that size; the ticket's `model` names the one chosen.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1031,6 +1032,7 @@ Ask for the server for a run of requests you cannot know in advance. It waits in
 | --- | --- | --- | --- | --- |
 | `act` | string | yes | — | The capability class the run is for, as the act header names it. |
 | `model` | string or null | no | — | A model to have resident when the session opens; it is loaded for the session (a load-model job attributed to it) when it is not. |
+| `max_params_b` | number or null | no | — | In place of `model`: open with the model this server registered for `act`, capped at this many billions of parameters (docs/VERB-SIZING.md rule 8). This server's own pick for the verb is kept when it is at or below the ceiling, and a pick above it is replaced by the biggest that fits this card at or below it; the ticket's `model` names the one chosen. Refused for an `act` with no size goal (`verb_not_sized`), beside a `model` (`model_with_ceiling`), and when nothing fits (`nothing_fits_ceiling`). |
 | `idle_s` | integer | no | `300` | Close the session after this long with nothing in flight, no item and no touch. A running job or an answer in flight always counts as activity. |
 | `max_wait_s` | integer | no | `3600` | How long it may wait in the line to open before it is removed `expired`. |
 
@@ -1043,6 +1045,7 @@ Ask for the server for a run of requests you cannot know in advance. It waits in
 | `session_id` | string | yes | — |  |
 | `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
 | `position` | integer or null | yes | — |  |
+| `model` | string or null | yes | — | The model the session opens with resident: the one it named, or the one its `max_params_b` chose; null when it named neither (it opens on whatever is resident). |
 
 ### `GET /v1/queue/sessions/{session_id}`
 
@@ -1150,9 +1153,24 @@ A chat surface shaped like OpenAI's, for clients that already speak it.
 
 ### `POST /openai/v1/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `response_format` or other grammar is enforced by the engine or refused `structured_output_not_served` before anything is sent: vLLM, llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured output"). A `"json_whitespace": "compact"` member, beside a JSON schema or json_object, keeps the answer's JSON free of whitespace between tokens (inside strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON constraint needs thinking stated off: `structured_output_with_thinking`); llama-server on llama-windows and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `response_format` or other grammar is enforced by the engine or refused `structured_output_not_served` before anything is sent: vLLM, llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured output"). A `"json_whitespace": "compact"` member, beside a JSON schema or json_object, keeps the answer's JSON free of whitespace between tokens (inside strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON constraint needs thinking stated off: `structured_output_with_thinking`); llama-server on llama-windows and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded. A chat may leave `model` out and be served by a verb's model instead: `verb` (default `generate`) and `max_params_b`, a ceiling on this server's own pick for the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model` names the model chosen. The same choice opens a queue session (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`, `params.max_params_b`).
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | string or null | no | — | A Crucible model id, or `<upstream>/<id>` for a routed upstream. Left out (or null), the chat is served by the model this server registered for `verb`, capped by `max_params_b`, and the reply's `model` names the one chosen. |
+| `messages` | array of object | yes | — | OpenAI's messages, forwarded as sent. |
+| `verb` | string or null | no | — | Crucible's: which verb's model serves a chat that names no model, one of `generate` (the default: open-ended chat), `clean`, `translate`, `simplify`, `analysis`. Beside a `model`, that model is held to the verb's rules (it must be in the verb's lineup here, `model_not_for_verb`, and fit the card unless it is the verb's Settings choice, `model_does_not_fit`). Another verb is refused `verb_not_for_chat`, an unknown name `unknown_verb`. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling, in billions of parameters, on the verb's model: this server's own pick (its Settings choice, else the biggest that fits up to the verb's goal) is kept when it is at or below the ceiling, and a pick above it is replaced by the biggest model that fits this card at or below the ceiling, the most parameters first, then the highest precision. Never raises the pick. Nothing at or below it: `nothing_fits_ceiling`; beside a `model`: `model_with_ceiling`. |
+| `stream` | boolean | no | `False` | OpenAI's: answer as server-sent events. |
+| `response_format` | object or null | no | — | OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or refused `structured_output_not_served` before anything is sent. |
+| `json_whitespace` | string or null | no | — | Crucible's: `compact` or `flexible` (the default), beside a JSON `response_format`. |
+| `prefill` | string or null | no | — | Crucible's: the start of the answer; the reply's content is what the model wrote after it. |
+| `form` | string or null | no | — | Crucible's: which form of the named `model` serves the chat. Without a `model` it is refused `form_without_model`. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, a chat whose model is not resident or whose engine is full waits in the server's line (up to an hour); `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 *Answers:* `200`
 
@@ -1212,9 +1230,24 @@ Cohere's and Jina's rerank: `{results: [{index, relevance_score, document?}], mo
 
 ### `POST /v1/openai/chat/completions`
 
-An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `response_format` or other grammar is enforced by the engine or refused `structured_output_not_served` before anything is sent: vLLM, llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured output"). A `"json_whitespace": "compact"` member, beside a JSON schema or json_object, keeps the answer's JSON free of whitespace between tokens (inside strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON constraint needs thinking stated off: `structured_output_with_thinking`); llama-server on llama-windows and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
+An OpenAI chat completion, proxied to the resident engine or, for a `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not resident, or whose engine has every slot taken, waits in the server's line (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with `"queue": false` it is refused at once instead. An upstream chat never waits. A `"prefill": "<text>"` member starts the answer with that text and the model writes on from it; the reply's content is what it wrote after the prefill (vLLM and llama-server; thinking stated off; no response_format or other grammar; refused by name otherwise: docs/internals/engines-and-capability.md, "Prefill"). A `response_format` or other grammar is enforced by the engine or refused `structured_output_not_served` before anything is sent: vLLM, llama-server and mlx-lm enforce a JSON schema, mlx-vlm enforces none ("Structured output"). A `"json_whitespace": "compact"` member, beside a JSON schema or json_object, keeps the answer's JSON free of whitespace between tokens (inside strings only); `"flexible"` is the default. vLLM, mlx-lm and llama-server on cuda-linux keep it (there the schema is sent as an llguidance grammar, and a JSON constraint needs thinking stated off: `structured_output_with_thinking`); llama-server on llama-windows and mlx-vlm are refused `json_whitespace_not_served`, and without a JSON constraint it is `json_whitespace_without_json`. A `"form": "<name>"` member names which form of a model that comes in more than one serves the chat (GET /v1/models, the row's `forms`); without it the resident form answers, and a load made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded. A chat may leave `model` out and be served by a verb's model instead: `verb` (default `generate`) and `max_params_b`, a ceiling on this server's own pick for the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model` names the model chosen. The same choice opens a queue session (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`, `params.max_params_b`).
 
 *Door:* token + `X-Crucible-Api: 1`
+
+**Body** (`application/json`)
+
+| field | type | required | default | what it is |
+| --- | --- | --- | --- | --- |
+| `model` | string or null | no | — | A Crucible model id, or `<upstream>/<id>` for a routed upstream. Left out (or null), the chat is served by the model this server registered for `verb`, capped by `max_params_b`, and the reply's `model` names the one chosen. |
+| `messages` | array of object | yes | — | OpenAI's messages, forwarded as sent. |
+| `verb` | string or null | no | — | Crucible's: which verb's model serves a chat that names no model, one of `generate` (the default: open-ended chat), `clean`, `translate`, `simplify`, `analysis`. Beside a `model`, that model is held to the verb's rules (it must be in the verb's lineup here, `model_not_for_verb`, and fit the card unless it is the verb's Settings choice, `model_does_not_fit`). Another verb is refused `verb_not_for_chat`, an unknown name `unknown_verb`. |
+| `max_params_b` | number or null | no | — | Crucible's: a ceiling, in billions of parameters, on the verb's model: this server's own pick (its Settings choice, else the biggest that fits up to the verb's goal) is kept when it is at or below the ceiling, and a pick above it is replaced by the biggest model that fits this card at or below the ceiling, the most parameters first, then the highest precision. Never raises the pick. Nothing at or below it: `nothing_fits_ceiling`; beside a `model`: `model_with_ceiling`. |
+| `stream` | boolean | no | `False` | OpenAI's: answer as server-sent events. |
+| `response_format` | object or null | no | — | OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or refused `structured_output_not_served` before anything is sent. |
+| `json_whitespace` | string or null | no | — | Crucible's: `compact` or `flexible` (the default), beside a JSON `response_format`. |
+| `prefill` | string or null | no | — | Crucible's: the start of the answer; the reply's content is what the model wrote after it. |
+| `form` | string or null | no | — | Crucible's: which form of the named `model` serves the chat. Without a `model` it is refused `form_without_model`. |
+| `queue` | QueueRequest or `False` | no | — | Crucible's: absent, a chat whose model is not resident or whose engine is full waits in the server's line (up to an hour); `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 *Answers:* `200`
 
@@ -1343,7 +1376,7 @@ The whole API reference as markdown: every route, every job type, every model.
 
 ### `POST /v1/embed`
 
-Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). How to use embed and rerank, with examples and the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else the biggest under `max_params_b` that fits, else what this server registered for embed; its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+Unit-length vectors for a list of texts, each answer naming exactly what wrote them (`model.fingerprint`). How to use embed and rerank, with examples and the measured costs: docs/RETRIEVAL.md in the server's repo. A model nothing holds is unloaded after each call, so a run of calls holds a queue session. Vectors are comparable only with vectors of the same fingerprint: store it with them and send it on later calls, and a server that would write anything else refuses `fingerprint_mismatch` instead of answering. `input_type` says whether the texts are queries (written with the model's instruction prefix) or documents (written as they are). The model's format, its pooling and the normalisation are Crucible's (the model manifest's [embed]). The model is the request's `model` (or its fingerprint's), else what this server registered for embed, capped by `max_params_b` (kept at or below it, else the biggest that fits under it); its models are the optional retrieval package (`crucible install retrieval`), refused `package_not_installed` where it is not installed. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1357,7 +1390,7 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 | `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
 | `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for embed: kept when it is at or below the ceiling, else the biggest embedding model that fits at or below it (docs/VERB-SIZING.md rule 8, section 11). Beside a `model` or a `fingerprint`: `model_with_ceiling`. |
 | `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
 | `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
@@ -1380,7 +1413,7 @@ Unit-length vectors for a list of texts, each answer naming exactly what wrote t
 
 ### `POST /v1/rerank`
 
-A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else the biggest under `max_params_b` that fits, else what this server registered for rerank; the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
+A relevance probability per document for one query: P(yes) normalised against P(no) under the model's prompt (how to use it, with examples: docs/RETRIEVAL.md in the server's repo), so the same model's scores compare across calls and a fixed cutoff means the same thing every time. `scores` are in document order; `results` the same, most relevant first. The prompt is Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any decide model Crucible's general template; the instruction and the query are read once and shared by every document where the engine keeps a cache (llama-server, mlx-lm). The model is the request's `model`, else what this server registered for rerank, capped by `max_params_b` (kept at or below it, else the biggest that fits under it); the dedicated rerankers are the optional retrieval package (`crucible install retrieval`, refused `package_not_installed` where it is not installed), and a decide model named in the request reranks wherever it decides. A request whose model is not resident waits in the server's line and the model is loaded for it; with `"queue": false` it is refused at once instead.
 
 *Door:* token + `X-Crucible-Api: 1`
 
@@ -1393,7 +1426,7 @@ A relevance probability per document for one query: P(yes) normalised against P(
 | `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
 | `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for rerank: kept when it is at or below the ceiling, else the biggest that fits at or below it (docs/VERB-SIZING.md section 11). Beside a `model`: `model_with_ceiling`. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 *Answers:* `200` RerankResponse, `422` HTTPValidationError
@@ -1409,6 +1442,22 @@ A relevance probability per document for one query: P(yes) normalised against P(
 | `results` | array of RerankResult | yes | — | Every document, most relevant first (a tie keeps the request's order). |
 | `tokens` | RerankTokens | yes | — |  |
 | `timing_ms` | RerankTiming | yes | — |  |
+
+### `GET /v1/resolve`
+
+Which model a request would be served by, without sending it: nothing is loaded, reserved or queued. The query is the request's own choosing fields: `verb` (default `generate`, a chat; also `clean`, `translate`, `simplify`, `analysis`, `decide`, `embed`, `rerank`, `image`), `model`, `max_params_b`, `form`, and for `decide` `images` (how many the decision carries). The answer names the `model`, its `source` (`model`, `max_params_b`, `settings`, `auto`), its `params_b`, `bits`, `engine` and `form`, whether it is `installed` and `resident`, its `fit` for the verb's working context (`need_bytes`, `available_bytes`), and its `facts`: a text model's GET /v1/models row, an image model's playground facts (native size, `quality_min_side`, defaults, negative prompt). A request the door would refuse while choosing answers 200 with `refused` holding the same `status`, `code`, `message` and `details` the door would send, and `model` null. It reads what the door reads before anything waits; what a door refuses later, about the body itself (a schema, a prefill), it does not.
+
+*Door:* token + `X-Crucible-Api: 1`
+
+| parameter | in | required | type | what it is |
+| --- | --- | --- | --- | --- |
+| `verb` | query | no | string or null | The verb whose door is previewed: `generate` (the default: a chat), `clean`, `translate`, `simplify`, `analysis` (a chat naming that verb), `decide`, `embed`, `rerank`, `image`. |
+| `model` | query | no | string or null | As the request's `model`. |
+| `max_params_b` | query | no | string or null | As the request's `max_params_b`, read the same way (a number above 0); `decide` and `image` take none. |
+| `form` | query | no | string or null | As the request's `form`. |
+| `images` | query | no | string or null | For `decide`: how many images the decision carries (with images it may be served by a vision form). |
+
+*Answers:* `200`, `422` HTTPValidationError
 
 ### `POST /v1/server/restart`
 
@@ -1488,6 +1537,8 @@ Starts an LLM engine for a model and leaves it resident, so the chat door (POST 
 | `timeout_s` | number | no | `900.0` | Seconds to wait for the engine to come up and answer before the load fails, 30 to 7200 (default 900). |
 | `context` | integer or null | no | `null` | The context length in tokens to start the engine at, at least 2048; null uses the model's own default. Above this host's ceiling it is refused `context_over_limit`; loading the resident model at a new context is a reload. |
 | `form` | string or null | no | `null` | Which form of the model to load, for a model whose block on this backend states more than one (GET /v1/models lists them under `forms`); null loads the one this host's card takes (the row's `form`). A name the model does not have is refused `unknown_form`. |
+| `verb` | string or null | no | `null` | In place of `model`: load the model this server registered for this verb (one with a size goal: generate, clean, translate, simplify, analysis, decide, embed, rerank; GET /v1/capability), capped by `max_params_b`; the job's `model` names the one chosen. Beside a `model`, that model is held to the verb's rules (`model_not_for_verb`, `model_does_not_fit`). Unknown: `unknown_verb`; a verb with no goal: `verb_not_sized`. |
+| `max_params_b` | number or null | no | `null` | In place of `model`: a ceiling, in billions of parameters, on the verb's model (`verb`, default `generate`). This server's own pick for the verb is kept when it is at or below the ceiling; a pick above it is replaced by the biggest that fits this card at or below it. Beside a `model`: `model_with_ceiling`; nothing at or below it: `nothing_fits_ceiling`. |
 
 *Inputs:* None.
 
@@ -2318,6 +2369,7 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `audio` | The `audio` job: sound effects, music and songs (docs/AUDIO.md). |
 | `catalog` | GET /v1/catalog and DELETE /v1/catalog/{kind}/{id}: what this build can serve, what is on disk, and reclaiming it. |
 | `chat` | POST /v1/openai/chat/completions: chat on the resident model, OpenAI-shaped. |
+| `chat.verbs` | A chat may leave out `model` and send `verb` (generate, the default; clean, translate, simplify, analysis) and `max_params_b`, a ceiling on this server's own pick for the verb that never raises it; the reply's `model` names the one chosen. The same choice on POST /v1/queue/sessions (`max_params_b` beside `act`, the ticket's `model`) and on `load-model` (`params.verb`, `params.max_params_b`). GET /v1/info `verbs` lists each chat verb's registered model (docs/VERB-SIZING.md rule 8). |
 | `decide` | POST /v1/decide with `questions`: answer distributions read off the resident model's next-token logprobs. |
 | `decide.items` | POST /v1/decide with `items`: one choice answer per item, in one request. |
 | `denoise` | The `denoise` job: speech separated from what is behind it. |
@@ -2340,6 +2392,7 @@ Puts a video model on the card and leaves it there, so the first job that uses i
 | `queue.sessions` | /v1/queue/sessions: an app's session holds the machine for a run of requests, waits its turn in the line, and ends on close or idle (docs/QUEUE.md). |
 | `rerank` | POST /v1/rerank: a relevance probability per document for one query, P(yes) against P(no), from a dedicated reranker (the retrieval package) or any decide model. |
 | `rerank.compat` | POST /v1/openai/rerank and /openai/v1/rerank: the same, Cohere/Jina-shaped (`results` with `index` and `relevance_score`, `top_n`). |
+| `resolve` | GET /v1/resolve?verb=&model=&max_params_b=&form=: which model a request would be served by, how it was chosen, whether it is installed and fits, and its facts, or the refusal the door would send; nothing is loaded (docs/VERB-SIZING.md section 11). |
 | `rvc` | The `rvc` job: voice conversion. |
 | `segment` | The `segment` job: subject cutouts and point-and-box selections, as masks (docs/SEGMENT.md). |
 | `settings` | GET/PUT /v1/settings: the one door apps configure Crucible through. |
@@ -2681,7 +2734,7 @@ What wrote the vectors: everything that changes a float.
 | `model` | string or null | no | — | The Crucible model id. An app that stores vectors names the model that wrote them (better: sends `fingerprint`). One that does not fit this server is refused `model_does_not_fit`, never swapped for another. Absent: the model this server registered for embed (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
 | `fingerprint` | string or null | no | — | An answer's `model.fingerprint`, sent back: this server serves exactly that identity or refuses `fingerprint_mismatch` (409) naming what it would serve instead, so stored vectors are never mixed with incomparable ones. Implies `model` (and `form`); sending them as well, they must agree. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest embedding model that fits this server at or below it (docs/VERB-SIZING.md rule 8). Ignored when `model` or `fingerprint` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for embed: kept when it is at or below the ceiling, else the biggest embedding model that fits at or below it (docs/VERB-SIZING.md rule 8, section 11). Beside a `model` or a `fingerprint`: `model_with_ceiling`. |
 | `dimensions` | integer or null | no | — | The vector's length: a prefix of the model's own, normalised again (Matryoshka). Any size the model is trained for (`GET /v1/models`, `embed.dimensions_range`; 32 to 4096 on Qwen3-Embedding-8B); refused `dimensions_not_supported` otherwise. Absent: the model's own length. |
 | `encoding_format` | `'float'` or `'base64'` or `'base64_float16'` | no | `'float'` | `float`: JSON arrays of numbers. `base64`: each vector's float32 values, little-endian, base64 (OpenAI's `base64`). `base64_float16`: IEEE half precision, little-endian, base64: half the bytes, about three decimal digits. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once (`409 model_not_resident`, `503 chat_queue_full`). |
@@ -3045,7 +3098,7 @@ What judged the documents.
 | `instruction` | string or null | no | — | What relevant means here, in one sentence ("Given a question about a podcast, find the transcript passages that answer it"). Absent: the model's default (the reply says which was used). |
 | `model` | string or null | no | — | The Crucible model id: a dedicated reranker, or any decide model (qwen3.5-9b and the like), which is judged with Crucible's general template. Absent: the model this server registered for rerank (`GET /v1/capability`). |
 | `form` | string or null | no | — | Which form of `model`, for a model whose block here states more than one. |
-| `max_params_b` | number or null | no | — | A ceiling in billions of parameters: the biggest model that fits this server at or below it. Ignored when `model` names one. |
+| `max_params_b` | number or null | no | — | A ceiling in billions of parameters on this server's own pick for rerank: kept when it is at or below the ceiling, else the biggest that fits at or below it (docs/VERB-SIZING.md section 11). Beside a `model`: `model_with_ceiling`. |
 | `queue` | QueueRequest or `False` | no | — | Absent: while the model is not resident, or its engine is busy, the request waits in the server's line up to an hour and the model is loaded for it. `{"max_wait_s": N}` changes the wait; `false` refuses at once. |
 
 ### `RerankResponse`
@@ -3159,6 +3212,7 @@ A command, typed on the server itself, that runs it as a machine service.
 | --- | --- | --- | --- | --- |
 | `act` | string | yes | — | The capability class the run is for, as the act header names it. |
 | `model` | string or null | no | — | A model to have resident when the session opens; it is loaded for the session (a load-model job attributed to it) when it is not. |
+| `max_params_b` | number or null | no | — | In place of `model`: open with the model this server registered for `act`, capped at this many billions of parameters (docs/VERB-SIZING.md rule 8). This server's own pick for the verb is kept when it is at or below the ceiling, and a pick above it is replaced by the biggest that fits this card at or below it; the ticket's `model` names the one chosen. Refused for an `act` with no size goal (`verb_not_sized`), beside a `model` (`model_with_ceiling`), and when nothing fits (`nothing_fits_ceiling`). |
 | `idle_s` | integer | no | `300` | Close the session after this long with nothing in flight, no item and no touch. A running job or an answer in flight always counts as activity. |
 | `max_wait_s` | integer | no | `3600` | How long it may wait in the line to open before it is removed `expired`. |
 
@@ -3199,6 +3253,7 @@ A queue session: one client's claim on the server for a run of requests. Not a T
 | `session_id` | string | yes | — |  |
 | `status` | `'queued'` or `'open'` or `'closed'` | yes | — |  |
 | `position` | integer or null | yes | — |  |
+| `model` | string or null | yes | — | The model the session opens with resident: the one it named, or the one its `max_params_b` chose; null when it named neither (it opens on whatever is resident). |
 
 ### `StartPairing`
 

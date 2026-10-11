@@ -10,7 +10,6 @@ from ... import rerank as rerank_core
 from ... import verbmodel
 from ...engines import likelihood_reading
 from ...errors import ApiError
-from ...formrequest import refuse_unknown_form
 from ...manifests import load_manifest
 from ...queuerequest import QueueChoice, queue_field
 from ...rerank import RerankRequest, RerankResponse
@@ -108,8 +107,6 @@ def compat_shape(body: CompatRerankRequest) -> Any:
 async def rerank_call(
     request: Request, ctx: AppContext, body: RerankRequest, render: Any
 ) -> Response:
-    if body.model is not None:
-        refuse_unknown_form(body.model, body.form, ctx.backend.kind)
     resident = ctx.residency.resident_model
     chosen = verbmodel.resolve(
         "rerank", ctx.config, ctx.backend,
@@ -154,8 +151,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
         Crucible's: a dedicated reranker's own (its manifest's [rerank]), or for any
         decide model Crucible's general template; the instruction and the query are read
         once and shared by every document where the engine keeps a cache (llama-server,
-        mlx-lm). The model is the request's `model`, else the biggest under
-        `max_params_b` that fits, else what this server registered for rerank; the
+        mlx-lm). The model is the request's `model`, else what this server registered
+        for rerank, capped by `max_params_b` (kept at or below it, else the biggest that
+        fits under it); the
         dedicated rerankers are the optional retrieval package (`crucible install
         retrieval`, refused `package_not_installed` where it is not installed), and a
         decide model named in the request reranks wherever it decides. A request whose

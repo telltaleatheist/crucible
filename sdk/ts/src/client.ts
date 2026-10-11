@@ -128,6 +128,8 @@ import {
   type RerankOptions,
   type RerankRequest,
   type RerankResponse,
+  type ResolveOptions,
+  type ResolvePreview,
   type VerbInfo,
   type VerbOptions,
   type VerbTiming,
@@ -422,6 +424,36 @@ export class CrucibleClient {
       'capability',
     );
     return readCapabilityRecord(body);
+  }
+
+  /**
+   * `GET /v1/resolve` — which model a request would be served by, without sending it: nothing is
+   * loaded or queued (1.0.142+). Ask with the request's own choosing fields.
+   *
+   * ```ts
+   * const pick = await crucible.resolve({ maxParamsB: 4 });
+   * if (pick.refused === null) console.log(pick.model, pick.source, pick.fit?.fits);
+   * ```
+   */
+  async resolve(options: ResolveOptions = {}): Promise<ResolvePreview> {
+    const query = new URLSearchParams();
+    if (options.verb !== undefined) query.set('verb', requireText(options.verb, 'verb'));
+    if (options.model !== undefined) query.set('model', requireText(options.model, 'model'));
+    if (options.maxParamsB !== undefined) query.set('max_params_b', String(requireCeiling(options.maxParamsB)));
+    if (options.form !== undefined) query.set('form', requireText(options.form, 'form'));
+    if (options.images !== undefined) {
+      if (!Number.isInteger(options.images) || options.images < 0) {
+        throw new CrucibleConfigError('images', `must be a whole number of images, got ${String(options.images)}`);
+      }
+      query.set('images', String(options.images));
+    }
+    const suffix = query.toString();
+    const body = await this.#json(
+      '/v1/resolve' + (suffix === '' ? '' : `?${suffix}`),
+      { method: 'GET' },
+      'resolve',
+    );
+    return readResolvePreview(body);
   }
 
   /** `GET /v1/settings` — where each class's work runs, and which upstreams are configured. */
@@ -943,6 +975,7 @@ export class CrucibleClient {
     const act = requireText(given.act, 'act');
     const payload: Record<string, unknown> = { act };
     if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     if (given.idleS !== undefined) payload['idle_s'] = requireSeconds(given.idleS, 'idleS', '300 s');
     if (given.maxWaitS !== undefined) {
       payload['max_wait_s'] = requireSeconds(given.maxWaitS, 'maxWaitS', 'an hour');
@@ -961,13 +994,14 @@ export class CrucibleClient {
     const ticket = await this.#askForSession(payload, signal);
     const id = str(ticket, 'session_id', 'session');
     const status = oneOf(str(ticket, 'status', 'session'), QUEUE_SESSION_STATUSES, 'session.status');
+    const model = nullableStr(ticket, 'model', 'session');
     if (signal !== undefined && signal.aborted) {
       // Aborted the instant the ticket arrived: the session is not wanted, open or not.
       await this.#leaveTheLine(id);
       throw signal.reason;
     }
     const cursor = status === 'open' ? 0 : await this.#untilOpen(id, { onQueue, onWaiting }, signal);
-    return this.#bind(id, act, cursor);
+    return this.#bind(id, act, model, cursor);
   }
 
   /**
@@ -1073,7 +1107,7 @@ export class CrucibleClient {
   }
 
   /** The client a session's items go through: this one, plus the session's header. */
-  #bind(sessionId: string, act: string, cursor: number): CrucibleSession {
+  #bind(sessionId: string, act: string, model: string | null, cursor: number): CrucibleSession {
     const watch = new AbortController();
     let resolve: (end: QueueSessionEnd) => void = () => undefined;
     const closed = new Promise<QueueSessionEnd>((settle) => {
@@ -1094,6 +1128,7 @@ export class CrucibleClient {
       this.#options,
       sessionId,
       act,
+      model,
       closed,
       this.#sessionHooks(binding),
     );
@@ -1284,15 +1319,27 @@ export class CrucibleClient {
     );
   }
 
-  /** Queue a `load-model` job and return its id. */
-  async loadModel(model: string, options?: LoadModelOptions): Promise<string> {
+  /**
+   * Queue a `load-model` job and return its id. `model` null loads the model this server
+   * registered for `options.verb`, capped by `options.maxParamsB` (1.0.142+); the job's `model`
+   * (`job(id)`) names the one chosen.
+   */
+  async loadModel(model: string | null, options?: LoadModelOptions): Promise<string> {
+    const params: Record<string, unknown> = {};
+    if (options?.context !== undefined) params['context'] = options.context;
+    if (options?.form !== undefined) params['form'] = requireText(options.form, 'form');
+    if (options?.verb !== undefined) params['verb'] = requireText(options.verb, 'verb');
+    if (options?.maxParamsB !== undefined) params['max_params_b'] = requireCeiling(options.maxParamsB);
+    if (model === null && params['verb'] === undefined && params['max_params_b'] === undefined) {
+      throw new CrucibleConfigError(
+        'model',
+        'loadModel(null, ...) needs options.verb or options.maxParamsB to say which model',
+      );
+    }
     return this.submit({
       type: 'load-model',
-      model: requireText(model, 'model'),
-      params: {
-        ...(options?.context === undefined ? {} : { context: options.context }),
-        ...(options?.form === undefined ? {} : { form: requireText(options.form, 'form') }),
-      },
+      ...(model === null ? {} : { model: requireText(model, 'model') }),
+      params,
       inputs: {},
     });
   }
@@ -1379,13 +1426,15 @@ export class CrucibleClient {
   #chatRequest(options: ChatOptions, stream: boolean): RequestInit {
     const given = options as Partial<ChatOptions> | undefined;
     if (given === undefined || given === null) {
-      throw new CrucibleConfigError('options', 'chat(...) needs {model, messages}');
+      throw new CrucibleConfigError('options', 'chat(...) needs {messages}');
     }
     const payload: Record<string, unknown> = {
-      model: requireText(given.model, 'model'),
       messages: readChatMessages(given.messages),
       stream,
     };
+    if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
+    if (given.verb !== undefined) payload['verb'] = requireText(given.verb, 'verb');
+    if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
     if (given.temperature !== undefined) {
       payload['temperature'] = requireFinite(given.temperature, 'temperature');
     }
@@ -2409,6 +2458,11 @@ export class CrucibleSession extends CrucibleClient {
   /** The capability class it was opened for. */
   readonly act: string;
   /**
+   * The model it opened with resident: the one it named, or the one its `maxParamsB` chose; null
+   * when it named neither (it opened on whatever was resident).
+   */
+  readonly model: string | null;
+  /**
    * How the session ended, once it has: closed by {@link close}, idle, by an operator, at the
    * server's maximum hold, or the server stopping. Never rejects. A background follow of the
    * session's own stream is what resolves it; that follow ends with the session.
@@ -2422,12 +2476,14 @@ export class CrucibleSession extends CrucibleClient {
     options: CrucibleClientOptions,
     id: string,
     act: string,
+    model: string | null,
     closed: Promise<QueueSessionEnd>,
     hooks: SessionHooks,
   ) {
     super(options);
     this.id = id;
     this.act = act;
+    this.model = model;
     this.closed = closed;
     this.#hooks = hooks;
   }
@@ -4540,17 +4596,20 @@ function requireCount(value: unknown, option: string): number {
   return value;
 }
 
+/** A `maxParamsB` ceiling, as the wire's `max_params_b`: a number above 0. */
+function requireCeiling(value: unknown): number {
+  const ceiling = requireFinite(value, 'maxParamsB');
+  if (ceiling <= 0) throw new CrucibleConfigError('maxParamsB', `must be above 0, got ${ceiling}`);
+  return ceiling;
+}
+
 function putVerbModel(
   payload: Record<string, unknown>,
   given: { readonly model?: unknown; readonly form?: unknown; readonly maxParamsB?: unknown },
 ): void {
   if (given.model !== undefined) payload['model'] = requireText(given.model, 'model');
   if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
-  if (given.maxParamsB !== undefined) {
-    const ceiling = requireFinite(given.maxParamsB, 'maxParamsB');
-    if (ceiling <= 0) throw new CrucibleConfigError('maxParamsB', `must be above 0, got ${ceiling}`);
-    payload['max_params_b'] = ceiling;
-  }
+  if (given.maxParamsB !== undefined) payload['max_params_b'] = requireCeiling(given.maxParamsB);
 }
 
 function numArray(body: Json, key: string, where: string): number[] {
@@ -4702,6 +4761,44 @@ function readModelRerank(entry: Json, where: string): ModelRerankInfo | null {
     yes: optStr(rerank, 'yes', at),
     no: optStr(rerank, 'no', at),
     source: optStr(rerank, 'source', at),
+  };
+}
+
+function readResolvePreview(body: Json): ResolvePreview {
+  const where = 'resolve';
+  const fit = nullableObject(body, 'fit', where);
+  const refused = nullableObject(body, 'refused', where);
+  return {
+    verb: str(body, 'verb', where),
+    door: nullableStr(body, 'door', where),
+    model: nullableStr(body, 'model', where),
+    source: nullableStr(body, 'source', where),
+    paramsB: nullableNum(body, 'params_b', where),
+    bits: nullableNum(body, 'bits', where),
+    engine: nullableStr(body, 'engine', where),
+    form: nullableStr(body, 'form', where),
+    installed: nullableBool(body, 'installed', where),
+    resident: nullableBool(body, 'resident', where),
+    fit:
+      fit === null
+        ? null
+        : {
+            fits: bool(fit, 'fits', `${where}.fit`),
+            needBytes: num(fit, 'need_bytes', `${where}.fit`),
+            availableBytes: num(fit, 'available_bytes', `${where}.fit`),
+            contextTokens: nullableNum(fit, 'context_tokens', `${where}.fit`),
+            concurrency: nullableNum(fit, 'concurrency', `${where}.fit`),
+          },
+    facts: nullableObject(body, 'facts', where),
+    refused:
+      refused === null
+        ? null
+        : {
+            status: num(refused, 'status', `${where}.refused`),
+            code: str(refused, 'code', `${where}.refused`),
+            message: str(refused, 'message', `${where}.refused`),
+            details: nullableObject(refused, 'details', `${where}.refused`),
+          },
   };
 }
 

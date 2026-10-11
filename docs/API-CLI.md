@@ -93,6 +93,9 @@ crucible api info              identity, host, job types, every capability row
 crucible api setup             the pairing lines an app's connect door takes
 crucible api capability        what this host can hold and why  [--accelerator-probe]
                                [--class generate --context-tokens N --concurrency N]
+crucible api resolve           which model a request would get, nothing loaded
+                               [--verb generate|decide|embed|rerank|image ...] [--model ID]
+                               [--max-params-b B] [--form NAME] [--images N]
 crucible api accelerator       what is on the card right now, probed
 crucible api activity          what this server is doing, and who asked
 crucible api models            the llm models this SERVER holds
@@ -221,7 +224,10 @@ with `--since` past that frame is refused rather than guessing a rate
 
 ```
 crucible api chat --model qwen3.5-9b --message "…"           one-shot shorthand
+crucible api chat --max-params-b 4 --message "…"             the server's chat model, at most 4B
+crucible api chat --verb translate --message "…"             the server's translate model
 crucible api chat --body @request.json [--stream] [--act clean]
+crucible api session open --act generate --max-params-b 4    open on the server's chat model, at most 4B
 ```
 
 The body is forwarded **verbatim** in both directions except `model`, so

@@ -11,7 +11,6 @@ from ... import verbmodel
 from ...embed import EmbedRequest, EmbedResponse
 from ...engines import embed_reading
 from ...errors import ApiError
-from ...formrequest import refuse_unknown_form
 from ...jobs.llm import MANIFESTS
 from ...manifests import load_manifest
 from ...queuerequest import QueueChoice, queue_field
@@ -103,8 +102,6 @@ def openai_shape(answer: EmbedResponse) -> dict[str, Any]:
 async def _resolve(ctx: AppContext, body: EmbedRequest) -> verbmodel.VerbModel:
     manifests = await asyncio.to_thread(MANIFESTS.all)
     named = embed_core.named_by_fingerprint(body, manifests, ctx.backend.kind)
-    if named.model is not None:
-        refuse_unknown_form(named.model, named.form, ctx.backend.kind)
     resident = ctx.residency.resident_model
     return verbmodel.resolve(
         "embed", ctx.config, ctx.backend,
@@ -163,9 +160,9 @@ def register(routers: Routers, ctx: AppContext) -> None:
         of answering. `input_type` says whether the texts are queries (written with the
         model's instruction prefix) or documents (written as they are). The model's
         format, its pooling and the normalisation are Crucible's (the model manifest's
-        [embed]). The model is the request's `model` (or its fingerprint's), else the
-        biggest under `max_params_b` that fits, else what this server registered for
-        embed; its models are the optional retrieval package (`crucible install
+        [embed]). The model is the request's `model` (or its fingerprint's), else what
+        this server registered for embed, capped by `max_params_b` (kept at or below it,
+        else the biggest that fits under it); its models are the optional retrieval package (`crucible install
         retrieval`), refused `package_not_installed` where it is not installed. A
         request whose model is not resident waits in the server's line and the model is
         loaded for it; with `"queue": false` it is refused at once instead."""

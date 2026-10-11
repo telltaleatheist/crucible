@@ -65,6 +65,7 @@ from .routes import (
     pairing,
     peer,
     rerank,
+    resolve,
     resumable,
     settings,
     tasks,
@@ -104,6 +105,7 @@ ROUTE_MODULES = (
     decide,
     embed,
     rerank,
+    resolve,
 )
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"

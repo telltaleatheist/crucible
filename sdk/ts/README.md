@@ -414,6 +414,25 @@ for await (const delta of crucible.chatStream({ model: 'qwen3.5-9b', messages: [
 await crucible.unloadModel('qwen3.5-9b');   // a job too; watch it the same way
 ```
 
+Or name no model and let each server choose (1.0.142+): `verb` (default `generate`) and
+`maxParamsB`, a ceiling on the server's own pick for the verb that never raises it. The reply's
+`model` says which model answered: on a 24 GiB PC `qwen3.5-4b` (bf16), on an 8 GiB laptop the
+`qwen3.5-4b-8bit` that server already uses.
+
+```ts
+const tags = await crucible.chat({ maxParamsB: 4, messages, responseFormat });
+console.log(tags.model);
+const session = await crucible.session({ act: 'generate', maxParamsB: 4 });
+console.log(session.model);   // the model the session holds
+await crucible.loadModel(null, { verb: 'generate', maxParamsB: 4 });
+
+// Which model would it be? Nothing is loaded; a refusal comes back as the door's own.
+const pick = await crucible.resolve({ maxParamsB: 4 });
+console.log(pick.model, pick.source, pick.fit?.fits, pick.refused?.code);
+const cover = await crucible.resolve({ verb: 'image' });
+console.log(cover.facts?.['quality_min_side']);   // size the picture to the model it will get
+```
+
 ### `models()`
 
 `ModelInfo` carries four booleans that are four different facts, and none of them implies

@@ -14,12 +14,14 @@ from ... import (
     jobenv,
     llamacpp,
     ollamastore,
+    verbmodel,
     vram,
     weights,
 )
 from ...backend import CUDA_LINUX, LLAMA_WINDOWS
 from ...cardfacts import card_for
 from ...cardkinds import KIND_LLM
+from ...classnames import DEFAULT_CHAT_VERB
 from ...clock import utcnow
 from ...config import Config
 from ...contextceiling import MIN_LOAD_CONTEXT, check_load_context
@@ -186,6 +188,25 @@ class LoadParams(BaseModel):
         "backend states more than one (GET /v1/models lists them under `forms`); null "
         "loads the one this host's card takes (the row's `form`). A name the model does "
         "not have is refused `unknown_form`.",
+    )
+    verb: str | None = Field(
+        default=None,
+        min_length=1,
+        description="In place of `model`: load the model this server registered for this "
+        "verb (one with a size goal: generate, clean, translate, simplify, analysis, "
+        "decide, embed, rerank; GET /v1/capability), capped by `max_params_b`; the job's "
+        "`model` names the one chosen. Beside a `model`, that model is held to the "
+        "verb's rules (`model_not_for_verb`, `model_does_not_fit`). Unknown: "
+        "`unknown_verb`; a verb with no goal: `verb_not_sized`.",
+    )
+    max_params_b: float | None = Field(
+        default=None,
+        gt=0,
+        description="In place of `model`: a ceiling, in billions of parameters, on the "
+        "verb's model (`verb`, default `generate`). This server's own pick for the verb "
+        "is kept when it is at or below the ceiling; a pick above it is replaced by the "
+        "biggest that fits this card at or below it. Beside a `model`: "
+        "`model_with_ceiling`; nothing at or below it: `nothing_fits_ceiling`.",
     )
 
 
@@ -611,6 +632,29 @@ class LoadModelJobType:
 
     def describe_models(self) -> list[ModelDescriptor]:
         return _descriptors(self._config, self._config.backend_kind, self._residency)
+
+    def choose_model(self, model: str | None, params: dict[str, Any]) -> str:
+        """The named model, or the one `params.verb` and `params.max_params_b` choose
+        (docs/VERB-SIZING.md rule 8): what this server registered for the verb, capped
+        at the ceiling, the same choice a chat that names no model gets."""
+        loading = parse_params(LoadParams, params, self.name)
+        if loading.verb is None and loading.max_params_b is None:
+            if model is None:
+                raise ApiError(
+                    400,
+                    "model_required",
+                    f"{self.name} needs a model, or `params.verb` / `params.max_params_b` "
+                    "to load the model this server registered for a verb",
+                )
+            return model
+        verb = DEFAULT_CHAT_VERB if loading.verb is None else loading.verb
+        verbmodel.refuse_unsized_verb(verb, "this load's `params.verb`")
+        resident = self._residency.resident_model
+        return verbmodel.resolve(
+            verb, self._config, self._backend,
+            model=model, form=loading.form, max_params_b=loading.max_params_b,
+            resident=None if resident is None else resident.model_id,
+        ).model
 
     def _reclaimable(self) -> int:
         return self._residency.reclaimable_bytes()

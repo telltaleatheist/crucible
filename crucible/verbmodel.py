@@ -4,11 +4,14 @@
 First that applies: an exact `model` in the request, then a `max_params_b` ceiling in the
 request, then the user's per-verb choice in Settings, then Crucible's own pick. The last
 two are what this server registered (its capability record's row, which holds the
-Settings choice), so the door reads the row; a ceiling decides again, against this card,
-with the goal lowered to it. A named model the estimate says does not fit is refused
-with the verb's own pick named (only a model the USER configured in Settings is tried
-past the estimate, section 1a.4). A model in an optional package this server has not
-installed is refused by name, whichever way it was reached.
+Settings choice), so the door reads the row. A ceiling caps that pick and never raises it
+(Owen, 2026-10-11): the server's own pick is kept when it is at or below the ceiling, and
+only a pick above it is replaced by the biggest that fits at or below the ceiling, decided
+again against this card with the goal lowered to it. A model and a ceiling in one request
+are refused: they are two answers to the one question. A named model the estimate says
+does not fit is refused with the verb's own pick named (only a model the USER configured
+in Settings is tried past the estimate, section 1a.4). A model in an optional package this
+server has not installed is refused by name, whichever way it was reached.
 
 Every refusal here is the caller's or the operator's to repair, so each one is by name.
 """
@@ -18,10 +21,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
-from .capabilityclasses import BY_NAME, CapabilityClass, Goal
+from .capabilityclasses import BY_NAME, CLASSES, CapabilityClass, Goal
 from .cardfacts import card_for
+from .classnames import CHAT_VERBS, DEFAULT_CHAT_VERB
 from .errors import ApiError
 from .fit import Candidate
+from .formrequest import refuse_unknown_form
 from .manifests import ManifestError, UnknownForm, load_manifest
 from .memorybudget import available_bytes, gib_text
 from .packages import package_not_installed
@@ -39,8 +44,95 @@ class VerbModel:
     model: str
     form: str | None
     chosen_by: str
-    """`model` (the request named it), `max_params_b` (the request's ceiling picked it)
-    or `registered` (this server's record: the Settings choice or Crucible's pick)."""
+    """`model` (the request named it), `max_params_b` (the request's ceiling replaced a
+    registered pick above it) or `registered` (this server's record: the Settings choice
+    or Crucible's pick, with or without a ceiling it was already within)."""
+
+
+SIZED_VERBS: tuple[str, ...] = tuple(
+    entry.name for entry in CLASSES if entry.goal is not None and entry.candidates is not None
+)
+"""The verbs a request may address by name instead of a model, and cap with
+`max_params_b`: every class with a size goal (docs/VERB-SIZING.md rule 2)."""
+
+
+VERB_KEY = "verb"
+
+
+def take_verb(body: dict[str, Any]) -> str | None:
+    """A raw body's `verb`, taken off it (it is Crucible's, never forwarded); None when it
+    is absent or null."""
+    verb = body.pop(VERB_KEY, None)
+    if verb is None:
+        return None
+    if not isinstance(verb, str) or verb == "":
+        raise ApiError(
+            400,
+            "invalid_request",
+            f'"verb" names the verb whose model serves this request, a non-empty string; '
+            f"got {verb!r}. Leave it out for {DEFAULT_CHAT_VERB!r}",
+            {"verb": verb},
+        )
+    return verb
+
+
+def take_ceiling(body: dict[str, Any]) -> float | None:
+    """A raw body's `max_params_b`, taken off it; None when it is absent or null."""
+    ceiling = body.pop(CEILING, None)
+    if ceiling is None:
+        return None
+    if isinstance(ceiling, bool) or not isinstance(ceiling, (int, float)) or not ceiling > 0:
+        raise ApiError(
+            400,
+            "invalid_request",
+            f'"max_params_b" is a ceiling in billions of parameters, a number above 0; '
+            f"got {ceiling!r}",
+            {"max_params_b": ceiling},
+        )
+    return float(ceiling)
+
+
+def refuse_unsized_verb(verb: str, where: str) -> None:
+    """A verb a request names to be served by must be one of SIZED_VERBS."""
+    if verb in SIZED_VERBS:
+        return
+    if verb in BY_NAME:
+        raise ApiError(
+            400,
+            "verb_not_sized",
+            f"{where} names {verb!r}, which has no size goal, so there is nothing for a "
+            f"verb or a ceiling to choose among; the verbs that have one are "
+            f"{list(SIZED_VERBS)}. Name a `model` instead",
+            {"verb": verb, "verbs": list(SIZED_VERBS)},
+        )
+    raise ApiError(
+        400,
+        "unknown_verb",
+        f"{where} names {verb!r}, which is not a verb this server knows; the verbs a "
+        f"request may name are {list(SIZED_VERBS)}",
+        {"verb": verb, "verbs": list(SIZED_VERBS)},
+    )
+
+
+def refuse_unchattable_verb(verb: str) -> None:
+    """A chat that names a verb names one whose work is a chat (classnames.CHAT_VERBS)."""
+    if verb not in BY_NAME:
+        raise ApiError(
+            400,
+            "unknown_verb",
+            f"this chat's `verb` is {verb!r}, which is not a verb this server knows; the "
+            f"verbs a chat may name are {list(CHAT_VERBS)}",
+            {"verb": verb, "verbs": list(CHAT_VERBS)},
+        )
+    if verb in CHAT_VERBS:
+        return
+    raise ApiError(
+        400,
+        "verb_not_for_chat",
+        f"this chat's `verb` is {verb!r}, which is not served through the chat door; the "
+        f"verbs a chat may name are {list(CHAT_VERBS)}",
+        {"verb": verb, "verbs": list(CHAT_VERBS)},
+    )
 
 
 def _candidate_ids(entry: CapabilityClass, backend_kind: str) -> list[str]:
@@ -155,6 +247,24 @@ def _ceiling_pick(
     return decision.selected
 
 
+def _row(entry: CapabilityClass, config: Any) -> Any:
+    """The verb's row in this server's capability record; refused by name when there is
+    none (no record, or one written before the class existed)."""
+    record = config.capability
+    row = None if record is None else record.row(entry.name)
+    if row is None:
+        raise ApiError(
+            503,
+            "capability_undecided",
+            f"this request names no model, and this server has registered nothing for "
+            f"{entry.name}: its capability record "
+            + ("does not exist" if record is None else f"predates the {entry.name} class")
+            + ". Run `crucible capability --write`, or name a `model`",
+            {"capability": entry.name},
+        )
+    return row
+
+
 def _registered(entry: CapabilityClass, config: Any) -> str:
     record = config.capability
     row = None if record is None else record.row(entry.name)
@@ -174,16 +284,7 @@ def _registered(entry: CapabilityClass, config: Any) -> str:
             ),
             {"verb": entry.name, "package": entry.package},
         )
-    if row is None:
-        raise ApiError(
-            503,
-            "capability_undecided",
-            f"this request names no model, and this server has registered nothing for "
-            f"{entry.name}: its capability record "
-            + ("does not exist" if record is None else f"predates the {entry.name} class")
-            + ". Run `crucible capability --write`, or name a `model`",
-            {"capability": entry.name},
-        )
+    row = _row(entry, config)
     if not row.enabled:
         raise ApiError(
             409,
@@ -193,6 +294,34 @@ def _registered(entry: CapabilityClass, config: Any) -> str:
             {"capability": entry.name, "shortfall_bytes": row.shortfall_bytes},
         )
     return row.selected
+
+
+def _params_b(entry: CapabilityClass, model: str) -> float:
+    """How many billions of parameters a registered model has, from its manifest."""
+    try:
+        return load_manifest(model).params_b
+    except ManifestError as exc:
+        raise ApiError(
+            503,
+            "capability_stale",
+            f"this server registered {model!r} for {entry.name}, and this build has no "
+            f"manifest for it ({exc}). Run `crucible capability --write` to decide the card "
+            "again",
+            {"capability": entry.name, "model": model},
+        ) from None
+
+
+def _within_ceiling(entry: CapabilityClass, config: Any, ceiling: float) -> str | None:
+    """This server's own pick for the verb (the Settings choice, else Crucible's) when it
+    is at or below the request's ceiling, which caps the pick and never raises it (Owen,
+    2026-10-11). None when it is above the ceiling, or when the server's row for the verb
+    is off (nothing of its own serves it, so the ceiling's pick is all there is)."""
+    row = _row(entry, config)
+    if not row.enabled:
+        return None
+    if _params_b(entry, row.selected) <= ceiling:
+        return row.selected
+    return None
 
 
 def registered(verb: str, config: Any) -> str:
@@ -215,9 +344,20 @@ def resolve(
 ) -> VerbModel:
     """The model this request is served by, every refusal made before anything waits.
     `resident` is the model on the card now: one that is loaded is held, whatever its
-    estimate says."""
+    estimate says. `verb` is one of SIZED_VERBS (refuse_unsized_verb, at the door)."""
     entry = BY_NAME[verb]
+    if model is not None and max_params_b is not None:
+        raise ApiError(
+            400,
+            "model_with_ceiling",
+            f"this request names a model ({model!r}) and a ceiling (max_params_b "
+            f"{max_params_b:g}); they are two ways to choose the model, so send one: the "
+            "model to be served by exactly it, or the ceiling to be served by this "
+            "server's pick for the verb, capped at that size",
+            {"model": model, "max_params_b": max_params_b},
+        )
     if model is not None:
+        refuse_unknown_form(model, form, backend.kind)
         _refuse_foreign(entry, model, backend.kind)
         _refuse_uninstalled_package(entry, config, model)
         if model != resident:
@@ -232,6 +372,10 @@ def resolve(
             {"form": form},
         )
     if max_params_b is not None:
+        kept = _within_ceiling(entry, config, max_params_b)
+        if kept is not None:
+            _refuse_uninstalled_package(entry, config, kept)
+            return VerbModel(model=kept, form=None, chosen_by=REGISTERED)
         picked = _ceiling_pick(entry, config, backend, max_params_b)
         _refuse_uninstalled_package(entry, config, picked)
         return VerbModel(model=picked, form=None, chosen_by=CEILING)
@@ -240,4 +384,83 @@ def resolve(
     return VerbModel(model=picked, form=None, chosen_by=REGISTERED)
 
 
-__all__ = ["CEILING", "MODEL", "REGISTERED", "VerbModel", "registered", "resolve"]
+def chat_model(
+    config: Any,
+    backend: Any,
+    *,
+    model: str | None,
+    verb: str | None,
+    form: str | None,
+    max_params_b: float | None,
+    resident: str | None,
+) -> VerbModel:
+    """The model a chat is served by (docs/VERB-SIZING.md rule 8). A chat that names a
+    model and neither a verb nor a ceiling is served as named, as it always was (its
+    model may be an upstream's, or one in no verb's lineup). Otherwise the verb (default
+    `generate`) chooses through `resolve`: a named model held to the verb's rules, else
+    what this server registered for it, capped by the ceiling. The chat door and the
+    preview (GET /v1/resolve) both call this."""
+    if model is not None and verb is None and max_params_b is None:
+        return VerbModel(model=model, form=form, chosen_by=MODEL)
+    chosen_verb = DEFAULT_CHAT_VERB if verb is None else verb
+    refuse_unchattable_verb(chosen_verb)
+    return resolve(
+        chosen_verb, config, backend,
+        model=model, form=form, max_params_b=max_params_b, resident=resident,
+    )
+
+
+SETTINGS = "settings"
+AUTO = "auto"
+
+
+def source_of(chosen: VerbModel, verb: str, config: Any) -> str:
+    """Which of section 1a.3's four rules chose the model, as a person says it: `model`
+    (the request named it), `max_params_b` (the request's ceiling replaced the server's
+    pick), `settings` (the verb's Settings choice) or `auto` (Crucible's own pick)."""
+    if chosen.chosen_by != REGISTERED:
+        return chosen.chosen_by
+    return SETTINGS if config.local_model(verb) == chosen.model else AUTO
+
+
+def fit_of(verb: str, config: Any, backend: Any, model: str, form: str | None) -> dict[str, Any] | None:
+    """Whether `model` fits this card for `verb`'s working context, with the numbers the
+    pick and `model_does_not_fit` use; None for a model this backend has no block for."""
+    entry = BY_NAME[verb]
+    try:
+        manifest = load_manifest(model)
+    except ManifestError:
+        return None
+    if not manifest.supports(backend.kind):
+        return None
+    candidate = Candidate.of(manifest, backend.kind, form)
+    budget = _budget(config, backend)
+    work = entry.work
+    return {
+        "fits": candidate.holds(work, budget),
+        "need_bytes": candidate.need_bytes(work),
+        "available_bytes": budget,
+        "context_tokens": None if work is None else work.tokens,
+        "concurrency": None if work is None else work.concurrency,
+    }
+
+
+__all__ = [
+    "AUTO",
+    "CEILING",
+    "MODEL",
+    "REGISTERED",
+    "SETTINGS",
+    "SIZED_VERBS",
+    "VerbModel",
+    "VERB_KEY",
+    "chat_model",
+    "fit_of",
+    "refuse_unchattable_verb",
+    "refuse_unsized_verb",
+    "registered",
+    "resolve",
+    "source_of",
+    "take_ceiling",
+    "take_verb",
+]

@@ -1665,16 +1665,25 @@ def test_an_engine_s_own_400_is_relayed_on_a_streamed_request_too(
     assert response.json()["type"] == "BadRequestError"
 
 
-def test_the_proxy_requires_a_model(
+def test_a_chat_with_no_model_on_a_server_that_registered_none_says_so(
     llm_client: TestClient, auth: dict[str, str]
 ) -> None:
+    # A chat that names no model is served by the model this server registered for
+    # `generate` (tests/test_chat_verb.py); this server has no capability record.
     response = llm_client.post(
         "/v1/openai/chat/completions",
         headers=auth,
         json={"messages": [{"role": "user", "content": "hi"}]},
     )
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "model_required"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "capability_undecided"
+    empty = llm_client.post(
+        "/v1/openai/chat/completions",
+        headers=auth,
+        json={"model": "", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert empty.status_code == 400
+    assert empty.json()["error"]["code"] == "model_required"
 
 
 def test_the_proxy_needs_auth(llm_client: TestClient) -> None:
@@ -1812,8 +1821,8 @@ def test_the_openai_surface_is_also_mounted_where_openai_clients_look(
     assert theirs == ours
     assert theirs["data"][0]["id"] == MODEL
     no_model = llm_client.post("/openai/v1/chat/completions", headers=auth, json={"messages": []})
-    assert no_model.status_code == 400
-    assert no_model.json()["error"]["code"] == "model_required"
+    assert no_model.status_code == 503
+    assert no_model.json()["error"]["code"] == "capability_undecided"
     other = llm_client.post(
         "/openai/v1/chat/completions", headers=auth, json={"model": "not-this-one", "messages": [], "queue": False}
     )

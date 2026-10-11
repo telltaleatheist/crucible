@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 import httpx
 from fastapi import Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
-from ... import upstreamrecord
+from ... import upstreamrecord, verbmodel
 from ...callqueue import take_a_turn
+from ...classnames import DEFAULT_CHAT_VERB
 from ...embed import refuse_vectors_only
 from ...engines import (
     chat_admission,
@@ -27,7 +30,7 @@ from ...prefill import (
     take_prefill,
     with_prefill,
 )
-from ...queuerequest import queue_of
+from ...queuerequest import QueueChoice, queue_field, queue_of
 from ...residency import serves_model
 from ...sampling import SAMPLING_HEADER, apply_defaults
 from ...structured import (
@@ -43,6 +46,7 @@ from ...structured import (
     with_llguidance_grammar,
 )
 from ..caller import client_agent, queue_session
+from ..chatlog import ChatLog
 from ..context import AppContext, Routers
 from ..proxy import (
     JSON_HEADERS,
@@ -61,6 +65,63 @@ from ..proxy import (
     settle_after_chat,
 )
 from ..upstream import forward_to_upstream, routed_upstream_rows
+
+
+class ChatCompletionBody(BaseModel):
+    """The chat door's body as the API reference shows it. The door reads the raw JSON
+    (every member OpenAI's API has is forwarded to the engine as sent), so this model is
+    never validated against a request: it documents the members the door itself reads,
+    and the ones Crucible adds."""
+
+    model_config = ConfigDict(extra="allow", use_attribute_docstrings=True)
+
+    model: str | None = None
+    """A Crucible model id, or `<upstream>/<id>` for a routed upstream. Left out (or
+    null), the chat is served by the model this server registered for `verb`, capped by
+    `max_params_b`, and the reply's `model` names the one chosen."""
+    messages: list[dict[str, Any]]
+    """OpenAI's messages, forwarded as sent."""
+    verb: str | None = None
+    """Crucible's: which verb's model serves a chat that names no model, one of
+    `generate` (the default: open-ended chat), `clean`, `translate`, `simplify`,
+    `analysis`. Beside a `model`, that model is held to the verb's rules (it must be in
+    the verb's lineup here, `model_not_for_verb`, and fit the card unless it is the verb's
+    Settings choice, `model_does_not_fit`). Another verb is refused `verb_not_for_chat`,
+    an unknown name `unknown_verb`."""
+    max_params_b: float | None = Field(default=None, gt=0)
+    """Crucible's: a ceiling, in billions of parameters, on the verb's model: this
+    server's own pick (its Settings choice, else the biggest that fits up to the verb's
+    goal) is kept when it is at or below the ceiling, and a pick above it is replaced by
+    the biggest model that fits this card at or below the ceiling, the most parameters
+    first, then the highest precision. Never raises the pick. Nothing at or below it:
+    `nothing_fits_ceiling`; beside a `model`: `model_with_ceiling`."""
+    stream: bool = False
+    """OpenAI's: answer as server-sent events."""
+    response_format: dict[str, Any] | None = None
+    """OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or
+    refused `structured_output_not_served` before anything is sent."""
+    json_whitespace: str | None = None
+    """Crucible's: `compact` or `flexible` (the default), beside a JSON
+    `response_format`."""
+    prefill: str | None = None
+    """Crucible's: the start of the answer; the reply's content is what the model wrote
+    after it."""
+    form: str | None = None
+    """Crucible's: which form of the named `model` serves the chat. Without a `model` it
+    is refused `form_without_model`."""
+    queue: QueueChoice = queue_field(
+        "Crucible's: absent, a chat whose model is not resident or whose engine is full "
+        "waits in the server's line (up to an hour); `{\"max_wait_s\": N}` changes the "
+        "wait; `false` refuses at once."
+    )
+
+
+def _documented_body() -> dict[str, Any]:
+    """ChatCompletionBody's schema for the route's OpenAPI entry, its nested models
+    referred to the document's own components (QueueRequest is one already)."""
+    schema = ChatCompletionBody.model_json_schema(ref_template="#/components/schemas/{model}")
+    schema.pop("$defs", None)
+    return {"requestBody": {"required": True, "content": {"application/json": {"schema": schema}}}}
 
 
 def _refuse_before_waiting(
@@ -147,6 +208,14 @@ def as_sent(
     return body
 
 
+def refuse_unservable(requested: str, form: str | None, backend_kind: str) -> None:
+    """What the chat door refuses about the model a chat is served by, before anything
+    waits: a form it does not have, a model that only writes vectors. The door and the
+    preview (GET /v1/resolve) both call this."""
+    refuse_unknown_form(requested, form, backend_kind)
+    refuse_vectors_only(requested, "chat")
+
+
 def register(routers: Routers, ctx: AppContext) -> None:
     private, openai = routers.private, routers.openai
     config, residency = ctx.config, ctx.residency
@@ -182,8 +251,8 @@ def register(routers: Routers, ctx: AppContext) -> None:
             ],
         }
 
-    @private.post("/openai/chat/completions")
-    @openai.post("/chat/completions")
+    @private.post("/openai/chat/completions", openapi_extra=_documented_body())
+    @openai.post("/chat/completions", openapi_extra=_documented_body())
     async def openai_chat_completions(request: Request) -> Response:
         """An OpenAI chat completion, proxied to the resident engine or, for a
         `<upstream>/<id>` model, forwarded to that upstream. A chat whose model is not
@@ -209,23 +278,54 @@ def register(routers: Routers, ctx: AppContext) -> None:
         /v1/models, the row's `forms`); without it the resident form answers, and a load
         made for the chat loads the form this card takes. Another form on the card is a reload; an unknown name is refused
         `unknown_form` (docs/FITS-AND-THE-CARD.md section 8). It is never forwarded.
+        A chat may leave `model` out and be served by a verb's model instead: `verb`
+        (default `generate`) and `max_params_b`, a ceiling on this server's own pick for
+        the verb that never raises it (docs/VERB-SIZING.md rule 8); the reply's `model`
+        names the model chosen. The same choice opens a queue session
+        (`max_params_b` beside `act`) and loads a model (`load-model`'s `params.verb`,
+        `params.max_params_b`).
         """
+        arrived = time.monotonic()
         raw = await request.body()
         body = chat_body(raw)
-        requested = body.get("model")
-        if not isinstance(requested, str) or requested == "":
+        named = body.get("model")
+        if named is not None and (not isinstance(named, str) or named == ""):
             raise ApiError(
                 400,
                 "model_required",
-                "a chat request must name a model; this server proxies only to the "
-                "model that is resident",
+                f"a chat's `model` is a model id, or left out (or null) to be served by "
+                f"the model this server registered for a verb (`verb`, default "
+                f"{DEFAULT_CHAT_VERB!r}, capped by `max_params_b`); got {named!r}",
+                {"model": named},
             )
+        sent_choice = "verb" in body or verbmodel.CEILING in body or named is None
+        verb = verbmodel.take_verb(body)
+        ceiling = verbmodel.take_ceiling(body)
         sent_queue = "queue" in body
         queued = queue_of(body)
         prefill = take_prefill(body)
         form = take_form(body)
         json_whitespace = take_json_whitespace(body)
-        if sent_queue or prefill is not None or form is not None or json_whitespace is not None:
+        resident_now = residency.resident_model
+        chosen = verbmodel.chat_model(
+            ctx.config, ctx.backend, model=named, verb=verb, form=form,
+            max_params_b=ceiling,
+            resident=None if resident_now is None else resident_now.model_id,
+        )
+        requested = chosen.model
+        body["model"] = requested
+        log = ChatLog.of(
+            body, requested,
+            verbmodel.source_of(chosen, DEFAULT_CHAT_VERB if verb is None else verb, ctx.config),
+            client_agent(request), arrived,
+        )
+        if (
+            sent_choice
+            or sent_queue
+            or prefill is not None
+            or form is not None
+            or json_whitespace is not None
+        ):
             raw = json.dumps(body).encode("utf-8")
         if upstreamrecord.split_model(requested) is not None:
             if form is not None:
@@ -237,8 +337,7 @@ def register(routers: Routers, ctx: AppContext) -> None:
             return await forward_to_upstream(
                 ctx, request, requested, body, client_agent=client_agent(request)
             )
-        refuse_unknown_form(requested, form, ctx.backend.kind)
-        refuse_vectors_only(requested, "chat")
+        refuse_unservable(requested, form, ctx.backend.kind)
         _refuse_before_waiting(body, requested, ctx.backend.kind, prefill, json_whitespace)
         inflight = ctx.inflight
         act = read_act(request.headers)
@@ -315,14 +414,24 @@ def register(routers: Routers, ctx: AppContext) -> None:
                 await chat_over()
             raise
         try:
+            log.sent()
             if body.get("stream") is True:
+                relayed = after_the_stream(inflight, entry, chat_over)
+
+                async def when_relayed() -> None:
+                    try:
+                        log.report()
+                    finally:
+                        await relayed()
+
                 return await proxy_stream(
                     client,
                     url,
                     forwarded,
                     resident,
                     sampling_headers,
-                    when_relayed=after_the_stream(inflight, entry, chat_over),
+                    when_relayed=when_relayed,
+                    observe=log.chunk,
                 )
             try:
                 upstream = await sent_across_the_wire(
@@ -334,8 +443,11 @@ def register(routers: Routers, ctx: AppContext) -> None:
             except httpx.HTTPError as exc:
                 raise engine_unreachable(resident, exc) from None
             if upstream is None:
+                log.report("the caller left before the answer")
                 response = caller_gone(resident)
             else:
+                log.completion(upstream.status_code, upstream.content)
+                log.report()
                 content = upstream.content
                 if upstream.status_code == 200:
                     content = restore_model_id(content, resident)

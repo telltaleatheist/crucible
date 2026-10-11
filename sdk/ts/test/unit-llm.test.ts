@@ -540,6 +540,73 @@ test('unloadModel submits an unload-model job the same way', async () => {
   });
 });
 
+test('a chat may name a verb and a ceiling instead of a model, and reads the model chosen', async () => {
+  handle = (_request, response) => json(response, 200, { ...COMPLETION, model: 'qwen3.5-4b' });
+  const answer = await client().chat({ maxParamsB: 4, messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(JSON.parse(lastBody), {
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    max_params_b: 4,
+  });
+  assert.equal(answer.model, 'qwen3.5-4b');
+  await client().chat({ verb: 'translate', messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(JSON.parse(lastBody), {
+    messages: [{ role: 'user', content: 'hi' }],
+    stream: false,
+    verb: 'translate',
+  });
+  await assert.rejects(
+    client().chat({ maxParamsB: 0, messages: [{ role: 'user', content: 'hi' }] }),
+    (error: unknown) => error instanceof CrucibleConfigError && error.option === 'maxParamsB',
+  );
+});
+
+test('resolve previews a request with its own choosing fields and reads the answer strictly', async () => {
+  const preview = {
+    verb: 'generate', door: 'POST /v1/openai/chat/completions', model: 'qwen3.5-4b',
+    source: 'max_params_b', params_b: 4, bits: 16, engine: 'vllm', form: null,
+    installed: true, resident: false,
+    fit: { fits: true, need_bytes: 13_000_000_000, available_bytes: 22_000_000_000,
+           context_tokens: 8192, concurrency: 1 },
+    facts: { id: 'qwen3.5-4b' }, refused: null,
+    request: { model: null, verb: null, max_params_b: '4', form: null, images: null },
+  };
+  handle = (_request, response) => json(response, 200, preview);
+  const answer = await client().resolve({ maxParamsB: 4 });
+  assert.equal(lastMethod, 'GET');
+  assert.equal(lastPath, '/v1/resolve?max_params_b=4');
+  assert.equal(answer.model, 'qwen3.5-4b');
+  assert.equal(answer.source, 'max_params_b');
+  assert.equal(answer.fit?.needBytes, 13_000_000_000);
+  assert.equal(answer.refused, null);
+
+  const refusal = { status: 409, code: 'nothing_fits_ceiling', message: 'nothing fits', details: null };
+  handle = (_request, response) =>
+    json(response, 200, { ...preview, model: null, source: null, params_b: null, bits: null,
+      engine: null, installed: null, resident: null, fit: null, facts: null, refused: refusal });
+  const refused = await client().resolve({ verb: 'image', model: 'qwen-image-2.1' });
+  assert.equal(lastPath, '/v1/resolve?verb=image&model=qwen-image-2.1');
+  assert.deepEqual(refused.refused, refusal);
+
+  handle = (_request, response) => json(response, 200, { ...preview, fit: undefined });
+  await assert.rejects(client().resolve(), /resolve has no field "fit"/);
+});
+
+test('loadModel with no model sends the verb and the ceiling as params, and needs one of them', async () => {
+  handle = (_request, response) => json(response, 200, { job_id: 'job-load-4' });
+  await client().loadModel(null, { verb: 'generate', maxParamsB: 4 });
+  assert.deepEqual(JSON.parse(lastBody), {
+    type: 'load-model',
+    params: { verb: 'generate', max_params_b: 4 },
+    inputs: {},
+  });
+  await assert.rejects(client().loadModel(null), (error: unknown) => {
+    assert.ok(error instanceof CrucibleConfigError, `got ${String(error)}`);
+    assert.equal(error.option, 'model');
+    return true;
+  });
+});
+
 test('loadModel refuses an empty model id by name rather than posting it', async () => {
   handle = (_request, response) => json(response, 200, { job_id: 'never' });
   await assert.rejects(client().loadModel(''), (error: unknown) => {
@@ -1073,10 +1140,11 @@ test('a completion with no content and no reasoning is still the plain missing-f
   );
 });
 
-test('chat requires model and messages, and names the one that is missing', async () => {
+test('chat requires messages and a well-formed model, and names what is wrong', async () => {
   handle = (_request, response) => json(response, 200, COMPLETION);
   const cases: Array<[Record<string, unknown>, string]> = [
-    [{ messages: [{ role: 'user', content: 'hi' }] }, 'model'],
+    [{ model: '', messages: [{ role: 'user', content: 'hi' }] }, 'model'],
+    [{ verb: '', messages: [{ role: 'user', content: 'hi' }] }, 'verb'],
     [{ model: 'qwen3.5-9b' }, 'messages'],
     [{ model: 'qwen3.5-9b', messages: [] }, 'messages'],
     [{ model: 'qwen3.5-9b', messages: [{ role: 'oracle', content: 'hi' }] }, 'messages[0].role'],

@@ -42,6 +42,17 @@ FEATURES: dict[str, str] = {
     "uploads": "POST /v1/uploads: bytes too big for a request body, named by `blob_id`.",
     "playground": "GET /v1/playground: the pages the operator page's playground draws.",
     "chat": "POST /v1/openai/chat/completions: chat on the resident model, OpenAI-shaped.",
+    "chat.verbs": "A chat may leave out `model` and send `verb` (generate, the default; "
+    "clean, translate, simplify, analysis) and `max_params_b`, a ceiling on this "
+    "server's own pick for the verb that never raises it; the reply's `model` names the "
+    "one chosen. The same choice on POST /v1/queue/sessions (`max_params_b` beside `act`, "
+    "the ticket's `model`) and on `load-model` (`params.verb`, `params.max_params_b`). "
+    "GET /v1/info `verbs` lists each chat verb's registered model "
+    "(docs/VERB-SIZING.md rule 8).",
+    "resolve": "GET /v1/resolve?verb=&model=&max_params_b=&form=: which model a request "
+    "would be served by, how it was chosen, whether it is installed and fits, and its "
+    "facts, or the refusal the door would send; nothing is loaded "
+    "(docs/VERB-SIZING.md section 11).",
     "decide": "POST /v1/decide with `questions`: answer distributions read off the "
     "resident model's next-token logprobs.",
     "decide.items": "POST /v1/decide with `items`: one choice answer per item, in one "

@@ -603,10 +603,13 @@ class ImageJobType(ResidentWorker):
     def _resident_session(self) -> workers.WorkerSession | None:
         return self._residency.image_session
 
-    def registered_model(self) -> str:
-        """The model a request that names none is served by: what this server registered
-        for the `image` verb (its capability record's row: the Settings choice, else the
-        biggest that fits, docs/VERB-SIZING.md), refused by name when it registered none."""
+    def choose_model(self, model: str | None, params: dict[str, Any]) -> str:
+        """The named model, else what this server registered for the `image` verb (its
+        capability record's row: the Settings choice, else the biggest that fits,
+        docs/VERB-SIZING.md), refused by name when it registered none. Image models carry
+        no parameter count, so there is no ceiling."""
+        if model is not None:
+            return model
         return verbmodel.registered(JOB_TYPE, self._config)
 
     def requirements(self, model_id: str, params: ImageParams) -> tuple[Needs, Settings]:

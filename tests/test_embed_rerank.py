@@ -259,6 +259,22 @@ def test_a_ceiling_picks_the_biggest_that_fits_at_or_below_it(tmp_path: Path) ->
     assert caught.value.code == "nothing_fits_ceiling"
 
 
+def test_a_ceiling_at_or_above_the_registered_model_keeps_it(tmp_path: Path) -> None:
+    # Owen 2026-10-11: a ceiling caps the server's own pick and never raises it.
+    config, backend = _host(tmp_path, 24 * GIB, frozenset({"retrieval"}))
+    for verb, model in (("embed", EMBED), ("rerank", RERANK)):
+        kept = _resolve(verb, config, backend, max_params_b=8)
+        assert (kept.model, kept.chosen_by) == (model, "registered")
+    chosen, backend = _host(tmp_path, 24 * GIB, frozenset(), chosen={"rerank": "qwen3.5-2b"})
+    kept = _resolve("rerank", chosen, backend, max_params_b=4)
+    assert (kept.model, kept.chosen_by) == ("qwen3.5-2b", "registered"), (
+        "a Settings choice under the ceiling is kept, not raised to the 4B"
+    )
+    with pytest.raises(ApiError) as caught:
+        _resolve("embed", config, backend, model=EMBED, max_params_b=8)
+    assert caught.value.code == "model_with_ceiling"
+
+
 def test_the_registered_model_and_the_package_refusals(tmp_path: Path) -> None:
     config, backend = _host(tmp_path, 24 * GIB, frozenset({"retrieval"}))
     assert _resolve("embed", config, backend).model == EMBED

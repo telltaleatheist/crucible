@@ -238,7 +238,7 @@ async def _admit(request: JobRequest, ctx: AdmissionContext) -> Job:
     plugin = _resolved_plugin(request, ctx)
     if request.model is not None:
         refuse_an_upstream_model(request.model)
-    model = resolve_model(plugin, request.model)
+    model = resolve_model(plugin, request.model, request.params)
     refuse_resume_without_a_journal(plugin, request.type, request.params)
     same_intent = _unloads_what_is_being_cleared(request, ctx, model)
     try:
@@ -267,7 +267,7 @@ async def admit_waiting(waiting: Any, ctx: AdmissionContext) -> ApiError | None:
     request = waiting.request
     try:
         plugin = _resolved_plugin(request, ctx)
-        model = resolve_model(plugin, request.model)
+        model = resolve_model(plugin, request.model, request.params)
         what = f"a queued {request.type} job"
         same_intent = _unloads_what_is_being_cleared(request, ctx, model)
         async with ctx.residency.settled_for(what, same_intent=same_intent):

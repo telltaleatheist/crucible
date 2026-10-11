@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
+from ... import verbmodel
 from ...admission import refuse_an_upstream_model
 from ...errors import ApiError
 from ...inflight import require_act_name
@@ -59,22 +60,33 @@ def register(routers: Routers, ctx: AppContext) -> None:
         """Ask for the server for a run of requests you cannot know in advance. It waits
         in the line like any queued item and answers at once with a ticket; follow
         `GET /v1/queue/sessions/{id}/events` for `opened`. While it is open, nothing
-        from any other client runs.
+        from any other client runs. `max_params_b` in place of `model` opens with the
+        model this server registered for `act`, capped at that size; the ticket's
+        `model` names the one chosen.
         """
         act = require_act_name(body.act.strip(), "a session's `act`")
-        if body.model is not None:
-            _refuse_an_unknown_model(body.model)
+        model = body.model
+        if body.max_params_b is not None:
+            verbmodel.refuse_unsized_verb(act, "this session's `act`")
+            resident = ctx.residency.resident_model
+            model = verbmodel.resolve(
+                act, ctx.config, ctx.backend,
+                model=body.model, form=None, max_params_b=body.max_params_b,
+                resident=None if resident is None else resident.model_id,
+            ).model
+        if model is not None:
+            _refuse_an_unknown_model(model)
         client = client_agent(request)
         line, sessions = ctx.line, ctx.sessions
         line.refuse_if_full(client)
         session = sessions.create(
-            act=act, client=client, model=body.model, idle_s=body.idle_s,
+            act=act, client=client, model=model, idle_s=body.idle_s,
             max_wait_s=body.max_wait_s,
         )
         line.join_session(session)
         await ctx.queue_pump.step()
         return {"session_id": session.id, "status": session.status,
-                "position": session.position}
+                "position": session.position, "model": session.model}
 
     @private.get(
         "/queue/sessions/{session_id}", response_model=SessionState, responses=NOT_FOUND
