@@ -493,7 +493,7 @@ def generate_request(
         "request_id": uuid.uuid4().hex,
         "kind": needs.manifest.kind,
         "prompt": params.prompt,
-        "tags": params.tags,
+        "tags": settled.tags,
         "lyrics": params.lyrics,
         # The words an instrumental's score is planned from and never sung: the client's
         # own or the pool's set for this seed (planning.py); null otherwise.
@@ -596,7 +596,7 @@ def effective_params(
         "engine": spec.engine,
         "dtype": spec.dtype,
         "prompt": params.prompt,
-        "tags": params.tags,
+        "tags": settled.tags,
         "lyrics": params.lyrics,
         "duration_s": settled.duration_s,
         "seed": settled.seed,

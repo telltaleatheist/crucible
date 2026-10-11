@@ -634,7 +634,7 @@ class YuE2Engine:
         )
         if fixed.abc != converted:
             raise RuntimeError("YuE2 did not keep the instrumental score it was given")
-        self.notes = {"instrumental_transfer": transfer, "planned_score": planned.abc}
+        self.notes = {"instrumental_transfer": transfer, "score_before_transfer": planned.abc}
         return fixed
 
     def _score(self, job, progress):

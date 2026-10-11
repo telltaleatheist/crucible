@@ -120,7 +120,7 @@ def test_an_instrumental_reports_the_score_yue2_decoded_not_the_fixed_one(
     engine._stages(_job(lyrics=None, planning_lyrics=LYRICS, instrumental=True), Progress(), {})
     assert engine.decode_stages["scoring"]["tokens"] == 1500
     assert engine.decode_stages["composing"]["ended"] == "cap"
-    assert engine.notes["planned_score"] == SCORE
+    assert engine.notes["score_before_transfer"] == SCORE
 
 
 def test_a_new_song_starts_with_no_facts_from_the_last(monkeypatch: pytest.MonkeyPatch) -> None:

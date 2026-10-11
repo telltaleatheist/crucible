@@ -8,6 +8,7 @@ notes.
 ## Unreleased
 
 - An update now re-places every pinned host tool an installed job type uses whose stamp differs from the release's pin (llama-server for an installed llm env on cuda-linux; ffmpeg, the C compiler and the speech detector as `crucible install` places them), through a new `crucible env tools` and the installers' `env-tools` step after `env-patch-llm`; a tool that cannot be placed fails the update by name. Before, only `crucible install` placed them, so the llama-server pin moved in 1.0.132 never reached Victoria's laptop through any update up to 2.0.0, whose installer said ready while `crucible doctor` said llama.cpp was not placed.
+- An instrumental YuE2 song's style is sent in YuE2's own instrumental form, the one its instrumental workflow writes for every request (skills/yue2-music/instrumental, YuE repo 18a07bb6): it opens with "Instrumental", carries "no vocals", "no singing", "no choir" and "no spoken words", and ends with a full stop. Clients wrote this by hand and some sent none of it (B-Sides' heavy-metal album the night before, 2026-10-11). `audio.tags` in the done record is the style the model was given. The record's `notes.planned_score` is renamed `notes.score_before_transfer`: it is what YuE2 first wrote, before the vocal melody moved to the instrument, and a reader took its Vocal notes for what was rendered (Mac job 65c4d936, whose rendered score.abc has none).
 
 ## 2.0.0 — 2026-10-11
 
