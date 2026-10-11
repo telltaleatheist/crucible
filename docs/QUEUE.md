@@ -354,7 +354,7 @@ or it is removed `expired`.
 
 `GET /v1/queue/sessions/{id}` reads it: `status` (`queued`, `open`, `closed`), `position`,
 `opened_at`, `items_run`, `in_flight` (what it has running or waiting: jobs, chats,
-queued calls, stream rows being said), `stream_session` (the TTS stream open in it, if any),
+queued calls, stream rows being said, installs its items wait on), `stream_session` (the TTS stream open in it, if any),
 `idle_deadline` (null while anything is in flight), `first_work_deadline` (when it closes
 `unused` if its first item has not arrived; null once one has), `max_hold_deadline` (null
 unless the server sets a maximum), `load_job`, and `reason`/`message`/`error` once it is
@@ -422,6 +422,14 @@ app's Queue, or `DELETE /v1/queue/{id}`).
 Anything in flight is presence: a session running a day-long job never idles out. For a
 long gap on your side with nothing in flight (a NAS copy between two steps), send
 `POST /v1/queue/sessions/{id}/touch`; it is a timestamp in memory, so every 30 s is fine.
+
+An install one of its items is waiting on is in flight too. An item refused `409
+installing` (the server installing an environment or pulling a model for it, or another
+task ahead of that) names the task in `details.task_id`, and from that refusal until the
+task ends, done or failed, the session holds it: `in_flight` lists it (`kind: "install"`)
+and the session never idles out under it, however long the download. When it ends, the
+session's `idle_s` runs from the task's end, so send the item again then. No touch is
+needed for it.
 
 **Send the first item as soon as it opens.** An open session that sends no work within
 **90 s** of opening closes `unused`, whatever `idle_s` it asked for (2026-10-11: a B-Sides

@@ -80,6 +80,10 @@ async def admit(request: JobRequest, ctx: AdmissionContext) -> AdmittedJob | Ref
     try:
         job = await _admit(request, ctx)
     except ApiError as error:
+        if request.session is not None:
+            waits_on = ctx.installs.task_named(error)
+            if waits_on is not None:
+                ctx.sessions.adopt_install(request.session, waits_on)
         return Refusal(error)
     if request.queue is None:
         return AdmittedJob(job)

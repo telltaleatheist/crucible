@@ -333,6 +333,13 @@ class InstallOnSubmit:
         task.describe = self.describe
         return self._installing(need, task)
 
+    def task_named(self, refusal: ApiError) -> Task | None:
+        """The task an ``installing`` refusal says the job waits on; None for any other
+        refusal."""
+        if refusal.code != INSTALLING:
+            return None
+        return self._tasks.get(str((refusal.details or {})["task_id"]))
+
     def describe(self, task: Task) -> str | None:
         need = self._task_needs.get(task.id)
         if need is None or task.state in TERMINAL_STATES:
