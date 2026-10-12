@@ -3434,8 +3434,6 @@ The states after which a job or a task never changes again.
 | `loc` | array of string or integer | yes | — |  |
 | `msg` | string | yes | — |  |
 | `type` | string | yes | — |  |
-| `input` | Input | no | — |  |
-| `ctx` | object | no | — |  |
 
 ### `VoiceInfo`
 

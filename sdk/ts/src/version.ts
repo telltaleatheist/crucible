@@ -1,2 +1,2 @@
 /** The SDK's build version, as it appears in `User-Agent`; never a compatibility statement. */
-export const SDK_VERSION = '2.0.6';
+export const SDK_VERSION = '2.0.7';
