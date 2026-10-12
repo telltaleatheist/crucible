@@ -80,7 +80,9 @@ def _job(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**{"tags": TAGS, "lyrics": LYRICS, "planning_lyrics": None, "seed": 7,
                               "cfg": 1.0, "instrumental": False, "min_duration_s": None,
                               "max_duration_s": None, "longest_s": 360,
-                              "planning_resizable": False, **overrides})
+                              "planning_resizable": False,
+                              # Not a cover: the worker plans the score itself.
+                              "cover": None, **overrides})
 
 
 def test_each_token_stage_says_how_it_ended_from_yue2s_own_account(monkeypatch: pytest.MonkeyPatch) -> None:
