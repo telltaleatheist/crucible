@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+- An install task for a job type whose env is already built no longer refuses `409 job_type_installed`: it skips the build and turns the type on through the same `enable <type>` steps a module takes (every type the env serves, so `install rvc` also turns on `denoise`), then the take-up, and ends `done`; with the type already on, every step is skipped. On owens-pc (2.0.8) a video job was refused `job_type_disabled` with the video env on disk, the install that refusal named was refused too, and only `crucible jobs enable video` by hand got out. Install-on-submit now does the same for a built env whose type is off instead of handing the refusal back. `job_type_installed` is gone from the server and the SDK.
+
 ## 2.0.8 — 2026-10-12
 
 - `yue2-3b-instrumental` is removed (Owen, 2026-10-12: "lets remove the adapter/fine tune and go back to base for everything"). Through 2.0.7 on the same scores and seeds it sang more, not less: Iron Lanterns 37.5 s of voice, and real spoken words where yue2-3b only hummed (jobs eea1405a vs 37d6f141). Every song is yue2-3b again; b-sides.toml no longer names it. A server that pulled its adapter keeps the 0.14 GB file under models/yue2-3b/<backend>/instrumental-lora until it is removed by hand.

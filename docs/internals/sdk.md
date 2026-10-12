@@ -177,7 +177,7 @@ The SDK reads the current server's wire and nothing older (docs/INTENT.md,
   (`server_busy`, `engine_in_use`, `job_type_disabled`, `model_not_resident`,
   `not_resident`, `unknown_model`, `stream_session_open`, `session_open`,
   `session_closed`, `session_not_open`, `session_not_yours`, `unknown_queue_session`,
-  `env_missing`, `task_busy`, `already_installed`, `job_type_installed`). An
+  `env_missing`, `task_busy`, `already_installed`). An
   unknown code answers `false`, so a new refusal is surfaced once rather than
   swallowed by a walk across machines.
 - `connect.ts` distinguishes a Crucible on another API major (named, both

@@ -34,7 +34,7 @@ from .validate import (
 )
 
 ALREADY_TRUE = (
-    "A module says what must be true, so an entry that is already true is "
+    "A module or an install says what must be true, so what is already true is "
     "skipped rather than refused"
 )
 
@@ -383,6 +383,9 @@ class TaskStore:
         job_type = task.request["job_type"]
         narrator_engine = task.request.get("narrator_engine")
         task.raise_if_cancelled()
+        if tasks.env_installed(self._config, self._backend, job_type, narrator_engine):
+            await self._turn_on_built(task, job_type, narrator_engine)
+            return
         argv = runner.install_argv(job_type, narrator_engine)
         self._step(task, install_label(job_type, narrator_engine), 1, 2)
         code = await self._install_process(task, argv)
@@ -397,6 +400,36 @@ class TaskStore:
                 "again from nothing",
             )
         self._reload_step(task, index=2, total=2)
+
+    async def _turn_on_built(
+        self, task: Task, job_type: str, narrator_engine: str | None
+    ) -> None:
+        """An install of an env that is already built: no build, the module path's
+        `enable <type>` steps for every type the env serves, then the take-up. It is the
+        door `job_type_disabled` names for a type that is off, and its env being built
+        does not make the type on (owens-pc, 2.0.8: `enable_video` false with the video
+        env on disk, and the install the refusal pointed at was refused
+        `job_type_installed`). A rebuild stays deliberate: `crucible install --force`
+        on the server."""
+        entry = ModuleEntry(
+            name=install_label(job_type, narrator_engine),
+            job_type=job_type,
+            narrator_engine=narrator_engine,
+        )
+        fit = await asyncio.to_thread(ModuleFit, self._config, self._backend)
+        wanted = enables(self._config, self._backend, [entry])
+        total = 1 + len(wanted) + 1
+        self._step(task, entry.name, 1, total)
+        engine = "" if narrator_engine is None else f" --narrator-engine {narrator_engine}"
+        self._skip(
+            task,
+            f"{entry.name}: this server already has that env, so nothing is built "
+            f"(`crucible install {job_type}{engine} --force` on the server rebuilds "
+            f"it). {ALREADY_TRUE}",
+        )
+        await self._enable_and_reload(
+            task, [entry], [Outcome(present=True)], fit, wanted, total=total
+        )
 
     def _reload_step(self, task: Task, *, index: int, total: int) -> None:
         self._step(task, "reload", index, total, job_types=self._take_up())
@@ -416,13 +449,27 @@ class TaskStore:
             else:
                 outcome = await self._subject_step(task, entry, fit, index, total)
             outcomes.append(outcome)
+        await self._enable_and_reload(task, entries, outcomes, fit, wanted, total=total)
+
+    async def _enable_and_reload(
+        self,
+        task: Task,
+        entries: list[ModuleEntry],
+        outcomes: list[Outcome],
+        fit: ModuleFit,
+        wanted: dict[str, list[int]],
+        *,
+        total: int,
+    ) -> None:
+        """The tail a module and an install of a built env share: an `enable <type>` step
+        for each type the entries are for, then the take-up, and the task's `unmet`."""
         unmet = [row for outcome in outcomes for row in outcome.unmet]
         turned_on = False
-        for offset, (job_type, asking) in enumerate(wanted.items(), start=1):
+        for index, (job_type, asking) in enumerate(wanted.items(), start=len(entries) + 1):
             task.raise_if_cancelled()
             present = [entries[at] for at in asking if outcomes[at].present]
             on, rows = await self._enable_step(
-                task, job_type, present, fit, index=len(entries) + offset, total=total
+                task, job_type, present, fit, index=index, total=total
             )
             turned_on |= on
             unmet.extend(rows)
@@ -550,9 +597,9 @@ class TaskStore:
         self._step(task, "reload", index, total)
         self._skip(
             task,
-            "reload: nothing this module asks for changed what this server offers "
+            "reload: nothing this task asks for changed what this server offers "
             "(every env was already built and every job type already on), so its "
-            "registry is already what the module asks for",
+            "registry is already what it asks for",
         )
 
     def _resolve_need(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .. import capabilityclasses, catalog, jobenv, tasks
+from .. import capabilityclasses, catalog, jobenv
 from ..backend import Backend
 from ..config import Config
 from ..errors import ApiError
@@ -132,19 +132,13 @@ def validate_pull(config: Config, backend: Backend, request: dict[str, Any]) -> 
 
 
 def validate_install(config: Config, backend: Backend, request: dict[str, Any]) -> None:
-    job_type, narrator_engine = request["job_type"], request.get("narrator_engine")
-    require_installable(job_type)
-    require_narrator_engine(job_type, narrator_engine)
-    if tasks.env_installed(config, backend, job_type, narrator_engine):
-        raise ApiError(
-            409,
-            "job_type_installed",
-            f"job type {job_type!r}"
-            + (f" ({narrator_engine})" if narrator_engine else "")
-            + " already has its env on this server. To rebuild it deliberately, "
-            "run `crucible install` with --force on the server",
-            {"job_type": job_type, "narrator_engine": narrator_engine},
-        )
+    """An install of an env that is already built is NOT refused: the task skips the
+    build and turns the type on (TaskStore._run_install). It used to be refused
+    `job_type_installed`, and that was the door `job_type_disabled` points at, so a type
+    whose env was built while its flag was off had no door at all (owens-pc, 2.0.8, a
+    video job: it took `crucible jobs enable video` by hand)."""
+    require_installable(request["job_type"])
+    require_narrator_engine(request["job_type"], request.get("narrator_engine"))
 
 
 def validate_module_request(config: Config, backend: Backend, request: dict[str, Any]) -> None:

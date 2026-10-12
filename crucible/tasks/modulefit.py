@@ -11,7 +11,9 @@ installplan.live_decisions (the same reading install-on-submit and
 
 It also says which job type each entry is FOR, so the module can turn on the type that
 serves what it put on disk (a `denoise` separator pulled into the `rvc` env is served by
-`denoise`, whose flag no install of `rvc` is asked to set when the env is already there).
+`denoise`), and every type an install's env serves, built now or already there (`rvc`
+serves `rvc` and `denoise`). An install TASK whose env is already built takes the same
+enable steps (TaskStore._run_install).
 """
 
 from __future__ import annotations
@@ -128,27 +130,32 @@ def served_by(installer: str) -> tuple[str, ...]:
     return JOB_TYPES_SERVED_BY_ENV.get(installer, (installer,))
 
 
-def job_type_of(config: Config, backend: Backend, entry: ModuleEntry) -> str:
-    """The job type that serves what this entry puts on the server: the type an install
-    names, the class's type for a need, the subject's own for a subject."""
+def job_types_of(config: Config, backend: Backend, entry: ModuleEntry) -> tuple[str, ...]:
+    """The job types that serve what this entry puts on the server: every type an
+    install's env serves (what `crucible install` turns on when it BUILDS the env, so one
+    that was already built is turned on the same way: `rvc` turns on `rvc` and `denoise`,
+    and `rvc` is the install `job_type_disabled` names for `denoise`), the class's type
+    for a need, the subject's own for a subject."""
     if entry.job_type is not None:
-        return entry.job_type
+        return served_by(entry.job_type)
     if entry.capability_class is not None:
-        return BY_NAME[entry.capability_class].job_type
+        return (BY_NAME[entry.capability_class].job_type,)
     assert entry.kind is not None and entry.subject_id is not None
     subject = catalog.find(config, backend, entry.kind, entry.subject_id)
     assert subject is not None
-    return subject.job_type
+    return (subject.job_type,)
 
 
 def enables(
     config: Config, backend: Backend, entries: list[ModuleEntry]
 ) -> dict[str, list[int]]:
-    """Each job type the module's entries are for, in the order they first appear, with
-    the positions of the entries that ask for it."""
+    """Each job type the entries are for, in the order they first appear, with the
+    positions of the entries that ask for it: a module's `enable <type>` steps, and an
+    install task's when the env it names is already built."""
     found: dict[str, list[int]] = {}
     for position, entry in enumerate(entries):
-        found.setdefault(job_type_of(config, backend, entry), []).append(position)
+        for job_type in job_types_of(config, backend, entry):
+            found.setdefault(job_type, []).append(position)
     return found
 
 
@@ -156,7 +163,7 @@ __all__ = [
     "ModuleFit",
     "Unfit",
     "enables",
-    "job_type_of",
+    "job_types_of",
     "served_by",
     "unmet_row",
 ]

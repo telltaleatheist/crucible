@@ -11,7 +11,7 @@ import huggingface_hub
 import pytest
 from fastapi.testclient import TestClient
 
-from crucible import jobenv, tasks
+from crucible import installonsubmit, jobenv, tasks
 from crucible.backend import Backend, Gpu
 from crucible.capabilitystore import decide_on, record_of
 from crucible.config import load_config
@@ -185,13 +185,127 @@ def test_a_narrator_engine_on_a_non_tts_type_is_refused(
     assert response.json()["error"]["code"] == "narrator_engine_refused"
 
 
-def test_an_install_of_a_built_env_is_refused_by_name(
-    client: TestClient, auth: dict[str, str], monkeypatch: pytest.MonkeyPatch
+def no_installer(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse() -> str:
+        raise AssertionError("an install of a built env must not run the installer")
+
+    monkeypatch.setattr(tasks, "install_command", refuse)
+
+
+def test_an_install_of_a_built_env_whose_type_is_off_turns_it_on(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    built_envs: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(tasks, "env_installed", lambda *a, **k: True)
-    response = post(client, auth, {"type": "install", "job_type": "llm"})
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "job_type_installed"
+    # owens-pc, 2.0.8: a video job was refused `job_type_disabled` (not_installed) with the
+    # video env on disk, and the install that refusal named was refused
+    # `job_type_installed`; only `crucible jobs enable video` by hand got out.
+    no_installer(monkeypatch)
+    built_envs("rvc")
+    with make_client(
+        enable_echo=True,
+        enable_rvc=False,
+        enable_denoise=False,
+        capability=card_record(FAKE_BACKEND, 3 * GIB),
+    ) as client:
+        assert "rvc" not in client.get("/v1/info", headers=auth).json()["job_types"]
+        events = run(client, auth, {"type": "install", "job_type": "rvc"})
+        task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
+        info = client.get("/v1/info", headers=auth).json()
+    assert kinds(events)[-1] == "done", events
+    assert steps(events) == ["install rvc", "enable rvc", "enable denoise", "reload"]
+    skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
+    assert len(skipped) == 1, skipped
+    assert skipped[0].startswith("install rvc: this server already has that env")
+    assert "--force" in skipped[0]
+    lines = [e["data"].get("line") for e in events if e["event"] == "progress"]
+    assert lines == ["[jobs] enable_rvc = true", "[jobs] enable_denoise = true"]
+    reload_step = next(e for e in events if e["data"].get("name") == "reload")
+    assert {"rvc", "denoise"} <= set(reload_step["data"]["job_types"])
+    assert task["unmet"] == []
+    config = load_config(home)
+    assert (config.enable_rvc, config.enable_denoise) == (True, True)
+    assert {"rvc", "denoise"} <= set(info["job_types"])
+
+
+def test_an_install_of_a_built_env_whose_type_is_on_is_done_with_nothing_to_do(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    built_envs: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    no_installer(monkeypatch)
+    built_envs("llm")
+    with make_client(enable_echo=True, enable_llm=True) as client:
+        response = post(client, auth, {"type": "install", "job_type": "llm"})
+        assert response.status_code == 202, response.text
+        events = watch(client, auth, response.json()["task_id"])
+    assert kinds(events)[-1] == "done", events
+    assert steps(events) == ["install llm", "enable llm", "reload"]
+    skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
+    assert len(skipped) == 3, skipped
+    assert "already has that env" in skipped[0]
+    assert "already on" in skipped[1]
+    assert skipped[2].startswith("reload: nothing this task asks for changed")
+    assert not [e for e in events if e["event"] == "progress"]
+
+
+def test_an_install_of_a_built_env_the_enable_door_refuses_is_done_with_it_unmet(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    built_envs: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The enable door's own refusal, reported as a module reports it: a skip naming it
+    # and a row in `unmet`. Nothing decided this card, so nothing knows it holds rvc.
+    no_installer(monkeypatch)
+    built_envs("rvc")
+    with make_client(enable_echo=True, enable_rvc=False, enable_denoise=False) as client:
+        events = run(client, auth, {"type": "install", "job_type": "rvc"})
+        task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
+    assert kinds(events)[-1] == "done", events
+    skipped = [e["data"]["reason"] for e in events if e["event"] == "skipped"]
+    assert any(reason.startswith("enable rvc: job_type_undecided: ") for reason in skipped)
+    assert {row["entry"] for row in task["unmet"]} == {"enable rvc", "enable denoise"}
+    assert load_config(home).enable_rvc is False
+
+
+def test_a_submit_for_a_built_env_whose_type_is_off_turns_it_on(
+    make_client: Callable[..., TestClient],
+    auth: dict[str, str],
+    home: Path,
+    built_envs: Callable[..., None],
+    pulled: list[tuple[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Install-on-submit's half of the same gap: a `denoise` job with the rvc env built
+    # and `denoise` off was handed the refusal back. It now starts the module a build
+    # would, whose install step skips the env and whose enable steps turn it on.
+    no_installer(monkeypatch)
+    built_envs("rvc")
+    with make_client(
+        enable_echo=True,
+        enable_rvc=False,
+        enable_denoise=False,
+        capability=card_record(FAKE_BACKEND, 3 * GIB),
+    ) as client:
+        response = client.post(
+            "/v1/jobs", headers=auth, json={"type": "denoise", "model": "vocals-roformer"}
+        )
+        assert response.status_code == 409, response.text
+        error = response.json()["error"]
+        assert error["code"] == "installing", error
+        assert "installing the rvc environment" not in error["message"]
+        started = client.app.state.tasks.get(error["details"]["task_id"])
+        assert started.request["module"]["job_types"] == [{"type": "rvc"}]
+        events = watch(client, auth, started.id)
+    assert kinds(events)[-1] == "done", events
+    assert "enable denoise" in steps(events)
+    config = load_config(home)
+    assert (config.enable_rvc, config.enable_denoise) == (True, True)
 
 
 def test_env_installed_reads_the_env_and_not_the_flag(
@@ -797,6 +911,7 @@ def built_envs(home: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Non
 
     monkeypatch.setattr(tasks, "env_installed", built)
     monkeypatch.setattr(validate_module, "env_installed", built)
+    monkeypatch.setattr(installonsubmit, "env_installed", built)
 
     def mark(*job_types: str) -> None:
         for job_type in job_types:
@@ -866,8 +981,8 @@ def test_the_b_sides_module_on_an_8_gb_card_leaves_rvc_denoise_and_yue2_ready(
         "pull denoise vocals-roformer",
         "pull model yue2-3b",
         "enable rvc",
-        "enable audio",
         "enable denoise",
+        "enable audio",
         "reload",
     ]
     assert pulled == [("denoise", "vocals-roformer"), ("model", "yue2-3b")]

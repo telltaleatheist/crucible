@@ -362,7 +362,6 @@ const SERVER_SPECIFIC_REFUSALS: ReadonlySet<string> = new Set([
   'env_missing',
   'task_busy',
   'already_installed',
-  'job_type_installed',
 ]);
 
 /** 5xx: the server broke; never retried. */

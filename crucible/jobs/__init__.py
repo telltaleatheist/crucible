@@ -186,13 +186,14 @@ def disabled_error(name: str, config: Any) -> ApiError:
         return ApiError(
             400,
             "job_type_disabled",
-            f"job type {job_type!r} is not installed on this server, but this "
-            f"host can hold it: "
+            f"job type {job_type!r} is not installed and turned on here ([jobs] "
+            f"{flag} is false), but this host can hold it: "
             + "; ".join(f"{row.capability} — {row.reason}" for row in fitting)
             + f". Installing {installer!r} is one request, POST /v1/tasks "
             f"{json.dumps(install)}{needs_engine}, which the Install button on "
-            "this server's operator page sends; the server takes the type up "
-            "when it finishes.",
+            "this server's operator page sends: it builds the env when this "
+            "server does not have it yet, turns the type on either way, and the "
+            "server takes the type up when it finishes.",
             {
                 "job_type": job_type,
                 "capability_recorded": True,
