@@ -20,6 +20,13 @@ id = "vocals-roformer"
 kind = "model"
 id = "yue2-3b"
 
+# Instrumentals: yue2-3b's weights plus an adapter folded in while it composes, so an
+# instrumental does not invent a singer (Owen, 2026-10-12). Pulled after yue2-3b, it
+# downloads only the adapter (0.14 GB) into yue2-3b's folder. The PC's backend only.
+[[subjects]]
+kind = "model"
+id = "yue2-3b-instrumental"
+
 # The tag model is not here. B-Sides names it itself (TAG_MODELS, chooseTagModel: the
 # best 4B that fits) and installs it on its first chat (`409 installing`). A
 # `[[needs]] class = "generate"` resolves the SERVER's generate pick, which a ceiling caps

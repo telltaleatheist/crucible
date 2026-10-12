@@ -139,6 +139,11 @@ def test_expected_bytes_is_declared_where_a_file_is_named_and_null_otherwise(
     for row in rows:
         if row["kind"] in ("model", "voice") and row["shares_weights_of"] is None:
             assert row["expected_bytes"] is None, row["id"]
+        elif row["job_type"] == "audio":
+            # An audio model on its base's weights adds companions of its own (an
+            # adapter): their pinned size once the base is here, unknown until then, as the
+            # base's own size is (tests/test_yue2_instrumental.py).
+            assert row["expected_bytes"] is None and not row["installed"], row["id"]
         elif row["kind"] == "model":
             assert row["expected_bytes"] == 0, row["id"]
         else:

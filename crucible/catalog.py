@@ -157,13 +157,25 @@ def _audio_subject(config: Config, manifest: Any, spec: Any) -> Subject:
         id=manifest.id,
         name=manifest.display,
         job_type="audio",
-        expected_bytes=None,
+        expected_bytes=_audio_download(config, manifest, spec),
         source=f"hf:{spec.hf_repo}",
         pull_command=manifest.pull_command,
         installed=lambda: audioweights.installed(config, manifest, spec),
         pull=lambda **kwargs: audioweights.pull(config, manifest, spec, **kwargs),
         remove=lambda: audioweights.remove(config, manifest, spec),
+        shares_weights_of=manifest.weights_of,
     )
+
+
+def _audio_download(config: Config, manifest: Any, spec: Any) -> int | None:
+    """What a pull downloads, where it is known: for a model on its base's weights
+    (`weights_of`) with the base already here, only its own companions (an adapter's
+    file, with its size pinned in the manifest). Unknown otherwise: a main repo's size is
+    not pinned."""
+    base = manifest.weights_base
+    if base is None or audioweights.installed(config, base, base.spec(spec.backend)) is None:
+        return None
+    return sum(companion.bytes for companion in manifest.own_companions(spec.backend))
 
 
 def _video_subjects(config: Config, backend: Backend) -> list[Subject]:
@@ -463,7 +475,7 @@ def ids_reading(subject: Subject) -> frozenset[str]:
         {subject.id}
         | {
             manifest.id
-            for manifest in load_all_manifests().values()
+            for manifest in (*load_all_manifests().values(), *load_all_audio_manifests().values())
             if manifest.weights_of == subject.id
         }
     )
