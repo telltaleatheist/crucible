@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.9 — 2026-10-12
+
 - An install task for a job type whose env is already built no longer refuses `409 job_type_installed`: it skips the build and turns the type on through the same `enable <type>` steps a module takes (every type the env serves, so `install rvc` also turns on `denoise`), then the take-up, and ends `done`; with the type already on, every step is skipped. On owens-pc (2.0.8) a video job was refused `job_type_disabled` with the video env on disk, the install that refusal named was refused too, and only `crucible jobs enable video` by hand got out. Install-on-submit now does the same for a built env whose type is off instead of handing the refusal back. `job_type_installed` is gone from the server and the SDK.
 
 ## 2.0.8 — 2026-10-12
