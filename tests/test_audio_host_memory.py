@@ -94,10 +94,13 @@ def test_doctor_names_the_model_and_both_figures_when_the_host_is_short(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     report = _doctor(monkeypatch, capsys, 6 * GIB)
-    (short,) = report["audio_host_memory"]["short"]
+    # yue2-3b-instrumental is yue2-3b's worker plus its adapter in host memory, so it is
+    # short wherever yue2-3b is, and named on its own: either can be the one a client runs.
+    short, instrumental = report["audio_host_memory"]["short"]
     assert (short["id"], short["total_bytes"]) == (SONG, 6 * GIB)
+    assert instrumental["id"] == "yue2-3b-instrumental" and instrumental["host_bytes"] > short["host_bytes"]
     found = [p for p in report["problems"] if p.startswith("audio_host_memory")]
-    assert len(found) == 1 and SONG in found[0] and "6.0 GiB in all" in found[0]
+    assert len(found) == 2 and SONG in found[0] and "6.0 GiB in all" in found[0]
 
 
 def test_doctor_is_quiet_when_the_host_holds_it(

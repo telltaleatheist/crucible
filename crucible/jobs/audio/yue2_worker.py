@@ -13,6 +13,7 @@ import contextlib
 import gc
 
 audiocore = workerio.load_sibling("audiocore", __file__)
+lorafold = workerio.load_sibling("lorafold", __file__)
 planning = workerio.load_sibling("planning", __file__)
 scorelength = workerio.load_sibling("scorelength", __file__)
 
@@ -173,6 +174,8 @@ class HostHomes:
         self._torch = torch
         self._label = label
         self._slots: dict = {}
+        # While an adapter is folded (`folded`): the Delta and each target linear's (A, B).
+        self._folding = None
         storages: dict = {}
         for module in root.modules():
             slots = []
@@ -231,10 +234,66 @@ class HostHomes:
                         if current.device == target:
                             continue
                         moved = home if target.type == "cpu" else home.to(target)
+                        if moved is not home and name == "weight":
+                            # A fresh copy arriving while an adapter is folded gets the
+                            # delta before anything computes with it; the home never does.
+                            self._fold_arrival(part, moved, home)
                         if is_parameter:
                             current.data = moved
                         else:
                             table[name] = moved
+
+    def _fold_arrival(self, module, weight, home) -> None:
+        if self._folding is None:
+            return
+        delta, bound = self._folding
+        pair = bound.get(module)
+        if pair is None:
+            return
+        if weight.untyped_storage().data_ptr() == home.untyped_storage().data_ptr():
+            raise RuntimeError(
+                f"{self._label}: an adapter was about to be folded into a host home, the copy "
+                "the base is restored from"
+            )
+        delta.fold_into(weight, pair)
+
+    def _home_of(self, module, name: str):
+        for _table, slot_name, _is_parameter, home in self._slots.get(module, ()):
+            if slot_name == name:
+                return home
+        raise RuntimeError(
+            f"{self._label}: {type(module).__name__} has no {name!r} with a host home, so "
+            "an adapter folded into it could not be taken out exactly"
+        )
+
+    @contextlib.contextmanager
+    def folded(self, delta, model):
+        """While the body runs, every target linear of `model` computes with base + delta:
+        the copies on the card now are folded in place, and every copy that arrives later
+        (a low_vram stage brings a half, the synthesis prefill streams a layer) is folded
+        as it arrives. When the body ends - or raises - each target weight is pointed back
+        at its host home, the copy the load made and nothing ever folded into, so the base
+        is restored exactly (no subtraction, no bfloat16 round trip) at no cost in memory;
+        the next stage brings a fresh copy to the card as it brings everything. Yields how
+        many linears the delta covers."""
+        if self._folding is not None:
+            raise RuntimeError(f"{self._label}: an adapter is already folded")
+        bound = delta.bind(model)
+        homes = {module: self._home_of(module, "weight") for module in bound}
+        self._folding = (delta, bound)
+        try:
+            with self._torch.no_grad():
+                for module, pair in bound.items():
+                    weight = module.weight
+                    if weight.device.type != "cpu":
+                        self._fold_arrival(module, weight.data, homes[module])
+            yield len(bound)
+        finally:
+            self._folding = None
+            for module, home in homes.items():
+                # Pointing a parameter at a tensor allocates nothing and cannot fail
+                # halfway, so no exit leaves a folded copy in the model.
+                module.weight.data = home
 
 
 def own_residency(pipe, torch, low_vram: bool) -> dict:
@@ -265,7 +324,8 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
     the VAE on first use, so its homes are taken there), and, for low_vram,
     `yue2.nar._offload_ar` (which only moves AR off for the solve, leaving NAR where it
     was) and `yue2.nar.CachedNAR._prefill` (which runs with the whole AR half resident).
-    Returns the host bytes the homes hold, by part, filled as each part loads."""
+    Returns the host bytes the homes hold, by part, and the HostHomes themselves, by part
+    (what an adapter is folded through: HostHomes.folded), both filled as each part loads."""
     import inspect
 
     import yue2.nar as nar_module
@@ -384,7 +444,7 @@ def own_residency(pipe, torch, low_vram: bool) -> dict:
         pipe.offload_ar = True
         nar_module._offload_ar = swap
         cached_nar._prefill = prefill_one_layer_at_a_time
-    return held
+    return held, homes
 
 
 def _adapters(model) -> list:
@@ -402,6 +462,49 @@ def _is_ar(name: str) -> bool:
     embeddings, lm_head, or a layer's non-`nar_*` modules."""
     return name.startswith(("model.embed_tokens.", "lm_head.")) or (
         name.startswith("model.layers.") and ".nar_" not in name
+    )
+
+
+def load_adapter(request: dict, torch, homes):
+    """The load request's `adapter` (null for a model with none) as a lorafold.Delta in
+    host memory: its file re-hashed against the sha256 the manifest pins, every tensor
+    bfloat16 like the backbone, and its names and shapes held to what the manifest
+    declares - all before the worker says it is ready, so a wrong file never composes.
+    It is folded only through the CUDA worker's host homes, which hold the base it is
+    taken out again from."""
+    if "adapter" not in request:
+        raise RuntimeError(f"the {LABEL} load request has no 'adapter'; it is required and null when unset")
+    wanted = request["adapter"]
+    if wanted is None:
+        return None
+    if homes is None:
+        raise RuntimeError(
+            "an adapter is folded through the CUDA worker's host homes, the base it is taken "
+            "out again from; this worker keeps none"
+        )
+    path = wanted["path"]
+    found = lorafold.file_sha256(path)
+    if found != wanted["sha256"]:
+        raise RuntimeError(
+            f"the adapter at {path} hashes to {found}, not the {wanted['sha256']} its manifest "
+            "pins; it is damaged or another file. `crucible models pull <model> --force` "
+            "fetches it again"
+        )
+    from safetensors.torch import load_file
+
+    tensors = load_file(path, device="cpu")
+    odd = sorted(name for name, tensor in tensors.items() if tensor.dtype != torch.bfloat16)
+    if odd:
+        raise RuntimeError(f"the adapter's {odd[0]} is {tensors[odd[0]].dtype}; YuE2 runs bfloat16")
+    targets = lorafold.targets_of(
+        {name: tuple(tensor.shape) for name, tensor in tensors.items()},
+        layers=wanted["layers"], names=tuple(wanted["targets"]), rank=wanted["rank"],
+    )
+    identity = {key: wanted[key] for key in
+                ("name", "hf_repo", "revision", "file", "sha256", "bytes", "rank", "scale")}
+    return lorafold.Delta(
+        tensors, targets, layers=wanted["layers"], scale=float(wanted["scale"]),
+        applies_to=tuple(wanted["applies_to"]), identity=identity,
     )
 
 
@@ -514,6 +617,13 @@ class YuE2Engine:
     host_homes = None
     # A cover's score in YuE2's tokens (_given_plan); None for a song YuE2 planned.
     score_tokens = None
+    # The adapter folded in for this song and the stages it was folded around
+    # (lorafold.Delta.record); None for a song made on the weights as they are.
+    adapter = None
+    # The load request's adapter, in host memory (lorafold.Delta); None for a model with none.
+    _delta = None
+    # The HostHomes by part (own_residency); None on Apple silicon.
+    _homes = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -546,7 +656,9 @@ class YuE2Engine:
         )
         # On Apple silicon the card and host memory are the same memory, so a host home
         # beside the copy on the GPU would hold the model twice; yue2-infer's own moves stay.
-        self.host_homes = own_residency(self._pipe, torch, low_vram) if self.device == "cuda" else None
+        if self.device == "cuda":
+            self.host_homes, self._homes = own_residency(self._pipe, torch, low_vram)
+        self._delta = load_adapter(request, torch, self._homes)
         if low_vram:
             # YuE2 capped this process at the card less 2 GiB, which on an 8 GiB card is
             # below the 6.05 GiB a halved composing stage reserves. Crucible admitted the
@@ -729,6 +841,23 @@ class YuE2Engine:
         self.length = length_record(wanted, sizing, count, plan, resized)
         return plan
 
+    @contextlib.contextmanager
+    def _folded(self, stage: str):
+        """The model's adapter folded into the backbone for `stage`, if its manifest names
+        that stage (only "compose" is built: the AR pass that writes the song's tokens and
+        the synthesis that prefills the same backbone), and taken out exactly when the
+        stage ends or raises (HostHomes.folded). The score was planned before this, on the
+        base weights: the adapter left to write its own score loops one riff."""
+        if self._delta is None or stage not in self._delta.applies_to:
+            yield
+            return
+        model = self._pipe._model
+        if model is None:
+            raise RuntimeError(f"YuE2 reached {stage} with no backbone loaded to fold the adapter into")
+        with self._homes["model"].folded(self._delta, model) as linears:
+            self.adapter = self._delta.record([stage], linears)
+            yield
+
     def _stages(self, job, progress, peaks):
         pipe = self._pipe
         caps = pipe.generation_config
@@ -737,6 +866,7 @@ class YuE2Engine:
         self.length = None
         self.decode_stages = {}
         self.score_tokens = None
+        self.adapter = None
         if job.cover is not None:
             plan = self._given_plan(job, progress)
         else:
@@ -744,16 +874,17 @@ class YuE2Engine:
             if job.instrumental:
                 plan = self._instrumental_plan(job, plan)
         self._close_stage(peaks, "scoring")
-        progress.enter("composing", caps.semantic.max_tokens)
-        ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
-        semantic = pipe.generate_semantic(plan, cancelled=stop, on_token=lambda *_: ticks.tick())
-        self.decode_stages["composing"] = decode_facts(
-            semantic.timing, semantic.truncated, caps.semantic.max_tokens, self.low_vram
-        )
-        self._close_stage(peaks, "composing")
-        progress.enter("synthesizing")
-        latents = pipe.synthesize(semantic, cancelled=stop)
-        self._close_stage(peaks, "synthesizing")
+        with self._folded("compose"):
+            progress.enter("composing", caps.semantic.max_tokens)
+            ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
+            semantic = pipe.generate_semantic(plan, cancelled=stop, on_token=lambda *_: ticks.tick())
+            self.decode_stages["composing"] = decode_facts(
+                semantic.timing, semantic.truncated, caps.semantic.max_tokens, self.low_vram
+            )
+            self._close_stage(peaks, "composing")
+            progress.enter("synthesizing")
+            latents = pipe.synthesize(semantic, cancelled=stop)
+            self._close_stage(peaks, "synthesizing")
         progress.enter("decoding")
         audio = pipe.decode(latents)
         self._close_stage(peaks, "decoding")

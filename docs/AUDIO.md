@@ -1,7 +1,7 @@
 # Audio generation: the `audio` job
 
 Words in, sound out: sound effects, instrumental music, and full songs with sung vocals. One job
-type, `audio`, serves three models; which one you name decides what you get. How it runs and
+type, `audio`, serves four models; which one you name decides what you get. How it runs and
 why is [internals/audio.md](internals/audio.md); this page is what a caller sends, what comes
 back, and how to write a prompt each model understands.
 
@@ -10,6 +10,7 @@ back, and how to write a prompt each model understands.
 | `stable-audio-3-small-sfx` | sound effects | `sfx` | yes | yes | 120 s | Stability AI Community (gated) |
 | `stable-audio-3-medium` | instrumental music, stems, also effects | `music` | yes | yes | 380 s (6 min 20 s) | Stability AI Community (gated) |
 | `yue2-3b` | songs with vocals, from lyrics and style tags | `song` | yes | **no** (below) | about 6 min, set by the lyrics | CC BY-NC 4.0 + creator addendum |
+| `yue2-3b-instrumental` | instrumentals only: yue2-3b plus an adapter that composes without a singer ([below](#yue2-3b-instrumental-instrumentals-that-do-not-invent-a-singer-2026-10-12)) | none (named by the client) | yes | no | as yue2-3b | CC BY-NC 4.0 |
 
 `GET /v1/capability` has one row per class: "can make sound effects, using
 stable-audio-3-small-sfx", "can make music, using stable-audio-3-medium", "can make songs with
@@ -451,6 +452,114 @@ planned instrumental's does. `audio.planning_lyrics` is null, and `audio.decode_
 no `scoring` stage: nothing decoded a score. A kept request (`request`, "A sound that did not
 finish") carries the same `cover` under `settled`, with `score_tokens` null.
 
+### `yue2-3b-instrumental`: instrumentals that do not invent a singer (2026-10-12)
+
+**Why.** A `yue2-3b` instrumental can still sing. Its score has no vocal note left (the
+melody moved to the instrument) and its lyrics are only section tags, yet the composing pass
+invents a singer anyway: the AR model that writes the song's tokens learned that songs have
+voices. B-Sides measured an adapter that fixes it, folded into the composing pass only, with
+the stock synthesis and VAE, the same score and the same seed: *Iron Lanterns* (seed
+1297391292) sang for 80 s on the base and 7.5 s with the adapter; a soul/Hammond piece for
+13.5 s and then 0 s, three runs of three. Owen listened and approved it (2026-10-12).
+
+**What it is.** `yue2-3b-instrumental` is yue2-3b's weights plus that adapter:
+[Mothersuperior/YuE2-instrumental-cot-full-loras](https://huggingface.co/Mothersuperior/YuE2-instrumental-cot-full-loras)
+at commit `947f2f4b`, the bfloat16 file `ar_lora_inst_v3abc.bf16.safetensors` (139,502,088
+bytes, sha256 `e408fd31…5414`, pinned from the Hugging Face API). It is rank 64 on
+`self_attn.{q,k,v,o}_proj` and `mlp.{gate,up,down}_proj` of all 28 layers: 392 tensors, 196
+linears, each changed by `W += B @ A` at scale 1.0. Nothing else changes - not the
+embeddings, `lm_head`, `llm2vae`/`vae2llm`, the `nar_*` half or the VAE. The adapter's
+README also offers a NAR adapter and a "realaudio" tokenizer; this model uses neither.
+
+**The rule is the model's, in its manifest** (`crucible/audio/yue2-3b-instrumental.toml`,
+`[backends.cuda-linux.adapter]`, `applies_to = ["compose"]`), not the request's:
+
+1. **Plan on the base.** The score is planned with yue2-3b's own weights (left to write its
+   own score, the adapter loops one riff), then the instrumental melody move
+   (`yue2_worker._instrumental_plan`) runs as it always has. A cover's given score is
+   likewise planned on the base.
+2. **Compose with the delta.** The adapter is folded in for the AR pass that writes the
+   song's tokens *and* for synthesis, whose prefill runs the same backbone; both ran with the
+   delta in the approved renders.
+3. **Then the base again, exactly.** When synthesis ends - or anything in it raises - every
+   folded weight is the base again.
+
+**How it is folded** (`crucible/jobs/audio/lorafold.py`, `yue2_worker.HostHomes.folded`).
+Never on disk: `weights_manifest.json`'s hashes stay yue2-3b's. The CUDA worker already keeps
+one host copy of every weight for the life of the model (`HostHomes`), and every copy on the
+card is made from it. While the adapter is folded, each target linear's copy on the card gets
+`addmm_(B, A)` in place - one bfloat16 GEMM that accumulates in float32 and rounds once -
+and every copy that *arrives* on the card during composing gets it as it arrives. That second
+part is what keeps `[audio] low_vram` right: there the AR half comes and goes between stages,
+and synthesis streams it one layer at a time, so a delta applied once to "the weights on the
+card" would be lost on the next arrival. Taking it out is pointing each weight back at its
+host copy, which nothing ever folded into: exact (no subtraction, so no bfloat16 round trip),
+no allocation, and nothing that can fail halfway; the next stage copies the base to the card
+as it already does every stage.
+
+**What it costs.** No second copy of any weight anywhere. On the card: one linear's A and B
+(at most 0.8 MB each) for the length of its fold, and no float32 temporary. In host memory:
+the adapter itself, 0.14 GB, for the life of the worker (the manifest's host figure is
+yue2-3b's 10.5 GB plus that, declared). The card figures are yue2-3b's, low_vram's 7.3 GB
+included: the fold adds nothing that grows. None of this has run on a card yet.
+
+**What it takes.** Exactly what an instrumental on yue2-3b takes - `tags`, planning lyrics, a
+`planning_set`, section-tag `lyrics`, a length range, `cfg`, an instrumental cover - and
+`instrumental: true` on every request. Anything else is refused before anything loads:
+
+```json
+{"error": {"code": "instrumental_only",
+  "message": "yue2-3b-instrumental makes instrumentals only: its adapter composes without a singer. Send `instrumental: true`, or send a sung song to yue2-3b",
+  "details": {"model": "yue2-3b-instrumental", "kind": "song", "backend": "cuda-linux",
+              "param": "instrumental", "sung_model": "yue2-3b"}}}
+```
+
+A sung cover is refused the same way: the adapter is trained to compose without a voice, so
+it is not quietly made instrumental. It is never the server's pick for the `song` verb
+(a `weights_of` model is not a verb candidate); a client names it.
+
+**What it records.** `audio.model` is `yue2-3b-instrumental`, `audio.weights_of` is
+`yue2-3b`, `audio.hf_repo`/`revision` are the base's, and `audio.adapter` names the adapter
+and where it ran:
+
+```json
+"adapter": {"name": "instrumental-lora",
+            "hf_repo": "Mothersuperior/YuE2-instrumental-cot-full-loras",
+            "revision": "947f2f4b28978b2b6c3e316e6a87925c76bf3c4b",
+            "file": "ar_lora_inst_v3abc.bf16.safetensors",
+            "sha256": "e408fd3148b75b1165f7ddbf63db575d83bb6402a0b5f876fcb767dbcb2c5414",
+            "bytes": 139502088, "rank": 64, "scale": 1.0,
+            "applied_to": ["compose"], "linears": 196}
+```
+
+The worker re-hashes the file at load and refuses it if it is not those bytes; `applied_to`
+is the worker's account of what it did, and the server fails the song `worker_failed` if it
+differs from the manifest in any field. On `yue2-3b`, `adapter` and `weights_of` are null and
+nothing about it changed: a yue2-3b record still reproduces, and B-Sides can still A/B.
+
+**Pulling it.** The manifest says `weights_of = "yue2-3b"` (Ollama's FROM) and carries the
+adapter as a companion (its ADAPTER): the same two mechanisms Crucible already uses for an
+LLM or ASR model that shares another's download and for YuE2's VAE. So
+`crucible models pull yue2-3b-instrumental` with yue2-3b present downloads only the adapter,
+into yue2-3b's folder (`models/yue2-3b/cuda-linux/instrumental-lora/`); without it, yue2-3b
+is pulled first, once, into its own folder. Its catalogue row has `shares_weights_of:
+"yue2-3b"`, `installed` only with the base, its VAE and the adapter all present,
+`installed_bytes` the adapter's alone, and `expected_bytes` 139,502,088 when the base is
+present (unknown otherwise: a main repo's size is not pinned). Removing it takes only the
+adapter; removing yue2-3b is refused `weights_shared` while it is pulled.
+
+**Switching between the two.** The card holds one audio model id at a time, so going from
+yue2-3b to yue2-3b-instrumental (or back) unloads one worker and loads the other: the same
+base weights are read again, a full YuE2 load. A worker that held the base once and folded
+the adapter in only for the songs that ask would avoid it, but it would make one resident
+answer to two ids, which residency, keep-calls-together and the card events all key on; not
+built. Within one model, its calls are kept together as yue2-3b's are.
+
+**Only on the PC.** The fold's exact way back is the CUDA worker's host homes. The Mac's
+worker keeps none (the card and host memory are one pool there, so a home would hold the
+model twice), so it has no exact way back to the base yet, and the model declares no
+`mlx-darwin` arm; the manifest parser refuses an adapter on one.
+
 ## The result
 
 One artifact, `audio.flac` (or `audio.wav`); a song adds `score.abc`, the chord-annotated ABC
@@ -625,3 +734,7 @@ the session keeps the model loaded between them and nothing from another app com
   2026-09-16 letting individual creators and musicians, acting for themselves, publish and
   monetise the songs they make. A company needs a commercial licence from the authors. The
   `yue2-infer` code is Apache-2.0.
+- **YuE2 3B Instrumental's adapter** (Mothersuperior/YuE2-instrumental-cot-full-loras): CC
+  BY-NC 4.0, derived from YuE2-3B; its README says "non-commercial use only". It carries no
+  creator addendum of its own, and its author does not say whether YuE2's addendum reaches
+  songs made with it; read it as non-commercial.

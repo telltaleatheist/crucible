@@ -112,6 +112,9 @@ class FakeEngine:
         self.decode_stages = None
         self.host_homes = None
         self.score_tokens = None
+        self.adapter = None
+        # yue2_worker.load_adapter's input: the load request's adapter, null for none.
+        self._adapter_request = request["adapter"]
 
     def _decode_stages(self, job) -> dict | None:
         """A song's two token stages as yue2_worker.decode_facts words them; a stage named
@@ -182,7 +185,24 @@ class FakeEngine:
         if job.cover is not None:
             score = job.cover["abc"]
         self.decode_stages = self._decode_stages(job)
+        self.adapter = self._adapter_record()
         return TinyAudio(frames, job.sample_rate, job.channels), score, {"denoising": 7, "decoding": 9}
+
+    def _adapter_record(self) -> dict | None:
+        """lorafold.Delta.record's shape for the load request's adapter, folded around
+        compose as yue2_worker._folded does; $CRUCIBLE_FAKE_AUDIO_ADAPTER_SHA256 makes the
+        worker claim other bytes, and $CRUCIBLE_FAKE_AUDIO_ADAPTER_STAGES other stages."""
+        wanted = self._adapter_request
+        if wanted is None:
+            return None
+        keys = ("name", "hf_repo", "revision", "file", "sha256", "bytes", "rank", "scale")
+        stages = os.environ.get("CRUCIBLE_FAKE_AUDIO_ADAPTER_STAGES")
+        return {
+            **{key: wanted[key] for key in keys},
+            "sha256": os.environ.get("CRUCIBLE_FAKE_AUDIO_ADAPTER_SHA256") or wanted["sha256"],
+            "applied_to": stages.split(",") if stages else list(wanted["applies_to"]),
+            "linears": wanted["layers"] * len(wanted["targets"]),
+        }
 
 
 if __name__ == "__main__":

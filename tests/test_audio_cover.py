@@ -158,7 +158,7 @@ def test_a_score_the_skill_refuses_or_too_long_is_refused_by_name(
 
 
 def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from crucible.jobs.audio import planning, scorelength
+    from crucible.jobs.audio import lorafold, planning, scorelength
 
     workerio = types.ModuleType("workerio")
     workerio.claim_stdout = lambda: None
@@ -170,7 +170,8 @@ def _load_worker(monkeypatch: pytest.MonkeyPatch) -> Any:
     spec = importlib.util.spec_from_file_location("audiocore_under_test", AUDIOCORE)
     audiocore = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(audiocore)
-    siblings = {"planning": planning, "scorelength": scorelength, "audiocore": audiocore}
+    siblings = {"planning": planning, "scorelength": scorelength, "audiocore": audiocore,
+                "lorafold": lorafold}
     workerio.load_sibling = lambda name, _file: siblings[name]
     spec = importlib.util.spec_from_file_location("yue2_worker_under_test", WORKER)
     module = importlib.util.module_from_spec(spec)

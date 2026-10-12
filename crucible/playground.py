@@ -118,6 +118,7 @@ AUDIO_EXAMPLES: dict[str, str] = {
     SONG: "English, warm piano pop, expressive female voice, 88 BPM",
 }
 LYRICS_EXAMPLE = "[Verse]\nThe kettle sings the morning in\n\n[Chorus]\nStay, stay a while"
+SECTIONS_EXAMPLE = "[Intro]\n\n[Verse]\n\n[Chorus]\n\n[Outro]"
 AUDIO_LABELS: dict[str, str] = {
     SFX: "Describe the sound",
     MUSIC: "Describe the music",
@@ -180,6 +181,18 @@ def video_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     return fields
 
 
+def instrumental_field(manifest: Any) -> dict[str, Any]:
+    if manifest.instrumental_only:
+        # The same switch, on and fixed: every request to this model sends
+        # `instrumental: true` (params._refuse_sung refuses anything else by name).
+        return field("instrumental", "Instrumental (no vocals)", BOOLEAN, default=True,
+                     fixed=True,
+                     hint="this model makes instrumentals only; a sung song is "
+                          f"{manifest.weights_of}'s")
+    return field("instrumental", "Instrumental (no vocals)", BOOLEAN, default=False,
+                 hint="YuE2 writes the melody, then plays it on an instrument instead of singing it")
+
+
 def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
     if manifest.text_param == "tags":
         first = field("tags", AUDIO_LABELS[manifest.kind], TAGS, required=True,
@@ -191,7 +204,12 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
         first = field(manifest.text_param, AUDIO_LABELS[manifest.kind], TEXT, required=True,
                       placeholder=AUDIO_EXAMPLES[manifest.kind])
     fields = [first]
-    if manifest.takes_lyrics:
+    if manifest.instrumental_only:
+        # Nothing is sung, so its lyrics are only section tags shaping the score.
+        fields.append(field("lyrics", "Lyrics", TEXT, placeholder=SECTIONS_EXAMPLE,
+                            hint="optional section tags such as [Verse] and [Chorus], never "
+                                 "sung; blank plans from a set in the server's pool"))
+    elif manifest.takes_lyrics:
         unsung = "instrumental" in spec.takes
         fields.append(field("lyrics", "Lyrics", TEXT, required=not unsung,
                             placeholder=LYRICS_EXAMPLE,
@@ -199,8 +217,7 @@ def audio_fields(manifest: Any, spec: Any) -> list[dict[str, Any]]:
                                   "are optional and only shape its sections (never sung)")
                             if unsung else "the song is as long as its lyrics"))
     if "instrumental" in spec.takes:
-        fields.append(field("instrumental", "Instrumental (no vocals)", BOOLEAN, default=False,
-                            hint="YuE2 writes the melody, then plays it on an instrument instead of singing it"))
+        fields.append(instrumental_field(manifest))
         # The pool's set ids: where a client finds what `planning_set` may name.
         fields.append(field("planning_set", "Planning set (instrumental)", CHOICE, default=None,
                             options=["", *(entry.id for entry in planning_pool(spec))],
@@ -365,7 +382,11 @@ def pages(config: Any, backend: Any, registry: dict[str, Any]) -> list[dict[str,
                 "name": manifest.display,
                 "media": family.media,
                 "kind": kind,
-                "makes": KIND_WORDS.get(kind, family.media + "s"),
+                "makes": (
+                    manifest.makes
+                    if family.job_type == audio_job.JOB_TYPE
+                    else KIND_WORDS.get(kind, family.media + "s")
+                ),
                 "standing": standing,
                 "available": standing != UNAVAILABLE,
                 "reason": reason,

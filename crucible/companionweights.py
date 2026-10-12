@@ -45,18 +45,30 @@ def missing_companions(config: Config, manifest: Any, spec: Any) -> list[str]:
     ]
 
 
+def own_companions(manifest: Any, spec: Any) -> tuple[Companion, ...]:
+    """The companions a model owns: every one, or for a model that shares a base's weights
+    (`weights_of`) only those the base does not declare (an adapter). Only these count as
+    its bytes and only these go when it is removed."""
+    owned = getattr(manifest, "own_companions", None)
+    return spec.companions if owned is None else owned(spec.backend)
+
+
 def installed(config: Config, manifest: Any, spec: Any) -> weights.InstalledWeights | None:
     main = weights.installed(config, manifest, spec)
     if main is None:
         return None
-    parts = [_companion_installed(main.path, companion) for companion in spec.companions]
-    if any(part is None for part in parts):
+    parts = {companion: _companion_installed(main.path, companion) for companion in spec.companions}
+    if any(part is None for part in parts.values()):
         return None
+    owned = own_companions(manifest, spec)
     return weights.InstalledWeights(
         path=main.path,
         hf_repo=main.hf_repo,
         revision=main.revision,
-        bytes=main.bytes + sum(part.bytes for part in parts if part is not None),
+        bytes=main.bytes + sum(
+            part.bytes for companion, part in parts.items()
+            if part is not None and companion in owned
+        ),
         pulled=main.pulled,
         source=main.source,
     )
@@ -124,6 +136,12 @@ def pull(
 
 
 def remove(config: Config, manifest: Any, spec: Any) -> Path:
+    if getattr(manifest, "weights_of", None) is not None:
+        # A model that shares its base's folder takes away only its own companions there
+        # (and, through weights.remove, its alias record); the base's parts stay.
+        model_dir = weights.subject_dir(config, manifest, spec.backend)
+        for companion in own_companions(manifest, spec):
+            weights.remove_tree(companion_dir(model_dir, companion))
     return weights.remove(config, manifest, spec)
 
 
@@ -131,6 +149,7 @@ __all__ = [
     "companion_dir",
     "installed",
     "missing_companions",
+    "own_companions",
     "part_dirs",
     "pull",
     "refuse_gated_without_token",

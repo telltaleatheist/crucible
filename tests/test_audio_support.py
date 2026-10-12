@@ -24,13 +24,17 @@ from .conftest import FAKE_BACKEND, FAKE_MAC_BACKEND, configure_box, stamp_env
 DIGEST = "cd1a45ebfc1731a13e55ad68e0c9ad92390ddfffba306f9222be67c6d5a805af"
 
 
-def test_the_three_models_are_declared_with_what_they_make_and_where() -> None:
+def test_the_models_are_declared_with_what_they_make_and_where() -> None:
     manifests = load_all_audio_manifests()
     assert {m.id: m.kind for m in manifests.values()} == {
         "stable-audio-3-small-sfx": "sfx",
         "stable-audio-3-medium": "music",
         "yue2-3b": "song",
+        "yue2-3b-instrumental": "song",
     }
+    # The instrumental model is yue2-3b's weights with an adapter, on the PC's backend
+    # only (tests/test_yue2_instrumental.py).
+    assert sorted(manifests["yue2-3b-instrumental"].backends) == ["cuda-linux"]
     for model in ("stable-audio-3-small-sfx", "stable-audio-3-medium", "yue2-3b"):
         assert sorted(manifests[model].backends) == ["cuda-linux", "mlx-darwin"]
         assert manifests[model].spec("mlx-darwin").device == "mps"
@@ -261,7 +265,9 @@ def test_the_catalog_lists_audio_models_as_models_of_the_audio_job(home: Path) -
     configure_box(home, enable_audio=True)
     config = load_config(home)
     rows = {s.id: s for s in catalog.subjects(config, FAKE_BACKEND) if s.job_type == "audio"}
-    assert sorted(rows) == ["stable-audio-3-medium", "stable-audio-3-small-sfx", "yue2-3b"]
+    assert sorted(rows) == [
+        "stable-audio-3-medium", "stable-audio-3-small-sfx", "yue2-3b", "yue2-3b-instrumental",
+    ]
     assert all(s.kind == "model" and s.installed() is None for s in rows.values())
     mac = {s.id for s in catalog.subjects(config, FAKE_MAC_BACKEND) if s.job_type == "audio"}
     assert mac == {"stable-audio-3-medium", "stable-audio-3-small-sfx", "yue2-3b"}

@@ -852,6 +852,7 @@ def test_the_b_sides_module_on_an_8_gb_card_leaves_rvc_denoise_and_yue2_ready(
     assert module["subjects"] == [
         {"kind": "denoise", "id": "vocals-roformer"},
         {"kind": "model", "id": "yue2-3b"},
+        {"kind": "model", "id": "yue2-3b-instrumental"},
     ]
     with make_client(
         backend=EIGHT_GB, enable_echo=True, capability=card_record(EIGHT_GB, LAPTOP_DESKTOP)
@@ -860,17 +861,22 @@ def test_the_b_sides_module_on_an_8_gb_card_leaves_rvc_denoise_and_yue2_ready(
         task = client.get("/v1/tasks", headers=auth).json()["tasks"][0]
         info = client.get("/v1/info", headers=auth).json()
     assert kinds(events)[-1] == "done", events
+    # The instrumental model is held under low_vram as yue2-3b is (the same figures), so the
+    # laptop pulls it too, after yue2-3b: only its adapter is left to fetch then.
     assert steps(events) == [
         "install rvc",
         "install audio",
         "pull denoise vocals-roformer",
         "pull model yue2-3b",
+        "pull model yue2-3b-instrumental",
         "enable rvc",
         "enable audio",
         "enable denoise",
         "reload",
     ]
-    assert pulled == [("denoise", "vocals-roformer"), ("model", "yue2-3b")]
+    assert pulled == [
+        ("denoise", "vocals-roformer"), ("model", "yue2-3b"), ("model", "yue2-3b-instrumental"),
+    ]
     lines = [e["data"].get("line") for e in events if e["event"] == "progress"]
     assert "[jobs] enable_denoise = true" in lines
     assert task["unmet"] == []

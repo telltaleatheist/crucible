@@ -382,6 +382,12 @@ def remove(config: Config, manifest: WeightsSubject, spec: WeightsSource) -> Pat
     return directory
 
 
+def remove_tree(path: Path) -> None:
+    """One part of a folder (a companion's directory), refused by name as `RemoveFailed`
+    if it will not go; nothing at `path` is not an error."""
+    _remove(path)
+
+
 def remove_files(
     target_root: Path,
     targets: Sequence[str],
