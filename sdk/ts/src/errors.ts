@@ -464,8 +464,46 @@ export const UPSTREAM_BAD_FIELD = 'upstream_bad_field';
 export const UPSTREAM_UNCONFIGURED = 'upstream_unconfigured';
 /** The upstream refused. */
 export const UPSTREAM_REJECTED = 'upstream_rejected';
-/** The upstream did not answer. */
+/**
+ * The upstream did not answer. For `anthropic` and `openai` the server sent the chat again only
+ * while no connection had been made; once the request may have reached the provider (and been
+ * billed) it is never resent, and the message says which happened.
+ */
 export const UPSTREAM_UNREACHABLE = 'upstream_unreachable';
+/**
+ * A chat member the upstream's translation has no faithful form for (400), refused rather than
+ * dropped: `details.upstream`, `details.fields` (the members, as paths) and `details.carried`
+ * (every member the translation reads). See {@link UpstreamFieldUnsupportedDetails}.
+ */
+export const UPSTREAM_FIELD_UNSUPPORTED = 'upstream_field_unsupported';
+/**
+ * A chat member the named upstream model does not take (400), refused before it is sent:
+ * sampling on a model that takes none, a `reasoningEffort` level it lacks, a JSON schema with no
+ * structured output, `json_object`. See {@link UpstreamParamUnsupportedDetails}.
+ */
+export const UPSTREAM_PARAM_UNSUPPORTED = 'upstream_param_unsupported';
+
+/** `CrucibleRefused.details` of {@link UPSTREAM_FIELD_UNSUPPORTED}. */
+export interface UpstreamFieldUnsupportedDetails {
+  readonly upstream: string;
+  readonly fields: readonly string[];
+  readonly carried: readonly string[];
+}
+
+/** `CrucibleRefused.details` of {@link UPSTREAM_PARAM_UNSUPPORTED}. */
+export interface UpstreamParamUnsupportedDetails {
+  readonly upstream: string;
+  /** The member, with its value where the value is what is refused (`reasoning_effort 'xhigh'`). */
+  readonly param: string;
+  /** The model id after `anthropic/`. */
+  readonly model: string;
+  /** The model-table row that refused it (a model id prefix), or null for a rule every model has. */
+  readonly rule: string | null;
+  /** For a sampling member, the value sent. */
+  readonly value?: unknown;
+  /** For an effort, the levels this model takes (empty: it has no effort setting). */
+  readonly takes?: readonly string[];
+}
 /** The upstream rate-limited it, passed through with `Retry-After`. */
 export const UPSTREAM_RATE_LIMITED = 'upstream_rate_limited';
 /** A `load-model` or a session's `model` naming an upstream model, which is never resident. */

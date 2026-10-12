@@ -261,6 +261,118 @@ keep up with.
 > `POST /v1/chat/completions`** on this server — checked against `crucible/api.py`
 > and against the live engine on 2026-09-16.
 
+### The anthropic upstream
+
+A chat whose `model` is `anthropic/<id>` is not forwarded verbatim: the OpenAI body
+is translated to Anthropic's Messages API (`POST /v1/messages`, `anthropic-version:
+2023-06-01`, the key the server holds) and the answer is translated back. Crucible's
+part is serving, so the rule is: **translate faithfully, refuse by name what cannot be
+honoured, never drop a member silently.** Everything is checked before anything is
+sent, so a refusal costs nothing.
+
+```
+crucible api chat --body @request.json [--stream]      # with "model": "anthropic/claude-opus-5-5"
+python scripts/check-anthropic-live.py --url http://127.0.0.1:7100 --model claude-opus-5-5
+```
+
+What crosses, and as what (`crucible/upstreams.py`, `_anthropic_document`):
+
+| OpenAI member | Messages API | Notes |
+|---|---|---|
+| leading `system` / `developer` messages | `system` | joined by a blank line; text parts only |
+| `user` / `assistant` messages | `messages` | string content, or `text` and `image_url` parts |
+| `image_url` `data:image/...;base64,` | `image` block, `source.type: base64` | the media type is the URL's |
+| `image_url` `http(s)://` | `image` block, `source.type: url` | Anthropic fetches it; `detail` other than `auto` is refused |
+| `max_tokens` / `max_completion_tokens` | `max_tokens` | one, not both; a positive integer; neither sent: **4096**, said as `"max_tokens": "upstream default 4096"` in `X-Crucible-Sampling` |
+| `stop` | `stop_sequences` | |
+| `temperature`, `top_p`, `top_k` | the same | only on models that take them (table below) |
+| `reasoning_effort` | `output_config.effort` | `low`, `medium`, `high`, `xhigh`, `max`, each as itself |
+| `response_format` `json_schema` | `output_config.format` `{type: json_schema, schema}` | structured output, not a forced tool; `name` and `strict` are read, the answer is the text block |
+| `response_format` `text` | nothing | the default |
+| `user` | `metadata.user_id` | |
+| `n: 1` | nothing | one answer is all the Messages API writes |
+| `stream`, `stream_options.include_usage` | `stream` | usage is a chunk of its own (below) |
+| `chat_template_kwargs.enable_thinking` | nothing | dropped and said: `"thinking": "dropped"` in `X-Crucible-Sampling` |
+| `context_tokens` | nothing | dropped and said: `X-Crucible-Context` source `dropped` |
+
+Refused, `400 upstream_field_unsupported` with `details.fields` (the paths) and
+`details.carried` (every member read): any member not in the table (`seed`,
+`frequency_penalty`, `presence_penalty`, `logit_bias`, `logprobs`, `tools`,
+`tool_choice`, `parallel_tool_calls`, `repetition_penalty`, …); `n` above 1; a `system`
+or `developer` message after the first user or assistant turn; `tool` and `function`
+messages and a message's `name` or `tool_calls`; a content part other than `text` and
+`image_url`; an image `detail` other than `auto`; a `json_schema.description` (it would
+be lost: put it in the prompt); a `chat_template_kwargs` key other than
+`enable_thinking`; a `stream_options` key other than `include_usage`.
+
+Refused, `400 upstream_param_unsupported` with `details.param`, `details.model`,
+`details.rule` (the table row that refused it) and, for sampling, `details.value`, for
+effort, `details.takes`:
+
+- a sampling member on a model that takes none. The one value those models accept,
+  `temperature: 1` (Anthropic's default), is forwarded; any other temperature, and any
+  `top_p` or `top_k`, is refused;
+- a `reasoning_effort` the model does not take, and `none` or `minimal` on any model
+  (the Messages API's lowest is `low`, and effort does not turn thinking off);
+- `response_format` `json_object`: the Messages API's structured output takes a schema
+  and has no schema-less JSON mode. Send `json_schema`, or ask for JSON in the prompt;
+- `response_format` `json_schema` on a model with no structured output (no current row).
+
+The model table (`ANTHROPIC_MODEL_RULES`), keyed by model-id prefix, the longest
+matching row winning (`claude-opus-4-5-20251101` is the `claude-opus-4-5` row). It was
+read from Anthropic's documentation on 2026-10-12 — [effort](https://platform.claude.com/docs/en/build-with-claude/effort.md),
+[structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs.md)
+and the [Opus 5.5](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide.md),
+[Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide.md),
+[Haiku 5.5](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide.md) and
+[Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide.md)
+migration guides. A new model is one row.
+
+| Row | Sampling | Structured output | Effort levels |
+|---|---|---|---|
+| `claude-fable-5-1`, `claude-mythos-5-1`, `claude-fable-5`, `claude-mythos-5` | no | yes | low, medium, high, xhigh, max |
+| `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7` | no | yes | low, medium, high, xhigh, max |
+| `claude-sonnet-5-5`, `claude-sonnet-5`, `claude-haiku-5-5` | no | yes | low, medium, high, xhigh, max |
+| `claude-opus-4-6`, `claude-sonnet-4-6` | yes | yes | low, medium, high, max |
+| `claude-opus-4-5` | yes | yes | low, medium, high |
+| `claude-sonnet-4-5`, `claude-haiku-4-5` | yes | yes | none |
+
+**A model no row names is forwarded as asked**, and Anthropic answers for it: what it
+refuses comes back as `502 upstream_rejected` in Anthropic's own words. Sending
+`reasoning_effort` with no row still checks the level is one of the five.
+
+Effort defaults to the model's own when unsent (`high`; `medium` on Opus 5.5 and
+Haiku 5.5). Thinking itself is never configured: the current models think adaptively
+by default, their thinking blocks are not relayed (`display` defaults to `omitted`),
+and a thinking-on model spends part of `max_tokens` thinking — send a `max_tokens` that
+leaves room, because 4096 can end in `finish_reason: "length"` before any text.
+
+The answer: the text blocks joined are `content`; `stop_reason` `end_turn` and
+`stop_sequence` are `stop`, `max_tokens` and `model_context_window_exceeded` are
+`length`, `refusal` is `content_filter`, and any other reason is relayed as Anthropic
+said it. `usage.prompt_tokens` is every prompt token (Anthropic's `input_tokens` plus
+its cache writes and reads), `usage.prompt_tokens_details.cached_tokens` the cache
+reads.
+
+Streaming: text deltas become content chunks; `ping`, thinking deltas and event types
+this server does not know are skipped. With `stream_options.include_usage: true` the
+stream ends, after the chunk carrying `finish_reason` and before `[DONE]`, with one
+chunk whose `choices` is empty and whose `usage` is counted as above from
+`message_start` and `message_delta` (cumulative). Without it no usage is sent, as
+OpenAI does. An `error` event is relayed as `data: {"error": {type, message, upstream:
+"anthropic"}}`, and a stream that ends before `message_stop` gets an error frame
+saying it is truncated; neither gets `[DONE]`.
+
+Billing and retries: a chat to `anthropic` or `openai` is sent again only when the
+connection was never made (`ConnectError`, `ConnectTimeout`: five attempts over ~7.5 s),
+so no byte reached the provider. Once the request may have arrived, a lost connection is
+`502 upstream_unreachable` saying it was not sent again; the caller decides. A `429` is
+passed back with `Retry-After` and never resent.
+
+What only a live run confirms: `scripts/check-anthropic-live.py` sends one plain chat,
+one streamed chat with usage and one JSON-schema chat, each with a small `max_tokens`,
+through a server that already holds the key.
+
 ### Embed and rerank — the retrieval verbs
 
 ```

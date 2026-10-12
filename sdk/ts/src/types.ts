@@ -998,6 +998,12 @@ export type ResponseFormat =
 /** {@link ChatOptions.jsonWhitespace}: compact JSON, or the default flexible whitespace. */
 export type JsonWhitespace = 'compact' | 'flexible';
 
+/**
+ * A `reasoningEffort` level: OpenAI's names, and the Messages API's `xhigh` and `max`. Which an
+ * upstream model takes is the server's to say (`upstream_param_unsupported`).
+ */
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 /** One turn of a chat. */
 export interface ChatMessage {
   readonly role: 'system' | 'user' | 'assistant';
@@ -1049,6 +1055,22 @@ export interface ChatOptions {
   readonly jsonWhitespace?: JsonWhitespace;
   /** Whether a reasoning model thinks before it answers. */
   readonly thinking?: boolean;
+  /**
+   * How much the model reasons, sent as OpenAI's `reasoning_effort`. For an `anthropic/<id>` model
+   * the server sends it as the Messages API's `output_config.effort` (`low`, `medium`, `high`,
+   * `xhigh`, `max`) and refuses a level the model does not take, and `none` / `minimal`, which have
+   * no equivalent there, as `upstream_param_unsupported` (details:
+   * `UpstreamParamUnsupportedDetails`). An `openai/<id>` model is sent it as given; a local engine
+   * is sent it as any other member.
+   */
+  readonly reasoningEffort?: ReasoningEffort;
+  /**
+   * `chatStream` only: called once, after the last content delta, with the tokens the completion
+   * cost. Given, the stream asks for them (`stream_options.include_usage`); a stream that ends
+   * without a usage chunk throws `CrucibleProtocolError`. Not given, none are asked for. `chat`
+   * refuses it (its answer carries `usage`).
+   */
+  readonly onUsage?: (usage: ChatUsage) => void;
   /**
    * The start of the answer: the model writes on from this text, and the reply's `content` is what
    * it wrote AFTER it (join the two yourself). Sent as `prefill`. Served on vLLM and llama-server;

@@ -38,6 +38,31 @@ OLLAMA_SHOW: dict[str, dict[str, Any]] = {
 
 THINKING = "Pondering the question."
 
+ANTHROPIC_JSON = '{"verdict":"routed"}'
+
+# The Messages API's request members (platform.claude.com/docs/en/api/messages/create),
+# plus the sampling members the older models still take.
+ANTHROPIC_MEMBERS = frozenset(
+    {
+        "model", "messages", "max_tokens", "system", "stop_sequences", "metadata",
+        "output_config", "cache_control", "container", "diagnostics", "inference_geo",
+        "service_tier", "stream", "thinking", "tool_choice", "tools",
+        "temperature", "top_p", "top_k",
+    }
+)
+# Kept apart from crucible.upstreams' own table on purpose, so a row wrong there is
+# caught here.
+ANTHROPIC_NO_FORCED_TOOL = frozenset(
+    {"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"}
+)
+ANTHROPIC_NO_SAMPLING = frozenset(
+    {
+        "claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5",
+        "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5-5", "claude-sonnet-5",
+        "claude-haiku-5-5",
+    }
+)
+
 
 class _Handler(BaseHTTPRequestHandler):
     owner: "FakeUpstream" = None
@@ -105,6 +130,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         owner = type(self).owner
         body = self._record()
+        if owner.drop_connection:
+            # The request arrived; the answer never leaves. To the caller it is a
+            # connection lost after sending.
+            self.close_connection = True
+            return
         if owner.status != 200:
             self._json(owner.status, owner.error_body, owner.extra_headers)
             return
@@ -186,36 +216,101 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
 
+    def _anthropic_refusal(self, body: dict[str, Any]) -> str | None:
+        """What the Messages API answers 400 for, as its documentation says it does for
+        the current models: a member it does not have, a forced tool_choice on the
+        models that removed it, a non-default sampling value on the models that removed
+        those, a schema-less structured output."""
+        extra = sorted(set(body) - ANTHROPIC_MEMBERS)
+        if extra:
+            return f"{extra[0]}: Extra inputs are not permitted"
+        model = body.get("model")
+        if not isinstance(body.get("max_tokens"), int):
+            return "max_tokens: Field required"
+        choice = body.get("tool_choice")
+        if (
+            model in ANTHROPIC_NO_FORCED_TOOL
+            and isinstance(choice, dict)
+            and choice.get("type") in ("any", "tool")
+        ):
+            return 'tool_choice: type "tool" and "any" are not supported for this model.'
+        if model in ANTHROPIC_NO_SAMPLING:
+            if "top_p" in body or "top_k" in body or body.get("temperature", 1) != 1:
+                return "temperature, top_p and top_k are not supported for this model"
+        for message in body.get("messages") or []:
+            if message.get("role") not in ("user", "assistant"):
+                return f"messages: role {message.get('role')!r} is not supported"
+        output_config = body.get("output_config")
+        if isinstance(output_config, dict):
+            form = output_config.get("format")
+            if form is not None and (
+                form.get("type") != "json_schema" or not isinstance(form.get("schema"), dict)
+            ):
+                return "output_config.format: a json_schema format needs a schema"
+        return None
+
     def _anthropic(self, body: dict[str, Any]) -> None:
-        tool = (body.get("tools") or [None])[0]
+        owner = type(self).owner
+        refused = self._anthropic_refusal(body)
+        if refused is not None:
+            self._json(
+                400,
+                {"type": "error",
+                 "error": {"type": "invalid_request_error", "message": refused}},
+            )
+            return
+        output_config = body.get("output_config") or {}
+        structured = output_config.get("format") is not None
+        text = ANTHROPIC_JSON if structured else ANSWER
+        usage = {
+            "input_tokens": 11,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 7,
+        }
         if body.get("stream") is True:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
-            self._event("message_start", {"message": {"id": "msg_fake"}})
-            self._event("content_block_start", {"index": 0})
-            for delta in DELTAS:
+            self._event(
+                "message_start",
+                {"message": {"id": "msg_fake", "type": "message", "role": "assistant",
+                             "content": [], "model": body.get("model"),
+                             "stop_reason": None,
+                             "usage": {**usage, "output_tokens": 1}}},
+            )
+            self._event(
+                "content_block_start",
+                {"index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+            )
+            self._event("ping", {})
+            self._event(
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "signature_delta", "signature": "sig"}},
+            )
+            self._event("content_block_stop", {"index": 0})
+            self._event(
+                "content_block_start",
+                {"index": 1, "content_block": {"type": "text", "text": ""}},
+            )
+            for delta in [text] if structured else DELTAS:
                 self._event(
                     "content_block_delta",
-                    {"index": 0, "delta": {"type": "text_delta", "text": delta}},
+                    {"index": 1, "delta": {"type": "text_delta", "text": delta}},
                 )
-            self._event("content_block_stop", {"index": 0})
-            self._event("message_delta", {"delta": {"stop_reason": "end_turn"}})
+            if owner.stream_error is not None:
+                self._event("error", {"error": owner.stream_error})
+                return
+            if owner.truncate_stream:
+                return
+            self._event("content_block_stop", {"index": 1})
+            self._event(
+                "message_delta",
+                {"delta": {"stop_reason": owner.stop_reason, "stop_sequence": None},
+                 "usage": {"output_tokens": 7}},
+            )
             self._event("message_stop", {})
             return
-        if tool is not None:
-            content = [
-                {
-                    "type": "tool_use",
-                    "id": "toolu_fake",
-                    "name": tool["name"],
-                    "input": {"verdict": "routed"},
-                }
-            ]
-            stop_reason = "tool_use"
-        else:
-            content = [{"type": "text", "text": ANSWER}]
-            stop_reason = "end_turn"
         self._json(
             200,
             {
@@ -223,9 +318,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "type": "message",
                 "role": "assistant",
                 "model": body.get("model"),
-                "content": content,
-                "stop_reason": stop_reason,
-                "usage": {"input_tokens": 11, "output_tokens": 7},
+                "content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "text", "text": text},
+                ],
+                "stop_reason": owner.stop_reason,
+                "usage": usage,
             },
         )
 
@@ -302,6 +400,9 @@ class FakeUpstream:
         self.show_status = 500
         self.done_reason = "stop"
         self.truncate_stream = False
+        self.stream_error: dict[str, Any] | None = None
+        self.stop_reason = "end_turn"
+        self.drop_connection = False
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 

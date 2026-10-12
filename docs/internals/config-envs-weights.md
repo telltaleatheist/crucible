@@ -284,15 +284,23 @@ page is a window onto the server's settings, not a copy of them.
 - There are exactly three: `anthropic`, `openai` and `ollama`. Hosted base URLs are
   fixed, with no per-upstream `base_url`, so a typo cannot send a key to another
   host.
-- The chat request is **never retried**, because a request that reached the
-  upstream may already have been billed. A 429 is passed back with `Retry-After`.
-  The model list is never invented or cached. An upstream rejection is `502`,
-  never `401`, because `401` means the Crucible token was wrong.
-- Anthropic requires `max_tokens`. The default is 4096, reported as `upstream
-  default 4096`. `response_format` with a JSON schema becomes a forced tool
-  (`structured_answer`), and `tool_use` maps back to `stop`. Leading system messages
-  become the top-level `system`. `thinking` is dropped for Anthropic and OpenAI and
-  reported as `dropped`.
+- A hosted (`anthropic`, `openai`) chat is **never resent once it may have reached
+  the upstream**, because it may already have been billed: `api/proxy.py`
+  `sent_before_any_byte` sends again only on `ConnectError` / `ConnectTimeout` (no
+  connection, so no byte sent), and a connection lost after that is `502
+  upstream_unreachable` saying it was not resent. Ollama's chats are not billed and keep
+  `sent_across_the_wire`. A 429 is passed back with `Retry-After`. The model list is
+  never invented or cached. An upstream rejection is `502`, never `401`, because `401`
+  means the Crucible token was wrong.
+- Anthropic: the OpenAI body is translated member by member and anything without a
+  faithful form, or that the named model does not take (`ANTHROPIC_MODEL_RULES`, one row
+  per model-id prefix), is refused by name — `upstream_field_unsupported`,
+  `upstream_param_unsupported`. `response_format` `json_schema` is the Messages API's
+  `output_config.format` (never a forced tool: Opus 5.5 and Fable 5.1 refuse forced
+  `tool_choice`); `reasoning_effort` is `output_config.effort`. `max_tokens` defaults to
+  4096, reported as `upstream default 4096`. Leading system messages become the
+  top-level `system`. `thinking` is dropped for Anthropic and OpenAI and reported as
+  `dropped`. The full table is docs/API-CLI.md, "The anthropic upstream".
 - **Ollama uses its native `/api/chat`.** The OpenAI-compatible endpoint has no
   `num_ctx`, so long prompts were silently cut from the front. Every Ollama chat
   sends `options.num_ctx`. The value comes from the request's `context_tokens`,
@@ -306,9 +314,10 @@ page is a window onto the server's settings, not a copy of them.
   0.5 s and 2 s waits. A 4xx is not retried.
 - Only the fields in `_OLLAMA_READS` are accepted; any other field is refused
   (`upstream_field_unsupported`).
-- An Anthropic stream that stops mid-message gets a closing `[DONE]`. An Ollama
-  stream without `done: true` gets **no** `[DONE]`, because that last line is the
-  only evidence the answer is complete.
+- An Anthropic stream without `message_stop`, and an Ollama stream without
+  `done: true`, get an error frame and **no** `[DONE]`, because that last event is the
+  only evidence the answer is complete. Both send a usage chunk before `[DONE]` when
+  asked (`stream_options.include_usage`).
 
 ## Code, not environments
 

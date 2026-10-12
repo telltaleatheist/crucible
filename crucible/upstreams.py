@@ -21,8 +21,6 @@ ANTHROPIC_VERSION = "2023-06-01"
 
 ANTHROPIC_MAX_TOKENS_DEFAULT = 4096
 
-ANTHROPIC_JSON_TOOL = "structured_answer"
-
 TEST_TIMEOUT_SECONDS = 20.0
 
 
@@ -137,51 +135,6 @@ def chat_headers(record: UpstreamRecord) -> dict[str, str]:
     return {"Content-Type": "application/json", **auth_headers(record)}
 
 
-def _anthropic_tool(response_format: Any) -> dict[str, Any] | None:
-    if not isinstance(response_format, dict):
-        return None
-    if response_format.get("type") != "json_schema":
-        return None
-    spec = response_format.get("json_schema")
-    if not isinstance(spec, dict):
-        return None
-    schema = spec.get("schema")
-    if not isinstance(schema, dict):
-        return None
-    return {
-        "name": ANTHROPIC_JSON_TOOL,
-        "description": (
-            "Return the answer as this object. Every field is required and "
-            "nothing outside the schema is read."
-        ),
-        "input_schema": schema,
-    }
-
-
-def _anthropic_messages(messages: Any) -> tuple[list[Any], str | None]:
-    if not isinstance(messages, list):
-        return [], None
-    system_parts: list[str] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        if not isinstance(message, dict) or message.get("role") != "system":
-            break
-        content = message.get("content")
-        if isinstance(content, str):
-            system_parts.append(content)
-        elif isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    system_parts.append(part["text"])
-        index += 1
-    rest = messages[index:]
-    system = "\n\n".join(system_parts) if system_parts else None
-    return rest, system
-
-
-_ANTHROPIC_PASSTHROUGH: tuple[str, ...] = ("temperature", "top_p", "top_k")
-
 DIALECT_OPENAI = "openai"
 DIALECT_ANTHROPIC = "anthropic"
 DIALECT_OLLAMA = "ollama"
@@ -231,7 +184,9 @@ def _sources(
             sources[key] = SOURCE_REQUEST
         else:
             sources[key] = SOURCE_ENGINE
-    if filled_max_tokens and "max_tokens" not in body:
+    if "max_completion_tokens" in body:
+        sources["max_tokens"] = SOURCE_REQUEST
+    elif filled_max_tokens and "max_tokens" not in body:
         sources["max_tokens"] = SOURCE_UPSTREAM_DEFAULT
     kwargs = body.get(TEMPLATE_KWARGS)
     if isinstance(kwargs, dict) and THINKING_KEY in kwargs:
@@ -282,61 +237,520 @@ def forward_body(name: str, model_id: str, body: dict[str, Any]) -> Forwarded:
             context=context,
         )
 
-    messages, system = _anthropic_messages(body.get("messages"))
-    document: dict[str, Any] = {"model": model_id, "messages": messages}
-    if system is not None:
-        document["system"] = system
-    max_tokens = body.get("max_tokens")
-    document["max_tokens"] = (
-        max_tokens if isinstance(max_tokens, int) else ANTHROPIC_MAX_TOKENS_DEFAULT
-    )
-    for key in _ANTHROPIC_PASSTHROUGH:
-        if key in body:
-            document[key] = body[key]
-    stop = body.get("stop")
-    if isinstance(stop, str):
-        document["stop_sequences"] = [stop]
-    elif isinstance(stop, list):
-        document["stop_sequences"] = stop
-    if body.get("stream") is True:
-        document["stream"] = True
-    tool = _anthropic_tool(body.get("response_format"))
-    if tool is not None:
-        document["tools"] = [tool]
-        document["tool_choice"] = {"type": "tool", "name": ANTHROPIC_JSON_TOOL}
+    document, include_usage = _anthropic_document(model_id, body)
     return Forwarded(
         body=json.dumps(document).encode("utf-8"),
         sources=_sources(body, filled_max_tokens=True),
         dialect=DIALECT_ANTHROPIC,
         context=context,
+        include_usage=include_usage,
     )
 
 
+# The Messages API's effort levels (output_config.effort), and what each current model
+# takes, from Anthropic's own documentation as read on 2026-10-12:
+#   https://platform.claude.com/docs/en/build-with-claude/effort.md
+#   https://platform.claude.com/docs/en/build-with-claude/structured-outputs.md
+#   https://platform.claude.com/docs/en/models/opus-5-5/migration-guide.md
+#   https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide.md
+#   https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide.md
+#   https://platform.claude.com/docs/en/models/fable-5-1/migration-guide.md
+# A new model is one row. A model no row names is forwarded as asked and Anthropic
+# answers for it; a refusal it sends is relayed as `502 upstream_rejected` in its words.
+ANTHROPIC_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+_EVERY_EFFORT = ANTHROPIC_EFFORTS
+_NO_XHIGH: tuple[str, ...] = ("low", "medium", "high", "max")
+
+
+@dataclass(frozen=True)
+class AnthropicModelRule:
+
+    sampling: bool
+    structured_output: bool
+    efforts: tuple[str, ...]
+
+
+ANTHROPIC_MODEL_RULES: dict[str, AnthropicModelRule] = {
+    "claude-fable-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-mythos-5-1": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-fable-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-mythos-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-4-8": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-4-7": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-opus-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
+    "claude-opus-4-5": AnthropicModelRule(True, True, ("low", "medium", "high")),
+    "claude-sonnet-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-sonnet-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-sonnet-4-6": AnthropicModelRule(True, True, _NO_XHIGH),
+    "claude-sonnet-4-5": AnthropicModelRule(True, True, ()),
+    "claude-haiku-5-5": AnthropicModelRule(False, True, _EVERY_EFFORT),
+    "claude-haiku-4-5": AnthropicModelRule(True, True, ()),
+}
+
+ANTHROPIC_SAMPLING: tuple[str, ...] = ("temperature", "top_p", "top_k")
+
+# The one sampling value a model that takes none still accepts: Anthropic's default
+# temperature. Anything else, and any top_p or top_k, is a 400 there.
+ANTHROPIC_DEFAULT_TEMPERATURE = 1
+
+ANTHROPIC_EFFORT_FIELD = "reasoning_effort"
+
+_ANTHROPIC_READS: frozenset[str] = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "max_tokens",
+        "max_completion_tokens",
+        "stop",
+        "response_format",
+        "chat_template_kwargs",
+        CONTEXT_FIELD,
+        "user",
+        "n",
+        ANTHROPIC_EFFORT_FIELD,
+        *ANTHROPIC_SAMPLING,
+    }
+)
+
+_DATA_IMAGE_TYPED = re.compile(
+    r"^data:(?P<media>image/[A-Za-z0-9.+-]+);base64,(?P<data>.+)$", re.S
+)
+
+
+def anthropic_rule(model_id: str) -> tuple[str, AnthropicModelRule] | None:
+    best: str | None = None
+    for prefix in ANTHROPIC_MODEL_RULES:
+        if model_id == prefix or model_id.startswith(prefix + "-"):
+            if best is None or len(prefix) > len(best):
+                best = prefix
+    return None if best is None else (best, ANTHROPIC_MODEL_RULES[best])
+
+
+def _field_unsupported(
+    upstream: str, fields: list[str], why: str, carried: frozenset[str]
+) -> ApiError:
+    return ApiError(
+        400,
+        "upstream_field_unsupported",
+        f"the {upstream} upstream does not carry {fields}: {why}",
+        {"upstream": upstream, "fields": fields, "carried": sorted(carried)},
+    )
+
+
+def _anthropic_unsupported(fields: list[str], why: str) -> ApiError:
+    return _field_unsupported("anthropic", fields, why, _ANTHROPIC_READS)
+
+
+def _param_unsupported(
+    param: str, model_id: str, rule: str | None, why: str, **details: Any
+) -> ApiError:
+    return ApiError(
+        400,
+        "upstream_param_unsupported",
+        f"anthropic/{model_id} does not take {param}: {why}",
+        {"upstream": "anthropic", "param": param, "model": model_id, "rule": rule,
+         **details},
+    )
+
+
+def _system_text(where: str, content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        raise ApiError(400, "invalid_request",
+                       f"{where}.content must be a string or a list of parts",
+                       {"field": f"{where}.content"})
+    texts: list[str] = []
+    for number, part in enumerate(content):
+        at = f"{where}.content[{number}]"
+        if (not isinstance(part, dict) or part.get("type") != "text"
+                or not isinstance(part.get("text"), str) or set(part) != {"type", "text"}):
+            raise _anthropic_unsupported(
+                [at], "a system message crosses as text only, into the top-level system"
+            )
+        texts.append(part["text"])
+    return "\n".join(texts)
+
+
+def _anthropic_image(at: str, part: dict[str, Any]) -> dict[str, Any]:
+    extra = sorted(set(part) - {"type", "image_url"})
+    if extra:
+        raise _anthropic_unsupported([f"{at}.{key}" for key in extra],
+                                     "an image part crosses as its image_url alone")
+    image = part.get("image_url")
+    if isinstance(image, dict):
+        extra = sorted(set(image) - {"url", "detail"})
+        if extra:
+            raise _anthropic_unsupported([f"{at}.image_url.{key}" for key in extra],
+                                         "an image crosses as its url alone")
+        detail = image.get("detail")
+        if detail is not None and detail != "auto":
+            raise _anthropic_unsupported(
+                [f"{at}.image_url.detail"],
+                f"the Messages API has no per-image detail setting, so {detail!r} "
+                "could not be honoured; leave it out (or `auto`)",
+            )
+        url = image.get("url")
+    else:
+        url = image
+    if not isinstance(url, str):
+        raise ApiError(400, "invalid_request", f"{at}.image_url.url must be a string",
+                       {"field": f"{at}.image_url.url"})
+    match = _DATA_IMAGE_TYPED.match(url)
+    if match is not None:
+        return {"type": "image", "source": {"type": "base64",
+                                            "media_type": match.group("media"),
+                                            "data": match.group("data")}}
+    if url.startswith(("https://", "http://")):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    raise ApiError(
+        400, "invalid_request",
+        f"{at} must carry its image as a `data:image/...;base64,` URL or an http(s) "
+        "address Anthropic fetches itself",
+        {"field": at},
+    )
+
+
+def _anthropic_message(index: int, message: Any) -> dict[str, Any]:
+    where = f"messages[{index}]"
+    if not isinstance(message, dict):
+        raise ApiError(400, "invalid_request", f"{where} must be an object",
+                       {"field": where})
+    role = message.get("role")
+    if role in ("system", "developer"):
+        raise _anthropic_unsupported(
+            [f"{where}.role"],
+            f"a {role} message after the conversation began has no faithful place "
+            "here: only the leading system messages cross, as the top-level system. "
+            "Move it to the front, or fold it into a user turn yourself",
+        )
+    if role not in ("user", "assistant"):
+        raise _anthropic_unsupported(
+            [f"{where}.role"],
+            f"a {role!r} message has no translation here: tool calls and their "
+            "results are not carried",
+        )
+    extra = sorted(set(message) - {"role", "content"})
+    if extra:
+        raise _anthropic_unsupported(
+            [f"{where}.{key}" for key in extra],
+            "a message crosses as its role and its content; tool calls and names "
+            "have no translation here",
+        )
+    content = message.get("content")
+    if isinstance(content, str):
+        return {"role": role, "content": content}
+    if not isinstance(content, list):
+        raise ApiError(400, "invalid_request",
+                       f"{where}.content must be a string or a list of parts",
+                       {"field": f"{where}.content"})
+    blocks: list[dict[str, Any]] = []
+    for number, part in enumerate(content):
+        at = f"{where}.content[{number}]"
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind == "text" and isinstance(part.get("text"), str):
+            extra = sorted(set(part) - {"type", "text"})
+            if extra:
+                raise _anthropic_unsupported([f"{at}.{key}" for key in extra],
+                                             "a text part crosses as its text alone")
+            blocks.append({"type": "text", "text": part["text"]})
+            continue
+        if kind == "image_url":
+            blocks.append(_anthropic_image(at, part))
+            continue
+        raise _anthropic_unsupported(
+            [at], f"a content part of type {kind!r} has no Messages API form here"
+        )
+    return {"role": role, "content": blocks}
+
+
+def _anthropic_conversation(messages: Any) -> tuple[list[dict[str, Any]], str | None]:
+    if not isinstance(messages, list) or not messages:
+        raise ApiError(400, "invalid_request",
+                       "messages must be a non-empty list", {"field": "messages"})
+    system_parts: list[str] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") not in ("system", "developer"):
+            break
+        extra = sorted(set(message) - {"role", "content"})
+        if extra:
+            raise _anthropic_unsupported(
+                [f"messages[{index}].{key}" for key in extra],
+                "a system message crosses as its text alone",
+            )
+        system_parts.append(_system_text(f"messages[{index}]", message.get("content")))
+        index += 1
+    rest = [_anthropic_message(i, m) for i, m in enumerate(messages) if i >= index]
+    if not rest:
+        raise ApiError(
+            400, "invalid_request",
+            "messages holds only system messages; the Messages API needs at least one "
+            "user turn",
+            {"field": "messages"},
+        )
+    return rest, ("\n\n".join(system_parts) if system_parts else None)
+
+
+def _anthropic_max_tokens(body: dict[str, Any]) -> int:
+    if "max_tokens" in body and "max_completion_tokens" in body:
+        raise ApiError(400, "invalid_request",
+                       "state max_tokens or max_completion_tokens, not both",
+                       {"field": "max_completion_tokens"})
+    for field in ("max_tokens", "max_completion_tokens"):
+        if field not in body or body[field] is None:
+            continue
+        value = body[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ApiError(400, "invalid_request",
+                           f"{field} must be a positive integer, got {value!r}",
+                           {"field": field})
+        return value
+    return ANTHROPIC_MAX_TOKENS_DEFAULT
+
+
+def _anthropic_format(
+    response_format: Any, model_id: str, rule: tuple[str, AnthropicModelRule] | None
+) -> dict[str, Any] | None:
+    if response_format is None:
+        return None
+    kind = response_format.get("type") if isinstance(response_format, dict) else None
+    if kind == "text":
+        return None
+    if kind == "json_object":
+        raise _param_unsupported(
+            "response_format.type json_object", model_id,
+            None if rule is None else rule[0],
+            "the Messages API's structured output (output_config.format) takes a JSON "
+            "schema and has no schema-less JSON mode; send response_format json_schema "
+            "with the schema you want, or ask for JSON in the prompt",
+        )
+    if kind != "json_schema":
+        raise ApiError(400, "invalid_request",
+                       f"response_format.type must be text, json_object or json_schema, "
+                       f"got {kind!r}", {"field": "response_format.type"})
+    spec = response_format.get("json_schema")
+    schema = spec.get("schema") if isinstance(spec, dict) else None
+    if not isinstance(schema, dict):
+        raise ApiError(400, "invalid_request",
+                       "response_format.json_schema.schema must be an object",
+                       {"field": "response_format.json_schema.schema"})
+    extra = sorted(set(spec) - {"name", "schema", "strict"})
+    if extra:
+        raise _anthropic_unsupported(
+            [f"response_format.json_schema.{key}" for key in extra],
+            "output_config.format carries the schema alone; a description would be "
+            "dropped, so put it in the prompt",
+        )
+    if rule is not None and not rule[1].structured_output:
+        raise _param_unsupported(
+            "response_format json_schema", model_id, rule[0],
+            "this model has no structured output (output_config.format), and this "
+            "server does not fake one with a forced tool",
+        )
+    return {"type": "json_schema", "schema": schema}
+
+
+def _anthropic_effort(
+    body: dict[str, Any], model_id: str, rule: tuple[str, AnthropicModelRule] | None
+) -> str | None:
+    if ANTHROPIC_EFFORT_FIELD not in body or body[ANTHROPIC_EFFORT_FIELD] is None:
+        return None
+    effort = body[ANTHROPIC_EFFORT_FIELD]
+    if effort in ("none", "minimal"):
+        raise _param_unsupported(
+            f"{ANTHROPIC_EFFORT_FIELD} {effort!r}", model_id,
+            None if rule is None else rule[0],
+            "the Messages API's lowest effort is `low`, and thinking is not turned off "
+            "through effort; send `low`",
+            takes=list(ANTHROPIC_EFFORTS if rule is None else rule[1].efforts),
+        )
+    if effort not in ANTHROPIC_EFFORTS:
+        raise ApiError(
+            400, "invalid_request",
+            f"{ANTHROPIC_EFFORT_FIELD} must be one of {list(ANTHROPIC_EFFORTS)}, got "
+            f"{effort!r}",
+            {"field": ANTHROPIC_EFFORT_FIELD},
+        )
+    if rule is not None and effort not in rule[1].efforts:
+        takes = rule[1].efforts
+        raise _param_unsupported(
+            f"{ANTHROPIC_EFFORT_FIELD} {effort!r}", model_id, rule[0],
+            (f"it takes {list(takes)}" if takes
+             else "it has no effort setting (output_config.effort)"),
+            takes=list(takes),
+        )
+    return effort
+
+
+def _anthropic_document(model_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    from .sampling import TEMPLATE_KWARGS, THINKING_KEY
+
+    unread = sorted(set(body) - _ANTHROPIC_READS)
+    if unread:
+        raise _anthropic_unsupported(
+            unread,
+            "this server would otherwise drop them silently, and a dropped field is a "
+            "setting the caller believes was applied",
+        )
+    rule = anthropic_rule(model_id)
+    messages, system = _anthropic_conversation(body.get("messages"))
+    document: dict[str, Any] = {
+        "model": model_id,
+        "messages": messages,
+        "max_tokens": _anthropic_max_tokens(body),
+    }
+    if system is not None:
+        document["system"] = system
+
+    for key in ANTHROPIC_SAMPLING:
+        if key not in body:
+            continue
+        value = body[key]
+        default = (
+            key == "temperature"
+            and type(value) in (int, float)
+            and value == ANTHROPIC_DEFAULT_TEMPERATURE
+        )
+        if rule is not None and not rule[1].sampling and not default:
+            raise _param_unsupported(
+                key, model_id, rule[0],
+                "this model takes no sampling parameters (only temperature at its "
+                f"default, {ANTHROPIC_DEFAULT_TEMPERATURE}); leave it out and steer "
+                "with the prompt",
+                value=value,
+            )
+        document[key] = value
+
+    stop = body.get("stop")
+    if isinstance(stop, str):
+        document["stop_sequences"] = [stop]
+    elif isinstance(stop, list) and all(isinstance(s, str) for s in stop):
+        document["stop_sequences"] = stop
+    elif stop is not None:
+        raise ApiError(400, "invalid_request",
+                       "stop must be a string or a list of strings", {"field": "stop"})
+
+    n = body.get("n")
+    if n is not None and n != 1:
+        raise _anthropic_unsupported(
+            ["n"], f"the Messages API writes one answer per request, and n is {n!r}"
+        )
+
+    user = body.get("user")
+    if user is not None:
+        if not isinstance(user, str):
+            raise ApiError(400, "invalid_request", "user must be a string",
+                           {"field": "user"})
+        document["metadata"] = {"user_id": user}
+
+    kwargs = body.get(TEMPLATE_KWARGS)
+    if kwargs is not None:
+        if not isinstance(kwargs, dict):
+            raise ApiError(400, "invalid_request",
+                           f"{TEMPLATE_KWARGS} must be an object, got "
+                           f"{type(kwargs).__name__}", {"field": TEMPLATE_KWARGS})
+        extra = sorted(set(kwargs) - {THINKING_KEY})
+        if extra:
+            raise _anthropic_unsupported(
+                [f"{TEMPLATE_KWARGS}.{key}" for key in extra],
+                f"the Messages API has no chat-template arguments; {THINKING_KEY} is "
+                "read (and dropped, as X-Crucible-Sampling says)",
+            )
+
+    output_config: dict[str, Any] = {}
+    effort = _anthropic_effort(body, model_id, rule)
+    if effort is not None:
+        output_config["effort"] = effort
+    response_format = _anthropic_format(body.get("response_format"), model_id, rule)
+    if response_format is not None:
+        output_config["format"] = response_format
+    if output_config:
+        document["output_config"] = output_config
+
+    stream = body.get("stream")
+    if stream is not None and not isinstance(stream, bool):
+        raise ApiError(400, "invalid_request", "stream must be a boolean",
+                       {"field": "stream"})
+    if stream is True:
+        document["stream"] = True
+    include_usage = False
+    stream_options = body.get("stream_options")
+    if stream_options is not None:
+        if not isinstance(stream_options, dict):
+            raise ApiError(400, "invalid_request", "stream_options must be an object",
+                           {"field": "stream_options"})
+        extra = sorted(set(stream_options) - {"include_usage"})
+        if extra:
+            raise _anthropic_unsupported(
+                [f"stream_options.{key}" for key in extra],
+                "include_usage alone is read",
+            )
+        include_usage = stream_options.get("include_usage") is True
+    return document, include_usage
+
+
+# Anthropic's stop reasons in OpenAI's words; a reason not here is relayed as Anthropic
+# said it rather than guessed at.
 _STOP_REASON: dict[str, str] = {
     "end_turn": "stop",
     "stop_sequence": "stop",
-    "tool_use": "stop",
     "max_tokens": "length",
+    "model_context_window_exceeded": "length",
     "refusal": "content_filter",
 }
+
+
+def _finish_reason(reason: Any) -> str | None:
+    if not isinstance(reason, str):
+        return None
+    return _STOP_REASON.get(reason, reason)
 
 
 def _completion_id() -> str:
     return f"chatcmpl-{uuid.uuid4().hex}"
 
 
+def _count(usage: dict[str, Any], key: str) -> int | None:
+    value = usage.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def anthropic_usage(usage: Any) -> dict[str, Any]:
+    if not isinstance(usage, dict):
+        usage = {}
+    fresh = _count(usage, "input_tokens")
+    written = _count(usage, "cache_creation_input_tokens")
+    read = _count(usage, "cache_read_input_tokens")
+    completion = _count(usage, "output_tokens")
+    # OpenAI's prompt_tokens counts every prompt token; Anthropic's input_tokens leaves
+    # out the ones written to and read from its cache, which it counts apart.
+    prompt = None if fresh is None else fresh + (written or 0) + (read or 0)
+    counted: dict[str, Any] = {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": (
+            None if prompt is None or completion is None else prompt + completion
+        ),
+    }
+    if read is not None:
+        counted["prompt_tokens_details"] = {"cached_tokens": read}
+    return counted
+
+
 def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
     text_parts: list[str] = []
     for block in payload.get("content", []) or []:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "text" and isinstance(block.get("text"), str):
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(
+            block.get("text"), str
+        ):
             text_parts.append(block["text"])
-        elif block.get("type") == "tool_use":
-            text_parts.append(json.dumps(block.get("input")))
-    usage = payload.get("usage") or {}
-    prompt_tokens = usage.get("input_tokens")
-    completion_tokens = usage.get("output_tokens")
     return {
         "id": payload.get("id") or _completion_id(),
         "object": "chat.completion",
@@ -346,94 +760,122 @@ def anthropic_to_openai(payload: dict[str, Any], model: str) -> dict[str, Any]:
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": "".join(text_parts)},
-                "finish_reason": _STOP_REASON.get(
-                    payload.get("stop_reason") or "", "stop"
-                ),
+                "finish_reason": _finish_reason(payload.get("stop_reason")),
             }
         ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": (
-                None
-                if prompt_tokens is None or completion_tokens is None
-                else prompt_tokens + completion_tokens
-            ),
-        },
+        "usage": anthropic_usage(payload.get("usage")),
     }
 
 
 class AnthropicStreamTranslator:
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, include_usage: bool = False) -> None:
         self.model = model
+        self.include_usage = include_usage
         self._id = _completion_id()
         self._buffer = b""
+        self._usage: dict[str, Any] = {}
         self._done = False
+        self._failed = False
 
-    def _chunk(self, delta: dict[str, Any], finish_reason: str | None) -> bytes:
-        payload = {
-            "id": self._id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": self.model,
-            "choices": [
-                {"index": 0, "delta": delta, "finish_reason": finish_reason}
-            ],
-        }
+    def _frame(self, payload: dict[str, Any]) -> bytes:
         return b"data: " + json.dumps(payload).encode("utf-8") + b"\n\n"
 
+    def _chunk(self, delta: dict[str, Any], finish_reason: str | None) -> bytes:
+        return self._frame(
+            {
+                "id": self._id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": self.model,
+                "choices": [
+                    {"index": 0, "delta": delta, "finish_reason": finish_reason}
+                ],
+            }
+        )
+
     def _translate(self, event: dict[str, Any]) -> Iterator[bytes]:
+        if self._done or self._failed:
+            return
         kind = event.get("type")
         if kind == "message_start":
             message = event.get("message")
-            if isinstance(message, dict) and isinstance(message.get("id"), str):
-                self._id = message["id"]
+            if isinstance(message, dict):
+                if isinstance(message.get("id"), str):
+                    self._id = message["id"]
+                if isinstance(message.get("usage"), dict):
+                    self._usage.update(message["usage"])
             yield self._chunk({"role": "assistant"}, None)
         elif kind == "content_block_delta":
             delta = event.get("delta")
-            if not isinstance(delta, dict):
-                return
-            text = delta.get("text")
-            if isinstance(text, str):
-                yield self._chunk({"content": text}, None)
-                return
-            partial = delta.get("partial_json")
-            if isinstance(partial, str):
-                yield self._chunk({"content": partial}, None)
+            if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                text = delta.get("text")
+                if isinstance(text, str):
+                    yield self._chunk({"content": text}, None)
         elif kind == "message_delta":
+            # Its usage is cumulative, and may restate the input counts.
+            if isinstance(event.get("usage"), dict):
+                self._usage.update(event["usage"])
             delta = event.get("delta")
             reason = delta.get("stop_reason") if isinstance(delta, dict) else None
             if isinstance(reason, str):
-                yield self._chunk({}, _STOP_REASON.get(reason, "stop"))
+                yield self._chunk({}, _finish_reason(reason))
         elif kind == "message_stop":
             self._done = True
+            if self.include_usage:
+                yield self._frame(
+                    {
+                        "id": self._id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": self.model,
+                        "choices": [],
+                        "usage": anthropic_usage(self._usage),
+                    }
+                )
             yield b"data: [DONE]\n\n"
         elif kind == "error":
-            yield b"data: " + json.dumps({"error": event.get("error")}).encode(
-                "utf-8"
-            ) + b"\n\n"
+            self._failed = True
+            error = event.get("error")
+            said = error if isinstance(error, dict) else {"message": json.dumps(error)}
+            yield self._frame({"error": {**said, "upstream": "anthropic"}})
 
     def feed(self, chunk: bytes) -> Iterator[bytes]:
         self._buffer += chunk
         while b"\n\n" in self._buffer:
             frame, self._buffer = self._buffer.split(b"\n\n", 1)
-            for line in frame.split(b"\n"):
-                if not line.startswith(b"data:"):
-                    continue
-                payload = line[len(b"data:"):].strip()
-                if payload == b"" or payload == b"[DONE]":
-                    continue
-                try:
-                    event = json.loads(payload)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if isinstance(event, dict):
-                    yield from self._translate(event)
+            yield from self._parse(frame)
+
+    def _parse(self, frame: bytes) -> Iterator[bytes]:
+        for line in frame.split(b"\n"):
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[len(b"data:"):].strip()
+            if payload == b"":
+                continue
+            try:
+                event = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if not self._failed and not self._done:
+                    self._failed = True
+                    yield self._frame(
+                        {"error": {"message": "anthropic sent a stream event that is "
+                                   "not JSON: " + payload[:200].decode("utf-8", "replace"),
+                                   "upstream": "anthropic"}}
+                    )
+                continue
+            if isinstance(event, dict):
+                yield from self._translate(event)
 
     def finish(self) -> Iterator[bytes]:
-        if not self._done:
-            yield b"data: [DONE]\n\n"
+        if self._buffer.strip():
+            frame, self._buffer = self._buffer, b""
+            yield from self._parse(frame)
+        if not self._done and not self._failed:
+            yield self._frame(
+                {"error": {"message": "anthropic's stream ended before message_stop; "
+                           "the answer is truncated", "upstream": "anthropic"}}
+            )
 
 
 OLLAMA_LOOKUP_ATTEMPTS = 3
@@ -640,12 +1082,7 @@ _DATA_IMAGE = re.compile(r"^data:image/[A-Za-z0-9.+-]+;base64,(?P<data>.+)$", re
 
 
 def _unsupported(fields: list[str], why: str) -> ApiError:
-    return ApiError(
-        400,
-        "upstream_field_unsupported",
-        f"the ollama upstream does not carry {fields}: {why}",
-        {"upstream": "ollama", "fields": fields, "carried": sorted(_OLLAMA_READS)},
-    )
+    return _field_unsupported("ollama", fields, why, _OLLAMA_READS)
 
 
 def _ollama_message(index: int, message: Any) -> dict[str, Any]:
@@ -986,9 +1423,14 @@ class OllamaStreamTranslator:
 
 __all__ = [
     "ANTHROPIC_BASE",
-    "ANTHROPIC_JSON_TOOL",
+    "ANTHROPIC_DEFAULT_TEMPERATURE",
+    "ANTHROPIC_EFFORTS",
+    "ANTHROPIC_EFFORT_FIELD",
     "ANTHROPIC_MAX_TOKENS_DEFAULT",
+    "ANTHROPIC_MODEL_RULES",
+    "ANTHROPIC_SAMPLING",
     "ANTHROPIC_VERSION",
+    "AnthropicModelRule",
     "AnthropicStreamTranslator",
     "CONTEXT_FIELD",
     "CONTEXT_HEADER",
@@ -1003,7 +1445,9 @@ __all__ = [
     "OllamaStreamTranslator",
     "SOURCE_DROPPED",
     "SOURCE_UPSTREAM_DEFAULT",
+    "anthropic_rule",
     "anthropic_to_openai",
+    "anthropic_usage",
     "auth_headers",
     "chat_headers",
     "chat_url",

@@ -100,6 +100,12 @@ class ChatCompletionBody(BaseModel):
     response_format: dict[str, Any] | None = None
     """OpenAI's: a `json_schema` or `json_object` constraint, enforced by the engine or
     refused `structured_output_not_served` before anything is sent."""
+    reasoning_effort: str | None = None
+    """OpenAI's: how much the model reasons. For an `anthropic/<id>` chat it is sent as
+    the Messages API's `output_config.effort`, one of `low`, `medium`, `high`, `xhigh`,
+    `max`, and a level the model does not take is refused `upstream_param_unsupported`
+    (docs/API-CLI.md, "The anthropic upstream"). An `openai/<id>` chat forwards it as
+    sent; a local engine is sent it as any other member."""
     json_whitespace: str | None = None
     """Crucible's: `compact` or `flexible` (the default), beside a JSON
     `response_format`."""
@@ -259,6 +265,10 @@ def register(routers: Routers, ctx: AppContext) -> None:
         resident, or whose engine has every slot taken, waits in the server's line
         (up to an hour, or `queue.max_wait_s`) and its model is loaded for it; with
         `"queue": false` it is refused at once instead. An upstream chat never waits.
+        An `anthropic/<id>` chat is translated to the Messages API member by member, and
+        a member with no faithful form there, or one the named model does not take, is
+        refused by name before anything is sent (`upstream_field_unsupported`,
+        `upstream_param_unsupported`; docs/API-CLI.md, "The anthropic upstream").
         A `"prefill": "<text>"` member starts the answer with that text and the model
         writes on from it; the reply's content is what it wrote after the prefill
         (vLLM and llama-server; thinking stated off; no response_format or other

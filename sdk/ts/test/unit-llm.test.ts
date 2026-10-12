@@ -24,7 +24,10 @@ import {
   CrucibleServerError,
   CrucibleUnreachable,
   isLlmCapability,
+  UPSTREAM_PARAM_UNSUPPORTED,
+  type ChatUsage,
   type JobEvent,
+  type UpstreamParamUnsupportedDetails,
 } from '../src/index.js';
 import { UNCLAIMED_ENGINE } from './engine-info.js';
 
@@ -1440,5 +1443,113 @@ test('a refusal on a streamed chat is read from the error body, not the stream',
       assert.equal(error.code, 'model_not_resident');
       return true;
     },
+  );
+});
+
+test('reasoningEffort is sent as reasoning_effort, and an unknown level is refused here', async () => {
+  handle = (_request, response) => json(response, 200, COMPLETION);
+  await client().chat({
+    model: 'anthropic/claude-opus-5-5',
+    messages: [{ role: 'user', content: 'hi' }],
+    reasoningEffort: 'xhigh',
+  });
+  const sent = JSON.parse(lastBody) as Record<string, unknown>;
+  assert.equal(sent['reasoning_effort'], 'xhigh');
+  assert.equal('stream_options' in sent, false);
+  await assert.rejects(
+    client().chat({
+      model: 'anthropic/claude-opus-5-5',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoningEffort: 'extreme' as never,
+    }),
+    (error: unknown) => error instanceof CrucibleConfigError && error.option === 'reasoningEffort',
+  );
+});
+
+test('an upstream_param_unsupported refusal carries its details', async () => {
+  handle = (_request, response) =>
+    json(response, 400, {
+      error: {
+        code: UPSTREAM_PARAM_UNSUPPORTED,
+        message: "anthropic/claude-opus-4-6 does not take reasoning_effort 'xhigh'",
+        details: {
+          upstream: 'anthropic', param: "reasoning_effort 'xhigh'", model: 'claude-opus-4-6',
+          rule: 'claude-opus-4-6', takes: ['low', 'medium', 'high', 'max'],
+        },
+      },
+    });
+  await assert.rejects(
+    client().chat({
+      model: 'anthropic/claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+      reasoningEffort: 'xhigh',
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof CrucibleRefused, `got ${String(error)}`);
+      assert.equal(error.code, UPSTREAM_PARAM_UNSUPPORTED);
+      const details = error.details as unknown as UpstreamParamUnsupportedDetails;
+      assert.deepEqual(details.takes, ['low', 'medium', 'high', 'max']);
+      return true;
+    },
+  );
+});
+
+test('chatStream with onUsage asks for usage and hands it over after the last delta', async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write(contentChunk('The forge '));
+    response.write(contentChunk('is lit.'));
+    response.write(
+      chunkFrame({
+        id: 'chatcmpl-stream', object: 'chat.completion.chunk', created: 1757640000,
+        model: 'anthropic/claude-opus-5-5', choices: [],
+        usage: {
+          prompt_tokens: 11, completion_tokens: 7, total_tokens: 18,
+          prompt_tokens_details: { cached_tokens: 0 },
+        },
+      }),
+    );
+    response.write('data: [DONE]\n\n');
+    response.end();
+  };
+  const order: string[] = [];
+  let usage: ChatUsage | null = null;
+  for await (const delta of client().chatStream({
+    model: 'anthropic/claude-opus-5-5',
+    messages: [{ role: 'user', content: 'hi' }],
+    onUsage: (counted) => {
+      order.push('usage');
+      usage = counted;
+    },
+  })) {
+    order.push(delta);
+  }
+  assert.deepEqual(JSON.parse(lastBody)['stream_options'], { include_usage: true });
+  assert.deepEqual(order, ['The forge ', 'is lit.', 'usage']);
+  assert.deepEqual(usage, { promptTokens: 11, completionTokens: 7, totalTokens: 18, cachedTokens: 0 });
+});
+
+test('chatStream asked for usage that never comes throws, and chat refuses onUsage', async () => {
+  handle = (_request, response) => {
+    openSse(response);
+    response.write(contentChunk('lit.'));
+    response.write('data: [DONE]\n\n');
+    response.end();
+  };
+  await assert.rejects(
+    (async () => {
+      for await (const _delta of client().chatStream({
+        model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }], onUsage: () => undefined,
+      })) {
+        // drain
+      }
+    })(),
+    (error: unknown) => error instanceof CrucibleProtocolError && /usage chunk/.test(error.message),
+  );
+  await assert.rejects(
+    client().chat({
+      model: 'qwen3.5-9b', messages: [{ role: 'user', content: 'hi' }], onUsage: () => undefined,
+    }),
+    (error: unknown) => error instanceof CrucibleConfigError && error.option === 'onUsage',
   );
 });

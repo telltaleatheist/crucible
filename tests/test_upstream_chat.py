@@ -77,7 +77,7 @@ def test_anthropic_gets_a_system_field_and_a_max_tokens_and_says_so(
         routed,
         auth,
         {
-            "model": "anthropic/claude-sonnet-5",
+            "model": "anthropic/claude-sonnet-4-6",
             "messages": [
                 {"role": "system", "content": "You are terse."},
                 {"role": "user", "content": "hi"},
@@ -142,43 +142,71 @@ def test_a_request_that_said_nothing_about_thinking_says_engine(
     assert json.loads(body.headers[SAMPLING_HEADER])["thinking"] == "engine"
 
 
-def test_a_json_schema_becomes_a_forced_tool_and_its_input_is_the_content(
-    routed, auth, upstream
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {"verdict": {"type": "string"}},
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.parametrize(
+    "model", ["claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1", "claude-future-9"]
+)
+def test_a_json_schema_is_the_messages_apis_own_structured_output(
+    routed, auth, upstream, model
 ) -> None:
-    schema = {
-        "type": "object",
-        "properties": {"verdict": {"type": "string"}},
-        "required": ["verdict"],
-    }
+    # Opus 5.5 and Fable 5.1 refuse a forced tool_choice (the fake does too), which is
+    # what a json_schema used to become.
     body = chat(
         routed,
         auth,
         {
-            "model": "anthropic/claude-sonnet-5",
+            "model": f"anthropic/{model}",
             "messages": [{"role": "user", "content": "judge"}],
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"name": "verdict", "schema": schema},
+                "json_schema": {"name": "verdict", "strict": True, "schema": VERDICT_SCHEMA},
             },
         },
     )
     assert body.status_code == 200, body.text
     sent = upstream.requests[-1]
-    assert sent["tools"][0]["name"] == upstreams.ANTHROPIC_JSON_TOOL
-    assert sent["tools"][0]["input_schema"] == schema
-    assert sent["tool_choice"] == {
-        "type": "tool",
-        "name": upstreams.ANTHROPIC_JSON_TOOL,
+    assert sent["output_config"] == {
+        "format": {"type": "json_schema", "schema": VERDICT_SCHEMA}
     }
+    assert "tools" not in sent
+    assert "tool_choice" not in sent
     content = body.json()["choices"][0]["message"]["content"]
     assert json.loads(content) == {"verdict": "routed"}
     assert body.json()["choices"][0]["finish_reason"] == "stop"
 
 
-def test_a_bare_json_object_response_format_forces_no_tool(
+def test_a_streamed_json_schema_arrives_as_its_text(routed, auth, upstream) -> None:
+    frames, _ = _stream(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-opus-5-5",
+            "messages": [{"role": "user", "content": "judge"}],
+            "stream": True,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "verdict", "schema": VERDICT_SCHEMA},
+            },
+        },
+    )
+    text = "".join(
+        p["choices"][0]["delta"].get("content", "") for p in _payloads(frames) if p["choices"]
+    )
+    assert json.loads(text) == {"verdict": "routed"}
+    assert frames[-1] == "data: [DONE]"
+
+
+def test_a_bare_json_object_response_format_is_refused_by_name(
     routed, auth, upstream
 ) -> None:
-    chat(
+    body = chat(
         routed,
         auth,
         {
@@ -187,7 +215,33 @@ def test_a_bare_json_object_response_format_forces_no_tool(
             "response_format": {"type": "json_object"},
         },
     )
-    assert "tools" not in upstream.requests[-1]
+    assert body.status_code == 400
+    error = body.json()["error"]
+    assert error["code"] == "upstream_param_unsupported"
+    assert error["details"]["param"] == "response_format.type json_object"
+    assert upstream.requests == []
+
+
+def test_a_json_schema_description_is_refused_rather_than_dropped(
+    routed, auth, upstream
+) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "v", "description": "a verdict",
+                                "schema": VERDICT_SCHEMA},
+            },
+        },
+    )
+    assert body.status_code == 400
+    assert body.json()["error"]["details"]["fields"] == [
+        "response_format.json_schema.description"
+    ]
 
 
 def test_the_provider_sees_its_own_credentials(routed, auth, upstream) -> None:
@@ -927,3 +981,558 @@ def test_the_hosted_upstreams_drop_context_tokens_and_say_so(
     )
     assert "context_tokens" not in upstream.requests[-1]
     assert _context(body) == {"num_ctx": None, "source": "upstream"}
+
+
+def _anthropic(routed, auth, model: str = "claude-sonnet-5", **extra: Any):
+    return chat(
+        routed,
+        auth,
+        {
+            "model": f"anthropic/{model}",
+            "messages": [{"role": "user", "content": "hi"}],
+            **extra,
+        },
+    )
+
+
+def _refused(response, code: str) -> dict[str, Any]:
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["code"] == code, error
+    return error
+
+
+@pytest.mark.parametrize(
+    "model, param, value",
+    [
+        ("claude-opus-5-5", "temperature", 0.2),
+        ("claude-sonnet-5", "temperature", 0),
+        ("claude-sonnet-5-5", "top_p", 0.9),
+        ("claude-haiku-5-5", "top_k", 40),
+        ("claude-fable-5-1", "top_p", 1),
+        ("claude-opus-4-7", "temperature", 0.7),
+    ],
+)
+def test_a_sampling_value_the_model_rejects_is_refused_naming_param_and_model(
+    routed, auth, upstream, model, param, value
+) -> None:
+    error = _refused(
+        _anthropic(routed, auth, model, **{param: value}), "upstream_param_unsupported"
+    )
+    assert error["details"]["param"] == param
+    assert error["details"]["model"] == model
+    assert error["details"]["rule"] == model
+    assert error["details"]["value"] == value
+    assert param in error["message"] and model in error["message"]
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    "model, extra",
+    [
+        ("claude-opus-5-5", {"temperature": 1}),
+        ("claude-sonnet-4-6", {"temperature": 0.2, "top_k": 40}),
+        ("claude-haiku-4-5-20251001", {"temperature": 0.0}),
+        ("claude-opus-4-5-20251101", {"top_p": 0.9}),
+        ("claude-future-9", {"temperature": 0.3}),
+    ],
+)
+def test_a_sampling_value_the_model_takes_is_forwarded(
+    routed, auth, upstream, model, extra
+) -> None:
+    body = _anthropic(routed, auth, model, **extra)
+    assert body.status_code == 200, body.text
+    for key, value in extra.items():
+        assert upstream.requests[-1][key] == value
+
+
+def test_every_model_the_key_door_listed_has_a_row() -> None:
+    # The models the PC's key listed on 2026-10-12.
+    listed = [
+        "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1",
+        "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-opus-4-8",
+        "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-6",
+        "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-5-20250929",
+    ]
+    for model in listed:
+        assert upstreams.anthropic_rule(model) is not None, model
+    assert upstreams.anthropic_rule("claude-fable-5-1")[0] == "claude-fable-5-1"
+    assert upstreams.anthropic_rule("claude-fable-5")[0] == "claude-fable-5"
+    assert upstreams.anthropic_rule("claude-sonnet-5-5")[0] == "claude-sonnet-5-5"
+    assert upstreams.anthropic_rule("claude-opus-4-5-20251101")[0] == "claude-opus-4-5"
+    assert upstreams.anthropic_rule("claude-opus-50") is None
+    assert upstreams.anthropic_rule("claude-future-9") is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"seed": 7},
+        {"frequency_penalty": 0.5},
+        {"presence_penalty": 0.5},
+        {"logit_bias": {"50256": -100}},
+        {"logprobs": True},
+        {"tools": [{"type": "function", "function": {"name": "f"}}]},
+        {"tool_choice": "auto"},
+        {"parallel_tool_calls": False},
+        {"repetition_penalty": 1.1},
+        {"num_ctx": 8192},
+    ],
+)
+def test_a_field_the_anthropic_translation_would_drop_is_refused_by_name(
+    routed, auth, upstream, extra
+) -> None:
+    error = _refused(_anthropic(routed, auth, **extra), "upstream_field_unsupported")
+    assert error["details"]["upstream"] == "anthropic"
+    assert error["details"]["fields"] == list(extra)
+    assert upstream.requests == []
+
+
+def test_n_of_one_is_read_and_more_is_refused(routed, auth, upstream) -> None:
+    assert _anthropic(routed, auth, n=1).status_code == 200
+    assert "n" not in upstream.requests[-1]
+    error = _refused(_anthropic(routed, auth, n=2), "upstream_field_unsupported")
+    assert error["details"]["fields"] == ["n"]
+
+
+def test_max_completion_tokens_is_max_tokens_and_the_audit_says_request(
+    routed, auth, upstream
+) -> None:
+    body = _anthropic(routed, auth, max_completion_tokens=64)
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["max_tokens"] == 64
+    assert "max_completion_tokens" not in upstream.requests[-1]
+    assert json.loads(body.headers[SAMPLING_HEADER])["max_tokens"] == "request"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"max_tokens": 10, "max_completion_tokens": 10},
+        {"max_tokens": 0},
+        {"max_tokens": "64"},
+        {"max_tokens": 64.0},
+        {"max_completion_tokens": True},
+    ],
+)
+def test_a_max_tokens_this_server_cannot_send_is_refused_not_replaced(
+    routed, auth, upstream, extra
+) -> None:
+    _refused(_anthropic(routed, auth, **extra), "invalid_request")
+    assert upstream.requests == []
+
+
+def test_a_system_message_mid_conversation_is_refused(routed, auth, upstream) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [
+                {"role": "system", "content": "Be terse."},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "system", "content": "Now be verbose."},
+                {"role": "user", "content": "again"},
+            ],
+        },
+    )
+    error = _refused(body, "upstream_field_unsupported")
+    assert error["details"]["fields"] == ["messages[3].role"]
+    assert upstream.requests == []
+
+
+def test_leading_developer_and_system_messages_are_the_system_field(
+    routed, auth, upstream
+) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [
+                {"role": "developer", "content": "Be terse."},
+                {"role": "system", "content": [{"type": "text", "text": "Use French."}]},
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            ],
+        },
+    )
+    assert body.status_code == 200, body.text
+    sent = upstream.requests[-1]
+    assert sent["system"] == "Be terse.\n\nUse French."
+    assert sent["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+    ]
+
+
+@pytest.mark.parametrize(
+    "message, field",
+    [
+        ({"role": "tool", "content": "42", "tool_call_id": "c"}, "messages[0].role"),
+        ({"role": "user", "content": "hi", "name": "owen"}, "messages[0].name"),
+        (
+            {"role": "user", "content": [{"type": "input_audio", "input_audio": {}}]},
+            "messages[0].content[0]",
+        ),
+    ],
+)
+def test_a_message_with_no_messages_api_form_is_refused(
+    routed, auth, upstream, message, field
+) -> None:
+    body = chat(
+        routed, auth, {"model": "anthropic/claude-sonnet-5", "messages": [message]}
+    )
+    error = _refused(body, "upstream_field_unsupported")
+    assert error["details"]["fields"] == [field]
+
+
+def test_images_become_image_blocks(routed, auth, upstream) -> None:
+    body = chat(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Compare these."},
+                        {"type": "image_url",
+                         "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+                        {"type": "image_url",
+                         "image_url": {"url": "https://example.com/a.jpg", "detail": "auto"}},
+                    ],
+                }
+            ],
+        },
+    )
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["messages"][0]["content"] == [
+        {"type": "text", "text": "Compare these."},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": "iVBORw0KGgo="}},
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.jpg"}},
+    ]
+
+
+def test_an_image_detail_is_refused_and_a_strange_address_is_invalid(
+    routed, auth, upstream
+) -> None:
+    def ask(image: dict[str, Any]):
+        return chat(
+            routed,
+            auth,
+            {
+                "model": "anthropic/claude-sonnet-5",
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": image}]}
+                ],
+            },
+        )
+
+    error = _refused(
+        ask({"url": "https://example.com/a.jpg", "detail": "high"}),
+        "upstream_field_unsupported",
+    )
+    assert error["details"]["fields"] == ["messages[0].content[0].image_url.detail"]
+    error = _refused(ask({"url": "ftp://example.com/a.jpg"}), "invalid_request")
+    assert error["details"]["field"] == "messages[0].content[0]"
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    "model, effort",
+    [
+        ("claude-opus-5-5", "low"),
+        ("claude-fable-5-1", "max"),
+        ("claude-sonnet-5", "xhigh"),
+        ("claude-opus-4-6", "max"),
+        ("claude-future-9", "xhigh"),
+    ],
+)
+def test_reasoning_effort_is_output_config_effort(
+    routed, auth, upstream, model, effort
+) -> None:
+    body = _anthropic(routed, auth, model, reasoning_effort=effort)
+    assert body.status_code == 200, body.text
+    sent = upstream.requests[-1]
+    assert sent["output_config"] == {"effort": effort}
+    assert "reasoning_effort" not in sent
+
+
+@pytest.mark.parametrize(
+    "model, effort, takes",
+    [
+        ("claude-opus-4-6", "xhigh", ["low", "medium", "high", "max"]),
+        ("claude-sonnet-4-6", "xhigh", ["low", "medium", "high", "max"]),
+        ("claude-opus-4-5-20251101", "max", ["low", "medium", "high"]),
+        ("claude-haiku-4-5", "low", []),
+        ("claude-sonnet-4-5-20250929", "high", []),
+    ],
+)
+def test_an_effort_the_model_does_not_take_is_refused_with_what_it_takes(
+    routed, auth, upstream, model, effort, takes
+) -> None:
+    error = _refused(
+        _anthropic(routed, auth, model, reasoning_effort=effort),
+        "upstream_param_unsupported",
+    )
+    assert error["details"]["param"] == f"reasoning_effort {effort!r}"
+    assert error["details"]["takes"] == takes
+    assert upstream.requests == []
+
+
+def test_an_effort_with_no_anthropic_equivalent_is_refused(routed, auth, upstream) -> None:
+    for effort in ("none", "minimal"):
+        error = _refused(
+            _anthropic(routed, auth, reasoning_effort=effort), "upstream_param_unsupported"
+        )
+        assert "low" in error["message"]
+    _refused(_anthropic(routed, auth, reasoning_effort="extreme"), "invalid_request")
+    assert upstream.requests == []
+
+
+def test_effort_and_a_schema_share_output_config(routed, auth, upstream) -> None:
+    body = _anthropic(
+        routed, auth, "claude-opus-5-5",
+        reasoning_effort="medium",
+        response_format={"type": "json_schema",
+                         "json_schema": {"name": "v", "schema": VERDICT_SCHEMA}},
+    )
+    assert body.status_code == 200, body.text
+    assert upstream.requests[-1]["output_config"] == {
+        "effort": "medium",
+        "format": {"type": "json_schema", "schema": VERDICT_SCHEMA},
+    }
+
+
+def test_user_is_metadata_user_id(routed, auth, upstream) -> None:
+    assert _anthropic(routed, auth, user="storyboard-7").status_code == 200
+    assert upstream.requests[-1]["metadata"] == {"user_id": "storyboard-7"}
+
+
+def test_a_chat_template_argument_other_than_thinking_is_refused(
+    routed, auth, upstream
+) -> None:
+    error = _refused(
+        _anthropic(routed, auth, chat_template_kwargs={"enable_thinking": True, "x": 1}),
+        "upstream_field_unsupported",
+    )
+    assert error["details"]["fields"] == ["chat_template_kwargs.x"]
+
+
+def test_a_completion_counts_its_usage_with_the_cache(routed, auth, upstream) -> None:
+    document = _anthropic(routed, auth).json()
+    assert document["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
+    assert upstreams.anthropic_usage(
+        {"input_tokens": 5, "cache_creation_input_tokens": 100,
+         "cache_read_input_tokens": 900, "output_tokens": 3}
+    ) == {
+        "prompt_tokens": 1005,
+        "completion_tokens": 3,
+        "total_tokens": 1008,
+        "prompt_tokens_details": {"cached_tokens": 900},
+    }
+
+
+@pytest.mark.parametrize(
+    "reason, finish",
+    [
+        ("max_tokens", "length"),
+        ("model_context_window_exceeded", "length"),
+        ("refusal", "content_filter"),
+        ("stop_sequence", "stop"),
+        ("pause_turn", "pause_turn"),
+    ],
+)
+def test_a_stop_reason_is_openais_word_or_anthropics_own(
+    routed, auth, upstream, reason, finish
+) -> None:
+    upstream.stop_reason = reason
+    assert _anthropic(routed, auth).json()["choices"][0]["finish_reason"] == finish
+    frames, _ = _stream(
+        routed, auth,
+        {"model": "anthropic/claude-sonnet-5",
+         "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+    finishes = [
+        p["choices"][0]["finish_reason"] for p in _payloads(frames) if p["choices"]
+    ]
+    assert finishes[-1] == finish
+
+
+def test_a_stream_asked_for_usage_ends_with_a_usage_chunk(routed, auth, upstream) -> None:
+    frames, _ = _stream(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-opus-5-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    )
+    assert frames[-1] == "data: [DONE]"
+    payloads = _payloads(frames)
+    assert payloads[0]["choices"][0]["delta"] == {"role": "assistant"}
+    with_choices = [p for p in payloads if p["choices"]]
+    assert "".join(
+        p["choices"][0]["delta"].get("content", "") for p in with_choices
+    ) == ANSWER
+    assert with_choices[-1]["choices"][0]["finish_reason"] == "stop"
+    usage = [p for p in payloads if not p["choices"]]
+    assert len(usage) == 1
+    assert payloads[-1] is usage[0]
+    assert usage[0]["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "prompt_tokens_details": {"cached_tokens": 0},
+    }
+    assert {p["model"] for p in payloads} == {"anthropic/claude-opus-5-5"}
+
+
+def test_a_stream_not_asked_for_usage_carries_none(routed, auth, upstream) -> None:
+    frames, _ = _stream(
+        routed,
+        auth,
+        {
+            "model": "anthropic/claude-sonnet-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    )
+    assert all(p["choices"] for p in _payloads(frames))
+    assert "usage" not in "".join(frames)
+
+
+def test_a_stream_option_this_server_does_not_read_is_refused(
+    routed, auth, upstream
+) -> None:
+    error = _refused(
+        _anthropic(routed, auth, stream=True,
+                   stream_options={"include_usage": True, "include_obfuscation": False}),
+        "upstream_field_unsupported",
+    )
+    assert error["details"]["fields"] == ["stream_options.include_obfuscation"]
+
+
+def test_an_anthropic_stream_cut_before_message_stop_gets_no_done(
+    routed, auth, upstream
+) -> None:
+    upstream.truncate_stream = True
+    frames, _ = _stream(
+        routed, auth,
+        {"model": "anthropic/claude-sonnet-5",
+         "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+    assert "data: [DONE]" not in frames
+    error = json.loads(frames[-1][len("data: "):])["error"]
+    assert "truncated" in error["message"]
+    assert error["upstream"] == "anthropic"
+
+
+def test_an_anthropic_stream_error_is_relayed_and_gets_no_done(
+    routed, auth, upstream
+) -> None:
+    upstream.stream_error = {"type": "overloaded_error", "message": "Overloaded"}
+    frames, _ = _stream(
+        routed, auth,
+        {"model": "anthropic/claude-sonnet-5",
+         "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+    assert "data: [DONE]" not in frames
+    error = json.loads(frames[-1][len("data: "):])["error"]
+    assert error == {"type": "overloaded_error", "message": "Overloaded",
+                     "upstream": "anthropic"}
+
+
+def test_the_stream_translator_skips_pings_thinking_and_unknown_events() -> None:
+    translator = upstreams.AnthropicStreamTranslator("anthropic/x", include_usage=False)
+    events = [
+        {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 3}}},
+        {"type": "ping"},
+        {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hm"}},
+        {"type": "some_future_event", "x": 1},
+        {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 2}},
+        {"type": "message_stop"},
+    ]
+    raw = b"".join(
+        f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events
+    )
+    out = b"".join(translator.feed(raw[:37])) + b"".join(translator.feed(raw[37:]))
+    out += b"".join(translator.finish())
+    lines = [line for line in out.decode().split("\n") if line]
+    assert lines[-1] == "data: [DONE]"
+    chunks = [json.loads(line[6:]) for line in lines[:-1]]
+    assert [c["choices"][0]["delta"] for c in chunks] == [
+        {"role": "assistant"}, {"content": "ok"}, {}
+    ]
+
+
+def test_a_billed_request_is_never_sent_twice_once_it_may_have_arrived(
+    routed, auth, upstream, monkeypatch
+) -> None:
+    from crucible.api import proxy
+
+    monkeypatch.setattr(proxy, "WIRE_BACKOFF_SECONDS", (0.0, 0.0, 0.0, 0.0))
+    upstream.drop_connection = True
+    for model in ("anthropic/claude-sonnet-5", "openai/gpt-5"):
+        before = len(upstream.requests)
+        body = chat(routed, auth, {"model": model,
+                                   "messages": [{"role": "user", "content": "hi"}]})
+        assert body.status_code == 502, body.text
+        error = body.json()["error"]
+        assert error["code"] == "upstream_unreachable"
+        assert "did not send it again" in error["message"]
+        assert len(upstream.requests) == before + 1, model
+
+
+def test_a_billed_request_that_never_connected_is_tried_again_and_says_so(
+    make_client, auth, upstream, monkeypatch
+) -> None:
+    from crucible.api import proxy
+
+    monkeypatch.setattr(proxy, "WIRE_BACKOFF_SECONDS", (0.0, 0.0, 0.0, 0.0))
+    dead = upstream.url
+    upstream.stop()
+    monkeypatch.setattr(upstreams, "ANTHROPIC_BASE", dead)
+    attempts: list[str] = []
+    real = proxy.sent_before_any_byte
+
+    async def counted(attempt, *, where):
+        async def once():
+            attempts.append(where)
+            return await attempt()
+
+        return await real(once, where=where)
+
+    monkeypatch.setattr("crucible.api.upstream.sent_before_any_byte", counted)
+    with make_client(enable_llm=True, capability=decided()) as instance:
+        instance.put("/v1/settings", headers=auth,
+                     json={"upstreams": {"anthropic": {"key": ANTHROPIC_KEY}}})
+        body = chat(instance, auth, {"model": "anthropic/claude-sonnet-5",
+                                     "messages": [{"role": "user", "content": "hi"}]})
+    assert body.status_code == 502
+    error = body.json()["error"]
+    assert error["code"] == "upstream_unreachable"
+    assert "no byte of the request reached it" in error["message"]
+    assert len(attempts) == proxy.WIRE_ATTEMPTS
+
+
+def test_the_rate_limit_message_says_what_this_server_does(routed, auth, upstream) -> None:
+    upstream.status = 429
+    upstream.error_body = {"error": {"message": "slow down"}}
+    body = _anthropic(routed, auth)
+    assert body.status_code == 429
+    assert "never resends a billed request once it may have reached" in (
+        body.json()["error"]["message"]
+    )
