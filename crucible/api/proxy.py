@@ -114,10 +114,57 @@ async def sent_across_the_wire(
             await asyncio.sleep(pause)
 
 
+# A billed request (a hosted upstream's chat) is sent again only when the connection it
+# would have gone down was never made, so no byte of it can have reached the provider. A
+# connection lost after that (a reset, a stale socket, a cut stream) may have been
+# answered and billed, so it is not resent: the caller decides.
+NEVER_CONNECTED: tuple[type[Exception], ...] = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+async def sent_before_any_byte(
+    attempt: Callable[[], Awaitable[Any]], *, where: str
+) -> Any:
+    attempt_number = 0
+    while True:
+        attempt_number += 1
+        try:
+            return await attempt()
+        except NEVER_CONNECTED as exc:
+            detail = type(exc).__name__ + (f": {exc}" if str(exc) else "")
+            if attempt_number >= WIRE_ATTEMPTS:
+                print(
+                    f"crucible: could not connect to {where} ({detail}), attempt "
+                    f"{attempt_number} of {WIRE_ATTEMPTS}; giving up",
+                    file=sys.stderr,
+                )
+                raise
+            pause = WIRE_BACKOFF_SECONDS[attempt_number - 1]
+            print(
+                f"crucible: could not connect to {where} ({detail}), attempt "
+                f"{attempt_number} of {WIRE_ATTEMPTS}; nothing was sent, connecting "
+                f"again in {pause:g} s",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(pause)
+
+
 def attempts_note(exc: Exception) -> str:
     if isinstance(exc, LOST_ON_THE_WIRE):
         return f" on {WIRE_ATTEMPTS} attempts"
     return ""
+
+
+def billed_attempts_note(exc: Exception) -> str:
+    if isinstance(exc, NEVER_CONNECTED):
+        return (
+            f" on {WIRE_ATTEMPTS} attempts to connect; no byte of the request reached "
+            "it, so nothing was billed"
+        )
+    return (
+        "; the connection was lost after the request may have reached it, so this "
+        "server did not send it again (it may already have been answered and billed). "
+        "Send it again yourself if you want it"
+    )
 
 
 def caller_gone(resident: Any) -> JSONResponse:

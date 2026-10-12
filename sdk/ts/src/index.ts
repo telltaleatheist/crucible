@@ -69,8 +69,10 @@ export {
   UNKNOWN_QUEUE_SESSION,
   UNKNOWN_UPSTREAM,
   UPSTREAM_BAD_FIELD,
+  UPSTREAM_FIELD_UNSUPPORTED,
   UPSTREAM_IN_USE,
   UPSTREAM_NEVER_RESIDENT,
+  UPSTREAM_PARAM_UNSUPPORTED,
   UPSTREAM_RATE_LIMITED,
   UPSTREAM_REJECTED,
   UPSTREAM_TEST_REFUSALS,
@@ -80,7 +82,11 @@ export {
   VOICES_NEEDS_REFERENCE_UNKNOWN,
   isServerSpecificRefusal,
 } from './errors.js';
-export type { FleetServerReason } from './errors.js';
+export type {
+  FleetServerReason,
+  UpstreamFieldUnsupportedDetails,
+  UpstreamParamUnsupportedDetails,
+} from './errors.js';
 
 export { PAIRING_SCHEME, parsePairing } from './pairing.js';
 export type { Pairing } from './pairing.js';
@@ -176,6 +182,7 @@ export type {
   ChatOptions,
   ChatResponse,
   ChatUsage,
+  ReasoningEffort,
   ChunkData,
   PauseCut,
   UnreadableRow,

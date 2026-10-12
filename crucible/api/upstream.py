@@ -18,8 +18,10 @@ from .proxy import (
     PROXY_CONNECT_TIMEOUT,
     RelayResponse,
     attempts_note,
+    billed_attempts_note,
     post_unless_the_caller_leaves,
     sent_across_the_wire,
+    sent_before_any_byte,
     set_model_in_frame,
 )
 
@@ -50,7 +52,24 @@ def routed_upstream_rows(config: Config) -> list[dict[str, Any]]:
     return rows
 
 
+# The upstreams whose chats are billed. Ollama's are not, and a request the wire lost on
+# the way to it is sent again as an engine's is.
+BILLED_UPSTREAMS: frozenset[str] = frozenset({"anthropic", "openai"})
+
+
+def _sent(name: str) -> Callable[..., Awaitable[Any]]:
+    return sent_before_any_byte if name in BILLED_UPSTREAMS else sent_across_the_wire
+
+
 def _upstream_unreachable(name: str, url: str, exc: Exception) -> ApiError:
+    if name in BILLED_UPSTREAMS:
+        return ApiError(
+            502,
+            "upstream_unreachable",
+            f"{name} did not answer at {url}: {type(exc).__name__}: {exc}"
+            f"{billed_attempts_note(exc)}",
+            {"upstream": name},
+        )
     return ApiError(
         502,
         "upstream_unreachable",
@@ -70,8 +89,8 @@ def _rate_limited(name: str, response: httpx.Response, body: bytes) -> Response:
             429,
             "upstream_rate_limited",
             f"{name} rate-limited this request: "
-            f"{upstreams.upstream_message(body)}. This server never retries a "
-            "billed request — the caller waits",
+            f"{upstreams.upstream_message(body)}. This server never resends a "
+            "billed request once it may have reached the provider — the caller waits",
             {
                 "upstream": name,
                 "retry_after": retry_after,
@@ -158,7 +177,7 @@ async def forward_to_upstream(
                 when_relayed=_close_inflight(inflight, entry),
             )
         try:
-            upstream = await sent_across_the_wire(
+            upstream = await _sent(name)(
                 lambda: post_unless_the_caller_leaves(
                     client, url, forwarded.body, request, headers
                 ),
@@ -240,7 +259,7 @@ async def _stream_from_upstream(
         ),
     )
     try:
-        upstream = await sent_across_the_wire(
+        upstream = await _sent(name)(
             lambda: client.send(upstream_request, stream=True),
             where=f"{name} at {url}",
         )
@@ -262,7 +281,9 @@ async def _stream_from_upstream(
         translator: (
             upstreams.AnthropicStreamTranslator | upstreams.OllamaStreamTranslator
         ) = (
-            upstreams.AnthropicStreamTranslator(requested)
+            upstreams.AnthropicStreamTranslator(
+                requested, include_usage=forwarded.include_usage
+            )
             if forwarded.dialect == upstreams.DIALECT_ANTHROPIC
             else upstreams.OllamaStreamTranslator(
                 requested, include_usage=forwarded.include_usage

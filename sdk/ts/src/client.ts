@@ -102,6 +102,8 @@ import {
   type ChatMessage,
   type ChatOptions,
   type ChatResponse,
+  type ChatUsage,
+  type ReasoningEffort,
   type ChunkData,
   type PauseCut,
   type DecideAnswer,
@@ -1364,6 +1366,12 @@ export class CrucibleClient {
 
   /** `POST /v1/openai/chat/completions` — one completion from the resident model. */
   async chat(options: ChatOptions): Promise<ChatResponse> {
+    if (options !== undefined && options !== null && options.onUsage !== undefined) {
+      throw new CrucibleConfigError(
+        'onUsage',
+        'is for chatStream; a chat() answer carries its usage in ChatResponse.usage',
+      );
+    }
     const init = this.#chatRequest(options, false);
     const body = await this.#json('/v1/openai/chat/completions', init, 'chat');
     return readChatResponse(body);
@@ -1405,11 +1413,18 @@ export class CrucibleClient {
       throw new CrucibleProtocolError('the chat completion stream carried no body');
     }
 
+    const onUsage = options.onUsage;
+    let usage: ChatUsage | null = null;
+    let finished = false;
     try {
       for await (const frame of readSseFrames(stream)) {
-        if (frame.data === DONE_SENTINEL) return;
-        const delta = readChatDelta(frame.data);
-        if (delta !== null) yield delta;
+        if (frame.data === DONE_SENTINEL) {
+          finished = true;
+          break;
+        }
+        const chunk = readChatChunk(frame.data);
+        if (chunk.usage !== null) usage = chunk.usage;
+        if (chunk.content !== null) yield chunk.content;
       }
     } catch (cause) {
       if (cause instanceof CrucibleError) throw cause;
@@ -1424,11 +1439,22 @@ export class CrucibleClient {
       await stream.cancel().catch(() => undefined);
     }
 
-    throw new CrucibleUnreachable(
-      this.url,
-      "the chat completion stream ended without OpenAI's [DONE] terminator; the " +
-        'answer is truncated',
-    );
+    if (!finished) {
+      throw new CrucibleUnreachable(
+        this.url,
+        "the chat completion stream ended without OpenAI's [DONE] terminator; the " +
+          'answer is truncated',
+      );
+    }
+    if (onUsage !== undefined) {
+      if (usage === null) {
+        throw new CrucibleProtocolError(
+          'the chat stream was asked for its usage (stream_options.include_usage) and ended ' +
+            'without a usage chunk',
+        );
+      }
+      onUsage(usage);
+    }
   }
 
   #chatRequest(options: ChatOptions, stream: boolean): RequestInit {
@@ -1482,6 +1508,21 @@ export class CrucibleClient {
         );
       }
       payload['chat_template_kwargs'] = { enable_thinking: given.thinking };
+    }
+    if (given.reasoningEffort !== undefined) {
+      if (!REASONING_EFFORTS.includes(given.reasoningEffort)) {
+        throw new CrucibleConfigError(
+          'reasoningEffort',
+          `must be one of ${REASONING_EFFORTS.join(', ')}, got ${JSON.stringify(given.reasoningEffort)}`,
+        );
+      }
+      payload['reasoning_effort'] = given.reasoningEffort;
+    }
+    if (given.onUsage !== undefined) {
+      if (typeof given.onUsage !== 'function') {
+        throw new CrucibleConfigError('onUsage', `must be a function, got ${typeof given.onUsage}`);
+      }
+      payload['stream_options'] = { include_usage: true };
     }
     if (given.prefill !== undefined) payload['prefill'] = requireText(given.prefill, 'prefill');
     if (given.form !== undefined) payload['form'] = requireText(given.form, 'form');
@@ -4425,17 +4466,28 @@ function readChatResponse(body: Json): ChatResponse {
     model: optStr(body, 'model', where),
     content: str(message, 'content', 'chat.choices[0].message'),
     finishReason,
-    usage:
-      usage === null
-        ? null
-        : {
-            promptTokens: optNum(usage, 'prompt_tokens', 'chat.usage'),
-            completionTokens: optNum(usage, 'completion_tokens', 'chat.usage'),
-            totalTokens: optNum(usage, 'total_tokens', 'chat.usage'),
-            cachedTokens: cachedTokensOf(usage),
-          },
+    usage: usage === null ? null : readChatUsage(usage),
   };
 }
+
+function readChatUsage(usage: Json): ChatUsage {
+  return {
+    promptTokens: optNum(usage, 'prompt_tokens', 'chat.usage'),
+    completionTokens: optNum(usage, 'completion_tokens', 'chat.usage'),
+    totalTokens: optNum(usage, 'total_tokens', 'chat.usage'),
+    cachedTokens: cachedTokensOf(usage),
+  };
+}
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 const DECIDE_TYPES = ['choice', 'score', 'yesno', 'likelihood'] as const;
 
@@ -5148,7 +5200,11 @@ function streamErrorFrame(error: unknown): CrucibleServerError {
   return new CrucibleServerError(200, code, `the chat stream failed mid-answer: ${message}`, error);
 }
 
-function readChatDelta(raw: string): string | null {
+/**
+ * One streamed chunk: its content delta, and the usage a stream asked for it carries (OpenAI's
+ * last chunk before `[DONE]`, with no choices; null on every other).
+ */
+function readChatChunk(raw: string): { content: string | null; usage: ChatUsage | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -5157,6 +5213,12 @@ function readChatDelta(raw: string): string | null {
   }
   const chunk = asObject(parsed, 'chat chunk');
   if (!('choices' in chunk) && 'error' in chunk) throw streamErrorFrame(chunk['error']);
+  const usageField = optObject(chunk, 'usage', 'chat chunk');
+  const usage = usageField === null ? null : readChatUsage(usageField);
+  return { content: readChatDelta(chunk), usage };
+}
+
+function readChatDelta(chunk: Json): string | null {
   const choices = asArray(field(chunk, 'choices', 'chat chunk'), 'chat chunk.choices');
   const first = choices[0];
   if (first === undefined) return null;
