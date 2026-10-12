@@ -7,6 +7,8 @@ notes.
 
 ## Unreleased
 
+## 2.0.8 — 2026-10-12
+
 - `yue2-3b-instrumental` is removed (Owen, 2026-10-12: "lets remove the adapter/fine tune and go back to base for everything"). Through 2.0.7 on the same scores and seeds it sang more, not less: Iron Lanterns 37.5 s of voice, and real spoken words where yue2-3b only hummed (jobs eea1405a vs 37d6f141). Every song is yue2-3b again; b-sides.toml no longer names it. A server that pulled its adapter keeps the 0.14 GB file under models/yue2-3b/<backend>/instrumental-lora until it is removed by hand.
 
 ## 2.0.7 — 2026-10-12
