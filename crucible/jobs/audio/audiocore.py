@@ -271,9 +271,6 @@ class Worker:
             # A cover's score in YuE2's own tokens (yue2_worker._given_plan); None for a
             # song the engine planned, or an engine that takes no score.
             "score_tokens": self.engine.score_tokens,
-            # The adapter folded into the weights for this song and the stages it was
-            # folded around (yue2_worker.YuE2Engine.adapter); None when none was.
-            "adapter": self.engine.adapter,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
             # keeps in host memory on purpose (yue2_worker.HostHomes), None for an engine

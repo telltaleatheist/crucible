@@ -545,8 +545,7 @@ JOB_DOCS: dict[str, JobDoc] = {
         summary="Makes sound from words: sound effects and instrumental music with "
         "Stable Audio 3, songs with sung vocals (or instrumentals) with YuE2.",
         model="An audio model id (GET /v1/catalog): `stable-audio-3-small-sfx` (sound "
-        "effects), `stable-audio-3-medium` (music), `yue2-3b` (songs), "
-        "`yue2-3b-instrumental` (instrumentals, PC only).",
+        "effects), `stable-audio-3-medium` (music), `yue2-3b` (songs).",
         params=AudioParams,
         inputs="None, except a YuE2 cover: exactly one input, the score `score` names "
         "(YuE2's two-voice ABC, uploaded or `{\"artifact\": {\"job_id\", \"name\"}}` of "
@@ -613,14 +612,6 @@ JOB_DOCS: dict[str, JobDoc] = {
             "tokens per second, and `audio.stages_at_cap` names the stages that ran to "
             "their cap (`[]` when none; null for Stable Audio). A stage at its cap still "
             "finishes the job and is never re-run (docs/AUDIO.md).",
-            "`yue2-3b-instrumental` is yue2-3b's weights with an adapter folded in while "
-            "it composes (the score is planned on the base), so its instrumentals do not "
-            "invent a singer. It takes what yue2-3b takes, with `instrumental: true` on "
-            "every request; anything else, a sung cover included, is refused `400 "
-            "instrumental_only` with `{param, sung_model}`. Its `done` event's "
-            "`audio.adapter` names the adapter (`hf_repo`, `revision`, `sha256`) and "
-            "`applied_to: [\"compose\"]`, and `audio.weights_of` the base (docs/AUDIO.md "
-            "\"yue2-3b-instrumental\").",
             "The Stable Audio repos are gated: until the licence is accepted on "
             "Hugging Face and the server has a token, `409 model_gated` says what to "
             "do (docs/AUDIO.md).",

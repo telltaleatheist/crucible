@@ -655,22 +655,12 @@
       });
     }
     if (field.kind === 'boolean') {
-      var box = el('input', {
+      return el('input', {
         id: id,
         name: field.name,
         type: 'checkbox',
         checked: field.default === true
       });
-      if (field.fixed) {
-        // A switch the model fixes (an instrumental-only model's `instrumental`): it shows
-        // what every request sends and cannot be changed, by a click or by a preset. Not
-        // `disabled`, which would leave it out of the request.
-        box.setAttribute('aria-readonly', 'true');
-        box.addEventListener('change', function () {
-          box.checked = field.default === true;
-        });
-      }
-      return box;
     }
     if (field.kind === 'choice') {
       var select = el('select', { id: id, name: field.name });

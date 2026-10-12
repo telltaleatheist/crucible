@@ -109,11 +109,9 @@ def test_b_sides_installs_the_envs_its_separator_and_its_songs_run_in() -> None:
         {"type": "rvc", "backends": both},
         {"type": "audio", "backends": both},
     ]
-    # Instrumentals: yue2-3b plus its adapter, on the PC's backend only (Owen, 2026-10-12).
     assert document["subjects"] == [
         {"kind": "denoise", "id": "vocals-roformer", "backends": both},
         {"kind": "model", "id": "yue2-3b", "backends": both},
-        {"kind": "model", "id": "yue2-3b-instrumental", "backends": ["cuda-linux"]},
     ]
     assert document["needs"] == []
 

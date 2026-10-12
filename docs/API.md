@@ -2109,7 +2109,7 @@ Puts an image model on the card and leaves it there, so the first job that uses 
 
 Makes sound from words: sound effects and instrumental music with Stable Audio 3, songs with sung vocals (or instrumentals) with YuE2.
 
-*Model:* An audio model id (GET /v1/catalog): `stable-audio-3-small-sfx` (sound effects), `stable-audio-3-medium` (music), `yue2-3b` (songs), `yue2-3b-instrumental` (instrumentals, PC only).
+*Model:* An audio model id (GET /v1/catalog): `stable-audio-3-small-sfx` (sound effects), `stable-audio-3-medium` (music), `yue2-3b` (songs).
 
 **Params**
 
@@ -2127,7 +2127,7 @@ Makes sound from words: sound effects and instrumental music with Stable Audio 3
 | `seed` | integer or null | no | `null` | 0 to 4294967295; null lets the server choose one and report it. |
 | `steps` | integer or null | no | `null` | Denoising steps, for models that take them (Stable Audio, up to its ceiling); null is the model's default. |
 | `cfg` | number or null | no | `null` | Guidance toward the tags and lyrics, for models that take it (YuE2, up to its ceiling); above 1 runs the model twice per token. Null is the model's default. |
-| `instrumental` | boolean or null | no | `null` | Songs (YuE2): true renders the planned melody on an instrument, so nothing is sung. Null is false. `yue2-3b-instrumental` makes nothing else and refuses any other value `instrumental_only`. |
+| `instrumental` | boolean or null | no | `null` | Songs (YuE2): true renders the planned melody on an instrument, so nothing is sung. Null is false. |
 | `score` | string or null | no | `null` | Covers (YuE2): the name of the job's input that carries a score (YuE2's two-voice ABC, uploaded or another job's held artifact), rendered instead of a score YuE2 plans. With `instrumental` its Vocal melody moves to the instrument and nothing is sung; without it the melody is sung with `lyrics`, written to the score's phrases. Never beside planning_lyrics, planning_set or a length range (docs/AUDIO.md "Covers"). |
 | `chords` | `'keep'` or `'strip'` or null | no | `null` | Covers (YuE2), only beside `score`: keep the score's chord symbols (YuE2 renders with cot `full`, the harmony fixed) or strip them (cot `melody`, the accompaniment free). Null keeps them for an instrumental cover and strips them for a sung one, as YuE2's own skill does. |
 | `format` | `'flac'` or `'wav'` or `'mp3'` | no | `'flac'` | The artifact: `flac` (24-bit), `wav` (24-bit PCM) or `mp3` (192 kbps CBR). |
@@ -2142,7 +2142,6 @@ Makes sound from words: sound effects and instrumental music with Stable Audio 3
 - Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), `audio_param_out_of_range`. A song's length follows its lyrics; `min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) are a length to aim at, never a guarantee: an instrumental planned from the pool has its set grown or cut by whole sections toward the range before its one score; any other song is made from its words as sent and the range only recorded. A song is always made in one pass and a range never fails it. Every YuE2 song's `done` event carries `audio.length` (`score_seconds`, its score's bars at its tempo; the range; `sized`; the structure; `in_range`) (docs/AUDIO.md "Song length").
 - A host with `[audio] low_vram = true` in its config holds only half of YuE2 on the card at a time; Crucible turns it on by itself on a card too small to hold YuE2 whole (an 8 GiB card), and `audio.low_vram` in the `done` event says which ran (docs/AUDIO.md).
 - A song's `done` event says how each token stage ended: `audio.decode_stages` gives `scoring` and `composing` their tokens, `cap`, `ended` (`eos`, or `cap` when the model never ended the stage), execution path, `low_vram` and tokens per second, and `audio.stages_at_cap` names the stages that ran to their cap (`[]` when none; null for Stable Audio). A stage at its cap still finishes the job and is never re-run (docs/AUDIO.md).
-- `yue2-3b-instrumental` is yue2-3b's weights with an adapter folded in while it composes (the score is planned on the base), so its instrumentals do not invent a singer. It takes what yue2-3b takes, with `instrumental: true` on every request; anything else, a sung cover included, is refused `400 instrumental_only` with `{param, sung_model}`. Its `done` event's `audio.adapter` names the adapter (`hf_repo`, `revision`, `sha256`) and `applied_to: ["compose"]`, and `audio.weights_of` the base (docs/AUDIO.md "yue2-3b-instrumental").
 - The Stable Audio repos are gated: until the licence is accepted on Hugging Face and the server has a token, `409 model_gated` says what to do (docs/AUDIO.md).
 - The model comes off the card when the job ends unless something holds it. To run several jobs without a reload between them, open a queue session first (POST /v1/queue/sessions, docs/QUEUE.md) and close it at the end.
 - A model or env not installed yet is installed on submit where the server allows it: the submit answers 409 `installing`; submit again when it is done.

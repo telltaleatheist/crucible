@@ -71,8 +71,6 @@ class StableAudio3Engine:
     length = None
     # It takes no score to cover (yue2_worker's `score_tokens`).
     score_tokens = None
-    # No manifest folds an adapter into Stable Audio (yue2_worker's `adapter`).
-    adapter = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:

@@ -193,51 +193,6 @@ def check_audio_file(path: Path, audio_format: str) -> None:
         )
 
 
-def adapter_request(needs: "Needs") -> dict[str, Any] | None:
-    """The load request's `adapter`: the file in its companion's folder, what names its
-    bytes (the worker re-hashes it before trusting it), its shape and the stages it is
-    folded around; null for a model that runs its weights as they are."""
-    adapter = needs.spec.adapter
-    if adapter is None:
-        return None
-    folder = audioweights.companion_dir(needs.weights_dir, adapter.companion)
-    return {
-        **adapter.identity(),
-        "path": str(folder / adapter.file.target),
-        "layers": adapter.layers,
-        "targets": list(adapter.targets),
-        "applies_to": list(adapter.applies_to),
-    }
-
-
-def verified_adapter(needs: "Needs", said: dict[str, Any] | None) -> dict[str, Any] | None:
-    """What the worker says it folded for this song, held to the manifest: the same bytes
-    (sha256) around exactly the stages the manifest names, or the song is not a success.
-    A model with no adapter must have folded none."""
-    adapter = needs.spec.adapter
-    if adapter is None:
-        if said is not None:
-            raise JobError(
-                "worker_failed",
-                f"the audio worker says it folded an adapter ({said.get('name')!r}) into "
-                f"{needs.manifest.id}, whose manifest names none",
-            )
-        return None
-    wanted = {**adapter.identity(), "applied_to": list(adapter.applies_to)}
-    differs = sorted(
-        key for key, value in wanted.items() if said is None or said.get(key) != value
-    )
-    if differs:
-        raise JobError(
-            "worker_failed",
-            f"{needs.manifest.id} composes with its adapter {adapter.companion.name!r} folded "
-            f"in, and the worker's account of this song differs in {differs}: "
-            f"{'it folded nothing' if said is None else said}. The song is not kept as made "
-            "by this model",
-        )
-    return {**wanted, "linears": said["linears"]}
-
-
 def start_audio_session(
     python: Path,
     needs: "Needs",
@@ -270,7 +225,6 @@ def start_audio_session(
             "memory_cap_bytes": workers.torch_memory_cap(spec.backend, needs.need_bytes),
             "memory_budget_bytes": needs.need_bytes,
             "low_vram": needs.low_vram,
-            "adapter": adapter_request(needs),
         },
         ready_silence_timeout=ready_silence_timeout,
         on_ready=on_ready,
@@ -541,7 +495,6 @@ class AudioJobType(ResidentWorker):
             # rendered nothing and is still resident.
             raise JobError(refused["code"], refused["message"])
         check_audio_file(output, params.format)
-        adapter = verified_adapter(needs, result["adapter"])
         ctx.artifact(output.name, output)
         wrote_score = bool(result.get("score_path")) and score.is_file()
         if wrote_score:
@@ -550,9 +503,7 @@ class AudioJobType(ResidentWorker):
             ctx.artifact(cover.GIVEN_ARTIFACT, given.path)
         ctx.progress(1.0, made_words(result.get("audio_seconds"), result["decode_stages"]), stage="done")
         ctx.done_extra(
-            audio=effective_params(
-                params, needs, settled, result, output.name, wrote_score, given, adapter
-            ),
+            audio=effective_params(params, needs, settled, result, output.name, wrote_score, given),
             resident=self._residency.resident_id,
         )
 
@@ -667,13 +618,6 @@ def kept_request(
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
-        # The adapter this model folds in around composing (repo, revision, sha256); null
-        # for a model that runs its weights as they are.
-        "adapter": (
-            None
-            if needs.spec.adapter is None
-            else {**needs.spec.adapter.identity(), "applies_to": list(needs.spec.adapter.applies_to)}
-        ),
         "backend": needs.spec.backend,
         "recorded": utcnow(),
         "reproduce": (
@@ -693,7 +637,6 @@ def effective_params(
     artifact: str,
     wrote_score: bool,
     given: Given | None = None,
-    adapter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = needs.spec
     notes = result.get("notes")
@@ -726,12 +669,6 @@ def effective_params(
         "kind": needs.manifest.kind,
         "hf_repo": spec.hf_repo,
         "revision": spec.revision,
-        # The model whose weights these are (`weights_of`), and the adapter folded into
-        # them: its repo, revision and sha256, and the stages it was folded around as the
-        # worker reported and the server held to the manifest (verified_adapter). Null
-        # for a model that runs its weights as they are.
-        "weights_of": needs.manifest.weights_of,
-        "adapter": adapter,
         "backend": spec.backend,
         "engine": spec.engine,
         "dtype": spec.dtype,

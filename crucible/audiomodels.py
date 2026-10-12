@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-import re
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -84,12 +83,6 @@ _MODEL_REQUIRED: dict[str, type] = {
 }
 _MODEL_OPTIONAL: dict[str, type] = {
     "keep_calls_together": bool,
-    # The model whose weights these are (FROM, in Ollama's words): its main repo and its
-    # companions, pulled once into that model's folder. This model adds only companions
-    # of its own beside them (an adapter: [backends.<kind>.adapter]).
-    "weights_of": str,
-    # The model makes instrumentals only: every request sends `instrumental: true`.
-    "instrumental_only": bool,
 }
 _BACKEND_REQUIRED: dict[str, Any] = {
     "engine": str,
@@ -118,30 +111,7 @@ _BACKEND_OPTIONAL: dict[str, Any] = {
     "low_vram_memory_note": str,
     "host_memory_bytes_estimate": int,
     "host_memory_note": str,
-    "adapter": dict,
 }
-_ADAPTER_REQUIRED: dict[str, Any] = {
-    "companion": str,
-    "file": str,
-    "rank": int,
-    "scale": (int, float),
-    "layers": int,
-    "targets": list,
-    "applies_to": list,
-    "note": str,
-}
-# The stages an adapter can be folded around. Only composing is built: YuE2 writes the
-# song's tokens and synthesizes from them with one backbone, so "compose" is both passes
-# (yue2_worker.YuE2Engine._stages), and the score is always planned on the base weights
-# (docs/AUDIO.md "yue2-3b-instrumental").
-ADAPTER_STAGES: tuple[str, ...] = ("compose",)
-# Where an adapter can be folded: through the CUDA worker's host homes, which hold the
-# base weights it is taken out again from (yue2_worker.HostHomes.folded). The Mac's worker
-# keeps no host home, so it has no exact way back to the base yet.
-ADAPTER_BACKENDS: frozenset[str] = frozenset({CUDA_LINUX})
-# One linear inside every layer, named as the adapter file names it (`self_attn.q_proj`);
-# the worker finds it at `model.layers.<i>.<target>`.
-ADAPTER_TARGET_PATTERN = re.compile(r"^[a-z_]+\.[a-z_]+$")
 _COMPANION_REQUIRED: dict[str, Any] = {
     "name": str,
     "hf_repo": str,
@@ -191,46 +161,6 @@ class Companion:
             "revision": self.revision,
             "files": [entry.target for entry in self.files],
             "bytes": self.bytes,
-        }
-
-
-@dataclass(frozen=True)
-class Adapter:
-    """A low-rank delta the worker folds into the base's linears in memory, around the
-    stages the manifest names, and takes out again after them (W += scale * B @ A, never
-    on disk: weights_manifest.json's hashes stay the base's). Its file is a companion of
-    the arm, pulled and hash-checked like any other part."""
-
-    companion: Companion
-    file: CompanionFile
-    rank: int
-    scale: float
-    layers: int
-    targets: tuple[str, ...]
-    applies_to: tuple[str, ...]
-    note: str
-
-    def identity(self) -> dict[str, Any]:
-        """What names this adapter's bytes: the record a song carries and the worker is
-        held to (its sha256, re-hashed at load)."""
-        return {
-            "name": self.companion.name,
-            "hf_repo": self.companion.hf_repo,
-            "revision": self.companion.revision,
-            "file": self.file.source,
-            "sha256": self.file.sha256,
-            "bytes": self.file.bytes,
-            "rank": self.rank,
-            "scale": self.scale,
-        }
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            **self.identity(),
-            "layers": self.layers,
-            "targets": list(self.targets),
-            "applies_to": list(self.applies_to),
-            "note": self.note,
         }
 
 
@@ -290,9 +220,6 @@ class AudioBackendSpec:
     # model that keeps nothing there worth weighing.
     host_memory_bytes_estimate: int | None = None
     host_memory_note: str | None = None
-    # The delta folded into the base around some stages (`[backends.<kind>.adapter]`);
-    # None for a model that runs its weights as they are.
-    adapter: Adapter | None = None
 
     @property
     def device(self) -> str:
@@ -331,7 +258,6 @@ class AudioBackendSpec:
             "low_vram_memory_note": self.low_vram_memory_note,
             "host_memory_bytes_estimate": self.host_memory_bytes_estimate,
             "host_memory_note": self.host_memory_note,
-            "adapter": None if self.adapter is None else self.adapter.to_dict(),
         }
 
 
@@ -351,11 +277,6 @@ class AudioManifest:
     # A model slow enough to load that its queued calls run back to back before anything
     # that would take it off the card (crucible/keeptogether.py, docs/QUEUE.md).
     keep_calls_together: bool = False
-    # The model whose weights these are, and that model (resolved on load); None for a
-    # model that owns its download.
-    weights_of: str | None = None
-    weights_base: "AudioManifest | None" = field(default=None, compare=False, repr=False)
-    instrumental_only: bool = False
 
     @property
     def pull_command(self) -> str:
@@ -369,34 +290,8 @@ class AudioManifest:
     def takes_lyrics(self) -> bool:
         return self.kind in LYRICS_KINDS
 
-    @property
-    def makes(self) -> str:
-        """What the model makes, in words a page shows."""
-        if self.instrumental_only:
-            return "instrumental songs (nothing is sung)"
-        return KIND_WORDS[self.kind]
-
     def aliases(self) -> "tuple[AudioManifest, ...]":
-        """The models that share this one's weights (`weights_of`), so removing it is
-        refused while one of them is pulled (weights.refuse_if_shared)."""
-        if self.weights_of is not None:
-            return ()
-        found = load_all_audio_manifests(self.path.parent)
-        return tuple(other for other in found.values() if other.weights_of == self.id)
-
-    def extra_files(self, backend_kind: str) -> tuple[str, ...]:
-        """Main-repo files this model adds to its base's: none, since an audio model that
-        shares weights declares exactly its base's (`_resolve_weights_of`)."""
         return ()
-
-    def own_companions(self, backend_kind: str) -> tuple[Companion, ...]:
-        """The companions this model owns: all of them, or for a model that shares its
-        base's weights only those its base does not declare (its adapter)."""
-        spec = self.spec(backend_kind)
-        if self.weights_base is None:
-            return spec.companions
-        shared = self.weights_base.spec(backend_kind).companions
-        return tuple(companion for companion in spec.companions if companion not in shared)
 
     def supports(self, backend_kind: str) -> bool:
         return backend_kind in self.backends
@@ -419,8 +314,6 @@ class AudioManifest:
             "licence": self.licence,
             "licence_url": self.licence_url,
             "commercial_use": self.commercial_use,
-            "weights_of": self.weights_of,
-            "instrumental_only": self.instrumental_only,
             "backends": {k: v.to_dict() for k, v in sorted(self.backends.items())},
         }
 
@@ -477,16 +370,6 @@ def _parse_model(model: dict[str, Any], path: Path, expected_id: str) -> str:
     if model["kind"] not in KINDS:
         raise AudioManifestError(
             f"{path.name}: kind {model['kind']!r} is not one of {list(KINDS)}"
-        )
-    weights_of = model.get("weights_of")
-    if weights_of is not None and (not MODEL_ID_PATTERN.match(weights_of) or weights_of == model_id):
-        raise AudioManifestError(
-            f"{path.name}: model.weights_of {weights_of!r} must name another audio model"
-        )
-    if model.get("instrumental_only") and model["kind"] != SONG:
-        raise AudioManifestError(
-            f"{path.name}: instrumental_only is for a song model, whose `instrumental` "
-            f"switch it fixes; this one makes {KIND_WORDS[model['kind']]}"
         )
     return model_id
 
@@ -654,55 +537,6 @@ def _companion(where: str, entry: Any) -> Companion:
     return Companion(entry["name"], entry["hf_repo"], entry["revision"], files)
 
 
-def _adapter_file(where: str, table: dict[str, Any], companions: tuple[Companion, ...]) -> tuple[Companion, CompanionFile]:
-    carrier = next((c for c in companions if c.name == table["companion"]), None)
-    if carrier is None:
-        raise AudioManifestError(
-            f"{where}: companion {table['companion']!r} is not one of this arm's companions "
-            f"{[c.name for c in companions]}; the adapter's file is pulled as a companion"
-        )
-    found = next((f for f in carrier.files if f.target == table["file"]), None)
-    if found is None:
-        raise AudioManifestError(
-            f"{where}: companion {carrier.name!r} places {[f.target for f in carrier.files]}, "
-            f"not {table['file']!r}"
-        )
-    return carrier, found
-
-
-def _adapter(where: str, kind: str, block: dict[str, Any], companions: tuple[Companion, ...]) -> Adapter | None:
-    table = block.get("adapter")
-    if table is None:
-        return None
-    where = f"{where} adapter"
-    check_table(where, table, _ADAPTER_REQUIRED, error=AudioManifestError)
-    if kind not in ADAPTER_BACKENDS or block["engine"] != YUE2:
-        raise AudioManifestError(
-            f"{where}: an adapter is folded through the YuE2 worker's host homes on "
-            f"{sorted(ADAPTER_BACKENDS)}, not on {kind} with engine {block['engine']!r}"
-        )
-    carrier, found = _adapter_file(where, table, companions)
-    targets = tuple(table["targets"])
-    if not targets or len(set(targets)) != len(targets) or not all(
-        isinstance(t, str) and ADAPTER_TARGET_PATTERN.match(t) for t in targets
-    ):
-        raise AudioManifestError(
-            f"{where}: targets must be distinct names such as 'self_attn.q_proj', got {list(targets)}"
-        )
-    if table["applies_to"] != list(ADAPTER_STAGES):
-        raise AudioManifestError(
-            f"{where}: applies_to {table['applies_to']} is not built; an adapter is folded "
-            f"around {list(ADAPTER_STAGES)} only, and the score is planned on the base"
-        )
-    if table["rank"] <= 0 or table["layers"] <= 0 or not table["scale"] > 0 or not table["note"].strip():
-        raise AudioManifestError(f"{where}: rank, layers and scale must be positive and note said")
-    return Adapter(
-        companion=carrier, file=found, rank=table["rank"], scale=float(table["scale"]),
-        layers=table["layers"], targets=targets, applies_to=tuple(table["applies_to"]),
-        note=table["note"],
-    )
-
-
 def _parse_backend(path: Path, kind: str, block: Any) -> AudioBackendSpec:
     where = f"{path.name} [backends.{kind}]"
     if not isinstance(block, dict):
@@ -742,19 +576,7 @@ def _parse_backend(path: Path, kind: str, block: Any) -> AudioBackendSpec:
         low_vram_memory_note=block.get("low_vram_memory_note"),
         host_memory_bytes_estimate=block.get("host_memory_bytes_estimate"),
         host_memory_note=block.get("host_memory_note"),
-        adapter=_adapter(where, kind, block, companions),
     )
-
-
-def _check_instrumental_only(path: Path, model: dict[str, Any], backends: dict[str, AudioBackendSpec]) -> None:
-    if not model.get("instrumental_only"):
-        return
-    for kind, spec in sorted(backends.items()):
-        if "instrumental" not in spec.takes:
-            raise AudioManifestError(
-                f"{path.name} [backends.{kind}]: an instrumental_only model takes "
-                "`instrumental`, which every request sends as true"
-            )
 
 
 def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AudioManifest:
@@ -765,7 +587,6 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AudioManif
         kind: _parse_backend(path, kind, block)
         for kind, block in document["backends"].items()
     }
-    _check_instrumental_only(path, model, backends)
     return AudioManifest(
         id=model_id,
         family=model["family"],
@@ -777,8 +598,6 @@ def _parse(document: dict[str, Any], path: Path, expected_id: str) -> AudioManif
         backends=backends,
         path=path,
         keep_calls_together=model.get("keep_calls_together", False),
-        weights_of=model.get("weights_of"),
-        instrumental_only=model.get("instrumental_only", False),
     )
 
 
@@ -802,47 +621,7 @@ def load_audio_manifest(model_id: str, directory: Path | None = None) -> AudioMa
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise AudioManifestError(f"could not read {path}: {exc}") from exc
-    return _resolve_weights_of(parse_audio_manifest(text, path, model_id), root)
-
-
-def _check_shared_arm(where: str, kind: str, spec: AudioBackendSpec, base: "AudioManifest") -> None:
-    base_spec = base.backends.get(kind)
-    if base_spec is None:
-        raise AudioManifestError(f"{where}: {base.id!r} has no {kind} block to share")
-    same = ("engine", "hf_repo", "revision", "dtype", "files")
-    differs = [key for key in same if getattr(spec, key) != getattr(base_spec, key)]
-    if differs:
-        raise AudioManifestError(
-            f"{where}: on {kind} its {', '.join(differs)} differ from {base.path.name}'s; a "
-            "model that shares weights declares the same main download"
-        )
-    missing = [c.name for c in base_spec.companions if c not in spec.companions]
-    if missing:
-        raise AudioManifestError(
-            f"{where}: on {kind} it lacks {base.id!r}'s companion(s) {missing} as "
-            f"{base.path.name} pins them; the shared folder holds them once, at one pin"
-        )
-
-
-def _resolve_weights_of(manifest: AudioManifest, root: Path) -> AudioManifest:
-    """FROM a base: the base's manifest is read beside this one, and every arm must pin
-    the base's main download and companions exactly, so pulling this model fetches only
-    its own companions when the base is there (weights.pull, `_pull_alias`)."""
-    if manifest.weights_of is None:
-        return manifest
-    where = manifest.path.name
-    base_path = root / f"{manifest.weights_of}.toml"
-    if not base_path.is_file():
-        raise AudioManifestError(f"{where}: weights_of {manifest.weights_of!r} has no manifest beside it")
-    base = parse_audio_manifest(base_path.read_text(encoding="utf-8"), base_path, manifest.weights_of)
-    if base.weights_of is not None or base.family != manifest.family:
-        raise AudioManifestError(
-            f"{where}: weights_of names {base.id!r}, which must own its weights and be of "
-            f"family {manifest.family!r}"
-        )
-    for kind, spec in sorted(manifest.backends.items()):
-        _check_shared_arm(where, kind, spec, base)
-    return replace(manifest, weights_base=base)
+    return parse_audio_manifest(text, path, model_id)
 
 
 def load_all_audio_manifests(directory: Path | None = None) -> dict[str, AudioManifest]:
@@ -878,11 +657,8 @@ def engines_on(backend_kind: str) -> tuple[str, ...]:
 
 
 __all__ = [
-    "ADAPTER_BACKENDS",
-    "ADAPTER_STAGES",
     "AUDIO_BACKEND_ENGINES",
     "AUDIO_DIR_ENV",
-    "Adapter",
     "AudioBackendSpec",
     "AudioManifest",
     "AudioManifestError",

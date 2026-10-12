@@ -119,8 +119,7 @@ class AudioParams(BaseModel):
     instrumental: bool | None = Field(
         default=None,
         description="Songs (YuE2): true renders the planned melody on an instrument, "
-        "so nothing is sung. Null is false. `yue2-3b-instrumental` makes nothing else "
-        "and refuses any other value `instrumental_only`.",
+        "so nothing is sung. Null is false.",
     )
     score: str | None = Field(
         default=None,
@@ -438,28 +437,9 @@ def _refuse_ranges(params: AudioParams, manifest: AudioManifest, spec: AudioBack
             )
 
 
-def _refuse_sung(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
-    """An instrumental-only model (`instrumental_only`): its adapter writes music without
-    a singer, so a song to sing - planned or a cover - is refused by name and pointed at
-    the model it is a delta of, never quietly made instrumental."""
-    if not manifest.instrumental_only or params.instrumental is True:
-        return
-    base = manifest.weights_of or "a song model"
-    raise _refusal(
-        "instrumental_only",
-        f"{manifest.id} makes instrumentals only: its adapter composes without a singer. "
-        f"Send `instrumental: true`, or send a sung song to {base}",
-        manifest,
-        spec,
-        param="instrumental",
-        sung_model=manifest.weights_of,
-    )
-
-
 def refuse_what_the_model_cannot_take(
     params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec
 ) -> None:
-    _refuse_sung(params, manifest, spec)
     _refuse_text(params, manifest, spec)
     for param in OPTIONAL_PARAMS:
         if getattr(params, param) is not None and param not in spec.takes:
