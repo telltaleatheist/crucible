@@ -1,0 +1,35 @@
+[module]
+name = "storyboard"
+
+# Storyboard turns a song or a recording into a video: it transcribes and aligns the
+# words, draws a still per scene and animates it. Its prompt drafting goes to Claude
+# through the `anthropic` upstream, which is a key in Crucible's settings, not a module entry.
+[[job_types]]
+type = "asr"
+
+[[job_types]]
+type = "align"
+
+[[job_types]]
+type = "image"
+
+# A card that cannot hold a video model skips it by name (crucible/tasks/modulefit.py)
+# rather than download weights it cannot run.
+[[job_types]]
+type = "video"
+
+[[subjects]]
+kind = "model"
+id = "qwen3-asr-1.7b"
+
+[[subjects]]
+kind = "model"
+id = "qwen3-aligner"
+
+[[subjects]]
+kind = "model"
+id = "qwen-image-2.1"
+
+[[subjects]]
+kind = "model"
+id = "ltx-2.5-distilled"

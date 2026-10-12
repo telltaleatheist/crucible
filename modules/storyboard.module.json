@@ -1,0 +1,69 @@
+{
+  "name": "storyboard",
+  "version": "2.0.9+b1886435aea6",
+  "job_types": [
+    {
+      "type": "asr",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "type": "align",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "type": "image",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "type": "video",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    }
+  ],
+  "needs": [],
+  "subjects": [
+    {
+      "kind": "model",
+      "id": "qwen3-asr-1.7b",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "qwen3-aligner",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "qwen-image-2.1",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    },
+    {
+      "kind": "model",
+      "id": "ltx-2.5-distilled",
+      "backends": [
+        "cuda-linux",
+        "mlx-darwin"
+      ]
+    }
+  ]
+}
