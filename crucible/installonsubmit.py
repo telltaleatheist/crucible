@@ -138,7 +138,8 @@ class InstallOnSubmit:
         model_required: bool,
     ) -> Need:
         capability = ALL_JOB_TYPES[job_type]
-        if env_installed(self._config, self._backend, installer, engine):
+        built = env_installed(self._config, self._backend, installer, engine)
+        if built:
             running = self._tasks.running
             earlier = None if running is None else self._task_needs.get(running.id)
             if earlier is not None and (earlier.installer, earlier.narrator_engine) == (
@@ -146,7 +147,12 @@ class InstallOnSubmit:
                 engine,
             ):
                 return earlier
-            raise refusal
+            if refusal.code in ENV_REFUSALS:
+                raise refusal
+            # The env is built and the type is off (`job_type_disabled`, not_installed):
+            # the same module as a build, whose install step skips the env and whose
+            # enable steps turn the type on (owens-pc, 2.0.8: a video job was refused
+            # with the video env on disk, and nothing a client could send turned it on).
 
         decisions, card, pool = live_decisions(self._config, self._backend)
         total = self._backend.gpu.vram_bytes
@@ -164,7 +170,9 @@ class InstallOnSubmit:
             raise ApiError(
                 400,
                 "job_type_disabled",
-                f"job type {job_type!r} is not installed, and it will not be: "
+                f"job type {job_type!r} is not "
+                + ("turned on" if built else "installed")
+                + ", and it will not be: "
                 f"on this card ({plan['card_words']}) {lines} Installing it "
                 "would put a type on this server whose first job fails.",
                 {
@@ -196,7 +204,7 @@ class InstallOnSubmit:
             job_type=job_type,
             installer=installer,
             narrator_engine=engine,
-            env_bytes=_env_bytes(installer, engine, self._backend.kind),
+            env_bytes=None if built else _env_bytes(installer, engine, self._backend.kind),
             pulls=tuple(pulls),
             plan="\n".join(words + lines),
         )
@@ -428,7 +436,7 @@ class InstallOnSubmit:
             at = names.index(current)
             rest = [phrases[name] for name in names[at + 1:]]
             return phrases[current] + pace + (f", then {_joined(rest)}" if rest else "")
-        if current == "reload" or str(current).startswith("enable "):
+        if current == "reload" or str(current).startswith("enable ") or not phrases:
             return f"turning {need.job_type} on"
         return _then(list(phrases.values()))
 

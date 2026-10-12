@@ -504,7 +504,8 @@ TASK_BUSY_RESPONSES: dict[int | str, dict[str, Any]] = {
         "model": ErrorEnvelope,
         "description": (
             "Refused by name: another task is running (`task_busy`), or the task asks "
-            "for what is already true (`already_installed`, `job_type_installed`)."
+            "for what is already true (`already_installed`). An install of an env "
+            "that is already built is not refused: it turns the type on."
         ),
     },
 }

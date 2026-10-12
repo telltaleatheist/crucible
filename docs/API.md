@@ -655,7 +655,7 @@ The last few tasks, newest first. In memory; a restart forgets them.
 
 ### `POST /v1/tasks`
 
-Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name. One task at a time (`409 task_busy` names the one running). Nothing on the card stops a task: an install ends by adding the job types it turned on, never by replacing one a job is running on. A module judges each of its job types and subjects against this card first and skips what cannot run here (a `skipped` event, and rows in the task's `unmet`), then turns on the job type that serves each entry (`enable <type>` steps), so one module leaves the server ready to serve what it asked for.
+Admit one operator task (pull, install, module, engine or engine-restart), or refuse by name. One task at a time (`409 task_busy` names the one running). Nothing on the card stops a task: an install ends by adding the job types it turned on, never by replacing one a job is running on. A module judges each of its job types and subjects against this card first and skips what cannot run here (a `skipped` event, and rows in the task's `unmet`), then turns on the job type that serves each entry (`enable <type>` steps), so one module leaves the server ready to serve what it asked for. An install whose env is already built builds nothing and takes the same `enable <type>` steps, so it is the request a `job_type_disabled` refusal names whether or not the env is on disk.
 
 *Door:* token + `X-Crucible-Api: 1`
 

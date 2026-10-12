@@ -293,7 +293,6 @@ test('task_busy is a refusal the caller can act on, and it travels', async () =>
   );
   assert.equal(isServerSpecificRefusal('task_busy'), true);
   assert.equal(isServerSpecificRefusal('already_installed'), true);
-  assert.equal(isServerSpecificRefusal('job_type_installed'), true);
   // A misspelled id is misspelled on every machine, so a walk must not retry.
   assert.equal(isServerSpecificRefusal('unknown_subject'), false);
   assert.equal(isServerSpecificRefusal('invalid_module'), false);
