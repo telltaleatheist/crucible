@@ -592,6 +592,15 @@ JOB_DOCS: dict[str, JobDoc] = {
             "planning budget `score_too_many_tokens`. `audio.cover` records the kind, "
             "source (`upload` or `reference`), cot, chords, `score_tokens` and "
             "`score_seconds`.",
+            "With `cfg` above 1 YuE2 composes against a negative branch: its stock one is "
+            "its instruction and the score alone. `negative_tags` and `negative_lyrics` "
+            "(YuE2, either alone) write it instead: the song's own request with those tags "
+            "and lyrics in place of its own, the same score, cot and seed (the one not sent "
+            "is empty). The words are the client's; Crucible composes none. Sent with cfg "
+            "1, where no negative branch runs, they are refused `audio_param_conflict`. "
+            "`audio.negative` is `{tags, lyrics}`, or null for the stock negative, and "
+            "`audio.negative_prefix_tokens` that branch's length (null at cfg 1) "
+            "(docs/AUDIO.md \"The negative branch\").",
             "Past a model's ceiling: `audio_too_long` (120 s sfx, 380 s music), "
             "`audio_param_out_of_range`. A song's length follows its lyrics; "
             "`min_duration_s` and `max_duration_s` (YuE2, either alone, 30 to 360 s) are a "

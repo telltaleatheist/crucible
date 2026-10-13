@@ -34,7 +34,7 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords", "negative_tags", "negative_lyrics"]
 default_cfg = 1.0
 max_cfg = 20.0
 # With `[audio] low_vram = true` in a host's config (for a card too small to hold YuE2
@@ -48,7 +48,7 @@ host_memory_note = "measured 2026-10-10 on the RTX 3090 Ti (WSL guest of 13 GB) 
 
 [backends.cuda-linux.not_taken]
 duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); send min_duration_s and max_duration_s to aim at a length (they size a pool-planned instrumental and are recorded for every song)"
-negative_prompt = "YuE2 has no negative prompt; with cfg above 1 it guides away from its instruction alone"
+negative_prompt = "YuE2 has no single negative prompt; its CFG negative branch is written as negative_tags and negative_lyrics (with cfg above 1), and without them it guides away from its instruction and the score alone"
 steps = "YuE2 writes a score and codec tokens one at a time and then runs a fixed 32-step flow-matching stage; there is no step count to choose"
 
 [[backends.cuda-linux.companions]]
@@ -97,13 +97,13 @@ files = [
 sample_rate = 48000
 channels = 2
 max_duration_s = 360
-takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords"]
+takes = ["cfg", "instrumental", "min_duration_s", "max_duration_s", "score", "chords", "negative_tags", "negative_lyrics"]
 default_cfg = 1.0
 max_cfg = 20.0
 
 [backends.mlx-darwin.not_taken]
 duration_s = "a YuE2 song is as long as its lyrics make it (up to about 6 minutes: 9,000 codec tokens at 25 a second); send min_duration_s and max_duration_s to aim at a length (they size a pool-planned instrumental and are recorded for every song)"
-negative_prompt = "YuE2 has no negative prompt; with cfg above 1 it guides away from its instruction alone"
+negative_prompt = "YuE2 has no single negative prompt; its CFG negative branch is written as negative_tags and negative_lyrics (with cfg above 1), and without them it guides away from its instruction and the score alone"
 steps = "YuE2 writes a score and codec tokens one at a time and then runs a fixed 32-step flow-matching stage; there is no step count to choose"
 
 [[backends.mlx-darwin.companions]]

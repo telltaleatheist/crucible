@@ -76,6 +76,7 @@ import {
   type ImageOptions,
   type ImageResult,
   type AudioCover,
+  type AudioNegative,
   type AudioDecodeStage,
   type AudioLength,
   type AudioPlanningLyrics,
@@ -2073,6 +2074,8 @@ export class CrucibleClient {
       ['minDurationS', 'min_duration_s'],
       ['maxDurationS', 'max_duration_s'],
       ['chords', 'chords'],
+      ['negativeTags', 'negative_tags'],
+      ['negativeLyrics', 'negative_lyrics'],
     ];
     for (const [key, wire] of optional) {
       const value = given[key];
@@ -3815,6 +3818,10 @@ export function readAudioResult(done: DoneData): AudioResult {
     score: nullableStr(audio, 'score', at),
     // Absent from a server older than covers; null on a newer one for any song not a cover.
     cover: readAudioCover(optObject(audio, 'cover', at), `${at}.cover`),
+    // Absent from a server older than the written negative branch; null on a newer one for
+    // the stock negative.
+    negative: readAudioNegative(optObject(audio, 'negative', at), `${at}.negative`),
+    negativePrefixTokens: optNum(audio, 'negative_prefix_tokens', at),
     audioSeconds: nullableNum(audio, 'audio_seconds', at),
     sampleRate: nullableNum(audio, 'sample_rate', at),
     channels: nullableNum(audio, 'channels', at),
@@ -3840,6 +3847,11 @@ function readPlanningLyrics(planning: Json | null, where: string): AudioPlanning
     resized: bool(planning, 'resized', where),
     lyrics: str(planning, 'lyrics', where),
   };
+}
+
+function readAudioNegative(negative: Json | null, where: string): AudioNegative | null {
+  if (negative === null) return null;
+  return { tags: str(negative, 'tags', where), lyrics: str(negative, 'lyrics', where) };
 }
 
 function readAudioCover(cover: Json | null, where: string): AudioCover | null {

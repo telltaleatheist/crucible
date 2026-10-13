@@ -429,6 +429,63 @@ def decode_facts(timing: dict, truncated: bool, cap: int, low_vram: bool) -> dic
     }
 
 
+@contextlib.contextmanager
+def written_negative(plan, negative: dict, tokenizer):
+    """While the body runs, the composing pass's CFG negative branch is the one the client
+    wrote (docs/AUDIO.md "The negative branch"): the prefix of the song's own SongRequest -
+    the same score (the plan's exact abc ids), cot, seed, cfg and id - with `negative`'s
+    tags as its style and its lyrics as its lyrics. Yields that prefix.
+
+    yue2-infer builds the negative inside `YuE2Pipeline.generate_semantic`, from
+    `yue2.protocol.negative_prefix` (the instruction and the score, no tags, no lyrics), and
+    takes no negative from its caller. Its own check that the plan's prefix is the request's
+    and everything after it are what make a song, so rather than re-write that method here
+    the one name it calls is replaced, for this one call, in `yue2.pipeline` only - the
+    installed package is never edited - and put back however the body ends. The
+    replacement answers only for this plan's request and abc ids, and the body must call
+    it exactly once; a yue2-infer that builds its negative some other way is refused
+    before a token is written."""
+    import dataclasses
+
+    import yue2.pipeline as pipeline
+    from yue2 import protocol
+
+    stock = protocol.negative_prefix
+    if (
+        getattr(pipeline, "negative_prefix", None) is not stock
+        or "negative_prefix" not in pipeline.YuE2Pipeline.generate_semantic.__code__.co_names
+    ):
+        raise RuntimeError(
+            "the worker writes a song's CFG negative branch through the negative_prefix "
+            "yue2-infer's YuE2Pipeline.generate_semantic calls (yue2.pipeline.negative_prefix, "
+            "which is yue2.protocol.negative_prefix); this yue2-infer builds its negative "
+            "some other way. Bring the env to its recipe (`crucible install audio`)"
+        )
+    request = dataclasses.replace(plan.request, style=negative["tags"], lyrics=negative["lyrics"])
+    prefix = protocol.token_prefixes(request, tokenizer, plan.abc_ids)
+    calls: list = []
+
+    def negative_prefix(positive, _tokenizer, abc_ids=None):
+        if positive is not plan.request or abc_ids is None or list(abc_ids) != list(plan.abc_ids):
+            raise RuntimeError(
+                "the written negative branch was asked for by a request or score other than "
+                "the plan it was built from; both branches compose from the plan's own abc ids"
+            )
+        calls.append(len(prefix))
+        return list(prefix)
+
+    pipeline.negative_prefix = negative_prefix
+    try:
+        yield prefix
+    finally:
+        pipeline.negative_prefix = stock
+    if len(calls) != 1:
+        raise RuntimeError(
+            f"yue2-infer asked for the negative branch {len(calls)} times composing one song; "
+            "the worker writes it for exactly one composing pass"
+        )
+
+
 def _version_of(distribution: str):
     from importlib import metadata
 
@@ -514,6 +571,9 @@ class YuE2Engine:
     host_homes = None
     # A cover's score in YuE2's tokens (_given_plan); None for a song YuE2 planned.
     score_tokens = None
+    # The composing pass's CFG negative branch in tokens, stock or written by the client
+    # (_compose); None when cfg 1 ran no negative branch.
+    negative_prefix_tokens = None
 
     def __init__(self, request: dict) -> None:
         import torch
@@ -729,6 +789,55 @@ class YuE2Engine:
         self.length = length_record(wanted, sizing, count, plan, resized)
         return plan
 
+    def _compose(self, job, plan, stop, on_token):
+        """The song's codec tokens from its one plan - planned, moved to the instrument, or
+        a cover's given score alike - under the CFG negative branch the request asks for:
+        YuE2's stock one (its instruction and the score), or the one the client wrote as
+        `negative_tags` and `negative_lyrics` (written_negative). The positive branch is
+        the plan's own either way. Every plan is made with `cfg_scale=job.cfg`, so job.cfg
+        is the guidance YuE2 composes with. Sets self.negative_prefix_tokens."""
+        pipe = self._pipe
+        if job.cfg == 1:
+            if job.negative is not None:
+                # The server refuses negative words without cfg above 1; arriving here
+                # they would be ignored, so they are refused rather than dropped.
+                raise RuntimeError(
+                    "a written negative branch arrived with cfg 1, where YuE2 runs no "
+                    "negative branch; the server refuses negative_tags and negative_lyrics "
+                    "without cfg above 1"
+                )
+            self.negative_prefix_tokens = None
+            return pipe.generate_semantic(plan, cancelled=stop, on_token=on_token)
+        from yue2 import protocol
+
+        if plan.request.guidance != job.cfg:
+            raise RuntimeError(
+                f"the plan composes with guidance {plan.request.guidance:g} and the request "
+                f"asked cfg {job.cfg:g}; every plan is made with the request's cfg"
+            )
+        if job.negative is None:
+            self.negative_prefix_tokens = len(
+                protocol.negative_prefix(plan.request, pipe.tokenizer, plan.abc_ids)
+            )
+            return pipe.generate_semantic(plan, cancelled=stop, on_token=on_token)
+        with written_negative(plan, job.negative, pipe.tokenizer) as prefix:
+            # yue2-infer refuses a negative that leaves the song no room in its context
+            # (sampling.generate_tokens); said here by name before the pass, and the
+            # worker stays loaded.
+            room = pipe.generation_config.context - pipe.generation_config.semantic.max_tokens
+            if len(prefix) > room:
+                raise audiocore.Refused(
+                    "negative_too_long",
+                    f"the written negative branch is {len(prefix)} tokens in YuE2's tokenizer, "
+                    f"and YuE2 composes a song of up to "
+                    f"{pipe.generation_config.semantic.max_tokens} tokens after it within its "
+                    f"{pipe.generation_config.context}-token context, which leaves {room}; send "
+                    "shorter negative_tags or negative_lyrics",
+                )
+            semantic = pipe.generate_semantic(plan, cancelled=stop, on_token=on_token)
+        self.negative_prefix_tokens = len(prefix)
+        return semantic
+
     def _stages(self, job, progress, peaks):
         pipe = self._pipe
         caps = pipe.generation_config
@@ -737,6 +846,7 @@ class YuE2Engine:
         self.length = None
         self.decode_stages = {}
         self.score_tokens = None
+        self.negative_prefix_tokens = None
         if job.cover is not None:
             plan = self._given_plan(job, progress)
         else:
@@ -746,7 +856,7 @@ class YuE2Engine:
         self._close_stage(peaks, "scoring")
         progress.enter("composing", caps.semantic.max_tokens)
         ticks = audiocore.Throttled(progress, TOKENS_PER_REPORT)
-        semantic = pipe.generate_semantic(plan, cancelled=stop, on_token=lambda *_: ticks.tick())
+        semantic = self._compose(job, plan, stop, lambda *_: ticks.tick())
         self.decode_stages["composing"] = decode_facts(
             semantic.timing, semantic.truncated, caps.semantic.max_tokens, self.low_vram
         )

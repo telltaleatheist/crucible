@@ -572,6 +572,9 @@ def generate_request(
         # its cot and the [Lyrics] it is planned with (cover.Cover.request); null for a
         # song YuE2 plans itself.
         "cover": None if given is None else given.cover.request(),
+        # The song's CFG negative branch as the client wrote it ({tags, lyrics}); null for
+        # YuE2's stock negative (docs/AUDIO.md "The negative branch").
+        "negative": settled.negative,
         "sample_rate": needs.spec.sample_rate,
         "channels": needs.spec.channels,
         "format": params.format,
@@ -615,6 +618,7 @@ def kept_request(
             # A cover's score as checked before it rendered (cover.Cover.record, without
             # the token count only the worker knows); null for a song YuE2 plans.
             "cover": None if given is None else given.cover.record(given.source, None),
+            "negative": settled.negative,
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
@@ -706,6 +710,12 @@ def effective_params(
         # from (upload or another job's artifact), the cot it rendered with, its chords
         # kept or stripped, its tokens and nominal seconds; null for a song YuE2 planned.
         "cover": covered,
+        # The CFG negative branch the song was composed against: {tags, lyrics} as the
+        # client wrote them (the one not sent is ""), null for YuE2's stock negative; and
+        # that branch's prefix in tokens, null when no negative branch ran (cfg 1, or an
+        # engine without one) (docs/AUDIO.md "The negative branch").
+        "negative": settled.negative,
+        "negative_prefix_tokens": result["negative_prefix_tokens"],
         "decode_stages": result["decode_stages"],
         "stages_at_cap": stages_at_cap(result["decode_stages"]),
         # The worker's host memory as the song began, once it was saved, and its peak

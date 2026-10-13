@@ -6,7 +6,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ...audiomodels import KIND_WORDS, OPTIONAL_PARAMS, AudioBackendSpec, AudioManifest
+from ...audiomodels import (
+    KIND_WORDS,
+    NEGATIVE_BRANCH_PARAMS,
+    OPTIONAL_PARAMS,
+    AudioBackendSpec,
+    AudioManifest,
+)
 from ...errors import ApiError
 from ..base import validate_member_name
 from . import planning
@@ -24,7 +30,8 @@ MIN_SONG_SECONDS = 30.0
 FORMATS: tuple[str, ...] = ("flac", "wav", "mp3")
 
 TEXT_FIELDS: tuple[str, ...] = (
-    "prompt", "tags", "lyrics", "planning_lyrics", "planning_set", "negative_prompt", "score"
+    "prompt", "tags", "lyrics", "planning_lyrics", "planning_set", "negative_prompt",
+    "negative_tags", "negative_lyrics", "score"
 )
 
 # A lyrics line that is only a section tag ([Verse], [Chorus], ...): all an instrumental's
@@ -72,6 +79,22 @@ class AudioParams(BaseModel):
         default=None,
         description="Taken only by a model whose manifest lists it; the shipped "
         "models refuse it by name.",
+    )
+    negative_tags: str | None = Field(
+        default=None,
+        description="Songs (YuE2), with `cfg` above 1: the style of the song's CFG negative "
+        "branch, the tags guidance steers AWAY from (e.g. \"lead vocals, singing, choir\"). "
+        "The negative is the song's own request with these tags and `negative_lyrics` in "
+        "place of its own: the same score, cot and seed. Null beside `negative_lyrics` is "
+        "no tags; both null is YuE2's stock negative, its instruction and the score alone "
+        "(docs/AUDIO.md \"The negative branch\").",
+    )
+    negative_lyrics: str | None = Field(
+        default=None,
+        description="Songs (YuE2), with `cfg` above 1: the lyrics of the song's CFG negative "
+        "branch, words guidance steers AWAY from, written as YuE2 takes lyrics (sections "
+        "tagged [Verse], [Chorus] and so on). Null beside `negative_tags` is no lyrics; "
+        "both null is YuE2's stock negative.",
     )
     duration_s: float | None = Field(
         default=None,
@@ -445,6 +468,29 @@ def refuse_what_the_model_cannot_take(
         if getattr(params, param) is not None and param not in spec.takes:
             raise _not_taken(param, manifest, spec)
     _refuse_ranges(params, manifest, spec)
+    _refuse_negative(params, manifest, spec)
+
+
+def _refuse_negative(params: AudioParams, manifest: AudioManifest, spec: AudioBackendSpec) -> None:
+    """A written negative branch exists only under guidance: with cfg 1 YuE2 runs no
+    negative branch at all, so the words would be silently ignored. Refused instead."""
+    sent = [name for name in NEGATIVE_BRANCH_PARAMS if getattr(params, name) is not None]
+    if not sent:
+        return
+    cfg = spec.default_cfg if params.cfg is None else params.cfg
+    if not cfg > 1:
+        whose = f"{manifest.id}'s default cfg" if params.cfg is None else "cfg"
+        raise _refusal(
+            "audio_param_conflict",
+            f"{' and '.join(sent)} write the CFG negative branch, which runs only with cfg "
+            f"above 1; {whose} is {cfg:g}, where no negative branch runs and the words would "
+            "be ignored. Send cfg above 1 (2.0 is where it was measured), or drop "
+            f"{' and '.join(repr(name) for name in sent)}",
+            manifest,
+            spec,
+            param=sent[0],
+            cfg=cfg,
+        )
 
 
 @dataclass(frozen=True)
@@ -461,6 +507,9 @@ class Settled:
     # The range a song's length is checked against after its score, before composing
     # (planning.LengthRange); None when the client sent neither end.
     length_range: planning.LengthRange | None = None
+    # The song's CFG negative branch as the client wrote it ({tags, lyrics}; the one not
+    # sent is ""); None for YuE2's stock negative (docs/AUDIO.md "The negative branch").
+    negative: dict[str, str] | None = None
 
 
 def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
@@ -485,7 +534,20 @@ def settle(params: AudioParams, spec: AudioBackendSpec, seed: int) -> Settled:
                 params.min_duration_s, params.max_duration_s, float(spec.max_duration_s)
             )
         ),
+        negative=_negative(params),
     )
+
+
+def _negative(params: AudioParams) -> dict[str, str] | None:
+    """The negative branch's two text fields. One sent alone leaves the other empty, not
+    copied from the song: the negative holds only what the client wrote against, which
+    is the nearest it can be to the stock negative (no tags, no lyrics) and still differ."""
+    if params.negative_tags is None and params.negative_lyrics is None:
+        return None
+    return {
+        "tags": "" if params.negative_tags is None else params.negative_tags,
+        "lyrics": "" if params.negative_lyrics is None else params.negative_lyrics,
+    }
 
 
 def _planning_lyrics(params: AudioParams, spec: AudioBackendSpec, seed: int) -> dict[str, Any] | None:

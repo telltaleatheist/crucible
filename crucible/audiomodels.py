@@ -64,7 +64,13 @@ OPTIONAL_PARAMS: tuple[str, ...] = (
     # planning one, and whether its chord symbols are kept.
     "score",
     "chords",
+    # A song's CFG negative branch as the client writes it (docs/AUDIO.md "The negative
+    # branch"): the style and lyrics guidance steers away from, under cfg above 1.
+    "negative_tags",
+    "negative_lyrics",
 )
+
+NEGATIVE_BRANCH_PARAMS: tuple[str, ...] = ("negative_tags", "negative_lyrics")
 
 MEMORY_BASES = frozenset({"measured", "declared"})
 
@@ -481,6 +487,12 @@ def _check_takes(where: str, block: dict[str, Any]) -> tuple[str, ...]:
                 raise AudioManifestError(
                     f"{where}: {key} goes with {param!r} in takes, and only with it"
                 )
+    for param in NEGATIVE_BRANCH_PARAMS:
+        if param in takes and "cfg" not in takes:
+            raise AudioManifestError(
+                f"{where}: {param} writes the CFG negative branch, which exists only with "
+                "cfg; an arm that takes it takes 'cfg' too"
+            )
     return takes
 
 
