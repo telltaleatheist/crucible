@@ -276,6 +276,35 @@ test('a song writes its CFG negative branch and reads back which one it composed
   );
 });
 
+test('a song fixes its key, meter and tempo and reads back what its score states', async () => {
+  answer(200, { job_id: 'job-header' });
+  await client().audio({
+    model: 'yue2-3b', tags: 'English, waltz, 76 BPM', lyrics: '[Verse]\nla\n',
+    key: 'Em', meter: '3/4', bpm: 76,
+  });
+  assert.deepEqual(JSON.parse(lastBody).params, {
+    tags: 'English, waltz, 76 BPM', lyrics: '[Verse]\nla\n', key: 'Em', meter: '3/4', bpm: 76,
+  });
+  const fixed = readAudioResult({
+    artifacts: [],
+    extra: { audio: { ...DONE_SONG, header: {
+      key: 'Em', meter: null, bpm: 76, score: { key: 'Em', meter: '6/8', bpm: 76 },
+    } } },
+  });
+  assert.deepEqual(fixed.header, { key: 'Em', meter: null, bpm: 76, score: { key: 'Em', meter: '6/8', bpm: 76 } });
+  const unscored = readAudioResult({
+    artifacts: [], extra: { audio: { ...DONE_SONG, header: { key: null, meter: null, bpm: null, score: null } } },
+  });
+  assert.equal(unscored.header?.score, null);
+  // A server older than the knob, and a sound model, send no header.
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: DONE_SONG } }).header, null);
+  assert.equal(readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, header: null } } }).header, null);
+  assert.throws(
+    () => readAudioResult({ artifacts: [], extra: { audio: { ...DONE_SONG, header: { key: 'Em' } } } }),
+    CrucibleProtocolError,
+  );
+});
+
 const NL = String.fromCharCode(10);
 const ABC = ['X:1', 'T:', 'M:4/4', 'L:1/32', 'Q:1/4=66', 'V:Vocal', '% verse', 'C8D8E8F8|', ''].join(NL);
 

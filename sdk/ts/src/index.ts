@@ -152,6 +152,8 @@ export type {
   AudioDecodeStage,
   AudioLength,
   AudioNegative,
+  AudioHeader,
+  AudioScoreHeader,
   AudioPlanningLyrics,
   AudioOptions,
   AudioResult,

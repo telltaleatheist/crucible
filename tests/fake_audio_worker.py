@@ -16,6 +16,7 @@ import workerio
 sys.path.pop(0)
 workerio.claim_stdout()
 audiocore = workerio.load_sibling("audiocore", str(JOBS_DIR / "audio" / "audiocore.py"))
+scoreheader = workerio.load_sibling("scoreheader", str(JOBS_DIR / "audio" / "scoreheader.py"))
 
 FAKE_SCORE = "X:1\nT:fake song\nM:4/4\nK:C\n\"C\"CDEF|\"G\"GABc|\n"
 
@@ -116,6 +117,7 @@ class FakeEngine:
         self.host_homes = None
         self.score_tokens = None
         self.negative_prefix_tokens = None
+        self.score_header = None
 
     def _decode_stages(self, job) -> dict | None:
         """A song's two token stages as yue2_worker.decode_facts words them; a stage named
@@ -143,7 +145,7 @@ class FakeEngine:
                      "min_duration_s": job.min_duration_s, "max_duration_s": job.max_duration_s,
                      "longest_s": job.longest_s, "planning_resizable": job.planning_resizable,
                      "cover": job.cover, "tags": job.tags, "cfg": job.cfg,
-                     "negative": job.negative})
+                     "negative": job.negative, "header": job.header})
         self.score_tokens = None
         # yue2_worker's negative branch prefix: none at cfg 1, FAKE_STOCK_NEGATIVE_TOKENS for
         # YuE2's stock one, and more for one the client wrote.
@@ -193,6 +195,12 @@ class FakeEngine:
         score = FAKE_SCORE if job.kind == "song" else None
         if job.cover is not None:
             score = job.cover["abc"]
+        # yue2_worker's read-back of the rendered score's K:, M: and Q: (scoreheader.read),
+        # with the fields the client fixed as yue2_worker.forced_header writes them in.
+        self.score_header = scoreheader.read(score)
+        for name, value in (job.header or {}).items():
+            if value is not None:
+                self.score_header[name] = value
         self.decode_stages = self._decode_stages(job)
         return TinyAudio(frames, job.sample_rate, job.channels), score, {"denoising": 7, "decoding": 9}
 

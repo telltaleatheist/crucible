@@ -45,6 +45,9 @@ negative_prompt = "Stability's inference guide says negative_prompt has no effec
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Small SFX checkpoint (it samples at cfg 1.0 in 8 steps)"
 negative_tags = "the post-trained Small SFX checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
 negative_lyrics = "the post-trained Small SFX checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
+key = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"
+meter = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"
+bpm = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"
 
 [backends.mlx-darwin]
 engine = "stable-audio-3"
@@ -84,3 +87,6 @@ negative_prompt = "Stability's inference guide says negative_prompt has no effec
 cfg = "Stability's inference guide says cfg has no effect on the post-trained Small SFX checkpoint (it samples at cfg 1.0 in 8 steps)"
 negative_tags = "the post-trained Small SFX checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
 negative_lyrics = "the post-trained Small SFX checkpoint samples at cfg 1.0, so there is no CFG negative branch to write; negative_tags and negative_lyrics are YuE2's"
+key = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"
+meter = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"
+bpm = "the Small SFX checkpoint makes sound effects and writes no score; key, meter and bpm fix the header of the score YuE2 plans"

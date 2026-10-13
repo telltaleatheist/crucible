@@ -29,7 +29,7 @@ MODEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
 # preset is a sound, not one take of it.
 PARAMS = frozenset({
     "prompt", "tags", "lyrics", "negative_prompt", "negative_tags", "negative_lyrics",
-    "duration_s", "steps", "cfg",
+    "duration_s", "steps", "cfg", "key", "meter", "bpm",
     "instrumental", "format", "width", "height", "num_frames", "fps",
 })
 MAX_BYTES = 64 * 1024

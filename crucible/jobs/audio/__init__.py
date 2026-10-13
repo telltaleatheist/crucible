@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ... import audioweights, jobenv, weights, workers
 from ...audiomodels import (
+    HEADER_PARAMS,
     STABLE_AUDIO_3,
     YUE2,
     AudioBackendSpec,
@@ -575,6 +576,9 @@ def generate_request(
         # The song's CFG negative branch as the client wrote it ({tags, lyrics}); null for
         # YuE2's stock negative (docs/AUDIO.md "The negative branch").
         "negative": settled.negative,
+        # The planned score's header fields the client fixed ({key, meter, bpm}, null
+        # where not sent); null when none was (docs/AUDIO.md "Key, meter and tempo").
+        "header": settled.header,
         "sample_rate": needs.spec.sample_rate,
         "channels": needs.spec.channels,
         "format": params.format,
@@ -619,6 +623,7 @@ def kept_request(
             # the token count only the worker knows); null for a song YuE2 plans.
             "cover": None if given is None else given.cover.record(given.source, None),
             "negative": settled.negative,
+            "header": settled.header,
         },
         "low_vram": needs.low_vram,
         "revision": needs.spec.revision,
@@ -631,6 +636,11 @@ def kept_request(
             f"{'on' if needs.low_vram else 'off'})"
         ),
     }
+
+
+def score_header(settled: Settled, result: dict[str, Any]) -> dict[str, Any]:
+    fixed = settled.header or {name: None for name in HEADER_PARAMS}
+    return {**fixed, "score": result["score_header"]}
 
 
 def effective_params(
@@ -716,6 +726,10 @@ def effective_params(
         # engine without one) (docs/AUDIO.md "The negative branch").
         "negative": settled.negative,
         "negative_prefix_tokens": result["negative_prefix_tokens"],
+        # A song's key, meter and tempo: the ones the client fixed (null where not sent)
+        # and, under `score`, the K:, M: and Q: its rendered score states; null for a
+        # model that writes no score (docs/AUDIO.md "Key, meter and tempo").
+        "header": score_header(settled, result) if needs.manifest.takes_lyrics else None,
         "decode_stages": result["decode_stages"],
         "stages_at_cap": stages_at_cap(result["decode_stages"]),
         # The worker's host memory as the song began, once it was saved, and its peak

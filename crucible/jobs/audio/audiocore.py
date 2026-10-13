@@ -180,6 +180,9 @@ class Job:
         # The song's CFG negative branch as the client wrote it ({tags, lyrics}); null for
         # the engine's stock negative.
         self.negative = nullable("negative", dict)
+        # The planned score's header fields the client fixed ({key, meter, bpm}, null
+        # where not sent); null when none was.
+        self.header = nullable("header", dict)
         self.sample_rate = required("sample_rate", int)
         self.channels = required("channels", int)
         self.format = required("format", str)
@@ -277,6 +280,9 @@ class Worker:
             # The CFG negative branch's prefix in tokens, stock or written by the client
             # (yue2_worker.YuE2Engine._compose); None when no negative branch ran.
             "negative_prefix_tokens": self.engine.negative_prefix_tokens,
+            # The key, meter and tempo the rendered score states (scoreheader.read); None
+            # for an engine that writes no score.
+            "score_header": self.engine.score_header,
             # This worker's host memory as the song began and once it was saved, with the
             # peak between (audiocore.host_memory); `host_homes_bytes` is what the engine
             # keeps in host memory on purpose (yue2_worker.HostHomes), None for an engine

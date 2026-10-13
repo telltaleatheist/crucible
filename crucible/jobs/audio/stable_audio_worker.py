@@ -73,6 +73,8 @@ class StableAudio3Engine:
     score_tokens = None
     # It samples without a CFG negative branch (yue2_worker's `negative_prefix_tokens`).
     negative_prefix_tokens = None
+    # It writes no score (yue2_worker's `score_header`).
+    score_header = None
     spans = SPANS
 
     def __init__(self, request: dict) -> None:

@@ -68,9 +68,16 @@ OPTIONAL_PARAMS: tuple[str, ...] = (
     # branch"): the style and lyrics guidance steers away from, under cfg above 1.
     "negative_tags",
     "negative_lyrics",
+    # A planned song's score header, fixed before YuE2 plans the rest of it (docs/AUDIO.md
+    # "Key, meter and tempo"): its key, meter and quarter-note tempo.
+    "key",
+    "meter",
+    "bpm",
 )
 
 NEGATIVE_BRANCH_PARAMS: tuple[str, ...] = ("negative_tags", "negative_lyrics")
+
+HEADER_PARAMS: tuple[str, ...] = ("key", "meter", "bpm")
 
 MEMORY_BASES = frozenset({"measured", "declared"})
 
